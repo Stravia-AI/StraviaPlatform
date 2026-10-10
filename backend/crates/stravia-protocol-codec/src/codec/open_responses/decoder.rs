@@ -58,9 +58,9 @@ const KNOWN_FIELDS: &[&str] = &[
 ];
 
 impl ResponsesDecoder {
-    pub fn decode_request(&self, body: Value) -> Result<AiRequest> {
+    pub fn decode_request(&self, mut body: Value) -> Result<AiRequest> {
         let obj = body
-            .as_object()
+            .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("request body must be a JSON object"))?;
         validate_field_types(obj)?;
         let passthrough_body = obj
@@ -96,13 +96,13 @@ impl ResponsesDecoder {
         let mut messages: Vec<AiItem> = Vec::new();
 
         // ── Input items ───────────────────────────────────────────────────────
-        let input = obj.get("input").filter(|value| !value.is_null());
+        let input = obj.remove("input").filter(|value| !value.is_null());
         if let Some(input) = input {
             match input {
                 Value::String(text) => {
                     messages.push(AiItem {
                         role: Role::User,
-                        content: MessageContent::Text(text.clone()),
+                        content: MessageContent::Text(text.into()),
                         tool_calls: None,
                         tool_call_id: None,
                         meta: None,
@@ -122,7 +122,7 @@ impl ResponsesDecoder {
                             })
                         })
                         .collect::<Result<HashMap<_, _>>>()?;
-                    for item in items {
+                    for item in &items {
                         let is_reference = is_item_reference(item);
                         let decoded = if is_reference {
                             if let Some(message) = item
@@ -624,7 +624,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 .ok_or_else(|| anyhow::anyhow!("item_reference missing 'id'"))?;
             Ok(Some(AiItem {
                 role: Role::User,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(String::new().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: Some(
@@ -671,7 +671,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 .get("output")
                 .ok_or_else(|| anyhow::anyhow!("function_call_output missing 'output'"))?;
             let content = match output {
-                Value::String(text) => MessageContent::Text(text.clone()),
+                Value::String(text) => MessageContent::Text(text.clone().into()),
                 Value::Array(_) => {
                     decode_message_item(
                         &serde_json::json!({
@@ -721,7 +721,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
             }
             Ok(Some(AiItem {
                 role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(String::new().into()),
                 tool_calls: Some(vec![ToolCall {
                     id: (call_id).into(),
                     name,
@@ -756,7 +756,7 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
     };
 
     let content = match item.get("content") {
-        Some(Value::String(text)) => MessageContent::Text(text.clone()),
+        Some(Value::String(text)) => MessageContent::Text(text.clone().into()),
         Some(Value::Array(blocks)) => {
             let mut texts = Vec::new();
             let mut content_blocks = Vec::new();
@@ -776,7 +776,7 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
                         })?;
                         texts.push(text.to_owned());
                         content_blocks.push(ContentBlock::Text {
-                            text: text.to_owned(),
+                            text: text.to_owned().into(),
                             cache_control: None,
                         });
                     }
@@ -881,7 +881,7 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
                 if text.is_empty() {
                     return Ok(None);
                 }
-                MessageContent::Text(text)
+                MessageContent::Text(text.into())
             }
         }
         Some(_) => anyhow::bail!("unsupported content type in responses input item"),

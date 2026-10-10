@@ -43,7 +43,7 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
 
         let messages = vec![AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("".to_string()),
+            content: IrMessageContent::Text("".to_string().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_1".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -64,7 +64,7 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
         req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
         let (body, _) = AnthropicEncoder
-            .encode_request(&req)
+            .encode_request(req)
             .expect("encode anthropic body");
         let blocks = body["messages"][0]["content"]
             .as_array()
@@ -254,7 +254,7 @@ fn anthropic_thinking_block_round_trips_with_signature() {
     ));
 
     let (encoded, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic request");
     let block = encoded
         .get("messages")
@@ -310,7 +310,7 @@ fn anthropic_mixed_assistant_history_encodes_as_ordered_responses_items() {
         .expect("Anthropic request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("mixed assistant history must remain representable")
         .body;
     let input = encoded["input"].as_array().expect("Responses input");
@@ -339,7 +339,7 @@ fn anthropic_mixed_assistant_history_encodes_as_ordered_responses_items() {
 fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
     let messages = vec![AiItem {
         role: IrRole::Tool,
-        content: IrMessageContent::Text("{\"ok\":true}".to_string()),
+        content: IrMessageContent::Text("{\"ok\":true}".to_string().into()),
         tool_calls: None,
         tool_call_id: Some(("call_orphan_1".to_string()).into()),
         meta: None,
@@ -352,7 +352,7 @@ fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode openai body");
     let messages = body
         .get("messages")
@@ -377,7 +377,7 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("will call".to_string()),
+            content: IrMessageContent::Text("will call".to_string().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_x".to_string()).into(),
                 name: "ls".to_string(),
@@ -388,14 +388,14 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
         },
         AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("intermediate".to_string()),
+            content: IrMessageContent::Text("intermediate".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("{\"ok\":true}".to_string()),
+            content: IrMessageContent::Text("{\"ok\":true}".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_x".to_string()).into()),
             meta: None,
@@ -409,7 +409,7 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode openai body");
     let messages = body
         .get("messages")
@@ -444,7 +444,7 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("plan".to_string()),
+            content: IrMessageContent::Text("plan".to_string().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_keep".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -455,14 +455,14 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("extra text".to_string()),
+            content: IrMessageContent::Text("extra text".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("{\"stdout\":\"...\"}".to_string()),
+            content: IrMessageContent::Text("{\"stdout\":\"...\"}".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_keep".to_string()).into()),
             meta: None,
@@ -476,7 +476,7 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode openai body");
     let messages = body
         .get("messages")
@@ -512,7 +512,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_dup".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -523,7 +523,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_dup".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -534,14 +534,14 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("{\"ok\":true}".to_string()),
+            content: IrMessageContent::Text("{\"ok\":true}".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_dup".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("{\"ok\":true}".to_string()),
+            content: IrMessageContent::Text("{\"ok\":true}".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_dup".to_string()).into()),
             meta: None,
@@ -555,7 +555,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode openai body");
     let messages = body
         .get("messages")
@@ -591,7 +591,7 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
 fn anthropic_encoder_maps_required_tool_choice_to_any() {
     let messages = vec![AiItem {
         role: IrRole::User,
-        content: IrMessageContent::Text("hello".to_string()),
+        content: IrMessageContent::Text("hello".to_string().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -617,7 +617,7 @@ fn anthropic_encoder_maps_required_tool_choice_to_any() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic body");
     assert_eq!(
         body.get("tool_choice")
@@ -630,7 +630,7 @@ fn anthropic_encoder_maps_required_tool_choice_to_any() {
 fn anthropic_encoder_maps_function_tool_choice_to_tool_name() {
     let messages = vec![AiItem {
         role: IrRole::User,
-        content: IrMessageContent::Text("hello".to_string()),
+        content: IrMessageContent::Text("hello".to_string().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -659,7 +659,7 @@ fn anthropic_encoder_maps_function_tool_choice_to_tool_name() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic body");
     assert_eq!(
         body.get("tool_choice")
@@ -679,28 +679,28 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
     let messages = vec![
         AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("first".to_string()),
+            content: IrMessageContent::Text("first".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("second".to_string()),
+            content: IrMessageContent::Text("second".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("tool".to_string()),
+            content: IrMessageContent::Text("tool".to_string().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_1".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -711,7 +711,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("result".to_string()),
+            content: IrMessageContent::Text("result".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_1".to_string()).into()),
             meta: None,
@@ -726,7 +726,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
     req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
 
     let (body, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic body");
     let msgs = body
         .get("messages")
@@ -759,7 +759,7 @@ fn anthropic_encoder_preserves_correlated_external_tool_ids() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_function_abc_1".to_string()).into(),
                 name: "glob".to_string(),
@@ -802,7 +802,7 @@ fn anthropic_encoder_preserves_correlated_external_tool_ids() {
     req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
 
     let (body, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic body");
     let msgs = body
         .get("messages")
@@ -830,7 +830,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_same".to_string()).into(),
                 name: "exec_command".to_string(),
@@ -841,21 +841,21 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("ok1".to_string()),
+            content: IrMessageContent::Text("ok1".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_same".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("intermediate".to_string()),
+            content: IrMessageContent::Text("intermediate".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("ok2".to_string()),
+            content: IrMessageContent::Text("ok2".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_same".to_string()).into()),
             meta: None,
@@ -877,7 +877,7 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
     req.tools = tools;
     req.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
-    let (body, _) = OpenAIEncoder.encode_request(&req).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(req).expect("encode");
     let msgs = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -902,7 +902,7 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("".to_string()),
+            content: IrMessageContent::Text("".to_string().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: ("call_a".to_string()).into(),
@@ -920,14 +920,14 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("r1".to_string()),
+            content: IrMessageContent::Text("r1".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_a".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("r2".to_string()),
+            content: IrMessageContent::Text("r2".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_b".to_string()).into()),
             meta: None,
@@ -949,7 +949,7 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
     req.tools = tools;
     req.meta.source_protocol = Some(ANTHROPIC_MESSAGES_2023_06_01);
 
-    let (body, _) = OpenAIEncoder.encode_request(&req).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(req).expect("encode");
     let msgs = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -1008,7 +1008,9 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
     let messages = vec![
         AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("What time is it in Tokyo and Paris?".to_string()),
+            content: IrMessageContent::Text(
+                "What time is it in Tokyo and Paris?".to_string().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -1016,7 +1018,7 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
         // Single assistant message with TWO parallel tool calls + reasoning_content
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text("".to_string()),
+            content: IrMessageContent::Text("".to_string().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: ("call_tokyo".to_string()).into(),
@@ -1038,14 +1040,14 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("10:30 JST".to_string()),
+            content: IrMessageContent::Text("10:30 JST".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_tokyo".to_string()).into()),
             meta: None,
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("03:30 CEST".to_string()),
+            content: IrMessageContent::Text("03:30 CEST".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_paris".to_string()).into()),
             meta: None,
@@ -1068,7 +1070,7 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
     req.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode openai body");
     let msgs = body
         .get("messages")
@@ -1180,7 +1182,7 @@ fn anthropic_to_openai_thinking_round_trip_carries_reasoning_content() {
     );
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&ir)
+        .encode_request(ir)
         .expect("encode openai body");
     let msgs = body
         .get("messages")
@@ -1226,14 +1228,14 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
     let messages = vec![
         AiItem {
             role: IrRole::System,
-            content: IrMessageContent::Text("sys".to_string()),
+            content: IrMessageContent::Text("sys".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: ("call_old_1".to_string()).into(),
@@ -1251,7 +1253,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
         },
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_new".to_string()).into(),
                 name: "glob".to_string(),
@@ -1262,7 +1264,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
         },
         AiItem {
             role: IrRole::Tool,
-            content: IrMessageContent::Text("{\"ok\":true}".to_string()),
+            content: IrMessageContent::Text("{\"ok\":true}".to_string().into()),
             tool_calls: None,
             tool_call_id: Some(("call_new".to_string()).into()),
             meta: None,
@@ -1284,7 +1286,7 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
     req.tools = tools;
     req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
 
-    let (body, _) = OpenAIEncoder.encode_request(&req).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(req).expect("encode");
     let msgs = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -1328,7 +1330,7 @@ fn codex_parallel_calls_with_intermediate_text_anthropic_egress() {
     normalize_request_tool_results(&mut req);
 
     let (encoded, _) = AnthropicEncoder
-        .encode_request(&req)
+        .encode_request(req)
         .expect("encode anthropic body");
     let msgs = encoded
         .get("messages")
@@ -1482,7 +1484,7 @@ fn anthropic_inline_system_role_encodes_into_top_level_system() {
 
     let ir = AnthropicDecoder.decode_request(body).expect("decode");
 
-    let (encoded, _) = AnthropicEncoder.encode_request(&ir).expect("encode");
+    let (encoded, _) = AnthropicEncoder.encode_request(ir).expect("encode");
 
     // Top-level system should contain both base and injected text.
     let system_val = encoded.get("system").expect("system field must exist");
@@ -1575,7 +1577,7 @@ fn anthropic_to_openai_strips_tool_use_from_content_array() {
         .expect("decode anthropic request");
 
     let (body, _) = OpenAIEncoder
-        .encode_request(&ir)
+        .encode_request(ir)
         .expect("encode openai body");
 
     let msgs = body

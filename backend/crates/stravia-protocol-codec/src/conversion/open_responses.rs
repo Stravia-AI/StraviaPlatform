@@ -62,7 +62,7 @@ fn responses_encoder_targets_slash_v1_responses_and_preserves_stream_choice() {
     let req = responses_request(
         vec![AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("hello".to_string()),
+            content: IrMessageContent::Text("hello".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -70,7 +70,7 @@ fn responses_encoder_targets_slash_v1_responses_and_preserves_stream_choice() {
         false,
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(req).expect("encode");
     assert_eq!(body.get("stream").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(
         body.get("store").and_then(|v| v.as_bool()),
@@ -88,14 +88,14 @@ fn responses_encoder_keeps_instructions_distinct_from_system_messages() {
         vec![
             AiItem {
                 role: IrRole::System,
-                content: IrMessageContent::Text("system context".to_string()),
+                content: IrMessageContent::Text("system context".to_string().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
             },
             AiItem {
                 role: IrRole::User,
-                content: IrMessageContent::Text("hi".to_string()),
+                content: IrMessageContent::Text("hi".to_string().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -105,7 +105,7 @@ fn responses_encoder_keeps_instructions_distinct_from_system_messages() {
     );
     req.instructions = Some("request instructions".into());
 
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(req).expect("encode");
     assert_eq!(
         body.get("instructions").and_then(|v| v.as_str()),
         Some("request instructions")
@@ -124,7 +124,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
         vec![
             AiItem {
                 role: IrRole::Assistant,
-                content: IrMessageContent::Text(String::new()),
+                content: IrMessageContent::Text(String::new().into()),
                 tool_calls: Some(vec![ToolCall {
                     id: ("call_abc".to_string()).into(),
                     name: "list_dir".to_string(),
@@ -135,7 +135,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
             },
             AiItem {
                 role: IrRole::Tool,
-                content: IrMessageContent::Text("file1\nfile2".to_string()),
+                content: IrMessageContent::Text("file1\nfile2".to_string().into()),
                 tool_calls: None,
                 tool_call_id: Some(("call_abc".to_string()).into()),
                 meta: None,
@@ -144,7 +144,7 @@ fn responses_encoder_emits_function_call_and_function_call_output_items() {
         false,
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(req).expect("encode");
     let input = body.get("input").and_then(|v| v.as_array()).expect("input");
     assert_eq!(
         input.len(),
@@ -187,7 +187,7 @@ fn responses_encoder_preserves_max_output_tokens() {
     let mut req = responses_request(
         vec![AiItem {
             role: IrRole::User,
-            content: IrMessageContent::Text("hi".to_string()),
+            content: IrMessageContent::Text("hi".to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -196,7 +196,7 @@ fn responses_encoder_preserves_max_output_tokens() {
     );
     req.generation.max_tokens = Some(128);
 
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(req).expect("encode");
     assert_eq!(
         body.get("max_output_tokens")
             .and_then(|value| value.as_u64()),

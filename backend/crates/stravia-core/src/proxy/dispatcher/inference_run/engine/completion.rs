@@ -34,7 +34,7 @@ pub(super) fn reconcile_completed_media(
                 media.push_back(std::mem::replace(
                     block,
                     ContentBlock::Text {
-                        text: String::new(),
+                        text: std::sync::Arc::new(String::new()),
                         cache_control: None,
                     },
                 ));
@@ -890,12 +890,12 @@ mod tests {
             append_restored_platform_round(&mut request, &response, Vec::new());
             request.items.push(AiItem {
                 role: stravia_runtime_contract::protocol::ir::Role::Tool,
-                content: MessageContent::Text("READY".into()),
+                content: MessageContent::Text(std::sync::Arc::new("READY".into())),
                 tool_calls: None,
                 tool_call_id: Some("call_echo".into()),
                 meta: None,
             });
-            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
             let assistants = wire["messages"]
                 .as_array()
                 .unwrap()
@@ -939,7 +939,7 @@ mod tests {
                 .insert(0, AiItem::thinking("", Some("opaque".into())));
             let mut request = AiRequest::new("model", Vec::new());
             append_restored_platform_round(&mut request, &response, Vec::new());
-            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
             assert_eq!(wire["messages"][0]["content"], "answer");
             assert_eq!(wire["messages"][0].get("reasoning_content"), Some(&value));
             response.items.remove(0);
@@ -970,7 +970,7 @@ mod tests {
                 Some(&value)
             );
             assert!(request.items[0].thinking_ref().is_none());
-            let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+            let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
             assert_eq!(wire["messages"][0].get("reasoning_content"), Some(&value));
         }
         let mut request = AiRequest::new("model", Vec::new());

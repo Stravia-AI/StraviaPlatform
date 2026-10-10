@@ -54,7 +54,7 @@ fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
     let mut compatible = original.clone();
     assert!(!super::prepare_thinking_replay(&mut compatible, |_| true));
     assert_eq!(
-        native.encode_request(&compatible).unwrap().body["input"][0]["encrypted_content"],
+        native.encode_request(compatible).unwrap().body["input"][0]["encrypted_content"],
         "secret"
     );
 
@@ -69,7 +69,7 @@ fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
         let pair = ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, target)
             .unwrap();
-        let body = pair.encode_request(&replay).unwrap().body;
+        let body = pair.encode_request(replay).unwrap().body;
         let serialized = body.to_string();
         assert!(serialized.contains("summary"));
         assert!(serialized.contains("detail"));
@@ -116,7 +116,7 @@ fn thinking_replay_gemini_tool_signature_stays_on_function_call_part() {
         for preserve in [true, false] {
             let mut replay = original.clone();
             super::prepare_thinking_replay(&mut replay, |_| preserve);
-            let body = pair.encode_request(&replay).unwrap().body;
+            let body = pair.encode_request(replay).unwrap().body;
             assert_eq!(body["contents"][0]["role"], "model");
             assert_eq!(
                 body["contents"][0]["parts"],
@@ -184,7 +184,7 @@ fn thinking_replay_chat_response_tools_survive_gemini_history_encoding() {
     for mut items in [response.items, vec![history], vec![dual]] {
         items.push(AiItem::function_call_output("call_lookup", json!("found")));
         let body = gemini
-            .encode_request(&AiRequest::new("model", items))
+            .encode_request(AiRequest::new("model", items))
             .unwrap()
             .body;
         let parts: Vec<_> = body["contents"]
@@ -231,7 +231,7 @@ fn thinking_replay_matrix_keeps_mixed_text_and_tool_associations() {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
-                        text: "before".into(),
+                        text: "before".to_owned().into(),
                         cache_control: None,
                     },
                     ContentBlock::Thinking {
@@ -239,7 +239,7 @@ fn thinking_replay_matrix_keeps_mixed_text_and_tool_associations() {
                         signature: Some("signed".into()),
                     },
                     ContentBlock::Text {
-                        text: "after".into(),
+                        text: "after".to_owned().into(),
                         cache_control: None,
                     },
                 ]),
@@ -269,7 +269,7 @@ fn thinking_replay_matrix_keeps_mixed_text_and_tool_associations() {
                 super::prepare_thinking_replay(&mut replay, |_| preserve),
                 !preserve
             );
-            let body = pair.encode_request(&replay).unwrap().body;
+            let body = pair.encode_request(replay).unwrap().body;
             match target {
                 OPEN_RESPONSES_2026_04_24 => {
                     assert_eq!(
@@ -418,7 +418,7 @@ fn wire_request_matrix_preserves_readable_reasoning_and_tool_continuations() {
         ] {
             let pair = ProtocolTransform::global().bind(source, target).unwrap();
             let request = pair.decode_request(wire.clone()).unwrap();
-            let body = pair.encode_request(&request).unwrap().body;
+            let body = pair.encode_request(request).unwrap().body;
             match target {
                 OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 => {
                     let messages = body["messages"].as_array().unwrap();
@@ -636,7 +636,7 @@ fn anthropic_tool_result_preserves_json_array_and_native_block_meanings() {
                 ANTHROPIC_MESSAGES_2023_06_01,
             )
             .unwrap();
-        let body = pair.encode_request(&request).unwrap().body;
+        let body = pair.encode_request(request).unwrap().body;
         let result = &body["messages"][1]["content"][0]["content"];
         if kind == ToolResultContentKind::Json {
             assert_eq!(
@@ -669,7 +669,7 @@ fn single_native_text_part_uses_the_common_chat_string_carrier() {
             {"role": "user", "content": "Continue."}
         ]
     })).unwrap();
-    let body = pair.encode_request(&request).unwrap().body;
+    let body = pair.encode_request(request).unwrap().body;
     assert_eq!(body["messages"][1]["content"].as_str(), Some("\nREADY"));
     assert_eq!(
         body["messages"][1]["reasoning_content"],
@@ -793,7 +793,7 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
             .unwrap(),
         "retained"
     );
-    let body = pair.encode_request(&request).unwrap().body;
+    let body = pair.encode_request(request.clone()).unwrap().body;
     assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
     assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
     assert_eq!(body["messages"][1]["content"], "lookup result");
@@ -807,7 +807,7 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     });
     assert!(!super::prepare_thinking_replay(&mut request, |_| false));
     assert!(matches!(
-        pair.encode_request(&request),
+        pair.encode_request(request),
         Err(TransformError::Unrepresentable { .. })
     ));
 }
@@ -823,7 +823,7 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
     ]})).unwrap();
     let mut same = original.clone();
     assert!(!super::prepare_thinking_replay(&mut same, |_| true));
-    let encoded = native.encode_request(&same).unwrap().body;
+    let encoded = native.encode_request(same).unwrap().body;
     assert_eq!(
         encoded["messages"][0]["content"],
         json!([
@@ -834,7 +834,7 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
     );
     let mut foreign = original.clone();
     assert!(super::prepare_thinking_replay(&mut foreign, |_| false));
-    let body = native.encode_request(&foreign).unwrap().body;
+    let body = native.encode_request(foreign).unwrap().body;
     assert_eq!(
         body["messages"][0]["content"][0],
         json!({"type":"text","text":"visible"})
@@ -854,7 +854,7 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
     // 明文仍走原生 reasoning_content，不混入正文。
     let mut replay = original;
     assert!(!super::prepare_thinking_replay(&mut replay, |_| true));
-    let body = chat.encode_request(&replay).unwrap().body;
+    let body = chat.encode_request(replay.clone()).unwrap().body;
     assert_eq!(body["messages"][0]["reasoning_content"], "visible");
     assert!(
         !body["messages"][0]["content"]
@@ -867,7 +867,7 @@ fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redaction
     let responses = ProtocolTransform::global()
         .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
         .unwrap();
-    let body = responses.encode_request(&replay).unwrap().body;
+    let body = responses.encode_request(replay).unwrap().body;
     assert_eq!(body["input"][0]["type"], "message");
     assert_eq!(
         body["input"][0]["content"],
@@ -903,7 +903,7 @@ fn thinking_replay_native_reasoning_keeps_ciphertext_but_moves_content_before_to
     }]);
     // 可证明来源的混合条目原样交给 codec；Responses encoder 自行拆出独立 reasoning item。
     assert!(!super::prepare_thinking_replay(&mut request, |_| true));
-    let body = native.encode_request(&request).unwrap().body;
+    let body = native.encode_request(request.clone()).unwrap().body;
     assert_eq!(body["input"][0]["encrypted_content"], "secret");
     assert_eq!(body["input"][0]["native_hint"], "reasoning-only");
     assert_eq!(body["input"][0]["content"], json!([]));
@@ -940,7 +940,7 @@ fn thinking_replay_native_reasoning_keeps_ciphertext_but_moves_content_before_to
     }]);
     assert!(!super::prepare_thinking_replay(&mut request, |_| false));
     assert!(matches!(
-        pair.encode_request(&request),
+        pair.encode_request(request),
         Err(TransformError::Unrepresentable { .. })
     ));
 }
@@ -1046,7 +1046,7 @@ fn provider_message_metadata_does_not_interrupt_chat_delivery() {
         }))
         .unwrap();
     assert_eq!(
-        outbound.encode_request(&request).unwrap().body["messages"][0]["content"],
+        outbound.encode_request(request).unwrap().body["messages"][0]["content"],
         "Checking hardware."
     );
 }
@@ -1067,7 +1067,7 @@ fn native_compaction_controls_and_state_cannot_be_lossily_converted() {
     ] {
         let request = outbound.decode_request(body).unwrap();
         assert!(matches!(
-            outbound.encode_request(&request),
+            outbound.encode_request(request),
             Err(TransformError::Unrepresentable { .. })
         ));
     }
@@ -1189,7 +1189,7 @@ fn pair_bound_adapter_translates_openai_text_to_anthropic() {
 
     assert_eq!(request.model, "claude-sonnet-4-5");
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Anthropic request");
 
     assert_eq!(encoded.path, "/v1/messages");
@@ -1343,7 +1343,7 @@ fn responses_to_chat_omits_advisory_include_fields() {
     );
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("advisory response fields should not block a compatible provider");
 
     assert!(encoded.body.get("include").is_none());
@@ -1378,7 +1378,7 @@ fn responses_same_protocol_preserves_rolling_extensions() {
         .expect("rolling Responses request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("same-protocol rolling extensions");
 
     assert_eq!(encoded.body["client_metadata"]["session_id"], "session");
@@ -1404,7 +1404,7 @@ fn responses_to_chat_rejects_required_hosted_tools() {
         .expect("rolling Responses request");
 
     let error = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("required hosted tools are a hard constraint");
 
     assert!(matches!(
@@ -1439,7 +1439,7 @@ fn responses_rejects_unrepresentable_hard_tool_choices_before_provider_call() {
             .expect("valid Responses request");
 
         let error = pair
-            .encode_request(&request)
+            .encode_request(request)
             .expect_err("hard tool choice must not be silently dropped");
         assert!(matches!(
             error,
@@ -1476,7 +1476,7 @@ fn gemini_auto_tool_config_translates_to_openai_tool_choice() {
         .expect("valid Gemini request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("Gemini AUTO tool selection is representable by OpenAI");
 
     assert_eq!(encoded.body["tool_choice"], "auto");
@@ -1513,7 +1513,7 @@ fn gemini_constrained_auto_tool_config_remains_unrepresentable() {
         .expect("valid Gemini request");
 
     let error = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("constrained Gemini tool selection must remain fail-closed");
 
     assert!(matches!(
@@ -1544,7 +1544,7 @@ fn responses_cross_protocol_distinguishes_advisory_and_hard_controls() {
             "include": ["reasoning.encrypted_content"]
         }))
         .expect("valid Responses request");
-    pair.encode_request(&request)
+    pair.encode_request(request)
         .expect("advisory controls may stay local");
 
     for (field, value) in [("max_tool_calls", json!(2)), ("truncation", json!("auto"))] {
@@ -1555,7 +1555,7 @@ fn responses_cross_protocol_distinguishes_advisory_and_hard_controls() {
         body[field] = value;
         let request = pair.decode_request(body).expect("valid Responses request");
         let error = pair
-            .encode_request(&request)
+            .encode_request(request)
             .expect_err("hard control must not be silently dropped");
         assert!(matches!(
             error,
@@ -1581,7 +1581,7 @@ fn pair_bound_adapter_rejects_cross_protocol_candidate_loss() {
         .expect("valid OpenAI request");
 
     let error = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("Anthropic cannot represent multiple candidates");
 
     match error {
@@ -1621,7 +1621,7 @@ fn donor_anthropic_system_blocks_map_to_gemini_system_instruction() {
         .expect("valid Anthropic request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Gemini request");
 
     assert_eq!(
@@ -1653,7 +1653,7 @@ fn donor_gemini_system_instruction_maps_to_responses_instructions() {
         .expect("valid Gemini request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Responses request");
 
     assert_eq!(encoded.body["instructions"], "You are OpenCode.");
@@ -1688,7 +1688,7 @@ fn donor_anthropic_base64_image_maps_to_gemini_inline_data() {
         .expect("valid Anthropic image request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Gemini image request");
 
     let inline_data = &encoded.body["contents"][0]["parts"][0]["inlineData"];
@@ -1723,7 +1723,7 @@ fn donor_anthropic_tool_turn_maps_to_responses_items() {
         .expect("valid Anthropic tool turn");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Responses tool turn");
     let items = encoded.body["input"].as_array().expect("Responses items");
 
@@ -1755,7 +1755,7 @@ fn donor_anthropic_system_maps_to_responses_instructions() {
         .expect("valid Anthropic request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Responses request");
 
     assert_eq!(
@@ -1795,7 +1795,7 @@ fn donor_responses_multimodal_function_output_maps_to_anthropic_tool_result() {
         .expect("valid Responses function output");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Anthropic tool result");
     let blocks = encoded.body["messages"]
         .as_array()
@@ -1851,7 +1851,7 @@ fn donor_responses_multimodal_function_output_maps_to_google_function_response()
         .expect("valid Responses function output");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("representable Google function response");
     let parts = encoded.body["contents"][1]["parts"]
         .as_array()
@@ -2132,7 +2132,7 @@ fn canonical_video_is_native_for_gemini_and_rejected_for_anthropic() {
             GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
         )
         .expect("Gemini protocol pair")
-        .encode_request(&request)
+        .encode_request(request.clone())
         .expect("Gemini native video");
     assert_eq!(
         gemini.body["contents"][0]["parts"][0]["fileData"]["mimeType"],
@@ -2145,7 +2145,7 @@ fn canonical_video_is_native_for_gemini_and_rejected_for_anthropic() {
             ANTHROPIC_MESSAGES_2023_06_01,
         )
         .expect("Anthropic protocol pair")
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("Anthropic must reject native video");
     assert!(matches!(
         error,
@@ -2160,7 +2160,7 @@ fn responses_reasoning_before_tool_call_is_preserved_for_openai_compatible() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("inspect".into()),
+                content: MessageContent::Text("inspect".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -2181,7 +2181,7 @@ fn responses_reasoning_before_tool_call_is_preserved_for_openai_compatible() {
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("{\"completion\":\"complete\"}".into()),
+                content: MessageContent::Text("{\"completion\":\"complete\"}".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: Some("call_media".into()),
                 meta: None,
@@ -2195,7 +2195,7 @@ fn responses_reasoning_before_tool_call_is_preserved_for_openai_compatible() {
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         )
         .expect("registered protocol pair")
-        .encode_request(&request)
+        .encode_request(request)
         .expect("reasoning-only assistant tool call is representable");
 
     assert_eq!(
@@ -2222,7 +2222,7 @@ fn responses_replay_preserves_canonical_reasoning_item() {
     let encoded = ProtocolTransform::global()
         .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
         .expect("registered protocol pair")
-        .encode_request(&request)
+        .encode_request(request)
         .expect("canonical reasoning is native Open Responses input");
 
     assert_eq!(encoded.body["input"][0]["type"], "reasoning");
@@ -2259,7 +2259,7 @@ fn strict_function_tool_is_omitted_when_target_cannot_express_it() {
         let encoded = ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, target)
             .expect("registered target pair")
-            .encode_request(&request)
+            .encode_request(request.clone())
             .expect("function tool strict is an advisory hint");
         let tool = &encoded.body["tools"][0];
         assert!(!tool.to_string().contains("strict"), "{tool}");
@@ -2294,7 +2294,7 @@ fn responses_target_keeps_non_strict_default_of_other_ingress_protocols() {
             "tools": tools,
         }))
         .expect("valid chat request");
-    let encoded = chat.encode_request(&request).expect("encode Responses");
+    let encoded = chat.encode_request(request).expect("encode Responses");
     assert_eq!(encoded.body["tools"][0]["strict"], false);
 
     let anthropic = ProtocolTransform::global()
@@ -2315,7 +2315,7 @@ fn responses_target_keeps_non_strict_default_of_other_ingress_protocols() {
             }],
         }))
         .expect("valid anthropic request");
-    let encoded = anthropic.encode_request(&request).expect("encode Responses");
+    let encoded = anthropic.encode_request(request).expect("encode Responses");
     assert_eq!(encoded.body["tools"][0]["strict"], false);
 
     let explicit = chat
@@ -2332,7 +2332,7 @@ fn responses_target_keeps_non_strict_default_of_other_ingress_protocols() {
             }],
         }))
         .expect("valid strict chat request");
-    let encoded = chat.encode_request(&explicit).expect("encode Responses");
+    let encoded = chat.encode_request(explicit).expect("encode Responses");
     assert_eq!(encoded.body["tools"][0]["strict"], true);
 }
 
@@ -2355,7 +2355,7 @@ fn chat_target_preserves_explicit_strict_and_omits_unset() {
             ],
         }))
         .expect("valid chat request");
-    let encoded = pair.encode_request(&request).expect("encode chat");
+    let encoded = pair.encode_request(request).expect("encode chat");
     assert_eq!(encoded.body["tools"][0]["function"]["strict"], true);
     assert_eq!(encoded.body["tools"][1]["function"]["strict"], false);
     assert!(encoded.body["tools"][2]["function"].get("strict").is_none());
@@ -2377,7 +2377,7 @@ fn responses_ingress_keeps_omitted_strict_for_responses_target() {
             }]
         }))
         .expect("valid Responses request");
-    let encoded = pair.encode_request(&request).expect("encode Responses");
+    let encoded = pair.encode_request(request).expect("encode Responses");
     assert!(encoded.body["tools"][0].get("strict").is_none());
 }
 
@@ -2393,7 +2393,7 @@ fn refusal_semantics_fail_closed_for_protocols_without_refusal_items() {
     let mut mixed = AiItem::output_text("visible");
     mixed.content = MessageContent::Blocks(vec![
         ContentBlock::Text {
-            text: "visible".into(),
+            text: "visible".to_owned().into(),
             cache_control: None,
         },
         ContentBlock::Refusal {
@@ -2615,7 +2615,7 @@ fn cross_protocol_omits_advisory_text_and_stream_controls() {
         .expect("dated request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("advisory controls are omitted");
     assert_eq!(
         encoded.body["messages"][0]["content"],
@@ -2688,7 +2688,7 @@ fn image_detail_is_ignored_without_losing_images_on_targets_without_the_control(
                 };
                 let request = pair.decode_request(body).expect("image request");
                 let body = pair
-                    .encode_request(&request)
+                    .encode_request(request)
                     .expect("unsupported image resolution hints do not block requests")
                     .body;
 
@@ -2738,7 +2738,7 @@ fn image_detail_does_not_block_anthropic_tool_continuation() {
         }))
         .expect("image tool result");
     let body = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("image tool continuation")
         .body;
     assert_eq!(
@@ -2795,7 +2795,7 @@ fn image_detail_is_preserved_on_openai_targets() {
                     })
                 };
                 let request = pair.decode_request(body).expect("image request");
-                let body = pair.encode_request(&request).expect("supported hint").body;
+                let body = pair.encode_request(request).expect("supported hint").body;
                 let encoded_detail = if target == OPEN_RESPONSES_2026_04_24 {
                     &body["input"][0]["content"][0]["detail"]
                 } else {
@@ -2834,7 +2834,7 @@ fn google_structured_output_is_representable_for_open_responses_requests() {
         .expect("dated request");
 
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("lossless Gemini structured output");
     assert_eq!(
         encoded.body["generationConfig"]["responseMimeType"],
@@ -2864,7 +2864,7 @@ fn google_structured_output_is_representable_for_open_responses_requests() {
         }))
         .expect("dated request");
     assert!(matches!(
-        pair.encode_request(&lossy),
+        pair.encode_request(lossy),
         Err(TransformError::Unrepresentable { .. })
     ));
 }

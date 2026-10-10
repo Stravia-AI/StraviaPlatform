@@ -240,7 +240,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut request = AiRequest::new(
+            let request = AiRequest::new(
                 "model",
                 vec![AiItem {
                     role: Role::Tool,
@@ -256,6 +256,7 @@ mod tests {
                     meta: None,
                 }],
             );
+            let mut request = std::sync::Arc::new(request);
             gateway
                 .redaction
                 .protect(&owner, &mut request, None)

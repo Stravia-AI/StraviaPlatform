@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,31 +10,59 @@ pub(crate) const REDACTED: &str = "***";
 
 pub(crate) fn user_input_text(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
-) -> Option<String> {
+) -> Option<Cow<'_, str>> {
     use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
     let text = match &item.content {
-        MessageContent::Text(text) => text.clone(),
-        MessageContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|block| match block {
+        MessageContent::Text(text) => Cow::Borrowed(text.as_str()),
+        MessageContent::Blocks(blocks) => {
+            let mut texts = blocks.iter().filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+            });
+            let first = texts.next()?;
+            if let Some(second) = texts.next() {
+                let capacity = first.len()
+                    + second.len()
+                    + 1
+                    + texts.clone().map(|text| text.len() + 1).sum::<usize>();
+                let mut joined = String::with_capacity(capacity);
+                joined.push_str(first);
+                joined.push('\n');
+                joined.push_str(second);
+                for text in texts {
+                    joined.push('\n');
+                    joined.push_str(text);
+                }
+                Cow::Owned(joined)
+            } else {
+                Cow::Borrowed(first)
+            }
+        }
     };
     (!text.is_empty()).then_some(text)
 }
 
-pub(crate) fn input_preview(mut text: String, protected: &ProtectedSecrets) -> String {
+pub(crate) fn input_preview(mut text: Cow<'_, str>, protected: &ProtectedSecrets) -> String {
     // Full text must cross both filters before taking a Unicode-safe opening window.
-    protected.text(&mut text);
-    text = redact_text(&text);
-    if let Some((end, _)) = text.char_indices().nth(4096) {
-        text.truncate(end);
+    if !protected.0.read().is_empty() {
+        protected.text(text.to_mut());
     }
-    text
+    if text_may_need_redaction(&text) {
+        text = Cow::Owned(redact_text(&text));
+    }
+    let end = text
+        .char_indices()
+        .nth(4096)
+        .map_or(text.len(), |(end, _)| end);
+    match text {
+        Cow::Borrowed(text) => text[..end].to_owned(),
+        Cow::Owned(mut text) => {
+            text.truncate(end);
+            text.shrink_to_fit();
+            text
+        }
+    }
 }
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
@@ -1663,7 +1691,7 @@ mod tests {
             "start {secret}\napi_key=credential-sentinel\n{}",
             "文".repeat(4200)
         );
-        let preview = super::input_preview(text, &protected);
+        let preview = super::input_preview(text.into(), &protected);
         assert!(preview.starts_with("start ***\napi_key=***\n"));
         assert!(!preview.contains("密"));
         assert!(!preview.contains("credential-sentinel"));
@@ -1682,7 +1710,7 @@ mod tests {
             "地址：https://example.test/path?token=never-persist"
         );
 
-        let preview = input_preview(text.to_owned(), &ProtectedSecrets::default());
+        let preview = input_preview(text.into(), &ProtectedSecrets::default());
 
         assert_eq!(
             preview,
@@ -1693,6 +1721,26 @@ mod tests {
                 "地址：https://example.test/path?token=***"
             )
         );
+    }
+
+    #[test]
+    fn input_preview_redacts_header_schemes_without_field_separators() {
+        let preview = input_preview(
+            "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel".into(),
+            &ProtectedSecrets::default(),
+        );
+
+        assert_eq!(preview, "safe prose bEaReR *** BaSiC ***");
+    }
+
+    #[test]
+    fn input_preview_limits_unprotected_unicode_text_to_whole_characters() {
+        let opening = "𠮷".repeat(4096);
+        let text = format!("{opening}last");
+
+        let preview = input_preview(text.as_str().into(), &ProtectedSecrets::default());
+
+        assert_eq!(preview, opening);
     }
 
     #[test]

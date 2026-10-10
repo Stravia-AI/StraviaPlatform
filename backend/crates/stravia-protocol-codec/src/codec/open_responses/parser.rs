@@ -468,7 +468,7 @@ impl ResponsesResponseParser {
                                                 anyhow::anyhow!("output_text content missing text")
                                             })?;
                                         blocks.push(ContentBlock::Text {
-                                            text: text.to_owned(),
+                                            text: text.to_owned().into(),
                                             cache_control: None,
                                         });
                                     }

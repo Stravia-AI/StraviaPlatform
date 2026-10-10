@@ -340,7 +340,11 @@ async fn http_case(case: &'static str) {
             request: inference,
         }
     };
-    let result = runtime.execute(&plugin, "codex", input, scope).await;
+    let (operation, encoded) = input.encode_for_host().expect("encode inference");
+    drop(input);
+    let result = runtime
+        .execute(&plugin, "codex", operation, encoded, scope)
+        .await;
     server.await.expect("loopback upstream");
     if matches!(case, "error" | "compact-error") {
         assert!(
@@ -659,7 +663,7 @@ fn request() -> AiRequest {
         "gpt-6-astra",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("你好".into()),
+            content: MessageContent::Text("你好".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -698,13 +702,11 @@ async fn execute_once(
         Deadline::from_now(Duration::from_secs(300)),
         0,
     );
+    let (operation, input) = OperationInput::Infer { provider, request }
+        .encode_for_host()
+        .map_err(|_| RuntimeError::InvalidOutput)?;
     runtime
-        .execute(
-            plugin,
-            "codex",
-            OperationInput::Infer { provider, request },
-            scope,
-        )
+        .execute(plugin, "codex", operation, input, scope)
         .await
 }
 

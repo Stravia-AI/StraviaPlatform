@@ -208,9 +208,9 @@ impl AiResponse {
                     if item.tool_calls.is_none() || !text.is_empty() =>
                 {
                     if replaced {
-                        text.clear();
+                        *text = String::new().into();
                     } else {
-                        *text = std::mem::take(&mut replacement);
+                        *text = std::mem::take(&mut replacement).into();
                         replaced = true;
                     }
                 }
@@ -229,9 +229,9 @@ impl AiResponse {
                             continue;
                         };
                         if replaced {
-                            text.clear();
+                            *text = String::new().into();
                         } else {
-                            *text = std::mem::take(&mut replacement);
+                            *text = std::mem::take(&mut replacement).into();
                             replaced = true;
                         }
                     }
@@ -365,7 +365,7 @@ mod tests {
                     input,
                     ..
                 }
-            ] if text == "planning"
+            ] if text.as_str() == "planning"
                 && id == "call_1"
                 && name == "lookup"
                 && input == &serde_json::json!({"query": "weather"})
@@ -393,15 +393,20 @@ mod tests {
         let mut response = AiResponse::new("resp_1", "logical-model");
         response.items.push(item);
 
+        let original = response.clone();
         response.replace_output_text("after");
 
         assert_eq!(response.items.len(), 1);
         assert!(matches!(
             &response.items[0].content,
-            MessageContent::Text(text) if text == "after"
+            MessageContent::Text(text) if text.as_str() == "after"
         ));
         assert_eq!(response.items[0].tool_calls.as_ref().map(Vec::len), Some(1));
         assert!(response.items[0].meta.is_some());
+        assert!(matches!(
+            &original.items[0].content,
+            MessageContent::Text(text) if text.as_str() == "before"
+        ));
     }
 
     #[test]
@@ -409,14 +414,14 @@ mod tests {
         let mut item = AiItem::output_text("unused");
         item.content = MessageContent::Blocks(vec![
             crate::protocol::ir::ContentBlock::Text {
-                text: "before one".into(),
+                text: "before one".to_owned().into(),
                 cache_control: None,
             },
             crate::protocol::ir::ContentBlock::Refusal {
                 refusal: "cannot comply".into(),
             },
             crate::protocol::ir::ContentBlock::Text {
-                text: "before two".into(),
+                text: "before two".to_owned().into(),
                 cache_control: None,
             },
         ]);
@@ -434,7 +439,7 @@ mod tests {
                 crate::protocol::ir::ContentBlock::Text { text: first, .. },
                 crate::protocol::ir::ContentBlock::Refusal { refusal },
                 crate::protocol::ir::ContentBlock::Text { text: second, .. },
-            ] if first == "after" && refusal == "cannot comply" && second.is_empty()
+            ] if first.as_str() == "after" && refusal == "cannot comply" && second.is_empty()
         ));
     }
 }

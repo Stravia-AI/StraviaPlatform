@@ -79,12 +79,12 @@ mod cache_deadline {
 }
 
 #[derive(Clone)]
-pub(super) struct GenerationChainCommit {
+pub(super) struct GenerationChainCommit<'a> {
     pub(crate) principal: Principal,
     pub(crate) id: String,
-    pub(crate) parent: ActiveGenerationChain,
-    pub(crate) request_delta: AiRequest,
-    pub(crate) effective_request: Option<AiRequest>,
+    pub(crate) parent: &'a ActiveGenerationChain,
+    pub(crate) request_delta: &'a AiRequest,
+    pub(crate) effective_request: Option<&'a AiRequest>,
     pub(crate) response: AiResponse,
     pub(crate) upstream_response_id: Option<String>,
     pub(crate) effective_state: GenerationChainState,
@@ -336,7 +336,8 @@ impl GenerationChainStore {
         request: &mut Arc<AiRequest>,
         allow_complete_window: bool,
     ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
-        let client_request = canonical_client_history_request(request);
+        let snapshot = Arc::clone(request);
+        let client_request = canonical_client_history_request(&snapshot);
         let leading_control_items = request.items.len() - client_request.items.len();
         let limit = client_request
             .items
@@ -878,10 +879,10 @@ impl GenerationChainStore {
         &self,
         principal: &Principal,
         parent_id: &str,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
         candidate_state: &GenerationChainState,
         allow_ephemeral_response: bool,
-        full_fallback: &mut Option<AiRequest>,
+        full_fallback: &mut Option<Arc<AiRequest>>,
     ) -> bool {
         *full_fallback = None;
         let Ok(materialized) = self
@@ -908,10 +909,10 @@ impl GenerationChainStore {
     pub fn prepare_upstream(
         &self,
         active: &ActiveGenerationChain,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
         candidate_state: &GenerationChainState,
         allow_ephemeral_response: bool,
-        full_fallback: &mut Option<AiRequest>,
+        full_fallback: &mut Option<Arc<AiRequest>>,
     ) -> bool {
         *full_fallback = None;
         if !(request_preserves_upstream_response(request) || allow_ephemeral_response)
@@ -946,9 +947,18 @@ impl GenerationChainStore {
         }
         // Snapshot only after every continuation gate succeeds, immediately before
         // discarding history or replacing protocol controls.
-        let mut fallback = request.clone();
-        crate::router::clear_previous_response_id(&mut fallback);
+        let mut fallback = Arc::clone(request);
+        if crate::router::parent_id_from_request(&fallback).is_some()
+            || fallback
+                .meta
+                .vendor
+                .ingress
+                .contains_key("previous_response_id")
+        {
+            crate::router::clear_previous_response_id(Arc::make_mut(&mut fallback));
+        }
         *full_fallback = Some(fallback);
+        let request = Arc::make_mut(request);
         request.items = request.items.split_off(parent_state.context_messages);
         match request.ext.as_mut() {
             Some(ProtocolExt::OpenResponses(extension)) => {
@@ -969,7 +979,10 @@ impl GenerationChainStore {
     }
 
     #[cfg(test)]
-    pub(crate) async fn save(&self, commit: GenerationChainCommit) -> Result<(), TurnCommitError> {
+    pub(crate) async fn save(
+        &self,
+        commit: GenerationChainCommit<'_>,
+    ) -> Result<(), TurnCommitError> {
         let GenerationChainCommit {
             principal,
             id,
@@ -995,7 +1008,7 @@ impl GenerationChainStore {
 
     pub(crate) async fn save_with_effective(
         &self,
-        commit: GenerationChainCommit,
+        commit: GenerationChainCommit<'_>,
     ) -> Result<(), TurnCommitError> {
         let GenerationChainCommit {
             principal,
@@ -1008,8 +1021,8 @@ impl GenerationChainStore {
             mut effective_state,
         } = commit;
         let mut response = response;
-        let mut effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
-        let projected_client = project_client_commit(&parent, &request_delta, &response)?;
+        let mut effective_request = Cow::Borrowed(effective_request.unwrap_or(request_delta));
+        let projected_client = project_client_commit(parent, request_delta, &response)?;
         let fresh_states = &parent.fresh_inline_states;
         let inline_boundary =
             stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
@@ -1019,15 +1032,15 @@ impl GenerationChainStore {
         if let Some(output_start) = inline_boundary(&response.items, fresh_states) {
             let state = std::slice::from_ref(&response.items[output_start]);
             if let Some(input_start) = inline_boundary(&effective_request.items, state) {
-                effective_request.items.drain(..input_start);
+                effective_request.to_mut().items.drain(..input_start);
                 response.items.drain(..=output_start);
             } else {
-                effective_request.items.clear();
+                effective_request.to_mut().items.clear();
                 response.items.drain(..output_start);
             }
             effective_inline = true;
         } else if let Some(input_start) = inline_boundary(&effective_request.items, fresh_states) {
-            effective_request.items.drain(..input_start);
+            effective_request.to_mut().items.drain(..input_start);
             effective_inline = true;
         }
         effective_state.context_fingerprint = history_context_fingerprint(&effective_request.items);
@@ -1060,7 +1073,7 @@ impl GenerationChainStore {
         } = projected_client;
         let effective_history_mutation = if effective_inline || parent.replace_effective_history {
             EffectiveHistoryMutation::Replace {
-                items: effective_request.items.clone(),
+                items: Cow::Borrowed(&effective_request.items),
             }
         } else if effective_request
             .items
@@ -1068,11 +1081,13 @@ impl GenerationChainStore {
             .is_some_and(|prefix| items_equal(prefix, &parent.parent_effective_items))
         {
             EffectiveHistoryMutation::Append {
-                items: effective_request.items[parent.parent_effective_items.len()..].to_vec(),
+                items: Cow::Borrowed(
+                    &effective_request.items[parent.parent_effective_items.len()..],
+                ),
             }
         } else {
             EffectiveHistoryMutation::Replace {
-                items: effective_request.items.clone(),
+                items: Cow::Borrowed(&effective_request.items),
             }
         };
         let item_count = u32::try_from(
@@ -1092,8 +1107,8 @@ impl GenerationChainStore {
         let trusted_media_turn_ids = response.trusted_media_turn_ids.clone();
         let payload = serde_json::to_value(PersistedResponseNode {
             client_delta: RequestDelta {
-                messages: client_request_delta.items,
-                system: client_request_delta.instructions,
+                messages: Cow::Borrowed(&client_request_delta.items),
+                system: client_request_delta.instructions.clone(),
             },
             client_output: Some(client_output),
             client_history_mutation,
@@ -1112,7 +1127,7 @@ impl GenerationChainStore {
             .commit(TurnCommit {
                 id: TurnNodeId::new(id),
                 kind: TurnNodeKind::Response,
-                parent_id: parent.parent_id.map(TurnNodeId::new),
+                parent_id: parent.parent_id.as_deref().map(TurnNodeId::new),
                 principal: principal.clone(),
                 payload_version: RESPONSE_PAYLOAD_VERSION,
                 payload,

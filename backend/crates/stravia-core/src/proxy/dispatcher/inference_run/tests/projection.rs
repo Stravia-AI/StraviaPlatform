@@ -861,7 +861,9 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
         "projected-platform",
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "test".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,

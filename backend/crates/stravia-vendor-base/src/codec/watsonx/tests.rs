@@ -10,14 +10,14 @@ fn encodes_watsonx_model_id_and_uses_a_distinct_stream_route() {
         "ibm/granite-4-h-small",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
 
-    let (body, _) = WatsonxTextChatV1.encode_request(&request).unwrap();
+    let (body, _) = WatsonxTextChatV1.encode_request(request).unwrap();
     assert_eq!(body["model_id"], "ibm/granite-4-h-small");
     assert!(body.get("model").is_none());
     assert_eq!(
@@ -44,7 +44,7 @@ fn replays_reasoning_content_and_drops_protected_only_assistant() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hi".into()),
+                content: MessageContent::Text("hi".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -60,13 +60,13 @@ fn replays_reasoning_content_and_drops_protected_only_assistant() {
                 signature: Some("sig_protected".into()),
             }),
             block(ContentBlock::Text {
-                text: "answer".into(),
+                text: "answer".to_owned().into(),
                 cache_control: None,
             }),
         ],
     );
 
-    let (body, _) = WatsonxTextChatV1.encode_request(&request).unwrap();
+    let (body, _) = WatsonxTextChatV1.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0]["role"], "user");

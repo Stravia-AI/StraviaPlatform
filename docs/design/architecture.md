@@ -310,6 +310,8 @@ stravia-server::start_http_server() → 绑定 listener 并提供优雅关闭
 - **请求生命周期追踪**：`RequestContext` 携带 request_id、deadline、cancellation token、outcome，以及请求范围扩展，端到端贯穿 dispatcher 与 handler。
 - **确定性协议协商**：`negotiate()`（`proxy/planner/negotiator.rs`）实现三级 egress 解析（Exact → Same-family → Provider Default），`ProtocolRegistry` 只暴露 endpoint identity、capabilities、alias 与 ingress route 查询。
 - **Pair-bound Protocol Conversion**：crate-private `ProtocolTransform::bind(ingress, egress)` 返回 `ProtocolPair`；调用方只通过 `decode_request` / `encode_request`、`decode_response` / `encode_response` 和有状态 stream session 转换 wire 与 canonical IR，不能直接取得 codec。
+- **请求编码所有权**：Rust 请求编码接口消费 `AiRequest`，语义损失与能力校验仍先借用输入完成。四类标准 codec 取出唯一归属的文本、移入已拥有的 JSON 子树；共享文本、历史快照、工具关联、原生字段优先级和 metadata 隔离语义保持不变，不提供旧借用编码兼容路径。
+- **内容解码所有权**：Canonical `MessageContent` 与 Chat 文本/parts 通过直接 Serde visitor 接收已有 `String` 或 typed sequence，避免 untagged 缓冲再借用复制。来自 wire 字节的文本仍按需要拥有缓冲；保留现有 JSON 形状、原生工具 JSON、任意精度 wire 数字和非法内容拒绝行为，不更换 JSON backend。
 - **Fail-closed representability**：跨协议 encode 前按实际 `AiRequest`、`AiResponse` 或 delta 检查语义损失并返回 typed `ProtocolLossyRejected`；同 endpoint 路径不套用跨协议 loss policy。
 - **Canonical-only 推理**：所有推理请求都经过 ingress decode、canonical IR、Vendor Plugin canonical execution 与 ingress encode；不提供以 wire raw request/response 绕过 HookRuntime 的路径。
 - **显式字段映射**：每个 codec 明确处理已知字段；允许的 vendor-specific 字段走 ExtensionBag，不隐式丢弃或把原始字节暴露给 hook。
@@ -509,7 +511,11 @@ Request Patch 可改写 canonical model、system/instructions、ContextItems、g
 
 ### 4.5 ContextSnapshot 与状态
 
-`InferenceRun` 在 `begin()` 为原始请求建立 `ContextSnapshot`：有序 `ContextItem`（Message、Reasoning、ToolCall、ToolResult）、稳定请求内 `ContextItemId`、版本化 checkpoint/fingerprint 与 `ReplaceContextSpan`。每次请求独立从客户端提交的上下文匹配，不维护压缩 rollback 状态机；重叠 span、反向 span、未知/重复 item ID 均拒绝。
+`InferenceRun` 仅在存在当前完整性允许执行的 Request 事件订阅者时，在 `begin()` 为原始请求建立 `ContextSnapshot`：有序 `ContextItem`（Message、Reasoning、ToolCall、ToolResult）、稳定请求内 `ContextItemId`、版本化 checkpoint/fingerprint 与 `ReplaceContextSpan`。无此订阅者时不物化大正文 JSON 快照；其他事件只读取独立的完整性状态，PlatformTool 仍通过既有 read scope、主体与取消上下文执行。每次请求独立从客户端提交的上下文匹配，不维护压缩 rollback 状态机；重叠 span、反向 span、未知/重复 item ID 均拒绝。
+
+原始与当前 Snapshot 在未修改时共享同一 `Arc`，流式只读回调不复制完整上下文。Request 动作在暂存状态中原子应用：空批次不复制请求，实际修改才分离请求或上下文；后续动作失败时仍丢弃整批暂存修改。Canonical 普通文本与 Text block 使用 `Arc<String>` 共享底层缓冲区，文本写入采用写时复制；序列化仍为原有字符串，不能因此改变 checkpoint、历史指纹或 Hook 的只读元数据规则。
+
+Canonical 语义投影将已拥有的 JSON 子树直接移入父对象或数组，不通过 `json!` 再次序列化并复制正文；历史逐项投影与比较不预先物化整段历史。普通 Text 的指纹与比较借用正文，复杂内容和原生字段仍经过既有受控投影；JSON Map 键序、长度前缀、语义单元顺序及缺省/null 等价关系保持不变。Context item 的身份匹配移交已计算的 canonical bytes，span fingerprint 每项只计算一次，仍保留重复项的独立 occurrence 身份。
 
 `ContextCompleteness::Full` 表示完整可见历史；provider opaque refs（例如 Google cached content、Anthropic container）会保留为 namespaced extension 并标记 `Partial`。声明 `requires_full_context` 的 hook 在 Partial 请求中跳过并记录 `HookSkip`，其他 hook 仍处理可见 canonical 语义。该能力只提供匹配原语，第一阶段不提供摘要模型、压缩算法、RewriteStore 或管理 UI。
 
@@ -569,6 +575,8 @@ Codex HTTP 推理实际发送 `stream=true` 时，Vendor 显式选择既有 SSE 
 `interaction_observation` 是 Generation Chain 外部的 crate-private deep module。一个 Connect Client Interaction 通常从新的 canonical User item 开始，并容纳其客户端工具续接的 Inference Run tree。同一 Principal 下精确续接 Generation Chain parent 时，无新增 User、提交父历史中待完成工具调用的结果，或 ingress 接收时间位于父响应完整交付后 `[0, 2000]` 毫秒内，均继续原 Interaction；后两项允许夹带新增 User，工具续接不限时间，快速续接允许重新激活已完成 Interaction。其余新增 User 创建 child Interaction。归并理由只用于诊断，不证明输入来自 harness，不改变模型输入、权限或执行父边。无 parent 的失败 root 仅在同 Principal、exact canonical fingerprint、未 Client Output Commit、无并发相同 Run、两分钟内等全部条件满足时在进程内推断重试归组。推断边绝不写回 Generation Chain。
 
 普通 Observation 使用有界非阻塞事件 seam，writer 在数据库事务中先提交 event 与 projection，再广播同一单调 sequence。forest snapshot 返回 `snapshot_sequence`，authenticated fetch SSE 从 `after` 续接；游标已超出保留范围时发送明确 `reset_required`。记录失败产生 `observation_gap`，Debug 写入失败产生带稳定 reason 的 `partial`，两者均不能改变 inference、Target retry/selection、Client Output Commit、Delivery 或 Generation Chain。
+
+SQLite 与 PostgreSQL 的 Interaction usage 汇总从该 Interaction 的索引 Run 集合关联 Target attempts，避免每次确认 usage 扫描全局历史。仍对全部所属 attempts 执行 `SUM`，保留未知值、显式零、失败 attempt 和仅首次确认入账的语义，不增加索引或修改 schema。
 
 Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest、Rejected Requests 与 Failed Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 不进入 Debug Trace；原始应用协议 payload 只通过 Debug Bundle 提供，不在 Run inspector 中展开。
 
@@ -999,6 +1007,12 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 ### 10.2 核心表结构（最终态，post-migration）
 
 Turn Chain format 2 在同一 Principal 内按 raw JSON 内容项摘要去重，至少 256B 的指定历史槽外置为内容行；节点 envelope 的 `slots` 保存路径与重复位置，`contents` 保存唯一摘要，`turn_chain_node_contents` 只保存不同内容的引用集合而非每个路径一行。复合外键约束节点与内容归属；写入先查已有项再插缺失项，物化按链批量读取并核验正文摘要，持锁 GC 维持引用安全。节点 envelope、内容及普通 Observation payload 使用同一二进制 codec，压缩门槛仍为 128B。精确的 14 字节 trailer、启动分阶段转换钩子、备份恢复与无可重复性能回退验收见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 状态不再进入关系表：`diagnostics/observation-debug/<trace_id>/manifest.json` 配合进程内 `DebugTraceIndex` 提供详情、失败请求列表与 Bundle 状态，单实例文件可见性不变；事件收敛见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+
+普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 envelope，再查询内容存在性提示；查询释放连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 保留 `ROW EXCLUSIVE` 表锁及既有行的 `FOR KEY SHARE`；SQLite 仍在共享 gate 内裁决。若 GC 在提示查询与事务之间删除内容，则使用保留的 raw JSON 在 blocking worker 中补做压缩，此异常路径保持写/GC 互斥，不释放锁后重试。缺失内容批量 `INSERT ... DO NOTHING RETURNING`，冲突后仅定向取号；节点与去重引用仍在同一事务提交。两后端使用相同准备与重查流程，不改变 SQL schema、格式版本或保留期。
+
+锁内确认内容存在后，立即释放已不再需要的恢复正文。缺失内容的压缩缓冲按所有权交给 SQLx 参数：SQLite 复用原 `Vec<u8>`，避免借用 slice 的绑定副本；PostgreSQL 仍需将 BYTEA 编码进协议参数区，但源缓冲在编码后释放，不再跨数据库等待重复驻留。启动迁移保留共享 prepared map 的借用路径，不改变其数据复用与原子提交。
+
+每个可外置历史值先对原始 compact JSON 流同时计数和散列，重复内容不分配第二份 raw body，首次内容才按精确长度写入正文。内容 key 仍取原始 JSON bytes 而不是语义指纹；256-byte 边界、逐 occurrence 的 slot、未知字段及完整恢复保持不变。
 
 本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 

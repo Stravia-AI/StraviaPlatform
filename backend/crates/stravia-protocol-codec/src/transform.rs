@@ -18,7 +18,7 @@ pub trait ProtocolAdapter: Send + Sync + 'static {
     fn id(&self) -> ProtocolEndpoint;
     fn capabilities(&self) -> &'static EndpointCapabilities;
     fn decode_request(&self, body: Value) -> anyhow::Result<AiRequest>;
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)>;
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)>;
     fn request_path(&self, model: &str, stream: bool) -> String;
     fn decode_response(&self, body: Value) -> anyhow::Result<AiResponse>;
     fn encode_response(&self, response: &AiResponse) -> Value;
@@ -156,10 +156,10 @@ impl ProtocolTransform {
     /// the host's standard protocol registry.
     pub fn encode_request_with(
         adapter: &dyn ProtocolAdapter,
-        canonical: &AiRequest,
+        canonical: AiRequest,
     ) -> Result<EncodedRequest, TransformError> {
         let endpoint = adapter.id();
-        Self::validate_request_for(endpoint, adapter.capabilities(), canonical)?;
+        Self::validate_request_for(endpoint, adapter.capabilities(), &canonical)?;
         let path = adapter.request_path(&canonical.model, canonical.stream.enabled);
         let (body, headers) =
             adapter
@@ -279,9 +279,9 @@ impl ProtocolPair {
             })
     }
 
-    pub fn encode_request(self, canonical: &AiRequest) -> Result<EncodedRequest, TransformError> {
+    pub fn encode_request(self, canonical: AiRequest) -> Result<EncodedRequest, TransformError> {
         let target = adapter(self.egress)?;
-        let lost = request_loss_paths(self, canonical, target.capabilities());
+        let lost = request_loss_paths(self, &canonical, target.capabilities());
         if !lost.is_empty() {
             return Err(unrepresentable(
                 self,

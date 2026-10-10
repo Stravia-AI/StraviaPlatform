@@ -40,16 +40,23 @@ pub(crate) fn infer(
         .take()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| invalid("Antigravity requires an upstream model"))?;
-    let raw_thinking = if request.reasoning.target_control.is_none() {
-        request
+    let (raw_thinking_level, raw_thinking_budget) = if request.reasoning.target_control.is_none() {
+        let raw = request
             .meta
             .vendor
             .ingress
             .get("__google_generation_config")
-            .and_then(|config| config.get("thinkingConfig"))
+            .and_then(|config| config.get("thinkingConfig"));
+        (
+            raw.and_then(|thinking| thinking.get("thinkingLevel"))
+                .cloned(),
+            raw.and_then(|thinking| thinking.get("thinkingBudget"))
+                .cloned(),
+        )
     } else {
-        None
+        (None, None)
     };
+    let has_raw_thinking_control = raw_thinking_level.is_some() || raw_thinking_budget.is_some();
     let selector_budget = if let Some(table) = provider
         .model_metadata
         .as_ref()
@@ -104,7 +111,8 @@ pub(crate) fn infer(
     let stop = request.generation.stop.take();
     request.stream.enabled = true;
     let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
-    let mut body = common::encode_inference_request(&protocol.to_string(), &request)?.body;
+    let model = request.model.clone();
+    let mut body = common::encode_inference_request(&protocol.to_string(), request)?.body;
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Gemini request must be an object"))?;
@@ -113,18 +121,15 @@ pub(crate) fn infer(
         .and_then(|config| config.get_mut("thinkingConfig"))
         .and_then(Value::as_object_mut)
     {
-        if let Some(raw) = raw_thinking.and_then(Value::as_object) {
-            for field in ["thinkingLevel", "thinkingBudget"] {
-                if let Some(value) = raw.get(field) {
-                    thinking.insert(field.into(), value.clone());
-                }
+        for (field, value) in [
+            ("thinkingLevel", raw_thinking_level),
+            ("thinkingBudget", raw_thinking_budget),
+        ] {
+            if let Some(value) = value {
+                thinking.insert(field.into(), value);
             }
         }
-        if let Some(budget) = selector_budget.filter(|_| {
-            raw_thinking.is_none_or(|raw| {
-                raw.get("thinkingLevel").is_none() && raw.get("thinkingBudget").is_none()
-            })
-        }) {
+        if let Some(budget) = selector_budget.filter(|_| !has_raw_thinking_control) {
             thinking.remove("thinkingLevel");
             thinking.insert("thinkingBudget".into(), json!(budget));
         }
@@ -210,7 +215,7 @@ pub(crate) fn infer(
     let project = client::project(host, &provider)?;
     let envelope = InferenceEnvelope {
         project: &project,
-        model: &request.model,
+        model: &model,
         request: &body,
         user_agent: "antigravity",
         request_type: "agent",

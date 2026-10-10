@@ -202,7 +202,7 @@ pub async fn snapshot_and_rewrite(
             }
             let marker = format!("Image {ordinal}: [{}]", artifact.reference());
             *block = ContentBlock::Text {
-                text: marker,
+                text: std::sync::Arc::new(marker),
                 cache_control: cache_control.clone(),
             };
             source_ids.push(artifact.id);

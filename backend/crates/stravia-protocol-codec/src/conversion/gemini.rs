@@ -5,7 +5,7 @@ fn gemini_tool_result_correlation_success() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("call_abc".to_string()).into(),
                 name: "read_file".to_string(),
@@ -49,7 +49,7 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
+            content: IrMessageContent::Text(String::new().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: ("call_a".to_string()).into(),
@@ -215,7 +215,7 @@ fn gemini_stream_formatter_normalizes_common_tool_argument_aliases() {
 fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
     let messages = vec![AiItem {
         role: IrRole::User,
-        content: IrMessageContent::Text("hello".to_string()),
+        content: IrMessageContent::Text("hello".to_string().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -253,7 +253,7 @@ fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
     req.tools = tools;
     req.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(req).expect("encode");
     let params = body
         .get("tools")
         .and_then(|v| v.as_array())
@@ -292,7 +292,7 @@ fn gemini_file_data_round_trip_preserves_uri_and_mime_type() {
     // Decode to IR, then re-encode.
     let mut req = GoogleDecoder.decode_request(inbound).expect("decode");
     req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
-    let (outbound, _) = GoogleEncoder.encode_request(&req).expect("encode");
+    let (outbound, _) = GoogleEncoder.encode_request(req).expect("encode");
 
     let parts = outbound["contents"][0]["parts"].as_array().expect("parts");
     let fd = &parts[0]["fileData"];
@@ -357,7 +357,7 @@ fn gemini_encoder_file_data_without_mime_type_omits_mime_type() {
     }];
     let req = AiRequest::new("gemini-2.5-flash", messages);
 
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(req).expect("encode");
 
     let parts = body["contents"][0]["parts"]
         .as_array()
@@ -390,7 +390,7 @@ fn gemini_encoder_file_data_with_mime_type_emits_mime_type() {
     }];
     let req = AiRequest::new("gemini-2.5-flash", messages);
 
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(req).expect("encode");
 
     let parts = body["contents"][0]["parts"]
         .as_array()

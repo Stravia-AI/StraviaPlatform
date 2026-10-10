@@ -199,7 +199,7 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
         observation_payload(
             vec![user_message("edited question")],
             Some(EffectiveHistoryMutation::Replace {
-                items: vec![user_message("edited question")],
+                items: Cow::Owned(vec![user_message("edited question")]),
             }),
             Some(vec![AiItem::output_text("new answer")]),
             "private new answer",
@@ -837,8 +837,8 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_immediately_expired".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
@@ -887,8 +887,8 @@ async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_m
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: id.to_string(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -941,8 +941,8 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_expiring".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -1243,8 +1243,8 @@ async fn previous_response_materializes_history_and_supports_branching() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_root".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -1288,9 +1288,9 @@ async fn replacement_mutation_replays_the_effective_history_without_a_hook() {
         .save_with_effective(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_rewritten".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root,
-            effective_request: Some(effective_root),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
+            effective_request: Some(&effective_root),
             response,
             upstream_response_id: Some("upstream".into()),
             effective_state: state,
@@ -1352,8 +1352,8 @@ async fn previous_response_materializes_the_ordered_item_graph_without_collapsin
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_root".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -1413,7 +1413,7 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
             stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: "planning".into(),
+                text: "planning".to_owned().into(),
                 cache_control: None,
             },
             stravia_runtime_contract::protocol::ir::ContentBlock::ToolUse {
@@ -1498,7 +1498,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         .expect("discover matching prefix");
     let lookup = chain.continuation_lookup();
 
-    let mut without_affinity = resumed.request().clone();
+    let mut without_affinity = Arc::new(resumed.request().clone());
     let mut miss_fallback = None;
     assert_eq!(
         lookup
@@ -1518,7 +1518,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
     );
     assert!(miss_fallback.is_none());
 
-    let mut root_request = responses_request(vec![user_message("new root")]);
+    let mut root_request = Arc::new(responses_request(vec![user_message("new root")]));
     assert_eq!(
         lookup
             .prepare(
@@ -1538,7 +1538,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
     assert!(miss_fallback.is_none());
     assert_eq!(root_request.items[0].content.to_text(), "new root");
 
-    let mut with_affinity = resumed.request().clone();
+    let mut with_affinity = Arc::new(resumed.request().clone());
     assert_eq!(
         lookup
             .prepare(
@@ -1573,11 +1573,11 @@ async fn stable_session_does_not_link_semantically_changed_history() {
         role: Role::User,
         content: MessageContent::Blocks(vec![
             stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: "first".into(),
+                text: "first".to_owned().into(),
                 cache_control: None,
             },
             stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: "transient reminder".into(),
+                text: "transient reminder".to_owned().into(),
                 cache_control: Some(
                     stravia_runtime_contract::protocol::ir::CacheControl::ephemeral(),
                 ),
@@ -1716,8 +1716,8 @@ async fn previous_response_resolves_principal_scoped_item_references() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_items".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -1728,7 +1728,7 @@ async fn previous_response_resolves_principal_scoped_item_references() {
 
     let mut request = responses_request(vec![AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(
@@ -1766,7 +1766,7 @@ async fn previous_response_resolves_principal_scoped_item_references() {
     extension.previous_response_id = Some("resp_items".into());
     unauthorized.items = vec![AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(
@@ -1849,8 +1849,8 @@ async fn previous_response_resolves_references_to_persisted_input_items() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_input".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![saved_input]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![saved_input]),
             effective_request: None,
             response: AiResponse::new("answer", "model"),
             upstream_response_id: None,
@@ -1861,7 +1861,7 @@ async fn previous_response_resolves_references_to_persisted_input_items() {
 
     let mut request = responses_request(vec![AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(
@@ -1895,8 +1895,8 @@ async fn previous_response_inherits_instructions_unless_replaced() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_instructions".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root,
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
             effective_request: None,
             response: AiResponse::new("answer", "model"),
             upstream_response_id: None,
@@ -1951,8 +1951,8 @@ async fn previous_response_inherits_request_configuration_and_keeps_overrides() 
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_config".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root,
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
             effective_request: None,
             response: AiResponse::new("answer", "root-model"),
             upstream_response_id: None,
@@ -1993,8 +1993,8 @@ async fn response_ids_are_isolated_by_principal() {
         .save(GenerationChainCommit {
             principal: principal("owner").clone(),
             id: "resp_private".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("secret")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("secret")]),
             effective_request: None,
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
@@ -2032,8 +2032,8 @@ async fn response_history_survives_adapter_reconstruction() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_persisted".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![user_message("question")]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("question")]),
             effective_request: None,
             response,
             upstream_response_id: None,
@@ -2099,8 +2099,8 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_tool_semantics".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: responses_request(vec![plain, media]),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![plain, media]),
             effective_request: None,
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
@@ -2136,6 +2136,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
         .set("reversible_redaction_enabled", "true")
         .await
         .unwrap();
+    let mut request = Arc::new(request);
     gateway
         .redaction
         .protect(&owner, &mut request, None)
@@ -2219,8 +2220,8 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_gateway_1".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: request,
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &request,
             effective_request: None,
             response,
             upstream_response_id: Some("upstream-1".into()),
@@ -2241,6 +2242,7 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
     let state = GenerationChainState::from_request(&next, "provider-a", OPEN_RESPONSES_2026_04_24);
 
     let full_items = next.items.clone();
+    let mut next = Arc::new(next);
     let mut fallback = None;
     assert!(store.prepare_upstream(&active, &mut next, &state, false, &mut fallback));
     let fallback = fallback.expect("successful continuation retains full replay");
@@ -2269,7 +2271,7 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         &full_items
     ));
     assert_eq!(next.items.len(), 1);
-    let Some(ProtocolExt::OpenResponses(extension)) = next.ext else {
+    let Some(ProtocolExt::OpenResponses(extension)) = next.ext.as_ref() else {
         unreachable!();
     };
     assert_eq!(
@@ -2295,8 +2297,8 @@ async fn automatic_prefix_selects_exact_completed_context_and_leaves_new_items()
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_gateway_1".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root.clone(),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
             effective_request: None,
             response,
             upstream_response_id: Some("upstream-1".into()),
@@ -2381,9 +2383,9 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
         .save_with_effective(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_parallel_tools".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root.clone(),
-            effective_request: Some(effective_root),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
+            effective_request: Some(&effective_root),
             response,
             upstream_response_id: Some("upstream".into()),
             effective_state: state,
@@ -2482,8 +2484,8 @@ async fn automatic_prefix_never_turns_an_identical_full_request_into_an_empty_de
         .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_gateway_1".into(),
-            parent: ActiveGenerationChain::default(),
-            request_delta: root.clone(),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &root,
             effective_request: None,
             response,
             upstream_response_id: Some("upstream-1".into()),
@@ -2668,6 +2670,7 @@ async fn native_upstream_reuse_requires_persisted_open_responses_target() {
             ..ActiveGenerationChain::default()
         };
 
+        let mut request = Arc::new(request);
         let mut fallback = None;
         assert!(!store.prepare_upstream(&active, &mut request, &state, false, &mut fallback));
         assert!(fallback.is_none());
@@ -2720,7 +2723,7 @@ fn changed_url_media_disables_upstream_reuse() {
 
 fn observation_payload(
     client_delta: Vec<AiItem>,
-    client_history_mutation: Option<EffectiveHistoryMutation>,
+    client_history_mutation: Option<EffectiveHistoryMutation<'_>>,
     client_output: Option<Vec<AiItem>>,
     effective_output_text: &str,
 ) -> serde_json::Value {
@@ -2728,7 +2731,7 @@ fn observation_payload(
     effective_output.push_output_text(effective_output_text);
     serde_json::to_value(PersistedResponseNode {
         client_delta: RequestDelta {
-            messages: client_delta,
+            messages: Cow::Owned(client_delta),
             system: None,
         },
         client_output,
@@ -2802,7 +2805,7 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
         observation_payload(
             Vec::new(),
             Some(EffectiveHistoryMutation::Append {
-                items: vec![user_message("follow up")],
+                items: Cow::Owned(vec![user_message("follow up")]),
             }),
             None,
             "fallback answer",
@@ -2818,7 +2821,7 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
         observation_payload(
             Vec::new(),
             Some(EffectiveHistoryMutation::Replace {
-                items: vec![user_message("edited question")],
+                items: Cow::Owned(vec![user_message("edited question")]),
             }),
             Some(vec![AiItem::output_text("public replacement")]),
             "private replacement",

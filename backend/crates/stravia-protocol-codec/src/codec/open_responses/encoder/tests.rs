@@ -6,6 +6,45 @@ use crate::codec::openai::compatible::decoder::OpenAIDecoder;
 use stravia_runtime_contract::protocol::ir::AiItem;
 
 #[test]
+fn consumed_text_requests_preserve_shared_snapshots_and_wire_roles() {
+    let text = Arc::new("Unicode 正文\n\"quoted\"\\tail".to_owned());
+    for (role, text_type) in [(Role::User, "input_text"), (Role::Assistant, "output_text")] {
+        for content in [
+            MessageContent::Text(text.clone()),
+            MessageContent::Blocks(vec![ContentBlock::Text {
+                text: text.clone(),
+                cache_control: None,
+            }]),
+        ] {
+            let request = AiRequest::new(
+                "gpt",
+                vec![AiItem {
+                    role,
+                    content,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }],
+            );
+            let snapshot = request.clone();
+            let (mut body, _) = ResponsesEncoder.encode_request(request).unwrap();
+            assert_eq!(body["input"][0]["content"][0]["type"], text_type);
+            assert_eq!(body["input"][0]["content"][0]["text"], text.as_str());
+            body["input"][0]["content"][0]["text"] = Value::String("changed".into());
+            match &snapshot.items[0].content {
+                MessageContent::Text(value) => assert_eq!(value.as_str(), text.as_str()),
+                MessageContent::Blocks(blocks) => {
+                    let ContentBlock::Text { text: value, .. } = &blocks[0] else {
+                        panic!("snapshot must retain its text block");
+                    };
+                    assert_eq!(value.as_str(), text.as_str());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn responses_summary_respects_explicit_intent_and_disabled_target() {
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
     for (display, level, control, expected) in [
@@ -30,7 +69,7 @@ fn responses_summary_respects_explicit_intent_and_disabled_target() {
         request.reasoning.display = display.map(str::to_owned);
         request.reasoning.level = level;
         request.reasoning.target_control = control;
-        let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+        let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
         assert_eq!(
             body["reasoning"].get("summary").and_then(Value::as_str),
             expected
@@ -56,7 +95,7 @@ fn target_effort_maps_to_responses_shape() {
         },
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["effort"], "xhigh");
     assert_eq!(body["reasoning"]["summary"], "auto");
@@ -92,7 +131,7 @@ fn chat_reasoning_content_degrades_to_output_text_before_its_tool_call() {
         .expect("decode Chat reasoning tool history");
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode Responses reasoning tool history");
 
     // Chat 的 `reasoning_content` 没有签名，上游不会
@@ -118,7 +157,7 @@ fn thinking_replay_signature_is_not_responses_ciphertext() {
             Some("anthropic-signature".into()),
         )],
     );
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
     assert_eq!(
         body["input"],
         serde_json::json!([{
@@ -137,7 +176,7 @@ fn native_responses_requests_summary_without_explicit_effort() {
         }))
         .unwrap();
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["summary"], "auto");
     assert!(body["reasoning"].get("effort").is_none());
@@ -158,7 +197,7 @@ fn native_responses_defaults_omitted_reasoning_summary() {
         },
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["effort"], "medium");
     assert_eq!(body["reasoning"]["summary"], "auto");
@@ -180,7 +219,7 @@ fn anthropic_thinking_defaults_to_responses_auto_summary() {
         },
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["summary"], "auto");
 }
@@ -203,7 +242,7 @@ fn anthropic_adaptive_thinking_maps_display_to_responses_summary() {
             },
         );
 
-        let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+        let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
         assert_eq!(
             body["reasoning"].get("summary").and_then(Value::as_str),
@@ -222,7 +261,7 @@ fn anthropic_without_thinking_requests_summary_without_selecting_effort() {
         }))
         .unwrap();
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["summary"], "auto");
     assert!(body["reasoning"].get("effort").is_none());
@@ -237,7 +276,7 @@ fn writes_max_target_effort_without_a_local_allow_list() {
         },
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["effort"], "max");
 }
@@ -249,14 +288,14 @@ fn preserves_request_instructions_and_developer_role_with_dated_defaults() {
         vec![
             AiItem {
                 role: Role::Developer,
-                content: MessageContent::Text("Use repository conventions.".into()),
+                content: MessageContent::Text("Use repository conventions.".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
             },
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("Implement it.".into()),
+                content: MessageContent::Text("Implement it.".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -265,7 +304,7 @@ fn preserves_request_instructions_and_developer_role_with_dated_defaults() {
     );
     request.instructions = Some("Follow the accepted design.".into());
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["instructions"], "Follow the accepted design.");
     assert_eq!(body["input"][0]["role"], "developer");
@@ -280,7 +319,7 @@ fn forwards_provider_persistence_only_when_explicitly_requested() {
         "logical-model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("Persist upstream.".into()),
+            content: MessageContent::Text("Persist upstream.".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -295,7 +334,7 @@ fn forwards_provider_persistence_only_when_explicitly_requested() {
         ),
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
     assert_eq!(body["store"], true);
 }
 
@@ -305,7 +344,7 @@ fn keeps_dated_metadata_and_safety_identifier_out_of_provider_requests() {
         "logical-model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -321,7 +360,7 @@ fn keeps_dated_metadata_and_safety_identifier_out_of_provider_requests() {
         ),
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert!(body.get("metadata").is_none());
     assert!(body.get("safety_identifier").is_none());
@@ -344,7 +383,7 @@ fn function_call_output_content_array_round_trips_without_stringification() {
         }))
         .expect("decode function output");
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode function output");
 
     assert_eq!(body["input"][0]["output"], output);
@@ -377,7 +416,7 @@ fn encodes_responses_supported_media_without_text_coercion() {
         }],
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
+    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
     assert_eq!(body["input"][0]["content"][0]["type"], "input_image");
     assert_eq!(
         body["input"][0]["content"][0]["image_url"],
@@ -403,7 +442,7 @@ fn continuation_without_new_input_omits_input() {
     );
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode continuation");
 
     assert_eq!(body["previous_response_id"], "resp_parent");
@@ -428,7 +467,7 @@ fn rejects_responses_unsupported_media() {
         }],
     );
 
-    let error = ResponsesEncoder.encode_request(&request).unwrap_err();
+    let error = ResponsesEncoder.encode_request(request).unwrap_err();
     assert!(error.to_string().contains("audio"));
 }
 
@@ -449,7 +488,7 @@ fn encodes_canonical_json_schema_for_dated_targets() {
     });
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode canonical response format");
     assert_eq!(body["text"]["format"]["type"], "json_schema");
     assert_eq!(body["text"]["format"]["name"], "answer");
@@ -468,7 +507,7 @@ fn rejects_canonical_json_object_for_dated_targets() {
     request.response_format = Some(ResponseFormat::JsonObject);
 
     let error = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("json_object has no dated representation");
     assert!(error.to_string().contains("json_object"));
 }
@@ -501,7 +540,7 @@ fn encodes_non_media_tool_payload_as_json_text() {
         );
 
         let (body, _) = ResponsesEncoder
-            .encode_request(&request)
+            .encode_request(request)
             .expect("encode structured tool result");
         let output = body["input"][0]["output"]
             .as_str()
@@ -555,7 +594,7 @@ fn unsigned_thinking_degrades_to_output_text_message() {
     let request = AiRequest::new("gpt", vec![AiItem::thinking("why", None)]);
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode unsigned thinking");
 
     // 无签名：上游不接受裸 reasoning item，明文进 output_text。
@@ -579,7 +618,7 @@ fn reasoning_without_id_or_encrypted_content_degrades_to_output_text() {
     );
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode unprotected reasoning");
 
     // summary 各段在前、content 各段在后，每段一个 output_text 部件。
@@ -600,7 +639,7 @@ fn mixed_assistant_item_splits_native_reasoning_in_order() {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
-                text: "before".into(),
+                text: "before".to_owned().into(),
                 cache_control: None,
             },
             ContentBlock::Reasoning {
@@ -609,7 +648,7 @@ fn mixed_assistant_item_splits_native_reasoning_in_order() {
                 encrypted_content: Some("opaque".into()),
             },
             ContentBlock::Text {
-                text: "after".into(),
+                text: "after".to_owned().into(),
                 cache_control: None,
             },
         ]),
@@ -625,7 +664,7 @@ fn mixed_assistant_item_splits_native_reasoning_in_order() {
     let request = AiRequest::new("gpt", vec![item]);
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode mixed assistant item");
 
     let input = body["input"].as_array().unwrap();
@@ -658,7 +697,7 @@ fn mixed_assistant_item_merges_degraded_reasoning_into_message() {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
-                text: "before".into(),
+                text: "before".to_owned().into(),
                 cache_control: None,
             },
             ContentBlock::Reasoning {
@@ -674,7 +713,7 @@ fn mixed_assistant_item_merges_degraded_reasoning_into_message() {
     let request = AiRequest::new("gpt", vec![item]);
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode mixed assistant item");
 
     // 无 id/密文的 Reasoning 降级为 output_text，与前后文本合并在同一 message。
@@ -698,7 +737,7 @@ fn redacted_thinking_is_silently_dropped() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -710,7 +749,7 @@ fn redacted_thinking_is_silently_dropped() {
                         data: "redacted-payload".into(),
                     },
                     ContentBlock::Text {
-                        text: "answer".into(),
+                        text: "answer".to_owned().into(),
                         cache_control: None,
                     },
                 ]),
@@ -721,7 +760,7 @@ fn redacted_thinking_is_silently_dropped() {
         ],
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(request).expect("encode");
 
     assert_eq!(body["input"][1]["type"], "message");
     assert_eq!(
@@ -738,7 +777,7 @@ fn assistant_item_with_only_redacted_thinking_emits_nothing() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -755,7 +794,7 @@ fn assistant_item_with_only_redacted_thinking_emits_nothing() {
         ],
     );
 
-    let (body, _) = ResponsesEncoder.encode_request(&request).expect("encode");
+    let (body, _) = ResponsesEncoder.encode_request(request).expect("encode");
 
     // 只剩承载不了的受保护载荷的 assistant 条目整条跳过，不发出空 message。
     let input = body["input"].as_array().unwrap();
@@ -796,7 +835,7 @@ fn degraded_reasoning_message_does_not_reuse_reasoning_item_id() {
         .expect("item fields is not reserved");
 
         let (body, _) = ResponsesEncoder
-            .encode_request(&AiRequest::new("gpt", vec![item]))
+            .encode_request(AiRequest::new("gpt", vec![item]))
             .expect("encode degraded reasoning");
 
         let input = body["input"].as_array().expect("input array");
@@ -844,7 +883,7 @@ fn mixed_reasoning_tool_use_split_does_not_reuse_item_identity() {
                 encrypted_content: None,
             },
             ContentBlock::Text {
-                text: "answer".into(),
+                text: "answer".to_owned().into(),
                 cache_control: None,
             },
             ContentBlock::ToolUse {
@@ -894,7 +933,7 @@ fn mixed_reasoning_tool_use_split_does_not_reuse_item_identity() {
     );
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode mixed reasoning tool history");
 
     let input = body["input"].as_array().expect("input array");
@@ -974,7 +1013,7 @@ fn plain_assistant_message_keeps_provider_item_identity() {
         .expect("phase is not reserved");
 
     let (body, _) = ResponsesEncoder
-        .encode_request(&AiRequest::new("gpt", vec![item]))
+        .encode_request(AiRequest::new("gpt", vec![item]))
         .expect("encode plain assistant message");
 
     assert_eq!(body["input"][0]["type"], "message");

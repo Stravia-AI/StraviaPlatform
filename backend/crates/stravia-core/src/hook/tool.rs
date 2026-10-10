@@ -170,7 +170,7 @@ pub(crate) fn blocks_to_value(
             }
             ContentBlock::Text { text, .. } => {
                 return Ok((
-                    Value::String(std::mem::take(text)),
+                    Value::String(Arc::unwrap_or_clone(std::mem::take(text))),
                     ToolResultContentKind::Json,
                 ));
             }

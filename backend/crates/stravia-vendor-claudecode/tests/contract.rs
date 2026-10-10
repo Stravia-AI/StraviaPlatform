@@ -199,7 +199,13 @@ async fn run(
         Deadline::from_now(Duration::from_secs(60)),
         0,
     );
-    runtime.execute(plugin, CHANNEL, input, scope).await
+    let (operation, encoded) = input
+        .encode_for_host()
+        .map_err(|_| RuntimeError::InvalidOutput)?;
+    drop(input);
+    runtime
+        .execute(plugin, CHANNEL, operation, encoded, scope)
+        .await
 }
 
 fn sent_cch(body: &[u8]) -> &str {

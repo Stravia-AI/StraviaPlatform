@@ -788,7 +788,13 @@ impl RunTerminalContext {
         shared.canonical_output = Some(response.items.clone());
         let prefix = if ingress
             == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
-        {
+            && crate::generation_chain::has_gemini_tool_calls(
+                &shared
+                    .client_request
+                    .as_ref()
+                    .expect("terminal client request")
+                    .items,
+            ) {
             std::sync::Arc::make_mut(
                 shared
                     .client_request

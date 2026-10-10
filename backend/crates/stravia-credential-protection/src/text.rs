@@ -366,7 +366,7 @@ fn encoded_tool_result(
 // Both borrows expand from one field-selection definition. Collection never clones
 // media, vendor metadata, opaque reasoning, or the request itself.
 macro_rules! readable_surface {
-    ($module:ident, $json:ident, $arguments:ident, $result:ident, $encoded:ident, $iter:ident, $get:ident, $values:ident, $slice:ident, $($qualifier:tt)*) => {
+    ($module:ident, $json:ident, $arguments:ident, $result:ident, $encoded:ident, $iter:ident, $get:ident, $values:ident, $slice:ident, $shared_text:path, $($qualifier:tt)*) => {
         mod $module {
             use super::*;
             fn json_values(value: & $($qualifier)* Value, context: Option<&str>, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
@@ -450,7 +450,7 @@ pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: 
             _ => location,
         };
         match block {
-            ContentBlock::Text { text, .. } => visit(text, None, location)?,
+            ContentBlock::Text { text, .. } => visit($shared_text(text), None, location)?,
             ContentBlock::Thinking { thinking, .. } => visit(thinking, None, location)?,
             ContentBlock::Reasoning { summary, content, .. } => for text in summary.$iter().chain(content) { visit(text, None, location)?; },
             ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => json_values(input, None, location, visit)?,
@@ -485,12 +485,12 @@ pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, _
     } else { None };
     match & $($qualifier)* item.content {
         MessageContent::Text(text) if item.role == stravia_runtime_contract::protocol::ir::Role::Tool => match encoded_kind {
-            Some(ToolResultContentKind::ContentBlocks) => encoded_tool_result(text, ToolResultContentKind::ContentBlocks, location, visit)?,
-            Some(ToolResultContentKind::Json) => visit(text, None, location)?,
+            Some(ToolResultContentKind::ContentBlocks) => encoded_tool_result($shared_text(text), ToolResultContentKind::ContentBlocks, location, visit)?,
+            Some(ToolResultContentKind::Json) => visit($shared_text(text), None, location)?,
             None if encoded_compound_array(text) => if reject_ambiguous { return Err(RedactionError::AmbiguousToolResult); },
-            None => visit(text, None, location)?,
+            None => visit($shared_text(text), None, location)?,
         },
-        MessageContent::Text(text) => visit(text, None, location)?,
+        MessageContent::Text(text) => visit($shared_text(text), None, location)?,
         MessageContent::Blocks(content) if item.role == stravia_runtime_contract::protocol::ir::Role::Tool => for block in content {
             if let (Some(kind), ContentBlock::ToolResult { content: Value::String(text), .. }
                 | ContentBlock::ServerToolResult { content: Value::String(text), .. }) = (encoded_kind, & $($qualifier)* *block) {
@@ -565,6 +565,7 @@ readable_surface!(
     get,
     values,
     from_ref,
+    std::sync::Arc::as_ref,
 );
 readable_surface!(
     write_surface,
@@ -576,6 +577,7 @@ readable_surface!(
     get_mut,
     values_mut,
     from_mut,
+    std::sync::Arc::make_mut,
     mut
 );
 
@@ -921,7 +923,7 @@ mod tests {
             )
             .unwrap();
             let actual = match &request.items[0].content {
-                MessageContent::Text(text) => text,
+                MessageContent::Text(text) => text.as_ref(),
                 MessageContent::Blocks(blocks) => {
                     let ContentBlock::ToolResult {
                         content: Value::String(text),

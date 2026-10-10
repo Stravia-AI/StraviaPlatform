@@ -63,27 +63,21 @@ pub(crate) fn execute(
     }
     match operation {
         Operation::Infer => {
-            let OperationInput::Infer {
-                provider,
-                mut request,
-            } = input
-            else {
+            let OperationInput::Infer { provider, request } = input else {
                 return Err(input_mismatch());
             };
             match vendor_id {
-                "azure" if channel == "default" => infer_azure(host, &provider, &mut request),
-                "amazon-bedrock" if channel == "default" => {
-                    infer_bedrock(host, &provider, &mut request)
-                }
+                "azure" if channel == "default" => infer_azure(host, &provider, request),
+                "amazon-bedrock" if channel == "default" => infer_bedrock(host, &provider, request),
                 "google-vertex" if matches!(channel, "native" | "openai") => {
-                    infer_vertex(host, channel, &provider, &mut request)
+                    infer_vertex(host, channel, &provider, request)
                 }
                 "google-vertex-anthropic" if channel == "default" => {
-                    infer_vertex_anthropic(host, &provider, &mut request)
+                    infer_vertex_anthropic(host, &provider, request)
                 }
-                "sap-ai-core" if channel == "default" => infer_sap(host, &provider, &mut request),
-                "gitlab" if channel == "default" => infer_gitlab(host, &provider, &mut request),
-                "watsonx" if channel == "default" => infer_watsonx(host, &provider, &mut request),
+                "sap-ai-core" if channel == "default" => infer_sap(host, &provider, request),
+                "gitlab" if channel == "default" => infer_gitlab(host, &provider, request),
+                "watsonx" if channel == "default" => infer_watsonx(host, &provider, request),
                 _ => Err(common::unsupported(operation.as_str(), vendor_id, channel)),
             }
         }
@@ -131,9 +125,9 @@ pub(crate) fn execute(
 fn infer_azure(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
     let protocol = common::endpoint(&provider.protocol)?;
     if protocol != OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
         && protocol != OPENAI_COMPATIBLE_EMBEDDINGS_V1
@@ -167,9 +161,9 @@ fn infer_azure(
 fn infer_bedrock(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
     let encoded = crate::encode_inference_request("bedrock-converse", request)?;
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
@@ -188,9 +182,9 @@ fn infer_vertex(
     host: &GuestHost,
     channel: &str,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
     let protocol = if channel == "native" {
         "google-generate-content"
     } else {
@@ -220,9 +214,10 @@ fn infer_vertex(
 fn infer_vertex_anthropic(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
+    let stream = request.stream.enabled;
     let encoded = crate::encode_inference_request("anthropic-messages", request)?;
     let model = provider
         .model
@@ -231,7 +226,7 @@ fn infer_vertex_anthropic(
         .ok_or_else(|| {
             common::plugin_error(ErrorKind::Invalid, "Vertex Anthropic model is required")
         })?;
-    let action = if request.stream.enabled {
+    let action = if stream {
         "streamRawPredict"
     } else {
         "rawPredict"
@@ -257,9 +252,9 @@ fn infer_vertex_anthropic(
 fn infer_sap(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
     let encoded = crate::encode_inference_request("openai-chat-completions", request)?;
     let path = encoded.path.strip_prefix("/v1").unwrap_or(&encoded.path);
     let url = common::endpoint_url(&provider.base_url, path)?;
@@ -283,9 +278,9 @@ fn infer_sap(
 fn infer_gitlab(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
     let encoded = crate::encode_inference_request("openai-chat-completions", request)?;
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
@@ -312,14 +307,17 @@ fn infer_gitlab(
 fn infer_watsonx(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    mut request: stravia_runtime_contract::protocol::ir::AiRequest,
 ) -> Result<OperationOutput, PluginError> {
-    apply_snapshot_model(provider, request)?;
+    apply_snapshot_model(provider, &mut request)?;
+    let stream = request.stream.enabled;
     let encoded = crate::encode_inference_request("watsonx-text-chat", request)?;
-    let object = encoded.body.as_object().cloned().ok_or_else(|| {
-        common::plugin_error(ErrorKind::Invalid, "watsonx request is not an object")
-    })?;
-    let mut object = object;
+    let Value::Object(mut object) = encoded.body else {
+        return Err(common::plugin_error(
+            ErrorKind::Invalid,
+            "watsonx request is not an object",
+        ));
+    };
     object.insert(
         "project_id".into(),
         Value::String(required_string(
@@ -336,11 +334,7 @@ fn infer_watsonx(
             object.insert("tool_choice".into(), choice);
         }
     }
-    let endpoint = if request.stream.enabled {
-        "chat_stream"
-    } else {
-        "chat"
-    };
+    let endpoint = if stream { "chat_stream" } else { "chat" };
     let version = string_value(provider, "apiVersion").unwrap_or_else(|| "2026-04-20".into());
     let base = provider.base_url.trim_end_matches('/').to_string();
     if base.is_empty() {

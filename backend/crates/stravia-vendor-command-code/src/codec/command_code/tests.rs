@@ -8,13 +8,13 @@ fn encodes_generate_envelope() {
         "deepseek/deepseek-v4-flash",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hi".into()),
+            content: MessageContent::Text("hi".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
-    let (body, headers) = CommandCodeGenerateV1.encode_request(&request).unwrap();
+    let (body, headers) = CommandCodeGenerateV1.encode_request(request).unwrap();
 
     assert_eq!(
         CommandCodeGenerateV1.request_path("anything", false),
@@ -37,7 +37,7 @@ fn encodes_tools_without_type_and_aliases_names() {
         "claude-sonnet-4-6",
         vec![AiItem {
             role: Role::System,
-            content: MessageContent::Text("be brief".into()),
+            content: MessageContent::Text("be brief".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -52,11 +52,44 @@ fn encodes_tools_without_type_and_aliases_names() {
         meta: None,
     }]);
     request.tool_choice = Some(ToolChoice::Required);
-    let (body, _) = CommandCodeGenerateV1.encode_request(&request).unwrap();
+    let (body, _) = CommandCodeGenerateV1.encode_request(request).unwrap();
     assert_eq!(body["params"]["system"][0]["text"], "be brief");
     assert_eq!(body["params"]["tools"][0]["name"], "shell_output");
     assert!(body["params"]["tools"][0].get("type").is_none());
     assert_eq!(body["params"]["tool_choice"], json!({"type": "any"}));
+}
+
+#[test]
+fn owned_encoding_preserves_shared_text_and_system_order() {
+    let shared = Arc::new("shared system".to_owned());
+    let item = |role, text| AiItem {
+        role,
+        content: MessageContent::Text(text),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let request = AiRequest::new(
+        "model",
+        vec![
+            item(Role::System, shared.clone()),
+            item(Role::Developer, Arc::new("last system".into())),
+            item(Role::User, Arc::new("question".into())),
+            item(Role::Assistant, Arc::new("answer".into())),
+        ],
+    );
+    let (body, _) = CommandCodeGenerateV1.encode_request(request).unwrap();
+    assert_eq!(shared.as_str(), "shared system");
+    assert_eq!(body["params"]["system"][0]["text"], "shared system\n");
+    assert_eq!(body["params"]["system"][1]["text"], "last system");
+    assert_eq!(
+        body["params"]["messages"][0]["content"][0]["text"],
+        "question"
+    );
+    assert_eq!(
+        body["params"]["messages"][1]["content"][0]["text"],
+        "answer"
+    );
 }
 
 #[test]
@@ -195,7 +228,7 @@ fn bare_tool_calls_without_input_stream_get_distinct_slots() {
 fn thinking_replay_keeps_readable_reasoning_native_and_omits_protected_payloads() {
     let user = |text: &str| AiItem {
         role: Role::User,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(text.to_owned().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -227,7 +260,7 @@ fn thinking_replay_keeps_readable_reasoning_native_and_omits_protected_payloads(
     for preserve in [false, true] {
         let mut request = original.clone();
         stravia_protocol_codec::transform::prepare_thinking_replay(&mut request, |_| preserve);
-        let (body, _) = CommandCodeGenerateV1.encode_request(&request).unwrap();
+        let (body, _) = CommandCodeGenerateV1.encode_request(request).unwrap();
         let messages = body["params"]["messages"].as_array().unwrap();
         assert_eq!(
             messages[1]["content"],

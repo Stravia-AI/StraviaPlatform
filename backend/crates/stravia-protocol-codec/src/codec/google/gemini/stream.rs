@@ -837,7 +837,7 @@ fn google_media_part(item: &AiItem) -> Option<Value> {
         return None;
     };
     // 这里只处理媒体块；媒体块在 Gemini 上总有对应 part。
-    let mut part = super::encoder::encode_content_block_for_gemini(block, &HashMap::new())?;
+    let mut part = super::encoder::encode_content_block_for_gemini(block.clone(), &HashMap::new())?;
     if let Some(extra) = item
         .meta
         .as_ref()

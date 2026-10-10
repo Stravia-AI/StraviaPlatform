@@ -140,7 +140,7 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
                 .unwrap_or_else(|| "unknown_tool".to_string());
             normalized.push(AiItem {
                 role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(std::sync::Arc::new(String::new())),
                 tool_calls: Some(vec![ToolCall {
                     id: final_id.clone(),
                     name: synth_name,
@@ -169,7 +169,7 @@ pub fn patch_broken_conversation(req: &mut AiRequest) {
             0,
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(std::sync::Arc::new(String::new())),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -221,7 +221,7 @@ mod tests {
     fn asst_with_tool(id: &str, name: &str) -> AiItem {
         AiItem {
             role: Role::Assistant,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(std::sync::Arc::new(String::new())),
             tool_calls: Some(vec![ToolCall {
                 id: (id.to_string()).into(),
                 name: name.to_string(),
@@ -235,7 +235,7 @@ mod tests {
     fn tool_result(tool_call_id: Option<&str>) -> AiItem {
         AiItem {
             role: Role::Tool,
-            content: MessageContent::Text("result".to_string()),
+            content: MessageContent::Text(std::sync::Arc::new("result".to_string())),
             tool_calls: None,
             tool_call_id: (tool_call_id.map(|s| s.to_string())).map(Into::into),
             meta: None,

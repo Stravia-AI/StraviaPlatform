@@ -12,12 +12,11 @@ fn request_round_trip_uses_typed_embedding_fields() {
     });
 
     let request = EmbeddingsDecoder.decode_request(input.clone()).unwrap();
-    let (encoded, _) = EmbeddingsEncoder.encode_request(&request).unwrap();
-
     assert!(matches!(
         request.embedding.as_ref().map(|embedding| &embedding.input),
         Some(EmbeddingInput::Texts(values)) if values == &["first", "second"]
     ));
+    let (encoded, _) = EmbeddingsEncoder.encode_request(request).unwrap();
     assert_eq!(encoded, input);
 }
 

@@ -140,7 +140,7 @@ pub(crate) fn select_protocol(
     };
     // 思考块无论来源都可由 Responses codec 表示（受保护载荷由 Core 按来源剥离），
     // 这里的严格编码只拒绝其它硬要求。
-    if pair.encode_request(request).is_ok() {
+    if pair.encode_request(request.clone()).is_ok() {
         return Ok(OPEN_RESPONSES_2026_04_24.to_string());
     }
 
@@ -219,7 +219,17 @@ fn infer(
     let preserve_upstream_errors = operation == Operation::Infer
         && protocol == OPEN_RESPONSES_2026_04_24
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
-    let encoded = common::encode_inference_request(&protocol.to_string(), &request)?;
+    let compact_fields = if operation == Operation::Compact {
+        request
+            .meta
+            .vendor
+            .ingress
+            .get("__stravia_compact_fields")
+            .cloned()
+    } else {
+        None
+    };
+    let encoded = common::encode_inference_request(&protocol.to_string(), request)?;
     let mut body = encoded.body;
     if protocol == OPEN_RESPONSES_2026_04_24 {
         prepare_responses_body(&provider, &mut body)?;
@@ -241,7 +251,7 @@ fn infer(
         .map(OperationOutput::Infer);
     }
     if operation == Operation::Compact {
-        retain_compact_fields(&request, &mut body)?;
+        retain_compact_fields(compact_fields.as_ref(), &mut body)?;
     }
     let path = if operation == Operation::Compact {
         "/v1/responses/compact".to_owned()
@@ -354,16 +364,11 @@ fn append_client_headers(provider: &ProviderSnapshot, headers: &mut Vec<(String,
     }
 }
 
-fn retain_compact_fields(request: &AiRequest, body: &mut Value) -> Result<(), PluginError> {
+fn retain_compact_fields(fields: Option<&Value>, body: &mut Value) -> Result<(), PluginError> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Open Responses compact request must be an object"))?;
-    let explicit = request
-        .meta
-        .vendor
-        .ingress
-        .get("__stravia_compact_fields")
-        .and_then(Value::as_array);
+    let explicit = fields.and_then(Value::as_array);
     object.retain(|key, _| {
         matches!(key.as_str(), "model" | "input" | "instructions")
             || explicit.is_some_and(|fields| {

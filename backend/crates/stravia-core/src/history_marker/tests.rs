@@ -50,7 +50,7 @@ async fn gated_resolution_cleans_private_carriers_and_preserves_protected_blocks
             .unwrap();
     }
     assert!(
-        matches!(&request.items[0].content, MessageContent::Text(text) if text == malformed_marker)
+        matches!(&request.items[0].content, MessageContent::Text(text) if text.as_str() == malformed_marker)
     );
     assert_eq!(
         request.items[1].thinking_ref(),
@@ -1152,7 +1152,7 @@ async fn resolver_keeps_tool_use_mirrors_with_their_fragments() {
         cache_control: Some(stravia_runtime_contract::protocol::ir::CacheControl::ephemeral()),
     };
     let trailing = ContentBlock::Text {
-        text: "after tool use".into(),
+        text: std::sync::Arc::new("after tool use".into()),
         cache_control: None,
     };
     let mut item = AiItem::thinking(render_history_marker(&marker), None);
@@ -1205,7 +1205,7 @@ async fn resolver_keeps_tool_use_mirrors_with_their_fragments() {
         .bind(endpoint, endpoint)
         .expect("Gemini protocol pair");
     let encoded = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode restored history");
     let wire_calls = encoded.body["contents"]
         .as_array()
@@ -1495,6 +1495,6 @@ async fn resolver_leaves_private_syntax_inside_tool_output_unchanged() {
     assert_eq!(summary, MarkerResolution::default());
     assert!(matches!(
         &request.items[0].content,
-        MessageContent::Text(text) if text == &fixture
+        MessageContent::Text(text) if text.as_str() == fixture
     ));
 }

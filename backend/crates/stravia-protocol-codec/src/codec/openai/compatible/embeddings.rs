@@ -61,7 +61,7 @@ impl ProtocolAdapter for OpenAIEmbeddingsV1 {
         EmbeddingsDecoder.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         EmbeddingsEncoder.encode_request(request)
     }
 
@@ -174,25 +174,36 @@ impl EmbeddingsDecoder {
 struct EmbeddingsEncoder;
 
 impl EmbeddingsEncoder {
-    pub(crate) fn encode_request(&self, req: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    pub(crate) fn encode_request(&self, req: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         let mut obj = serde_json::Map::new();
-        obj.insert("model".into(), Value::String(req.model.clone()));
+        obj.insert("model".into(), Value::String(req.model));
         let embedding = req
             .embedding
-            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("canonical embedding request is missing"))?;
-        obj.insert("input".into(), serde_json::to_value(&embedding.input)?);
+        let input = match embedding.input {
+            EmbeddingInput::Text(text) => Value::String(text),
+            EmbeddingInput::Texts(texts) => {
+                Value::Array(texts.into_iter().map(Value::String).collect())
+            }
+            EmbeddingInput::Tokens(tokens) => {
+                Value::Array(tokens.into_iter().map(Value::from).collect())
+            }
+            EmbeddingInput::TokenBatches(batches) => Value::Array(
+                batches
+                    .into_iter()
+                    .map(|tokens| Value::Array(tokens.into_iter().map(Value::from).collect()))
+                    .collect(),
+            ),
+        };
+        obj.insert("input".into(), input);
         if let Some(dimensions) = embedding.dimensions {
             obj.insert("dimensions".into(), serde_json::json!(dimensions));
         }
-        if let Some(encoding_format) = &embedding.encoding_format {
-            obj.insert(
-                "encoding_format".into(),
-                Value::String(encoding_format.clone()),
-            );
+        if let Some(encoding_format) = embedding.encoding_format {
+            obj.insert("encoding_format".into(), Value::String(encoding_format));
         }
-        if let Some(user) = &embedding.user {
-            obj.insert("user".into(), Value::String(user.clone()));
+        if let Some(user) = embedding.user {
+            obj.insert("user".into(), Value::String(user));
         }
 
         Ok((Value::Object(obj), HeaderMap::new()))

@@ -372,9 +372,9 @@ impl GenerationChainWrite {
             .save_with_effective(GenerationChainCommit {
                 principal: self.principal.clone(),
                 id: self.id.clone(),
-                parent: self.parent.as_ref().clone(),
-                request_delta: self.request_delta.as_ref().clone(),
-                effective_request: Some(self.request.as_ref().clone()),
+                parent: &self.parent,
+                request_delta: &self.request_delta,
+                effective_request: Some(&self.request),
                 response: staged.response,
                 upstream_response_id: staged.upstream_response_id,
                 effective_state: staged.effective_state,

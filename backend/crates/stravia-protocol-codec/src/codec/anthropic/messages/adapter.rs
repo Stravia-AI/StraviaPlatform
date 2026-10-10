@@ -40,7 +40,7 @@ impl ProtocolAdapter for AnthropicMessages2023 {
         super::decoder::AnthropicDecoder.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         super::encoder::AnthropicEncoder.encode_request(request)
     }
 

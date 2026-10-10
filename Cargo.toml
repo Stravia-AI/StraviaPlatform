@@ -41,10 +41,10 @@ reqwest-websocket = "0.6"
 tungstenite = { version = "0.28", default-features = false }
 tower-http = { version = "0.6.11", features = ["cors", "trace"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-wasmtime = { version = "=49.0.1", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation"] }
+wasmtime = { version = "=49.0.1", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation"] }
 wasmtime-wasi = { version = "=49.0.1", default-features = false, features = ["p2"] }
 wasmprinter = "=0.258.0"
 wat = "=1.258.0"

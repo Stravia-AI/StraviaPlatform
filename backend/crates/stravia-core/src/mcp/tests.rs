@@ -246,7 +246,7 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
     let mut request = AiRequest::new("gpt-6-astra", vec![input]);
     request.tools = Some(vec![exposed.spec]);
     let (body, _) = ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode Responses request");
     let function = &body["tools"][0];
     assert_eq!(function["strict"], true);

@@ -197,7 +197,7 @@ fn configured_reasoning_field_stream_replays_only_the_selected_text() {
     assert_eq!(public["choices"][0]["message"]["content"], "answer");
     let history = client_history_output_item(&response);
     let request = stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(
         wire["messages"][0]["reasoning_content"],
         "  actual thought\n"
@@ -286,7 +286,7 @@ fn explicit_empty_reasoning_survives_response_history_and_request() {
             ]
         }))
         .unwrap();
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(
         wire["messages"][1].get("reasoning_content"),
         Some(&serde_json::json!("")),
@@ -337,7 +337,7 @@ fn missing_and_null_reasoning_remain_distinct_in_client_history() {
         let history = client_history_output_item(&response);
         let request =
             stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
-        let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+        let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
         assert_eq!(
             wire["messages"][0].get("reasoning_content"),
             expected.as_ref()
@@ -380,7 +380,7 @@ fn explicit_empty_reasoning_survives_tool_only_response_history() {
             .items
             .remove(0),
     );
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(wire["messages"][0]["reasoning_content"], "");
     assert_eq!(wire["messages"][0]["tool_calls"][0]["id"], "call_echo");
     assert_eq!(wire["messages"][1]["tool_call_id"], "call_echo");
@@ -401,7 +401,7 @@ fn explicit_reasoning_field_keeps_a_legitimate_empty_assistant_message() {
             ]
         }))
         .unwrap();
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(wire["messages"][1]["role"], "assistant");
     assert_eq!(wire["messages"][1]["content"], "");
     assert_eq!(
@@ -451,7 +451,7 @@ fn chunked_empty_reasoning_stream_preserves_the_replayable_field() {
     assert!(response.reasoning_items().next().is_none());
     let history = client_history_output_item(&response);
     let request = stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(wire["messages"][0]["reasoning_content"], "");
 }
 
@@ -503,7 +503,7 @@ fn actual_stream_reasoning_takes_precedence_over_an_initial_null_field() {
     );
     let history = client_history_output_item(&response);
     let request = stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![history]);
-    let (wire, _) = OpenAIChatCompletionsV1.encode_request(&request).unwrap();
+    let (wire, _) = OpenAIChatCompletionsV1.encode_request(request).unwrap();
     assert_eq!(
         wire["messages"][0]["reasoning_content"],
         "  actual thought\n"

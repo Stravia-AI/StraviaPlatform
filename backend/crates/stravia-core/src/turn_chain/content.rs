@@ -9,6 +9,7 @@
 //! are never read back during restore.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 
 use anyhow::{Context, ensure};
 use serde_json::Value;
@@ -50,14 +51,35 @@ struct Extraction {
 
 pub(super) struct Encoded {
     pub payload: Vec<u8>,
-    /// Unique `(content_key, raw JSON)` in envelope `contents` order. Bytes are
-    /// kept raw: only keys missing from `turn_chain_contents` pay for codec
-    /// compression and the insert round-trip.
+    /// Unique content in envelope order. Hint-missing entries become codec
+    /// bytes; hint-existing entries retain raw JSON for GC recovery.
     pub contents: Vec<(String, Vec<u8>)>,
+    stored: Vec<bool>,
 }
 
 pub(super) fn content_key(bytes: &[u8]) -> String {
     stravia_runtime_contract::identifier::encode_digest(&Sha256::digest(bytes).into())
+}
+
+#[derive(Default)]
+struct HashWriter {
+    bytes: usize,
+    hash: Sha256,
+}
+
+impl Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("JSON size exceeds address space"))?;
+        self.hash.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Externalizes `value` when its raw JSON serialization reaches
@@ -68,14 +90,20 @@ fn externalize(value: &mut Value, path: String, state: &mut Extraction) -> anyho
     if value.is_null() {
         return Ok(false);
     }
-    let raw = serde_json::to_vec(value)?;
-    if raw.len() < MIN_EXTERNAL_BYTES {
+    // Count and fingerprint the same compact JSON stream before allocating
+    // its body. Repeated items need only this pass; unique items retain the
+    // previous two-pass serialization and exact-sized body allocation.
+    let mut writer = HashWriter::default();
+    serde_json::to_writer(&mut writer, &*value)?;
+    if writer.bytes < MIN_EXTERNAL_BYTES {
         return Ok(false);
     }
-    let key = content_key(&raw);
+    let key = stravia_runtime_contract::identifier::encode_digest(&writer.hash.finalize().into());
     let index = match state.index.get(&key) {
         Some(index) => *index,
         None => {
+            let mut raw = Vec::with_capacity(writer.bytes);
+            serde_json::to_writer(&mut raw, &*value)?;
             let index = state.contents.len();
             state.index.insert(key.clone(), index);
             state.contents.push((key, raw));
@@ -163,12 +191,44 @@ pub(super) fn encode(mut payload: Value) -> anyhow::Result<Encoded> {
     let payload = crate::storage_codec::encode(&serde_json::to_vec(&envelope)?)?;
     Ok(Encoded {
         payload,
+        stored: vec![false; state.contents.len()],
         contents: state.contents,
     })
 }
 
+/// Existence probes are hints only: GC can remove rows before the transaction.
+pub(super) async fn prepare_missing(
+    encoded: &mut Encoded,
+    ids: &[Option<i64>],
+) -> anyhow::Result<()> {
+    let stored = &encoded.stored;
+    let pending: Vec<_> = encoded
+        .contents
+        .iter_mut()
+        .enumerate()
+        .filter(|(index, _)| ids[*index].is_none() && !stored[*index])
+        .map(|(index, (_, bytes))| (index, std::mem::take(bytes)))
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let prepared = tokio::task::spawn_blocking(move || {
+        pending
+            .into_iter()
+            .map(|(index, raw)| Ok((index, crate::storage_codec::encode(&raw)?)))
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await
+    .context("history content preparation worker failed")??;
+    for (index, bytes) in prepared {
+        encoded.contents[index].1 = bytes;
+        encoded.stored[index] = true;
+    }
+    Ok(())
+}
+
 macro_rules! backend {
-    ($put:ident, $prepared:ident, $inner:ident, $restore:ident, $db:ty, $conn:ty, $lock:literal) => {
+    ($put:ident, $prepared:ident, $inner:ident, $lookup:ident, $restore:ident, $db:ty, $conn:ty, $lock:literal) => {
         /// Links an already-inserted node to its distinct content ids. Callers
         /// hold the contents table lock on PostgreSQL; SQLite serializes on the
         /// commit transaction. Empty contents skip every contents statement.
@@ -176,13 +236,33 @@ macro_rules! backend {
             connection: &mut $conn,
             node: &str,
             principal: &str,
-            encoded: &Encoded,
+            encoded: &mut Encoded,
         ) -> anyhow::Result<()> {
-            $inner(connection, node, principal, encoded, None).await
+            let ids = $lookup(connection, principal, encoded, true).await?;
+            // The authoritative lookup protects existing rows until commit;
+            // their recovery buffers are no longer needed.
+            for ((_, bytes), id) in encoded.contents.iter_mut().zip(&ids) {
+                if id.is_some() {
+                    *bytes = Vec::new();
+                }
+            }
+            // Only hint-existing rows collected before this lookup need
+            // recovery compression, still off the asynchronous worker.
+            prepare_missing(encoded, &ids).await?;
+            let mut positions = HashMap::with_capacity(encoded.contents.len());
+            let mut missing = Vec::new();
+            for (index, (key, bytes)) in encoded.contents.iter_mut().enumerate() {
+                positions.insert(key.as_str(), index);
+                if ids[index].is_none() {
+                    ensure!(encoded.stored[index], "missing prepared history content");
+                    missing.push((key.as_str(), std::mem::take(bytes)));
+                }
+            }
+            $inner(connection, node, principal, positions, missing, ids).await
         }
 
         /// Startup migration only: contents have already been codec-encoded
-        /// on a blocking worker. Runtime writes retain lazy compression.
+        /// on a blocking worker and raw buffers may already be empty.
         pub(super) async fn $prepared(
             connection: &mut $conn,
             node: &str,
@@ -190,19 +270,31 @@ macro_rules! backend {
             encoded: &Encoded,
             contents: &HashMap<String, Vec<u8>>,
         ) -> anyhow::Result<()> {
-            $inner(connection, node, principal, encoded, Some(contents)).await
+            let ids = $lookup(connection, principal, encoded, true).await?;
+            let mut positions = HashMap::with_capacity(encoded.contents.len());
+            let mut missing = Vec::new();
+            for (index, (key, _)) in encoded.contents.iter().enumerate() {
+                positions.insert(key.as_str(), index);
+                if ids[index].is_none() {
+                    missing.push((
+                        key.as_str(),
+                        contents
+                            .get(key)
+                            .context("missing prepared history content")?
+                            .as_slice(),
+                    ));
+                }
+            }
+            $inner(connection, node, principal, positions, missing, ids).await
         }
 
-        async fn $inner(
+        /// Without transaction locks the result is only an existence hint.
+        pub(super) async fn $lookup(
             connection: &mut $conn,
-            node: &str,
             principal: &str,
             encoded: &Encoded,
-            prepared: Option<&HashMap<String, Vec<u8>>>,
-        ) -> anyhow::Result<()> {
-            if encoded.contents.is_empty() {
-                return Ok(());
-            }
+            lock: bool,
+        ) -> anyhow::Result<Vec<Option<i64>>> {
             let positions: HashMap<&str, usize> = encoded
                 .contents
                 .iter()
@@ -220,7 +312,9 @@ macro_rules! backend {
                     list.push_bind(key.as_str());
                 }
                 list.push_unseparated(")");
-                query.push($lock);
+                if lock {
+                    query.push($lock);
+                }
                 let rows: Vec<(i64, String)> =
                     query.build_query_as().fetch_all(&mut *connection).await?;
                 for (id, key) in rows {
@@ -229,42 +323,33 @@ macro_rules! backend {
                     }
                 }
             }
+            Ok(ids)
+        }
+
+        async fn $inner<'q, B>(
+            connection: &mut $conn,
+            node: &'q str,
+            principal: &'q str,
+            positions: HashMap<&'q str, usize>,
+            mut missing: Vec<(&'q str, B)>,
+            mut ids: Vec<Option<i64>>,
+        ) -> anyhow::Result<()>
+        where
+            B: sqlx::Encode<'q, $db> + sqlx::Type<$db> + Send + 'q,
+        {
+            if positions.is_empty() {
+                return Ok(());
+            }
             // Sorted so two concurrent commits inserting overlapping key sets
             // take speculative insertion locks in the same order.
-            let mut missing: Vec<&(String, Vec<u8>)> = encoded
-                .contents
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| ids[*index].is_none())
-                .map(|(_, entry)| entry)
-                .collect();
-            missing.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            for chunk in missing.chunks(200) {
-                let mut rows = Vec::with_capacity(chunk.len());
-                for entry in chunk {
-                    rows.push((
-                        entry.0.as_str(),
-                        if let Some(contents) = prepared {
-                            std::borrow::Cow::Borrowed(
-                                contents
-                                    .get(&entry.0)
-                                    .context("missing prepared history content")?
-                                    .as_slice(),
-                            )
-                        } else {
-                            std::borrow::Cow::Owned(crate::storage_codec::encode(
-                                entry.1.as_slice(),
-                            )?)
-                        },
-                    ));
-                }
+            missing.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            let mut missing = missing.into_iter().peekable();
+            while missing.peek().is_some() {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "INSERT INTO turn_chain_contents (principal, content_key, content) ",
                 );
-                query.push_values(rows.iter(), |mut row, (key, content)| {
-                    row.push_bind(principal)
-                        .push_bind(*key)
-                        .push_bind(content.as_ref());
+                query.push_values(missing.by_ref().take(200), |mut row, (key, content)| {
+                    row.push_bind(principal).push_bind(key).push_bind(content);
                 });
                 query.push(
                     " ON CONFLICT (principal, content_key) DO NOTHING RETURNING id, content_key",
@@ -279,22 +364,18 @@ macro_rules! backend {
             }
             // Concurrent commits that won a race above committed their row; a
             // targeted lookup resolves those ids without DO UPDATE or retries.
-            for chunk in encoded.contents.chunks(400) {
-                let pending: Vec<&str> = chunk
-                    .iter()
-                    .filter(|(key, _)| ids[positions[key.as_str()]].is_none())
-                    .map(|(key, _)| key.as_str())
-                    .collect();
-                if pending.is_empty() {
-                    continue;
-                }
+            let pending: Vec<&str> = positions
+                .iter()
+                .filter_map(|(key, index)| ids[*index].is_none().then_some(*key))
+                .collect();
+            for chunk in pending.chunks(400) {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "SELECT id, content_key FROM turn_chain_contents WHERE principal = ",
                 );
                 query.push_bind(principal).push(" AND content_key IN (");
                 let mut list = query.separated(",");
-                for key in pending {
-                    list.push_bind(key);
+                for key in chunk {
+                    list.push_bind(*key);
                 }
                 list.push_unseparated(")");
                 query.push($lock);
@@ -306,10 +387,10 @@ macro_rules! backend {
                     }
                 }
             }
-            let mut content_ids = Vec::with_capacity(encoded.contents.len());
-            for index in 0..encoded.contents.len() {
-                content_ids.push(ids[index].context("missing history content")?);
-            }
+            let mut content_ids = ids
+                .into_iter()
+                .map(|id| id.context("missing history content"))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             content_ids.sort_unstable();
             content_ids.dedup();
             for chunk in content_ids.chunks(200) {
@@ -419,6 +500,7 @@ backend!(
     put_sqlite,
     put_sqlite_prepared,
     put_sqlite_inner,
+    lookup_sqlite,
     restore_sqlite,
     sqlx::Sqlite,
     sqlx::SqliteConnection,
@@ -428,6 +510,7 @@ backend!(
     put_postgres,
     put_postgres_prepared,
     put_postgres_inner,
+    lookup_postgres,
     restore_postgres,
     sqlx::Postgres,
     sqlx::PgConnection,

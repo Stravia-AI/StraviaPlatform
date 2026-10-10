@@ -271,11 +271,16 @@ async fn run(
     services: &Arc<Services>,
     input: OperationInput,
 ) -> Result<OperationOutput, stravia_vendor_runtime::RuntimeError> {
+    let (operation, encoded) = input
+        .encode_for_host()
+        .map_err(|_| stravia_vendor_runtime::RuntimeError::InvalidOutput)?;
+    drop(input);
     runtime
         .execute(
             plugin,
             "oauth",
-            input,
+            operation,
+            encoded,
             OperationScope::new(
                 Arc::clone(services) as Arc<dyn HostServices>,
                 CancellationToken::new(),

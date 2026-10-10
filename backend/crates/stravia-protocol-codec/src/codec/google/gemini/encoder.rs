@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use http::header::HeaderMap;
@@ -16,8 +17,8 @@ use stravia_runtime_contract::protocol::ir::request::ToolChoice;
 pub struct GoogleEncoder;
 
 impl GoogleEncoder {
-    pub(crate) fn encode_request(&self, req: &AiRequest) -> Result<(Value, HeaderMap)> {
-        let ingress = &req.meta.vendor.ingress;
+    pub(crate) fn encode_request(&self, mut req: AiRequest) -> Result<(Value, HeaderMap)> {
+        let ingress = &mut req.meta.vendor.ingress;
         if req
             .tool_choice
             .as_ref()
@@ -27,26 +28,13 @@ impl GoogleEncoder {
         }
 
         // ── System instruction ────────────────────────────────────────────────
-        let system_val: Option<Value> =
-            if let Some(v) = ingress.get("__google_raw_system_instruction") {
-                Some(v.clone())
-            } else {
-                let mut system_parts: Vec<Value> = req
-                    .instructions
-                    .iter()
-                    .map(|text| serde_json::json!({"text": text}))
-                    .collect();
-                for msg in &req.items {
-                    if matches!(msg.role, Role::System | Role::Developer) {
-                        system_parts.push(serde_json::json!({"text": msg.content.to_text()}));
-                    }
-                }
-                if system_parts.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::json!({"parts": system_parts}))
-                }
-            };
+        let raw_system = ingress.remove("__google_raw_system_instruction");
+        let mut system_parts = Vec::new();
+        if raw_system.is_none()
+            && let Some(text) = req.instructions.take()
+        {
+            system_parts.push(object([("text", Value::String(text))]));
+        }
 
         // ── Contents ─────────────────────────────────────────────────────────
         let call_names = req
@@ -59,7 +47,9 @@ impl GoogleEncoder {
                 }
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    ContentBlock::ToolUse { id, name, .. } => {
+                        Some((id.as_str().to_owned(), name.clone()))
+                    }
                     _ => None,
                 });
                 block_calls.chain(
@@ -67,18 +57,25 @@ impl GoogleEncoder {
                         .tool_calls
                         .iter()
                         .flatten()
-                        .map(|call| (call.id.as_str(), call.name.as_str())),
+                        .map(|call| (call.id.as_str().to_owned(), call.name.clone())),
                 )
             })
             .collect::<HashMap<_, _>>();
 
         let mut contents: Vec<Value> = Vec::new();
         let mut previous_was_assistant = false;
-        for msg in &req.items {
+        for msg in req.items {
             if matches!(msg.role, Role::System | Role::Developer) {
+                if raw_system.is_none() {
+                    system_parts.push(object([(
+                        "text",
+                        Value::String(content_into_text(msg.content)),
+                    )]));
+                }
                 previous_was_assistant = false;
                 continue;
             }
+            let is_assistant = msg.role == Role::Assistant;
             let mut content = encode_content(msg, &call_names)?;
             if previous_was_assistant
                 && let Some(previous) = contents.last_mut()
@@ -96,16 +93,18 @@ impl GoogleEncoder {
             }
             // 乐观回放可能让条目只剩 Gemini 承载不了的受保护载荷（如 redacted）：
             // 编码后没有 part 的 model 条目整条跳过，不发出空 content。
-            if msg.role == Role::Assistant && content["parts"].as_array().is_some_and(Vec::is_empty)
-            {
+            if is_assistant && content["parts"].as_array().is_some_and(Vec::is_empty) {
                 previous_was_assistant = false;
                 continue;
             }
-            previous_was_assistant = msg.role == Role::Assistant;
+            previous_was_assistant = is_assistant;
             contents.push(content);
         }
 
-        let mut body = serde_json::json!({ "contents": contents });
+        let system_val = raw_system.or_else(|| {
+            (!system_parts.is_empty()).then(|| object([("parts", Value::Array(system_parts))]))
+        });
+        let mut body = object([("contents", Value::Array(contents))]);
         let obj = body.as_object_mut().unwrap();
 
         if let Some(sv) = system_val {
@@ -114,8 +113,8 @@ impl GoogleEncoder {
 
         // ── generationConfig ──────────────────────────────────────────────────
         let mut gen_config: serde_json::Map<String, Value> =
-            if let Some(Value::Object(m)) = ingress.get("__google_generation_config") {
-                m.clone()
+            if let Some(Value::Object(m)) = ingress.remove("__google_generation_config") {
+                m
             } else {
                 serde_json::Map::new()
             };
@@ -130,7 +129,7 @@ impl GoogleEncoder {
         if let Some(p) = req.generation.top_p {
             gen_config.insert("topP".into(), p.into());
         }
-        match req.response_format.as_ref() {
+        match req.response_format {
             Some(ResponseFormat::JsonObject) => {
                 gen_config.insert(
                     "responseMimeType".into(),
@@ -142,7 +141,10 @@ impl GoogleEncoder {
                     "responseMimeType".into(),
                     Value::String("application/json".into()),
                 );
-                gen_config.insert("responseSchema".into(), sanitize_gemini_schema(schema));
+                gen_config.insert(
+                    "responseSchema".into(),
+                    sanitize_owned_gemini_schema(schema),
+                );
             }
             Some(ResponseFormat::Text) | None => {}
         }
@@ -183,9 +185,9 @@ impl GoogleEncoder {
         }
 
         // ── Tools ─────────────────────────────────────────────────────────────
-        if let Some(raw) = ingress.get("__google_raw_tools") {
-            obj.insert("tools".into(), raw.clone());
-        } else if let Some(ref tools) = req.tools {
+        if let Some(raw) = ingress.remove("__google_raw_tools") {
+            obj.insert("tools".into(), raw);
+        } else if let Some(tools) = req.tools {
             let mut fn_decls: Vec<Value> = Vec::new();
             let mut builtin_entries: Vec<Value> = Vec::new();
 
@@ -201,12 +203,15 @@ impl GoogleEncoder {
                         builtin_entries.push(serde_json::json!({"googleSearchRetrieval": {}}));
                     }
                     _ => {
-                        let mut decl = serde_json::json!({"name": t.name});
+                        let mut decl = object([("name", Value::String(t.name))]);
                         let d = decl.as_object_mut().unwrap();
-                        if let Some(ref desc) = t.description {
-                            d.insert("description".into(), Value::String(desc.clone()));
+                        if let Some(desc) = t.description {
+                            d.insert("description".into(), Value::String(desc));
                         }
-                        d.insert("parameters".into(), sanitize_gemini_schema(&t.parameters));
+                        d.insert(
+                            "parameters".into(),
+                            sanitize_owned_gemini_schema(t.parameters),
+                        );
                         fn_decls.push(decl);
                     }
                 }
@@ -214,7 +219,7 @@ impl GoogleEncoder {
 
             let mut tool_array: Vec<Value> = Vec::new();
             if !fn_decls.is_empty() {
-                tool_array.push(serde_json::json!({"functionDeclarations": fn_decls}));
+                tool_array.push(object([("functionDeclarations", Value::Array(fn_decls))]));
             }
             tool_array.extend(builtin_entries);
 
@@ -224,14 +229,14 @@ impl GoogleEncoder {
         }
 
         // ── Extra passthrough fields ───────────────────────────────────────────
-        if let Some(v) = ingress.get("__google_tool_config") {
-            obj.insert("toolConfig".into(), v.clone());
+        if let Some(v) = ingress.remove("__google_tool_config") {
+            obj.insert("toolConfig".into(), v);
         }
-        if let Some(v) = ingress.get("__google_safety_settings") {
-            obj.insert("safetySettings".into(), v.clone());
+        if let Some(v) = ingress.remove("__google_safety_settings") {
+            obj.insert("safetySettings".into(), v);
         }
-        if let Some(v) = ingress.get("__google_cached_content") {
-            obj.insert("cachedContent".into(), v.clone());
+        if let Some(v) = ingress.remove("__google_cached_content") {
+            obj.insert("cachedContent".into(), v);
         }
 
         Ok((body, HeaderMap::new()))
@@ -272,32 +277,118 @@ pub(crate) fn schema_is_losslessly_representable(schema: &Value) -> bool {
     sanitize_gemini_schema(schema) == *schema
 }
 
+fn sanitize_owned_gemini_schema(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "$schema"
+                            | "additionalProperties"
+                            | "$ref"
+                            | "ref"
+                            | "definitions"
+                            | "$defs"
+                    )
+                })
+                .map(|(key, value)| (key, sanitize_owned_gemini_schema(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(sanitize_owned_gemini_schema)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 // ── Content encoding ──────────────────────────────────────────────────────────
 
-fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Value> {
+fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+}
+
+fn content_into_text(content: MessageContent) -> String {
+    match content {
+        MessageContent::Text(text) => Arc::unwrap_or_clone(text),
+        MessageContent::Blocks(blocks) => {
+            let mut texts = blocks.into_iter().filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(Arc::unwrap_or_clone(text)),
+                _ => None,
+            });
+            let mut text = texts.next().unwrap_or_default();
+            for next in texts {
+                text.push_str(&next);
+            }
+            text
+        }
+    }
+}
+
+fn function_call(id: String, name: String, args: Value) -> Value {
+    object([(
+        "functionCall",
+        object([
+            ("id", Value::String(id)),
+            ("name", Value::String(name)),
+            ("args", args),
+        ]),
+    )])
+}
+
+fn encode_content(msg: AiItem, call_names: &HashMap<String, String>) -> Result<Value> {
     let role = match msg.role {
         Role::User | Role::Tool => "user",
         Role::Assistant => "model",
         Role::System | Role::Developer => unreachable!("instruction roles handled separately"),
     };
 
-    let mut parts = match &msg.content {
+    let block_call_ids = match &msg.content {
+        MessageContent::Blocks(blocks)
+            if msg.tool_call_id.is_none() && msg.tool_calls.is_some() =>
+        {
+            Some(
+                blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolUse { id, .. } => Some(id.as_str().to_owned()),
+                        _ => None,
+                    })
+                    .collect::<std::collections::HashSet<_>>(),
+            )
+        }
+        MessageContent::Text(_) | MessageContent::Blocks(_) => None,
+    };
+    let mut tool_calls = msg.tool_calls;
+    let mut parts = match msg.content {
         MessageContent::Text(t) => {
             if let Some(call_id) = msg.tool_call_id.as_deref() {
                 let name = call_names.get(call_id).ok_or_else(|| {
                     anyhow::anyhow!("Gemini tool result references unknown call_id")
                 })?;
-                vec![serde_json::json!({
-                    "functionResponse": {
-                        "id": call_id,
-                        "name": name,
-                        "response": {"result": t}
-                    }
-                })]
-            } else if let Some(ref tcs) = msg.tool_calls {
+                vec![object([(
+                    "functionResponse",
+                    object([
+                        ("id", Value::String(call_id.to_owned())),
+                        ("name", Value::String(name.clone())),
+                        (
+                            "response",
+                            object([("result", Value::String(Arc::unwrap_or_clone(t)))]),
+                        ),
+                    ]),
+                )])]
+            } else if let Some(tcs) = tool_calls.take() {
                 let mut parts = Vec::new();
                 if !t.is_empty() {
-                    parts.push(serde_json::json!({"text": t}));
+                    parts.push(object([("text", Value::String(Arc::unwrap_or_clone(t)))]));
                 }
                 for tc in tcs {
                     let args: Value = serde_json::from_str(&tc.arguments).map_err(|error| {
@@ -306,15 +397,11 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                             tc.id
                         )
                     })?;
-                    parts.push(serde_json::json!({"functionCall": {
-                        "id": tc.id,
-                        "name": tc.name,
-                        "args": args
-                    }}));
+                    parts.push(function_call(tc.id.into_string(), tc.name, args));
                 }
                 parts
             } else {
-                vec![serde_json::json!({"text": t})]
+                vec![object([("text", Value::String(Arc::unwrap_or_clone(t)))])]
             }
         }
         MessageContent::Blocks(blocks) if msg.tool_call_id.is_some() => {
@@ -333,22 +420,29 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                 }
                 parts
             } else {
-                let mut function_response = serde_json::json!({
-                    "id": call_id,
-                    "name": name,
-                    "response": {"result": msg.content.to_text()}
-                });
+                let mut text = String::new();
                 let mut parts = Vec::new();
-                for block in blocks
-                    .iter()
-                    .filter(|block| !matches!(block, ContentBlock::Text { .. }))
-                {
-                    append_content_parts_for_gemini(&mut parts, block, call_names);
+                for block in blocks {
+                    if let ContentBlock::Text { text: next, .. } = block {
+                        let next = Arc::unwrap_or_clone(next);
+                        if text.is_empty() {
+                            text = next;
+                        } else {
+                            text.push_str(&next);
+                        }
+                    } else {
+                        append_content_parts_for_gemini(&mut parts, block, call_names);
+                    }
                 }
+                let mut function_response = object([
+                    ("id", Value::String(call_id.to_owned())),
+                    ("name", Value::String(name.clone())),
+                    ("response", object([("result", Value::String(text))])),
+                ]);
                 if !parts.is_empty() {
                     function_response["parts"] = Value::Array(parts);
                 }
-                vec![serde_json::json!({"functionResponse": function_response})]
+                vec![object([("functionResponse", function_response)])]
             }
         }
         MessageContent::Blocks(blocks) => {
@@ -360,15 +454,12 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
         }
     };
 
-    if let MessageContent::Blocks(blocks) = &msg.content
+    if let Some(block_call_ids) = block_call_ids
         && msg.tool_call_id.is_none()
-        && let Some(calls) = &msg.tool_calls
+        && let Some(calls) = tool_calls
     {
         for call in calls {
-            if blocks.iter().any(|block| {
-                matches!(block,
-                ContentBlock::ToolUse { id, .. } if id == &call.id)
-            }) {
+            if block_call_ids.contains(call.id.as_str()) {
                 continue;
             }
             let args: Value = serde_json::from_str(&call.arguments).map_err(|error| {
@@ -377,13 +468,14 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
                     call.id
                 )
             })?;
-            parts.push(serde_json::json!({"functionCall": {
-                "id": call.id, "name": call.name, "args": args
-            }}));
+            parts.push(function_call(call.id.into_string(), call.name, args));
         }
     }
     pair_call_signatures(&mut parts);
-    Ok(serde_json::json!({"role": role, "parts": parts}))
+    Ok(object([
+        ("role", Value::String(role.into())),
+        ("parts", Value::Array(parts)),
+    ]))
 }
 
 pub(super) fn attach_call_signature(carrier: &mut Value, call: &mut Value) -> bool {
@@ -418,8 +510,8 @@ pub(super) fn pair_call_signatures(parts: &mut Vec<Value>) {
 
 fn append_content_parts_for_gemini(
     parts: &mut Vec<Value>,
-    block: &ContentBlock,
-    call_names: &HashMap<&str, &str>,
+    block: ContentBlock,
+    call_names: &HashMap<String, String>,
 ) {
     if let ContentBlock::Reasoning {
         summary, content, ..
@@ -427,10 +519,15 @@ fn append_content_parts_for_gemini(
     {
         parts.extend(
             summary
-                .iter()
+                .into_iter()
                 .chain(content)
                 .filter(|text| !text.is_empty())
-                .map(|text| serde_json::json!({"text": text, "thought": true})),
+                .map(|text| {
+                    object([
+                        ("text", Value::String(text)),
+                        ("thought", Value::Bool(true)),
+                    ])
+                }),
         );
     } else if let Some(part) = encode_content_block_for_gemini(block, call_names) {
         parts.push(part);
@@ -439,32 +536,21 @@ fn append_content_parts_for_gemini(
 
 /// 返回 `None` 表示该块在 Gemini 上没有可承载的载体（如 redacted 数据），整块忽略。
 pub(super) fn encode_content_block_for_gemini(
-    b: &ContentBlock,
-    call_names: &HashMap<&str, &str>,
+    b: ContentBlock,
+    call_names: &HashMap<String, String>,
 ) -> Option<Value> {
     Some(match b {
-        ContentBlock::Text { text, .. } => serde_json::json!({"text": text}),
-        ContentBlock::Image { source, .. } => match source {
-            MediaSource::Base64 { media_type, data } => serde_json::json!({
-                "inlineData": {
-                    "mimeType": media_type,
-                    "data": data,
-                }
-            }),
-            MediaSource::Url(url) => serde_json::json!({"fileData": {"fileUri": url}}),
-            MediaSource::FileId { file_id, .. } => {
-                serde_json::json!({"fileData": {"fileUri": file_id}})
-            }
-        },
+        ContentBlock::Text { text, .. } => {
+            object([("text", Value::String(Arc::unwrap_or_clone(text)))])
+        }
+        ContentBlock::Image { source, .. } => encode_media_source(source, None),
         ContentBlock::Audio { source } => encode_media_source(source, None),
         ContentBlock::File { source, media_type } | ContentBlock::Video { source, media_type } => {
-            encode_media_source(source, media_type.as_deref())
+            encode_media_source(source, media_type)
         }
         ContentBlock::ToolUse {
             id, name, input, ..
-        } => {
-            serde_json::json!({"functionCall": {"id": id, "name": name, "args": input}})
-        }
+        } => function_call(id.into_string(), name, input),
         ContentBlock::ToolResult {
             tool_use_id,
             content,
@@ -472,19 +558,23 @@ pub(super) fn encode_content_block_for_gemini(
         } => {
             let name = call_names
                 .get(tool_use_id.as_str())
-                .copied()
-                .unwrap_or(tool_use_id);
-            serde_json::json!({
-                "functionResponse": {
-                    "id": tool_use_id,
-                    "name": name,
-                    "response": if content.is_object() {
-                        content.clone()
-                    } else {
-                        serde_json::json!({"result": content})
-                    }
-                }
-            })
+                .cloned()
+                .unwrap_or_else(|| tool_use_id.as_str().to_owned());
+            object([(
+                "functionResponse",
+                object([
+                    ("id", Value::String(tool_use_id.into_string())),
+                    ("name", Value::String(name)),
+                    (
+                        "response",
+                        if content.is_object() {
+                            content
+                        } else {
+                            object([("result", content)])
+                        },
+                    ),
+                ]),
+            )])
         }
         // Gemini 接受无 thoughtSignature 的 thought part（可能只是忽略它），所以
         // 无签名明文保持原生 thought part，不降级为正文：降级会让模型把自己的
@@ -493,9 +583,12 @@ pub(super) fn encode_content_block_for_gemini(
             thinking,
             signature,
         } => {
-            let mut part = serde_json::json!({"text": thinking, "thought": true});
+            let mut part = object([
+                ("text", Value::String(thinking)),
+                ("thought", Value::Bool(true)),
+            ]);
             if let Some(signature) = signature {
-                part["thoughtSignature"] = Value::String(signature.clone());
+                part["thoughtSignature"] = Value::String(signature);
             }
             part
         }
@@ -503,36 +596,40 @@ pub(super) fn encode_content_block_for_gemini(
         ContentBlock::Reasoning { .. } => return None,
         // redacted 数据没有 Gemini 原生载体，静默忽略，绝不能落到可读文本里。
         ContentBlock::RedactedThinking { .. } => return None,
-        ContentBlock::Unknown { raw } => raw.clone(),
-        other => crate::codec::content_block_wire_value(other),
+        ContentBlock::Unknown { raw } => raw,
+        other => crate::codec::content_block_wire_value(&other),
     })
 }
 
-fn encode_media_source(source: &MediaSource, media_type: Option<&str>) -> Value {
+fn encode_media_source(source: MediaSource, media_type: Option<String>) -> Value {
     match source {
         MediaSource::Url(url) => {
-            let mut part = serde_json::json!({"fileData": {"fileUri": url}});
+            let mut part = object([("fileData", object([("fileUri", Value::String(url))]))]);
             if let Some(media_type) = media_type {
-                part["fileData"]["mimeType"] = Value::String(media_type.to_owned());
+                part["fileData"]["mimeType"] = Value::String(media_type);
             }
             part
         }
         MediaSource::FileId { file_id, .. } => {
-            let mut part = serde_json::json!({"fileData": {"fileUri": file_id}});
+            let mut part = object([("fileData", object([("fileUri", Value::String(file_id))]))]);
             if let Some(media_type) = media_type {
-                part["fileData"]["mimeType"] = Value::String(media_type.to_owned());
+                part["fileData"]["mimeType"] = Value::String(media_type);
             }
             part
         }
         MediaSource::Base64 {
             media_type: source_media_type,
             data,
-        } => serde_json::json!({
-            "inlineData": {
-                "mimeType": media_type.unwrap_or(source_media_type),
-                "data": data,
-            }
-        }),
+        } => object([(
+            "inlineData",
+            object([
+                (
+                    "mimeType",
+                    Value::String(media_type.unwrap_or(source_media_type)),
+                ),
+                ("data", Value::String(data)),
+            ]),
+        )]),
     }
 }
 

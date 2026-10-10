@@ -1,11 +1,12 @@
 //! `AiRequest` — the unified ingress IR for all supported protocols.
 //!
-//! Codec decoders (PR-2) produce `AiRequest`; codec encoders (PR-3) and the
-//! dispatcher (PR-5) consume it.  Until PR-2 lands, `compat.rs` provides
-//! lossless `From` conversions from/to the old `InternalRequest`.
+//! Codec decoders produce `AiRequest`; encoders and the dispatcher consume it.
+//! Text buffers are shared across snapshots. Mutations detach the buffer, while
+//! serialization retains the existing plain-string JSON representation.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Map, Value};
+use std::sync::Arc;
 
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::cache::CacheControl;
@@ -102,7 +103,7 @@ pub const TOOL_RESULT_CONTENT_KIND_META: &str = "__stravia_tool_result_content_k
 pub enum ContentBlock {
     // ── Text ─────────────────────────────────────────────────────────────────
     Text {
-        text: String,
+        text: Arc<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -290,18 +291,54 @@ impl ContentBlock {
     }
 }
 
-/// Message content — either a plain string or a typed block list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Message content — shared plain text or a typed block list.
+/// Use `Arc::make_mut` before editing shared text; JSON remains a string.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum MessageContent {
-    Text(String),
+    Text(Arc<String>),
     Blocks(Vec<ContentBlock>),
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContentVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ContentVisitor {
+            type Value = MessageContent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a text string or an array of content blocks")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(MessageContent::Text(value.to_owned().into()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                // Untagged buffering borrows an owned Value string and copies it.
+                Ok(MessageContent::Text(value.into()))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                Vec::<ContentBlock>::deserialize(serde::de::value::SeqAccessDeserializer::new(
+                    sequence,
+                ))
+                .map(MessageContent::Blocks)
+            }
+        }
+
+        deserializer.deserialize_any(ContentVisitor)
+    }
 }
 
 impl MessageContent {
     pub fn to_text(&self) -> String {
         match self {
-            Self::Text(t) => t.clone(),
+            Self::Text(t) => t.as_ref().clone(),
             Self::Blocks(bs) => bs
                 .iter()
                 .filter_map(|b| b.as_text())
@@ -613,6 +650,13 @@ impl AiItemMetadata {
         self.opaque.is_none().then_some(&self.extensions)
     }
 
+    /// Consume the extension map without exposing typed graph annotations.
+    /// Malformed legacy graph fields stay in this map; opaque non-objects have
+    /// no object extensions.
+    pub fn into_object_extensions(self) -> Option<Map<String, Value>> {
+        self.opaque.is_none().then_some(self.extensions)
+    }
+
     pub fn remove_extension(&mut self, key: &str) -> Result<Option<Value>, &'static str> {
         if Self::is_graph_field(key) {
             return Err("reserved item metadata field");
@@ -785,7 +829,7 @@ impl AiItem {
     pub fn output_text(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            content: MessageContent::Text(text.into()),
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -838,7 +882,7 @@ impl AiItem {
     pub fn function_call(call: ToolCall) -> Self {
         Self {
             role: Role::Assistant,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(std::sync::Arc::new(String::new())),
             tool_calls: Some(vec![call]),
             tool_call_id: None,
             meta: None,
@@ -859,7 +903,7 @@ impl AiItem {
     pub fn function_call_output(call_id: impl Into<ToolCallId>, output: Value) -> Self {
         let call_id = call_id.into();
         let content = match output {
-            Value::String(text) => MessageContent::Text(text),
+            Value::String(text) => MessageContent::Text(std::sync::Arc::new(text)),
             other => MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: call_id.clone(),
                 content: other,
@@ -886,7 +930,7 @@ impl AiItem {
         let mut content = Vec::new();
         if let Some(snippet) = snippet {
             content.push(ContentBlock::Text {
-                text: snippet,
+                text: std::sync::Arc::new(snippet),
                 cache_control: None,
             });
         }
@@ -1028,10 +1072,10 @@ impl AiItem {
             return None;
         }
         match &mut self.content {
-            MessageContent::Text(text) if self.role == Role::Assistant => Some(text),
+            MessageContent::Text(text) if self.role == Role::Assistant => Some(Arc::make_mut(text)),
             MessageContent::Blocks(blocks) if self.role == Role::Assistant => {
                 match blocks.as_mut_slice() {
-                    [ContentBlock::Text { text, .. }] => Some(text),
+                    [ContentBlock::Text { text, .. }] => Some(Arc::make_mut(text)),
                     _ => None,
                 }
             }
@@ -1413,9 +1457,91 @@ impl AiRequest {
 mod tests {
     use super::{
         AiItem, AiItemAudience, AiItemMetadata, AiItemProvenance, AiItemStatus, DocumentSource,
-        MediaSource,
+        MediaSource, MessageContent,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn message_content_decoding_preserves_text_blocks_and_native_values() {
+        let exact_number = json!(9_007_199_254_740_993_u64);
+        for text in ["", "原文 🐟\n\"quote\"\\path\tend"] {
+            let content: MessageContent =
+                serde_json::from_value(json!(text)).expect("decode owned text");
+            assert!(matches!(&content, MessageContent::Text(value) if value.as_str() == text));
+            let restored: MessageContent =
+                serde_json::from_slice(&serde_json::to_vec(&content).expect("encode text"))
+                    .expect("decode escaped text");
+            assert!(matches!(restored, MessageContent::Text(value) if value.as_str() == text));
+        }
+        for blocks in [
+            json!([]),
+            json!([
+                {"type": "text", "text": "原文 🐟\n"},
+                {"type": "thinking", "thinking": "保留思考", "signature": "opaque"},
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": {"type": "text", "text": "business JSON", "nested": [null, false], "number": exact_number},
+                    "content_kind": "json",
+                    "is_error": true
+                }
+            ]),
+        ] {
+            let content: MessageContent =
+                serde_json::from_value(blocks.clone()).expect("decode owned blocks");
+            assert!(matches!(&content, MessageContent::Blocks(_)));
+            assert_eq!(
+                serde_json::to_value(&content).expect("encode blocks"),
+                blocks
+            );
+            let restored: MessageContent =
+                serde_json::from_slice(&serde_json::to_vec(&blocks).expect("encode wire blocks"))
+                    .expect("decode wire blocks");
+            assert_eq!(
+                serde_json::to_value(restored).expect("encode restored"),
+                blocks
+            );
+        }
+    }
+
+    #[test]
+    fn message_content_wire_decoding_preserves_arbitrary_precision_numbers() {
+        let raw = br#"[{"type":"tool_result","tool_use_id":"call_1","content":{"number":123456789012345678901234567890},"content_kind":"json"}]"#;
+        let restored: MessageContent =
+            serde_json::from_slice(raw).expect("decode native JSON number from wire");
+        let MessageContent::Blocks(blocks) = restored else {
+            panic!("expected tool-result blocks");
+        };
+        let Some(super::ContentBlock::ToolResult { content, .. }) = blocks.first() else {
+            panic!("expected tool result");
+        };
+        assert!(content["number"].is_number());
+        assert_eq!(
+            content["number"].as_number().expect("number").to_string(),
+            "123456789012345678901234567890"
+        );
+    }
+
+    #[test]
+    fn message_content_decoding_rejects_non_content_shapes() {
+        for invalid in [
+            Value::Null,
+            json!(false),
+            json!(42),
+            json!({"type": "text", "text": "not an array"}),
+            json!(["not a content block"]),
+            json!([{"type": "text", "text": 42}]),
+            json!([{"type": "unknown_block"}]),
+        ] {
+            assert!(serde_json::from_value::<MessageContent>(invalid.clone()).is_err());
+            assert!(
+                serde_json::from_slice::<MessageContent>(
+                    &serde_json::to_vec(&invalid).expect("encode invalid wire")
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn item_metadata_preserves_opaque_and_unknown_values_until_graph_mutation() {

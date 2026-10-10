@@ -7,7 +7,7 @@ fn make_req(messages: Vec<AiItem>) -> AiRequest {
 fn assistant_with_tool(tool_id: &str, tool_name: &str) -> AiItem {
     AiItem {
         role: Role::Assistant,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: Some(vec![ToolCall {
             id: (tool_id.to_string()).into(),
             name: tool_name.to_string(),
@@ -21,7 +21,7 @@ fn assistant_with_tool(tool_id: &str, tool_name: &str) -> AiItem {
 fn tool_result_with_id(tool_call_id: &str) -> AiItem {
     AiItem {
         role: Role::Tool,
-        content: MessageContent::Text("result".to_string()),
+        content: MessageContent::Text("result".to_string().into()),
         tool_calls: None,
         tool_call_id: Some((tool_call_id.to_string()).into()),
         meta: None,
@@ -31,7 +31,7 @@ fn tool_result_with_id(tool_call_id: &str) -> AiItem {
 fn tool_result_no_id() -> AiItem {
     AiItem {
         role: Role::Tool,
-        content: MessageContent::Text("result".to_string()),
+        content: MessageContent::Text("result".to_string().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -86,7 +86,7 @@ fn test_generated_id_for_empty_tool_call_id() {
     let mut req = make_req(vec![
         AiItem {
             role: Role::Assistant,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(String::new().into()),
             tool_calls: Some(vec![ToolCall {
                 id: ("".to_string()).into(),
                 name: "my_tool".to_string(),
@@ -127,7 +127,7 @@ fn generated_ids_skip_supplied_ids_without_breaking_fifo() {
     let mut req = make_req(vec![
         AiItem {
             role: Role::Assistant,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(String::new().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: (String::new()).into(),
@@ -159,7 +159,7 @@ fn test_multiple_tool_calls_fifo_order() {
     let mut req = make_req(vec![
         AiItem {
             role: Role::Assistant,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(String::new().into()),
             tool_calls: Some(vec![
                 ToolCall {
                     id: ("call_1".to_string()).into(),

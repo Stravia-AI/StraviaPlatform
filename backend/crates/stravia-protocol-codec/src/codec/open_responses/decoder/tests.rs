@@ -115,7 +115,7 @@ fn response_input_message_preserves_inline_images_in_stable_order() {
                     detail: Some(detail),
                     ..
                 }
-            ] if text == "inspect" && media_type == "image/png" && data == "aW1hZ2U=" && detail == "high"
+            ] if text.as_str() == "inspect" && media_type == "image/png" && data == "aW1hZ2U=" && detail == "high"
         )
     ));
 }
@@ -433,7 +433,7 @@ fn preserves_reasoning_as_an_ordered_graph_item() {
     assert_eq!(request.items[1].role, Role::Developer);
     assert_eq!(request.items[2].role, Role::Assistant);
     let (encoded, _) = super::super::encoder::ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode dated request");
     assert_eq!(
         encoded["input"][0]["summary"][0]["text"],

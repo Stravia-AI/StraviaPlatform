@@ -54,7 +54,7 @@ impl ProtocolAdapter for OpenAIChatCompletionsV1 {
         super::decoder::OpenAIDecoder.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         super::encoder::OpenAIEncoder.encode_request(request)
     }
 
@@ -96,7 +96,7 @@ impl ProtocolAdapter for ResponseReasoningFieldAdapter {
         OpenAIChatCompletionsV1.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         OpenAIChatCompletionsV1.encode_request(request)
     }
 

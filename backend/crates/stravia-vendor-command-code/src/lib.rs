@@ -305,7 +305,7 @@ fn infer(
 
     common::ensure_no_native_compaction(&request)?;
     let adapter = CommandCodeGenerateV1;
-    let encoded = ProtocolTransform::encode_request_with(&adapter, &request)
+    let encoded = ProtocolTransform::encode_request_with(&adapter, request)
         .map_err(common::map_request_transform_error)?;
     let mut body = encoded.body;
     let mut state = read_state(host)?;

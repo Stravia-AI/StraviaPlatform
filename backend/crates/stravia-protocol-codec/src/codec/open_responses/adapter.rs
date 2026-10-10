@@ -39,7 +39,7 @@ impl ProtocolAdapter for OpenResponses20260424 {
         super::decoder::ResponsesDecoder.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         super::encoder::ResponsesEncoder.encode_request(request)
     }
 

@@ -1044,18 +1044,18 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     }];
     let system = stravia_runtime_contract::protocol::ir::AiItem {
         role: stravia_runtime_contract::protocol::ir::Role::System,
-        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(std::sync::Arc::new(
             "repository instructions".into(),
-        ),
+        )),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
     };
     let user = stravia_runtime_contract::protocol::ir::AiItem {
         role: stravia_runtime_contract::protocol::ir::Role::User,
-        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(std::sync::Arc::new(
             "inspect repository".into(),
-        ),
+        )),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -1101,7 +1101,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
                 signature: None,
             },
             stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: first_marker,
+                text: first_marker.into(),
                 cache_control: None,
             },
         ]),
@@ -1146,7 +1146,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
                 signature: None,
             },
             stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: second_marker,
+                text: second_marker.into(),
                 cache_control: None,
             },
         ]),

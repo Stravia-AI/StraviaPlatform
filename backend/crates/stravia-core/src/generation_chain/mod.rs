@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +45,8 @@ use store::*;
 
 pub(crate) use project::{
     apply_provider_effective_response, generation_node_is_completed,
-    generation_session_fingerprint, project_client_history, set_generation_session_id,
+    generation_session_fingerprint, has_gemini_tool_calls, project_client_history,
+    set_generation_session_id,
 };
 pub(crate) use store::{
     hydrate_response_artifact_references, request_has_item_references,
@@ -423,6 +425,7 @@ impl GenerationChain {
         let mut request_delta = Arc::clone(&request);
         if ProtocolTransform::inferred_ingress(&request_delta)
             == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+            && has_gemini_tool_calls(&request_delta.items)
         {
             // Build Gemini call/result aliases while the full client prefix is
             // present. After discovery slices the delta, its raw result ID can
@@ -503,8 +506,11 @@ impl GenerationChain {
                     None => ActiveGenerationChain::default(),
                 };
                 parent.replace_effective_history = true;
-                parent.replacement_client_items =
-                    Some(canonical_client_history_request(&request).items);
+                parent.replacement_client_items = Some(
+                    canonical_client_history_request(&request)
+                        .into_owned()
+                        .items,
+                );
                 parent.compaction_input_range = Some(native_range.clone());
                 Arc::make_mut(&mut request_delta).items.drain(native_range);
                 crate::router::clear_previous_response_id(Arc::make_mut(&mut request));
@@ -589,7 +595,7 @@ impl GenerationChain {
         source_request
             .items
             .retain(|item| !item.is_compaction_trigger());
-        let client_request = canonical_client_history_request(&source_request);
+        let client_request = canonical_client_history_request(&source_request).into_owned();
         let leading_controls = source_request.items.len() - client_request.items.len();
         let source_prefix = self
             .compaction_source_prefix(&principal, &source_request)
@@ -705,8 +711,8 @@ impl crate::router::ContinuationLookup for GenerationChainContinuationLookup {
         &self,
         principal: &Principal,
         target: crate::router::ContinuationTarget<'_>,
-        request: &mut AiRequest,
-        full_fallback: &mut Option<AiRequest>,
+        request: &mut Arc<AiRequest>,
+        full_fallback: &mut Option<Arc<AiRequest>>,
     ) -> Option<String> {
         *full_fallback = None;
         let parent_id = crate::router::parent_id_from_request(request)?;
@@ -728,7 +734,15 @@ impl crate::router::ContinuationLookup for GenerationChainContinuationLookup {
         {
             crate::router::parent_id_from_request(request)
         } else {
-            crate::router::clear_previous_response_id(request);
+            if crate::router::parent_id_from_request(request).is_some()
+                || request
+                    .meta
+                    .vendor
+                    .ingress
+                    .contains_key("previous_response_id")
+            {
+                crate::router::clear_previous_response_id(Arc::make_mut(request));
+            }
             None
         }
     }
@@ -839,16 +853,16 @@ struct DiscoveredGenerationPrefix {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct RequestDelta {
-    messages: Vec<AiItem>,
+struct RequestDelta<'a> {
+    messages: Cow<'a, [AiItem]>,
     system: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum EffectiveHistoryMutation {
-    Append { items: Vec<AiItem> },
-    Replace { items: Vec<AiItem> },
+enum EffectiveHistoryMutation<'a> {
+    Append { items: Cow<'a, [AiItem]> },
+    Replace { items: Cow<'a, [AiItem]> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1004,16 +1018,16 @@ fn inherit_open_responses_ext(
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct PersistedResponseNode {
-    client_delta: RequestDelta,
+struct PersistedResponseNode<'a> {
+    client_delta: RequestDelta<'a>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_output: Option<Vec<AiItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_history_mutation: Option<EffectiveHistoryMutation>,
+    client_history_mutation: Option<EffectiveHistoryMutation<'a>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compaction_record_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    effective_history_mutation: Option<EffectiveHistoryMutation>,
+    effective_history_mutation: Option<EffectiveHistoryMutation<'a>>,
     effective_system: Option<String>,
     effective_output: AiResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]

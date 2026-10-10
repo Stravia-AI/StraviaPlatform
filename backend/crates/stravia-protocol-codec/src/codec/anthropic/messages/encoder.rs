@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::Result;
 use http::header::{HeaderMap, HeaderValue};
@@ -16,21 +17,29 @@ use stravia_runtime_contract::protocol::ir::request::ToolResultContentKind;
 pub struct AnthropicEncoder;
 
 impl AnthropicEncoder {
-    pub(crate) fn encode_request(&self, req: &AiRequest) -> Result<(Value, HeaderMap)> {
-        let ingress = &req.meta.vendor.ingress;
+    pub(crate) fn encode_request(&self, mut req: AiRequest) -> Result<(Value, HeaderMap)> {
+        let ingress = &mut req.meta.vendor.ingress;
+        let supplied_tool_ids = if ingress.contains_key("__anthropic_raw_messages") {
+            HashSet::new()
+        } else {
+            supplied_anthropic_tool_ids(&req.items)
+        };
 
         // ── System ────────────────────────────────────────────────────────────
         // Prefer __anthropic_raw_system (preserves cache_control) if present.
-        let system_val: Option<Value> = if let Some(v) = ingress.get("__anthropic_raw_system") {
-            Some(v.clone())
+        let system_val: Option<Value> = if let Some(v) = ingress.remove("__anthropic_raw_system") {
+            Some(v)
         } else {
-            let mut system_text = req.instructions.clone().unwrap_or_default();
-            for msg in &req.items {
+            let mut system_text = req.instructions.take().unwrap_or_default();
+            for msg in &mut req.items {
                 if matches!(msg.role, Role::System | Role::Developer) {
                     if !system_text.is_empty() {
                         system_text.push('\n');
                     }
-                    system_text.push_str(&msg.content.to_text());
+                    append_system_content(
+                        &mut system_text,
+                        std::mem::replace(&mut msg.content, MessageContent::Blocks(Vec::new())),
+                    );
                 }
             }
             if system_text.is_empty() {
@@ -43,13 +52,12 @@ impl AnthropicEncoder {
         // ── Messages ──────────────────────────────────────────────────────────
         // Prefer __anthropic_raw_messages (preserves cache_control / exotic
         // blocks) if present; otherwise reconstruct from Message.
-        let messages_val: Value = if let Some(v) = ingress.get("__anthropic_raw_messages") {
-            v.clone()
+        let messages_val: Value = if let Some(v) = ingress.remove("__anthropic_raw_messages") {
+            v
         } else {
-            let supplied_tool_ids = supplied_anthropic_tool_ids(&req.items);
             let mut generated_tool_id_seq = 0;
             let mut raw_messages = Vec::new();
-            for msg in &req.items {
+            for msg in req.items {
                 if matches!(msg.role, Role::System | Role::Developer) {
                     continue;
                 }
@@ -64,12 +72,12 @@ impl AnthropicEncoder {
 
         let max_tokens = req.generation.max_tokens.unwrap_or(4096);
 
-        let mut body = serde_json::json!({
-            "model": req.model,
-            "messages": messages_val,
-            "max_tokens": max_tokens,
-            "stream": req.stream.enabled,
-        });
+        let mut body = object([
+            ("model", Value::String(req.model)),
+            ("messages", messages_val),
+            ("max_tokens", max_tokens.into()),
+            ("stream", Value::Bool(req.stream.enabled)),
+        ]);
 
         let obj = body.as_object_mut().unwrap();
 
@@ -85,30 +93,33 @@ impl AnthropicEncoder {
 
         // ── Tools ─────────────────────────────────────────────────────────────
         // Prefer raw tools (preserves cache_control) if present.
-        if let Some(raw_tools) = ingress.get("__anthropic_raw_tools") {
-            obj.insert("tools".into(), raw_tools.clone());
-        } else if let Some(ref tools) = req.tools {
+        if let Some(raw_tools) = ingress.remove("__anthropic_raw_tools") {
+            obj.insert("tools".into(), raw_tools);
+        } else if let Some(tools) = req.tools {
             let tools_val: Vec<Value> = tools
-                .iter()
+                .into_iter()
                 .map(|t| {
                     if let Some(builtin_type) = t.name.strip_prefix("__builtin__") {
                         let mut entry = serde_json::json!({
                             "type": builtin_type,
                             "name": builtin_type,
                         });
-                        if let Some(desc) = &t.description {
+                        if let Some(desc) = t.description {
                             entry
                                 .as_object_mut()
                                 .unwrap()
-                                .insert("description".into(), Value::String(desc.clone()));
+                                .insert("description".into(), Value::String(desc));
                         }
                         entry
                     } else {
-                        serde_json::json!({
-                            "name": t.name,
-                            "description": t.description,
-                            "input_schema": t.parameters,
-                        })
+                        object([
+                            ("name", Value::String(t.name)),
+                            (
+                                "description",
+                                t.description.map(Value::String).unwrap_or(Value::Null),
+                            ),
+                            ("input_schema", t.parameters),
+                        ])
                     }
                 })
                 .collect();
@@ -116,7 +127,7 @@ impl AnthropicEncoder {
         }
 
         // ── Tool choice ───────────────────────────────────────────────────────
-        if let Some(ref tc) = req.tool_choice {
+        if let Some(tc) = req.tool_choice {
             let raw = tool_choice_to_value_raw(tc);
             let mapped = map_tool_choice_for_anthropic(&raw)
                 .ok_or_else(|| anyhow::anyhow!("unsupported tool_choice for Anthropic Messages"))?;
@@ -146,8 +157,8 @@ impl AnthropicEncoder {
         }
 
         // ── Extra fields ──────────────────────────────────────────────────────
-        if let Some(v) = ingress.get("__anthropic_context_management") {
-            obj.insert("context_management".into(), v.clone());
+        if let Some(v) = ingress.remove("__anthropic_context_management") {
+            obj.insert("context_management".into(), v);
         }
         for key in &[
             "__anthropic_container",
@@ -156,9 +167,9 @@ impl AnthropicEncoder {
             "__anthropic_stop_sequences",
             "__anthropic_top_k",
         ] {
-            if let Some(v) = ingress.get(*key) {
+            if let Some(v) = ingress.remove(*key) {
                 let field_name = key.trim_start_matches("__anthropic_");
-                obj.insert(field_name.into(), v.clone());
+                obj.insert(field_name.into(), v);
             }
         }
 
@@ -177,16 +188,53 @@ impl AnthropicEncoder {
 
 // ── tool_choice helpers ───────────────────────────────────────────────────────
 
-fn tool_choice_to_value_raw(tc: &ToolChoice) -> Value {
+fn object<const N: usize>(entries: [(&str, Value); N]) -> Value {
+    Value::Object(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+}
+
+fn text_block(text: String) -> Value {
+    object([
+        ("type", Value::String("text".into())),
+        ("text", Value::String(text)),
+    ])
+}
+
+fn append_system_content(target: &mut String, content: MessageContent) {
+    let mut append = |text| {
+        let text = Arc::unwrap_or_clone(text);
+        if target.is_empty() {
+            *target = text;
+        } else {
+            target.push_str(&text);
+        }
+    };
+    match content {
+        MessageContent::Text(text) => append(text),
+        MessageContent::Blocks(blocks) => {
+            for block in blocks {
+                if let ContentBlock::Text { text, .. } = block {
+                    append(text);
+                }
+            }
+        }
+    }
+}
+
+fn tool_choice_to_value_raw(tc: ToolChoice) -> Value {
     match tc {
         ToolChoice::Auto => Value::String("auto".into()),
         ToolChoice::None => Value::String("none".into()),
         ToolChoice::Required => Value::String("required".into()),
-        ToolChoice::Named { name } => serde_json::json!({
-            "type": "tool",
-            "name": name,
-        }),
-        ToolChoice::Raw(v) => v.clone(),
+        ToolChoice::Named { name } => object([
+            ("type", Value::String("tool".into())),
+            ("name", Value::String(name)),
+        ]),
+        ToolChoice::Raw(v) => v,
     }
 }
 
@@ -365,7 +413,7 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
 // ── Message encoding helpers ──────────────────────────────────────────────────
 
 fn encode_message(
-    msg: &AiItem,
+    mut msg: AiItem,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> Result<Value> {
@@ -377,7 +425,7 @@ fn encode_message(
 
     if msg.role == Role::Tool {
         let (tool_content, hinted_tool_use_id) =
-            anthropic_tool_result_payload(msg, generated_tool_id_seq, supplied_tool_ids);
+            anthropic_tool_result_payload(msg.content, generated_tool_id_seq, supplied_tool_ids);
         let tool_use_id = msg
             .tool_call_id
             .as_deref()
@@ -391,27 +439,31 @@ fn encode_message(
             .unwrap_or_else(|| {
                 next_synthetic_anthropic_tool_id(generated_tool_id_seq, supplied_tool_ids)
             });
-        return Ok(serde_json::json!({
-            "role": role,
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": tool_content,
-            }],
-        }));
+        return Ok(object([
+            ("role", Value::String(role.into())),
+            (
+                "content",
+                Value::Array(vec![object([
+                    ("type", Value::String("tool_result".into())),
+                    ("tool_use_id", Value::String(tool_use_id)),
+                    ("content", tool_content),
+                ])]),
+            ),
+        ]));
     }
 
-    let meta_obj = msg.meta.as_ref().and_then(|m| m.object_extensions());
-    let content = match &msg.content {
+    let content = match msg.content {
         MessageContent::Text(t) => {
-            let reasoning = meta_obj
-                .and_then(|m| m.get("reasoning_content"))
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.trim().is_empty());
-            let reasoning_signature = meta_obj
-                .and_then(|m| m.get("reasoning_signature"))
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.trim().is_empty());
+            let mut take_meta_text = |key| {
+                let meta = msg.meta.as_mut()?;
+                meta.object_extensions()?;
+                match meta.remove_extension(key).ok().flatten()? {
+                    Value::String(text) if !text.trim().is_empty() => Some(text),
+                    _ => None,
+                }
+            };
+            let reasoning = take_meta_text("reasoning_content");
+            let reasoning_signature = take_meta_text("reasoning_signature");
 
             if reasoning.is_some() || msg.tool_calls.is_some() {
                 let mut blocks: Vec<Value> = vec![];
@@ -419,18 +471,18 @@ fn encode_message(
                     // Anthropic 拒绝无签名的 thinking 块：只有携带签名的思考才能
                     // 原生回放，无签名明文只能降级为普通文本，否则上游直接 400。
                     match reasoning_signature {
-                        Some(signature) => blocks.push(serde_json::json!({
-                            "type": "thinking",
-                            "thinking": text,
-                            "signature": signature,
-                        })),
-                        None => blocks.push(serde_json::json!({"type": "text", "text": text})),
+                        Some(signature) => blocks.push(object([
+                            ("type", Value::String("thinking".into())),
+                            ("thinking", Value::String(text)),
+                            ("signature", Value::String(signature)),
+                        ])),
+                        None => blocks.push(text_block(text)),
                     }
                 }
                 if !t.is_empty() {
-                    blocks.push(serde_json::json!({"type": "text", "text": t}));
+                    blocks.push(text_block(Arc::unwrap_or_clone(t)));
                 }
-                if let Some(tcs) = &msg.tool_calls {
+                if let Some(tcs) = msg.tool_calls.take() {
                     for tc in tcs {
                         let input: Value = serde_json::from_str(&tc.arguments).map_err(
                             |error| {
@@ -445,23 +497,33 @@ fn encode_message(
                             generated_tool_id_seq,
                             supplied_tool_ids,
                         );
-                        blocks.push(serde_json::json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": tc.name,
-                            "input": input,
-                        }));
+                        blocks.push(object([
+                            ("type", Value::String("tool_use".into())),
+                            ("id", Value::String(id)),
+                            ("name", Value::String(tc.name)),
+                            ("input", input),
+                        ]));
                     }
                 }
                 Value::Array(blocks)
             } else {
-                Value::String(t.clone())
+                Value::String(Arc::unwrap_or_clone(t))
             }
         }
         MessageContent::Blocks(blocks) => {
+            let represented_ids: HashSet<_> = blocks
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // 一个推理块可能展开为多个 text 块，也可能整块省略，这里用 flat_map 展开。
             let mut arr: Vec<Value> = blocks
-                .iter()
+                .into_iter()
                 .flat_map(|block| {
                     encode_content_block_for_anthropic_with_ids(
                         block,
@@ -473,12 +535,9 @@ fn encode_message(
             // Blocks 形态同样可能携带 msg.tool_calls（如 chat 解码出的
             // thinking+tool_calls 条目）；未以 ToolUse 块表达的调用必须补发，
             // 否则回放时整条调用被静默丢掉。
-            if let Some(tcs) = &msg.tool_calls {
+            if let Some(tcs) = msg.tool_calls.take() {
                 for tc in tcs {
-                    let represented = blocks.iter().any(
-                        |block| matches!(block, ContentBlock::ToolUse { id, .. } if id == &tc.id),
-                    );
-                    if represented {
+                    if represented_ids.contains(&tc.id) {
                         continue;
                     }
                     let input: Value = serde_json::from_str(&tc.arguments).map_err(|error| {
@@ -492,26 +551,26 @@ fn encode_message(
                         generated_tool_id_seq,
                         supplied_tool_ids,
                     );
-                    arr.push(serde_json::json!({
-                        "type": "tool_use",
-                        "id": id,
-                        "name": tc.name,
-                        "input": input,
-                    }));
+                    arr.push(object([
+                        ("type", Value::String("tool_use".into())),
+                        ("id", Value::String(id)),
+                        ("name", Value::String(tc.name)),
+                        ("input", input),
+                    ]));
                 }
             }
             Value::Array(arr)
         }
     };
 
-    Ok(serde_json::json!({
-        "role": role,
-        "content": content,
-    }))
+    Ok(object([
+        ("role", Value::String(role.into())),
+        ("content", content),
+    ]))
 }
 
 #[cfg(test)]
-fn encode_content_block_for_anthropic(b: &ContentBlock) -> Vec<Value> {
+fn encode_content_block_for_anthropic(b: ContentBlock) -> Vec<Value> {
     let mut generated_tool_id_seq = 0;
     encode_content_block_for_anthropic_with_ids(b, &mut generated_tool_id_seq, &HashSet::new())
 }
@@ -519,7 +578,7 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Vec<Value> {
 /// 一个 IR 块可能展开为多个 wire 块（无签名推理降级为逐段 text），
 /// 也可能整块省略（空的无签名思考），因此返回 Vec。
 fn encode_content_block_for_anthropic_with_ids(
-    b: &ContentBlock,
+    b: ContentBlock,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> Vec<Value> {
@@ -529,23 +588,23 @@ fn encode_content_block_for_anthropic_with_ids(
         ContentBlock::Thinking {
             thinking,
             signature,
-        } => match signature.as_deref().filter(|sig| !sig.trim().is_empty()) {
-            Some(signature) => vec![serde_json::json!({
-                "type": "thinking",
-                "thinking": thinking,
-                "signature": signature,
-            })],
+        } => match signature.filter(|sig| !sig.trim().is_empty()) {
+            Some(signature) => vec![object([
+                ("type", Value::String("thinking".into())),
+                ("thinking", Value::String(thinking)),
+                ("signature", Value::String(signature)),
+            ])],
             None if thinking.is_empty() => Vec::new(),
-            None => vec![serde_json::json!({"type": "text", "text": thinking})],
+            None => vec![text_block(thinking)],
         },
         // Responses ciphertext is not an Anthropic thinking signature.
         ContentBlock::Reasoning {
             summary, content, ..
         } => summary
-            .iter()
+            .into_iter()
             .chain(content)
             .filter(|text| !text.is_empty())
-            .map(|text| serde_json::json!({"type": "text", "text": text}))
+            .map(text_block)
             .collect(),
         other => vec![encode_single_anthropic_content_block(
             other,
@@ -556,7 +615,7 @@ fn encode_content_block_for_anthropic_with_ids(
 }
 
 fn encode_single_anthropic_content_block(
-    b: &ContentBlock,
+    b: ContentBlock,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> Value {
@@ -565,7 +624,7 @@ fn encode_single_anthropic_content_block(
             text,
             cache_control,
         } => {
-            let mut block = serde_json::json!({"type": "text", "text": text});
+            let mut block = text_block(Arc::unwrap_or_clone(text));
             if let Some(cc) = cache_control {
                 block["cache_control"] = serde_json::to_value(cc).unwrap_or(Value::Null);
             }
@@ -577,21 +636,21 @@ fn encode_single_anthropic_content_block(
             ..
         } => {
             let src = match source {
-                MediaSource::Base64 { media_type, data } => serde_json::json!({
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                }),
-                MediaSource::Url(url) => serde_json::json!({
-                    "type": "url",
-                    "url": url,
-                }),
-                MediaSource::FileId { file_id, .. } => serde_json::json!({
-                    "type": "file",
-                    "file_id": file_id,
-                }),
+                MediaSource::Base64 { media_type, data } => object([
+                    ("type", Value::String("base64".into())),
+                    ("media_type", Value::String(media_type)),
+                    ("data", Value::String(data)),
+                ]),
+                MediaSource::Url(url) => object([
+                    ("type", Value::String("url".into())),
+                    ("url", Value::String(url)),
+                ]),
+                MediaSource::FileId { file_id, .. } => object([
+                    ("type", Value::String("file".into())),
+                    ("file_id", Value::String(file_id)),
+                ]),
             };
-            let mut block = serde_json::json!({"type": "image", "source": src});
+            let mut block = object([("type", Value::String("image".into())), ("source", src)]);
             if let Some(cc) = cache_control {
                 block["cache_control"] = serde_json::to_value(cc).unwrap_or(Value::Null);
             }
@@ -599,22 +658,23 @@ fn encode_single_anthropic_content_block(
         }
         // Thinking / Reasoning 由 `encode_content_block_for_anthropic_with_ids`
         // 统一处理（可能展开为多个块），不会走到这里。
-        ContentBlock::RedactedThinking { data } => {
-            serde_json::json!({"type": "redacted_thinking", "data": data})
-        }
+        ContentBlock::RedactedThinking { data } => object([
+            ("type", Value::String("redacted_thinking".into())),
+            ("data", Value::String(data)),
+        ]),
         ContentBlock::ToolUse {
             id,
             name,
             input,
             cache_control,
         } => {
-            let id = normalized_anthropic_tool_id(id, generated_tool_id_seq, supplied_tool_ids);
-            let mut block = serde_json::json!({
-                "type": "tool_use",
-                "id": id,
-                "name": name,
-                "input": input,
-            });
+            let id = normalized_anthropic_tool_id(&id, generated_tool_id_seq, supplied_tool_ids);
+            let mut block = object([
+                ("type", Value::String("tool_use".into())),
+                ("id", Value::String(id)),
+                ("name", Value::String(name)),
+                ("input", input),
+            ]);
             if let Some(cc) = cache_control {
                 block["cache_control"] = serde_json::to_value(cc).unwrap_or(Value::Null);
             }
@@ -628,15 +688,21 @@ fn encode_single_anthropic_content_block(
             cache_control,
             ..
         } => {
-            let tool_use_id =
-                normalized_anthropic_tool_id(tool_use_id, generated_tool_id_seq, supplied_tool_ids);
-            let mut block = serde_json::json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": anthropic_tool_result_content(content, *content_kind),
-            });
+            let tool_use_id = normalized_anthropic_tool_id(
+                &tool_use_id,
+                generated_tool_id_seq,
+                supplied_tool_ids,
+            );
+            let mut block = object([
+                ("type", Value::String("tool_result".into())),
+                ("tool_use_id", Value::String(tool_use_id)),
+                (
+                    "content",
+                    anthropic_tool_result_content(content, content_kind),
+                ),
+            ]);
             if let Some(err) = is_error {
-                block["is_error"] = Value::Bool(*err);
+                block["is_error"] = Value::Bool(err);
             }
             if let Some(cc) = cache_control {
                 block["cache_control"] = serde_json::to_value(cc).unwrap_or(Value::Null);
@@ -650,12 +716,15 @@ fn encode_single_anthropic_content_block(
             server_type,
             cache_control,
         } => {
-            let mut block = serde_json::json!({
-                "type": server_type.as_deref().unwrap_or("server_tool_use"),
-                "id": id,
-                "name": name,
-                "input": input,
-            });
+            let mut block = object([
+                (
+                    "type",
+                    Value::String(server_type.unwrap_or_else(|| "server_tool_use".into())),
+                ),
+                ("id", Value::String(id.to_string())),
+                ("name", Value::String(name)),
+                ("input", input),
+            ]);
             if let Some(cache_control) = cache_control {
                 block["cache_control"] = serde_json::to_value(cache_control).unwrap_or(Value::Null);
             }
@@ -668,40 +737,50 @@ fn encode_single_anthropic_content_block(
             cache_control,
             ..
         } => {
-            let mut block = serde_json::json!({
-                "type": server_type.as_deref().unwrap_or("server_tool_result"),
-                "tool_use_id": tool_use_id,
-                "content": content,
-            });
+            let mut block = object([
+                (
+                    "type",
+                    Value::String(server_type.unwrap_or_else(|| "server_tool_result".into())),
+                ),
+                ("tool_use_id", Value::String(tool_use_id.to_string())),
+                ("content", content),
+            ]);
             if let Some(cache_control) = cache_control {
                 block["cache_control"] = serde_json::to_value(cache_control).unwrap_or(Value::Null);
             }
             block
         }
-        ContentBlock::Unknown { raw } => raw.clone(),
-        other => crate::codec::content_block_wire_value(other),
+        ContentBlock::Unknown { raw } => raw,
+        other => crate::codec::content_block_wire_value(&other),
     }
 }
 
-fn anthropic_tool_result_content(content: &Value, kind: Option<ToolResultContentKind>) -> Value {
+fn anthropic_tool_result_content(content: Value, kind: Option<ToolResultContentKind>) -> Value {
     // 原生 content 只接受文本或内容块；业务 JSON 数组不能冒充原生块数组。
     if kind == Some(ToolResultContentKind::Json) || !(content.is_string() || content.is_array()) {
         Value::String(content.to_string())
     } else {
-        content.clone()
+        content
     }
 }
 
 fn anthropic_tool_result_payload(
-    msg: &AiItem,
+    content: MessageContent,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> (Value, Option<String>) {
-    match &msg.content {
-        MessageContent::Text(t) => (Value::String(t.clone()), None),
+    match content {
+        MessageContent::Text(t) => (Value::String(Arc::unwrap_or_clone(t)), None),
         MessageContent::Blocks(blocks) => {
-            for block in blocks {
-                match block {
+            let result_index = blocks.iter().position(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { .. } | ContentBlock::ServerToolResult { .. }
+                )
+            });
+            let mut blocks = blocks;
+            if let Some(index) = result_index {
+                match blocks.swap_remove(index) {
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
@@ -709,7 +788,7 @@ fn anthropic_tool_result_payload(
                         ..
                     } => {
                         return (
-                            anthropic_tool_result_content(content, *content_kind),
+                            anthropic_tool_result_content(content, content_kind),
                             Some(tool_use_id.to_string()),
                         );
                     }
@@ -717,14 +796,14 @@ fn anthropic_tool_result_payload(
                         tool_use_id,
                         content,
                         ..
-                    } => return (content.clone(), Some(tool_use_id.to_string())),
-                    _ => {}
+                    } => return (content, Some(tool_use_id.to_string())),
+                    _ => unreachable!("selected a tool result"),
                 }
             }
             (
                 Value::Array(
                     blocks
-                        .iter()
+                        .into_iter()
                         .flat_map(|block| {
                             encode_content_block_for_anthropic_with_ids(
                                 block,
@@ -734,7 +813,7 @@ fn anthropic_tool_result_payload(
                         })
                         .collect(),
                 ),
-                msg.tool_call_id.as_ref().map(ToString::to_string),
+                None,
             )
         }
     }
@@ -807,32 +886,32 @@ fn normalized_anthropic_tool_id(
 
 fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut normalized: Vec<Value> = Vec::new();
-    for msg in messages {
-        let Some(role) = msg.get("role").and_then(|v| v.as_str()) else {
+    for mut msg in messages {
+        let Some(obj) = msg.as_object_mut() else {
             continue;
         };
-        let blocks = content_to_blocks(msg.get("content").cloned().unwrap_or(Value::Null));
+        let Some(Value::String(role)) = obj.remove("role") else {
+            continue;
+        };
+        let blocks = content_to_blocks(obj.remove("content").unwrap_or(Value::Null));
         if blocks.is_empty() {
             continue;
         }
 
         if let Some(last) = normalized.last_mut() {
-            let same_role = last.get("role").and_then(|v| v.as_str()) == Some(role);
+            let same_role = last.get("role").and_then(|v| v.as_str()) == Some(role.as_str());
             if same_role {
-                if let Some(last_obj) = last.as_object_mut() {
-                    let mut merged =
-                        content_to_blocks(last_obj.get("content").cloned().unwrap_or(Value::Null));
+                if let Some(merged) = last.get_mut("content").and_then(Value::as_array_mut) {
                     merged.extend(blocks);
-                    last_obj.insert("content".into(), Value::Array(merged));
                 }
                 continue;
             }
         }
 
-        normalized.push(serde_json::json!({
-            "role": role,
-            "content": Value::Array(blocks),
-        }));
+        normalized.push(object([
+            ("role", Value::String(role)),
+            ("content", Value::Array(blocks)),
+        ]));
     }
 
     // DeepSeek's Anthropic-compatible endpoint requires assistant tool_use
@@ -880,7 +959,7 @@ fn content_to_blocks(content: Value) -> Vec<Value> {
             if s.trim().is_empty() {
                 Vec::new()
             } else {
-                vec![serde_json::json!({"type":"text","text":s})]
+                vec![text_block(s)]
             }
         }
         Value::Array(arr) => arr

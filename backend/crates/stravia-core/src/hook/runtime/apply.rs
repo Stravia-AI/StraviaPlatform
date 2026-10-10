@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Cow;
 
 pub(super) fn action_kind(action: &HookAction) -> &'static str {
     match action {
@@ -84,10 +85,9 @@ where
 
 pub(super) fn should_skip_for_partial(
     descriptor: &HookDescriptor,
-    original: &ContextSnapshot,
+    completeness: &ContextCompleteness,
 ) -> bool {
-    descriptor.requires_full_context
-        && matches!(original.completeness, ContextCompleteness::Partial { .. })
+    descriptor.requires_full_context && matches!(completeness, ContextCompleteness::Partial { .. })
 }
 
 pub(super) fn apply_response_actions(
@@ -279,12 +279,15 @@ pub(super) struct ToolExposure<'a> {
 pub(super) fn apply_request_actions(
     hook_id: &HookId,
     request: &mut AiRequest,
-    current: &mut ContextSnapshot,
+    current: &mut Arc<ContextSnapshot>,
     exposure: &mut ToolExposure<'_>,
     registry: &PlatformToolRegistry,
     batch: ActionBatch,
 ) -> Result<HookControl, HookError> {
-    let mut staged_request = request.clone();
+    if batch.actions.is_empty() {
+        return Ok(HookControl::Continue);
+    }
+    let mut staged_request = Cow::Borrowed(&*request);
     let mut staged_context = current.clone();
     let mut staged_tools = exposure.tools.clone();
     let mut staged_tool_specs = exposure.specs.clone();
@@ -301,8 +304,12 @@ pub(super) fn apply_request_actions(
     for action in batch.actions {
         match action {
             HookAction::PatchRequest(patch) => {
-                apply_request_patch(&mut staged_request, &mut staged_context, *patch)
-                    .map_err(|message| invalid_action(hook_id, EventKind::Request, message))?;
+                apply_request_patch(
+                    staged_request.to_mut(),
+                    Arc::make_mut(&mut staged_context),
+                    *patch,
+                )
+                .map_err(|message| invalid_action(hook_id, EventKind::Request, message))?;
             }
             HookAction::ExposeRead { scope, description } => {
                 let tool_id = ToolId::new("stravia-read");
@@ -330,7 +337,7 @@ pub(super) fn apply_request_actions(
                         _ => {}
                     }
                 }
-                let tools = staged_request.tools.get_or_insert_with(Vec::new);
+                let tools = staged_request.to_mut().tools.get_or_insert_with(Vec::new);
                 tools.retain(|tool| tool.name != provider_name);
                 tools.push(spec.clone());
                 protected_specs.insert(provider_name.clone(), spec.clone());
@@ -358,7 +365,7 @@ pub(super) fn apply_request_actions(
                 // forced selection through the registry's collision-safe rename,
                 // but never redirect a still-present client-owned tool.
                 if let Some(stravia_runtime_contract::protocol::ir::ToolChoice::Named { name }) =
-                    staged_request.tool_choice.as_mut()
+                    staged_request.to_mut().tool_choice.as_mut()
                     && registry.external_name(&tool_id) == Some(name.as_str())
                     && protected_specs.contains_key(name)
                     && !existing_names.contains(name)
@@ -367,6 +374,7 @@ pub(super) fn apply_request_actions(
                 }
                 protected_specs.insert(exposed.provider_name.clone(), exposed.spec.clone());
                 staged_request
+                    .to_mut()
                     .tools
                     .get_or_insert_with(Vec::new)
                     .push(exposed.spec.clone());
@@ -402,7 +410,9 @@ pub(super) fn apply_request_actions(
         }
     }
 
-    *request = staged_request;
+    if let Cow::Owned(staged_request) = staged_request {
+        *request = staged_request;
+    }
     *current = staged_context;
     *exposure.tools = staged_tools;
     *exposure.specs = staged_tool_specs;
@@ -557,13 +567,22 @@ pub(super) fn redact_vendor_map(
         .collect()
 }
 
-pub(super) fn hook_request_view(request: &AiRequest) -> AiRequest {
+pub(super) fn hook_request_view(request: &AiRequest) -> Cow<'_, AiRequest> {
+    let ingress = redact_vendor_map(&request.meta.vendor.ingress);
+    let passthrough_safe = redact_vendor_map(&request.meta.vendor.passthrough_safe);
+    if request.meta.raw.is_none()
+        && request.meta.vendor.egress.is_empty()
+        && ingress == request.meta.vendor.ingress
+        && passthrough_safe == request.meta.vendor.passthrough_safe
+    {
+        return Cow::Borrowed(request);
+    }
     let mut view = request.clone();
     view.meta.raw = None;
     view.meta.vendor.egress.clear();
-    view.meta.vendor.ingress = redact_vendor_map(&view.meta.vendor.ingress);
-    view.meta.vendor.passthrough_safe = redact_vendor_map(&view.meta.vendor.passthrough_safe);
-    view
+    view.meta.vendor.ingress = ingress;
+    view.meta.vendor.passthrough_safe = passthrough_safe;
+    Cow::Owned(view)
 }
 
 pub(super) fn set_control(

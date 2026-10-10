@@ -168,6 +168,205 @@ async fn hook_requiring_full_context_is_skipped_for_partial_request() {
 
 struct ResponseStagesSession;
 
+struct CompleteContextSession;
+
+#[async_trait]
+impl HookSession for CompleteContextSession {
+    async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        if matches!(event, HookEvent::Request { .. }) {
+            Ok(ActionBatch::one(HookAction::PatchRequest(Box::new(
+                RequestPatch::SetProtocolExtension(None),
+            ))))
+        } else {
+            Ok(ActionBatch::default())
+        }
+    }
+}
+
+struct ObserveCompletedContextSession;
+
+#[async_trait]
+impl HookSession for ObserveCompletedContextSession {
+    async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        let HookEvent::Request {
+            original,
+            current,
+            context,
+            ..
+        } = event
+        else {
+            return Ok(ActionBatch::default());
+        };
+        assert!(matches!(
+            original.completeness,
+            ContextCompleteness::Partial { .. }
+        ));
+        assert_eq!(context.completeness, ContextCompleteness::Full);
+        let mut original_request = AiRequest::new("model", Vec::new());
+        original.write_to_request(&mut original_request);
+        let mut current_request = AiRequest::new("model", Vec::new());
+        context.write_to_request(&mut current_request);
+        assert_eq!(
+            serde_json::to_value(&original_request.items).unwrap(),
+            serde_json::to_value(&current.items).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&current_request.items).unwrap(),
+            serde_json::to_value(&current.items).unwrap()
+        );
+        assert_eq!(original_request.instructions, current.instructions);
+        assert_eq!(current_request.instructions, current.instructions);
+        Ok(ActionBatch::one(HookAction::PatchRequest(Box::new(
+            RequestPatch::SetModel("observed-complete-context".into()),
+        ))))
+    }
+}
+
+#[tokio::test]
+async fn completing_partial_context_enables_later_full_context_consumers() {
+    let runtime = HookRuntime::new(vec![
+        Arc::new(TestHook {
+            descriptor: HookDescriptor::all("complete"),
+            make: Arc::new(|| Box::new(CompleteContextSession)),
+        }),
+        Arc::new(TestHook {
+            descriptor: HookDescriptor {
+                requires_full_context: true,
+                ..HookDescriptor::all("observe-complete")
+            },
+            make: Arc::new(|| Box::new(ObserveCompletedContextSession)),
+        }),
+    ]);
+    let mut request = AiRequest::new("model", vec![AiItem::output_text("full visible context")]);
+    request.instructions = Some("preserved system".into());
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Partial {
+                opaque_refs: vec![],
+            },
+        )
+        .unwrap();
+
+    run.on_request(&mut request).await.unwrap();
+
+    assert_eq!(request.model, "observed-complete-context");
+}
+
+struct InvalidCompletionSession;
+
+#[async_trait]
+impl HookSession for InvalidCompletionSession {
+    async fn handle(&mut self, _event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        Ok(ActionBatch {
+            actions: vec![
+                HookAction::PatchRequest(Box::new(RequestPatch::SetProtocolExtension(None))),
+                HookAction::PatchResponse(ResponsePatch::SetContent("invalid".into())),
+            ],
+        })
+    }
+}
+
+#[tokio::test]
+async fn failed_context_completion_does_not_enable_full_context_response_hooks() {
+    let runtime = HookRuntime::new(vec![
+        Arc::new(TestHook {
+            descriptor: HookDescriptor {
+                event_kinds: vec![EventKind::Request],
+                ..HookDescriptor::all("invalid-completion")
+            },
+            make: Arc::new(|| Box::new(InvalidCompletionSession)),
+        }),
+        Arc::new(TestHook {
+            descriptor: HookDescriptor {
+                event_kinds: vec![EventKind::UpstreamResponse],
+                requires_full_context: true,
+                ..HookDescriptor::all("full-response")
+            },
+            make: Arc::new(|| Box::new(ResponseStagesSession)),
+        }),
+    ]);
+    let mut request = AiRequest::new("model", Vec::new());
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Partial {
+                opaque_refs: vec![],
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        run.on_request(&mut request).await,
+        Err(HookError::InvalidAction { .. })
+    ));
+    run.set_route(route_context());
+    let mut response = AiResponse::new("response", "model");
+    response.push_output_text("unchanged");
+
+    run.on_upstream_response(&request, &mut response)
+        .await
+        .unwrap();
+
+    assert_eq!(response.output_text(), "unchanged");
+}
+
+#[tokio::test]
+async fn no_hooks_preserve_route_errors_and_client_tool_ownership() {
+    let runtime = HookRuntime::new(Vec::new());
+    let mut request = AiRequest::new("model", vec![AiItem::output_text("visible context")]);
+    request.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
+        name: "StraviaRead".into(),
+        description: None,
+        parameters: serde_json::json!({"type": "object"}),
+        strict: None,
+        cache_control: None,
+        meta: None,
+    }]);
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Full,
+        )
+        .unwrap();
+    assert!(matches!(
+        run.on_request(&mut request).await.unwrap(),
+        HookControl::Continue
+    ));
+    let mut response = AiResponse::new("response", "model");
+    response.extend_tool_calls(vec![tool_call("client-read", "StraviaRead", "{}")]);
+    assert!(matches!(
+        run.on_upstream_response(&request, &mut response).await,
+        Err(HookError::Runtime { .. })
+    ));
+    assert!(matches!(
+        run.on_client_output(&mut response).await,
+        Err(HookError::Runtime { .. })
+    ));
+    run.set_route(route_context());
+    run.next_round();
+    assert!(matches!(
+        run.on_upstream_response(&request, &mut response)
+            .await
+            .unwrap(),
+        HookControl::Continue
+    ));
+    let classified = run.classify_tool_calls(&response);
+    assert!(classified.platform.is_empty());
+    assert_eq!(classified.client[0].name, "StraviaRead");
+    let transformed = run
+        .transform_stream(AiStreamDelta::TextDelta("untouched".into()))
+        .unwrap();
+    assert!(matches!(
+        transformed.as_slice(),
+        [AiStreamDelta::TextDelta(text)] if text == "untouched"
+    ));
+    assert!(run.flush_stream().unwrap().is_empty());
+    assert!(run.flush_stream().unwrap().is_empty());
+}
+
 #[async_trait]
 impl HookSession for ResponseStagesSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
@@ -221,7 +420,14 @@ fn route_context() -> RouteContext {
 #[tokio::test]
 async fn response_and_tool_result_stages_are_distinct_and_ordered() {
     let runtime = HookRuntime::new(vec![Arc::new(TestHook {
-        descriptor: HookDescriptor::all("stages"),
+        descriptor: HookDescriptor {
+            event_kinds: vec![
+                EventKind::UpstreamResponse,
+                EventKind::ToolResult,
+                EventKind::ClientOutput,
+            ],
+            ..HookDescriptor::all("stages")
+        },
         make: Arc::new(|| Box::new(ResponseStagesSession)),
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
@@ -435,7 +641,10 @@ fn stream_transformer_panics_are_fail_closed() {
 #[tokio::test]
 async fn stream_transformer_holds_across_deltas_and_flushes_semantic_content() {
     let runtime = HookRuntime::new(vec![Arc::new(TestHook {
-        descriptor: HookDescriptor::all("delimiter"),
+        descriptor: HookDescriptor {
+            event_kinds: vec![EventKind::Stream],
+            ..HookDescriptor::all("delimiter")
+        },
         make: Arc::new(|| {
             Box::new(TransformSession {
                 transformer: Box::new(DelimiterTransformer {

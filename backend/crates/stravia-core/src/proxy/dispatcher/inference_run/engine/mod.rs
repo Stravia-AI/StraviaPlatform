@@ -316,7 +316,7 @@ fn stabilize_media_generation_chain(
             if !matches!(
                 rewritten_block,
                 stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                    if text == &expected
+                    if text.as_str() == expected
             ) {
                 return false;
             }

@@ -330,7 +330,6 @@ fn decode_content(
         Some(other) => anyhow::bail!("unknown Gemini role: {other}"),
     };
 
-    let mut text_parts: Vec<String> = Vec::new();
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut has_function_response = false;
@@ -349,9 +348,8 @@ fn decode_content(
                         signature: thought_signature,
                     });
                 } else {
-                    text_parts.push(text.clone());
                     blocks.push(ContentBlock::Text {
-                        text,
+                        text: text.into(),
                         cache_control: None,
                     });
                 }
@@ -446,9 +444,8 @@ fn decode_content(
                             .map(str::to_owned),
                     });
                 } else if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                    text_parts.push(text.to_string());
                     blocks.push(ContentBlock::Text {
-                        text: text.to_string(),
+                        text: text.to_string().into(),
                         cache_control: None,
                     });
                 }
@@ -456,8 +453,11 @@ fn decode_content(
         }
     }
 
-    let msg_content = if blocks.len() == 1 && text_parts.len() == 1 {
-        MessageContent::Text(text_parts.into_iter().next().unwrap())
+    let msg_content = if matches!(blocks.as_slice(), [ContentBlock::Text { .. }]) {
+        let Some(ContentBlock::Text { text, .. }) = blocks.pop() else {
+            unreachable!();
+        };
+        MessageContent::Text(text)
     } else {
         MessageContent::Blocks(blocks)
     };

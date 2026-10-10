@@ -11,19 +11,19 @@ pub(super) fn project_client_output(
     project_client_history(ingress, response, prefix).map_err(TurnCommitError::Storage)
 }
 
-pub(super) struct ProjectedClientCommit {
-    pub(super) client_request_delta: AiRequest,
+pub(super) struct ProjectedClientCommit<'a> {
+    pub(super) client_request_delta: Cow<'a, AiRequest>,
     pub(super) client_items: Vec<AiItem>,
     pub(super) client_output: Vec<AiItem>,
-    pub(super) client_history_mutation: Option<EffectiveHistoryMutation>,
+    pub(super) client_history_mutation: Option<EffectiveHistoryMutation<'static>>,
     pub(super) client_history: ClientHistoryState,
 }
 
-pub(super) fn project_client_commit(
+pub(super) fn project_client_commit<'a>(
     parent: &ActiveGenerationChain,
-    request_delta: &AiRequest,
+    request_delta: &'a AiRequest,
     response: &AiResponse,
-) -> Result<ProjectedClientCommit, TurnCommitError> {
+) -> Result<ProjectedClientCommit<'a>, TurnCommitError> {
     let fresh_states = &parent.fresh_inline_states;
     let inline_boundary = stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
     let mut client_request_delta = canonical_client_history_request(request_delta);
@@ -35,11 +35,11 @@ pub(super) fn project_client_commit(
     if parent.replacement_client_items.is_none() {
         client_items.extend(client_request_delta.items.clone());
     }
-    let mut client_output = project_client_output(
-        ProtocolTransform::inferred_ingress(request_delta),
-        response,
-        &mut client_items,
-    )?;
+    let ingress = ProtocolTransform::inferred_ingress(request_delta);
+    let rewrites_delta = ingress
+        == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        && has_gemini_tool_calls(&client_items);
+    let mut client_output = project_client_output(ingress, response, &mut client_items)?;
     let client_inline = if let Some(start) = inline_boundary(&client_output, fresh_states) {
         client_items.clear();
         client_output.drain(..start);
@@ -52,10 +52,10 @@ pub(super) fn project_client_commit(
     };
     let client_history_mutation = (client_inline || parent.replacement_client_items.is_some())
         .then(|| EffectiveHistoryMutation::Replace {
-            items: client_items.clone(),
+            items: Cow::Owned(client_items.clone()),
         });
-    if client_history_mutation.is_none() {
-        client_request_delta.items = client_items[parent_items..].to_vec();
+    if client_history_mutation.is_none() && rewrites_delta {
+        client_request_delta.to_mut().items = client_items[parent_items..].to_vec();
     }
     client_items.extend(client_output.clone());
     let client_history = ClientHistoryState::from_request(&client_request_delta, &client_items);
@@ -215,16 +215,23 @@ fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<A
             }
         }
     }
-    let prefix_len = prefix.len();
-    let mut chain = prefix.to_vec();
-    chain.extend(output);
-    normalize_gemini_client_tool_ids(&mut chain);
-    prefix.clone_from_slice(&chain[..prefix_len]);
-    output = chain.split_off(prefix_len);
+    normalize_gemini_client_tool_ids(prefix.iter_mut().chain(output.iter_mut()));
     output
 }
 
-pub(super) fn normalize_gemini_client_tool_ids(items: &mut [AiItem]) {
+pub(crate) fn has_gemini_tool_calls(items: &[AiItem]) -> bool {
+    items.iter().any(|item| {
+        item.tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+            || matches!(&item.content, MessageContent::Blocks(blocks)
+                if blocks.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. })))
+    })
+}
+
+pub(super) fn normalize_gemini_client_tool_ids<'a>(
+    items: impl IntoIterator<Item = &'a mut AiItem>,
+) {
     let mut ids = HashMap::<
         stravia_runtime_contract::protocol::ir::ToolCallId,
         stravia_runtime_contract::protocol::ir::ToolCallId,
@@ -515,7 +522,7 @@ pub(super) fn attach_persisted_profile(
 
 pub(super) fn append_history_catalog_node(
     catalog: &mut Vec<AiItem>,
-    node: &PersistedResponseNode,
+    node: &PersistedResponseNode<'_>,
     ingress: Option<ProtocolId>,
 ) -> Result<(), String> {
     catalog.extend(node.client_delta.messages.iter().cloned());
@@ -534,7 +541,7 @@ pub(super) fn append_history_catalog_node(
 }
 
 fn history_catalog(
-    persisted: &[(TurnNodeId, PersistedResponseNode)],
+    persisted: &[(TurnNodeId, PersistedResponseNode<'_>)],
     ingress: Option<ProtocolId>,
 ) -> Result<Vec<AiItem>, String> {
     let mut catalog = Vec::new();
@@ -546,7 +553,7 @@ fn history_catalog(
 
 pub(super) fn resolve_item_references(
     messages: &mut [AiItem],
-    persisted: &[(TurnNodeId, PersistedResponseNode)],
+    persisted: &[(TurnNodeId, PersistedResponseNode<'_>)],
     ingress: Option<ProtocolId>,
 ) -> Result<(), String> {
     let catalog = history_catalog(persisted, ingress)?;
@@ -576,8 +583,10 @@ pub(super) fn items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
     stravia_runtime_contract::protocol::ir::canonical::history_items_equal(left, right)
 }
 
-pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest {
-    let mut canonical = request.clone();
+pub(super) fn canonical_client_history_request(
+    request: &AiRequest,
+) -> std::borrow::Cow<'_, AiRequest> {
+    let mut canonical = std::borrow::Cow::Borrowed(request);
     if canonical.instructions.is_none() {
         let leading_developer_items = canonical
             .items
@@ -594,22 +603,18 @@ pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest
             && canonical.items[0].tool_call_id.is_none()
             && canonical.items[0].meta.is_none()
         {
-            canonical.instructions = Some(instructions.clone());
+            let instructions = instructions.as_ref().clone();
+            let canonical = canonical.to_mut();
+            canonical.instructions = Some(instructions);
             canonical.items.remove(0);
         }
     }
 
-    if let Some(ingress) = ProtocolTransform::inferred_ingress(&canonical) {
-        let mut items = std::mem::take(&mut canonical.items);
-        if project_client_history(
-            ingress,
-            &AiResponse::new(String::new(), String::new()),
-            &mut items,
-        )
-        .is_ok()
-        {
-            canonical.items = items;
-        }
+    if ProtocolTransform::inferred_ingress(&canonical)
+        == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        && has_gemini_tool_calls(&canonical.items)
+    {
+        normalize_gemini_client_tool_ids(&mut canonical.to_mut().items);
     }
     canonical
 }

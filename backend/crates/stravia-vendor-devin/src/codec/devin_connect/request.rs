@@ -869,7 +869,7 @@ fn encode_user_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()>
     let mut has_content = false;
     let blocks: &[ContentBlock] = match &item.content {
         MessageContent::Text(text) => {
-            current.text = text.clone();
+            current.text = text.as_ref().clone();
             has_content = !text.is_empty();
             &[]
         }
@@ -1049,7 +1049,7 @@ fn encode_tool_result_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Res
     let mut tool_error = false;
     let mut images = Vec::new();
     let text = match &item.content {
-        MessageContent::Text(value) => value.clone(),
+        MessageContent::Text(value) => value.as_ref().clone(),
         MessageContent::Blocks(blocks) => {
             let mut text = String::new();
             let mut separator = "";
@@ -1580,7 +1580,7 @@ mod tests {
     fn text_item(role: Role, text: &str) -> AiItem {
         AiItem {
             role,
-            content: MessageContent::Text(text.to_string()),
+            content: MessageContent::Text(text.to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -2244,7 +2244,7 @@ mod tests {
                     role: Role::Tool,
                     content: MessageContent::Blocks(vec![
                         ContentBlock::Text {
-                            text: "Image from read.".into(),
+                            text: "Image from read.".to_owned().into(),
                             cache_control: None,
                         },
                         ContentBlock::Image {

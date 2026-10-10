@@ -199,6 +199,16 @@ base 插件为 `custom` Profile 的 OpenAI-compatible Chat Completions 声明思
 - 当前 Rust 预编译标准库仍导入 WASI `0.2.9`，因此新构建的插件可以同时包含 SDK 的 `0.2.12` 与标准库的 `0.2.9` imports。更新项目 `wasip2` 依赖不会替换工具链的标准库；本次不更换 Rust 工具链或自建标准库。构建产物的实际 imports 可用 `wasm-tools component wit <component.wasm>` 检查。
 - 推理与原生压缩在执行前调用同一固定版本的 `select-protocol` 导出，由插件根据连接快照与 canonical 请求选择实际上游协议。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消与截止时间约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
 
+Rust 运行时执行入口接收 SDK 的操作类型与已编码输入，准入直接检查连接快照与 channel，不将完整 canonical payload 再解码为第二份 Native IR。请求准备、模型覆盖与续接使用共享 `Arc<AiRequest>`，只在真实修改时分离；文本叶子 `MessageContent::Text` 与 `ContentBlock::Text.text` 使用 `Arc<String>`。Rust 调用方从 `String` 构造时使用 `.into()`，从字符串字面量构造时使用 `.to_owned().into()`，编辑共享文本时使用 `Arc::make_mut` 或既有的 `output_text_mut()`。这些是 Rust 源码接口变化，canonical JSON、格式版本与 `stravia:vendor@0.4.0` WIT 不变，兼容的已安装 Component 无需为接口兼容而重建。
+
+`ProtocolAdapter::encode_request`、`ProtocolPair::encode_request`、`ProtocolTransform::encode_request_with` 和 `vendor_common::common::encode_inference_request` 消费 `AiRequest`，不再提供借用请求的编码入口。语义损失与能力校验仍在消费前完成，编码失败不绕过已有拒绝策略。调用方先保留消费后仍需要的 model、stream、display 或 compaction 字段；确实需要继续使用完整请求时才显式克隆。四类标准 codec 在文本唯一归属时取出底层 `String`，共享文本仍保持只读；已拥有的原生字段、工具定义、工具结果和数组/对象直接移入 wire JSON，避免父对象再次序列化整段正文。已安装插件的性能优化需要重建并重新导入；内嵌 `base` 随宿主构建更新。
+
+SDK 私有 canonical 编码与 base provider 请求体编码对不可变快照先计数，再按序列化长度分配 JSON 缓冲区，避免大文本触发容量翻倍；公开 generic payload 编码仍保持单次序列化，不额外调用外部实现的 `Serialize`。Wasmtime 继续启用 fuel 与操作取消/deadline，异步让出间隔为每 1,000,000 fuel；不减少总执行预算、不关闭沙箱，也不改用 Native 执行。
+
+Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string 或 typed sequence，不经 untagged 缓冲的借用分支复制整段正文；wire 字节的文本拥有成本仍保留。字符串/数组形状、原生工具 JSON、任意精度 wire 数字与非法内容拒绝契约不变；JSON backend 仍为 `serde_json`。
+
+`execute` 的宿主绑定使用 owned lowering：参数复制进 guest 线性内存后，宿主不再为整个上游等待保留 canonical JSON 输入缓冲。宿主调度通过 Wasmtime concurrent call API 驱动，但一次调用仍使用独立 Store、只执行一个操作，不并发复用实例或 HostServices。`async | store` 是宿主生成绑定选项，不改变同步 WIT 导出；guest 的 component async、附加 async builtins、stackful async 与 threading 扩展显式禁用。取消、deadline、数据代际校验、受控网络与资源析构边界保持不变。
+
 ### 实现与验证入口
 
 - 所有 crate（包括 Wasm 契约 fixture）的 package 版本与依赖统一由根 `Cargo.toml` 的 workspace 声明，依赖解析由唯一的根 `Cargo.lock` 管理；子清单继承 workspace，不维护独立版本、依赖版本或锁文件。

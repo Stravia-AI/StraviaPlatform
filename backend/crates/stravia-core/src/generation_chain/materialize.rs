@@ -2,23 +2,25 @@ use super::*;
 
 pub(super) fn decode_response_node(
     node: stravia_runtime_contract::turn_chain::TurnNode,
-) -> Result<(TurnNodeId, PersistedResponseNode), String> {
+) -> Result<(TurnNodeId, PersistedResponseNode<'static>), String> {
     if node.payload_version != RESPONSE_PAYLOAD_VERSION {
         return Err("unsupported generation payload version".into());
     }
-    let persisted = serde_json::from_value::<PersistedResponseNode>(node.payload)
+    let persisted = serde_json::from_value::<PersistedResponseNode<'static>>(node.payload)
         .map_err(|_| "invalid generation payload".to_string())?;
     Ok((node.id, persisted))
 }
 
 fn fold_client_history(
     client_items: &mut Vec<AiItem>,
-    persisted: &mut PersistedResponseNode,
+    persisted: &mut PersistedResponseNode<'static>,
 ) -> usize {
     match persisted.client_history_mutation.take() {
-        Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
-        Some(EffectiveHistoryMutation::Replace { items }) => *client_items = items,
-        None => client_items.append(&mut persisted.client_delta.messages),
+        Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items.into_owned()),
+        Some(EffectiveHistoryMutation::Replace { items }) => *client_items = items.into_owned(),
+        None => {
+            client_items.extend(std::mem::take(&mut persisted.client_delta.messages).into_owned())
+        }
     }
     let input_end = client_items.len();
     client_items.extend(
@@ -58,7 +60,7 @@ pub(super) fn materialize_generation_nodes_with_catalog(
 fn materialize_generation_nodes_inner(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
-    mut visit_node: impl FnMut(&PersistedResponseNode),
+    mut visit_node: impl FnMut(&PersistedResponseNode<'static>),
 ) -> Result<MaterializedGeneration, String> {
     let mut root_id = None;
     let mut compaction_record_ids = Vec::new();
@@ -80,8 +82,12 @@ fn materialize_generation_nodes_inner(
         compaction_record_ids.append(&mut persisted.compaction_record_ids);
         visit_node(&persisted);
         match persisted.effective_history_mutation.take() {
-            Some(EffectiveHistoryMutation::Append { items }) => effective_items.extend(items),
-            Some(EffectiveHistoryMutation::Replace { items }) => effective_items = items,
+            Some(EffectiveHistoryMutation::Append { items }) => {
+                effective_items.extend(items.into_owned())
+            }
+            Some(EffectiveHistoryMutation::Replace { items }) => {
+                effective_items = items.into_owned()
+            }
             None => effective_items.extend_from_slice(&persisted.client_delta.messages),
         }
         if !persisted.trusted_media_turn_ids.is_empty() {

@@ -246,7 +246,17 @@ fn infer(
     let protocol = OPEN_RESPONSES_2026_04_24;
     let preserve_upstream_errors = operation == Operation::Infer
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
-    let encoded = common::encode_inference_request(&protocol.to_string(), &request)?;
+    let compact_fields = if operation == Operation::Compact {
+        request
+            .meta
+            .vendor
+            .ingress
+            .get("__stravia_compact_fields")
+            .cloned()
+    } else {
+        None
+    };
+    let encoded = common::encode_inference_request(&protocol.to_string(), request)?;
     let mut body = encoded.body;
     let codec_headers = encoded.headers;
     let egress_path = encoded.path;
@@ -261,7 +271,7 @@ fn infer(
             .map(OperationOutput::Infer);
     }
     if operation == Operation::Compact {
-        retain_compact_fields(&request, &mut body)?;
+        retain_compact_fields(compact_fields.as_ref(), &mut body)?;
     }
     let path = if operation == Operation::Compact {
         "/responses/compact".to_owned()
@@ -360,16 +370,11 @@ fn prepare_responses_body(
     Ok(())
 }
 
-fn retain_compact_fields(request: &AiRequest, body: &mut Value) -> Result<(), PluginError> {
+fn retain_compact_fields(fields: Option<&Value>, body: &mut Value) -> Result<(), PluginError> {
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Open Responses compact request must be an object"))?;
-    let explicit = request
-        .meta
-        .vendor
-        .ingress
-        .get("__stravia_compact_fields")
-        .and_then(Value::as_array);
+    let explicit = fields.and_then(Value::as_array);
     object.retain(|key, _| {
         matches!(key.as_str(), "model" | "input" | "instructions")
             || explicit.is_some_and(|fields| {

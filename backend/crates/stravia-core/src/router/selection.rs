@@ -402,7 +402,7 @@ mod tests {
     fn user_item(text: &str) -> AiItem {
         AiItem {
             role: Role::User,
-            content: MessageContent::Text(text.into()),
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -434,8 +434,8 @@ mod tests {
             &self,
             _principal: &Principal,
             _target: ContinuationTarget<'_>,
-            _request: &mut AiRequest,
-            _full_fallback: &mut Option<AiRequest>,
+            _request: &mut Arc<AiRequest>,
+            _full_fallback: &mut Option<Arc<AiRequest>>,
         ) -> Option<String> {
             None
         }
@@ -459,8 +459,8 @@ mod tests {
             &self,
             _principal: &Principal,
             _target: ContinuationTarget<'_>,
-            _request: &mut AiRequest,
-            _full_fallback: &mut Option<AiRequest>,
+            _request: &mut Arc<AiRequest>,
+            _full_fallback: &mut Option<Arc<AiRequest>>,
         ) -> Option<String> {
             None
         }

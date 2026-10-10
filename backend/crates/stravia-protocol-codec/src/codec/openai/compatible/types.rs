@@ -153,11 +153,46 @@ pub struct OpenAIMessage {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum OpenAIContent {
     Text(String),
     Parts(Vec<OpenAIContentPart>),
+}
+
+impl<'de> Deserialize<'de> for OpenAIContent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContentVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ContentVisitor {
+            type Value = OpenAIContent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a text string or an array of OpenAI content parts")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(OpenAIContent::Text(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                // Keep an owned ingress Value string instead of untagged replay copying it.
+                Ok(OpenAIContent::Text(value))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                Vec::<OpenAIContentPart>::deserialize(serde::de::value::SeqAccessDeserializer::new(
+                    sequence,
+                ))
+                .map(OpenAIContent::Parts)
+            }
+        }
+
+        deserializer.deserialize_any(ContentVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

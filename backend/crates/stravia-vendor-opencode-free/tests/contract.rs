@@ -143,7 +143,7 @@ fn request(model: &str) -> AiRequest {
         model,
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("say ok".into()),
+            content: MessageContent::Text("say ok".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -187,13 +187,11 @@ async fn infer_once(
         Deadline::from_now(Duration::from_secs(60)),
         0,
     );
+    let (operation, input) = OperationInput::Infer { provider, request }
+        .encode_for_host()
+        .map_err(|_| RuntimeError::InvalidOutput)?;
     runtime
-        .execute(
-            plugin,
-            "default",
-            OperationInput::Infer { provider, request },
-            scope,
-        )
+        .execute(plugin, "default", operation, input, scope)
         .await
 }
 
@@ -366,16 +364,14 @@ async fn discovery_lists_only_free_models() {
         Deadline::from_now(Duration::from_secs(60)),
         0,
     );
+    let (operation, input) = OperationInput::Discover {
+        provider: provider(""),
+        request: stravia_vendor_sdk::DiscoverRequest { cursor: None },
+    }
+    .encode_for_host()
+    .expect("encode discovery");
     let output = runtime
-        .execute(
-            &plugin,
-            "default",
-            OperationInput::Discover {
-                provider: provider(""),
-                request: stravia_vendor_sdk::DiscoverRequest { cursor: None },
-            },
-            scope,
-        )
+        .execute(&plugin, "default", operation, input, scope)
         .await
         .expect("discovery succeeds");
     let OperationOutput::Discover(response) = output else {
@@ -513,16 +509,14 @@ async fn live_free_model_infer_against_real_zen() {
         Deadline::from_now(Duration::from_secs(120)),
         0,
     );
+    let (operation, input) = OperationInput::Infer {
+        provider: provider("big-pickle"),
+        request: request("big-pickle"),
+    }
+    .encode_for_host()
+    .expect("encode inference");
     let output = runtime
-        .execute(
-            &plugin,
-            "default",
-            OperationInput::Infer {
-                provider: provider("big-pickle"),
-                request: request("big-pickle"),
-            },
-            scope,
-        )
+        .execute(&plugin, "default", operation, input, scope)
         .await
         .expect("live infer completes");
     let OperationOutput::Infer(response) = output else {

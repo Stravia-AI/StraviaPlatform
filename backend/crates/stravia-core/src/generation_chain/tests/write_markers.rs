@@ -441,7 +441,7 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
                 signature: None,
             },
             ContentBlock::Text {
-                text: format!("{marker}public text"),
+                text: format!("{marker}public text").into(),
                 cache_control: None,
             },
         ]),
@@ -478,7 +478,7 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
                 signature: None,
             },
             ContentBlock::Text {
-                text: "public text".into(),
+                text: "public text".to_owned().into(),
                 cache_control: None,
             },
         ]),

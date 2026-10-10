@@ -76,7 +76,7 @@ impl ReversibleRedaction {
     pub async fn protect(
         &self,
         principal: &Principal,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
         observer: Option<Arc<dyn RedactionObserver>>,
     ) -> Result<Vec<Mapping>, RedactionError> {
         let enabled = self.host.enabled().await?;
@@ -136,6 +136,7 @@ impl ReversibleRedaction {
                     }
                 }
             }
+            let request = Arc::make_mut(request);
             let references = text::redact_request(request, &mappings)?;
             request.meta.redaction.record(references)?;
         }
@@ -150,6 +151,7 @@ impl ReversibleRedaction {
                 .map(|mapping| mapping.reference.clone())
                 .collect();
             if !references.is_empty() {
+                let request = Arc::make_mut(request);
                 request.meta.redaction.record(references)?;
                 // 只影响当前模型请求；无引用的请求与客户端历史不携带平台说明。
                 let instructions = request.instructions.get_or_insert_with(String::new);

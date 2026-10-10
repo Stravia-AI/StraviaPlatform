@@ -290,7 +290,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 role: stravia_runtime_contract::protocol::ir::Role::User,
                 content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
                     stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                        text: "Image prose should remain ordinary text.".into(),
+                        text: "Image prose should remain ordinary text.".to_owned().into(),
                         cache_control: None,
                     },
                     repeated_image(),
@@ -303,7 +303,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 role: stravia_runtime_contract::protocol::ir::Role::User,
                 content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
                     stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                        text: "What is in this image again?".into(),
+                        text: "What is in this image again?".to_owned().into(),
                         cache_control: None,
                     },
                     repeated_image(),
@@ -393,7 +393,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .to_owned();
     let mut prior_user = request.items[0].clone();
     prior_user.content = stravia_runtime_contract::protocol::ir::MessageContent::Text(
-        "Image prose should remain ordinary text.".into(),
+        std::sync::Arc::new("Image prose should remain ordinary text.".into()),
     );
     let mut second_user =
         stravia_runtime_contract::protocol::ir::AiItem::output_text("What is its subject?");

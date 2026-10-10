@@ -141,7 +141,10 @@ fn scrub_request(request: &mut AiRequest) -> Result<(), ArtifactError> {
     }
     for item in &mut request.items {
         match &mut item.content {
-            MessageContent::Text(text) => scrub(text),
+            MessageContent::Text(text) if text_contains_upload_grant(text) => {
+                scrub(Arc::make_mut(text));
+            }
+            MessageContent::Text(_) => {}
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
                     if block_contains_upload_grant(block)? {
@@ -576,7 +579,7 @@ async fn normalize_source(
 pub(crate) async fn materialize_request(
     gateway: &crate::Gateway,
     principal: &Principal,
-    request: &mut AiRequest,
+    request: &mut Arc<AiRequest>,
     protocol: Option<ProtocolId>,
 ) -> Result<Vec<(String, ArtifactId)>, ArtifactError> {
     if !request
@@ -594,7 +597,7 @@ pub(crate) async fn materialize_request(
         retention: retention(gateway).await?,
     };
     let mut transfers = Vec::new();
-    for item in &mut request.items {
+    for item in &mut Arc::make_mut(request).items {
         if let MessageContent::Blocks(blocks) = &mut item.content {
             materialize_blocks(&access, blocks, protocol, &mut transfers).await?;
         }

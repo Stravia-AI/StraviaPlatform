@@ -2,8 +2,8 @@ use super::RunEvent;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
-use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::canonical;
+use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent};
 
 pub(super) const MAX_CANDIDATES: usize = 128;
 const MAX_UNITS: usize = 512;
@@ -75,6 +75,25 @@ pub(super) fn hash_json(
     Ok(Some((writer.digest.finalize().into(), writer.bytes)))
 }
 
+fn unadorned_text_exceeds_budget(item: &AiItem, budget: usize) -> bool {
+    if item.meta.is_some() || item.tool_calls.is_some() {
+        return false;
+    }
+    match &item.content {
+        MessageContent::Text(text) => text.len() > budget,
+        MessageContent::Blocks(blocks) => {
+            let mut bytes = 0usize;
+            for block in blocks {
+                let ContentBlock::Text { text, .. } = block else {
+                    return false;
+                };
+                bytes = bytes.saturating_add(text.len());
+            }
+            bytes > budget
+        }
+    }
+}
+
 impl Window {
     pub(super) fn capture(items: &[AiItem]) -> Option<Self> {
         let start = items
@@ -94,6 +113,12 @@ impl Window {
         let mut units = Vec::new();
         let mut bytes = 0;
         for item in items[start..].iter().rev() {
+            // An unadorned text item projects to one unit whose encoded size
+            // cannot be smaller than its text. Decide the existing suffix
+            // limit before copying it; private controls still use projection.
+            if unadorned_text_exceeds_budget(item, MAX_WINDOW_BYTES - bytes) {
+                return Self::overflow_window(units, bytes);
+            }
             let Value::Array(values) = canonical::item_value(item) else {
                 return None;
             };
@@ -154,6 +179,9 @@ impl Window {
         let mut received = Vec::with_capacity(items.len());
         let mut bytes = 0usize;
         for item in items {
+            if unadorned_text_exceeds_budget(item, MAX_WINDOW_BYTES - bytes) {
+                return None;
+            }
             let mut value = canonical::item_value(item);
             value.sort_all_objects();
             let (hash, unit_bytes) = hash_json(&value, MAX_WINDOW_BYTES - bytes).ok()??;
@@ -720,7 +748,9 @@ mod tests {
     fn user(text: &str) -> AiItem {
         AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(text.into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                std::sync::Arc::new(text.into()),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -746,8 +776,9 @@ mod tests {
         assert!(!old.is_received_prefix_with_only_new_users(&old));
         for index in 0..old_items.len() {
             let mut changed = replay.clone();
-            changed[index].content =
-                stravia_runtime_contract::protocol::ir::MessageContent::Text("changed".into());
+            changed[index].content = stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                std::sync::Arc::new("changed".into()),
+            );
             assert!(!old.is_received_prefix_with_only_new_users(
                 &Window::capture_received_input(&changed).unwrap()
             ));
@@ -1071,6 +1102,64 @@ mod tests {
         assert!(captured.units.len() < 4);
         assert!(captured.units.len() >= expected.units.len());
         assert!(Window::capture(&[bulky("too-big", MAX_WINDOW_BYTES)]).is_none());
+    }
+
+    #[test]
+    fn joined_text_overflow_keeps_newest_suffix_without_prefix_proof() {
+        let mut oversized = user("");
+        oversized.content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "a".repeat(MAX_WINDOW_BYTES / 2).into(),
+                cache_control: None,
+            },
+            ContentBlock::Text {
+                text: "b".repeat(MAX_WINDOW_BYTES / 2 + 1).into(),
+                cache_control: None,
+            },
+        ]);
+        let newest = long_user("newest");
+        let suffix = Window::capture_received_input(std::slice::from_ref(&newest)).unwrap();
+        let captured = Window::capture_received_input(&[oversized, newest]).unwrap();
+        assert_eq!(captured.unit_hash_hexes(), suffix.unit_hash_hexes());
+        assert!(!captured.complete);
+        assert!(!suffix.is_received_prefix_with_only_new_users(&captured));
+    }
+
+    #[test]
+    fn oversized_text_with_private_controls_preserves_boundary_and_budget() {
+        let mut hidden = user(&"secret".repeat(MAX_WINDOW_BYTES / 6 + 1));
+        hidden.meta = Some(Box::new(
+            serde_json::json!({
+                "__open_responses_item_fields": {"signature": "protected"},
+            })
+            .into(),
+        ));
+        let metadata_boundary =
+            Window::capture_received_input(std::slice::from_ref(&hidden)).unwrap();
+        assert!(metadata_boundary.complete);
+        assert!(metadata_boundary.retained_bytes() <= MAX_WINDOW_BYTES);
+        assert!(metadata_boundary.received_items.is_none());
+
+        let mut mixed = AiItem::thinking("private reasoning", Some("protected".into()));
+        let MessageContent::Blocks(blocks) = &mut mixed.content else {
+            unreachable!("thinking is a block");
+        };
+        blocks.insert(
+            0,
+            ContentBlock::Text {
+                text: "a".repeat(MAX_WINDOW_BYTES + 1).into(),
+                cache_control: None,
+            },
+        );
+        let mixed_boundary = Window::capture(&[mixed]).unwrap();
+        assert!(!mixed_boundary.complete);
+        assert!(mixed_boundary.retained_bytes() <= MAX_WINDOW_BYTES);
+        assert!(
+            mixed_boundary
+                .units
+                .iter()
+                .all(|unit| !unit.value.to_string().contains("private reasoning"))
+        );
     }
 
     #[test]

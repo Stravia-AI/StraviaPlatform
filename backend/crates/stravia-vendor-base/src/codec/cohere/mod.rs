@@ -76,10 +76,10 @@ impl ProtocolAdapter for CohereChatV2 {
         Ok(request)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         let mut body = Map::new();
         body.insert("model".into(), Value::String(request.model.clone()));
-        body.insert("messages".into(), Value::Array(encode_messages(request)?));
+        body.insert("messages".into(), Value::Array(encode_messages(&request)?));
         body.insert("stream".into(), Value::Bool(request.stream.enabled));
         insert_number(&mut body, "temperature", request.generation.temperature);
         insert_u32(&mut body, "max_tokens", request.generation.max_tokens);
@@ -507,7 +507,9 @@ fn encode_message(item: &AiItem) -> anyhow::Result<Option<Value>> {
 
 fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<Value>> {
     match content {
-        MessageContent::Text(text) => Ok((!text.is_empty()).then(|| Value::String(text.clone()))),
+        MessageContent::Text(text) => {
+            Ok((!text.is_empty()).then(|| Value::String(text.as_ref().clone())))
+        }
         MessageContent::Blocks(blocks) => {
             let has_reasoning = blocks.iter().any(|block| {
                 matches!(
@@ -561,7 +563,7 @@ fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<V
 
 fn encode_user_content(content: &MessageContent) -> anyhow::Result<Value> {
     match content {
-        MessageContent::Text(text) => Ok(Value::String(text.clone())),
+        MessageContent::Text(text) => Ok(Value::String(text.as_ref().clone())),
         MessageContent::Blocks(blocks) => {
             if blocks
                 .iter()
@@ -602,7 +604,7 @@ fn encode_user_content(content: &MessageContent) -> anyhow::Result<Value> {
 
 fn encode_text_content(content: &MessageContent) -> anyhow::Result<String> {
     match content {
-        MessageContent::Text(text) => Ok(text.clone()),
+        MessageContent::Text(text) => Ok(text.as_ref().clone()),
         MessageContent::Blocks(blocks) => {
             let mut out = String::new();
             for block in blocks {
@@ -622,12 +624,12 @@ fn encode_text_content(content: &MessageContent) -> anyhow::Result<String> {
 
 fn encode_tool_result_content(content: &MessageContent) -> anyhow::Result<String> {
     match content {
-        MessageContent::Text(text) => Ok(text.clone()),
+        MessageContent::Text(text) => Ok(text.as_ref().clone()),
         MessageContent::Blocks(blocks) => {
             let mut values = Vec::new();
             for block in blocks {
                 match block {
-                    ContentBlock::Text { text, .. } => values.push(text.clone()),
+                    ContentBlock::Text { text, .. } => values.push(text.as_ref().clone()),
                     ContentBlock::ToolResult { content, .. } => values.push(match content {
                         Value::String(text) => text.clone(),
                         other => serde_json::to_string(other)?,
@@ -688,13 +690,13 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                 other => bail!("unsupported Cohere message role `{other}`"),
             };
             let content = match message.get("content") {
-                Some(Value::String(text)) => MessageContent::Text(text.clone()),
+                Some(Value::String(text)) => MessageContent::Text(text.clone().into()),
                 Some(Value::Array(parts)) => MessageContent::Blocks(
                     parts
                         .iter()
                         .map(|part| match part.get("type").and_then(Value::as_str) {
                             Some("text") => Ok(ContentBlock::Text {
-                                text: required_string(part, "text")?,
+                                text: required_string(part, "text")?.into(),
                                 cache_control: None,
                             }),
                             Some("thinking") if role == Role::Assistant => {
@@ -722,7 +724,7 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                         })
                         .collect::<anyhow::Result<Vec<_>>>()?,
                 ),
-                None if role == Role::Assistant => MessageContent::Text(String::new()),
+                None if role == Role::Assistant => MessageContent::Text(String::new().into()),
                 _ => bail!("Cohere message has invalid content"),
             };
             let tool_calls = message

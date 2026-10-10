@@ -1,6 +1,128 @@
 use super::*;
 
 #[test]
+fn owned_large_text_preserves_wire_content_and_roles() {
+    for role in [Role::User, Role::Assistant] {
+        for as_block in [false, true] {
+            let text = "varied text\n".repeat(480_000);
+            let text = Arc::new(text);
+            let content = if as_block {
+                MessageContent::Blocks(vec![ContentBlock::Text {
+                    text,
+                    cache_control: None,
+                }])
+            } else {
+                MessageContent::Text(text)
+            };
+            let request = AiRequest::new(
+                "model",
+                vec![AiItem {
+                    role,
+                    content,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }],
+            );
+            let (body, _) = GoogleEncoder
+                .encode_request(request)
+                .expect("encode owned text");
+            let encoded = body["contents"][0]["parts"][0]["text"].as_str().unwrap();
+            assert_eq!(encoded, "varied text\n".repeat(480_000));
+            assert_eq!(
+                body["contents"][0]["role"],
+                if role == Role::Assistant {
+                    "model"
+                } else {
+                    "user"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_text_remains_available_after_owned_request_encoding() {
+    let text = Arc::new("shared history\n".to_owned());
+    let request = AiRequest::new(
+        "model",
+        vec![AiItem {
+            role: Role::User,
+            content: MessageContent::Text(Arc::clone(&text)),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+    let (body, _) = GoogleEncoder
+        .encode_request(request)
+        .expect("encode shared text");
+    assert_eq!(body["contents"][0]["parts"][0]["text"], text.as_str());
+    assert_eq!(text.as_str(), "shared history\n");
+}
+
+#[test]
+fn system_text_preserves_concatenation_newlines_and_raw_priority() {
+    let mut request = AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::System,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "first\n".to_owned().into(),
+                        cache_control: None,
+                    },
+                    ContentBlock::Text {
+                        text: "second".to_owned().into(),
+                        cache_control: None,
+                    },
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Developer,
+                content: MessageContent::Text("developer\n".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+    request.instructions = Some("instructions\n".into());
+    let (body, _) = GoogleEncoder
+        .encode_request(request.clone())
+        .expect("encode system text");
+    assert_eq!(
+        body["systemInstruction"],
+        serde_json::json!({"parts": [
+            {"text": "instructions\n"}, {"text": "first\nsecond"}, {"text": "developer\n"}
+        ]})
+    );
+    let raw = object([
+        ("role", Value::String("system".into())),
+        (
+            "parts",
+            Value::Array(vec![object([
+                ("text", Value::String("raw system\n".into())),
+                ("vendorFlag", Value::Bool(true)),
+            ])]),
+        ),
+    ]);
+    request
+        .meta
+        .vendor
+        .ingress
+        .insert("__google_raw_system_instruction".into(), raw.clone());
+    let (body, _) = GoogleEncoder
+        .encode_request(request)
+        .expect("encode raw system");
+    assert_eq!(body["systemInstruction"], raw);
+}
+
+#[test]
 fn gemini_summary_intent_survives_independent_intensity_mapping() {
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
     for (config, control, include) in [
@@ -37,7 +159,8 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
             }))
             .unwrap();
         request.reasoning.target_control = control.clone();
-        let (body, _) = GoogleEncoder.encode_request(&request).unwrap();
+        let reasoning_level = request.reasoning.level;
+        let (body, _) = GoogleEncoder.encode_request(request).unwrap();
         let thinking = &body["generationConfig"]["thinkingConfig"];
         assert_eq!(thinking["includeThoughts"], include);
         match control {
@@ -49,7 +172,7 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
             }
             Some(TargetThinkingControl::Disabled) => assert_eq!(thinking["thinkingBudget"], 0),
             None => {
-                assert_eq!(request.reasoning.level, None::<ThinkingLevel>);
+                assert_eq!(reasoning_level, None::<ThinkingLevel>);
                 assert!(thinking.get("thinkingBudget").is_none());
                 assert!(thinking.get("thinkingLevel").is_none());
             }
@@ -96,7 +219,7 @@ fn native_function_responses_round_trip_business_json_and_parallel_call_ids() {
             .expect("decode native Gemini tool results");
 
         let (body, _) = GoogleEncoder
-            .encode_request(&request)
+            .encode_request(request)
             .expect("encode native Gemini tool results");
 
         assert_eq!(body["contents"][1]["role"], "user");
@@ -106,10 +229,10 @@ fn native_function_responses_round_trip_business_json_and_parallel_call_ids() {
 
 #[test]
 fn text_and_multimodal_tool_outputs_keep_existing_response_envelopes() {
-    let call_names = HashMap::from([("call_sum", "sum")]);
+    let call_names = HashMap::from([("call_sum".to_owned(), "sum".to_owned())]);
     for (content, expected) in [
         (
-            MessageContent::Text("{\"sum\":42}".into()),
+            MessageContent::Text("{\"sum\":42}".to_owned().into()),
             serde_json::json!({
                 "id": "call_sum", "name": "sum", "response": {"result": "{\"sum\":42}"}
             }),
@@ -117,7 +240,7 @@ fn text_and_multimodal_tool_outputs_keep_existing_response_envelopes() {
         (
             MessageContent::Blocks(vec![
                 ContentBlock::Text {
-                    text: "image result".into(),
+                    text: "image result".to_owned().into(),
                     cache_control: None,
                 },
                 ContentBlock::Image {
@@ -142,7 +265,7 @@ fn text_and_multimodal_tool_outputs_keep_existing_response_envelopes() {
             tool_call_id: Some("call_sum".into()),
             meta: None,
         };
-        let encoded = encode_content(&message, &call_names).expect("encode tool result");
+        let encoded = encode_content(message, &call_names).expect("encode tool result");
         assert_eq!(
             encoded,
             serde_json::json!({"role": "user", "parts": [{"functionResponse": expected}]})
@@ -189,7 +312,7 @@ fn chat_history_and_responses_tool_result_keep_gemini_call_pairing() {
         let mut request = continuation.clone();
         request.items.insert(0, history);
         let (body, _) = GoogleEncoder
-            .encode_request(&request)
+            .encode_request(request)
             .expect("encode continuation");
         assert_eq!(
             body["contents"][0]["parts"],
@@ -214,7 +337,7 @@ fn rejects_unrepresentable_named_tool_choice() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -225,7 +348,7 @@ fn rejects_unrepresentable_named_tool_choice() {
     });
 
     let error = GoogleEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect_err("Gemini encoder cannot silently drop named tool choice");
     assert!(error.to_string().contains("tool_choice"));
 }
@@ -235,7 +358,7 @@ fn encodes_json_schema_response_format_in_generation_config() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -252,7 +375,7 @@ fn encodes_json_schema_response_format_in_generation_config() {
     });
 
     let (body, _) = GoogleEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("Gemini supports structured JSON output");
 
     assert_eq!(
@@ -276,7 +399,7 @@ fn target_controls_replace_raw_gemini_thinking_config() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -293,7 +416,7 @@ fn target_controls_replace_raw_gemini_thinking_config() {
     );
 
     let (body, _) = GoogleEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("Gemini Thinking Level");
     assert_eq!(
         body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
@@ -312,7 +435,7 @@ fn assistant_blocks_request(blocks: Vec<ContentBlock>) -> AiRequest {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -335,7 +458,7 @@ fn signed_thinking_keeps_thought_part_with_signature() {
         signature: Some("opaque-sig".into()),
     }]);
 
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(request).expect("encode");
 
     assert_eq!(
         body["contents"][1]["parts"][0],
@@ -354,7 +477,7 @@ fn unsigned_thinking_stays_a_thought_part_not_plain_text() {
         signature: None,
     }]);
 
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(request).expect("encode");
 
     // Gemini 接受无 thoughtSignature 的 thought part；明文推理不能降级为正文，
     // 否则模型会把推理当成已说出口的话。
@@ -372,7 +495,7 @@ fn thinking_replay_responses_ciphertext_is_not_gemini_signature() {
         encrypted_content: Some("ciphertext".into()),
     }]);
 
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(request).expect("encode");
 
     assert_eq!(
         body["contents"][1]["parts"],
@@ -390,12 +513,12 @@ fn redacted_thinking_is_dropped_without_leaking_data() {
             data: "redacted-payload".into(),
         },
         ContentBlock::Text {
-            text: "answer".into(),
+            text: "answer".to_owned().into(),
             cache_control: None,
         },
     ]);
 
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(request).expect("encode");
 
     let parts = body["contents"][1]["parts"].as_array().unwrap();
     assert_eq!(parts.as_slice(), [serde_json::json!({"text": "answer"})]);
@@ -408,7 +531,7 @@ fn assistant_item_with_only_unmappable_protected_payload_is_skipped() {
         data: "redacted-payload".into(),
     }]);
 
-    let (body, _) = GoogleEncoder.encode_request(&request).expect("encode");
+    let (body, _) = GoogleEncoder.encode_request(request).expect("encode");
 
     // 整条 assistant 内容都无法承载时不能发出空 model content。
     let contents = body["contents"].as_array().unwrap();

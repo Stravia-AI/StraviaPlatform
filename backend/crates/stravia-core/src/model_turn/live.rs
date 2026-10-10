@@ -36,6 +36,7 @@ use stravia_runtime_contract::protocol::ir::AiError;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
+use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
 use stravia_runtime_contract::thinking::ThinkingLevel;
 use stravia_vendor_runtime::RuntimeError;
 use stravia_vendor_sdk::{
@@ -158,7 +159,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
                         .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
                     let mappings = self.gateway.redaction
-                        .protect(&input.principal, Arc::make_mut(&mut input.request), observer.as_ref()).await?;
+                        .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                         observer.publish_input_preview();
@@ -955,8 +956,8 @@ struct PreparedAttempt {
     compact: bool,
     preserve_upstream_error: bool,
     observer: Option<crate::interaction_observation::RunObserver>,
-    request: AiRequest,
-    continuation_fallback: Option<AiRequest>,
+    request: Arc<AiRequest>,
+    continuation_fallback: Option<Arc<AiRequest>>,
     dispatch_model: String,
     actual_model: String,
     namespace: String,
@@ -1202,13 +1203,13 @@ async fn prepare_attempt(
     }
 
     // 每次尝试都从原请求解析，避免前一个 Target 的钳制结果污染 failover。
-    let mut provider_request = input.request.as_ref().clone();
+    let mut provider_request = input.request.clone();
     // Preserve the client's original off intent across the existing upward mapping.
     // This only suppresses automatic summaries; it does not change intensity resolution.
     if provider_request.reasoning.level == Some(ThinkingLevel::Off)
         && provider_request.reasoning.display.is_none()
     {
-        provider_request.reasoning.display = Some("omitted".into());
+        Arc::make_mut(&mut provider_request).reasoning.display = Some("omitted".into());
     }
     // 与 generation_chain 的继承判定一致：任何显式推理指令都阻止默认档介入。
     if !provider_request.reasoning.enabled
@@ -1220,7 +1221,7 @@ async fn prepare_attempt(
     {
         match ThinkingLevel::from_wire(value) {
             Ok(level) => {
-                provider_request.reasoning.level = Some(level);
+                Arc::make_mut(&mut provider_request).reasoning.level = Some(level);
             }
             Err(_) => {
                 tracing::warn!(
@@ -1242,13 +1243,16 @@ async fn prepare_attempt(
                 count += 1;
             }
         }
-        provider_request.reasoning.level = provider_request
+        let level = provider_request
             .reasoning
             .level
             .and_then(|requested| requested.clamp(&supported[..count]));
+        if level != provider_request.reasoning.level {
+            Arc::make_mut(&mut provider_request).reasoning.level = level;
+        }
         // 未配置可用档位时交给上游默认行为，不让客户端 effort 改变 Target 选择。
-        if count == 0 {
-            provider_request.reasoning.effort = None;
+        if count == 0 && provider_request.reasoning.effort.is_some() {
+            Arc::make_mut(&mut provider_request).reasoning.effort = None;
         }
     }
 
@@ -1294,11 +1298,25 @@ async fn prepare_attempt(
         )),
     };
     // 来源不明的受保护载荷乐观回放：上游拒绝时由 `protected_reasoning_rejected` 恢复分级剥离。
-    let thinking_replayed =
-        stravia_protocol_codec::transform::prepare_thinking_replay(&mut provider_request, |item| {
-            thinking_source.provenance(item, &gateway.reasoning_rejections)
-                != crate::history_marker::ThinkingProvenance::Foreign
-        });
+    // Plain text requests need no replay mutation or private history copy.
+    let has_thinking = provider_request.items.iter().any(|item| {
+        matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Thinking { .. }
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::RedactedThinking { .. }
+            )
+        }))
+    });
+    let thinking_replayed = has_thinking
+        && stravia_protocol_codec::transform::prepare_thinking_replay(
+            Arc::make_mut(&mut provider_request),
+            |item| {
+                thinking_source.provenance(item, &gateway.reasoning_rejections)
+                    != crate::history_marker::ThinkingProvenance::Foreign
+            },
+        );
     let native_compaction_requested =
         stravia_protocol_codec::codec::compaction::native_compaction_requested(&provider_request);
     let binding = crate::compaction::CompactionTarget {
@@ -1378,9 +1396,13 @@ async fn prepare_attempt(
                 ),
             ));
         }
-        provider_request.reasoning.target_control = Some(control.clone());
-    } else {
-        provider_request.reasoning.target_control = None;
+        Arc::make_mut(&mut provider_request)
+            .reasoning
+            .target_control = Some(control.clone());
+    } else if provider_request.reasoning.target_control.is_some() {
+        Arc::make_mut(&mut provider_request)
+            .reasoning
+            .target_control = None;
     }
     // 准备期间保留逻辑模型；仅在交给 guest 的请求副本上改写派发模型。
     input
@@ -1397,7 +1419,15 @@ async fn prepare_attempt(
     let require_affinity = request_requires_affinity(&provider_request);
     let mut continuation_fallback = None;
     if compact || thinking_replayed {
-        crate::router::clear_previous_response_id(&mut provider_request);
+        if crate::router::parent_id_from_request(&provider_request).is_some()
+            || provider_request
+                .meta
+                .vendor
+                .ingress
+                .contains_key("previous_response_id")
+        {
+            crate::router::clear_previous_response_id(Arc::make_mut(&mut provider_request));
+        }
     } else {
         executor
             .continuation
@@ -2049,11 +2079,11 @@ async fn drive_vendor_attempt(
                 if let Some(fallback) = continuation_fallback.take() {
                     prepared.request = fallback;
                 }
-                crate::router::clear_previous_response_id(&mut prepared.request);
+                crate::router::clear_previous_response_id(Arc::make_mut(&mut prepared.request));
                 let before =
                     crate::history_marker::protected_payload_digests(&prepared.request.items);
                 if strip_rejected_protected_reasoning(
-                    &mut prepared.request,
+                    Arc::make_mut(&mut prepared.request),
                     &mut protected_reasoning_recovery,
                     &prepared.thinking_source,
                     &gateway.reasoning_rejections,
