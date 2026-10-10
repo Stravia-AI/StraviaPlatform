@@ -26,6 +26,7 @@ import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import * as Tooltip from '$lib/components/ui/tooltip'
 import BrandMark from '$lib/components/brand-mark.svelte'
+import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SquarePenIcon from '@lucide/svelte/icons/square-pen'
@@ -202,14 +203,19 @@ async function copy(value: string) {
 }
 </script>
 
-{#snippet iconAction(label: string, Icon: typeof CopyIcon, onclick: () => void, disabled = false)}
+{#snippet iconAction(label: string, Icon: typeof CopyIcon, onclick: () => void, disabled = false, compact = false)}
   <Tooltip.Root>
     <Tooltip.Trigger
       aria-label={label}
       {disabled}
       {onclick}
-      class={buttonVariants({ variant: 'ghost', size: 'icon', class: 'text-muted-foreground hover:text-foreground' })}
-      ><Icon /></Tooltip.Trigger>
+      class={buttonVariants({
+        variant: 'ghost',
+        size: 'icon',
+        class: compact
+          ? 'size-7 rounded-md text-muted-foreground hover:text-foreground'
+          : 'text-muted-foreground hover:text-foreground',
+      })}><Icon class={compact ? 'size-3.5' : undefined} /></Tooltip.Trigger>
     <Tooltip.Content>{label}</Tooltip.Content>
   </Tooltip.Root>
 {/snippet}
@@ -270,8 +276,15 @@ async function copy(value: string) {
                   {activity}
                   expansionPolicy="chat"
                   minimumHeadingLevel={2} />{/each}
-              {#if live}<StreamingMarkdown text={consoleVisibleText(generation.text)} active minimumHeadingLevel={2} />
-              {:else}<MarkdownContent text={consoleVisibleText(content.text)} minimumHeadingLevel={2} />{/if}
+              {#if live}<StreamingMarkdown
+                  text={consoleVisibleText(generation.text)}
+                  active
+                  minimumHeadingLevel={2}
+                  variant="document" />
+              {:else}<MarkdownContent
+                  text={consoleVisibleText(content.text)}
+                  minimumHeadingLevel={2}
+                  variant="document" />{/if}
               {#if message.status === 'failed' && !live}<div role="alert" class="text-destructive">
                   {localizeBackendErrorMessage(
                     message.error ?? m.console_chat_request_failed(),
@@ -280,10 +293,9 @@ async function copy(value: string) {
                     </p>{/if}
                 </div>{/if}
 
-              <div class="flex flex-wrap gap-1">
-                {@render iconAction(m.console_chat_copy(), CopyIcon, () =>
-                  void copy(live ? generation.text : content.text),
-                )}
+              {#if live}<span role="status" class="sr-only">{m.console_chat_generating()}</span>
+              {:else}<div class="flex items-center gap-1">
+                {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
                 {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
                   {#if message.status === 'failed'}<Button
                       variant="outline"
@@ -298,26 +310,34 @@ async function copy(value: string) {
                       Boolean(guide) ||
                       Boolean(snapshot.catalogError) ||
                       (snapshot.historyHasImages && !snapshot.modelSupportsImages),
+                    true,
                   )}
                 {/if}
-              </div>
-              {#snippet meta()}
-                <span class="font-technical break-all">{message.routeId}</span><span
-                  >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
-                    ? m.console_chat_default()
-                    : message.thinkingLevel}</span
-                ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
-                {#if usage?.inputTokens !== undefined}<span
-                    >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
-                  >{/if}
-                {#if usage?.outputTokens !== undefined}<span
-                    >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
-                  >{/if}
-                {#if live}<span role="status">{m.console_chat_generating()}</span
-                  >{:else if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
-                  >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
-                  >{:else if message.status === 'completed'}<span role="status">{m.console_chat_completed()}</span>{/if}
-              {/snippet}
+                <div
+                  class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
+                  <span class="font-technical break-all">{message.routeId}</span><span
+                    >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
+                      ? m.console_chat_default()
+                      : message.thinkingLevel}</span
+                  ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
+                  {#if usage?.inputTokens !== undefined}<span
+                      >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
+                    >{/if}
+                  {#if usage?.outputTokens !== undefined}<span
+                      >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
+                    >{/if}
+                  {#if usage?.cacheReadTokens !== undefined}<span
+                      >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
+                    >{/if}
+                  {#if usage?.cacheWriteTokens !== undefined}<span
+                      >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
+                    >{/if}
+                  {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
+                    >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
+                    >{:else if message.status === 'completed'}<span role="status">{m.console_chat_completed()}</span
+                    >{/if}
+                </div>
+              </div>{/if}
             </ConversationMessage>
           {/if}
         {/each}
@@ -351,14 +371,20 @@ async function copy(value: string) {
         ></Empty.Root>
     {:else if !snapshot.loadError && !snapshot.catalogError}
       <div class="composer-dock">
-        {#if !follow && conversation}<Button
-            class="mx-auto"
-            variant="outline"
-            onclick={() => {
-              follow = true
-              if (scroller) scroller.scrollTop = scroller.scrollHeight
-            }}>{m.console_chat_latest()}</Button
-          >{/if}
+        {#if !follow && conversation}<Tooltip.Root>
+            <Tooltip.Trigger
+              aria-label={m.console_chat_latest()}
+              onclick={() => {
+                follow = true
+                if (scroller) scroller.scrollTop = scroller.scrollHeight
+              }}
+              class={buttonVariants({
+                variant: 'outline',
+                size: 'icon',
+                class: 'jump-latest rounded-full bg-card shadow-md dark:bg-card',
+              })}><ArrowDownIcon /></Tooltip.Trigger>
+            <Tooltip.Content>{m.console_chat_latest()}</Tooltip.Content>
+          </Tooltip.Root>{/if}
         <ConsoleChatComposer
           bind:text
           bind:images
@@ -395,5 +421,23 @@ async function copy(value: string) {
   margin-top: auto;
   padding-block: 0.75rem max(1rem, env(safe-area-inset-bottom));
   background: var(--background);
+}
+/* 正文滚到输入区下方时渐隐，而不是被底色硬切。 */
+.composer-dock::before {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 100%;
+  height: 2.5rem;
+  background: linear-gradient(to bottom, transparent, var(--background));
+  content: '';
+  pointer-events: none;
+}
+/* 浮在正文上，不占输入区布局，出现与消失时输入框不跳动。 */
+.composer-dock :global(.jump-latest) {
+  position: absolute;
+  bottom: calc(100% + 0.25rem);
+  left: 50%;
+  z-index: 1;
+  translate: -50% 0;
 }
 </style>

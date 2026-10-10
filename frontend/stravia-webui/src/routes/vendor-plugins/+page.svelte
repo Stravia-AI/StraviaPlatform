@@ -17,6 +17,7 @@ import type {
   PluginSummary,
 } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
+import ProviderMark from '$lib/components/provider-mark.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import * as Alert from '$lib/components/ui/alert'
@@ -535,9 +536,11 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
         {@const features = listedCapabilities(plugin.capabilities)}
         <li class="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:gap-4">
           <div class="flex min-w-0 flex-1 items-start gap-3.5">
-            <span
-              class="font-structural flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-base font-semibold text-accent-foreground"
-              aria-hidden="true">{plugin.name.charAt(0).toUpperCase()}</span>
+            <ProviderMark
+              class="size-10 rounded-lg p-1.5 text-base"
+              name={plugin.name}
+              svg={plugin.icon_svg}
+              logo={plugin.vendor_id} />
             <div class="flex min-w-0 flex-1 flex-col gap-2">
               <div class="flex min-w-0 flex-col gap-0.5">
                 <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -667,9 +670,11 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       {@const plugin = detailPlugin}
       <Sheet.Header class="pr-12">
         <Sheet.Title class="flex items-center gap-2.5">
-          <span
-            class="font-structural flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent text-xs font-semibold text-accent-foreground"
-            aria-hidden="true">{plugin.name.charAt(0).toUpperCase()}</span>
+          <ProviderMark
+            class="size-8 rounded-lg p-1 text-xs"
+            name={plugin.name}
+            svg={plugin.icon_svg}
+            logo={plugin.vendor_id} />
           <span class="truncate">{plugin.name}</span>
         </Sheet.Title>
         <Sheet.Description class="font-technical">{plugin.vendor_id}</Sheet.Description>
@@ -850,6 +855,11 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       <div class="flex flex-col gap-4">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <ProviderMark
+              class="size-7 rounded-md p-0.5 text-xs"
+              name={preview.name}
+              svg={preview.icon_svg}
+              logo={preview.vendor_id} />
             <h2 class="truncate font-medium">{preview.name}</h2>
             <span class="font-technical text-xs text-muted-foreground">{preview.vendor_id}</span>
             <span class="font-technical ms-auto text-sm tabular-nums">

@@ -9,6 +9,7 @@ let {
   textStart = 0,
   snapshotKey = 0,
   minimumHeadingLevel = 1,
+  variant,
 }: {
   text: string
   active?: boolean
@@ -16,6 +17,7 @@ let {
   textStart?: number
   snapshotKey?: number
   minimumHeadingLevel?: 1 | 2
+  variant?: 'compact' | 'document'
 } = $props()
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
@@ -168,4 +170,8 @@ $effect(() => {
 
 <svelte:document onvisibilitychange={() => flush()} />
 
-<MarkdownContent text={displayed} {minimumHeadingLevel} streaming={(streaming ?? active) || displayed !== text} />
+<MarkdownContent
+  text={displayed}
+  {minimumHeadingLevel}
+  {variant}
+  streaming={(streaming ?? active) || displayed !== text} />

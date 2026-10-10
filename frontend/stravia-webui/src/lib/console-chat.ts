@@ -12,9 +12,11 @@ import type {
   ConsoleImageAttachment,
   ConsoleMessage,
   ConsoleReadOnlyReason,
+  ConsoleResponse,
   ConsoleResponsesRequest,
   ConsoleResponsesEvent,
   ConsoleThinkingSelection,
+  ConsoleTokenUsage,
 } from '$lib/console-chat-types'
 import type { Route } from '$lib/types'
 import type { ThinkingActivity } from '$lib/observation-activities'
@@ -116,6 +118,24 @@ function replay(messages: ConsoleMessage[]): unknown[] {
     }
     return message.outputItems
   })
+}
+
+/**
+ * 终态 usage 已由 Stravia 合计本轮全部内部模型请求（平台工具轮次），客户端不再累加。
+ * 只保存已报告的分项；净输入需要总输入与缓存读取同时已知，缺失不补零。
+ */
+function tokenUsage(usage: ConsoleResponse['usage']): ConsoleTokenUsage | undefined {
+  if (!usage) return undefined
+  const count = (value: number | null | undefined) => (typeof value === 'number' ? value : undefined)
+  const input = count(usage.input_tokens)
+  const cacheRead = count(usage.input_tokens_details?.cached_tokens)
+  const result: ConsoleTokenUsage = {
+    inputTokens: input !== undefined && cacheRead !== undefined ? Math.max(input - cacheRead, 0) : undefined,
+    outputTokens: count(usage.output_tokens),
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: count(usage.input_tokens_details?.cache_write_tokens),
+  }
+  return Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined))
 }
 
 function chatError(error: unknown): ConsoleChatError {
@@ -705,30 +725,23 @@ export class ConsoleChatController {
         else if (updateReasoning(active, event, this.now())) {
           // Per-item lifecycle is independent of the surrounding response.
         } else if (event.type === 'error' || event.type === 'response.failed') {
+          // 失败终态可能带有已消耗的真实用量；没有报告时保持未知。
+          const usage = tokenUsage(event.response?.usage)
+          if (usage) message.usage = usage
           const failure = event.response?.error ??
             event.error ?? { message: event.message ?? 'Response failed', code: event.code }
           throw Object.assign(new Error(failure.message), failure)
         } else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
           const response = event.response
           if (!response) throw new Error('Response ended without a result')
+          const usage = tokenUsage(response.usage)
+          if (usage) message.usage = usage
           if (response.error || response.status === 'failed') {
             throw Object.assign(new Error(response.error?.message ?? 'Response failed'), response.error)
           }
           message.status =
             response.status === 'incomplete' || event.type === 'response.incomplete' ? 'incomplete' : 'completed'
           message.outputItems = response.output ?? []
-          if (response.usage) {
-            const input = response.usage.input_tokens
-            const cacheRead = response.usage.input_tokens_details?.cached_tokens
-            message.usage = {
-              ...(typeof input === 'number' && typeof cacheRead === 'number'
-                ? { inputTokens: Math.max(input - cacheRead, 0) }
-                : {}),
-              ...(typeof response.usage.output_tokens === 'number'
-                ? { outputTokens: response.usage.output_tokens }
-                : {}),
-            }
-          }
           delete message.partialText
           delete message.partialThinking
           delete message.partialActivities

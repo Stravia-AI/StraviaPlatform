@@ -350,7 +350,7 @@ onMount(() => {
         <Sidebar.Group>
           <Sidebar.GroupLabel>{group.label()}</Sidebar.GroupLabel>
           <Sidebar.GroupContent>
-            <Sidebar.Menu>
+            <Sidebar.Menu class="gap-1">
               {#each group.items as item (item.href)}
                 {@const label = item.label()}
                 {@const current = isCurrent(item.href)}

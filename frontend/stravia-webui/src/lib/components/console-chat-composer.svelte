@@ -1,7 +1,6 @@
 <script lang="ts">
 import PlusIcon from '@lucide/svelte/icons/plus'
 import KeyRoundIcon from '@lucide/svelte/icons/key-round'
-import LockIcon from '@lucide/svelte/icons/lock'
 import XIcon from '@lucide/svelte/icons/x'
 import SendIcon from '@lucide/svelte/icons/arrow-up'
 import StopIcon from '@lucide/svelte/icons/square'
@@ -101,16 +100,10 @@ function drop(event: DragEvent) {
 </script>
 
 <div class="flex min-w-0 flex-col">
-  <!-- Key 归属贴在输入卡片上沿：选择时是 Select，首条消息后变为同位置的只读标签。 -->
-  <div
-    class="mx-3 flex max-w-[calc(100%-1.5rem)] min-w-0 items-center self-start rounded-t-xl border border-b-0 bg-muted/50 px-1 pt-1 dark:bg-muted/40">
-    {#if conversation}
-      <p class="flex h-9 min-w-0 items-center gap-1.5 px-2.5 text-sm text-muted-foreground">
-        <LockIcon class="size-3.5 shrink-0" aria-hidden="true" /><span class="sr-only">{m.console_chat_key()}:</span
-        ><span class="truncate text-foreground">{conversation.apiKeyName}</span><span class="sr-only"
-          >· {m.console_chat_key_locked()}</span>
-      </p>
-    {:else}
+  <!-- Key 只在新对话中选择：顶栏下沿压在输入卡片之后，首条消息固定归属后整条隐藏。 -->
+  {#if !conversation}
+    <div
+      class="mx-3 -mb-3 flex min-w-0 items-center rounded-t-xl border border-b-0 bg-muted/50 px-1 pt-1 pb-3 dark:bg-muted/40">
       <label for="chat-key" class="sr-only">{m.console_chat_key()}</label>
       <Select.Root
         type="single"
@@ -130,11 +123,11 @@ function drop(event: DragEvent) {
               >{/each}</Select.Group
           ></Select.Content>
       </Select.Root>
-    {/if}
-  </div>
+    </div>
+  {/if}
   <form
     class={[
-      'flex min-w-0 flex-col gap-2 rounded-xl border bg-card px-3 pt-3 pb-2 transition-[border-color,box-shadow] duration-[140ms] focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50',
+      'relative flex min-w-0 flex-col gap-2 rounded-xl border bg-card px-3 pt-3 pb-2 shadow-[0_-6px_20px_-10px_rgb(0_0_0/0.16)] transition-[border-color,box-shadow] duration-[140ms] dark:shadow-[0_-6px_20px_-10px_rgb(0_0_0/0.7)] focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50',
       dragging && 'outline-2 outline-primary',
     ]}
     onsubmit={(event) => {

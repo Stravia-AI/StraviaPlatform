@@ -667,6 +667,7 @@ impl VendorPlugins {
                 }
                 sessions
             },
+            icon_svg: descriptor_icon_svg(descriptor),
         };
         let record = InstalledPlugin {
             vendor_id: descriptor.vendor_id.clone(),
@@ -1027,8 +1028,24 @@ impl VendorPlugins {
             affected_bindings: binding_impacts(gw, &profiles, None, &providers, loaded.is_some())
                 .await?,
             pending_update,
+            icon_svg: descriptor.as_ref().and_then(descriptor_icon_svg),
         })
     }
+}
+
+fn descriptor_icon_svg(descriptor: &stravia_vendor_sdk::VendorDescriptor) -> Option<String> {
+    if descriptor.vendor_id == "base" {
+        return Some(
+            include_str!("../../../../../frontend/stravia-webui/static/stravia-logo.svg")
+                .to_string(),
+        );
+    }
+    descriptor
+        .providers
+        .iter()
+        .find(|profile| profile.provider_id == descriptor.vendor_id)
+        .and_then(|profile| profile.icon_svg.clone())
+        .or_else(|| descriptor.providers.iter().find_map(|profile| profile.icon_svg.clone()))
 }
 
 /// 安装记录本身建立接管关系；加载失败也不得绕过记录去调用基础插件。

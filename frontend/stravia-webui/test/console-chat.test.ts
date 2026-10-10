@@ -438,20 +438,24 @@ describe('request and presentation', () => {
   test.each([
     [
       { input_tokens: 12, input_tokens_details: { cached_tokens: 5 } },
-      { inputTokens: 7, outputTokens: 3 },
+      { inputTokens: 7, outputTokens: 3, cacheReadTokens: 5 },
     ],
     [
       { input_tokens: 12, input_tokens_details: { cached_tokens: 0 } },
-      { inputTokens: 12, outputTokens: 3 },
+      { inputTokens: 12, outputTokens: 3, cacheReadTokens: 0 },
     ],
     [
       { input_tokens: 3, input_tokens_details: { cached_tokens: 9 } },
-      { inputTokens: 0, outputTokens: 3 },
+      { inputTokens: 0, outputTokens: 3, cacheReadTokens: 9 },
+    ],
+    [
+      { input_tokens: 12, input_tokens_details: { cached_tokens: 5, cache_write_tokens: 4 } },
+      { inputTokens: 7, outputTokens: 3, cacheReadTokens: 5, cacheWriteTokens: 4 },
     ],
     [{ input_tokens: 12 }, { outputTokens: 3 }],
-    [{ input_tokens_details: { cached_tokens: 5 } }, { outputTokens: 3 }],
+    [{ input_tokens_details: { cached_tokens: 5 } }, { outputTokens: 3, cacheReadTokens: 5 }],
     [{ input_tokens: 12, input_tokens_details: { cached_tokens: null } }, { outputTokens: 3 }],
-  ])('persists net input only when both reported operands are known %#', async (usage, expected) => {
+  ])('persists net input and reported cache usage without inventing unknown operands %#', async (usage, expected) => {
     const h = harness({
       script: function* () {
         yield complete('Metered answer', { usage: { ...usage, output_tokens: 3 } })

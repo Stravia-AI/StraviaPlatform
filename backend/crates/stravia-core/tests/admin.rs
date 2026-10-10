@@ -2290,3 +2290,49 @@ async fn provider_icon_errors_when_no_source_matches() -> anyhow::Result<()> {
     data_dir.close()?;
     Ok(())
 }
+
+#[tokio::test]
+async fn provider_icon_serves_base_provider_icon() -> anyhow::Result<()> {
+    let (data_dir, gw) = build_gateway().await?;
+
+    let icon = gw.provider_icon("base").await?;
+    assert_eq!(icon.content_type, "image/svg+xml");
+    let svg = String::from_utf8(icon.body)?;
+    assert!(svg.contains("<svg"), "base icon must contain svg root");
+    assert!(svg.contains("cadence-motion"), "base icon must be the official Stravia mark");
+
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn vendor_plugins_summary_includes_registered_icon_svg() -> anyhow::Result<()> {
+    let (data_dir, gw) = build_gateway().await?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
+
+    let plugins = gw.admin().list_vendor_plugins().await?;
+    let base = plugins
+        .iter()
+        .find(|plugin| plugin.vendor_id == "base")
+        .expect("base plugin exists");
+    let base_svg = base.icon_svg.as_deref().expect("base plugin has icon_svg");
+    assert!(base_svg.contains("<svg"), "base icon must be SVG");
+    assert!(base_svg.contains("cadence-motion"), "base icon must be the official Stravia mark");
+
+    let codex = plugins
+        .iter()
+        .find(|plugin| plugin.vendor_id == "openai-codex")
+        .expect("openai-codex plugin exists");
+    let codex_svg = codex
+        .icon_svg
+        .as_deref()
+        .expect("codex plugin has registered icon_svg");
+    assert!(codex_svg.contains("<svg"), "codex icon must be SVG");
+
+    gw.shutdown().await;
+    drop(gw);
+    data_dir.close()?;
+    Ok(())
+}

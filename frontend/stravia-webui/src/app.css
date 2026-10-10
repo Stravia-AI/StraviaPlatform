@@ -56,6 +56,7 @@
   --font-technical: var(--font-mono);
   --radius: 0.5rem;
   --signal: oklch(0.58 0.132 48);
+  --peak: oklch(0.54 0.16 300);
   --shadow-2xs: 0 1px 1px rgb(17 20 23 / 0.04);
   --shadow-xs: 0 1px 2px rgb(17 20 23 / 0.05);
   --shadow-sm: 0 1px 2px rgb(17 20 23 / 0.06), 0 1px 1px rgb(17 20 23 / 0.04);
@@ -104,6 +105,7 @@
   --sidebar-border: oklch(0.37 0.018 240.38);
   --sidebar-ring: oklch(0.7329 0.066 238.9);
   --signal: oklch(0.72 0.12 48);
+  --peak: oklch(0.76 0.13 302);
   --shadow-md: 0 12px 32px rgb(0 0 0 / 0.36), 0 2px 8px rgb(0 0 0 / 0.24);
   --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.44), 0 4px 14px rgb(0 0 0 / 0.28);
   --shadow-xl: 0 30px 80px rgb(0 0 0 / 0.52), 0 6px 20px rgb(0 0 0 / 0.34);
@@ -130,6 +132,7 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-signal: var(--signal);
+  --color-peak: var(--peak);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -547,8 +550,6 @@ html[lang='zh-CN'] .font-structural {
 
 .route-provider-mark {
   display: inline-grid;
-  width: 1.75rem;
-  height: 1.75rem;
   flex: none;
   place-items: center;
   overflow: hidden;
@@ -556,6 +557,14 @@ html[lang='zh-CN'] .font-structural {
   background: var(--card);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 0.1);
   color: var(--primary);
+}
+
+.route-provider-mark:not([class*='size-'], [class*='w-']) {
+  width: 1.75rem;
+}
+
+.route-provider-mark:not([class*='size-'], [class*='h-']) {
+  height: 1.75rem;
 }
 
 .route-provider-mark[data-fallback='true'] {

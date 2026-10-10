@@ -6,13 +6,20 @@ let {
   text,
   minimumHeadingLevel = 1,
   streaming = false,
-}: { text: string; minimumHeadingLevel?: 1 | 2; streaming?: boolean } = $props()
+  variant = 'compact',
+}: {
+  text: string
+  minimumHeadingLevel?: 1 | 2
+  streaming?: boolean
+  /** `compact` 用于观测与思考等窄区域，标题与正文同号；`document` 用于对话回答，标题按原文级别分级。 */
+  variant?: 'compact' | 'document'
+} = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
 const blocks = $derived(markdownBlocks(text, minimumHeadingLevel))
 </script>
 
-<div class="markdown-content">
+<div class="markdown-content" data-variant={variant}>
   {#each blocks as block (block.id)}
     <MarkdownRenderedBlock {block} {streaming} />
   {/each}
@@ -42,6 +49,20 @@ const blocks = $derived(markdownBlocks(text, minimumHeadingLevel))
   margin-block: 0.35rem;
   font-size: inherit;
   font-weight: 600;
+}
+/* 字号按原文级别取，不按语义标签：对话把 `#` 抬为 h2，否则会与 `##` 同号。 */
+.markdown-content[data-variant='document'] :global([data-markdown-heading]) {
+  margin-block: 1rem 0.5rem;
+  line-height: 1.4;
+}
+.markdown-content[data-variant='document'] :global([data-markdown-heading='1']) {
+  font-size: 1.25rem;
+}
+.markdown-content[data-variant='document'] :global([data-markdown-heading='2']) {
+  font-size: 1.125rem;
+}
+.markdown-content[data-variant='document'] :global([data-markdown-heading='3']) {
+  font-size: 1rem;
 }
 .markdown-content :global(ul),
 .markdown-content :global(ol) {

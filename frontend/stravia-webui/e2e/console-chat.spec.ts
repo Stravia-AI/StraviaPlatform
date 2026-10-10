@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { prepareApp } from './prepare-app'
 
 type StreamRequest = {
@@ -144,7 +144,11 @@ function response(text: string) {
     status: 'completed',
     model: 'console-model',
     output,
-    usage: { input_tokens: 11, input_tokens_details: { cached_tokens: 4 }, output_tokens: 7 },
+    usage: {
+      input_tokens: 11,
+      input_tokens_details: { cached_tokens: 4 } as Record<string, number>,
+      output_tokens: 7,
+    },
   }
 }
 async function complete(page: Page, index: number, text: string, status = 'completed') {
@@ -394,6 +398,67 @@ test('shared math and Mermaid preserve incomplete and invalid source without ext
   await expect(answer.locator('svg').filter({ hasText: 'Finish' })).toBeVisible()
 })
 
+test('a failed turn keeps the usage the gateway reported for it', async ({ page }) => {
+  await prepareChat(page)
+  await page.goto('/')
+  await send(page, 'Fail after spending tokens', 1)
+  await emit(
+    page,
+    0,
+    {
+      type: 'response.failed',
+      response: {
+        status: 'failed',
+        error: { message: 'Upstream gave up' },
+        usage: { input_tokens: 20, input_tokens_details: { cached_tokens: 5, cache_write_tokens: 2 }, output_tokens: 3 },
+      },
+    },
+    true,
+  )
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  await expect(answer.getByRole('alert')).toContainText('Upstream gave up')
+  for (const usage of ['Input: 15 tokens', 'Output: 3 tokens', 'Cache read: 5 tokens', 'Cache write: 2 tokens']) {
+    await expect(answer).toContainText(usage)
+  }
+  await page.reload()
+  await expect(answer).toContainText('Cache write: 2 tokens')
+})
+
+test('answer headings keep a visible size hierarchy while thinking stays compact', async ({ page }) => {
+  await prepareChat(page)
+  await page.goto('/')
+  await send(page, 'Show heading levels', 1)
+  const terminal = response('# Level one\n\n## Level two\n\n### Level three\n\n#### Level four\n\nBody text')
+  terminal.output.unshift({
+    type: 'reasoning',
+    id: 'reason',
+    summary: [{ type: 'summary_text', text: '# Thinking heading\n\nThinking body' }],
+  })
+  await emit(page, 0, { type: 'response.completed', response: terminal }, true)
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  await expect(answer.getByRole('heading', { name: 'Level four' })).toBeVisible()
+  // `#` 语义上仍抬为 h2，页面只保留一个一级标题。
+  await expect(answer.getByRole('heading', { name: 'Level one', level: 2 })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1)
+  const size = (locator: Locator) =>
+    locator.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))
+  const [one, two, three, four, body] = await Promise.all([
+    size(answer.getByRole('heading', { name: 'Level one' })),
+    size(answer.getByRole('heading', { name: 'Level two' })),
+    size(answer.getByRole('heading', { name: 'Level three' })),
+    size(answer.getByRole('heading', { name: 'Level four' })),
+    size(answer.getByText('Body text', { exact: true })),
+  ])
+  expect(one).toBeGreaterThan(two)
+  expect(two).toBeGreaterThan(three)
+  expect(three).toBeGreaterThan(body)
+  expect(four).toBe(body)
+  await answer.getByRole('button', { expanded: false }).first().click()
+  const thinkingHeading = answer.getByRole('heading', { name: 'Thinking heading' })
+  await expect(thinkingHeading).toBeVisible()
+  expect(await size(thinkingHeading)).toBe(await size(answer.getByText('Thinking body', { exact: true })))
+})
+
 test('streams safely, copies only visible output and persists authoritative responses across refresh', async ({
   page,
   context,
@@ -407,10 +472,14 @@ test('streams safely, copies only visible output and persists authoritative resp
   const answer = page.getByRole('article', { name: 'Assistant response' })
   await expect(answer).toContainText('Live answer')
   await expect(answer).not.toContainText('private unfinished')
+  // 用量与操作行只在终态出现，流式期间不展示半成品计量。
+  await expect(answer.getByRole('button', { name: /Copy/ })).toHaveCount(0)
+  await expect(answer).not.toContainText('console-model')
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
   const text =
     '## Final answer\n\n**Safe**\n\n```ts\nconst result = 42\n```\n<!-- stravia-private-marker -->\n<script>window.chatXss = true</script>'
   const terminal = response(text)
+  terminal.usage.input_tokens_details = { cached_tokens: 4, cache_write_tokens: 3 }
   terminal.output.unshift({
     type: 'reasoning',
     id: 'reason',
@@ -418,6 +487,17 @@ test('streams safely, copies only visible output and persists authoritative resp
   })
   await emit(page, 0, { type: 'response.completed', response: terminal }, true)
   await expect(answer.getByRole('heading', { name: 'Final answer' })).toBeVisible()
+  await expect(answer).toContainText('Cache read: 4 tokens')
+  await expect(answer).toContainText('Cache write: 3 tokens')
+  const [copyBox, modelBox] = await Promise.all([
+    answer.getByRole('button', { name: /Copy/ }).boundingBox(),
+    answer.getByText('console-model', { exact: true }).boundingBox(),
+  ])
+  // 计量从操作按钮右侧起排，首行与按钮同高；空间不足时只在计量区内部换行。
+  const modelCenter = modelBox!.y + modelBox!.height / 2
+  expect(modelCenter).toBeGreaterThan(copyBox!.y)
+  expect(modelCenter).toBeLessThan(copyBox!.y + copyBox!.height)
+  expect(modelBox!.x).toBeGreaterThan(copyBox!.x + copyBox!.width)
   await expect(answer.locator('pre')).toContainText('const result = 42')
   await expect(answer.getByText('Checked carefully', { exact: true })).not.toBeVisible()
   await answer.getByRole('button', { expanded: false }).first().click()

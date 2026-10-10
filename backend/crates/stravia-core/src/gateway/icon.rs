@@ -97,6 +97,13 @@ impl Gateway {
                 content_type: "image/svg+xml",
             });
         }
+        if key == "base" {
+            return Ok(ProviderIcon {
+                body: include_bytes!("../../../../../frontend/stravia-webui/static/stravia-logo.svg")
+                    .to_vec(),
+                content_type: "image/svg+xml",
+            });
+        }
         if let Ok(body) = self.provider_catalog.logo(key).await {
             return Ok(ProviderIcon {
                 body,

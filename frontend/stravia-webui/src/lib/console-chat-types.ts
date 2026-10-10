@@ -33,6 +33,8 @@ export interface ConsoleTokenUsage {
   /** 管理面净输入；无法确定总输入或缓存读取时不保存数值。 */
   inputTokens?: number
   outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
 }
 
 export interface ConsoleAssistantMessage {
@@ -97,7 +99,8 @@ export interface ConsoleResponse {
   model?: string
   usage?: {
     input_tokens?: number | null
-    input_tokens_details?: { cached_tokens?: number | null } | null
+    /** `cache_write_tokens` 是 Stravia 扩展字段，上游未报告缓存写入时省略。 */
+    input_tokens_details?: { cached_tokens?: number | null; cache_write_tokens?: number | null } | null
     output_tokens?: number | null
   } | null
   error?: ConsoleChatError | null

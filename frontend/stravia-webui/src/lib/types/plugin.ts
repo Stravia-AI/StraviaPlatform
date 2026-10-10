@@ -44,6 +44,7 @@ export interface PluginPreview {
   cancels_active_operations: boolean
   active_operations: number
   affected_auth_sessions: number
+  icon_svg?: string | null
 }
 
 export interface PluginSummary {
@@ -57,6 +58,7 @@ export interface PluginSummary {
   capabilities: string[]
   affected_bindings: PluginBindingImpact[]
   pending_update: PluginPreview | null
+  icon_svg?: string | null
 }
 
 export interface ConfirmPluginUpdate {

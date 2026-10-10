@@ -46,6 +46,8 @@ function thinkingLabel(level: string): string {
 }
 const effortLabel = $derived(thinkingLabel(snapshot.thinkingSelection))
 const index = $derived(Math.max(0, stops.indexOf(snapshot.thinkingSelection)))
+// 最高档位用 peak 渐变强调；只有一个真实档位时它也是唯一档位，不算「最高」。
+const peak = $derived(ordered && stops.length > 2 && index === stops.length - 1)
 const hasEffort = $derived(Boolean(selectedModel) && snapshot.thinkingLevels.length > 0)
 
 function chooseEffort(value: string) {
@@ -97,7 +99,7 @@ async function pickModel(id: string) {
     align="end"
     side="top"
     collisionPadding={16}
-    class="w-80 max-w-[calc(100vw-2rem)] gap-3 rounded-xl p-3"
+    class="w-72 max-w-[calc(100vw-2rem)] gap-2 rounded-xl p-3"
     onOpenAutoFocus={(event: Event) => {
       // 模型列表的键盘导航由 Command 根节点处理，直接打开列表层时把焦点交给它。
       if (layer !== 'model') return
@@ -106,20 +108,25 @@ async function pickModel(id: string) {
     }}>
     {#if layer === 'effort'}
       <div class="flex flex-col items-center">
-        <p class="text-lg leading-tight font-semibold text-primary" aria-live="polite">{effortLabel}</p>
+        <p
+          class={['text-base leading-tight font-semibold transition-colors duration-[140ms]', peak ? 'text-peak' : 'text-primary']}
+          aria-live="polite">
+          {effortLabel}
+        </p>
         <button
           bind:this={modelButton}
           type="button"
-          class="inline-flex min-h-10 max-w-full items-center gap-0.5 rounded-md px-2 text-sm text-muted-foreground transition-colors duration-[140ms] outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+          class="inline-flex min-h-7 max-w-full items-center gap-0.5 rounded-md px-2 text-xs text-muted-foreground transition-colors duration-[140ms] outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
           onclick={() => void showModels()}>
           <span class="sr-only">{m.console_chat_model()}: </span><span class="truncate">{modelName}</span
-          ><ChevronRightIcon class="size-4 shrink-0" aria-hidden="true" />
+          ><ChevronRightIcon class="size-3.5 shrink-0" aria-hidden="true" />
         </button>
       </div>
       {#if ordered}
         <Slider
           id="chat-thinking"
           size="lg"
+          rangeClass={peak ? 'bg-linear-to-r from-primary to-peak' : undefined}
           aria-label={m.console_chat_effort()}
           aria-valuetext={effortLabel}
           min={0}

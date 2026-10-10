@@ -64,6 +64,8 @@ pub struct PluginPreview {
     pub cancels_active_operations: bool,
     pub active_operations: usize,
     pub affected_auth_sessions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_svg: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -78,6 +80,8 @@ pub struct PluginSummary {
     pub capabilities: Vec<String>,
     pub affected_bindings: Vec<PluginBindingImpact>,
     pub pending_update: Option<PluginPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_svg: Option<String>,
 }
 
 #[derive(Deserialize)]
