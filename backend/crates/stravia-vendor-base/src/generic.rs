@@ -141,9 +141,7 @@ pub(crate) fn execute_inference(
     } else {
         None
     };
-    let mut encoded = crate::encode_inference_request(protocol, &request)?;
-    // 编码结果已拥有所需语义；在可挂起的 HTTP import 前释放不再使用的 IR/Value。
-    drop(request);
+    let mut encoded = crate::encode_inference_request(protocol, request)?;
     prepare_custom_reasoning_history(provider, protocol, reasoning_source, &mut encoded.body);
     let mut headers = common::header_pairs(&encoded.headers)?;
     for (name, value) in &provider.client_headers {
@@ -154,7 +152,7 @@ pub(crate) fn execute_inference(
     apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
     prepare_gemini_imported_tool_history(protocol, model, &url, &mut encoded.body);
-    let body = serde_json::to_vec(&encoded.body).map_err(|error| {
+    let body = stravia_runtime_contract::json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(
             ErrorKind::Invalid,
             format!("failed to serialize codec request: {error}"),

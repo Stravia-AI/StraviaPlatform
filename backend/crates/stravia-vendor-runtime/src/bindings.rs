@@ -10,6 +10,7 @@ wasmtime::component::bindgen!({
         "stravia:vendor/host@0.4.0": async | trappable,
     },
     exports: {
+        "execute": async | store,
         default: async,
     },
 });

@@ -320,7 +320,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
     }
 
     let (content, tool_calls, tool_call_id) = match msg.content {
-        AnthropicContent::Text(t) => (MessageContent::Text(t), None, None),
+        AnthropicContent::Text(t) => (MessageContent::Text(t.into()), None, None),
         AnthropicContent::Blocks(blocks) => {
             let mut content_blocks: Vec<ContentBlock> = Vec::new();
             let mut tcs: Vec<ToolCall> = Vec::new();
@@ -335,7 +335,7 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                         ..
                     } => {
                         content_blocks.push(ContentBlock::Text {
-                            text,
+                            text: text.into(),
                             cache_control: cache_control.as_ref().map(map_cache_control),
                         });
                     }
@@ -516,7 +516,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                 };
                 messages.push(AiItem {
                     role: Role::Tool,
-                    content: MessageContent::Text(tool_text),
+                    content: MessageContent::Text(tool_text.into()),
                     tool_calls: None,
                     tool_call_id: Some((tool_use_id).into()),
                     meta,
@@ -528,7 +528,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                 ..
             } => {
                 user_blocks.push(ContentBlock::Text {
-                    text,
+                    text: text.into(),
                     cache_control: cache_control.as_ref().map(map_cache_control),
                 });
             }

@@ -1,5 +1,215 @@
 use super::*;
 
+#[test]
+fn request_roundtrip_preserves_escaped_text_and_multimodal_parts() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::{ProtocolAdapter, ProtocolTransform};
+
+    for content in [
+        serde_json::json!(""),
+        serde_json::json!("原文 🐟\n\"quote\"\\path\tend"),
+        serde_json::json!([
+            {"type": "text", "text": "原文 🐟\n"},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/image", "detail": "auto"}},
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}}
+        ]),
+    ] {
+        let request = OpenAIChatCompletionsV1
+            .decode_request(serde_json::json!({
+                "model": "model",
+                "messages": [{"role": "user", "content": content}]
+            }))
+            .expect("decode content");
+        let encoded = ProtocolTransform::encode_request_with(&OpenAIChatCompletionsV1, request)
+            .expect("encode content");
+        assert_eq!(encoded.body["messages"][0]["role"], "user");
+        assert_eq!(encoded.body["messages"][0]["content"], content);
+    }
+}
+
+#[test]
+fn request_decode_rejects_invalid_text_or_parts() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::ProtocolAdapter;
+
+    for content in [
+        serde_json::json!(false),
+        serde_json::json!(42),
+        serde_json::json!({"type": "text", "text": "not an array"}),
+        serde_json::json!(["not a part"]),
+        serde_json::json!([{"type": "text", "text": 42}]),
+        serde_json::json!([{"type": "unknown_part"}]),
+    ] {
+        assert!(
+            OpenAIChatCompletionsV1
+                .decode_request(serde_json::json!({
+                    "model": "model",
+                    "messages": [{"role": "user", "content": content}]
+                }))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn owned_encoding_preserves_malformed_legacy_metadata_extensions() {
+    use crate::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
+    use crate::transform::{ProtocolAdapter, ProtocolTransform};
+
+    let message = serde_json::json!({
+        "role": "user",
+        "content": "hello",
+        "id": null,
+        "status": "legacy-status",
+        "provenance": 42,
+        "audience": ["legacy-audience"],
+        "__open_responses_item_reference": null,
+        "vendor_extra": {"value": "preserved"}
+    });
+    let request = OpenAIChatCompletionsV1
+        .decode_request(serde_json::json!({
+            "model": "model",
+            "messages": [message]
+        }))
+        .expect("decode legacy metadata");
+    let encoded = ProtocolTransform::encode_request_with(&OpenAIChatCompletionsV1, request)
+        .expect("encode legacy metadata");
+    assert_eq!(
+        encoded.body["messages"],
+        serde_json::json!([{
+            "role": "user",
+            "content": "hello",
+            "id": null,
+            "status": "legacy-status",
+            "provenance": 42,
+            "audience": ["legacy-audience"],
+            "__open_responses_item_reference": null,
+            "vendor_extra": {"value": "preserved"}
+        }])
+    );
+}
+
+#[test]
+fn owned_encoding_preserves_shared_text_and_visible_block_shapes() {
+    let shared = Arc::new(" shared payload \n".to_string());
+    let item = |role, content| AiItem {
+        role,
+        content,
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let request = AiRequest::new(
+        "model",
+        vec![
+            item(Role::User, MessageContent::Text(Arc::clone(&shared))),
+            item(Role::Assistant, MessageContent::Text(Arc::clone(&shared))),
+            item(
+                Role::User,
+                MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: Arc::clone(&shared),
+                        cache_control: None,
+                    },
+                    ContentBlock::Text {
+                        text: "tail".to_string().into(),
+                        cache_control: None,
+                    },
+                ]),
+            ),
+            item(
+                Role::Assistant,
+                MessageContent::Blocks(vec![ContentBlock::Text {
+                    text: Arc::clone(&shared),
+                    cache_control: None,
+                }]),
+            ),
+        ],
+    );
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
+    assert_eq!(shared.as_str(), " shared payload \n");
+    assert_eq!(body["messages"][0]["content"], shared.as_str());
+    assert_eq!(body["messages"][1]["content"], shared.as_str());
+    assert_eq!(
+        body["messages"][2]["content"],
+        serde_json::json!([
+            {"type": "text", "text": shared.as_str()},
+            {"type": "text", "text": "tail"},
+        ])
+    );
+    assert_eq!(body["messages"][3]["content"], shared.as_str());
+}
+
+#[test]
+fn tool_result_uses_first_block_hint_and_keeps_result_order() {
+    let shared = Arc::new("first result".to_string());
+    let request = AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new().into()),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "first".into(),
+                        name: "first_tool".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "second".into(),
+                        name: "second_tool".into(),
+                        arguments: "{}".into(),
+                    },
+                ]),
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: String::new().into(),
+                        content: Value::String("first result".into()),
+                        content_kind: None,
+                        is_error: None,
+                        cache_control: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "second".into(),
+                        content: Value::String("ignored second block".into()),
+                        content_kind: None,
+                        is_error: None,
+                        cache_control: None,
+                    },
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text(Arc::clone(&shared)),
+                tool_calls: None,
+                tool_call_id: Some("second".into()),
+                meta: None,
+            },
+        ],
+    );
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
+    let results: Vec<_> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["tool_call_id"], "first");
+    assert_eq!(results[0]["content"], "first result");
+    assert_eq!(results[1]["tool_call_id"], "second");
+    assert_eq!(results[1]["content"], shared.as_str());
+    assert_eq!(shared.as_str(), "first result");
+}
+
 /// Regression: Open Responses replays history as separate items — a standalone
 /// reasoning item, one item per function_call, then the outputs. The reasoning
 /// item must not be encoded as an assistant message with neither `content` nor
@@ -10,7 +220,7 @@ use super::*;
 fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
     let assistant_call = |id: &str, name: &str| AiItem {
         role: Role::Assistant,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: Some(vec![ToolCall {
             id: id.into(),
             name: name.into(),
@@ -21,7 +231,7 @@ fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
     };
     let tool_output = |id: &str, text: &str| AiItem {
         role: Role::Tool,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(text.to_owned().into()),
         tool_calls: None,
         tool_call_id: Some(id.into()),
         meta: None,
@@ -31,7 +241,7 @@ fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("修复这个问题".into()),
+                content: MessageContent::Text("修复这个问题".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -44,7 +254,7 @@ fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
         ],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
     assert_replayed_reasoning_is_valid(body);
 
     // Release shape: replay keeps preserved native reasoning as Thinking
@@ -55,7 +265,7 @@ fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("修复这个问题".into()),
+                content: MessageContent::Text("修复这个问题".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -68,7 +278,7 @@ fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
         ],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
     assert_replayed_reasoning_is_valid(body);
 }
 
@@ -106,7 +316,7 @@ fn canonical_system_is_encoded_as_a_system_message() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -114,7 +324,7 @@ fn canonical_system_is_encoded_as_a_system_message() {
     );
     request.instructions = Some("hook-system".into());
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).unwrap();
+    let (body, _) = OpenAIEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["content"], "hook-system");
@@ -127,7 +337,7 @@ fn internal_artifact_identity_is_not_sent_upstream() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: Some(
@@ -142,7 +352,7 @@ fn internal_artifact_identity_is_not_sent_upstream() {
         }],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
     assert_eq!(
         body["messages"][0]["reasoning_content"],
         "visible reasoning"
@@ -161,7 +371,7 @@ fn gateway_request_state_is_not_passed_through_upstream() {
         "model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -178,7 +388,7 @@ fn gateway_request_state_is_not_passed_through_upstream() {
     );
     ingress.insert("client_extension".into(), serde_json::json!("kept"));
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
     assert_eq!(body["client_extension"], "kept");
     assert!(!body.to_string().contains("__stravia_"), "{body}");
 }
@@ -190,7 +400,7 @@ fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
         vec![
             AiItem {
                 role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(String::new().into()),
                 tool_calls: Some(vec![
                     ToolCall {
                         id: (String::new()).into(),
@@ -213,21 +423,21 @@ fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("first result".into()),
+                content: MessageContent::Text("first result".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("external result".into()),
+                content: MessageContent::Text("external result".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("second result".into()),
+                content: MessageContent::Text("second result".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -235,8 +445,10 @@ fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
         ],
     );
 
-    let (first, _) = OpenAIEncoder.encode_request(&request).expect("encode");
-    let (repeated, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (first, _) = OpenAIEncoder
+        .encode_request(request.clone())
+        .expect("encode");
+    let (repeated, _) = OpenAIEncoder.encode_request(request).expect("encode");
     let result_ids: Vec<&str> = first["messages"]
         .as_array()
         .unwrap()
@@ -256,7 +468,7 @@ fn duplicate_external_tool_calls_remain_distinct_and_correlated() {
         vec![
             AiItem {
                 role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(String::new().into()),
                 tool_calls: Some(vec![
                     ToolCall {
                         id: "external".into(),
@@ -274,14 +486,14 @@ fn duplicate_external_tool_calls_remain_distinct_and_correlated() {
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("second result".into()),
+                content: MessageContent::Text("second result".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: Some("external".into()),
                 meta: None,
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("first result".into()),
+                content: MessageContent::Text("first result".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: Some("external".into()),
                 meta: None,
@@ -289,7 +501,7 @@ fn duplicate_external_tool_calls_remain_distinct_and_correlated() {
         ],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
     let result_ids: Vec<&str> = body["messages"]
         .as_array()
         .unwrap()
@@ -318,7 +530,7 @@ fn responses_reasoning_effort_maps_to_chat_without_loss() {
         },
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).unwrap();
+    let (body, _) = OpenAIEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning_effort"], "xhigh");
     assert!(body.get("reasoning").is_none());
@@ -330,7 +542,7 @@ fn generic_toggle_without_provider_adapter_is_rejected() {
         "custom-model",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -347,7 +559,7 @@ fn generic_toggle_without_provider_adapter_is_rejected() {
             stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         )
         .unwrap()
-        .encode_request(&request)
+        .encode_request(request)
         .unwrap_err();
 
     assert!(
@@ -381,7 +593,7 @@ fn thinking_and_reasoning_plaintext_joins_into_reasoning_content() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -402,7 +614,7 @@ fn thinking_and_reasoning_plaintext_joins_into_reasoning_content() {
                         data: "redacted-payload".into(),
                     },
                     ContentBlock::Text {
-                        text: "answer".into(),
+                        text: "answer".to_owned().into(),
                         cache_control: None,
                     },
                 ]),
@@ -413,7 +625,7 @@ fn thinking_and_reasoning_plaintext_joins_into_reasoning_content() {
         ],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
 
     let assistant = &body["messages"][1];
     // 明文推理按块顺序进入 reasoning_content；受保护载荷没有任何载体。
@@ -449,7 +661,7 @@ fn protected_only_assistant_item_is_dropped_entirely() {
             vec![
                 AiItem {
                     role: Role::User,
-                    content: MessageContent::Text("hello".into()),
+                    content: MessageContent::Text("hello".to_owned().into()),
                     tool_calls: None,
                     tool_call_id: None,
                     meta: None,
@@ -463,7 +675,7 @@ fn protected_only_assistant_item_is_dropped_entirely() {
                 },
                 AiItem {
                     role: Role::User,
-                    content: MessageContent::Text("continue".into()),
+                    content: MessageContent::Text("continue".to_owned().into()),
                     tool_calls: None,
                     tool_call_id: None,
                     meta: None,
@@ -471,7 +683,7 @@ fn protected_only_assistant_item_is_dropped_entirely() {
             ],
         );
 
-        let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+        let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
 
         // 条目只剩承载不了的受保护载荷：整条跳过，不能发出空 assistant 消息。
         let messages = body["messages"].as_array().unwrap();
@@ -491,7 +703,7 @@ fn signed_thinking_with_tool_calls_keeps_reasoning_content_and_drops_signature()
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -512,7 +724,7 @@ fn signed_thinking_with_tool_calls_keeps_reasoning_content_and_drops_signature()
             },
             AiItem {
                 role: Role::Tool,
-                content: MessageContent::Text("listing".into()),
+                content: MessageContent::Text("listing".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: Some("call_1".into()),
                 meta: None,
@@ -520,7 +732,7 @@ fn signed_thinking_with_tool_calls_keeps_reasoning_content_and_drops_signature()
         ],
     );
 
-    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (body, _) = OpenAIEncoder.encode_request(request).expect("encode");
 
     let assistant = &body["messages"][1];
     assert_eq!(assistant["reasoning_content"], "inspect the repo");

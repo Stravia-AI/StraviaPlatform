@@ -236,13 +236,13 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
     };
 
     let mut content = match msg.content {
-        Some(OpenAIContent::Text(t)) => MessageContent::Text(t),
+        Some(OpenAIContent::Text(t)) => MessageContent::Text(t.into()),
         Some(OpenAIContent::Parts(parts)) => {
             let blocks = parts
                 .into_iter()
                 .map(|p| match p {
                     OpenAIContentPart::Text { text } => ContentBlock::Text {
-                        text,
+                        text: text.into(),
                         cache_control: None,
                     },
                     OpenAIContentPart::ImageUrl { image_url } => {
@@ -268,7 +268,7 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
                 .collect();
             MessageContent::Blocks(blocks)
         }
-        None => MessageContent::Text(String::new()),
+        None => MessageContent::Text(String::new().into()),
     };
 
     let tool_calls = msg.tool_calls.map(|tcs| {

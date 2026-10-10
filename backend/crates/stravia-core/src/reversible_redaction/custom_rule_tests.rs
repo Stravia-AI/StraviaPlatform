@@ -220,13 +220,14 @@ async fn enabled_custom_rules_protect_requests_and_show_up_in_tests() {
 
     let mut request = AiRequest::new("model", Vec::new());
     request.instructions = Some(text.into());
+    let mut request = std::sync::Arc::new(request);
     let principal = Principal::new("custom-rule-owner");
     gateway
         .redaction
         .protect(&principal, &mut request, None)
         .await
         .unwrap();
-    let protected = request.instructions.unwrap();
+    let protected = request.instructions.as_deref().unwrap();
     assert!(!protected.contains("A B C"));
     assert!(!protected.contains("1234"));
     assert!(protected.contains("never-sent") && protected.contains("a b c"));

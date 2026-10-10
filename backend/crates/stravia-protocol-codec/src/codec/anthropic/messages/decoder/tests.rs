@@ -109,7 +109,7 @@ fn same_protocol_round_trip_keeps_tool_strict_and_tool_result_is_error() {
             .all(|tool| tool.strict.is_none())
     );
     let (encoded, _) = crate::codec::anthropic::messages::encoder::AnthropicEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode");
 
     assert_eq!(encoded["tools"][0]["strict"], true);

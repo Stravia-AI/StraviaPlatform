@@ -3,6 +3,7 @@
 use anyhow::Result;
 use http::header::HeaderMap;
 use serde_json::Value;
+use std::sync::Arc;
 
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::request::ContentBlock;
@@ -17,8 +18,8 @@ pub struct ResponsesEncoder;
 
 // Open Responses fields are emitted only from the canonical IR and dated extension.
 impl ResponsesEncoder {
-    pub fn encode_request(&self, req: &AiRequest) -> Result<(Value, HeaderMap)> {
-        validate_target_thinking_control(req)?;
+    pub fn encode_request(&self, mut req: AiRequest) -> Result<(Value, HeaderMap)> {
+        validate_target_thinking_control(&req)?;
         let extension = match req.ext.as_ref() {
             Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
                 Some(extension)
@@ -32,8 +33,8 @@ impl ResponsesEncoder {
         }
         let mut input: Vec<Value> = Vec::new();
 
-        for item in &req.items {
-            if let Some(native) = super::native_compaction_item(item) {
+        for mut item in std::mem::take(&mut req.items) {
+            if let Some(native) = take_native_compaction_item(&mut item) {
                 input.push(native);
                 continue;
             }
@@ -54,7 +55,7 @@ impl ResponsesEncoder {
                 .tool_calls
                 .as_ref()
                 .is_some_and(|calls| !calls.is_empty())
-                && let Some(items) = encode_mixed_assistant_items(item)?
+                && let Some(items) = encode_mixed_assistant_items(&mut item)?
             {
                 input.extend(items);
                 continue;
@@ -66,7 +67,7 @@ impl ResponsesEncoder {
                 // assistant message 的 output_text。
                 if encrypted_content.is_some() {
                     input.push(encode_native_reasoning_item(
-                        item,
+                        &item,
                         summary,
                         encrypted_content,
                     ));
@@ -89,35 +90,45 @@ impl ResponsesEncoder {
                 if !super::is_registered_extension_item(item_type) {
                     anyhow::bail!("unregistered Open Responses input extension: {item_type}");
                 }
-                input.push(raw.clone());
+                let MessageContent::Blocks(mut blocks) = item.content else {
+                    unreachable!("unknown item has block content");
+                };
+                let ContentBlock::Unknown { raw } = blocks.remove(0) else {
+                    unreachable!("unknown item has an unknown block");
+                };
+                input.push(raw);
                 continue;
             }
             if item.role == Role::Tool {
                 let mut output = serde_json::json!({
                     "type": "function_call_output",
                     "call_id": item.tool_call_id.clone().unwrap_or_default(),
-                    "output": encode_tool_output(&item.content)?,
                 });
-                insert_item_metadata(&mut output, item, true);
+                insert_owned_item_metadata(&mut output, &mut item, true);
+                output["output"] = encode_tool_output(std::mem::replace(
+                    &mut item.content,
+                    MessageContent::Blocks(Vec::new()),
+                ))?;
                 input.push(output);
                 continue;
             }
 
-            if let Some(items) = encode_mixed_assistant_items(item)? {
+            if let Some(items) = encode_mixed_assistant_items(&mut item)? {
                 input.extend(items);
                 continue;
             }
 
-            if let Some(tool_calls) = &item.tool_calls {
+            if let Some(tool_calls) = item.tool_calls.take() {
+                let single_call = tool_calls.len() == 1;
                 for tool_call in tool_calls {
                     let mut call = serde_json::json!({
                         "type": "function_call",
                         "call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "arguments": tool_call.arguments,
                     });
-                    if tool_calls.len() == 1 {
-                        insert_item_metadata(&mut call, item, true);
+                    call["name"] = Value::String(tool_call.name);
+                    call["arguments"] = Value::String(tool_call.arguments);
+                    if single_call {
+                        insert_item_metadata(&mut call, &item, true);
                     }
                     input.push(call);
                 }
@@ -129,7 +140,10 @@ impl ResponsesEncoder {
                     "refusal": refusal,
                 })])
             } else {
-                encode_message_content(&item.content, item.role)?
+                encode_message_content(
+                    std::mem::replace(&mut item.content, MessageContent::Blocks(Vec::new())),
+                    item.role,
+                )?
             };
             if let Some(content) = content {
                 let role = match item.role {
@@ -142,9 +156,9 @@ impl ResponsesEncoder {
                 let mut message = serde_json::json!({
                     "type": "message",
                     "role": role,
-                    "content": content,
                 });
-                insert_item_metadata(&mut message, item, true);
+                message["content"] = Value::Array(content);
+                insert_owned_item_metadata(&mut message, &mut item, true);
                 if let Some(phase) = item.meta.as_ref().and_then(|meta| meta.get("phase")) {
                     message["phase"] = phase.clone();
                 }
@@ -167,10 +181,9 @@ impl ResponsesEncoder {
                 .expect("request body is an object")
                 .insert("input".into(), Value::Array(input));
         }
-        insert_request_control_fields(
+        insert_owned_request_control_fields(
             body.as_object_mut().expect("request body is an object"),
             req,
-            extension,
         );
 
         Ok((body, HeaderMap::new()))
@@ -234,6 +247,101 @@ pub fn effective_response_profile_from_request(req: &AiRequest) -> Value {
         profile.entry(key).or_insert(value);
     }
     Value::Object(profile)
+}
+
+fn insert_owned_request_control_fields(
+    obj: &mut serde_json::Map<String, Value>,
+    mut req: AiRequest,
+) {
+    let tools = req.tools.take();
+    let format = req.response_format.take();
+    let tool_choice = req.tool_choice.take();
+    let mut extension = match req.ext.take() {
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
+            Some(extension)
+        }
+        _ => None,
+    };
+    let (stream_options, text, passthrough_tools, passthrough_body) =
+        if let Some(extension) = extension.as_mut() {
+            (
+                extension.stream_options.take(),
+                extension.text.take(),
+                std::mem::take(&mut extension.passthrough_tools),
+                std::mem::take(&mut extension.passthrough_body),
+            )
+        } else {
+            (None, None, Vec::new(), Default::default())
+        };
+    insert_request_control_fields(obj, &req, extension.as_ref());
+    if let Some(tools) = tools {
+        let encoded = tools
+            .into_iter()
+            .map(|tool| {
+                if tool.name.starts_with("__builtin__") {
+                    tool.parameters
+                } else {
+                    let mut encoded = serde_json::json!({"type": "function"});
+                    encoded["name"] = Value::String(tool.name);
+                    encoded["description"] =
+                        tool.description.map(Value::String).unwrap_or(Value::Null);
+                    encoded["parameters"] = tool.parameters;
+                    if let Some(strict) = tool.strict {
+                        encoded["strict"] = Value::Bool(strict);
+                    }
+                    encoded
+                }
+            })
+            .collect();
+        obj.insert("tools".into(), Value::Array(encoded));
+    }
+    if let Some(choice) = tool_choice {
+        let encoded = match choice {
+            ToolChoice::Raw(value) => value,
+            other => tool_choice_to_value(&other),
+        };
+        obj.insert("tool_choice".into(), encoded);
+    }
+    if let Some(format) = format {
+        let format = match format {
+            ResponseFormat::Text => serde_json::json!({"type": "text"}),
+            ResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            } => {
+                let mut format = serde_json::json!({"type": "json_schema"});
+                format["name"] = Value::String(name);
+                format["schema"] = schema;
+                if let Some(strict) = strict {
+                    format["strict"] = Value::Bool(strict);
+                }
+                format
+            }
+            ResponseFormat::JsonObject => Value::Null,
+        };
+        if !format.is_null() {
+            let mut text = serde_json::Map::new();
+            text.insert("format".into(), format);
+            obj.insert("text".into(), Value::Object(text));
+        }
+    }
+    if let Some(value) = stream_options {
+        obj.insert("stream_options".into(), value);
+    }
+    if let Some(value) = text {
+        obj.insert("text".into(), value);
+    }
+    if !passthrough_tools.is_empty() {
+        obj.entry("tools")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("encoded tools are an array")
+            .extend(passthrough_tools);
+    }
+    for (key, value) in passthrough_body {
+        obj.entry(key).or_insert(value);
+    }
 }
 
 fn insert_request_control_fields(
@@ -414,6 +522,66 @@ fn validate_target_thinking_control(req: &AiRequest) -> anyhow::Result<()> {
     }
 }
 
+fn take_native_compaction_item(
+    item: &mut stravia_runtime_contract::protocol::ir::AiItem,
+) -> Option<Value> {
+    if !item.is_compaction() && !item.is_compaction_trigger() {
+        return None;
+    }
+    let mut wire = item
+        .meta
+        .as_mut()
+        .and_then(|meta| {
+            meta.remove_extension("__open_responses_item")
+                .ok()
+                .flatten()
+        })
+        .and_then(|value| match value {
+            Value::Object(object) => Some(object),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let MessageContent::Blocks(mut blocks) =
+        std::mem::replace(&mut item.content, MessageContent::Blocks(Vec::new()))
+    else {
+        unreachable!("native compaction content was checked above");
+    };
+    match blocks.remove(0) {
+        ContentBlock::Compaction { encrypted_content } => {
+            wire.insert("type".into(), Value::String("compaction".into()));
+            wire.insert("encrypted_content".into(), Value::String(encrypted_content));
+        }
+        ContentBlock::CompactionTrigger {} => {
+            wire.insert("type".into(), Value::String("compaction_trigger".into()));
+        }
+        _ => unreachable!("native compaction block was checked above"),
+    }
+    if let Some(id) = item.id_ref() {
+        wire.insert("id".into(), Value::String(id.into()));
+    }
+    Some(Value::Object(wire))
+}
+
+fn insert_owned_item_metadata(
+    encoded: &mut Value,
+    item: &mut stravia_runtime_contract::protocol::ir::AiItem,
+    status: bool,
+) {
+    if let Some(Value::Object(fields)) = item.meta.as_mut().and_then(|meta| {
+        meta.remove_extension("__open_responses_item_fields")
+            .ok()
+            .flatten()
+    }) {
+        let object = encoded
+            .as_object_mut()
+            .expect("encoded Open Responses item is an object");
+        for (field, value) in fields {
+            object.entry(field).or_insert(value);
+        }
+    }
+    insert_item_metadata(encoded, item, status);
+}
+
 pub(super) fn insert_item_metadata(
     encoded: &mut Value,
     item: &stravia_runtime_contract::protocol::ir::AiItem,
@@ -488,7 +656,7 @@ fn degraded_reasoning_parts<S: AsRef<str>>(texts: impl Iterator<Item = S>) -> Ve
 }
 
 fn encode_mixed_assistant_items(
-    item: &stravia_runtime_contract::protocol::ir::AiItem,
+    item: &mut stravia_runtime_contract::protocol::ir::AiItem,
 ) -> Result<Option<Vec<Value>>> {
     let MessageContent::Blocks(blocks) = &item.content else {
         return Ok(None);
@@ -506,6 +674,18 @@ fn encode_mixed_assistant_items(
         return Ok(None);
     }
 
+    let represented_calls: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let MessageContent::Blocks(blocks) =
+        std::mem::replace(&mut item.content, MessageContent::Blocks(Vec::new()))
+    else {
+        unreachable!("mixed assistant content was checked above");
+    };
     let mut items = Vec::with_capacity(blocks.len());
     let mut message_content = Vec::new();
     for block in blocks {
@@ -530,7 +710,7 @@ fn encode_mixed_assistant_items(
                     push_derived_assistant_message(&mut items, &mut message_content);
                     items.push(encode_native_reasoning_item(
                         item,
-                        summary,
+                        &summary,
                         encrypted_content,
                     ));
                     message_content.extend(degraded_reasoning_parts(content.iter()));
@@ -557,7 +737,7 @@ fn encode_mixed_assistant_items(
             other => {
                 anyhow::bail!(
                     "responses request cannot encode {} content block in assistant message",
-                    content_block_kind(other)
+                    content_block_kind(&other)
                 );
             }
         }
@@ -566,9 +746,7 @@ fn encode_mixed_assistant_items(
 
     if let Some(tool_calls) = &item.tool_calls {
         for tool_call in tool_calls {
-            let represented = blocks.iter().any(
-                |block| matches!(block, ContentBlock::ToolUse { id, .. } if id == &tool_call.id),
-            );
+            let represented = represented_calls.contains(&tool_call.id);
             if represented {
                 continue;
             }
@@ -589,14 +767,15 @@ fn push_derived_assistant_message(items: &mut Vec<Value>, content: &mut Vec<Valu
     if content.is_empty() {
         return;
     }
-    items.push(serde_json::json!({
+    let mut message = serde_json::json!({
         "type": "message",
         "role": "assistant",
-        "content": std::mem::take(content),
-    }));
+    });
+    message["content"] = Value::Array(std::mem::take(content));
+    items.push(message);
 }
 
-fn encode_message_content(content: &MessageContent, role: Role) -> Result<Option<Vec<Value>>> {
+fn encode_message_content(content: MessageContent, role: Role) -> Result<Option<Vec<Value>>> {
     let text_type = match role {
         Role::System | Role::Developer | Role::User => "input_text",
         Role::Assistant => "output_text",
@@ -608,16 +787,13 @@ fn encode_message_content(content: &MessageContent, role: Role) -> Result<Option
             if text.is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(vec![serde_json::json!({
-                    "type": text_type,
-                    "text": text
-                })]))
+                Ok(Some(vec![text_part(text_type, Arc::unwrap_or_clone(text))]))
             }
         }
         MessageContent::Blocks(blocks) => {
             let mut encoded = Vec::with_capacity(blocks.len());
             for block in blocks {
-                if matches!(block, ContentBlock::Text { text, .. } if text.is_empty()) {
+                if matches!(&block, ContentBlock::Text { text, .. } if text.is_empty()) {
                     continue;
                 }
                 if role == Role::Assistant {
@@ -632,7 +808,7 @@ fn encode_message_content(content: &MessageContent, role: Role) -> Result<Option
                     ) {
                         anyhow::bail!(
                             "responses request cannot encode {} content block in assistant message",
-                            content_block_kind(block)
+                            content_block_kind(&block)
                         );
                     }
                 }
@@ -679,10 +855,10 @@ fn request_tool_output_part(value: &Value) -> bool {
     }
 }
 
-fn normalize_tool_result_content(content: &Value) -> Result<Value> {
-    match content {
-        Value::String(_) => Ok(content.clone()),
-        Value::Array(items) if items.iter().all(request_tool_output_part) => Ok(content.clone()),
+fn normalize_tool_result_content(content: Value) -> Result<Value> {
+    match &content {
+        Value::String(_) => Ok(content),
+        Value::Array(items) if items.iter().all(request_tool_output_part) => Ok(content),
         other => Ok(Value::String(serde_json::to_string(other)?)),
     }
 }
@@ -706,15 +882,18 @@ pub(crate) fn tool_output_representable(content: &MessageContent) -> bool {
     }
 }
 
-pub(crate) fn encode_tool_output(content: &MessageContent) -> Result<Value> {
+pub(crate) fn encode_tool_output(content: MessageContent) -> Result<Value> {
     match content {
-        MessageContent::Text(text) => Ok(Value::String(text.clone())),
-        MessageContent::Blocks(blocks) => {
-            if let [
-                ContentBlock::ToolResult { content, .. }
-                | ContentBlock::ServerToolResult { content, .. },
-            ] = blocks.as_slice()
+        MessageContent::Text(text) => Ok(Value::String(Arc::unwrap_or_clone(text))),
+        MessageContent::Blocks(mut blocks) => {
+            if let [ContentBlock::ToolResult { .. } | ContentBlock::ServerToolResult { .. }] =
+                blocks.as_slice()
             {
+                let (ContentBlock::ToolResult { content, .. }
+                | ContentBlock::ServerToolResult { content, .. }) = blocks.remove(0)
+                else {
+                    unreachable!("single tool result checked above");
+                };
                 return normalize_tool_result_content(content);
             }
             let mut output = Vec::with_capacity(blocks.len());
@@ -725,8 +904,7 @@ pub(crate) fn encode_tool_output(content: &MessageContent) -> Result<Value> {
                         match normalize_tool_result_content(content)? {
                             Value::Array(items) => output.extend(items),
                             Value::String(text) => {
-                                output
-                                    .push(serde_json::json!({"type": "input_text", "text": text}));
+                                output.push(text_part("input_text", text));
                             }
                             _ => unreachable!("normalized tool output is string or array"),
                         }
@@ -770,7 +948,7 @@ fn response_tool_output_part(value: &Value) -> bool {
 
 pub(crate) fn encode_response_tool_output(content: &MessageContent) -> Result<Value> {
     match content {
-        MessageContent::Text(text) => Ok(Value::String(text.clone())),
+        MessageContent::Text(text) => Ok(Value::String(text.as_ref().clone())),
         MessageContent::Blocks(blocks) => {
             if let [
                 ContentBlock::ToolResult { content, .. }
@@ -802,7 +980,8 @@ pub(crate) fn encode_response_tool_output(content: &MessageContent) -> Result<Va
                         })),
                     },
                     _ => {
-                        let mut encoded = encode_responses_content_block(block, "input_text")?;
+                        let mut encoded =
+                            encode_responses_content_block(block.clone(), "input_text")?;
                         if encoded.get("type").and_then(Value::as_str) == Some("input_image")
                             && encoded.get("detail").is_none()
                         {
@@ -823,12 +1002,16 @@ pub(crate) fn encode_response_tool_output(content: &MessageContent) -> Result<Va
     }
 }
 
-fn encode_responses_content_block(block: &ContentBlock, text_type: &str) -> Result<Value> {
+fn text_part(text_type: &str, text: String) -> Value {
+    let mut part = serde_json::Map::new();
+    part.insert("type".into(), Value::String(text_type.into()));
+    part.insert("text".into(), Value::String(text));
+    Value::Object(part)
+}
+
+fn encode_responses_content_block(block: ContentBlock, text_type: &str) -> Result<Value> {
     match block {
-        ContentBlock::Text { text, .. } => Ok(serde_json::json!({
-            "type": text_type,
-            "text": text
-        })),
+        ContentBlock::Text { text, .. } => Ok(text_part(text_type, Arc::unwrap_or_clone(text))),
         ContentBlock::Image { source, detail, .. } => {
             let mut encoded = serde_json::json!({"type": "input_image"});
             match source {
@@ -837,24 +1020,25 @@ fn encode_responses_content_block(block: &ContentBlock, text_type: &str) -> Resu
                         Value::String(format!("data:{media_type};base64,{data}"));
                 }
                 MediaSource::Url(url) => {
-                    encoded["image_url"] = Value::String(url.clone());
+                    encoded["image_url"] = Value::String(url);
                 }
                 MediaSource::FileId { file_id, detail } => {
-                    encoded["file_id"] = Value::String(file_id.clone());
+                    encoded["file_id"] = Value::String(file_id);
                     if let Some(detail) = detail {
-                        encoded["detail"] = Value::String(detail.clone());
+                        encoded["detail"] = Value::String(detail);
                     }
                 }
             }
             if let Some(detail) = detail {
-                encoded["detail"] = Value::String(detail.clone());
+                encoded["detail"] = Value::String(detail);
             }
             Ok(encoded)
         }
-        ContentBlock::Refusal { refusal } => Ok(serde_json::json!({
-            "type": "refusal",
-            "refusal": refusal
-        })),
+        ContentBlock::Refusal { refusal } => {
+            let mut encoded = serde_json::json!({"type": "refusal"});
+            encoded["refusal"] = Value::String(refusal);
+            Ok(encoded)
+        }
         ContentBlock::File { source, media_type } => {
             let mut encoded = serde_json::json!({"type": "input_file"});
             match source {
@@ -865,15 +1049,15 @@ fn encode_responses_content_block(block: &ContentBlock, text_type: &str) -> Resu
                     let media_type = media_type
                         .as_deref()
                         .filter(|value| !value.is_empty())
-                        .unwrap_or(source_media_type);
+                        .unwrap_or(&source_media_type);
                     encoded["file_data"] =
                         Value::String(format!("data:{media_type};base64,{data}"));
                 }
                 MediaSource::Url(url) => {
-                    encoded["file_url"] = Value::String(url.clone());
+                    encoded["file_url"] = Value::String(url);
                 }
                 MediaSource::FileId { file_id, .. } => {
-                    encoded["file_id"] = Value::String(file_id.clone());
+                    encoded["file_id"] = Value::String(file_id);
                 }
             }
             Ok(encoded)
@@ -887,28 +1071,27 @@ fn encode_responses_content_block(block: &ContentBlock, text_type: &str) -> Resu
                     let media_type = media_type
                         .as_deref()
                         .filter(|value| !value.is_empty())
-                        .unwrap_or(source_media_type);
+                        .unwrap_or(&source_media_type);
                     format!("data:{media_type};base64,{data}")
                 }
-                MediaSource::Url(url) => url.clone(),
+                MediaSource::Url(url) => url,
                 MediaSource::FileId { .. } => {
                     anyhow::bail!(
                         "responses request cannot encode a file-id video: dated input_video requires video_url"
                     )
                 }
             };
-            Ok(serde_json::json!({
-                "type": "input_video",
-                "video_url": video_url
-            }))
+            let mut encoded = serde_json::json!({"type": "input_video"});
+            encoded["video_url"] = Value::String(video_url);
+            Ok(encoded)
         }
-        ContentBlock::Audio { .. } => anyhow::bail!(
+        block @ ContentBlock::Audio { .. } => anyhow::bail!(
             "responses request cannot encode {} content block: Responses API has no supported wire mapping",
-            content_block_kind(block)
+            content_block_kind(&block)
         ),
-        _ => anyhow::bail!(
+        block => anyhow::bail!(
             "responses request cannot encode {} content block",
-            content_block_kind(block)
+            content_block_kind(&block)
         ),
     }
 }

@@ -7,6 +7,23 @@ use stravia_vendor_runtime::{LoadError, VendorRuntime};
 use stravia_vendor_sdk::{AiRequest, Operation, ProviderSnapshot};
 
 #[tokio::test]
+async fn rejects_guest_async_types_before_descriptor_admission() {
+    let bytes = wat::parse_str("(component (type (future string)))").expect("async component");
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    let engine = wasmtime::Engine::new(&config).expect("async-capable fixture engine");
+    wasmtime::component::Component::from_binary(&engine, &bytes)
+        .expect("fixture must be a valid component when guest async types are enabled");
+
+    let runtime = VendorRuntime::new().expect("runtime");
+    assert!(matches!(
+        runtime.load(&bytes).await,
+        Err(LoadError::InvalidComponent(_))
+    ));
+}
+
+#[tokio::test]
 async fn rejects_forbidden_wasi_interfaces_and_versions() {
     let runtime = VendorRuntime::new().expect("runtime");
     let mut names = Vec::new();

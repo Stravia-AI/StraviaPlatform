@@ -43,7 +43,7 @@ async fn shared_text_normalization_scrubs_extension_keys_and_keeps_sql_errors() 
     assert_eq!(input.instructions.as_deref(), Some("existing instructions"));
     assert!(matches!(
         &input.items[0].content,
-        stravia_runtime_contract::protocol::ir::MessageContent::Text(text) if text == "ordinary text"
+        stravia_runtime_contract::protocol::ir::MessageContent::Text(text) if text.as_str() == "ordinary text"
     ));
 
     gateway

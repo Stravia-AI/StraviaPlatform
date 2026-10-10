@@ -249,7 +249,7 @@ pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
     }
     if !output.is_empty() {
         blocks.push(ContentBlock::Text {
-            text: output,
+            text: output.into(),
             cache_control: None,
         });
     }
@@ -263,7 +263,7 @@ pub fn client_history_output_item(resp: &AiResponse) -> AiItem {
     AiItem {
         role: Role::Assistant,
         content: if blocks.is_empty() {
-            MessageContent::Text(String::new())
+            MessageContent::Text(String::new().into())
         } else {
             MessageContent::Blocks(blocks)
         },

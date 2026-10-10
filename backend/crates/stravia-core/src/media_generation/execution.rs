@@ -299,7 +299,7 @@ async fn generate_image(
 fn reference_request(model: String, prompt: String, references: Vec<String>) -> AiRequest {
     let mut content = Vec::with_capacity(references.len() + 1);
     content.push(ContentBlock::Text {
-        text: prompt,
+        text: std::sync::Arc::new(prompt),
         cache_control: None,
     });
     content.extend(references.into_iter().map(|reference| ContentBlock::Image {

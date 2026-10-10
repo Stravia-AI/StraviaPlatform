@@ -2273,7 +2273,7 @@ async fn mixed_tool_continuation_replays_impl() {
         "mixed-continuation-route",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -2327,7 +2327,7 @@ async fn mixed_tool_continuation_replays_impl() {
     let mut resumed = initial;
     resumed.items.push(AiItem {
         role: Role::Assistant,
-        content: MessageContent::Text(marker),
+        content: MessageContent::Text(std::sync::Arc::new(marker)),
         tool_calls: Some(vec![ToolCall {
             id: "client-call".into(),
             name: "client_tool".into(),
@@ -2338,7 +2338,7 @@ async fn mixed_tool_continuation_replays_impl() {
     });
     resumed.items.push(AiItem {
         role: Role::Tool,
-        content: MessageContent::Text("client result".into()),
+        content: MessageContent::Text(std::sync::Arc::new("client result".into())),
         tool_calls: None,
         tool_call_id: Some("client-call".into()),
         meta: None,
@@ -3847,7 +3847,9 @@ async fn execute_stream_with_timeout(
         model,
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "test".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3910,7 +3912,9 @@ async fn execute_protocol_request_with_session(
         model,
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "test".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3955,7 +3959,9 @@ async fn execute_protocol_request_with_timeout(
         model,
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "test".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,

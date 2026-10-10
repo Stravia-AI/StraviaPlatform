@@ -174,16 +174,15 @@ fn adapter_round_trips_request_for_every_endpoint() {
         let body = sample_body(id);
         let h = reg.adapter(&id).unwrap();
         let internal = h.decode_request(body).unwrap();
+        let _path = h.request_path(&internal.model, internal.stream.enabled);
         let (out_body, headers) = h
-            .encode_request(&internal)
+            .encode_request(internal)
             .unwrap_or_else(|e| panic!("encoder failed for {id}: {e}"));
         assert!(
             out_body.is_object(),
             "encoded body must be an object for {id}"
         );
         let _ = headers;
-
-        let _path = h.request_path(&internal.model, internal.stream.enabled);
     }
 }
 
@@ -263,7 +262,7 @@ fn embeddings_decoder_round_trips_body() {
     let (encoded, _headers) = reg
         .adapter(&OPENAI_COMPATIBLE_EMBEDDINGS_V1)
         .unwrap()
-        .encode_request(&internal)
+        .encode_request(internal)
         .unwrap();
     assert_eq!(encoded, body, "encoder must round-trip the original body");
 }

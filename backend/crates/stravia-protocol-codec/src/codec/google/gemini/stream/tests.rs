@@ -357,7 +357,7 @@ fn assert_accumulated_native_gemini_replay(thought_is_signed: bool) {
         }))
         .expect("decode native Gemini replay request");
     let replay = pair
-        .encode_request(&request)
+        .encode_request(request)
         .expect("encode native Gemini replay request");
     assert_eq!(
         replay.body["contents"][0]["parts"],

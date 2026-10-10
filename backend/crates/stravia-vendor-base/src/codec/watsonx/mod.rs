@@ -49,7 +49,7 @@ impl ProtocolAdapter for WatsonxTextChatV1 {
         Ok(request)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         let (mut body, headers) = OpenAIChatCompletionsV1.encode_request(request)?;
         let object = body
             .as_object_mut()

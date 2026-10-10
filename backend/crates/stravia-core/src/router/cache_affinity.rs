@@ -207,7 +207,7 @@ mod tests {
                 .iter()
                 .map(|item| AiItem {
                     role: Role::User,
-                    content: MessageContent::Text((*item).into()),
+                    content: MessageContent::Text(std::sync::Arc::new((*item).into())),
                     tool_calls: None,
                     tool_call_id: None,
                     meta: None,
@@ -261,7 +261,7 @@ mod tests {
         let owner = Principal::new("owner");
         let question = AiItem {
             role: Role::User,
-            content: MessageContent::Text("question".into()),
+            content: MessageContent::Text(std::sync::Arc::new("question".into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -274,7 +274,7 @@ mod tests {
                     signature: Some("opaque".into()),
                 },
                 ContentBlock::Text {
-                    text: "answer".into(),
+                    text: "answer".to_owned().into(),
                     cache_control: None,
                 },
                 ContentBlock::ToolUse {
@@ -299,7 +299,7 @@ mod tests {
                 anthropic_output,
                 AiItem {
                     role: Role::User,
-                    content: MessageContent::Text("recorded turn".into()),
+                    content: MessageContent::Text("recorded turn".to_owned().into()),
                     tool_calls: None,
                     tool_call_id: None,
                     meta: None,
@@ -333,7 +333,7 @@ mod tests {
                 }),
                 AiItem {
                     role: Role::User,
-                    content: MessageContent::Text("next turn".into()),
+                    content: MessageContent::Text("next turn".to_owned().into()),
                     tool_calls: None,
                     tool_call_id: None,
                     meta: None,

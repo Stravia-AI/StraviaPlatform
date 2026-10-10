@@ -365,7 +365,7 @@ mod tests {
         .unwrap();
         common::encode_inference_request(
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-            &request,
+            request,
         )
         .unwrap()
         .body
@@ -473,7 +473,7 @@ mod tests {
         .unwrap();
         let body = common::encode_inference_request(
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-            &request,
+            request,
         )
         .unwrap()
         .body;
@@ -524,7 +524,7 @@ mod tests {
         assert!(
             common::encode_inference_request(
                 &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-                &unknown
+                unknown
             )
             .is_err()
         );
@@ -561,7 +561,7 @@ mod tests {
             &mut request,
         )
         .unwrap();
-        let body = pair.encode_request(&request).unwrap().body;
+        let body = pair.encode_request(request).unwrap().body;
         assert_eq!(body["messages"][0]["reasoning_content"], "");
         assert_eq!(body["messages"][1]["reasoning_content"], "native reasoning");
         assert!(body["messages"][2].get("reasoning_content").is_none());

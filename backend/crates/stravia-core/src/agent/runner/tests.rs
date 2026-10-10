@@ -157,7 +157,7 @@ fn agent_tool_payload(request: &AiRequest) -> (&Value, Option<bool>) {
 #[tokio::test]
 async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable_text() {
     const SECRET: &str = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
-    let (mut request, _) = platform_output_roundtrip(vec![
+    let (request, _) = platform_output_roundtrip(vec![
         ContentBlock::Image {
             source: MediaSource::Base64 {
                 media_type: "image/png".into(),
@@ -167,13 +167,13 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
             cache_control: None,
         },
         ContentBlock::Text {
-            text: format!("credential: {SECRET}"),
+            text: format!("credential: {SECRET}").into(),
             cache_control: None,
         },
         ContentBlock::Document {
             source: stravia_runtime_contract::protocol::ir::DocumentSource::Blocks {
                 content: vec![ContentBlock::Text {
-                    text: SECRET.into(),
+                    text: SECRET.to_owned().into(),
                     cache_control: None,
                 }],
             },
@@ -207,6 +207,7 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
         .intern(&Principal::new("owner"), &[SECRET.into()])
         .await
         .unwrap();
+    let mut request = std::sync::Arc::new(request);
     gateway
         .redaction
         .protect(&Principal::new("owner"), &mut request, None)
@@ -257,13 +258,14 @@ async fn platform_agent_business_json_and_single_text_remain_readable_payloads()
         (ContentBlock::Unknown { raw: json.clone() }, json),
         (
             ContentBlock::Text {
-                text: SECRET.into(),
+                text: std::sync::Arc::new(SECRET.into()),
                 cache_control: None,
             },
             Value::String(SECRET.into()),
         ),
     ] {
-        let (mut request, _) = platform_output_roundtrip(vec![block]).await;
+        let (request, _) = platform_output_roundtrip(vec![block]).await;
+        let mut request = std::sync::Arc::new(request);
         gateway
             .redaction
             .protect(&Principal::new("owner"), &mut request, None)

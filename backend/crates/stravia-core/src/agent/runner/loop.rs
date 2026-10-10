@@ -329,7 +329,7 @@ impl AgentRunner {
         .await?;
 
         let mut content = vec![ContentBlock::Text {
-            text: input.prompt.clone(),
+            text: input.prompt.clone().into(),
             cache_control: None,
         }];
         let artifact_blocks = tokio::select! {
@@ -360,7 +360,7 @@ impl AgentRunner {
         transcript.push(AiItem {
             role: Role::User,
             content: if content.len() == 1 {
-                MessageContent::Text(input.prompt.clone())
+                MessageContent::Text(std::sync::Arc::new(input.prompt.clone()))
             } else {
                 MessageContent::Blocks(content)
             },
@@ -926,7 +926,7 @@ fn append_finalization_instruction(
 fn user_instruction(text: impl Into<String>) -> AiItem {
     AiItem {
         role: Role::User,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(std::sync::Arc::new(text.into())),
         tool_calls: None,
         tool_call_id: None,
         meta: None,

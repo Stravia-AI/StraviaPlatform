@@ -2547,14 +2547,15 @@ async fn recompute_usage_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     iid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE interaction_id=?) WHERE id=?").bind(iid).bind(iid).execute(&mut **tx).await?;
+    // 从 interaction 的索引 run 集合开始，避免每次 usage 扫描全部历史 attempt。
+    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(a.input_tokens),SUM(a.output_tokens),SUM(a.cache_read_tokens),SUM(a.cache_write_tokens),SUM(a.reasoning_tokens) FROM inference_run_observations r CROSS JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=? AND a.interaction_id=?) WHERE id=?").bind(iid).bind(iid).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 async fn recompute_usage_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     iid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE interaction_id=$1) WHERE id=$1").bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(a.input_tokens),SUM(a.output_tokens),SUM(a.cache_read_tokens),SUM(a.cache_write_tokens),SUM(a.reasoning_tokens) FROM inference_run_observations r JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=$1 AND a.interaction_id=$1) WHERE id=$1").bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 fn resolved_evidence(
@@ -2741,6 +2742,129 @@ mod tests {
 
     use super::*;
     use crate::interaction_observation::types::{FailedRequestQuery, ForestQuery};
+
+    #[tokio::test]
+    async fn confirmed_usage_aggregates_all_runs_without_foreign_interactions() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        for (interaction, run, parent, input, output, cache) in [
+            ("usage-root", "usage-first", None, Some(11), None, Some(0)),
+            (
+                "usage-root",
+                "usage-child",
+                Some("usage-first"),
+                None,
+                Some(3),
+                None,
+            ),
+            (
+                "usage-foreign",
+                "usage-other",
+                None,
+                Some(99),
+                Some(99),
+                Some(99),
+            ),
+        ] {
+            admit_waiting_scenario_run(&store, interaction, run, parent).await?;
+            store
+                .persist_run_event(
+                    interaction,
+                    run,
+                    &RunEvent::ModelTurnStarted {
+                        model_turn_id: run.into(),
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        estimated_input_tokens: None,
+                    },
+                    2,
+                    i64::MAX,
+                )
+                .await?;
+            store
+                .persist_run_event(
+                    interaction,
+                    run,
+                    &RunEvent::TargetAttemptStarted {
+                        model_turn_id: run.into(),
+                        attempt_id: run.into(),
+                        target_id: "target".into(),
+                        provider_id: "provider".into(),
+                        provider_name: "provider".into(),
+                        upstream_model: "model".into(),
+                        protocol: "responses".into(),
+                        upstream_url: "http://localhost".into(),
+                    },
+                    3,
+                    i64::MAX,
+                )
+                .await?;
+            store
+                .persist_run_event(
+                    interaction,
+                    run,
+                    &RunEvent::UsageConfirmed {
+                        model_turn_id: run.into(),
+                        attempt_id: run.into(),
+                        usage: ConfirmedUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            cache_read_tokens: cache,
+                            cache_write_tokens: None,
+                            reasoning_tokens: None,
+                            coverage: None,
+                        },
+                    },
+                    4,
+                    i64::MAX,
+                )
+                .await?;
+            store
+                .persist_run_event(
+                    interaction,
+                    run,
+                    &RunEvent::UsageConfirmed {
+                        model_turn_id: run.into(),
+                        attempt_id: run.into(),
+                        usage: ConfirmedUsage {
+                            input_tokens: Some(1000),
+                            output_tokens: Some(1000),
+                            cache_read_tokens: Some(1000),
+                            cache_write_tokens: Some(1000),
+                            reasoning_tokens: Some(1000),
+                            coverage: None,
+                        },
+                    },
+                    5,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let detail = store
+            .get_interaction("usage-root", ForestQuery::default())
+            .await?
+            .unwrap();
+        assert_eq!(detail.interaction.usage.input_tokens, Some(11));
+        assert_eq!(detail.interaction.usage.output_tokens, Some(3));
+        assert_eq!(detail.interaction.usage.cache_read_tokens, Some(0));
+        assert_eq!(detail.interaction.usage.cache_write_tokens, None);
+        assert_eq!(detail.interaction.usage.reasoning_tokens, None);
+        let coverage = detail.interaction.usage.coverage.unwrap();
+        assert_eq!(coverage.attempt_count, 2);
+        assert_eq!(coverage.missing_input_tokens, 1);
+        assert_eq!(coverage.missing_output_tokens, 1);
+        assert_eq!(coverage.missing_cache_read_tokens, 1);
+        assert_eq!(coverage.missing_cache_write_tokens, 2);
+        assert_eq!(coverage.missing_reasoning_tokens, 2);
+        Ok(())
+    }
 
     async fn confirmed_usage_scenario(store: &ObservationStore) -> anyhow::Result<()> {
         use crate::interaction_observation::types::UsageCoverage;

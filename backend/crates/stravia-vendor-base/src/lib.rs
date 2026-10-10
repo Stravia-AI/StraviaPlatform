@@ -267,12 +267,12 @@ pub(crate) fn apply_session_affinity(
 
 pub(crate) fn encode_inference_request(
     protocol: &str,
-    request: &AiRequest,
+    request: AiRequest,
 ) -> Result<EncodedRequest, PluginError> {
     let Some(adapter) = codec::adapter(protocol) else {
         return common::encode_inference_request(protocol, request);
     };
-    common::ensure_no_native_compaction(request)?;
+    common::ensure_no_native_compaction(&request)?;
     ProtocolTransform::encode_request_with(adapter, request)
         .map_err(common::map_request_transform_error)
 }

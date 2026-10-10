@@ -133,7 +133,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
                 .unwrap_or_else(|| "unknown_tool".to_string());
             normalized_messages.push(AiItem {
                 role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
+                content: MessageContent::Text(String::new().into()),
                 tool_calls: Some(vec![ToolCall {
                     id: final_id.clone(),
                     name: synth_name,

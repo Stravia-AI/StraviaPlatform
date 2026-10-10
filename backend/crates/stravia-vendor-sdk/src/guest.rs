@@ -904,7 +904,9 @@ fn decode_body<T: DeserializeOwned>(payload: &types::CanonicalPayload) -> Result
 fn encode_canonical<T: Serialize>(value: &T) -> Result<types::CanonicalPayload, PluginError> {
     Ok(types::CanonicalPayload {
         format: CANONICAL_FORMAT_VERSION,
-        body: encode_body(value)?,
+        // Only immutable SDK DTO snapshots reach this private encoder.
+        body: stravia_runtime_contract::json::to_vec(value)
+            .map_err(|_| error(ErrorKind::Invalid, "operation result could not be encoded"))?,
     })
 }
 

@@ -12,7 +12,7 @@ fn encodes_cohere_tool_schema_without_openai_shape() {
         cache_control: None,
         meta: None,
     }]);
-    let (body, _) = CohereChatV2.encode_request(&request).unwrap();
+    let (body, _) = CohereChatV2.encode_request(request).unwrap();
     assert_eq!(body["tools"][0]["function"]["name"], "weather");
     assert!(body.get("messages").is_some());
     assert!(body.get("choices").is_none());
@@ -43,7 +43,7 @@ fn normalizes_cohere_null_tool_arguments() {
 fn omits_assistant_text_when_replaying_cohere_tool_calls() {
     let item = AiItem {
         role: Role::Assistant,
-        content: MessageContent::Text("I will call weather.".into()),
+        content: MessageContent::Text("I will call weather.".to_owned().into()),
         tool_calls: Some(vec![ToolCall {
             id: "call_1".into(),
             name: "weather".into(),
@@ -84,7 +84,7 @@ fn replays_reasoning_as_thinking_parts_without_protected_payloads() {
         ],
     );
 
-    let (body, _) = CohereChatV2.encode_request(&request).unwrap();
+    let (body, _) = CohereChatV2.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(
         messages[0]["content"],
@@ -141,7 +141,7 @@ fn drops_protected_only_assistant_without_breaking_tool_pairing() {
     );
     request.items[0].role = Role::User;
 
-    let (body, _) = CohereChatV2.encode_request(&request).unwrap();
+    let (body, _) = CohereChatV2.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     // 空 assistant 条目被整条跳过；带 tool_call 的条目保留以维持配对。
     assert_eq!(messages.len(), 3);

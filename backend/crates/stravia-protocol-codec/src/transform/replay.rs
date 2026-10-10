@@ -8,6 +8,7 @@ use stravia_runtime_contract::protocol::ir::{
 /// 宿主只负责来源约束：不可回放的签名、`encrypted_content` 与 redacted 块在此剥离。
 /// 明文思考保持为思考块，由出口 codec 决定原生承载还是降级为正文；受保护载荷
 /// 若出口协议无法承载，也由 codec 忽略。这里不按协议分支，插件协议同样适用。
+/// Untouched text blocks retain their shared payload; downgraded reasoning moves into new text.
 pub fn prepare_thinking_replay(
     request: &mut AiRequest,
     preserve_protected: impl Fn(&AiItem) -> bool,
@@ -124,7 +125,7 @@ fn is_protected(block: &ContentBlock) -> bool {
 fn push_text(blocks: &mut Vec<ContentBlock>, text: String) {
     if !text.is_empty() {
         blocks.push(ContentBlock::Text {
-            text,
+            text: text.into(),
             cache_control: None,
         });
     }

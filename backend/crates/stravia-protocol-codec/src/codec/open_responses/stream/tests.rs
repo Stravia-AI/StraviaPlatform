@@ -1367,15 +1367,15 @@ fn annotation_stays_on_its_unchanged_indexed_message() {
         role: stravia_runtime_contract::protocol::ir::Role::Assistant,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
-                text: String::new(),
+                text: String::new().into(),
                 cache_control: None,
             },
             ContentBlock::Text {
-                text: String::new(),
+                text: String::new().into(),
                 cache_control: None,
             },
             ContentBlock::Text {
-                text: "answer".into(),
+                text: "answer".to_owned().into(),
                 cache_control: None,
             },
         ]),
@@ -1554,7 +1554,7 @@ fn function_output_item_done_emits_lifecycle_and_terminal_item() {
     let function_output = stravia_runtime_contract::protocol::ir::AiItem {
         role: stravia_runtime_contract::protocol::ir::Role::Tool,
         content: MessageContent::Blocks(vec![ContentBlock::Text {
-            text: "tool output".into(),
+            text: "tool output".to_owned().into(),
             cache_control: None,
         }]),
         tool_calls: None,

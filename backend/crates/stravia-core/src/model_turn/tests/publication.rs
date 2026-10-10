@@ -136,6 +136,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let mut request = Arc::new(request);
     let protection = {
         let redaction = gateway.redaction.clone();
         let principal = principal.clone();
@@ -254,6 +255,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let mut request = Arc::new(request);
     assert!(matches!(
         gateway
             .redaction
@@ -290,6 +292,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     let observer = credential_observer(&gateway, &other);
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let mut request = Arc::new(request);
     assert!(matches!(
         gateway
             .redaction
@@ -336,6 +339,7 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
     sqlx::query("CREATE TRIGGER reject_discovery_event BEFORE INSERT ON observation_events WHEN NEW.kind = 'credential_mappings_created' BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END").execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let mut request = Arc::new(request);
     let mappings = gateway
         .redaction
         .protect(&principal, &mut request, Some(&observer))
@@ -478,6 +482,7 @@ async fn held_publication_turn(
             .remove(0);
         pending_expiry = mapping.expires_at;
         related.instructions = Some(mapping.reference);
+        let mut related = Arc::new(related);
         gateway
             .redaction
             .protect(&principal, &mut related, None)

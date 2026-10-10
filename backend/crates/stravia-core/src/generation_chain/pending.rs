@@ -27,7 +27,7 @@ impl PendingGenerationCommits {
         &self,
         principal: Principal,
         node_id: String,
-        projected: ProjectedClientCommit,
+        projected: ProjectedClientCommit<'_>,
     ) -> GenerationCommitFence {
         let (resolved, _) = tokio::sync::watch::channel(false);
         let pending = Arc::new(PendingGenerationCommit {
@@ -71,8 +71,11 @@ impl PendingGenerationCommits {
             return;
         }
         let canonical = canonical_client_history_request(request);
-        let controls_fingerprint =
-            ClientHistoryState::from_request(&canonical, &canonical.items).controls_fingerprint;
+        let controls_fingerprint = stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+            &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                &canonical,
+            ),
+        );
         let explicit_parent = crate::router::parent_id_from_request(request);
         let ingress = ProtocolTransform::inferred_ingress(request);
         let referenced_nodes = ingress

@@ -575,7 +575,7 @@ mod tests {
                 envelope,
                 AiItem {
                     role: Role::Assistant,
-                    content: MessageContent::Text(String::new()),
+                    content: MessageContent::Text(String::new().into()),
                     tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
                         id: "read-1".into(),
                         name: "StraviaRead".into(),
@@ -641,7 +641,8 @@ mod tests {
                         "path": turn_id.reference(),
                         "ancestors": []
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ),
                 tool_calls: None,
                 tool_call_id: None,
@@ -723,7 +724,8 @@ mod tests {
                         "policy": {"allowed_domains": ["8.8.4.4"]},
                         "ancestors": []
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ),
                 tool_calls: None,
                 tool_call_id: None,

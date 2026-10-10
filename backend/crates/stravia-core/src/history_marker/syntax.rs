@@ -263,7 +263,7 @@ fn tokenize_private_syntax(text: &str) -> Vec<PrivateToken> {
 fn scalar_block(kind: &ScalarKind, text: String) -> ContentBlock {
     match kind {
         ScalarKind::Text(cache_control) => ContentBlock::Text {
-            text,
+            text: text.into(),
             cache_control: cache_control.clone(),
         },
         ScalarKind::Thinking => ContentBlock::Thinking {
@@ -354,8 +354,8 @@ pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
                     match block {
-                        ContentBlock::Text { text, .. }
-                        | ContentBlock::Thinking {
+                        ContentBlock::Text { text, .. } => references.extend(strip_markers(text).1),
+                        ContentBlock::Thinking {
                             thinking: text,
                             signature: None,
                         } => references.extend(strip_markers(text).1),
@@ -614,12 +614,12 @@ fn legacy_cleaned_item(original: &AiItem, atoms: &[CarrierAtom]) -> Option<AiIte
             .iter()
             .all(|block| matches!(block, ContentBlock::Text { .. }))
     {
-        MessageContent::Text(
+        MessageContent::Text(std::sync::Arc::new(
             visible
                 .iter()
                 .filter_map(ContentBlock::as_text)
                 .collect::<String>(),
-        )
+        ))
     } else {
         MessageContent::Blocks(visible)
     };
@@ -708,7 +708,9 @@ async fn materialize_parsed_item(
                         context.resolved_items.push(client_fragment(
                             &original,
                             ContentBlock::Text {
-                                text: projection_source_text(&source).to_owned(),
+                                text: std::sync::Arc::new(
+                                    projection_source_text(&source).to_owned(),
+                                ),
                                 cache_control: None,
                             },
                             &mut meta,
@@ -765,7 +767,7 @@ async fn materialize_parsed_item(
     if has_tool_calls || original.tool_call_id.is_some() {
         context.resolved_items.push(AiItem {
             role: original.role,
-            content: MessageContent::Text(String::new()),
+            content: MessageContent::Text(std::sync::Arc::new(String::new())),
             tool_calls: has_tool_calls.then_some(remaining_calls),
             tool_call_id: original.tool_call_id,
             meta,

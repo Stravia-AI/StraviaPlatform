@@ -104,8 +104,8 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
         Ok(request)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
-        let tool_names = tool_names(request);
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+        let tool_names = tool_names(&request);
         let mut prompt = Vec::new();
         if let Some(instructions) = &request.instructions
             && !instructions.trim().is_empty()
@@ -349,7 +349,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
     if matches!(role, Role::System) {
         return Ok(AiItem {
             role,
-            content: MessageContent::Text(required_string(message, "content")?),
+            content: MessageContent::Text(required_string(message, "content")?.into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -366,7 +366,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
     for part in parts {
         match part.get("type").and_then(Value::as_str) {
             Some("text") => blocks.push(ContentBlock::Text {
-                text: required_string(part, "text")?,
+                text: required_string(part, "text")?.into(),
                 cache_control: None,
             }),
             Some("reasoning") if role == Role::Assistant => {
@@ -640,7 +640,7 @@ fn encode_file_part(source: &MediaSource, media_type: &str) -> anyhow::Result<Va
 
 fn text_content(content: &MessageContent) -> anyhow::Result<String> {
     match content {
-        MessageContent::Text(text) => Ok(text.clone()),
+        MessageContent::Text(text) => Ok(text.as_ref().clone()),
         MessageContent::Blocks(blocks) => blocks
             .iter()
             .map(|block| match block {
@@ -657,11 +657,11 @@ fn text_content(content: &MessageContent) -> anyhow::Result<String> {
 
 fn tool_result_text(content: &MessageContent) -> anyhow::Result<String> {
     match content {
-        MessageContent::Text(text) => Ok(text.clone()),
+        MessageContent::Text(text) => Ok(text.as_ref().clone()),
         MessageContent::Blocks(blocks) => blocks
             .iter()
             .map(|block| match block {
-                ContentBlock::Text { text, .. } => Ok(text.clone()),
+                ContentBlock::Text { text, .. } => Ok(text.as_ref().clone()),
                 ContentBlock::ToolResult { content, .. } => Ok(serde_json::to_string(content)?),
                 other => bail!(
                     "Gateway tool result cannot represent `{}`",

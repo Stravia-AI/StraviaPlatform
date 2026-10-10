@@ -168,7 +168,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
             content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
-                "follow-up".into(),
+                "follow-up".to_owned().into(),
             ),
             tool_calls: None,
             tool_call_id: None,

@@ -86,7 +86,7 @@ fn standalone_compact_window_replays_native_identity_without_generation_coercion
         }))
         .unwrap();
     let (replay, _) = super::super::encoder::ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .unwrap();
     assert_eq!(
         replay["input"][0]["retained_context"],
@@ -110,7 +110,7 @@ fn codex_native_trigger_is_a_control_not_thinking_or_unknown() {
     assert!(request.items[0].thinking_ref().is_none());
     assert!(request.items[0].unknown_ref().is_none());
     let (replay, _) = super::super::encoder::ResponsesEncoder
-        .encode_request(&request)
+        .encode_request(request)
         .unwrap();
     assert_eq!(
         replay["input"],

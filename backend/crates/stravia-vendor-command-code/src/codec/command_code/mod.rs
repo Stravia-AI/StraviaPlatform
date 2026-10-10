@@ -5,6 +5,7 @@
 //! like AI SDK (`text-delta`, `reasoning-delta`, `tool-call`, `finish`).
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use http::header::HeaderMap;
@@ -124,16 +125,16 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
         Ok(request)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
-        let tool_names = tool_names(request);
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+        let tool_names = tool_names(&request);
         let mut system = Vec::new();
-        if let Some(instructions) = &request.instructions
+        if let Some(instructions) = request.instructions
             && !instructions.trim().is_empty()
         {
-            system.push(json!({"type": "text", "text": instructions}));
+            system.push(text_part("text", instructions));
         }
         let mut messages = Vec::new();
-        for item in &request.items {
+        for item in request.items {
             match item.role {
                 Role::System | Role::Developer => system.extend(encode_system_blocks(item)?),
                 _ => {
@@ -162,7 +163,7 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
             .unwrap_or(DEFAULT_MAX_TOKENS)
             .min(MAX_TOKENS_CAP);
         let mut params = Map::from_iter([
-            ("model".into(), Value::String(request.model.clone())),
+            ("model".into(), Value::String(request.model)),
             ("messages".into(), Value::Array(messages)),
             ("max_tokens".into(), json!(max_tokens)),
             ("stream".into(), Value::Bool(true)),
@@ -172,9 +173,8 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
                 Value::Array(
                     request
                         .tools
-                        .as_deref()
                         .unwrap_or_default()
-                        .iter()
+                        .into_iter()
                         .map(encode_tool)
                         .collect(),
                 ),
@@ -189,14 +189,14 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
         {
             params.insert("reasoning_effort".into(), Value::String(effort.into()));
         }
-        if let Some(choice) = &request.tool_choice {
+        if let Some(choice) = request.tool_choice {
             params.insert("tool_choice".into(), encode_tool_choice(choice));
         }
         if let Some(parallel) = request.parallel_tool_calls {
             params.insert("parallel_tool_calls".into(), Value::Bool(parallel));
         }
 
-        let body = json!({
+        let mut body = json!({
             "config": {
                 "workingDir": DEFAULT_WORKING_DIR,
                 "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
@@ -213,8 +213,10 @@ impl ProtocolAdapter for CommandCodeGenerateV1 {
             "skills": Value::Null,
             "permissionMode": "standard",
             "mode": "agent",
-            "params": params,
         });
+        body.as_object_mut()
+            .expect("envelope is an object")
+            .insert("params".into(), Value::Object(params));
         Ok((body, HeaderMap::new()))
     }
 
@@ -320,7 +322,7 @@ fn decode_system(value: &Value) -> anyhow::Result<Vec<AiItem>> {
         }
         return Ok(vec![AiItem {
             role: Role::System,
-            content: MessageContent::Text(text.to_string()),
+            content: MessageContent::Text(text.to_string().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -332,7 +334,7 @@ fn decode_system(value: &Value) -> anyhow::Result<Vec<AiItem>> {
         .iter()
         .map(|block| {
             Ok(ContentBlock::Text {
-                text: required_string(block, "text")?,
+                text: required_string(block, "text")?.into(),
                 cache_control: None,
             })
         })
@@ -376,7 +378,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
         };
         return Ok(AiItem {
             role,
-            content: MessageContent::Text(text),
+            content: MessageContent::Text(text.into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -392,7 +394,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
     for part in parts {
         match part.get("type").and_then(Value::as_str) {
             Some("text") => blocks.push(ContentBlock::Text {
-                text: required_string(part, "text")?,
+                text: required_string(part, "text")?.into(),
                 cache_control: None,
             }),
             Some("reasoning") if role == Role::Assistant => {
@@ -492,18 +494,43 @@ fn decode_tool_call(value: &Value) -> anyhow::Result<ToolCall> {
     })
 }
 
-fn encode_system_blocks(item: &AiItem) -> anyhow::Result<Vec<Value>> {
-    match &item.content {
+fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+}
+
+fn text_part(kind: &str, text: String) -> Value {
+    object([
+        ("type", Value::String(kind.into())),
+        ("text", Value::String(text)),
+    ])
+}
+
+fn message(role: &str, content: Vec<Value>) -> Value {
+    object([
+        ("role", Value::String(role.into())),
+        ("content", Value::Array(content)),
+    ])
+}
+
+fn encode_system_blocks(item: AiItem) -> anyhow::Result<Vec<Value>> {
+    match item.content {
         MessageContent::Text(text) if !text.is_empty() => {
-            Ok(vec![json!({"type": "text", "text": text})])
+            Ok(vec![text_part("text", Arc::unwrap_or_clone(text))])
         }
         MessageContent::Blocks(blocks) => blocks
-            .iter()
+            .into_iter()
             .map(|block| match block {
-                ContentBlock::Text { text, .. } => Ok(json!({"type": "text", "text": text})),
+                ContentBlock::Text { text, .. } => {
+                    Ok(text_part("text", Arc::unwrap_or_clone(text)))
+                }
                 other => bail!(
                     "Command Code system cannot represent `{}`",
-                    content_block_name(other)
+                    content_block_name(&other)
                 ),
             })
             .collect(),
@@ -514,68 +541,72 @@ fn encode_system_blocks(item: &AiItem) -> anyhow::Result<Vec<Value>> {
 /// 返回 None 表示整条消息跳过：编码后没有任何部件且不带 tool call 的
 /// assistant 条目（如只剩无法承载的受保护思考载荷）不应发出空消息。
 fn encode_message(
-    item: &AiItem,
+    item: AiItem,
     tool_names: &BTreeMap<String, String>,
 ) -> anyhow::Result<Option<Value>> {
     match item.role {
         Role::System | Role::Developer => unreachable!("system messages are encoded separately"),
-        Role::User => Ok(Some(json!({
-            "role": "user",
-            "content": encode_user_parts(&item.content)?,
-        }))),
+        Role::User => Ok(Some(message("user", encode_user_parts(item.content)?))),
         Role::Assistant => {
-            let mut content = encode_assistant_parts(&item.content)?;
-            for call in item.tool_calls.as_deref().unwrap_or_default() {
-                content.push(encode_tool_call_value(call));
+            let mut content = encode_assistant_parts(item.content)?;
+            for call in item.tool_calls.unwrap_or_default() {
+                content.push(owned_tool_call_value(call));
             }
             if content.is_empty() {
                 return Ok(None);
             }
-            Ok(Some(json!({"role": "assistant", "content": content})))
+            Ok(Some(message("assistant", content)))
         }
         Role::Tool => {
             let tool_call_id = item
                 .tool_call_id
-                .as_deref()
                 .context("Command Code tool result is missing tool_call_id")?;
             let tool_name = tool_names
-                .get(tool_call_id)
+                .get(tool_call_id.as_str())
                 .map(String::as_str)
                 .unwrap_or("");
-            Ok(Some(json!({
-                "role": "tool",
-                "content": [{
-                    "type": "tool-result",
-                    "toolCallId": tool_call_id,
-                    "toolName": tool_name,
-                    "output": {"type": "text", "value": tool_result_text(&item.content)?},
-                }],
-            })))
+            Ok(Some(message(
+                "tool",
+                vec![object([
+                    ("type", Value::String("tool-result".into())),
+                    ("toolCallId", Value::String(tool_call_id.into_string())),
+                    ("toolName", Value::String(tool_name.into())),
+                    (
+                        "output",
+                        object([
+                            ("type", Value::String("text".into())),
+                            ("value", Value::String(tool_result_text(item.content)?)),
+                        ]),
+                    ),
+                ])],
+            )))
         }
     }
 }
 
-fn encode_user_parts(content: &MessageContent) -> anyhow::Result<Vec<Value>> {
+fn encode_user_parts(content: MessageContent) -> anyhow::Result<Vec<Value>> {
     match content {
-        MessageContent::Text(text) => Ok(vec![json!({"type": "text", "text": text})]),
+        MessageContent::Text(text) => Ok(vec![text_part("text", Arc::unwrap_or_clone(text))]),
         MessageContent::Blocks(blocks) => blocks
-            .iter()
+            .into_iter()
             .map(|block| match block {
-                ContentBlock::Text { text, .. } => Ok(json!({"type": "text", "text": text})),
+                ContentBlock::Text { text, .. } => {
+                    Ok(text_part("text", Arc::unwrap_or_clone(text)))
+                }
                 ContentBlock::Image { source, .. } => encode_image(source),
                 other => bail!(
                     "Command Code user message cannot represent `{}`",
-                    content_block_name(other)
+                    content_block_name(&other)
                 ),
             })
             .collect(),
     }
 }
 
-fn encode_assistant_parts(content: &MessageContent) -> anyhow::Result<Vec<Value>> {
+fn encode_assistant_parts(content: MessageContent) -> anyhow::Result<Vec<Value>> {
     match content {
         MessageContent::Text(text) if text.is_empty() => Ok(Vec::new()),
-        MessageContent::Text(text) => Ok(vec![json!({"type": "text", "text": text})]),
+        MessageContent::Text(text) => Ok(vec![text_part("text", Arc::unwrap_or_clone(text))]),
         MessageContent::Blocks(blocks) => {
             let mut parts = Vec::new();
             let mut reasoning = Vec::new();
@@ -585,37 +616,37 @@ fn encode_assistant_parts(content: &MessageContent) -> anyhow::Result<Vec<Value>
                     // reasoning 部件只有 text：signature/encrypted_content/redacted
                     // 均无可承载的字段，按回放契约静默忽略，绝不写进可读正文。
                     ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
-                        reasoning.push(json!({"type": "reasoning", "text": thinking}));
+                        reasoning.push(text_part("reasoning", thinking));
                     }
                     ContentBlock::Reasoning {
                         summary, content, ..
                     } => {
                         // Open Responses 明文顺序：summary 在前、content 在后，
                         // 每段非空文本一个 reasoning 部件。
-                        for text in summary.iter().chain(content) {
+                        for text in summary.into_iter().chain(content) {
                             if !text.is_empty() {
-                                reasoning.push(json!({"type": "reasoning", "text": text}));
+                                reasoning.push(text_part("reasoning", text));
                             }
                         }
                     }
                     ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
                     ContentBlock::Text { text, .. } if !text.is_empty() => {
-                        rest.push(json!({"type": "text", "text": text}));
+                        rest.push(text_part("text", Arc::unwrap_or_clone(text)));
                     }
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => {
-                        rest.push(json!({
-                            "type": "tool-call",
-                            "toolCallId": id,
-                            "toolName": name,
-                            "input": input,
-                        }));
+                        rest.push(object([
+                            ("type", Value::String("tool-call".into())),
+                            ("toolCallId", Value::String(id.into_string())),
+                            ("toolName", Value::String(name)),
+                            ("input", input),
+                        ]));
                     }
                     ContentBlock::Text { .. } => {}
                     other => bail!(
                         "Command Code assistant message cannot represent `{}`",
-                        content_block_name(other)
+                        content_block_name(&other)
                     ),
                 }
             }
@@ -626,11 +657,15 @@ fn encode_assistant_parts(content: &MessageContent) -> anyhow::Result<Vec<Value>
     }
 }
 
-fn encode_image(source: &MediaSource) -> anyhow::Result<Value> {
+fn encode_image(source: MediaSource) -> anyhow::Result<Value> {
     match source {
         MediaSource::Url(url) => {
-            let mut image = json!({"type": "image", "image": url});
-            if let Some(media_type) = data_url_media_type(url) {
+            let media_type = data_url_media_type(&url).map(str::to_owned);
+            let mut image = object([
+                ("type", Value::String("image".into())),
+                ("image", Value::String(url)),
+            ]);
+            if let Some(media_type) = media_type {
                 image
                     .as_object_mut()
                     .expect("image part is an object")
@@ -638,36 +673,52 @@ fn encode_image(source: &MediaSource) -> anyhow::Result<Value> {
             }
             Ok(image)
         }
-        MediaSource::Base64 { media_type, data } => Ok(json!({
-            "type": "image",
-            "image": format!("data:{media_type};base64,{data}"),
-            "mimeType": media_type,
-        })),
+        MediaSource::Base64 { media_type, data } => {
+            let image = format!("data:{media_type};base64,{data}");
+            Ok(object([
+                ("type", Value::String("image".into())),
+                ("image", Value::String(image)),
+                ("mimeType", Value::String(media_type)),
+            ]))
+        }
         MediaSource::FileId { .. } => {
             bail!("Command Code cannot represent file-id image sources")
         }
     }
 }
 
-fn encode_tool(tool: &ToolSpec) -> Value {
-    json!({
-        "name": wire_tool_name(&tool.name),
-        "description": tool.description.as_deref().unwrap_or(""),
-        "input_schema": if tool.parameters.is_null() {
-            json!({"type": "object", "properties": {}})
-        } else {
-            tool.parameters.clone()
-        },
-    })
+fn encode_tool(tool: ToolSpec) -> Value {
+    let name = TOOL_NAME_ALIASES
+        .iter()
+        .find_map(|(from, to)| (*from == tool.name).then(|| (*to).to_owned()))
+        .unwrap_or(tool.name);
+    object([
+        ("name", Value::String(name)),
+        (
+            "description",
+            Value::String(tool.description.unwrap_or_default()),
+        ),
+        (
+            "input_schema",
+            if tool.parameters.is_null() {
+                json!({"type": "object", "properties": {}})
+            } else {
+                tool.parameters
+            },
+        ),
+    ])
 }
 
-fn encode_tool_choice(choice: &ToolChoice) -> Value {
+fn encode_tool_choice(choice: ToolChoice) -> Value {
     match choice {
         ToolChoice::Auto => json!({"type": "auto"}),
         ToolChoice::None => json!({"type": "none"}),
         ToolChoice::Required => json!({"type": "any"}),
-        ToolChoice::Named { name } => json!({"type": "tool", "name": name}),
-        ToolChoice::Raw(value) => value.clone(),
+        ToolChoice::Named { name } => object([
+            ("type", Value::String("tool".into())),
+            ("name", Value::String(name)),
+        ]),
+        ToolChoice::Raw(value) => value,
     }
 }
 
@@ -681,11 +732,15 @@ fn encode_tool_call_value(call: &ToolCall) -> Value {
     })
 }
 
-fn wire_tool_name(name: &str) -> &str {
-    TOOL_NAME_ALIASES
-        .iter()
-        .find_map(|(from, to)| (*from == name).then_some(*to))
-        .unwrap_or(name)
+fn owned_tool_call_value(call: ToolCall) -> Value {
+    let input = serde_json::from_str::<Value>(&call.arguments)
+        .unwrap_or_else(|_| Value::String(call.arguments));
+    object([
+        ("type", Value::String("tool-call".into())),
+        ("toolCallId", Value::String(call.id.into_string())),
+        ("toolName", Value::String(call.name)),
+        ("input", input),
+    ])
 }
 
 fn tool_names(request: &AiRequest) -> BTreeMap<String, String> {
@@ -697,17 +752,17 @@ fn tool_names(request: &AiRequest) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn tool_result_text(content: &MessageContent) -> anyhow::Result<String> {
+fn tool_result_text(content: MessageContent) -> anyhow::Result<String> {
     match content {
-        MessageContent::Text(text) => Ok(text.clone()),
+        MessageContent::Text(text) => Ok(Arc::unwrap_or_clone(text)),
         MessageContent::Blocks(blocks) => Ok(blocks
-            .iter()
+            .into_iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.clone()),
+                ContentBlock::Text { text, .. } => Some(Arc::unwrap_or_clone(text)),
                 ContentBlock::ToolResult { content, .. } => content
                     .as_str()
                     .map(str::to_string)
-                    .or_else(|| serde_json::to_string(content).ok()),
+                    .or_else(|| serde_json::to_string(&content).ok()),
                 _ => None,
             })
             .collect::<Vec<_>>()

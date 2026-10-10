@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use super::{
     AttemptFailure, AttemptRoutePolicy, PreparedAttempt, UPSTREAM_FAILURE_MASK,
@@ -324,10 +327,14 @@ impl Operation<'_, '_> {
             });
         }
 
-        // Each actual call owns its materialized wire request. Recovery retains
-        // only the Target-specific logical request, not another driver snapshot.
+        // Share the stable Target snapshot until dispatch or media delivery
+        // actually changes it; recovery must retain the logical request.
         let mut request = prepared.request.clone();
-        request.model.clone_from(&prepared.dispatch_model);
+        if request.model != prepared.dispatch_model {
+            Arc::make_mut(&mut request)
+                .model
+                .clone_from(&prepared.dispatch_model);
+        }
         crate::media::ingest::materialize_request(
             gateway,
             principal,
@@ -455,14 +462,14 @@ impl Operation<'_, '_> {
             (false, OperationOutput::Infer(response)) => {
                 if prepared.request.meta.redaction.has_provider_proof() {
                     // 上游画像不含宿主解析出的 Target control，证明仍需保留本轮实际派发的控制。
-                    let target_control = prepared.request.reasoning.target_control.take();
+                    let request = Arc::make_mut(&mut prepared.request);
+                    let target_control = request.reasoning.target_control.take();
                     let effective_controls =
                         crate::generation_chain::apply_provider_effective_response(
-                            &mut prepared.request,
-                            &response,
+                            request, &response,
                         )
                         .is_some();
-                    prepared.request.reasoning.target_control = target_control;
+                    request.reasoning.target_control = target_control;
                     if effective_controls {
                         prepared
                             .request

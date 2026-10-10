@@ -88,7 +88,7 @@ impl ReversibleRedaction {
     pub(crate) async fn protect(
         &self,
         principal: &Principal,
-        request: &mut AiRequest,
+        request: &mut Arc<AiRequest>,
         observer: Option<&RunObserver>,
     ) -> Result<Vec<Mapping>, RedactionError> {
         let observer = observer

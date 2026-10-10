@@ -6,7 +6,7 @@ fn encodes_converse_tool_config_not_chat_completions() {
         "anthropic.claude",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("Hello".into()),
+            content: MessageContent::Text("Hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -20,7 +20,7 @@ fn encodes_converse_tool_config_not_chat_completions() {
         cache_control: None,
         meta: None,
     }]);
-    let (body, _) = BedrockConverseV1.encode_request(&request).unwrap();
+    let (body, _) = BedrockConverseV1.encode_request(request).unwrap();
     assert_eq!(
         body["toolConfig"]["tools"][0]["toolSpec"]["name"],
         "weather"
@@ -32,7 +32,7 @@ fn encodes_converse_tool_config_not_chat_completions() {
 fn user_item(text: &str) -> AiItem {
     AiItem {
         role: Role::User,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(text.to_owned().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -70,7 +70,7 @@ fn replays_signed_thinking_and_redacted_natively() {
         ],
     );
 
-    let (body, _) = BedrockConverseV1.encode_request(&request).unwrap();
+    let (body, _) = BedrockConverseV1.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(
         messages[1]["content"][0],
@@ -111,7 +111,7 @@ fn downgrades_unsigned_reasoning_to_text_blocks() {
         ],
     );
 
-    let (body, _) = BedrockConverseV1.encode_request(&request).unwrap();
+    let (body, _) = BedrockConverseV1.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages[0]["content"], json!([{"text": "plain thought"}]));
     // 每段非空文本一个 text 块，保持原位置顺序。
@@ -152,7 +152,7 @@ fn skips_empty_assistant_without_breaking_tool_pairing() {
         ],
     );
 
-    let (body, _) = BedrockConverseV1.encode_request(&request).unwrap();
+    let (body, _) = BedrockConverseV1.encode_request(request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 4);
     assert_eq!(messages[1]["role"], "assistant");

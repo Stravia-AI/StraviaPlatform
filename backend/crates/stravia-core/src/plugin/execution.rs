@@ -30,8 +30,8 @@ use super::store::{PluginStorageError, PluginStore};
 
 #[derive(Debug, Clone)]
 pub(crate) enum VendorRequest {
-    Infer(AiRequest),
-    Compact(AiRequest),
+    Infer(Arc<AiRequest>),
+    Compact(Arc<AiRequest>),
     Search(SearchRequest),
     MediaImage(MediaImageRequest),
     Auth(AuthRequest),
@@ -41,10 +41,26 @@ pub(crate) enum VendorRequest {
 }
 
 impl VendorRequest {
-    pub(crate) fn into_input(self, provider: ProviderSnapshot) -> OperationInput {
-        match self {
-            Self::Infer(request) => OperationInput::Infer { provider, request },
-            Self::Compact(request) => OperationInput::Compact { provider, request },
+    fn encode_for_host(
+        self,
+        provider: ProviderSnapshot,
+    ) -> Result<
+        (
+            stravia_vendor_sdk::wit::types::OperationKind,
+            stravia_vendor_sdk::wit::types::OperationInput,
+        ),
+        stravia_vendor_sdk::PluginError,
+    > {
+        let operation = self.operation();
+        let input = match self {
+            Self::Infer(request) | Self::Compact(request) => {
+                let (provider, input) =
+                    stravia_vendor_sdk::guest::encode_protocol_selection(&provider, &request)?;
+                return Ok((
+                    operation.into(),
+                    stravia_vendor_sdk::wit::types::OperationInput { provider, input },
+                ));
+            }
             Self::Search(request) => OperationInput::Search { provider, request },
             Self::MediaImage(request) => OperationInput::MediaImage { provider, request },
             Self::Auth(request) => OperationInput::Auth { provider, request },
@@ -53,7 +69,8 @@ impl VendorRequest {
             Self::ConfigValidation(request) => {
                 OperationInput::ConfigValidation { provider, request }
             }
-        }
+        };
+        input.encode_for_host()
     }
 
     fn operation(&self) -> Operation {
@@ -553,7 +570,8 @@ impl Gateway {
             None,
             prepared.use_proxy,
             prepared.origins,
-            request.into_input(prepared.provider),
+            prepared.provider,
+            request,
             context,
         )
         .await
@@ -623,7 +641,8 @@ impl Gateway {
             Some(session.private_state.clone()),
             use_proxy,
             session.origins.clone(),
-            request.into_input(provider),
+            provider,
+            request,
             context,
         )
         .await
@@ -714,7 +733,8 @@ impl Gateway {
         session_state: Option<Arc<Mutex<Option<Vec<u8>>>>>,
         use_proxy: bool,
         origins: BTreeSet<String>,
-        input: OperationInput,
+        provider: ProviderSnapshot,
+        request: VendorRequest,
         context: VendorCallContext,
     ) -> anyhow::Result<VendorExecution> {
         if context.deadline.is_exceeded() {
@@ -727,7 +747,7 @@ impl Gateway {
 
         let descriptor = plugin
             .descriptor()
-            .provider(&input.provider().provider_id)
+            .provider(&provider.provider_id)
             .ok_or_else(|| anyhow::anyhow!("vendor operation profile is unavailable"))?;
         let clients = self.vendor_client_snapshot(use_proxy).await?;
         if context.cancellation.is_cancelled() {
@@ -740,7 +760,7 @@ impl Gateway {
         let websocket_scope = websocket_scope_key(
             provider_id.as_deref(),
             plugin.identity(),
-            &input.provider().credentials,
+            &provider.credentials,
             &clients.websocket_reuse_identity,
         )?;
         let websocket_affinity = provider_id
@@ -752,7 +772,7 @@ impl Gateway {
             origins,
             operation.clone(),
             context.cancellation.clone(),
-            input.provider().protocol.clone(),
+            provider.protocol.clone(),
         )
         .with_observer(context.observer.clone())
         .with_observation_scope(context.model_turn_id.clone(), context.attempt_id.clone())
@@ -769,7 +789,7 @@ impl Gateway {
             .map_or_else(ProtectedSecrets::default, |observer| {
                 observer.protected_secrets()
             });
-        register_snapshot_secrets(&secrets, input.provider());
+        register_snapshot_secrets(&secrets, &provider);
         let state = match (provider_id, session_state) {
             (Some(provider_id), None) => StateScope::Provider {
                 store: self.vendor_plugins.store.clone(),
@@ -799,12 +819,17 @@ impl Gateway {
             context.deadline.clone(),
             0,
         );
-        let channel = input.provider().channel.clone();
-        let protocol = input.provider().protocol.clone();
-        let execution = self
-            .vendor_plugins
-            .runtime
-            .execute(&plugin, &channel, input, scope);
+        let channel = provider.channel.clone();
+        let protocol = provider.protocol.clone();
+        // Share canonical snapshots through the final host encoding, then
+        // release this call's Arc before guest execution waits on transport.
+        let (sdk_operation, sdk_input) = request
+            .encode_for_host(provider)
+            .map_err(|_| RuntimeError::InvalidOutput)?;
+        let execution =
+            self.vendor_plugins
+                .runtime
+                .execute(&plugin, &channel, sdk_operation, sdk_input, scope);
         let output = tokio::select! {
             biased;
             _ = context.cancellation.cancelled() => {

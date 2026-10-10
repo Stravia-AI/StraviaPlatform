@@ -203,7 +203,7 @@ mod tests {
 
     fn prompt_block(source_ids: &[&ArtifactId]) -> ContentBlock {
         ContentBlock::Text {
-            text: prompt_declaring(source_ids),
+            text: std::sync::Arc::new(prompt_declaring(source_ids)),
             cache_control: None,
         }
     }
@@ -513,7 +513,7 @@ mod tests {
         // embedded images attach under their own Artifact ids.
         let transcript = vec![turn(vec![
             ContentBlock::Text {
-                text: document_prompt(&document.id, &[&embedded.id], true),
+                text: document_prompt(&document.id, &[&embedded.id], true).into(),
                 cache_control: None,
             },
             derivative_block(&embedded.id),
@@ -564,7 +564,7 @@ mod tests {
 
         // A document entry without extracted text is not evidence.
         let no_text = vec![turn(vec![ContentBlock::Text {
-            text: document_prompt(&document.id, &[], false),
+            text: document_prompt(&document.id, &[], false).into(),
             cache_control: None,
         }])];
         assert!(

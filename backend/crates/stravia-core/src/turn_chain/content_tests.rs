@@ -461,12 +461,22 @@ async fn complete_items_preserve_order_repeats_and_agent_transcript() {
 
 #[tokio::test]
 async fn raw_json_externalization_boundary_preserves_payload() {
-    let store = super::test_store().await;
     let principal = Principal::new("boundary-owner");
-    // JSON string quotes contribute two bytes to the extraction threshold.
-    for (length, expected_contents) in [(253, 0), (254, 1)] {
+    // The boundary counts compact JSON bytes, including quotes, UTF-8 and
+    // escapes, rather than source characters or an unescaped string length.
+    for (system, expected_contents) in [
+        ("x".repeat(253), 0),
+        ("x".repeat(254), 1),
+        (format!("{}x", "界".repeat(84)), 0),
+        (format!("{}xx", "界".repeat(84)), 1),
+        (format!("{}x", "\n".repeat(126)), 0),
+        (format!("{}xx", "\n".repeat(126)), 1),
+        (format!("{}x", "\"".repeat(126)), 0),
+        (format!("{}xx", "\"".repeat(126)), 1),
+    ] {
+        let store = super::test_store().await;
         let id = TurnNodeId::response();
-        let original = json!({"client_delta": {"system": "x".repeat(length)}});
+        let original = json!({"client_delta": {"system": system}});
         store
             .commit(TurnCommit {
                 id: id.clone(),
@@ -496,8 +506,149 @@ async fn raw_json_externalization_boundary_preserves_payload() {
 }
 
 #[tokio::test]
+async fn repeated_large_opaque_items_preserve_raw_bytes_and_slots() {
+    let store = super::test_store().await;
+    let principal = Principal::new("opaque-item-owner");
+    let item = json!({
+        "id": "original-item-id",
+        "phase": "unknown-vendor-phase",
+        "content": "界\n\"\\e\u{301}".repeat(600_000),
+        "metadata": {"a/b~c": [null, true, {"future": "字段"}]},
+        "private": {"opaque": {"items": ["not a history array"], "system": "untouched"}},
+        "reference": {"id": "original-reference", "extra": [1, 2, 3]}
+    });
+    let original = json!({
+        "client_history_mutation": {"type": "replace", "items": [item.clone(), null, item.clone()]},
+        "effective_history_mutation": {"type": "append", "items": [item.clone()]},
+        "vendor/opaque~container": {"messages": [item.clone()]}
+    });
+    let raw = serde_json::to_vec(&item).unwrap();
+    assert!(raw.len() >= 5_000_000);
+    let key = super::content::content_key(&raw);
+    let encoded = super::content::encode(original.clone()).unwrap();
+    // Inspect the persisted envelope, not serializer invocation counts: one
+    // content body must serve every occurrence, including an escaped pointer.
+    assert_eq!(encoded.contents.len(), 1);
+    assert_eq!(encoded.contents[0].0, key);
+    assert_eq!(encoded.contents[0].1, raw);
+    let envelope: Value =
+        serde_json::from_slice(&crate::storage_codec::decode(&encoded.payload).unwrap()).unwrap();
+    assert_eq!(envelope["contents"], json!([key]));
+    assert_eq!(
+        envelope["slots"],
+        json!([
+            ["/client_history_mutation/items/0", 0],
+            ["/client_history_mutation/items/2", 0],
+            ["/effective_history_mutation/items/0", 0],
+            ["/vendor~1opaque~0container/messages/0", 0]
+        ])
+    );
+    let id = TurnNodeId::response();
+    store
+        .commit(TurnCommit {
+            id: id.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: principal.clone(),
+            payload_version: 6,
+            payload: original.clone(),
+            idle_ttl: Duration::from_secs(60),
+            reusable_prefix: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .materialize(&principal, TurnNodeKind::Response, &id)
+            .await
+            .unwrap()[0]
+            .payload,
+        original
+    );
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM turn_chain_contents").await,
+        1
+    );
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM turn_chain_node_contents").await,
+        1
+    );
+}
+
+#[tokio::test]
 async fn structural_history_sqlite_contract() {
     contract(super::test_store().await).await;
+}
+
+#[tokio::test]
+async fn stale_content_hint_preserves_history_after_gc() {
+    let store = super::test_store().await;
+    let owner = Principal::new("stale-hint-owner");
+    let original = payload();
+    store
+        .commit(TurnCommit {
+            id: TurnNodeId::response(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: original.clone(),
+            idle_ttl: Duration::from_secs(60),
+            reusable_prefix: None,
+        })
+        .await
+        .unwrap();
+    let principal = owner.continuation_key();
+    let SqlTurnChainStore::Sqlite(pool, gate) = &store else {
+        unreachable!()
+    };
+    let mut encoded = super::content::encode(original.clone()).unwrap();
+    let ids = {
+        let mut connection = pool.acquire().await.unwrap();
+        super::content::lookup_sqlite(&mut connection, &principal, &encoded, false)
+            .await
+            .unwrap()
+    };
+    assert!(ids.iter().all(Option::is_some));
+    super::content::prepare_missing(&mut encoded, &ids)
+        .await
+        .unwrap();
+
+    // 在准备与写事务之间收集命中行；事务必须用保留的原文重建内容。
+    execute(&store, "UPDATE turn_chain_nodes SET expires_at=0").await;
+    assert_eq!(store.sweep_expired().await.unwrap(), 1);
+    let id = TurnNodeId::response();
+    {
+        let _write_gate = gate.lock().await;
+        let mut transaction = pool.begin().await.unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO turn_chain_nodes \
+             (id, kind, principal, payload_version, payload, created_at, expires_at, storage_format) \
+             VALUES (?, ?, ?, 6, ?, ?, ?, 2)",
+        )
+        .bind(id.as_str())
+        .bind(TurnNodeKind::Response.as_str())
+        .bind(&principal)
+        .bind(&encoded.payload)
+        .bind(now)
+        .bind(now + 60_000)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        super::content::put_sqlite(&mut transaction, id.as_str(), &principal, &mut encoded)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    }
+    assert_eq!(
+        store
+            .materialize(&owner, TurnNodeKind::Response, &id)
+            .await
+            .unwrap()[0]
+            .payload,
+        original
+    );
 }
 
 /// Restoring a short chain must decode only the contents its envelopes name,

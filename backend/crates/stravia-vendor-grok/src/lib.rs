@@ -58,10 +58,7 @@ pub fn execute(
     }
     check_provider(channel, input.provider())?;
     match input {
-        OperationInput::Infer {
-            provider,
-            mut request,
-        } => execute_inference(host, &provider, &mut request),
+        OperationInput::Infer { provider, request } => execute_inference(host, &provider, request),
         OperationInput::Auth { provider, request } => {
             xai_auth(host, &provider, request).map(OperationOutput::Auth)
         }
@@ -174,7 +171,7 @@ fn check_provider(channel: &str, provider: &ProviderSnapshot) -> Result<(), Plug
 fn execute_inference(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: &mut AiRequest,
+    mut request: AiRequest,
 ) -> Result<OperationOutput, PluginError> {
     let model = provider
         .model
@@ -188,7 +185,7 @@ fn execute_inference(
         CHANNEL_ID,
         provider,
         OPEN_RESPONSES_PROTOCOL,
-        request,
+        &mut request,
     )?;
     let encoded = common::encode_inference_request(OPEN_RESPONSES_PROTOCOL, request)?;
     let mut headers = common::header_pairs(&encoded.headers)?;

@@ -2127,7 +2127,7 @@ mod snapshot_tests {
         let observation = test_observation(&pool, directory.path(), false).await;
         let user = |text: &str| AiItem {
             role: Role::User,
-            content: MessageContent::Text(text.into()),
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3155,7 +3155,7 @@ mod snapshot_tests {
         let observation = test_observation(&pool, directory.path(), false).await;
         let user = AiItem {
             role: Role::User,
-            content: MessageContent::Text("repeat preview-secret".into()),
+            content: MessageContent::Text(std::sync::Arc::new("repeat preview-secret".into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3205,7 +3205,8 @@ mod snapshot_tests {
 
         // This is a separate fork, despite returning the exact pending tool ID.
         let mut fork = input.clone();
-        fork[0].content = MessageContent::Text("changed prefix preview-secret".into());
+        fork[0].content =
+            MessageContent::Text(std::sync::Arc::new("changed prefix preview-secret".into()));
         let branch = publish("preview-fork", &fork);
         branch.finish(RunOutcome {
             client_output_committed: false,
@@ -3318,7 +3319,7 @@ mod snapshot_tests {
         let observation = test_observation(&pool, directory.path(), false).await;
         let question = AiItem {
             role: Role::User,
-            content: MessageContent::Text("question".into()),
+            content: MessageContent::Text(std::sync::Arc::new("question".into())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,

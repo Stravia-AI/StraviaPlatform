@@ -2088,7 +2088,7 @@ mod tests {
             "swe-2",
             vec![AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hello".into()),
+                content: MessageContent::Text("hello".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,

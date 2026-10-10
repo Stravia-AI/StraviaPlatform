@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
@@ -28,13 +29,10 @@ pub trait ContinuationLookup: Send + Sync {
         &self,
         principal: &Principal,
         target: ContinuationTarget<'_>,
-        request: &mut AiRequest,
-        full_fallback: &mut Option<AiRequest>,
+        request: &mut Arc<AiRequest>,
+        full_fallback: &mut Option<Arc<AiRequest>>,
     ) -> Option<String>;
 }
-
-#[cfg(test)]
-use std::sync::Arc;
 
 #[cfg(test)]
 #[derive(Clone, Default)]
@@ -64,20 +62,36 @@ impl ContinuationLookup for ScriptedContinuation {
         &self,
         _principal: &Principal,
         _target: ContinuationTarget<'_>,
-        request: &mut AiRequest,
-        full_fallback: &mut Option<AiRequest>,
+        request: &mut Arc<AiRequest>,
+        full_fallback: &mut Option<Arc<AiRequest>>,
     ) -> Option<String> {
         *full_fallback = None;
         match &self.previous_response_id {
             Some(previous_response_id) => {
                 let mut fallback = request.clone();
-                clear_previous_response_id(&mut fallback);
+                if parent_id_from_request(&fallback).is_some()
+                    || fallback
+                        .meta
+                        .vendor
+                        .ingress
+                        .contains_key("previous_response_id")
+                {
+                    clear_previous_response_id(Arc::make_mut(&mut fallback));
+                }
                 *full_fallback = Some(fallback);
-                stamp_previous_response_id(request, previous_response_id);
+                stamp_previous_response_id(Arc::make_mut(request), previous_response_id);
                 Some(previous_response_id.clone())
             }
             None => {
-                clear_previous_response_id(request);
+                if parent_id_from_request(request).is_some()
+                    || request
+                        .meta
+                        .vendor
+                        .ingress
+                        .contains_key("previous_response_id")
+                {
+                    clear_previous_response_id(Arc::make_mut(request));
+                }
                 None
             }
         }

@@ -184,6 +184,8 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 每窗口最多 512 单元/512 KiB：超限时保留最新后缀，而不是丢弃整个窗口；单个语义单元超过字节上限仍返回 `resource_limit`。进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。候选核验超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 使用不匹配边界；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
 
+无 metadata、无 tool calls 且仅含普通文本的 item 形成一个语义单元；其原始 UTF-8 文本总长度是编码尺寸的下界。该下界已超出剩余窗口预算时，在物化 JSON 前沿用既有后缀溢出裁决，避免先复制数 MB 正文再丢弃。混合内容、私有控制及 native metadata 仍走完整投影与不可匹配边界；原有预算、指纹与完整性标记不变，也不裁剪推理请求或 Generation Chain 历史。
+
 收到输入的证明与已交付尾部共用 16 MiB 进程索引预算，并额外要求包含 leading 前缀的完整输入不超过 512 items/512 KiB；超限后缀仍可用于既有尾部诊断，但不能证明结果回放。输入证明只保留 canonical 摘要，不向普通 Observation 新增完整请求、签名或密文。
 
 `stravia-core` 新增 crate-private 深模块 `interaction_observation/`。外部 seam 保持小：

@@ -236,7 +236,7 @@ fn normalized_context_items(messages: &[AiItem]) -> Vec<ContextItem> {
                     id: ContextItemId::new(),
                     role: message.role,
                     tool_use_id: message.tool_call_id.clone().unwrap_or_default(),
-                    content: serde_json::Value::String(text.clone()),
+                    content: serde_json::Value::String(text.as_ref().clone()),
                     content_kind: message
                         .meta
                         .as_ref()
@@ -391,13 +391,13 @@ fn assign_original_ids(items: &mut [ContextItem], previous: &[ContextItem]) {
     let mut occurrences: HashMap<Vec<u8>, usize> = HashMap::new();
     for item in items {
         let canonical = item.canonical_bytes();
-        let occurrence = occurrences.entry(canonical.clone()).or_default();
+        let occurrence = occurrences.get(&canonical).copied().unwrap_or_default();
         let id = previous_ids
             .get(&canonical)
-            .and_then(|ids| ids.get(*occurrence))
+            .and_then(|ids| ids.get(occurrence))
             .cloned()
-            .unwrap_or_else(|| ContextItemId::original(&canonical, *occurrence));
-        *occurrence += 1;
+            .unwrap_or_else(|| ContextItemId::original(&canonical, occurrence));
+        *occurrences.entry(canonical).or_default() += 1;
         *item.id_mut() = id;
     }
 }
@@ -438,8 +438,9 @@ impl ContextSnapshot {
         let mut hasher = Sha256::new();
         hasher.update(b"stravia-context-span-v1\0");
         for item in &self.items[start..=end] {
-            hasher.update((item.canonical_bytes().len() as u64).to_be_bytes());
-            hasher.update(item.canonical_bytes());
+            let canonical = item.canonical_bytes();
+            hasher.update((canonical.len() as u64).to_be_bytes());
+            hasher.update(canonical);
         }
         Ok(hex_digest(hasher.finalize()))
     }
@@ -642,7 +643,7 @@ mod tests {
     fn message(text: &str) -> AiItem {
         AiItem {
             role: Role::User,
-            content: MessageContent::Text(text.to_string()),
+            content: MessageContent::Text(std::sync::Arc::new(text.to_string())),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -656,6 +657,33 @@ mod tests {
                 .map(|index| message(&format!("m{index}")))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn repeated_items_keep_occurrence_identity_across_request_updates() {
+        let request = AiRequest::new("model", vec![message("same"), message("same")]);
+        let mut snapshot = ContextSnapshot::from_request(&request, ContextCompleteness::Full);
+        let first = snapshot.items[0].id().clone();
+        let second = snapshot.items[1].id().clone();
+        assert_ne!(first, second);
+        let span = snapshot.span_fingerprint(&first, &second).unwrap();
+        let updated = AiRequest::new(
+            "model",
+            vec![
+                message("prefix"),
+                message("same"),
+                message("same"),
+                message("same"),
+            ],
+        );
+
+        snapshot.update_from_request(&updated, ContextCompleteness::Full);
+
+        assert_eq!(snapshot.items[1].id(), &first);
+        assert_eq!(snapshot.items[2].id(), &second);
+        assert_ne!(snapshot.items[3].id(), &first);
+        assert_ne!(snapshot.items[3].id(), &second);
+        assert_eq!(snapshot.span_fingerprint(&first, &second).unwrap(), span);
     }
 
     #[test]
@@ -789,7 +817,7 @@ mod tests {
                     signature: Some("sig".into()),
                 },
                 ContentBlock::Text {
-                    text: "checking".into(),
+                    text: "checking".to_owned().into(),
                     cache_control: None,
                 },
                 ContentBlock::ToolUse {

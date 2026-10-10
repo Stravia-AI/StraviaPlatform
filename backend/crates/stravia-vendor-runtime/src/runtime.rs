@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_sdk::{
-    AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationInput, OperationOutput,
-    ProviderSnapshot, VendorDescriptor,
+    AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationOutput, ProviderSnapshot,
+    VendorDescriptor,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
@@ -98,6 +98,13 @@ impl VendorRuntime {
     pub fn new() -> Result<Self, LoadError> {
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true);
+        // Owned host calls release lowered payloads before awaiting the guest.
+        // This scheduler does not expand the guest's component feature surface.
+        engine_config.concurrency_support(true);
+        engine_config.wasm_component_model_async(false);
+        engine_config.wasm_component_model_more_async_builtins(false);
+        engine_config.wasm_component_model_async_stackful(false);
+        engine_config.wasm_component_model_threading(false);
         engine_config.consume_fuel(true);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
@@ -211,7 +218,13 @@ impl VendorRuntime {
                 None,
             ));
         }
-        admit_operation(plugin.descriptor(), provider, &provider.channel, operation)?;
+        admit_operation(
+            plugin.descriptor(),
+            &provider.provider_id,
+            &provider.channel,
+            &provider.channel,
+            operation,
+        )?;
         if cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
@@ -289,11 +302,18 @@ impl VendorRuntime {
         &self,
         plugin: &LoadedPlugin,
         channel: &str,
-        input: OperationInput,
+        sdk_operation: stravia_vendor_sdk::wit::types::OperationKind,
+        sdk_input: stravia_vendor_sdk::wit::types::OperationInput,
         scope: OperationScope,
     ) -> Result<OperationOutput, RuntimeError> {
-        let operation = input.operation();
-        admit_operation(plugin.descriptor(), input.provider(), channel, operation)?;
+        let operation = Operation::from(sdk_operation);
+        admit_operation(
+            plugin.descriptor(),
+            &sdk_input.provider.provider_id,
+            &sdk_input.provider.channel,
+            channel,
+            operation,
+        )?;
         if scope.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
@@ -304,11 +324,7 @@ impl VendorRuntime {
             return Err(RuntimeError::Cancelled);
         }
 
-        let (sdk_operation, sdk_input) = input
-            .encode_for_host()
-            .map_err(|_| RuntimeError::InvalidOutput)?;
-        drop(input);
-        let wit_operation = convert_operation(sdk_operation);
+        let wit_operation = convert_operation(operation.into());
         let wit_input = convert_input(sdk_input);
         let mut store = self.new_store(scope, Some(operation), false);
         let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
@@ -325,14 +341,18 @@ impl VendorRuntime {
             result = instantiate => result.map_err(|error| classify_trap(&error))?,
         };
 
-        let call = instance.call_execute(&mut store, wit_operation, channel, &wit_input);
+        let call = store.run_concurrent(async |accessor| {
+            instance
+                .call_execute(accessor, wit_operation, channel.to_owned(), wit_input)
+                .await
+        });
         let raw = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
             () = deadline.wait() => {
                 return Err(RuntimeError::DeadlineExceeded);
             }
-            result = call => result,
+            result = call => result.and_then(|result| result),
         };
         let raw = match raw {
             Ok(value) => value,
@@ -545,8 +565,10 @@ impl VendorRuntime {
         store
             .set_fuel(u64::MAX)
             .expect("fuel consumption is enabled for vendor runtime");
+        // 大载荷的 JSON 编解码不应为每个短循环切换 fiber；仍定期让出执行，
+        // 使纯 CPU guest 的取消与 deadline 不依赖它调用宿主服务。
         store
-            .fuel_async_yield_interval(Some(10_000))
+            .fuel_async_yield_interval(Some(1_000_000))
             .expect("async support and fuel consumption are enabled for vendor runtime");
         store
     }
@@ -860,14 +882,15 @@ impl wit_host::HostWsConnection for StoreState {
 
 fn admit_operation(
     descriptor: &VendorDescriptor,
-    provider: &ProviderSnapshot,
+    provider_id: &str,
+    snapshot_channel: &str,
     channel: &str,
     operation: Operation,
 ) -> Result<(), RuntimeError> {
-    if provider.channel != channel {
+    if snapshot_channel != channel {
         return Err(RuntimeError::InvalidOutput);
     }
-    let Some(profile) = descriptor.provider(&provider.provider_id) else {
+    let Some(profile) = descriptor.provider(provider_id) else {
         return Err(RuntimeError::from_guest(
             ErrorKind::Unsupported,
             "vendor operation is not supported".into(),
@@ -1330,9 +1353,11 @@ mod profile_admission_tests {
 
     #[test]
     fn admission_does_not_union_capabilities_across_profiles() {
+        let provider = snapshot("alpha");
         let error = admit_operation(
             &descriptor(),
-            &snapshot("alpha"),
+            &provider.provider_id,
+            &provider.channel,
             "default",
             Operation::Search,
         )
@@ -1348,8 +1373,15 @@ mod profile_admission_tests {
 
     #[test]
     fn admission_rejects_snapshot_channel_mismatch() {
-        let error = admit_operation(&descriptor(), &snapshot("alpha"), "other", Operation::Infer)
-            .expect_err("execute channel must match the signed snapshot");
+        let provider = snapshot("alpha");
+        let error = admit_operation(
+            &descriptor(),
+            &provider.provider_id,
+            &provider.channel,
+            "other",
+            Operation::Infer,
+        )
+        .expect_err("execute channel must match the signed snapshot");
         assert!(matches!(error, RuntimeError::InvalidOutput));
     }
 }

@@ -227,9 +227,35 @@ impl TurnChainStore for SqlTurnChainStore {
         let principal = commit.principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         let expires_at = unix_millis_after(commit.idle_ttl);
-        let encoded = content::encode(commit.payload)
+        let mut encoded = tokio::task::spawn_blocking(move || content::encode(commit.payload))
+            .await
+            .map_err(|error| TurnCommitError::Storage(error.to_string()))?
             .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
         tracing::Span::current().record("reference_count", encoded.contents.len() as u64);
+        if !encoded.contents.is_empty() {
+            // Read only key/id metadata before acquiring the write gate or
+            // transaction. Release the connection before CPU preparation.
+            let ids = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut connection = pool
+                        .acquire()
+                        .await
+                        .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                    content::lookup_sqlite(&mut connection, &principal, &encoded, false).await
+                }
+                Self::Postgres(pool) => {
+                    let mut connection = pool
+                        .acquire()
+                        .await
+                        .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                    content::lookup_postgres(&mut connection, &principal, &encoded, false).await
+                }
+            }
+            .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+            content::prepare_missing(&mut encoded, &ids)
+                .await
+                .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+        }
         let payload = &encoded.payload;
         let payload_version = i64::from(commit.payload_version);
         let prefix_namespace = commit
@@ -324,9 +350,14 @@ impl TurnChainStore for SqlTurnChainStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
-                content::put_sqlite(&mut transaction, commit.id.as_str(), &principal, &encoded)
-                    .await
-                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                content::put_sqlite(
+                    &mut transaction,
+                    commit.id.as_str(),
+                    &principal,
+                    &mut encoded,
+                )
+                .await
+                .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
 
                 transaction
                     .commit()
@@ -405,9 +436,14 @@ impl TurnChainStore for SqlTurnChainStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
-                content::put_postgres(&mut transaction, commit.id.as_str(), &principal, &encoded)
-                    .await
-                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                content::put_postgres(
+                    &mut transaction,
+                    commit.id.as_str(),
+                    &principal,
+                    &mut encoded,
+                )
+                .await
+                .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
 
                 transaction
                     .commit()
@@ -645,7 +681,9 @@ impl SqlTurnChainStore {
                     }
                     let mut payload = nodes.into_iter().next().expect("restored node").payload;
                     edit(&mut payload);
-                    let encoded = content::encode(payload)?;
+                    let mut encoded = tokio::task::spawn_blocking(move || content::encode(payload))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("history rewrite preparation worker failed: {error}"))??;
                     $(let _write_gate = $gate.lock().await;)?
                     let mut transaction = $pool.begin().await?;
                     if !encoded.contents.is_empty() {
@@ -655,7 +693,7 @@ impl SqlTurnChainStore {
                         .bind(&id)
                         .execute(&mut *transaction)
                         .await?;
-                    content::$put(&mut transaction, &id, &principal, &encoded).await?;
+                    content::$put(&mut transaction, &id, &principal, &mut encoded).await?;
                     sqlx::query("UPDATE turn_chain_nodes SET payload = $1 WHERE id = $2")
                         .bind(encoded.payload.as_slice())
                         .bind(&id)

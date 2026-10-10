@@ -34,6 +34,25 @@ use super::{
     ToolSpec,
 };
 
+struct HashWriter(Sha256);
+
+impl std::io::Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_hash(value: &(impl serde::Serialize + ?Sized)) -> [u8; 32] {
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, value).expect("canonical JSON value must serialize");
+    writer.0.finalize().into()
+}
+
 /// Produces the stable Provider prompt material used by cache routing.
 ///
 /// Cache directives and graph metadata are policy and delivery state, not
@@ -45,28 +64,223 @@ pub fn item_value(item: &AiItem) -> serde_json::Value {
 }
 
 pub fn item_hash(item: &AiItem) -> [u8; 32] {
-    hash_bytes(
-        &serde_json::to_vec(&item_value(item)).expect("canonical AiItem must serialize as JSON"),
-    )
+    json_hash(&history_units(item))
 }
 
 pub fn item_hashes(items: &[AiItem]) -> Vec<[u8; 32]> {
-    history_values(items)
-        .into_iter()
-        .map(|value| {
-            hash_bytes(
-                &serde_json::to_vec(&value)
-                    .expect("canonical provider-context unit must serialize as JSON"),
-            )
-        })
+    items
+        .iter()
+        .flat_map(history_units)
+        .map(|value| json_hash(&value))
         .collect()
 }
 
 pub fn history_unit_count(items: &[AiItem]) -> usize {
-    items
-        .iter()
-        .map(|item| history_item_values(item).len())
-        .sum()
+    items.iter().map(|item| history_units(item).len()).sum()
+}
+
+enum HistoryUnit<'a> {
+    Text { item: &'a AiItem, text: &'a str },
+    Owned(serde_json::Value),
+}
+
+// A real JSON Map preserves the established order with or without
+// serde_json's preserve_order feature, including feature unification.
+enum HistoryObject {
+    Text,
+    Assistant,
+    Tool,
+    Message,
+}
+
+impl HistoryObject {
+    fn keys(&self) -> &'static [String] {
+        use std::sync::OnceLock;
+        static TEXT: OnceLock<Vec<String>> = OnceLock::new();
+        static ASSISTANT: OnceLock<Vec<String>> = OnceLock::new();
+        static TOOL: OnceLock<Vec<String>> = OnceLock::new();
+        static MESSAGE: OnceLock<Vec<String>> = OnceLock::new();
+        let (cache, keys): (_, &[&str]) = match self {
+            Self::Text => (&TEXT, &["type", "text"]),
+            Self::Assistant => (&ASSISTANT, &["role", "content"]),
+            Self::Tool => (&TOOL, &["role", "tool_call_id", "output", "is_error"]),
+            Self::Message => (
+                &MESSAGE,
+                &[
+                    "role",
+                    "content",
+                    "tool_calls",
+                    "tool_call_id",
+                    "artifact_references",
+                ],
+            ),
+        };
+        cache.get_or_init(|| {
+            keys.iter()
+                .map(|key| ((*key).to_owned(), serde_json::Value::Null))
+                .collect::<serde_json::Map<_, _>>()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect()
+        })
+    }
+}
+
+fn text_unit_kind(item: &AiItem) -> u8 {
+    if item.role == super::Role::Assistant {
+        0
+    } else if item.role == super::Role::Tool && item.tool_call_id.is_some() {
+        1
+    } else {
+        2
+    }
+}
+
+impl PartialEq for HistoryUnit<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Owned(left), Self::Owned(right)) => left == right,
+            (
+                Self::Text {
+                    item: left,
+                    text: a,
+                },
+                Self::Text {
+                    item: right,
+                    text: b,
+                },
+            ) => {
+                let kind = text_unit_kind(left);
+                a == b
+                    && kind == text_unit_kind(right)
+                    && match kind {
+                        0 => true,
+                        1 => left.tool_call_id == right.tool_call_id,
+                        _ => {
+                            left.role == right.role
+                                && match (&left.tool_calls, &right.tool_calls) {
+                                    (None, None) => true,
+                                    (Some(a), Some(b)) => {
+                                        a.len() == b.len()
+                                            && a.iter().zip(b).all(|(a, b)| {
+                                                a.id == b.id
+                                                    && a.name == b.name
+                                                    && a.arguments == b.arguments
+                                            })
+                                    }
+                                    _ => false,
+                                }
+                                && left.tool_call_id == right.tool_call_id
+                                && left
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|meta| meta.get("__stravia_artifact_references"))
+                                    .filter(|value| !value.is_null())
+                                    == right
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.get("__stravia_artifact_references"))
+                                        .filter(|value| !value.is_null())
+                        }
+                    }
+            }
+            // Mixed schemas still compare exact semantic values, not digests.
+            (Self::Owned(value), borrowed) | (borrowed, Self::Owned(value)) => {
+                *value
+                    == serde_json::to_value(borrowed)
+                        .expect("canonical history unit must serialize")
+            }
+        }
+    }
+}
+
+struct HistoryText<'a>(&'a str);
+
+impl serde::Serialize for HistoryText<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        for key in HistoryObject::Text.keys() {
+            match key.as_str() {
+                "type" => map.serialize_entry(key, "text")?,
+                "text" => map.serialize_entry(key, self.0)?,
+                _ => unreachable!(),
+            }
+        }
+        map.end()
+    }
+}
+
+impl serde::Serialize for HistoryUnit<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Self::Text { item, text } = self else {
+            let Self::Owned(value) = self else {
+                unreachable!()
+            };
+            return serde::Serialize::serialize(value, serializer);
+        };
+        let assistant = item.role == super::Role::Assistant;
+        let tool = item.role == super::Role::Tool && item.tool_call_id.is_some();
+        let keys = if assistant {
+            HistoryObject::Assistant.keys()
+        } else if tool {
+            HistoryObject::Tool.keys()
+        } else {
+            HistoryObject::Message.keys()
+        };
+        let mut map = serializer.serialize_map(Some(keys.len()))?;
+        for key in keys {
+            match key.as_str() {
+                "role" => map.serialize_entry(key, &item.role)?,
+                "content" if assistant => map.serialize_entry(key, &HistoryText(text))?,
+                "content" => map.serialize_entry(key, &[HistoryText(text)])?,
+                // Struct serializers emit declaration order, whereas the old
+                // Value projection uses JSON Map order for each tool call.
+                "tool_calls" => map.serialize_entry(
+                    key,
+                    &serde_json::to_value(&item.tool_calls)
+                        .expect("canonical tool calls must serialize"),
+                )?,
+                "tool_call_id" => map.serialize_entry(key, &item.tool_call_id)?,
+                "artifact_references" => map.serialize_entry(
+                    key,
+                    &item
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("__stravia_artifact_references")),
+                )?,
+                "output" => map.serialize_entry(key, text)?,
+                "is_error" => map.serialize_entry(key, &Option::<bool>::None)?,
+                _ => unreachable!(),
+            }
+        }
+        map.end()
+    }
+}
+
+fn history_units(item: &AiItem) -> Vec<HistoryUnit<'_>> {
+    // Complex content and native wrappers retain the canonical projection.
+    if let MessageContent::Text(text) = &item.content {
+        if history_native_item_fields(item).is_none() {
+            let mut units = Vec::new();
+            if item.role == super::Role::Assistant {
+                let mut tail = Vec::new();
+                assistant_history_tail(item, &mut tail, &[]);
+                if !text.is_empty() || tail.is_empty() {
+                    units.push(HistoryUnit::Text { item, text });
+                }
+                units.extend(tail.into_iter().map(HistoryUnit::Owned));
+            } else {
+                units.push(HistoryUnit::Text { item, text });
+            }
+            return units;
+        }
+    }
+    history_item_values(item)
+        .into_iter()
+        .map(HistoryUnit::Owned)
+        .collect()
 }
 
 /// Canonical semantic units of one history item, in emission order. Callers
@@ -84,7 +298,10 @@ pub fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
                 fields.remove(key);
             }
         }
-        vec![serde_json::json!({"role": item.role, "native_compaction": native})]
+        vec![serde_json::Value::Object(serde_json::Map::from_iter([
+            ("role".into(), serde_json::json!(item.role)),
+            ("native_compaction".into(), native),
+        ]))]
     } else if item.role == super::Role::Assistant {
         assistant_history_values(item)
     } else if let Some(values) = tool_output_history_values(item) {
@@ -93,7 +310,10 @@ pub fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
         vec![history_item_value(item)]
     };
     if let Some(fields) = history_native_item_fields(item) {
-        return vec![serde_json::json!({"items": values, "native_item_fields": fields})];
+        return vec![serde_json::Value::Object(serde_json::Map::from_iter([
+            ("items".into(), serde_json::Value::Array(values)),
+            ("native_item_fields".into(), fields),
+        ]))];
     }
     values
 }
@@ -119,11 +339,9 @@ fn history_native_item_fields(item: &AiItem) -> Option<serde_json::Value> {
     (!semantic.is_empty()).then_some(serde_json::Value::Object(semantic))
 }
 
-fn history_values(items: &[AiItem]) -> Vec<serde_json::Value> {
-    items.iter().flat_map(history_item_values).collect()
-}
-
 fn history_item_value(item: &AiItem) -> serde_json::Value {
+    // Move projected JSON into its parent: json! serializes Value expressions
+    // again, recursively copying already-owned text and nested payloads.
     let content = match &item.content {
         MessageContent::Text(text) => {
             serde_json::json!([{ "type": "text", "text": text }])
@@ -133,10 +351,17 @@ fn history_item_value(item: &AiItem) -> serde_json::Value {
                 .iter()
                 .all(|block| matches!(block, ContentBlock::Text { .. })) =>
         {
-            serde_json::json!([{
-                "type": "text",
-                "text": blocks.iter().filter_map(ContentBlock::as_text).collect::<String>()
-            }])
+            serde_json::Value::Array(vec![serde_json::Value::Object(serde_json::Map::from_iter(
+                [
+                    ("type".into(), serde_json::json!("text")),
+                    (
+                        "text".into(),
+                        serde_json::Value::String(
+                            blocks.iter().filter_map(ContentBlock::as_text).collect(),
+                        ),
+                    ),
+                ],
+            ))])
         }
         MessageContent::Blocks(blocks) => {
             serde_json::Value::Array(blocks.iter().map(history_content_block_value).collect())
@@ -146,13 +371,16 @@ fn history_item_value(item: &AiItem) -> serde_json::Value {
         .meta
         .as_ref()
         .and_then(|meta| meta.get("__stravia_artifact_references"));
-    serde_json::json!({
-        "role": &item.role,
-        "content": content,
-        "tool_calls": &item.tool_calls,
-        "tool_call_id": &item.tool_call_id,
-        "artifact_references": artifact_references,
-    })
+    serde_json::Value::Object(serde_json::Map::from_iter([
+        ("role".into(), serde_json::json!(&item.role)),
+        ("content".into(), content),
+        ("tool_calls".into(), serde_json::json!(&item.tool_calls)),
+        ("tool_call_id".into(), serde_json::json!(&item.tool_call_id)),
+        (
+            "artifact_references".into(),
+            serde_json::json!(artifact_references),
+        ),
+    ]))
 }
 
 fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
@@ -162,10 +390,15 @@ fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
 
     let flush_text = |values: &mut Vec<serde_json::Value>, text: &mut String| {
         if !text.is_empty() {
-            values.push(assistant_content_value(serde_json::json!({
-                "type": "text",
-                "text": std::mem::take(text),
-            })));
+            values.push(assistant_content_value(serde_json::Value::Object(
+                serde_json::Map::from_iter([
+                    ("type".into(), serde_json::json!("text")),
+                    (
+                        "text".into(),
+                        serde_json::Value::String(std::mem::take(text)),
+                    ),
+                ]),
+            )));
         }
     };
 
@@ -212,6 +445,22 @@ fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
     }
     flush_text(&mut values, &mut text);
 
+    assistant_history_tail(item, &mut values, &represented_tool_calls);
+
+    if values.is_empty() {
+        values.push(assistant_content_value(serde_json::json!({
+            "type": "text",
+            "text": "",
+        })));
+    }
+    values
+}
+
+fn assistant_history_tail(
+    item: &AiItem,
+    values: &mut Vec<serde_json::Value>,
+    represented_tool_calls: &[&str],
+) {
     for call in item.tool_calls.iter().flatten() {
         if represented_tool_calls.contains(&call.id.as_str()) {
             continue;
@@ -231,31 +480,29 @@ fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
             "artifact_references": artifact_references,
         }));
     }
-    if values.is_empty() {
-        values.push(assistant_content_value(serde_json::json!({
-            "type": "text",
-            "text": "",
-        })));
-    }
-    values
 }
 
 fn tool_output_history_values(item: &AiItem) -> Option<Vec<serde_json::Value>> {
     if let MessageContent::Blocks(blocks) = &item.content {
-        let tool_results = blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                    ..
-                } => Some(tool_output_value(tool_use_id, content.clone(), *is_error)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if !tool_results.is_empty() && tool_results.len() == blocks.len() {
-            return Some(tool_results);
+        if !blocks.is_empty()
+            && blocks
+                .iter()
+                .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            return Some(
+                blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                            ..
+                        } => Some(tool_output_value(tool_use_id, content.clone(), *is_error)),
+                        _ => None,
+                    })
+                    .collect(),
+            );
         }
     }
     if item.role != super::Role::Tool {
@@ -263,18 +510,19 @@ fn tool_output_history_values(item: &AiItem) -> Option<Vec<serde_json::Value>> {
     }
     let call_id = item.tool_call_id.as_deref()?;
     let output = match &item.content {
-        MessageContent::Text(text) => serde_json::Value::String(text.clone()),
+        MessageContent::Text(text) => serde_json::Value::String(text.as_ref().clone()),
         MessageContent::Blocks(blocks) => {
-            let values = blocks
+            let mut values = blocks
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Unknown { raw } => raw.clone(),
                     other => history_content_block_value(other),
                 })
                 .collect::<Vec<_>>();
-            match values.as_slice() {
-                [value] => value.clone(),
-                _ => serde_json::Value::Array(values),
+            if values.len() == 1 {
+                values.pop().expect("one projected tool output block")
+            } else {
+                serde_json::Value::Array(values)
             }
         }
     };
@@ -286,39 +534,48 @@ fn tool_output_value(
     output: serde_json::Value,
     is_error: Option<bool>,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "role": "tool",
-        "tool_call_id": call_id,
-        "output": output,
-        "is_error": is_error,
-    })
+    serde_json::Value::Object(serde_json::Map::from_iter([
+        ("role".into(), serde_json::json!("tool")),
+        ("tool_call_id".into(), serde_json::json!(call_id)),
+        ("output".into(), output),
+        ("is_error".into(), serde_json::json!(is_error)),
+    ]))
 }
 
 fn assistant_content_value(content: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "role": "assistant",
-        "content": content,
-    })
+    serde_json::Value::Object(serde_json::Map::from_iter([
+        ("role".into(), serde_json::json!("assistant")),
+        ("content".into(), content),
+    ]))
 }
 
 fn reasoning_value(text: String, encrypted_content: Option<&str>) -> serde_json::Value {
-    assistant_content_value(serde_json::json!({
-        "type": "reasoning",
-        "summary": [text],
-        "content": [],
-        "encrypted_content": encrypted_content,
-    }))
+    assistant_content_value(serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".into(), serde_json::json!("reasoning")),
+        (
+            "summary".into(),
+            serde_json::Value::Array(vec![serde_json::Value::String(text)]),
+        ),
+        ("content".into(), serde_json::Value::Array(Vec::new())),
+        (
+            "encrypted_content".into(),
+            serde_json::json!(encrypted_content),
+        ),
+    ])))
 }
 
 fn tool_call_value(id: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "role": "assistant",
-        "tool_call": {
-            "id": id,
-            "name": name,
-            "arguments": arguments,
-        },
-    })
+    serde_json::Value::Object(serde_json::Map::from_iter([
+        ("role".into(), serde_json::json!("assistant")),
+        (
+            "tool_call".into(),
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("id".into(), serde_json::json!(id)),
+                ("name".into(), serde_json::json!(name)),
+                ("arguments".into(), arguments),
+            ])),
+        ),
+    ]))
 }
 
 /// Compares the same semantic projection used by history fingerprints.
@@ -327,13 +584,17 @@ fn tool_call_value(id: &str, name: &str, arguments: serde_json::Value) -> serde_
 /// delivery metadata and cache policy are not. Unclassified additive wire
 /// fields remain significant until explicitly classified as non-semantic.
 pub fn history_items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
-    history_values(left) == history_values(right)
+    left.iter()
+        .flat_map(history_units)
+        .eq(right.iter().flat_map(history_units))
 }
 
 pub fn append_history_context_hash(previous: &[u8; 32], item: &AiItem) -> [u8; 32] {
-    history_item_values(item)
+    history_units(item)
         .into_iter()
-        .fold(*previous, append_history_value_hash)
+        .fold(*previous, |previous, value| {
+            append_history_serialized_hash(previous, &value)
+        })
 }
 
 pub fn history_context_hash(items: &[AiItem]) -> [u8; 32] {
@@ -348,41 +609,54 @@ pub fn history_context_hash(items: &[AiItem]) -> [u8; 32] {
 /// [`history_item_values`] to project each item once when both the hash chain
 /// and the unit count are needed.
 pub fn append_history_value_hash(previous: [u8; 32], value: serde_json::Value) -> [u8; 32] {
-    let value = serde_json::to_vec(&value)
+    append_history_serialized_hash(previous, &value)
+}
+
+fn append_history_serialized_hash(
+    previous: [u8; 32],
+    value: &(impl serde::Serialize + ?Sized),
+) -> [u8; 32] {
+    // 长度前缀属于既有持久化指纹契约；先计数，再直接散列相同 JSON 字节。
+    let length = crate::json::serialized_len(&value)
         .expect("model-visible provider-context unit must serialize as JSON");
     let mut hasher = Sha256::new();
     hasher.update(b"stravia-generation-chain-history-v1\0");
     hasher.update(previous);
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value);
-    hasher.finalize().into()
+    hasher.update((length as u64).to_be_bytes());
+    let mut writer = HashWriter(hasher);
+    serde_json::to_writer(&mut writer, &value)
+        .expect("model-visible provider-context unit must serialize as JSON");
+    writer.0.finalize().into()
 }
 
 /// Fingerprints material and controls that can change Provider prompt-cache
 /// matching. The projection is intentionally positive: new request fields do
 /// not become cache identity until their Provider semantics are classified.
 pub fn cache_controls_hash(request: &AiRequest) -> [u8; 32] {
-    let controls = serde_json::json!({
+    let mut controls = serde_json::json!({
         "model": &request.model,
         "instructions": &request.instructions,
-        "tools": request.tools.as_ref().map(|tools| {
-            tools.iter().map(history_tool_value).collect::<Vec<_>>()
-        }),
+        "tools": null,
         "tool_choice": &request.tool_choice,
         "parallel_tool_calls": request.parallel_tool_calls,
         "disable_parallel_tool_calls": request.disable_parallel_tool_calls,
         "reasoning": &request.reasoning,
         "response_format": &request.response_format,
         "safety_settings": &request.safety_settings,
-        "protocol_controls": cache_protocol_controls_value(request.ext.as_ref()),
+        "protocol_controls": null,
     });
-    hash_bytes(
-        &serde_json::to_vec(&controls).expect("prompt cache controls must serialize as JSON"),
-    )
+    controls["tools"] = request
+        .tools
+        .as_ref()
+        .map_or(serde_json::Value::Null, |tools| {
+            serde_json::Value::Array(tools.iter().map(history_tool_value).collect())
+        });
+    controls["protocol_controls"] = cache_protocol_controls_value(request.ext.as_ref());
+    json_hash(&controls)
 }
 
 pub fn history_request_controls_hash(request: &AiRequest) -> [u8; 32] {
-    let controls = serde_json::json!({
+    let mut controls = serde_json::json!({
         "model": &request.model,
         "instructions": &request.instructions,
         "generation": {
@@ -394,21 +668,24 @@ pub fn history_request_controls_hash(request: &AiRequest) -> [u8; 32] {
             "frequency_penalty": request.generation.frequency_penalty,
         },
         "embedding": &request.embedding,
-        "tools": request.tools.as_ref().filter(|tools| !tools.is_empty()).map(|tools| {
-            tools.iter().map(history_tool_value).collect::<Vec<_>>()
-        }),
+        "tools": null,
         "tool_choice": &request.tool_choice,
         "parallel_tool_calls": request.parallel_tool_calls,
         "disable_parallel_tool_calls": request.disable_parallel_tool_calls,
         "reasoning": &request.reasoning,
         "response_format": &request.response_format,
         "safety_settings": &request.safety_settings,
-        "protocol_controls": history_protocol_controls_value(request.ext.as_ref()),
+        "protocol_controls": null,
     });
-    hash_bytes(
-        &serde_json::to_vec(&controls)
-            .expect("Generation Chain history controls must serialize as JSON"),
-    )
+    controls["tools"] = request
+        .tools
+        .as_ref()
+        .filter(|tools| !tools.is_empty())
+        .map_or(serde_json::Value::Null, |tools| {
+            serde_json::Value::Array(tools.iter().map(history_tool_value).collect())
+        });
+    controls["protocol_controls"] = history_protocol_controls_value(request.ext.as_ref());
+    json_hash(&controls)
 }
 
 fn history_tool_value(tool: &ToolSpec) -> serde_json::Value {
@@ -558,25 +835,31 @@ fn history_content_block_value(block: &ContentBlock) -> serde_json::Value {
         ContentBlock::Text { text, .. } => {
             serde_json::json!({ "type": "text", "text": text })
         }
-        ContentBlock::Image { source, detail, .. } => serde_json::json!({
-            "type": "image",
-            "source": media_source_value(source),
-            "detail": detail,
-        }),
-        ContentBlock::Audio { source } => serde_json::json!({
-            "type": "audio",
-            "source": media_source_value(source),
-        }),
-        ContentBlock::File { source, media_type } => serde_json::json!({
-            "type": "file",
-            "source": media_source_value(source),
-            "media_type": media_type,
-        }),
-        ContentBlock::Video { source, media_type } => serde_json::json!({
-            "type": "video",
-            "source": media_source_value(source),
-            "media_type": media_type,
-        }),
+        ContentBlock::Image { source, detail, .. } => {
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("type".into(), serde_json::json!("image")),
+                ("source".into(), media_source_value(source)),
+                ("detail".into(), serde_json::json!(detail)),
+            ]))
+        }
+        ContentBlock::Audio { source } => serde_json::Value::Object(serde_json::Map::from_iter([
+            ("type".into(), serde_json::json!("audio")),
+            ("source".into(), media_source_value(source)),
+        ])),
+        ContentBlock::File { source, media_type } => {
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("type".into(), serde_json::json!("file")),
+                ("source".into(), media_source_value(source)),
+                ("media_type".into(), serde_json::json!(media_type)),
+            ]))
+        }
+        ContentBlock::Video { source, media_type } => {
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("type".into(), serde_json::json!("video")),
+                ("source".into(), media_source_value(source)),
+                ("media_type".into(), serde_json::json!(media_type)),
+            ]))
+        }
         ContentBlock::Thinking {
             thinking,
             signature,
@@ -651,23 +934,26 @@ fn history_content_block_value(block: &ContentBlock) -> serde_json::Value {
             title,
             context,
             ..
-        } => serde_json::json!({
-            "type": "document",
-            "source": history_document_source_value(source),
-            "title": title,
-            "context": context,
-        }),
+        } => serde_json::Value::Object(serde_json::Map::from_iter([
+            ("type".into(), serde_json::json!("document")),
+            ("source".into(), history_document_source_value(source)),
+            ("title".into(), serde_json::json!(title)),
+            ("context".into(), serde_json::json!(context)),
+        ])),
         ContentBlock::SearchResult {
             content,
             source,
             title,
             ..
-        } => serde_json::json!({
-            "type": "search_result",
-            "content": content.iter().map(history_content_block_value).collect::<Vec<_>>(),
-            "source": source,
-            "title": title,
-        }),
+        } => serde_json::Value::Object(serde_json::Map::from_iter([
+            ("type".into(), serde_json::json!("search_result")),
+            (
+                "content".into(),
+                serde_json::Value::Array(content.iter().map(history_content_block_value).collect()),
+            ),
+            ("source".into(), serde_json::json!(source)),
+            ("title".into(), serde_json::json!(title)),
+        ])),
         ContentBlock::ContainerUpload { file_id, .. } => serde_json::json!({
             "type": "container_upload",
             "file_id": file_id,
@@ -715,10 +1001,17 @@ fn history_document_source_value(source: &DocumentSource) -> serde_json::Value {
             serde_json::json!({ "type": "plain_text", "data": data })
         }
         DocumentSource::Url(url) => serde_json::json!({ "type": "url", "url": url }),
-        DocumentSource::Blocks { content } => serde_json::json!({
-            "type": "blocks",
-            "content": content.iter().map(history_content_block_value).collect::<Vec<_>>(),
-        }),
+        DocumentSource::Blocks { content } => {
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                ("type".into(), serde_json::json!("blocks")),
+                (
+                    "content".into(),
+                    serde_json::Value::Array(
+                        content.iter().map(history_content_block_value).collect(),
+                    ),
+                ),
+            ]))
+        }
     }
 }
 
@@ -749,6 +1042,213 @@ mod tests {
         ToolCall,
     };
 
+    fn assert_borrowed_history_matches_owned(items: &[AiItem]) {
+        let mut expected = hash_bytes(b"stravia-generation-chain-history-v1");
+        let mut count = 0;
+        let mut hashes = Vec::new();
+        for item in items {
+            let owned = history_item_values(item);
+            assert_eq!(
+                serde_json::to_vec(&history_units(item)).unwrap(),
+                serde_json::to_vec(&owned).unwrap(),
+            );
+            assert_eq!(
+                item_hash(item),
+                json_hash(&serde_json::Value::Array(owned.clone()))
+            );
+            for value in owned {
+                // Original persisted contract: hash the length-prefixed owned
+                // projection bytes, independently of the new streaming writer.
+                let bytes = serde_json::to_vec(&value).unwrap();
+                let mut hasher = Sha256::new();
+                hasher.update(b"stravia-generation-chain-history-v1\0");
+                hasher.update(expected);
+                hasher.update((bytes.len() as u64).to_be_bytes());
+                hasher.update(&bytes);
+                expected = hasher.finalize().into();
+                hashes.push(json_hash(&value));
+                count += 1;
+            }
+        }
+        assert_eq!(history_context_hash(items), expected);
+        assert_eq!(history_unit_count(items), count);
+        assert_eq!(item_hashes(items), hashes);
+    }
+
+    #[test]
+    fn borrowed_text_history_matches_owned_bytes_for_roles_and_metadata() {
+        for role in [
+            Role::System,
+            Role::Developer,
+            Role::User,
+            Role::Assistant,
+            Role::Tool,
+        ] {
+            for text in [
+                "",
+                " \t\r\n ",
+                "中文🙂 quote:\" slash:\\ controls:\0\u{8}\u{c}",
+            ] {
+                for meta in [
+                    None,
+                    Some(serde_json::json!({"metadata": {"ignored": true}})),
+                    Some(serde_json::json!({"__stravia_artifact_references": [{"id": "a"}]})),
+                    Some(
+                        serde_json::json!({"__open_responses_item_fields": {"metadata": {"ignored": true}}}),
+                    ),
+                    Some(
+                        serde_json::json!({"__open_responses_item_fields": {"z": "native", "a": [1, null]}}),
+                    ),
+                    Some(serde_json::json!({"__open_responses_item_fields": "opaque"})),
+                ] {
+                    let plain = AiItem {
+                        role,
+                        content: MessageContent::Text(text.to_owned().into()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        meta: meta.map(|value| Box::new(value.into())),
+                    };
+                    let mut calls = plain.clone();
+                    calls.tool_calls = Some(vec![
+                        ToolCall {
+                            id: "call_z".into(),
+                            name: "z".into(),
+                            arguments: "{\"z\":1,\"a\":2}".into(),
+                        },
+                        ToolCall {
+                            id: "call_a".into(),
+                            name: "a".into(),
+                            arguments: "invalid\n🙂".into(),
+                        },
+                    ]);
+                    calls.tool_call_id = Some("output".into());
+                    let mut blocks = plain.clone();
+                    blocks.content = MessageContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "".to_owned().into(),
+                            cache_control: None,
+                        },
+                        ContentBlock::Text {
+                            text: text.to_owned().into(),
+                            cache_control: None,
+                        },
+                    ]);
+                    assert_borrowed_history_matches_owned(&[plain.clone(), calls, blocks.clone()]);
+                    assert_eq!(
+                        history_items_equal(
+                            std::slice::from_ref(&plain),
+                            std::slice::from_ref(&blocks)
+                        ),
+                        history_item_values(&plain) == history_item_values(&blocks),
+                    );
+                    let mut changed = plain.clone();
+                    changed.content = MessageContent::Text(format!("{text}!").into());
+                    assert!(!history_items_equal(&[plain.clone()], &[changed]));
+                    assert!(history_items_equal(&[plain.clone()], &[plain]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn history_equality_normalizes_missing_and_null_artifact_references() {
+        for role in [Role::System, Role::Developer, Role::User, Role::Tool] {
+            let absent = AiItem {
+                role,
+                content: MessageContent::Text("text🙂\n\"".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            };
+            let mut null = absent.clone();
+            null.meta = Some(Box::new(
+                serde_json::json!({"__stravia_artifact_references": null}).into(),
+            ));
+            let mut blocks = null.clone();
+            blocks.content = MessageContent::Blocks(vec![ContentBlock::Text {
+                text: "text🙂\n\"".to_owned().into(),
+                cache_control: None,
+            }]);
+            assert_eq!(item_hash(&absent), item_hash(&null));
+            assert!(history_items_equal(
+                std::slice::from_ref(&absent),
+                std::slice::from_ref(&null),
+            ));
+            assert!(history_items_equal(
+                std::slice::from_ref(&absent),
+                std::slice::from_ref(&blocks),
+            ));
+            let mut referenced = null.clone();
+            referenced.meta = Some(Box::new(
+                serde_json::json!({"__stravia_artifact_references": ["artifact"]}).into(),
+            ));
+            assert!(!history_items_equal(&[absent], &[referenced]));
+        }
+    }
+
+    #[test]
+    fn borrowed_history_retains_complex_fallback_and_unit_order() {
+        let mut assistant = item(ContentBlock::Thinking {
+            thinking: "thought🙂".to_owned().into(),
+            signature: Some("signed".into()),
+        });
+        assistant.role = Role::Assistant;
+        assistant.content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "before ".to_owned().into(),
+                cache_control: None,
+            },
+            ContentBlock::Thinking {
+                thinking: "thought🙂".to_owned().into(),
+                signature: Some("signed".into()),
+            },
+            ContentBlock::Text {
+                text: " after".to_owned().into(),
+                cache_control: None,
+            },
+        ]);
+        let media = item(ContentBlock::Image {
+            source: MediaSource::Base64 {
+                media_type: "image/png".into(),
+                data: "payload".into(),
+            },
+            detail: Some("high".into()),
+            cache_control: None,
+        });
+        let native = item(ContentBlock::Compaction {
+            encrypted_content: "opaque-state".into(),
+        });
+        let tool =
+            AiItem::function_call_output("call", serde_json::json!({"nested": ["🙂", null]}));
+        assert_borrowed_history_matches_owned(&[assistant, media, native, tool]);
+    }
+
+    #[test]
+    fn persisted_history_hash_preserves_json_byte_contract() {
+        let previous = history_context_hash(&[]);
+        for (value, expected) in [
+            (
+                serde_json::Value::Null,
+                "50ad83999d56ad8c839dd3ff6536fc7cfb1a4d87ca8f7ef6b993099f85465b11",
+            ),
+            (
+                serde_json::Value::String("\n🙂".repeat(16_384)),
+                "931b9183b5e5db73b8982f96bb77df3ae0970d10fe864dc8d16d84a7ae53633f",
+            ),
+            (
+                serde_json::Value::String(
+                    "quote:\" slash:\\ controls:\u{8}\u{c}\r\t\0 中文".into(),
+                ),
+                "e5e34a9c7c0a532c566f892b4638382501a80f51034f91d025a90334d5debaff",
+            ),
+        ] {
+            assert_eq!(
+                hash_hex(&append_history_value_hash(previous, value)),
+                expected
+            );
+        }
+    }
+
     fn item(content: ContentBlock) -> AiItem {
         AiItem {
             role: Role::User,
@@ -756,6 +1256,208 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             meta: None,
+        }
+    }
+
+    #[test]
+    fn nested_projection_preserves_native_fields_and_json_bytes() {
+        let mut item = item(ContentBlock::Document {
+            source: DocumentSource::Blocks {
+                content: vec![ContentBlock::Image {
+                    source: MediaSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "payload\n🙂".into(),
+                    },
+                    detail: Some("high".into()),
+                    cache_control: None,
+                }],
+            },
+            title: Some("title".into()),
+            context: Some("context".into()),
+            cache_control: None,
+        });
+        item.meta = Some(Box::new(
+            serde_json::json!({
+                "__open_responses_item_fields": {
+                    "metadata": {"ignored": true},
+                    "internal_chat_message_metadata_passthrough": {"ignored": true},
+                    "extension": {"z": [null, "opaque"], "a": 1},
+                },
+                "__stravia_artifact_references": [{"id": "artifact"}],
+            })
+            .into(),
+        ));
+        let expected = serde_json::json!([{
+            "items": [{
+                "role": "user",
+                "content": [{
+                    "type": "document",
+                    "source": {
+                        "type": "blocks",
+                        "content": [{
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "payload\n🙂",
+                            },
+                            "detail": "high",
+                        }],
+                    },
+                    "title": "title",
+                    "context": "context",
+                }],
+                "tool_calls": null,
+                "tool_call_id": null,
+                "artifact_references": [{"id": "artifact"}],
+            }],
+            "native_item_fields": {"extension": {"z": [null, "opaque"], "a": 1}},
+        }]);
+        assert_eq!(item_value(&item), expected);
+        assert_eq!(item_hash(&item), json_hash(&expected));
+        assert_eq!(
+            history_context_hash(std::slice::from_ref(&item)),
+            append_history_value_hash(history_context_hash(&[]), expected[0].clone()),
+        );
+    }
+
+    #[test]
+    fn text_projection_preserves_empty_blocks_role_and_escaping() {
+        for role in [Role::User, Role::Assistant] {
+            for text in ["", "quote:\" slash:\\\n🙂"] {
+                let plain = AiItem {
+                    role,
+                    content: MessageContent::Text(text.to_owned().into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                };
+                let mut blocks = plain.clone();
+                blocks.content = MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "".to_owned().into(),
+                        cache_control: None,
+                    },
+                    ContentBlock::Text {
+                        text: text.to_owned().into(),
+                        cache_control: None,
+                    },
+                ]);
+                assert_eq!(item_value(&plain), item_value(&blocks));
+                assert_eq!(item_hash(&plain), item_hash(&blocks));
+                assert_eq!(
+                    history_context_hash(std::slice::from_ref(&plain)),
+                    history_context_hash(std::slice::from_ref(&blocks)),
+                );
+                if text.is_empty() {
+                    blocks.content = MessageContent::Blocks(Vec::new());
+                    assert_eq!(item_value(&plain), item_value(&blocks));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_projection_preserves_single_multiple_and_invalid_arguments() {
+        let output = serde_json::json!({"z": ["nested", null], "a": {"escaped": "\n🙂"}});
+        let single = AiItem::function_call_output("call_1", output.clone());
+        assert_eq!(
+            history_item_values(&single),
+            vec![serde_json::json!({
+                "role": "tool", "tool_call_id": "call_1", "output": output, "is_error": null,
+            })],
+        );
+        let mut unknown = single.clone();
+        unknown.content = MessageContent::Blocks(vec![ContentBlock::Unknown {
+            raw: output.clone(),
+        }]);
+        assert_eq!(history_item_values(&single), history_item_values(&unknown));
+        let mut multiple = single.clone();
+        multiple.content = MessageContent::Blocks(vec![
+            ContentBlock::Unknown {
+                raw: serde_json::json!({"a": 1}),
+            },
+            ContentBlock::Unknown {
+                raw: serde_json::json!({"b": 2}),
+            },
+        ]);
+        assert_eq!(
+            history_item_values(&multiple),
+            vec![serde_json::json!({
+                "role": "tool", "tool_call_id": "call_1",
+                "output": [{"a": 1}, {"b": 2}], "is_error": null,
+            })],
+        );
+        let call = AiItem::function_call(ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: "{not-json\n🙂".into(),
+        });
+        assert_eq!(
+            history_item_values(&call),
+            vec![serde_json::json!({
+                "role": "assistant",
+                "tool_call": {"id": "call_1", "name": "lookup", "arguments": "{not-json\n🙂"},
+            })],
+        );
+    }
+
+    #[test]
+    fn controls_projection_preserves_optional_tools_and_protocol_values() {
+        let tool = ToolSpec {
+            name: "lookup".into(),
+            description: Some("description\n🙂".into()),
+            parameters: serde_json::json!({"type": "object", "properties": {"z": {"type": "string"}}}),
+            strict: Some(true),
+            cache_control: None,
+            meta: Some(serde_json::json!({"native": [null, {"z": 2, "a": 1}]})),
+        };
+        for tools in [None, Some(Vec::new()), Some(vec![tool])] {
+            let mut request = AiRequest::new("model", Vec::new());
+            request.tools = tools;
+            request.ext = Some(ProtocolExt::Google(super::super::GoogleExt {
+                cached_content: Some("cachedContents/example".into()),
+                response_json_schema: Some(serde_json::json!({"type": "object", "z": [1, null]})),
+                ..Default::default()
+            }));
+            let expected_cache = serde_json::json!({
+                "model": &request.model,
+                "instructions": &request.instructions,
+                "tools": request.tools.as_ref().map(|tools| tools.iter().map(history_tool_value).collect::<Vec<_>>()),
+                "tool_choice": &request.tool_choice,
+                "parallel_tool_calls": request.parallel_tool_calls,
+                "disable_parallel_tool_calls": request.disable_parallel_tool_calls,
+                "reasoning": &request.reasoning,
+                "response_format": &request.response_format,
+                "safety_settings": &request.safety_settings,
+                "protocol_controls": cache_protocol_controls_value(request.ext.as_ref()),
+            });
+            let expected_history = serde_json::json!({
+                "model": &request.model,
+                "instructions": &request.instructions,
+                "generation": {
+                    "temperature": request.generation.temperature,
+                    "top_p": request.generation.top_p,
+                    "seed": request.generation.seed,
+                    "stop": &request.generation.stop,
+                    "presence_penalty": request.generation.presence_penalty,
+                    "frequency_penalty": request.generation.frequency_penalty,
+                },
+                "embedding": &request.embedding,
+                "tools": request.tools.as_ref().filter(|tools| !tools.is_empty()).map(|tools| tools.iter().map(history_tool_value).collect::<Vec<_>>()),
+                "tool_choice": &request.tool_choice,
+                "parallel_tool_calls": request.parallel_tool_calls,
+                "disable_parallel_tool_calls": request.disable_parallel_tool_calls,
+                "reasoning": &request.reasoning,
+                "response_format": &request.response_format,
+                "safety_settings": &request.safety_settings,
+                "protocol_controls": history_protocol_controls_value(request.ext.as_ref()),
+            });
+            assert_eq!(cache_controls_hash(&request), json_hash(&expected_cache));
+            assert_eq!(
+                history_request_controls_hash(&request),
+                json_hash(&expected_history)
+            );
         }
     }
 
@@ -821,11 +1523,11 @@ mod tests {
     fn appended_context_hash_matches_the_complete_prefix() {
         let items = [
             item(ContentBlock::Text {
-                text: "first".into(),
+                text: std::sync::Arc::new("first".into()),
                 cache_control: None,
             }),
             item(ContentBlock::Text {
-                text: "second".into(),
+                text: std::sync::Arc::new("second".into()),
                 cache_control: None,
             }),
         ];
@@ -938,21 +1640,21 @@ mod tests {
 
         assert!(!history_items_equal(
             &[item(ContentBlock::Text {
-                text: "question".into(),
+                text: "question".to_owned().into(),
                 cache_control: None,
             })],
             &[item(ContentBlock::Text {
-                text: "different".into(),
+                text: "different".to_owned().into(),
                 cache_control: None,
             })]
         ));
         assert!(history_items_equal(
             &[item(ContentBlock::Text {
-                text: "question".into(),
+                text: "question".to_owned().into(),
                 cache_control: Some(crate::protocol::ir::CacheControl::ephemeral()),
             })],
             &[item(ContentBlock::Text {
-                text: "question".into(),
+                text: "question".to_owned().into(),
                 cache_control: None,
             })]
         ));
@@ -970,7 +1672,7 @@ mod tests {
                             signature: Some(signature.into()),
                         },
                         ContentBlock::Text {
-                            text: text.into(),
+                            text: text.to_owned().into(),
                             cache_control: None,
                         },
                         ContentBlock::ToolUse {

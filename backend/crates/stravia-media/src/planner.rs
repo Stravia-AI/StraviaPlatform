@@ -514,7 +514,9 @@ mod tests {
             .expect("marker key is not reserved");
         let mut call = stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::Assistant,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(String::new()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                std::sync::Arc::new(String::new()),
+            ),
             tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "media-call".into(),
                 name: "StraviaRead".into(),

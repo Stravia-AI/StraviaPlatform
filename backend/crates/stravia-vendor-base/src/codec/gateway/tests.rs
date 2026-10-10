@@ -8,13 +8,15 @@ fn encodes_ai_sdk_v4_language_model_wire() {
         "ignored-by-gateway",
         vec![AiItem {
             role: Role::User,
-            content: MessageContent::Text("hello".into()),
+            content: MessageContent::Text("hello".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
-    let (body, headers) = GatewayLanguageModelV4.encode_request(&request).unwrap();
+    let (body, headers) = GatewayLanguageModelV4
+        .encode_request(request.clone())
+        .unwrap();
 
     assert_eq!(
         GatewayLanguageModelV4.request_path("anything", false),
@@ -41,7 +43,7 @@ fn encodes_ai_sdk_v4_language_model_wire() {
     let mut streaming_request = request;
     streaming_request.stream.enabled = true;
     let (_, streaming_headers) = GatewayLanguageModelV4
-        .encode_request(&streaming_request)
+        .encode_request(streaming_request)
         .unwrap();
     assert_eq!(
         streaming_headers
@@ -113,7 +115,7 @@ fn replays_reasoning_natively_and_drops_protected_only_assistant() {
         vec![
             AiItem {
                 role: Role::User,
-                content: MessageContent::Text("hi".into()),
+                content: MessageContent::Text("hi".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
@@ -134,7 +136,7 @@ fn replays_reasoning_natively_and_drops_protected_only_assistant() {
         ],
     );
 
-    let (body, _) = GatewayLanguageModelV4.encode_request(&request).unwrap();
+    let (body, _) = GatewayLanguageModelV4.encode_request(request).unwrap();
     let prompt = body["prompt"].as_array().unwrap();
     assert_eq!(prompt.len(), 3);
     assert_eq!(

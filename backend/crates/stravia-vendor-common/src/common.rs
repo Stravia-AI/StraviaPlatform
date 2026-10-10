@@ -64,13 +64,13 @@ pub fn ensure_no_native_compaction(request: &AiRequest) -> Result<(), PluginErro
 
 pub fn encode_inference_request(
     protocol: &str,
-    request: &AiRequest,
+    request: AiRequest,
 ) -> Result<EncodedRequest, PluginError> {
     let egress = endpoint(protocol)?;
     if egress.protocol != Protocol::OpenResponses {
-        ensure_no_native_compaction(request)?;
+        ensure_no_native_compaction(&request)?;
     }
-    let ingress = ProtocolTransform::inferred_ingress(request).unwrap_or(egress);
+    let ingress = ProtocolTransform::inferred_ingress(&request).unwrap_or(egress);
     ProtocolTransform::global()
         .bind(ingress, egress)
         .and_then(|pair| pair.encode_request(request))

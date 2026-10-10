@@ -214,10 +214,11 @@ fn infer(
 ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
     request.model = required_model(provider)?.to_owned();
     let protocol = ANTHROPIC_MESSAGES_2023_06_01.to_string();
-    let mut encoded = common::encode_inference_request(&protocol, &request)?;
+    let display = request.reasoning.display.clone();
+    let mut encoded = common::encode_inference_request(&protocol, request)?;
     // 通用 Anthropic 编码器不输出 `thinking.display`（部分兼容上游不认该字段）；
     // 本插件的上游是 Anthropic 本身，客户端选择的思考展示方式原样保留。
-    if let Some(display) = request.reasoning.display.as_deref()
+    if let Some(display) = display.as_deref()
         && let Some(thinking) = encoded
             .body
             .get_mut("thinking")
@@ -232,11 +233,7 @@ fn infer(
         device_id: credential(provider, auth::DEVICE_ID),
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
-    thinking::preserve_implicit_summary_intent(
-        &mut encoded.body,
-        &caps,
-        request.reasoning.display.as_deref(),
-    );
+    thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display.as_deref());
     let shaped = request::shape(encoded.body, client_version, &identity, &caps, || {
         fallback_session_id(provider)
     })

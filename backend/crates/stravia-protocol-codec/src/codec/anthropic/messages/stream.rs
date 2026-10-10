@@ -127,7 +127,7 @@ pub fn normalize_client_history_item(item: &mut AiItem) {
             }
             ContentBlock::Refusal { refusal } => {
                 *block = ContentBlock::Text {
-                    text: std::mem::take(refusal),
+                    text: std::mem::take(refusal).into(),
                     cache_control: None,
                 };
             }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use http::header::HeaderMap;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -17,25 +18,25 @@ use stravia_runtime_contract::protocol::ir::request::ToolSpec;
 pub struct OpenAIEncoder;
 
 impl OpenAIEncoder {
-    pub(crate) fn encode_request(&self, req: &AiRequest) -> Result<(Value, HeaderMap)> {
+    pub(crate) fn encode_request(&self, req: AiRequest) -> Result<(Value, HeaderMap)> {
         let tools = req.tools.as_deref().unwrap_or(&[]);
         let tools_opt: Option<&[ToolSpec]> = if tools.is_empty() { None } else { Some(tools) };
 
         let normalized_messages =
-            normalize_messages_for_openai(&req.items, req.instructions.as_deref(), tools_opt);
+            normalize_messages_for_openai(req.items, req.instructions, tools_opt);
         let messages: Vec<Value> = normalized_messages
-            .iter()
+            .into_iter()
             .map(encode_message)
             .collect::<Result<Vec<_>>>()?;
 
-        let ingress = &req.meta.vendor.ingress;
+        let mut ingress = req.meta.vendor.ingress;
         let responses_ingress = req.meta.source_protocol == Some(OPEN_RESPONSES_2026_04_24);
 
-        let mut body = serde_json::json!({
-            "model": req.model,
-            "messages": messages,
-            "stream": req.stream.enabled,
-        });
+        let mut body = object([
+            ("model", Value::String(req.model)),
+            ("messages", Value::Array(messages)),
+            ("stream", Value::Bool(req.stream.enabled)),
+        ]);
 
         let obj = body.as_object_mut().unwrap();
 
@@ -48,9 +49,9 @@ impl OpenAIEncoder {
         if let Some(p) = req.generation.top_p {
             obj.insert("top_p".into(), p.into());
         }
-        match req.reasoning.target_control.as_ref() {
+        match req.reasoning.target_control {
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
-                obj.insert("reasoning_effort".into(), Value::String(value.clone()));
+                obj.insert("reasoning_effort".into(), Value::String(value));
             }
             None => {}
             Some(control) => {
@@ -60,36 +61,32 @@ impl OpenAIEncoder {
             }
         }
 
-        if !tools.is_empty() {
+        if let Some(tools) = req.tools.filter(|tools| !tools.is_empty()) {
             let tools_val: Vec<Value> = tools
-                .iter()
+                .into_iter()
                 .map(|t| {
-                    let mut f = serde_json::json!({
-                        "name": t.name,
-                        "parameters": t.parameters,
-                    });
-                    if let Some(ref desc) = t.description {
+                    let mut f = object([
+                        ("name", Value::String(t.name)),
+                        ("parameters", t.parameters),
+                    ]);
+                    if let Some(desc) = t.description {
                         f.as_object_mut()
                             .unwrap()
-                            .insert("description".into(), desc.clone().into());
+                            .insert("description".into(), desc.into());
                     }
-                    serde_json::json!({
-                        "type": "function",
-                        "function": f,
-                    })
+                    object([("type", Value::String("function".into())), ("function", f)])
                 })
                 .collect();
             obj.insert("tools".into(), Value::Array(tools_val));
         }
-        if let Some(ref tc) = req.tool_choice {
+        if let Some(tc) = req.tool_choice {
             obj.insert("tool_choice".into(), tool_choice_to_value(tc));
         }
 
         // Always include_usage when streaming.
         if req.stream.enabled {
             let stream_opts = ingress
-                .get("stream_options")
-                .cloned()
+                .remove("stream_options")
                 .unwrap_or_else(|| serde_json::json!({"include_usage": true}));
             obj.insert("stream_options".into(), stream_opts);
         }
@@ -109,8 +106,8 @@ impl OpenAIEncoder {
             "n",
             "user",
         ] {
-            if let Some(v) = ingress.get(*key) {
-                obj.entry(key.to_string()).or_insert_with(|| v.clone());
+            if let Some(v) = ingress.remove(*key) {
+                obj.entry(key.to_string()).or_insert(v);
             }
         }
 
@@ -132,7 +129,7 @@ impl OpenAIEncoder {
             {
                 continue;
             }
-            obj.entry(k.clone()).or_insert_with(|| v.clone());
+            obj.entry(k).or_insert(v);
         }
 
         Ok((body, HeaderMap::new()))
@@ -143,25 +140,34 @@ impl OpenAIEncoder {
     }
 }
 
-fn tool_choice_to_value(tc: &ToolChoice) -> Value {
+fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect(),
+    )
+}
+
+fn tool_choice_to_value(tc: ToolChoice) -> Value {
     match tc {
         ToolChoice::Auto => Value::String("auto".into()),
         ToolChoice::None => Value::String("none".into()),
         ToolChoice::Required => Value::String("required".into()),
-        ToolChoice::Named { name } => serde_json::json!({
-            "type": "function",
-            "function": {"name": name}
-        }),
-        ToolChoice::Raw(v) => v.clone(),
+        ToolChoice::Named { name } => object([
+            ("type", Value::String("function".into())),
+            ("function", object([("name", Value::String(name))])),
+        ]),
+        ToolChoice::Raw(v) => v,
     }
 }
 
 fn normalize_messages_for_openai(
-    messages: &[AiItem],
-    system: Option<&str>,
+    messages: Vec<AiItem>,
+    system: Option<String>,
     tools: Option<&[ToolSpec]>,
 ) -> Vec<AiItem> {
-    let supplied_tool_ids = collect_supplied_tool_ids(messages);
+    let supplied_tool_ids = collect_supplied_tool_ids(&messages);
     let preprocessed = remap_duplicate_tool_call_ids(messages, system, &supplied_tool_ids);
     let mut unavailable_tool_ids = collect_supplied_tool_ids(&preprocessed);
 
@@ -180,7 +186,9 @@ fn normalize_messages_for_openai(
 
     for mut msg in preprocessed {
         if msg.role == Role::Assistant {
-            promote_reasoning_meta(&mut msg);
+            if !is_standalone_reasoning_item(&msg) {
+                promote_reasoning_meta(&mut msg);
+            }
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     if tc.id.trim().is_empty() {
@@ -205,7 +213,7 @@ fn normalize_messages_for_openai(
             continue;
         }
 
-        let hinted_id = tool_message_payload(&msg).1;
+        let hinted_id = tool_message_hint(&msg);
         let mut resolved_id = msg
             .tool_call_id
             .clone()
@@ -243,7 +251,7 @@ fn normalize_messages_for_openai(
                 let source_meta = out[source_idx].meta.clone();
                 out.push(AiItem {
                     role: Role::Assistant,
-                    content: MessageContent::Text(String::new()),
+                    content: MessageContent::Text(String::new().into()),
                     tool_calls: Some(vec![tc]),
                     tool_call_id: None,
                     meta: source_meta,
@@ -261,7 +269,7 @@ fn normalize_messages_for_openai(
                     .unwrap_or_else(|| fallback_tool_name.clone());
                 out.push(AiItem {
                     role: Role::Assistant,
-                    content: MessageContent::Text(String::new()),
+                    content: MessageContent::Text(String::new().into()),
                     tool_calls: Some(vec![ToolCall {
                         id: final_id.clone(),
                         name: synth_name,
@@ -307,7 +315,7 @@ fn normalize_messages_for_openai(
                     _ => false,
                 })
         );
-        has_reasoning || !msg.content.to_text().trim().is_empty()
+        has_reasoning || content_has_non_whitespace_text(&msg.content)
     });
 
     fold_standalone_reasoning_items(&mut out);
@@ -332,24 +340,39 @@ fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
         if !is_standalone_reasoning_item(&out[idx]) {
             continue;
         }
-        let text = standalone_reasoning_text(&out[idx]);
-        if out.get(idx + 1).is_some_and(|next| {
+        let mut carrier = out.remove(idx);
+        let text = standalone_reasoning_text(&mut carrier);
+        if out.get(idx).is_some_and(|next| {
             next.role == Role::Assistant
                 && next
                     .meta
                     .as_ref()
                     .is_none_or(|meta| meta.object_extensions().is_some())
         }) {
-            let next_meta = out[idx + 1].meta.get_or_insert_with(Default::default);
-            let existing = next_meta
+            let next_meta = out[idx].meta.get_or_insert_with(Default::default);
+            let existing = if next_meta
                 .get("reasoning_content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+                .is_some_and(Value::is_string)
+            {
+                match next_meta
+                    .remove_extension("reasoning_content")
+                    .expect("reasoning content is not reserved")
+                {
+                    Some(Value::String(text)) => text,
+                    _ => unreachable!("string extension checked above"),
+                }
+            } else {
+                String::new()
+            };
             let merged = match (text.is_empty(), existing.is_empty()) {
                 (true, _) => existing,
                 (false, true) => text,
-                (false, false) => format!("{text}\n{existing}"),
+                (false, false) => {
+                    let mut text = text;
+                    text.push('\n');
+                    text.push_str(&existing);
+                    text
+                }
             };
             // 只含受保护载荷的 carrier 没有明文可合并，不应凭空写出空的
             // `reasoning_content` 字段。
@@ -358,14 +381,12 @@ fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
                     .insert_extension("reasoning_content", Value::String(merged))
                     .expect("reasoning content is not reserved");
             }
-            out.remove(idx);
-        } else if text.is_empty() {
-            out.remove(idx);
-        } else {
+        } else if !text.is_empty() {
             // 明文降级为 content；清空 meta，避免来源侧扩展（如
             // `__open_responses_item_fields` 或推理签名副本）泄漏到消息字段。
-            out[idx].content = MessageContent::Text(text);
-            out[idx].meta = None;
+            carrier.content = MessageContent::Text(text.into());
+            carrier.meta = None;
+            out.insert(idx, carrier);
         }
     }
 }
@@ -407,18 +428,18 @@ fn is_explicit_chat_reasoning_carrier(item: &AiItem) -> bool {
 }
 
 /// Reasoning text of a standalone carrier, in encode order. The blocks win:
-/// `promote_reasoning_meta` mirrors Thinking and Reasoning plaintext into
-/// `meta.reasoning_content` during the split loop, so the blocks are the
-/// single authoritative source. `meta.reasoning_content` is the fallback for
-/// meta-only carriers.
-fn standalone_reasoning_text(item: &AiItem) -> String {
+/// Blocks are the single authoritative source; standalone carriers skip
+/// metadata promotion so their plaintext can be consumed directly.
+/// `meta.reasoning_content` is the fallback for meta-only carriers.
+fn standalone_reasoning_text(item: &mut AiItem) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let MessageContent::Blocks(blocks) = &item.content {
+    if let MessageContent::Blocks(blocks) = &mut item.content {
+        let blocks = std::mem::take(blocks);
         for block in blocks {
             match block {
                 ContentBlock::Thinking { thinking, .. } => {
                     if !thinking.trim().is_empty() {
-                        parts.push(thinking.clone());
+                        parts.push(thinking);
                     }
                 }
                 ContentBlock::Reasoning {
@@ -426,10 +447,9 @@ fn standalone_reasoning_text(item: &AiItem) -> String {
                 } => {
                     parts.extend(
                         summary
-                            .iter()
+                            .into_iter()
                             .chain(content)
-                            .filter(|text| !text.trim().is_empty())
-                            .cloned(),
+                            .filter(|text| !text.trim().is_empty()),
                     );
                 }
                 ContentBlock::RedactedThinking { .. } => {}
@@ -440,16 +460,25 @@ fn standalone_reasoning_text(item: &AiItem) -> String {
     if parts.is_empty()
         && let Some(reasoning) = item
             .meta
-            .as_ref()
-            .and_then(|meta| meta.get("reasoning_content"))
-            .and_then(Value::as_str)
+            .as_mut()
+            .and_then(|meta| meta.remove_extension("reasoning_content").ok().flatten())
+            .and_then(|value| match value {
+                Value::String(text) => Some(text),
+                _ => None,
+            })
     {
-        return reasoning.to_string();
+        return reasoning;
     }
-    parts.join("\n")
+    let mut parts = parts.into_iter();
+    let mut text = parts.next().unwrap_or_default();
+    for next in parts {
+        text.push('\n');
+        text.push_str(&next);
+    }
+    text
 }
 
-fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
+fn prune_orphan_assistant_tool_calls(mut messages: Vec<AiItem>) -> Vec<AiItem> {
     let referenced_tool_ids: HashSet<stravia_runtime_contract::protocol::ir::ToolCallId> = messages
         .iter()
         .filter(|m| m.role == Role::Tool)
@@ -457,22 +486,17 @@ fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
         .filter(|id| !id.trim().is_empty())
         .collect();
 
-    let mut out: Vec<AiItem> = Vec::with_capacity(messages.len());
-    for mut msg in messages {
+    for msg in &mut messages {
         if msg.role == Role::Assistant
-            && let Some(calls) = msg.tool_calls.take()
+            && let Some(calls) = msg.tool_calls.as_mut()
         {
-            let kept: Vec<ToolCall> = calls
-                .into_iter()
-                .filter(|tc| referenced_tool_ids.contains(&tc.id))
-                .collect();
-            if !kept.is_empty() {
-                msg.tool_calls = Some(kept);
+            calls.retain(|tc| referenced_tool_ids.contains(&tc.id));
+            if calls.is_empty() {
+                msg.tool_calls = None;
             }
         }
-        out.push(msg);
     }
-    out
+    messages
 }
 
 fn collect_supplied_tool_ids(
@@ -543,21 +567,22 @@ fn assistant_has_tool_call_id(msg: &AiItem, tool_call_id: &str) -> bool {
 }
 
 fn remap_duplicate_tool_call_ids(
-    messages: &[AiItem],
-    system: Option<&str>,
+    mut messages: Vec<AiItem>,
+    system: Option<String>,
     supplied_tool_ids: &HashSet<stravia_runtime_contract::protocol::ir::ToolCallId>,
 ) -> Vec<AiItem> {
-    let mut out = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
     if let Some(system) = system {
-        out.push(AiItem {
-            role: Role::System,
-            content: MessageContent::Text(system.into()),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        });
+        messages.insert(
+            0,
+            AiItem {
+                role: Role::System,
+                content: MessageContent::Text(system.into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        );
     }
-    out.extend_from_slice(messages);
     let mut seen_counts: HashMap<stravia_runtime_contract::protocol::ir::ToolCallId, usize> =
         HashMap::new();
     let mut pending_by_original: HashMap<
@@ -567,7 +592,7 @@ fn remap_duplicate_tool_call_ids(
     let mut unavailable_tool_ids = supplied_tool_ids.clone();
     let mut generated_seq: usize = 0;
 
-    for msg in &mut out {
+    for msg in &mut messages {
         if msg.role == Role::Assistant {
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
@@ -614,7 +639,7 @@ fn remap_duplicate_tool_call_ids(
         }
     }
 
-    out
+    messages
 }
 
 fn make_matching_call_adjacent(out: &mut Vec<AiItem>, tool_call_id: &str) -> bool {
@@ -737,7 +762,29 @@ fn promote_reasoning_meta(message: &mut AiItem) {
         .expect("reasoning content is not reserved");
 }
 
-fn encode_message(msg: &AiItem) -> Result<Value> {
+fn content_has_non_whitespace_text(content: &MessageContent) -> bool {
+    match content {
+        MessageContent::Text(text) => !text.trim().is_empty(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(ContentBlock::as_text)
+            .any(|text| !text.trim().is_empty()),
+    }
+}
+
+fn tool_message_hint(msg: &AiItem) -> Option<stravia_runtime_contract::protocol::ir::ToolCallId> {
+    let MessageContent::Blocks(blocks) = &msg.content else {
+        return None;
+    };
+    for block in blocks {
+        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+            return (!tool_use_id.trim().is_empty()).then(|| tool_use_id.clone());
+        }
+    }
+    None
+}
+
+fn encode_message(msg: AiItem) -> Result<Value> {
     let role = match msg.role {
         Role::System => "system",
         Role::Developer => "developer",
@@ -750,11 +797,10 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
     let map = obj.as_object_mut().unwrap();
 
     if msg.role == Role::Tool {
-        let (tool_content, hinted_tool_call_id) = tool_message_payload(msg);
+        let (tool_content, hinted_tool_call_id) = tool_message_payload(msg.content);
         map.insert("content".into(), Value::String(tool_content));
         let resolved_tool_call_id = msg
             .tool_call_id
-            .clone()
             .filter(|v| !v.trim().is_empty())
             .or_else(|| hinted_tool_call_id.filter(|v| !v.trim().is_empty()));
         if let Some(tool_call_id) = resolved_tool_call_id {
@@ -766,9 +812,9 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         return Ok(obj);
     }
 
-    match &msg.content {
+    match msg.content {
         MessageContent::Text(t) => {
-            map.insert("content".into(), Value::String(t.clone()));
+            map.insert("content".into(), Value::String(Arc::unwrap_or_clone(t)));
         }
         MessageContent::Blocks(blocks) => {
             // For assistant messages, strip blocks that are already expressed
@@ -786,7 +832,7 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
             //     OpenAI cross-protocol conversion (the Anthropic decoder
             //     carries `tool_use` in BOTH `content` and `tool_calls`).
             let strip_for_assistant = msg.role == Role::Assistant;
-            let mut visible = blocks.iter().filter(|b| {
+            let mut visible = blocks.into_iter().filter(|b| {
                 !(strip_for_assistant
                     && matches!(
                         b,
@@ -802,7 +848,7 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
                 // 单一文本优先使用两种合法载体中的字符串形式，
                 // 避免要求兼容上游同时支持多模态 content 数组。
                 (Some(ContentBlock::Text { text, .. }), None) => {
-                    map.insert("content".into(), Value::String(text.clone()));
+                    map.insert("content".into(), Value::String(Arc::unwrap_or_clone(text)));
                 }
                 (Some(first), second) => {
                     let parts = std::iter::once(first)
@@ -821,39 +867,40 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         }
     }
 
-    if let Some(ref tcs) = msg.tool_calls {
+    if let Some(tcs) = msg.tool_calls {
         let arr: Vec<Value> = tcs
-            .iter()
+            .into_iter()
             .map(|tc| {
-                serde_json::json!({
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                    }
-                })
+                object([
+                    ("id", Value::String(tc.id.into_string())),
+                    ("type", Value::String("function".into())),
+                    (
+                        "function",
+                        object([
+                            ("name", Value::String(tc.name)),
+                            ("arguments", Value::String(tc.arguments)),
+                        ]),
+                    ),
+                ])
             })
             .collect();
         map.insert("tool_calls".into(), Value::Array(arr));
     }
-    if let Some(ref tid) = msg.tool_call_id {
-        map.insert(
-            "tool_call_id".into(),
-            Value::String(tid.clone().into_string()),
-        );
+    if let Some(tid) = msg.tool_call_id {
+        map.insert("tool_call_id".into(), Value::String(tid.into_string()));
     }
 
     // Internal canonical metadata participates in local semantics but must never
     // become an upstream vendor field.
-    if let Some(extra) = msg.meta.as_ref().and_then(|meta| meta.object_extensions()) {
-        for (key, value) in extra.iter().filter(|(key, _)| {
-            !key.starts_with("__stravia_")
+    if let Some(extra) = msg.meta.and_then(|meta| meta.into_object_extensions()) {
+        for (key, value) in extra {
+            if !key.starts_with("__stravia_")
                 // `reasoning_signature` 是受保护载荷的来源侧载体，chat 协议无法
                 // 承载，静默丢弃而不是作为可读字段透传。
                 && key.as_str() != "reasoning_signature"
-        }) {
-            map.entry(key.clone()).or_insert_with(|| value.clone());
+            {
+                map.entry(key).or_insert(value);
+            }
         }
     }
 
@@ -871,21 +918,22 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
     Ok(obj)
 }
 
-fn encode_content_block_for_openai(b: &ContentBlock) -> Value {
+fn encode_content_block_for_openai(b: ContentBlock) -> Value {
     match b {
-        ContentBlock::Text { text, .. } => {
-            serde_json::json!({"type": "text", "text": text})
-        }
+        ContentBlock::Text { text, .. } => object([
+            ("type", Value::String("text".into())),
+            ("text", Value::String(Arc::unwrap_or_clone(text))),
+        ]),
         ContentBlock::Image { source, detail, .. } => {
             let url = media_source_to_url(source);
-            let mut image_url = serde_json::json!({"url": url});
+            let mut image_url = object([("url", Value::String(url))]);
             if let Some(detail) = detail {
-                image_url["detail"] = Value::String(detail.clone());
+                image_url["detail"] = Value::String(detail);
             }
-            serde_json::json!({
-                "type": "image_url",
-                "image_url": image_url
-            })
+            object([
+                ("type", Value::String("image_url".into())),
+                ("image_url", image_url),
+            ])
         }
         ContentBlock::Audio { source } => match source {
             MediaSource::Base64 { media_type, data } => {
@@ -897,89 +945,130 @@ fn encode_content_block_for_openai(b: &ContentBlock) -> Value {
                 } else {
                     "mp3"
                 };
-                serde_json::json!({"type": "input_audio", "input_audio": {"data": data, "format": format}})
+                object([
+                    ("type", Value::String("input_audio".into())),
+                    (
+                        "input_audio",
+                        object([
+                            ("data", Value::String(data)),
+                            ("format", Value::String(format.into())),
+                        ]),
+                    ),
+                ])
             }
-            _ => {
-                serde_json::json!({"type": "input_audio", "input_audio": {"data": media_source_to_url(source)}})
-            }
+            _ => object([
+                ("type", Value::String("input_audio".into())),
+                (
+                    "input_audio",
+                    object([("data", Value::String(media_source_to_url(source)))]),
+                ),
+            ]),
         },
         ContentBlock::File { source, .. } => {
             let file = match source {
-                MediaSource::Base64 { .. } => {
-                    serde_json::json!({"filename": "attachment", "file_data": media_source_to_url(source)})
+                MediaSource::Base64 { .. } => object([
+                    ("filename", Value::String("attachment".into())),
+                    ("file_data", Value::String(media_source_to_url(source))),
+                ]),
+                MediaSource::FileId { file_id, .. } => {
+                    object([("file_id", Value::String(file_id))])
                 }
-                MediaSource::FileId { file_id, .. } => serde_json::json!({"file_id": file_id}),
-                MediaSource::Url(url) => serde_json::json!({"file_url": url}),
+                MediaSource::Url(url) => object([("file_url", Value::String(url))]),
             };
-            serde_json::json!({"type": "file", "file": file})
+            object([("type", Value::String("file".into())), ("file", file)])
         }
         ContentBlock::ToolUse {
             id, name, input, ..
-        } => {
-            serde_json::json!({
-                "type": "function",
-                "id": id,
-                "function": {"name": name, "arguments": input.to_string()}
-            })
-        }
+        } => object([
+            ("type", Value::String("function".into())),
+            ("id", Value::String(id.into_string())),
+            (
+                "function",
+                object([
+                    ("name", Value::String(name)),
+                    ("arguments", Value::String(input.to_string())),
+                ]),
+            ),
+        ]),
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             ..
-        } => {
-            serde_json::json!({
-                "type": "text",
-                "text": match content {
-                    Value::String(s) => s.clone(),
+        } => object([
+            ("type", Value::String("text".into())),
+            (
+                "text",
+                Value::String(match content {
+                    Value::String(s) => s,
                     Value::Null => String::new(),
                     other => other.to_string(),
-                },
-                "tool_call_id": tool_use_id,
-            })
-        }
+                }),
+            ),
+            ("tool_call_id", Value::String(tool_use_id.into_string())),
+        ]),
         ContentBlock::Thinking { thinking, .. } => {
             // OpenAI does not support thinking blocks; pass as plain text
-            serde_json::json!({"type": "text", "text": thinking})
+            object([
+                ("type", Value::String("text".into())),
+                ("text", Value::String(thinking)),
+            ])
         }
         // 非 assistant 角色的 Reasoning 没有 reasoning_content 载体，明文降级为
         // text；encrypted_content 是受保护载荷，一并丢弃。
         ContentBlock::Reasoning {
             summary, content, ..
-        } => serde_json::json!({
-            "type": "text",
-            "text": summary.iter().chain(content).cloned().collect::<String>()
-        }),
+        } => object([
+            ("type", Value::String("text".into())),
+            (
+                "text",
+                Value::String(summary.into_iter().chain(content).collect::<String>()),
+            ),
+        ]),
         ContentBlock::RedactedThinking { .. } => {
             serde_json::json!({"type": "text", "text": ""})
         }
-        ContentBlock::Unknown { raw } => raw.clone(),
+        ContentBlock::Unknown { raw } => raw,
         other => {
             // Other block types (Document, SearchResult, etc.) not supported
             // by OpenAI chat/completions; serialise raw as fallback.
-            crate::codec::content_block_wire_value(other)
+            crate::codec::content_block_wire_value(&other)
         }
     }
 }
 
-fn media_source_to_url(source: &MediaSource) -> String {
+fn media_source_to_url(source: MediaSource) -> String {
     match source {
         MediaSource::Base64 { media_type, data } => {
             format!("data:{media_type};base64,{data}")
         }
-        MediaSource::Url(url) => url.clone(),
-        MediaSource::FileId { file_id, .. } => file_id.clone(),
+        MediaSource::Url(url) => url,
+        MediaSource::FileId { file_id, .. } => file_id,
     }
 }
 
 fn tool_message_payload(
-    msg: &AiItem,
+    content: MessageContent,
 ) -> (
     String,
     Option<stravia_runtime_contract::protocol::ir::ToolCallId>,
 ) {
-    match &msg.content {
-        MessageContent::Text(t) => (t.clone(), None),
+    match content {
+        MessageContent::Text(t) => (Arc::unwrap_or_clone(t), None),
         MessageContent::Blocks(blocks) => {
+            if !blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            {
+                let mut texts = blocks.into_iter().filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(Arc::unwrap_or_clone(text)),
+                    _ => None,
+                });
+                let mut text = texts.next().unwrap_or_default();
+                for next in texts {
+                    text.push_str(&next);
+                }
+                return (text, None);
+            }
             for block in blocks {
                 if let ContentBlock::ToolResult {
                     tool_use_id,
@@ -988,19 +1077,19 @@ fn tool_message_payload(
                 } = block
                 {
                     let text = match content {
-                        Value::String(s) => s.clone(),
+                        Value::String(s) => s,
                         Value::Null => String::new(),
                         other => other.to_string(),
                     };
                     let hinted_id = if tool_use_id.trim().is_empty() {
                         None
                     } else {
-                        Some(tool_use_id.clone())
+                        Some(tool_use_id)
                     };
                     return (text, hinted_id);
                 }
             }
-            (msg.content.to_text(), None)
+            unreachable!("tool result existence checked above")
         }
     }
 }

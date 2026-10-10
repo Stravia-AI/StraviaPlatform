@@ -40,12 +40,24 @@ impl HookRuntime {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let original = ContextSnapshot::from_request(request, completeness);
+        // Only Request events expose snapshots. Other stages and stream
+        // transformers use completeness alone; platform tools receive their
+        // read scope, not a snapshot.
+        let original = sessions
+            .iter()
+            .any(|session| {
+                session
+                    .descriptor
+                    .accepts(context.request_kind, EventKind::Request)
+                    && !should_skip_for_partial(&session.descriptor, &completeness)
+            })
+            .then(|| Arc::new(ContextSnapshot::from_request(request, completeness.clone())));
         Ok(InferenceRun {
             cancellation: context.cancellation.clone(),
             context,
             original: original.clone(),
             current: original,
+            completeness,
             sessions,
             route: None,
             round: 0,
@@ -77,8 +89,9 @@ struct RuntimeSession {
 pub(crate) struct InferenceRun {
     cancellation: stravia_runtime_contract::CancellationToken,
     context: SessionContext,
-    original: ContextSnapshot,
-    current: ContextSnapshot,
+    original: Option<Arc<ContextSnapshot>>,
+    current: Option<Arc<ContextSnapshot>>,
+    completeness: ContextCompleteness,
     sessions: Vec<RuntimeSession>,
     route: Option<RouteContext>,
     pub(super) round: u32,
@@ -194,7 +207,7 @@ impl InferenceRun {
             if !accepts {
                 continue;
             }
-            if should_skip_for_partial(&self.sessions[index].descriptor, &self.current) {
+            if should_skip_for_partial(&self.sessions[index].descriptor, &self.completeness) {
                 self.skips.push(HookSkip {
                     hook_id: self.sessions[index].descriptor.id.clone(),
                     event: EventKind::Request,
@@ -206,10 +219,16 @@ impl InferenceRun {
             let hook_view = hook_request_view(request);
             let event = HookEvent::Request {
                 session: &self.context,
-                original: &self.original,
+                original: self
+                    .original
+                    .as_deref()
+                    .expect("Request consumer has a snapshot"),
                 read_scope: self.read_scope,
                 current: &hook_view,
-                context: &self.current,
+                context: self
+                    .current
+                    .as_deref()
+                    .expect("Request consumer has a snapshot"),
                 route: self.route.as_ref(),
                 round: self.round,
             };
@@ -225,7 +244,9 @@ impl InferenceRun {
             let control = apply_request_actions(
                 &runtime_session.descriptor.id,
                 request,
-                &mut self.current,
+                self.current
+                    .as_mut()
+                    .expect("Request consumer has a snapshot"),
                 &mut ToolExposure {
                     tools: &mut self.exposed_tools,
                     specs: &mut self.exposed_tool_specs,
@@ -234,6 +255,12 @@ impl InferenceRun {
                 &self.tools,
                 batch,
             )?;
+            self.completeness = self
+                .current
+                .as_ref()
+                .expect("Request consumer has a snapshot")
+                .completeness
+                .clone();
             if !matches!(control, HookControl::Continue) {
                 return Ok(control);
             }
@@ -261,7 +288,7 @@ impl InferenceRun {
         let route = self.route.as_ref().ok_or_else(|| HookError::Runtime {
             message: "route context is required before UpstreamResponse".into(),
         })?;
-        let hook_request = hook_request_view(request);
+        let hook_request = std::cell::OnceCell::new();
         let mut modified = false;
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
@@ -270,7 +297,7 @@ impl InferenceRun {
             if !accepts {
                 continue;
             }
-            if should_skip_for_partial(&self.sessions[index].descriptor, &self.current) {
+            if should_skip_for_partial(&self.sessions[index].descriptor, &self.completeness) {
                 self.skips.push(HookSkip {
                     hook_id: self.sessions[index].descriptor.id.clone(),
                     event: EventKind::UpstreamResponse,
@@ -278,10 +305,11 @@ impl InferenceRun {
                 });
                 continue;
             }
+            let hook_request = hook_request.get_or_init(|| hook_request_view(request));
             let classified = self.classify_tool_calls(response);
             let event = HookEvent::UpstreamResponse {
                 session: &self.context,
-                request: &hook_request,
+                request: hook_request,
                 response,
                 classified: &classified,
                 route,
@@ -327,7 +355,7 @@ impl InferenceRun {
             if !accepts {
                 continue;
             }
-            if should_skip_for_partial(&self.sessions[index].descriptor, &self.current) {
+            if should_skip_for_partial(&self.sessions[index].descriptor, &self.completeness) {
                 self.skips.push(HookSkip {
                     hook_id: self.sessions[index].descriptor.id.clone(),
                     event: EventKind::ToolResult,
@@ -380,7 +408,7 @@ impl InferenceRun {
             if !accepts {
                 continue;
             }
-            if should_skip_for_partial(&self.sessions[index].descriptor, &self.current) {
+            if should_skip_for_partial(&self.sessions[index].descriptor, &self.completeness) {
                 self.skips.push(HookSkip {
                     hook_id: self.sessions[index].descriptor.id.clone(),
                     event: EventKind::ClientOutput,
@@ -494,11 +522,10 @@ impl InferenceRun {
         } else {
             Vec::new()
         };
-        let current = self.current.clone();
         let transformed = transform_through(
             &mut self.sessions,
             self.context.request_kind,
-            &current,
+            &self.completeness,
             &mut self.skips,
             vec![delta],
         )?;
@@ -520,7 +547,6 @@ impl InferenceRun {
     fn drain_stream(&mut self, close: bool) -> Result<Vec<AiStreamDelta>, HookError> {
         let mut output = Vec::new();
         let mut first_error = None;
-        let current = self.current.clone();
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
@@ -528,7 +554,7 @@ impl InferenceRun {
             if !accepts {
                 continue;
             }
-            if should_skip_for_partial(&self.sessions[index].descriptor, &current) {
+            if should_skip_for_partial(&self.sessions[index].descriptor, &self.completeness) {
                 record_skip(
                     &mut self.skips,
                     &self.sessions[index].descriptor.id,
@@ -632,7 +658,7 @@ impl InferenceRun {
             match transform_through(
                 &mut self.sessions[index + 1..],
                 self.context.request_kind,
-                &current,
+                &self.completeness,
                 &mut self.skips,
                 flushed,
             ) {
@@ -688,7 +714,7 @@ fn record_skip(skips: &mut Vec<HookSkip>, hook_id: &HookId, event: EventKind, re
 fn transform_through(
     sessions: &mut [RuntimeSession],
     request_kind: RequestKind,
-    current: &ContextSnapshot,
+    completeness: &ContextCompleteness,
     skips: &mut Vec<HookSkip>,
     mut events: Vec<AiStreamDelta>,
 ) -> Result<Vec<AiStreamDelta>, HookError> {
@@ -699,7 +725,7 @@ fn transform_through(
         {
             continue;
         }
-        if should_skip_for_partial(&runtime_session.descriptor, current) {
+        if should_skip_for_partial(&runtime_session.descriptor, completeness) {
             record_skip(
                 skips,
                 &runtime_session.descriptor.id,

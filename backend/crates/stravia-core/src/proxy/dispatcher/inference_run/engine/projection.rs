@@ -101,11 +101,13 @@ impl UploadProjection {
             return Ok(());
         }
         match &mut item.content {
-            MessageContent::Text(text) => self.replace(text, principal)?,
+            MessageContent::Text(text) => {
+                self.replace(std::sync::Arc::make_mut(text), principal)?
+            }
             MessageContent::Blocks(blocks) => {
                 for block in blocks {
                     if let ContentBlock::Text { text, .. } = block {
-                        self.replace(text, principal)?;
+                        self.replace(std::sync::Arc::make_mut(text), principal)?;
                     }
                 }
             }
@@ -1666,7 +1668,10 @@ impl ClientProjectionSession {
             let source = crate::history_marker::ThinkingSource::from_item(&item)
                 .or_else(|| self.thinking_source.clone());
             let mut meta = item.meta.take();
-            match std::mem::replace(&mut item.content, MessageContent::Text(String::new())) {
+            match std::mem::replace(
+                &mut item.content,
+                MessageContent::Text(std::sync::Arc::new(String::new())),
+            ) {
                 MessageContent::Text(text) => {
                     if !text.is_empty() {
                         self.staged_upload_items.insert(projected.len());

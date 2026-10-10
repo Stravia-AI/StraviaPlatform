@@ -44,7 +44,7 @@ async fn generation_chain() -> GenerationChain {
 fn user_message(text: &str) -> AiItem {
     AiItem {
         role: Role::User,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(std::sync::Arc::new(text.into())),
         tool_calls: None,
         tool_call_id: None,
         meta: None,

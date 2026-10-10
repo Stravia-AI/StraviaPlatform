@@ -215,7 +215,7 @@ fn clears_text_metadata_when_canonical_text_changes() {
     response.items = vec![stravia_runtime_contract::protocol::ir::AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![ContentBlock::Text {
-            text: "after".into(),
+            text: "after".to_owned().into(),
             cache_control: None,
         }]),
         tool_calls: None,
@@ -330,7 +330,7 @@ fn encodes_function_output_arrays_with_dated_content_shapes() {
         role: Role::Tool,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
-                text: "tool text".into(),
+                text: "tool text".to_owned().into(),
                 cache_control: None,
             },
             ContentBlock::Image {

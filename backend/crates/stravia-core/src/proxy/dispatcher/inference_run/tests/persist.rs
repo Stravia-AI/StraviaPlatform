@@ -326,7 +326,9 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
     let mut events = gateway.observation.subscribe(0);
     let question = stravia_runtime_contract::protocol::ir::AiItem {
         role: stravia_runtime_contract::protocol::ir::Role::User,
-        content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(std::sync::Arc::new(
+            "first".into(),
+        )),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -378,7 +380,7 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
             stravia_runtime_contract::protocol::ir::AiItem {
                 role: stravia_runtime_contract::protocol::ir::Role::User,
                 content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
-                    "second".into(),
+                    "second".to_owned().into(),
                 ),
                 tool_calls: None,
                 tool_call_id: None,
@@ -509,7 +511,7 @@ async fn delivered_tool_resumes_before_source_generation_commit(websocket: bool)
     let mut events = gateway.observation.subscribe(0);
     let user = |text: &str| AiItem {
         role: Role::User,
-        content: MessageContent::Text(text.into()),
+        content: MessageContent::Text(std::sync::Arc::new(text.into())),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -771,7 +773,9 @@ async fn unavailable_observation_writer_never_holds_generation_progress() {
 
     let question = stravia_runtime_contract::protocol::ir::AiItem {
         role: stravia_runtime_contract::protocol::ir::Role::User,
-        content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(std::sync::Arc::new(
+            "first".into(),
+        )),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -802,7 +806,7 @@ async fn unavailable_observation_writer_never_holds_generation_progress() {
             stravia_runtime_contract::protocol::ir::AiItem {
                 role: stravia_runtime_contract::protocol::ir::Role::User,
                 content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
-                    "second".into(),
+                    "second".to_owned().into(),
                 ),
                 tool_calls: None,
                 tool_call_id: None,
@@ -851,7 +855,9 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
         model,
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "first".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -887,7 +893,9 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
         model,
         vec![stravia_runtime_contract::protocol::ir::AiItem {
             role: stravia_runtime_contract::protocol::ir::Role::User,
-            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("second".into()),
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "second".to_owned().into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,

@@ -53,7 +53,7 @@ async fn explicit_chat_reasoning_field_survives_persisted_client_history() {
         assert!(assistant.thinking_ref().is_none());
         assert!(assistant.reasoning_ref().is_none());
         let (wire, _) = stravia_protocol_codec::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1
-            .encode_request(&resumed.request)
+            .encode_request(resumed.request.as_ref().clone())
             .unwrap();
         assert_eq!(wire["messages"][1].get("reasoning_content"), Some(&value));
     }
@@ -128,7 +128,10 @@ async fn explicit_chat_reasoning_field_survives_effective_history_across_ingress
                 Some(root.id()),
                 "ingress={ingress}, field={value:?}"
             );
-            let wire = pair.encode_request(&resumed.request).unwrap().body;
+            let wire = pair
+                .encode_request(resumed.request.as_ref().clone())
+                .unwrap()
+                .body;
             assert_eq!(
                 wire["messages"][1].get("reasoning_content"),
                 value.as_ref(),
@@ -324,7 +327,7 @@ async fn hook_completion_does_not_reuse_an_earlier_target_or_upstream_response()
         lookup.preferred_target(&owner, resumed.request()).await,
         None
     );
-    let mut continued = resumed.request().clone();
+    let mut continued = Arc::new(resumed.request().clone());
     assert_eq!(
         lookup
             .prepare(
@@ -404,7 +407,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
     assert_eq!(resumed.request_delta.items.len(), 1);
 
     let lookup = chain.continuation_lookup();
-    let mut continued = resumed.request().clone();
+    let mut continued = Arc::new(resumed.request().clone());
     assert_eq!(
         lookup
             .prepare(
@@ -425,7 +428,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
     assert_eq!(continued.items.len(), 1);
     assert_eq!(continued.items[0].content.to_text(), "follow-up");
 
-    let mut materialized = resumed.request().clone();
+    let mut materialized = Arc::new(resumed.request().clone());
     assert_eq!(
         lookup
             .prepare(
@@ -452,7 +455,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
             OPEN_RESPONSES_2026_04_24,
         )
         .expect("registered protocol pair")
-        .encode_request(&materialized)
+        .encode_request(Arc::unwrap_or_clone(materialized))
         .expect("materialized encrypted reasoning remains representable");
     assert_eq!(encoded.body["input"][1]["encrypted_content"], "encrypted");
 
@@ -610,7 +613,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
         .await
         .expect("discover semantically identical replay");
     assert_eq!(resumed.request_delta.items.len(), 1);
-    let mut provider_request = resumed.request().clone();
+    let mut provider_request = Arc::new(resumed.request().clone());
     assert_eq!(
         chain
             .continuation_lookup()
@@ -689,7 +692,7 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
         .begin(owner.clone(), continuation)
         .await
         .expect("materialize response history");
-    let mut replay = resumed.request().clone();
+    let mut replay = Arc::new(resumed.request().clone());
     assert_eq!(
         chain
             .continuation_lookup()
@@ -711,7 +714,7 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
     let encoded = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("registered protocol pair")
-        .encode_request(&replay)
+        .encode_request(Arc::unwrap_or_clone(replay))
         .expect("encrypted reasoning replay remains representable");
     assert_eq!(encoded.body["input"][1]["encrypted_content"], "encrypted");
     assert!(
@@ -758,7 +761,7 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
     let mut resumed_request = responses_request(vec![
         AiItem {
             role: Role::Developer,
-            content: MessageContent::Text("shared instructions".into()),
+            content: MessageContent::Text("shared instructions".to_owned().into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -1193,7 +1196,7 @@ fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
 
     let mut request_items = vec![AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(
@@ -1221,7 +1224,7 @@ fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_his
     );
     let reference = || AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(std::sync::Arc::new(String::new())),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(
@@ -1319,7 +1322,7 @@ fn chat_projects_flattened_assistant_history() {
         &output[0].content,
         MessageContent::Blocks(blocks)
             if blocks.iter().any(|block| matches!(block, ContentBlock::Thinking { .. }))
-            && blocks.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "answer"))
+            && blocks.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text.as_str() == "answer"))
     ));
 }
 
@@ -1410,7 +1413,7 @@ fn gemini_rewrites_tool_ids_across_the_client_prefix() {
 fn chat_rejects_item_references() {
     let mut items = vec![AiItem {
         role: Role::User,
-        content: MessageContent::Text(String::new()),
+        content: MessageContent::Text(String::new().into()),
         tool_calls: None,
         tool_call_id: None,
         meta: Some(

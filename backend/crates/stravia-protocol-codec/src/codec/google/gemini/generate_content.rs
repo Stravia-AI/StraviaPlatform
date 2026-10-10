@@ -41,7 +41,7 @@ impl ProtocolAdapter for GoogleGenerateContentV1Beta {
         super::decoder::GoogleDecoder.decode_request(body)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         super::encoder::GoogleEncoder.encode_request(request)
     }
 

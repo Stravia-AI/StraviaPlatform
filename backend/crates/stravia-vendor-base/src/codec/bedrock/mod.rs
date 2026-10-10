@@ -92,7 +92,7 @@ impl ProtocolAdapter for BedrockConverseV1 {
         Ok(request)
     }
 
-    fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+    fn encode_request(&self, request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
         if request.generation.seed.is_some()
             || request.generation.frequency_penalty.is_some()
             || request.generation.presence_penalty.is_some()
@@ -108,7 +108,7 @@ impl ProtocolAdapter for BedrockConverseV1 {
             bail!("Bedrock Converse does not expose a model-neutral response format");
         }
         let mut body =
-            Map::from_iter([("messages".into(), Value::Array(encode_messages(request)?))]);
+            Map::from_iter([("messages".into(), Value::Array(encode_messages(&request)?))]);
         if let Some(instructions) = &request.instructions
             && !instructions.trim().is_empty()
         {
@@ -117,11 +117,11 @@ impl ProtocolAdapter for BedrockConverseV1 {
                 Value::Array(vec![json!({"text": instructions})]),
             );
         }
-        let inference_config = encode_inference_config(request);
+        let inference_config = encode_inference_config(&request);
         if !inference_config.is_empty() {
             body.insert("inferenceConfig".into(), Value::Object(inference_config));
         }
-        if let Some(tool_config) = encode_tool_config(request)? {
+        if let Some(tool_config) = encode_tool_config(&request)? {
             body.insert("toolConfig".into(), tool_config);
         }
         Ok((Value::Object(body), HeaderMap::new()))
@@ -148,7 +148,9 @@ impl ProtocolAdapter for BedrockConverseV1 {
             .flatten()
         {
             match decode_content_block(block)? {
-                ContentBlock::Text { text, .. } => response.push_output_text(text),
+                ContentBlock::Text { text, .. } => {
+                    response.push_output_text(std::sync::Arc::unwrap_or_clone(text))
+                }
                 ContentBlock::Thinking {
                     thinking,
                     signature,
@@ -610,7 +612,7 @@ fn encode_tool_result(item: &AiItem) -> anyhow::Result<Vec<Value>> {
         .context("Bedrock tool message is missing tool_call_id")?;
     Ok(vec![json!({"toolResult": {
         "toolUseId": tool_use_id,
-        "content": [{"text": value_as_text(&match &item.content { MessageContent::Text(text) => Value::String(text.clone()), MessageContent::Blocks(blocks) => Value::Array(blocks.iter().filter_map(ContentBlock::as_text).map(|text| Value::String(text.into())).collect()) })?}],
+        "content": [{"text": value_as_text(&match &item.content { MessageContent::Text(text) => Value::String(text.as_ref().clone()), MessageContent::Blocks(blocks) => Value::Array(blocks.iter().filter_map(ContentBlock::as_text).map(|text| Value::String(text.into())).collect()) })?}],
     }} )])
 }
 
@@ -707,7 +709,7 @@ fn decode_system(value: &Value) -> anyhow::Result<String> {
 fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
     if let Some(text) = block.get("text").and_then(Value::as_str) {
         return Ok(ContentBlock::Text {
-            text: text.into(),
+            text: text.to_owned().into(),
             cache_control: None,
         });
     }

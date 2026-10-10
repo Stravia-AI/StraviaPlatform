@@ -2,6 +2,7 @@
 //! `AiResponse` for caching and formatted response aggregation.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::AiResponse;
@@ -62,12 +63,13 @@ fn completed_item_semantic_shell(item: &AiItem) -> AiItem {
     if shell.role != stravia_runtime_contract::protocol::ir::Role::Assistant {
         return shell;
     }
+    // The shell discards text, so replace the shared payload instead of copying it to clear it.
     match &mut shell.content {
-        MessageContent::Text(text) => text.clear(),
+        MessageContent::Text(text) => *text = String::new().into(),
         MessageContent::Blocks(blocks) => {
             for block in blocks {
                 match block {
-                    ContentBlock::Text { text, .. } => text.clear(),
+                    ContentBlock::Text { text, .. } => *text = String::new().into(),
                     ContentBlock::Refusal { refusal } => refusal.clear(),
                     ContentBlock::Thinking { thinking, .. } => thinking.clear(),
                     ContentBlock::Reasoning {
@@ -596,7 +598,7 @@ fn materialize_indexed_items(
         messages.entry(*output_index).or_default().insert(
             *content_index,
             ContentBlock::Text {
-                text: text.clone(),
+                text: text.clone().into(),
                 cache_control: None,
             },
         );
@@ -706,6 +708,26 @@ fn take_matching(
         .and_then(Option::take)
 }
 
+fn take_output_text(remaining: &mut [Option<AiItem>]) -> Option<Arc<String>> {
+    let item = take_matching(remaining, |item| item.output_text_ref().is_some())?;
+    match item.content {
+        MessageContent::Text(text) => Some(text),
+        MessageContent::Blocks(mut blocks) => match blocks.pop() {
+            Some(ContentBlock::Text { text, .. }) => Some(text),
+            _ => unreachable!("output_text_ref only accepts a single text block"),
+        },
+    }
+}
+
+fn replace_indexed_text(text: &mut Arc<String>, replacement: &String) {
+    // Reuse unique storage, but never copy the old shared payload just to overwrite it.
+    if let Some(text) = Arc::get_mut(text) {
+        text.clone_from(replacement);
+    } else {
+        *text = replacement.clone().into();
+    }
+}
+
 struct ReconciliationContext<'a> {
     indexed_text: &'a BTreeMap<(usize, usize), String>,
     indexed_refusal: &'a BTreeMap<(usize, usize), String>,
@@ -757,13 +779,9 @@ fn reconcile_completed_item(
     match &mut completed.content {
         MessageContent::Text(text) => {
             if let Some(replacement) = indexed_text.get(&(output_index, 0)) {
-                text.clone_from(replacement);
-            } else if let Some(derived) =
-                take_matching(remaining, |item| item.output_text_ref().is_some())
-                && let Some(replacement) = derived.output_text_ref()
-            {
-                text.clear();
-                text.push_str(replacement);
+                replace_indexed_text(text, replacement);
+            } else if let Some(replacement) = take_output_text(remaining) {
+                *text = replacement;
             }
         }
         MessageContent::Blocks(blocks) => {
@@ -772,13 +790,9 @@ fn reconcile_completed_item(
                     ContentBlock::Text { text, .. } => {
                         if let Some(replacement) = indexed_text.get(&(output_index, content_index))
                         {
-                            text.clone_from(replacement);
-                        } else if let Some(derived) =
-                            take_matching(remaining, |item| item.output_text_ref().is_some())
-                            && let Some(replacement) = derived.output_text_ref()
-                        {
-                            text.clear();
-                            text.push_str(replacement);
+                            replace_indexed_text(text, replacement);
+                        } else if let Some(replacement) = take_output_text(remaining) {
+                            *text = replacement;
                         }
                     }
                     ContentBlock::Refusal { refusal } => {
@@ -1192,7 +1206,7 @@ mod tests {
             role: stravia_runtime_contract::protocol::ir::Role::Assistant,
             content: MessageContent::Blocks(vec![
                 ContentBlock::Text {
-                    text: "provider text".into(),
+                    text: "provider text".to_owned().into(),
                     cache_control: None,
                 },
                 ContentBlock::Refusal {
@@ -1223,7 +1237,7 @@ mod tests {
                     [
                         ContentBlock::Text { text, .. },
                         ContentBlock::Refusal { refusal },
-                    ] if text == "transformed text" && refusal == "transformed refusal"
+                    ] if text.as_str() == "transformed text" && refusal == "transformed refusal"
                 )
         ));
     }

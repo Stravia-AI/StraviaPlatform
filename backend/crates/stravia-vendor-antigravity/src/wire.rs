@@ -94,7 +94,8 @@ pub(crate) fn infer(
     let stop = request.generation.stop.take();
     request.stream.enabled = true;
     let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
-    let mut body = common::encode_inference_request(&protocol.to_string(), &request)?.body;
+    let model = request.model.clone();
+    let mut body = common::encode_inference_request(&protocol.to_string(), request)?.body;
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Gemini request must be an object"))?;
@@ -190,7 +191,7 @@ pub(crate) fn infer(
     let project = client::project(host, &provider)?;
     let envelope = InferenceEnvelope {
         project: &project,
-        model: &request.model,
+        model: &model,
         request: &body,
         user_agent: "antigravity",
         request_type: "agent",

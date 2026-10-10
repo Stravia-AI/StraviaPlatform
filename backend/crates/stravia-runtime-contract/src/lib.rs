@@ -7,6 +7,7 @@ mod deadline;
 pub mod hook;
 pub mod identifier;
 mod identity;
+pub mod json;
 pub mod model_turn;
 pub mod protocol;
 pub mod redaction;

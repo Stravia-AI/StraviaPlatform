@@ -194,7 +194,7 @@ fn execute_inference(
     if is_free_tier_model(model) {
         prepare_free_tier_request(&mut request);
     }
-    let encoded = common::encode_inference_request(PROTOCOL, &request)?;
+    let encoded = common::encode_inference_request(PROTOCOL, request)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
     apply_client_fingerprint(provider, &mut headers);
     for (name, value) in &provider.client_headers {
@@ -451,7 +451,7 @@ mod tests {
             model,
             vec![AiItem {
                 role: Role::User,
-                content: MessageContent::Text("say ok".into()),
+                content: MessageContent::Text("say ok".to_owned().into()),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
