@@ -4,6 +4,7 @@ import { consoleAdminCatalog, fetchResponsesTransport, IndexedDbConversationStor
 import type {
   ConsoleChatControllerOptions,
   ConsoleChatSnapshot,
+  ConsoleImageAttachment,
   ConsoleThinkingSelection,
 } from '$lib/console-chat-types'
 
@@ -27,7 +28,7 @@ export class ConsoleChat {
   selectKey = (id: string | null): void => this.#controller.selectKey(id)
   selectModel = (id: string | null): void => this.#controller.selectModel(id)
   selectThinking = (selection: ConsoleThinkingSelection): void => this.#controller.selectThinking(selection)
-  send = (text: string): Promise<void> => this.#controller.send(text)
+  send = (text: string, images?: ConsoleImageAttachment[]): Promise<boolean> => this.#controller.send(text, images)
   stop = (id?: string): Promise<void> => this.#controller.stop(id)
   stopAll = (): Promise<void> => this.#controller.stopAll()
   retry = (): Promise<void> => this.#controller.retry()

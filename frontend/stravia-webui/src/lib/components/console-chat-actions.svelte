@@ -3,15 +3,17 @@ import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { page } from '$app/state'
 import { toast } from 'svelte-sonner'
+import EllipsisIcon from '@lucide/svelte/icons/ellipsis'
 import { getConsoleChat } from '$lib/console-chat.svelte'
 import type { ConsoleConversation } from '$lib/console-chat-types'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import * as m from '$lib/paraglide/messages.js'
-import { Button } from '$lib/components/ui/button'
+import { Button, buttonVariants } from '$lib/components/ui/button'
 import { Input } from '$lib/components/ui/input'
 import * as Dialog from '$lib/components/ui/dialog'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import * as Field from '$lib/components/ui/field'
+import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
 let { conversation = null, clearAll = false }: { conversation?: ConsoleConversation | null; clearAll?: boolean } =
   $props()
 const chat = getConsoleChat()
@@ -62,19 +64,26 @@ async function remove() {
         deleteOpen = true
       }}>{m.console_chat_clear()}</Button>
   {:else if conversation}
-    <Button
-      variant="ghost"
-      onclick={() => {
-        title = conversation?.title ?? ''
-        error = ''
-        renameOpen = true
-      }}>{m.console_chat_rename()}</Button>
-    <Button
-      variant="ghost"
-      onclick={() => {
-        error = ''
-        deleteOpen = true
-      }}>{m.console_chat_delete()}</Button>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger
+        aria-label={m.console_chat_actions()}
+        class={buttonVariants({ variant: 'ghost', size: 'icon' })}><EllipsisIcon /></DropdownMenu.Trigger>
+      <DropdownMenu.Content align="end"
+        ><DropdownMenu.Group>
+          <DropdownMenu.Item
+            onSelect={() => {
+              title = conversation?.title ?? ''
+              error = ''
+              renameOpen = true
+            }}>{m.console_chat_rename()}</DropdownMenu.Item>
+          <DropdownMenu.Item
+            variant="destructive"
+            onSelect={() => {
+              error = ''
+              deleteOpen = true
+            }}>{m.console_chat_delete()}</DropdownMenu.Item>
+        </DropdownMenu.Group></DropdownMenu.Content>
+    </DropdownMenu.Root>
   {/if}
 </div>
 <Dialog.Root bind:open={renameOpen}>

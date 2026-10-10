@@ -1,4 +1,5 @@
 import type { ApiKey, Provider, Route, ThinkingLevel } from '$lib/types'
+import type { ThinkingActivity } from '$lib/observation-activities'
 
 export type ConsoleThinkingSelection = 'default' | ThinkingLevel
 export type ConsoleApiKey = Omit<ApiKey, 'key'>
@@ -13,10 +14,18 @@ export interface ConsoleChatError {
   params?: Record<string, unknown>
 }
 
+export interface ConsoleImageAttachment {
+  id: string
+  name: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp'
+  dataUrl: string
+}
+
 export interface ConsoleUserMessage {
   id: string
   role: 'user'
   text: string
+  images?: ConsoleImageAttachment[]
   createdAt: string
 }
 
@@ -35,6 +44,7 @@ export interface ConsoleAssistantMessage {
   outputItems: unknown[]
   partialText?: string
   partialThinking?: string
+  partialActivities?: ThinkingActivity[]
   requestReasoning?: ConsoleResponsesRequest['reasoning']
   usage?: ConsoleTokenUsage
   error?: ConsoleChatError
@@ -101,6 +111,7 @@ export interface ConsoleResponsesEvent {
   message?: string
   code?: string
   output_index?: number
+  item_id?: string
   content_index?: number
   summary_index?: number
   item?: unknown
@@ -120,6 +131,7 @@ export interface ConsoleGeneration {
   text: string
   summary: string
   reasoning: string
+  activities: ThinkingActivity[]
 }
 
 export interface ConsoleChatSnapshot {
@@ -131,6 +143,9 @@ export interface ConsoleChatSnapshot {
   loadError: unknown
   catalogError: unknown
   storageError: unknown
+  inputError: ConsoleChatError | null
+  historyHasImages: boolean
+  modelSupportsImages: boolean
   keyCandidates: ConsoleApiKey[]
   modelCandidates: Route[]
   selectedKeyId: string | null

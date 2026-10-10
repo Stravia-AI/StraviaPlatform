@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { rejects } from 'node:assert/strict'
-import { ConsoleChatController, consoleAssistantContent, consoleVisibleText } from '../src/lib/console-chat'
+import {
+  ConsoleChatController,
+  consoleAssistantContent,
+  consoleReasoningActivities,
+  consoleVisibleText,
+} from '../src/lib/console-chat'
 import type {
   ConsoleAdminCatalog,
   ConsoleApiKey,
@@ -222,6 +227,107 @@ describe('selection and onboarding', () => {
 })
 
 describe('request and presentation', () => {
+  test('original image inputs survive refresh, full replay and regeneration under the same Key', async () => {
+    const images = [
+      { id: 'png', name: 'screen.png', mediaType: 'image/png' as const, dataUrl: 'data:image/png;base64,aGVsbG8=' },
+      {
+        id: 'webp',
+        name: 'diagram.webp',
+        mediaType: 'image/webp' as const,
+        dataUrl: 'data:image/webp;base64,d29ybGQ=',
+      },
+    ]
+    const h = harness({ models: [model('route-a', { supports_image_input: true })] })
+    await h.controller.start()
+    expect(await h.controller.send('Look at these', images)).toBe(true)
+    const userInput = {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Look at these' },
+        { type: 'input_image', image_url: images[0].dataUrl },
+        { type: 'input_image', image_url: images[1].dataUrl },
+      ],
+    }
+    expect(h.requests[0].request.input).toEqual([userInput])
+    const id = h.controller.snapshot.currentConversationId!
+    const refreshed = harness({ store: h.store, models: h.state.models })
+    await refreshed.controller.start()
+    refreshed.controller.openConversation(id)
+    expect(refreshed.controller.snapshot.historyHasImages).toBe(true)
+    expect(refreshed.controller.snapshot.currentConversation!.messages[0]).toMatchObject({ images })
+    await refreshed.controller.send('Continue')
+    expect(refreshed.requests[0].request.input[0]).toEqual(userInput)
+    await refreshed.controller.regenerate()
+    expect(refreshed.requests[1].request.input[0]).toEqual(userInput)
+    expect(refreshed.controller.snapshot.currentConversation!.apiKeyId).toBe('key-a')
+    await refreshed.controller.delete(id)
+    expect(refreshed.store.conversations).toEqual([])
+  })
+  test('current and historical images block incompatible routes without losing saved input', async () => {
+    const image = {
+      id: 'jpeg',
+      name: 'photo.jpg',
+      mediaType: 'image/jpeg' as const,
+      dataUrl: 'data:image/jpeg;base64,aGVsbG8=',
+    }
+    const h = harness({ models: [model('route-a', { supports_image_input: true }), model('route-b')] })
+    await h.controller.start()
+    h.controller.selectModel('route-b')
+    expect(await h.controller.send('Explain', [image])).toBe(false)
+    expect(h.requests).toEqual([])
+    expect(h.controller.snapshot.inputError?.code).toBe('CONSOLE_IMAGE_INPUT_UNSUPPORTED')
+    h.controller.selectModel('route-a')
+    expect(await h.controller.send('   ', [image])).toBe(false)
+    await h.controller.send('Explain', [image])
+    h.controller.selectModel('route-b')
+    await h.controller.send('Continue')
+    await h.controller.regenerate()
+    expect(h.requests).toHaveLength(1)
+    expect(h.controller.snapshot.currentConversation!.messages[0]).toMatchObject({ images: [image] })
+  })
+  test('attachment rejection and retry preserve original image bytes and the failed request effort', async () => {
+    const image = {
+      id: 'jpeg',
+      name: 'photo.jpg',
+      mediaType: 'image/jpeg' as const,
+      dataUrl: 'data:image/jpeg;base64,aGVsbG8=',
+    }
+    const h = harness({
+      models: [model('route-a', { supports_image_input: true })],
+      script: function* (_, index) {
+        if (index === 0)
+          yield {
+            type: 'response.failed',
+            response: { error: { code: 'attachment_error', message: 'Attachment storage unavailable' } },
+          }
+        else yield complete('Accepted')
+      },
+    })
+    await h.controller.start()
+    h.controller.selectThinking('high')
+    expect(await h.controller.send('Read the photo', [image])).toBe(false)
+    expect(h.controller.snapshot.currentConversation!.messages[0]).toMatchObject({ images: [image] })
+    h.controller.selectThinking('low')
+    await h.controller.retry()
+    expect(h.requests[1].request).toEqual(h.requests[0].request)
+    expect(h.controller.snapshot.currentConversation!.messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+    ])
+    expect(h.requests.every((request) => request.apiKey === 'ephemeral-secret')).toBe(true)
+  })
+  test('unsupported and temporary attachment references cannot become saved user images', async () => {
+    const h = harness({ models: [model('route-a', { supports_image_input: true })] })
+    await h.controller.start()
+    expect(
+      await h.controller.send('Read', [
+        { id: 'bad', name: 'bad.png', mediaType: 'image/png', dataUrl: 'blob:temporary' },
+      ]),
+    ).toBe(false)
+    expect(h.controller.snapshot.inputError?.code).toBe('CONSOLE_IMAGE_ATTACHMENT_INVALID')
+    expect(h.controller.snapshot.conversations).toEqual([])
+    expect(h.requests).toEqual([])
+  })
   test.each([
     [null, 'default', { summary: 'auto' }],
     ['high', 'default', { summary: 'auto', effort: 'high' }],
@@ -358,6 +464,139 @@ describe('request and presentation', () => {
 })
 
 describe('stream lifecycle and races', () => {
+  test('reasoning items retain public identity, output order, per-item completion and authoritative fallback', async () => {
+    const snapshots: ConsoleChatSnapshot[] = []
+    const h = harness({
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      script: function* () {
+        yield {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'reasoning', id: 'first', status: 'in_progress' },
+        }
+        yield {
+          type: 'response.reasoning_text.delta',
+          output_index: 0,
+          item_id: 'first',
+          content_index: 0,
+          delta: 'Readable original',
+        }
+        yield {
+          type: 'response.reasoning_summary_text.delta',
+          output_index: 0,
+          item_id: 'first',
+          summary_index: 0,
+          delta: 'Draft summary',
+        }
+        yield {
+          type: 'response.reasoning_summary_text.done',
+          output_index: 0,
+          item_id: 'first',
+          summary_index: 0,
+          text: 'Final summary',
+        }
+        yield {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'reasoning', id: 'first', summary: [{ type: 'summary_text', text: 'Final summary' }] },
+        }
+        yield {
+          type: 'response.output_item.added',
+          output_index: 2,
+          item: { type: 'reasoning', id: 'second', status: 'in_progress' },
+        }
+        yield {
+          type: 'response.reasoning_text.delta',
+          output_index: 2,
+          item_id: 'second',
+          content_index: 0,
+          delta: 'Second original<!--opaque-->',
+        }
+        yield complete('', {
+          output: [
+            { type: 'reasoning', id: 'first', summary: [{ type: 'summary_text', text: 'Authoritative summary' }] },
+            {
+              type: 'reasoning',
+              id: 'second',
+              content: [{ type: 'reasoning_text', text: 'Authoritative original' }],
+              encrypted_content: 'never display',
+            },
+          ],
+        })
+      },
+    })
+    await h.controller.start()
+    await h.controller.send('Reason')
+    const generations = snapshots.flatMap((snapshot) => Object.values(snapshot.generations))
+    expect(
+      generations.some((generation) =>
+        generation.activities.some(
+          (activity) => activity.id === 'first' && activity.live && activity.text === 'Draft summary',
+        ),
+      ),
+    ).toBe(true)
+    expect(
+      generations.some(
+        (generation) =>
+          generation.activities.length === 2 &&
+          generation.activities[0].id === 'first' &&
+          !generation.activities[0].live &&
+          generation.activities[1].id === 'second' &&
+          generation.activities[1].live,
+      ),
+    ).toBe(true)
+    const answer = h.controller.snapshot.currentConversation!.messages[1]
+    if (answer.role !== 'assistant') throw new Error('Expected assistant')
+    expect(consoleReasoningActivities(answer).map(({ id, text, live }) => ({ id, text, live }))).toEqual([
+      { id: 'first', text: 'Authoritative summary', live: false },
+      { id: 'second', text: 'Authoritative original', live: false },
+    ])
+  })
+  test.each(['stop', 'fail'] as const)(
+    'interrupted reasoning preserves all readable items and partial answer after %s and refresh',
+    async (ending) => {
+      const entered = deferred<void>()
+      const resume = deferred<void>()
+      const h = harness({
+        script: async function* () {
+          yield { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'r1' } }
+          yield { type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'r1', delta: 'First' }
+          yield {
+            type: 'response.output_item.done',
+            output_index: 0,
+            item: { type: 'reasoning', id: 'r1', summary: [{ text: 'First' }] },
+          }
+          yield { type: 'response.output_item.added', output_index: 1, item: { type: 'reasoning', id: 'r2' } }
+          yield { type: 'response.reasoning_text.delta', output_index: 1, item_id: 'r2', delta: 'Second<!--private-->' }
+          yield { type: 'response.output_text.delta', delta: 'Partial answer' }
+          entered.resolve()
+          await resume.promise
+          yield {
+            type: 'response.failed',
+            response: { error: { message: 'Upstream rejected attachment', code: 'attachment_error' } },
+          }
+        },
+      })
+      await h.controller.start()
+      const pending = h.controller.send('Explain')
+      await entered.promise
+      const id = h.controller.snapshot.currentConversationId!
+      if (ending === 'stop') await h.controller.stop()
+      resume.resolve()
+      expect(await pending).toBe(false)
+      const refreshed = harness({ store: h.store })
+      await refreshed.controller.start()
+      refreshed.controller.openConversation(id)
+      const answer = refreshed.controller.snapshot.currentConversation!.messages[1]
+      if (answer.role !== 'assistant') throw new Error('Expected assistant')
+      expect(answer.status).toBe(ending === 'stop' ? 'stopped' : 'failed')
+      expect(consoleAssistantContent(answer)).toEqual({ text: 'Partial answer', thinking: 'First\n\nSecond' })
+      expect(consoleReasoningActivities(answer).map(({ id, live }) => ({ id, live }))).toEqual([
+        { id: 'r1', live: false },
+        { id: 'r2', live: false },
+      ])
+    },
+  )
   test('published conversation snapshots remain stable when later messages and titles change', async () => {
     const h = harness()
     await h.controller.start()
@@ -387,7 +626,7 @@ describe('stream lifecycle and races', () => {
     const id = h.controller.snapshot.currentConversationId!
     expect(id).toBeTruthy()
     await delivered.promise
-    expect(h.controller.snapshot.generations[id]).toEqual({
+    expect(h.controller.snapshot.generations[id]).toMatchObject({
       text: 'Partial<!--private-->',
       summary: 'Summary',
       reasoning: 'Raw reasoning',
@@ -498,17 +737,35 @@ describe('stream lifecycle and races', () => {
     if (answer.role !== 'assistant') throw new Error('Expected assistant')
     expect(consoleAssistantContent(answer).text).toBe('authoritative result')
   })
-  test('a store write failure is explicit without converting a successful response into a request failure', async () => {
+  test('an initial store failure preserves the draft boundary and never starts upstream or claims saved history', async () => {
     const h = harness()
     await h.controller.start()
     const failure = new Error('disk full')
     h.store.failure = failure
-    await h.controller.send('hello')
+    expect(await h.controller.send('hello')).toBe(false)
     expect(h.controller.snapshot.storageError).toBe(failure)
-    expect(h.controller.snapshot.currentConversation!.messages[1]).toMatchObject({ status: 'completed' })
+    expect(h.requests).toEqual([])
+    expect(h.controller.snapshot.currentConversation).toBeNull()
+    expect(h.store.conversations).toEqual([])
     h.store.failure = null
-    await h.controller.rename(h.controller.snapshot.currentConversationId!, 'Recovered')
+    expect(await h.controller.send('hello')).toBe(true)
     expect(h.controller.snapshot.storageError).toBeNull()
+  })
+  test('unsaved replacement generation cannot discard the previous authoritative answer', async () => {
+    const h = harness({ models: [model('route-a', { supports_image_input: true })] })
+    await h.controller.start()
+    await h.controller.send('Saved question', [
+      { id: 'original', name: 'original.png', mediaType: 'image/png', dataUrl: 'data:image/png;base64,aGVsbG8=' },
+    ])
+    const saved = structuredClone(h.controller.snapshot.currentConversation!.messages)
+    h.store.failure = new Error('Storage quota exhausted')
+    await h.controller.regenerate()
+    expect(h.requests).toHaveLength(1)
+    expect(h.controller.snapshot.currentConversation!.messages).toEqual(saved)
+    expect(h.store.conversations[0].messages).toEqual(saved)
+    expect(await h.controller.send('Unsaved next question')).toBe(false)
+    expect(h.controller.snapshot.currentConversation!.messages).toEqual(saved)
+    expect(h.requests).toHaveLength(1)
   })
   test('stopAll interrupts every conversation without depending on iterator cooperation', async () => {
     const resume = deferred<void>()

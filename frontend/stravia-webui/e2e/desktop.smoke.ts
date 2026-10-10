@@ -259,7 +259,9 @@ describe('Stravia desktop smoke', () => {
       // 首页现在是控制台对话；真实统计与图表集中在用量分析，不再绑定旧 Overview。
       await $('a[href="/"]').click()
       await expect($('#chat-key')).toHaveText(expect.stringContaining(`Native observation ${suffix}`))
-      await expect($('#chat-model')).toHaveText(expect.stringContaining('Native observation'))
+      await expect($('button[aria-label="Model and reasoning effort"]')).toHaveText(
+        expect.stringContaining('Native observation'),
+      )
       await expect($('#chat-message')).toBeEnabled()
       // 真实原生宿主使用刚完成的本地调用，不以浏览器桩响应代替 IPC 统计与绘图。
       await $('a[href="/stats"]').click()
@@ -427,6 +429,248 @@ describe('Stravia desktop smoke', () => {
     await localRow.$('button=Edit').click()
     await expect($('#web-provider-browser-path')).toHaveValue(savedPath)
     await $('[role="dialog"]').$('button=Cancel').click()
+  })
+
+  it('uses the docked chat composer, effort overlay and original image input in the actual WebView', async () => {
+    await browser.execute(() => localStorage.setItem('stravia-locale', 'en-US'))
+    await browser.refresh()
+    await browser.tauri.switchWindow('main')
+    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const suffix = Date.now().toString(36)
+    const upstreamInputs: unknown[] = []
+    const upstream = createProvider((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => {
+        body += chunk.toString()
+      })
+      request.on('end', () => {
+        if (request.method !== 'POST' || !request.url?.endsWith('/responses')) {
+          response.writeHead(404)
+          response.end()
+          return
+        }
+        const input = JSON.parse(body) as { input: unknown }
+        upstreamInputs.push(input.input)
+        const output = [
+          {
+            type: 'message',
+            id: 'native-answer',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Native original image received', annotations: [] }],
+          },
+        ]
+        // Exercise the same complete Responses lifecycle as the real Server
+        // image proof, including the text deltas consumed by streaming clients.
+        const result = {
+          id: 'native-image-response',
+          object: 'response',
+          created_at: Math.floor(Date.now() / 1000),
+          status: 'completed',
+          model: 'native-visual',
+          output,
+          usage: {
+            input_tokens: 17,
+            output_tokens: 9,
+            total_tokens: 26,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+          error: null,
+          incomplete_details: null,
+          tools: [],
+          tool_choice: 'auto',
+          parallel_tool_calls: true,
+          store: false,
+          completed_at: Math.floor(Date.now() / 1000),
+          previous_response_id: null,
+          instructions: null,
+          truncation: 'disabled',
+          text: { format: { type: 'text' }, verbosity: 'medium' },
+          top_p: 1,
+          presence_penalty: 0,
+          frequency_penalty: 0,
+          top_logprobs: 0,
+          temperature: 1,
+          reasoning: { effort: null, summary: 'auto' },
+          max_output_tokens: null,
+          max_tool_calls: null,
+          background: false,
+          service_tier: 'auto',
+          metadata: {},
+          safety_identifier: null,
+          prompt_cache_key: null,
+        }
+        const message = output[0]
+        const content = message.content[0]
+        const events = [
+          {
+            type: 'response.created',
+            response: { ...result, status: 'in_progress', completed_at: null, output: [], usage: null },
+          },
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { ...message, status: 'in_progress', content: [] },
+          },
+          {
+            type: 'response.content_part.added',
+            output_index: 0,
+            content_index: 0,
+            item_id: message.id,
+            part: { ...content, text: '' },
+          },
+          {
+            type: 'response.output_text.delta',
+            output_index: 0,
+            content_index: 0,
+            item_id: message.id,
+            delta: content.text,
+          },
+          {
+            type: 'response.output_text.done',
+            output_index: 0,
+            content_index: 0,
+            item_id: message.id,
+            text: content.text,
+          },
+          { type: 'response.content_part.done', output_index: 0, content_index: 0, item_id: message.id, part: content },
+          { type: 'response.output_item.done', output_index: 0, item: message },
+          { type: 'response.completed', response: result },
+        ]
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.end(
+          events
+            .map(
+              (event, sequence_number) =>
+                `event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number })}\n\n`,
+            )
+            .join(''),
+        )
+      })
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    let serviceId: string | undefined
+    let routeId: string | undefined
+    let keyId: string | undefined
+    try {
+      const service = createdResource(
+        await adminRequest(port, '/providers', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: `Native chat service ${suffix}`,
+            source: {
+              type: 'custom',
+              vendor: 'custom',
+              channel: 'default',
+              protocol: 'open-responses',
+              base_url: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+            },
+            credential: { type: 'api_key', value: 'synthetic-only' },
+            vendor_options: {},
+          }),
+        }),
+        'Provider',
+      )
+      serviceId = service.id
+      await adminRequest(port, `/providers/${service.id}/models`, {
+        method: 'POST',
+        body: JSON.stringify({
+          model_id: 'native-visual',
+          metadata: {
+            name: 'Native visual',
+            modalities: { input: ['text', 'image'], output: ['text'] },
+            reasoning_efforts: ['low', 'high'],
+          },
+        }),
+      })
+      const route = createdRoute(
+        await adminRequest(port, '/models', {
+          method: 'POST',
+          body: JSON.stringify({
+            model_id: `native-chat-${suffix}`,
+            display_name: `Native chat ${suffix}`,
+            targets: [{ provider_id: service.id, model: 'native-visual' }],
+          }),
+        }),
+      )
+      routeId = route.id
+      const keyName = `Native chat Key ${suffix}`
+      keyId = createdResource(
+        await adminRequest(port, '/api-keys', {
+          method: 'POST',
+          body: JSON.stringify({ name: keyName, model_ids: [route.id] }),
+        }),
+        'Key',
+      ).id
+      await $('a[href="/"]').click()
+      // SvelteKit navigation is asynchronous; refreshing before it commits can
+      // reload the previous smoke's /web-search page instead of the chat page.
+      await browser.waitUntil(() => browser.execute(() => location.pathname === '/' && !location.search), {
+        timeoutMsg: 'Native chat navigation did not reach a new conversation',
+      })
+      await refreshDesktop()
+      await browser.tauri.switchWindow('main')
+      await $('#chat-key').waitForExist()
+      await $('#chat-key').click()
+      // The embedded bridge's synthetic click does not emit Select's pointer
+      // events; use the same keyboard interaction as the native Connect proof.
+      await browser.keys('ArrowDown')
+      await expect($(`//*[@role="option" and contains(normalize-space(), "${keyName}")]`)).toBeDisplayed()
+      await browser.keys(keyName)
+      await browser.keys('Enter')
+      await expect($('#chat-key')).toHaveText(expect.stringContaining(keyName))
+      await $('button[aria-label="Model and reasoning effort"]').click()
+      await $('#chat-model').click()
+      await browser.keys('ArrowDown')
+      await expect($(`//*[@role="option" and contains(normalize-space(), "Native chat ${suffix}")]`)).toBeDisplayed()
+      await browser.keys(`Native chat ${suffix}`)
+      await browser.keys('Enter')
+      await expect($('#chat-model')).toHaveText(expect.stringContaining(`Native chat ${suffix}`))
+      await $('button*=Reasoning effort').click()
+      await expect($('[role="slider"]')).toBeDisplayed()
+      await browser.keys('Escape')
+      const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9l8AAAAASUVORK5CYII='
+      await browser.execute((encoded) => {
+        const clipboard = new DataTransfer()
+        clipboard.items.add(
+          new File([Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0))], 'native.png', {
+            type: 'image/png',
+          }),
+        )
+        document
+          .querySelector('textarea')!
+          .dispatchEvent(new ClipboardEvent('paste', { clipboardData: clipboard, bubbles: true }))
+      }, base64)
+      await expect($('img[alt="native.png"]')).toBeDisplayed()
+      await expect($('button[aria-label="Send"]')).toBeDisabled()
+      await $('#chat-message').setValue('Native screenshot question')
+      await $('button[aria-label="Send"]').click()
+      await expect($('article[aria-label="Assistant response"]')).toHaveText(
+        expect.stringContaining('Native original image received'),
+      )
+      expect(JSON.stringify(upstreamInputs)).toContain(`data:image/png;base64,${base64}`)
+      await refreshDesktop()
+      await expect($('article[aria-label="Your message"] img[alt="native.png"]')).toBeDisplayed()
+      await expect($('button[aria-label="Add images"]')).toBeDisplayed()
+      const geometry = await browser.execute(() => {
+        const message = document.querySelector('#chat-message')!.getBoundingClientRect()
+        const main = document.querySelector('main')!.getBoundingClientRect()
+        return { top: message.top, bottom: message.bottom, mainBottom: main.bottom }
+      })
+      expect(geometry.bottom).toBeLessThanOrEqual(geometry.mainBottom)
+      expect(geometry.top).toBeGreaterThan(geometry.mainBottom / 2)
+      await mkdir(resolve(import.meta.dirname, '../../../target/test-results/chat-presentation'), { recursive: true })
+      await browser.saveScreenshot(
+        resolve(import.meta.dirname, '../../../target/test-results/chat-presentation/desktop.png'),
+      )
+    } finally {
+      if (keyId) await adminRequest(port, `/api-keys/${keyId}`, { method: 'DELETE' })
+      if (routeId) await adminRequest(port, `/models/${routeId}`, { method: 'DELETE' })
+      if (serviceId) await adminRequest(port, `/providers/${serviceId}`, { method: 'DELETE' })
+      upstream.closeAllConnections()
+      await new Promise<void>((resolve, reject) => upstream.close((error) => (error ? reject(error) : resolve())))
+    }
   })
 
   it('imports a local Wasm component through native-authenticated desktop management', async () => {

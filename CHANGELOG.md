@@ -4,11 +4,13 @@
 
 ### Added
 
+- Console Chat now supports original PNG/JPEG/WebP attachments through file selection, paste, and drop, with local persistence and full Responses replay. Messages still require text and an image-capable allowed model. Chat and request observations share safe, bundled math and Mermaid rendering; invalid or unfinished fragments retain readable source. See [Console Chat](docs/design/console-chat.md) for upstream, Artifact, Debug, and unencrypted local-image retention.
 - Added built-in Console Chat to the management UI, with API-Key-scoped streaming, reasoning previews, upstream-reported usage, and locally stored conversation history. See [Console Chat](docs/design/console-chat.md) for local-storage and transparent-injection limits.
 - Added a [real HTTP 4×4 ingress/upstream protocol benchmark](docs/research/protocol-http-benchmark.md) with streaming and non-streaming delivery, open-loop and fixed-worker loads, large request bodies, per-process CPU and memory sampling, protocol completion checks, and baseline/optimized comparison reports. It exercises the actual Server and SQL storage paths with a local synthetic upstream; measurements are not a guarantee of a final memory target.
 
 ### Changed
 
+- Console Chat and request observations now share a flat assistant / muted user message layout. Chat has a docked composer, layered model/effort picker, and item-scoped thinking lifecycle; observations retain manual expansion and show tool activity only from execution, handoff, result, and authoritative Run evidence.
 - Usage analytics now features a “Latency and speed” chart with independent zero-based axes for time to first token (seconds) and full-call TPS (tok/s). Window summaries and same-bucket tooltips preserve unknown values and real zero output; missing hours remain gaps. TPS is weighted over successful Target attempts, includes first-token waiting, and requires complete output/duration coverage. Other duration metrics and existing observation records remain unchanged; no migration or backfill is required.
 - Replaced the Overview landing page with Console Chat. Traffic, latency, errors, and model/service statistics remain available in Usage analytics; the Overview dashboard and Request Spine have been removed.
 - The allowance reset timeline previews up to ten resets within the next seven days, with an expandable full future list. Hover or keyboard focus highlights the matching matrix allowance; clicking or tapping locates it without expanding service details. Forecast totals remain unchanged.

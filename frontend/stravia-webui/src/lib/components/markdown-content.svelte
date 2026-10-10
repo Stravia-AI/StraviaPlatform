@@ -1,23 +1,20 @@
 <script lang="ts">
-import DOMPurify from 'dompurify'
-import { MARKDOWN_SANITIZE, markdownBlocks } from '$lib/markdown'
+import { markdownBlocks } from '$lib/markdown'
+import MarkdownRenderedBlock from '$lib/components/markdown-rendered-block.svelte'
 
-let { text, minimumHeadingLevel = 1 }: { text: string; minimumHeadingLevel?: 1 | 2 } = $props()
+let {
+  text,
+  minimumHeadingLevel = 1,
+  streaming = false,
+}: { text: string; minimumHeadingLevel?: 1 | 2; streaming?: boolean } = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
-const blocks = $derived.by(() =>
-  markdownBlocks(text, minimumHeadingLevel).map((block) => ({
-    ...block,
-    html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE),
-  })),
-)
+const blocks = $derived(markdownBlocks(text, minimumHeadingLevel))
 </script>
 
 <div class="markdown-content">
   {#each blocks as block (block.id)}
-    <!-- HTML 仅包含安全过滤后的非交互 Markdown 排版。 -->
-    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-    {@html block.html}
+    <MarkdownRenderedBlock {block} {streaming} />
   {/each}
 </div>
 
@@ -35,10 +32,10 @@ const blocks = $derived.by(() =>
 .markdown-content :global(table) {
   margin-block: 0.35rem;
 }
-.markdown-content :global(:first-child) {
+.markdown-content :global(.markdown-rendered-block:first-child > :first-child) {
   margin-top: 0;
 }
-.markdown-content :global(:last-child) {
+.markdown-content :global(.markdown-rendered-block:last-child > :last-child) {
   margin-bottom: 0;
 }
 .markdown-content :global(:is(h1, h2, h3, h4, h5, h6)) {
@@ -77,7 +74,7 @@ const blocks = $derived.by(() =>
   border: 1px solid var(--markdown-border, color-mix(in oklab, currentColor 25%, transparent));
   padding: 0.15rem;
 }
-.markdown-content > :global(:is(p, pre, blockquote, ul, ol, table):first-child) {
+.markdown-content :global(.markdown-rendered-block:first-child > :is(p, pre, blockquote, ul, ol, table):first-child) {
   margin-top: var(--markdown-first-margin, 0);
 }
 </style>

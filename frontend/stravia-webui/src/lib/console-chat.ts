@@ -9,12 +9,15 @@ import type {
   ConsoleChatSnapshot,
   ConsoleConversation,
   ConsoleGeneration,
+  ConsoleImageAttachment,
   ConsoleMessage,
   ConsoleReadOnlyReason,
   ConsoleResponsesRequest,
+  ConsoleResponsesEvent,
   ConsoleThinkingSelection,
 } from '$lib/console-chat-types'
 import type { Route } from '$lib/types'
+import type { ThinkingActivity } from '$lib/observation-activities'
 
 /** 隐藏普通 HTML 注释及尚未收完的流式注释；不解释 Core 私有历史语法。 */
 export function consoleVisibleText(text: string): string {
@@ -37,29 +40,72 @@ function readableParts(value: unknown): string {
 }
 
 export function consoleAssistantContent(message: ConsoleAssistantMessage): { text: string; thinking: string } {
-  if (message.status === 'stopped') {
+  if (message.status === 'stopped' || message.status === 'failed') {
     return {
       text: consoleVisibleText(message.partialText ?? ''),
-      thinking: consoleVisibleText(message.partialThinking ?? ''),
+      thinking: consoleReasoningActivities(message)
+        .map((activity) => activity.text)
+        .join('\n\n'),
     }
   }
   let text = ''
-  let summary = ''
-  let reasoning = ''
   for (const output of message.outputItems) {
     const item = record(output)
     if (item?.type === 'message') text += readableParts(item.content)
-    if (item?.type === 'reasoning') {
-      summary += readableParts(item.summary)
-      reasoning += readableParts(item.content) || readableParts(item.text)
-    }
   }
-  return { text: consoleVisibleText(text), thinking: consoleVisibleText(summary) || consoleVisibleText(reasoning) }
+  return {
+    text: consoleVisibleText(text),
+    thinking: consoleReasoningActivities(message)
+      .map((activity) => activity.text)
+      .join('\n\n'),
+  }
+}
+
+export function consoleReasoningActivities(message: ConsoleAssistantMessage): ThinkingActivity[] {
+  if (message.status === 'stopped' || message.status === 'failed') {
+    if (message.partialActivities)
+      return message.partialActivities
+        .map((activity) => ({ ...activity, text: consoleVisibleText(activity.text), live: false }))
+        .filter((activity) => !!activity.text)
+    const text = consoleVisibleText(message.partialThinking ?? '')
+    return text
+      ? [{ kind: 'thinking', id: `${message.id}:reasoning`, at: Date.parse(message.createdAt), text, live: false }]
+      : []
+  }
+  return message.outputItems.flatMap((output, index): ThinkingActivity[] => {
+    const item = record(output)
+    if (item?.type !== 'reasoning') return []
+    const text =
+      consoleVisibleText(readableParts(item.summary)) ||
+      consoleVisibleText(readableParts(item.content) || readableParts(item.text))
+    return text
+      ? [
+          {
+            kind: 'thinking',
+            id: typeof item.id === 'string' ? item.id : `${message.id}:reasoning:${index}`,
+            at: Date.parse(message.createdAt),
+            text,
+            live: false,
+          },
+        ]
+      : []
+  })
 }
 
 function replay(messages: ConsoleMessage[]): unknown[] {
   return messages.flatMap((message): unknown[] => {
-    if (message.role === 'user') return [{ role: 'user', content: message.text }]
+    if (message.role === 'user')
+      return [
+        {
+          role: 'user',
+          content: message.images?.length
+            ? [
+                { type: 'input_text', text: message.text },
+                ...message.images.map((image) => ({ type: 'input_image', image_url: image.dataUrl })),
+              ]
+            : message.text,
+        },
+      ]
     if (message.status === 'failed') return []
     if (message.status === 'stopped') {
       const text = consoleVisibleText(message.partialText ?? '')
@@ -83,6 +129,80 @@ interface ActiveRequest {
   abort: AbortController
   message: ConsoleAssistantMessage
   generation: ConsoleGeneration
+  reasoningItems: Map<number, ReasoningItem>
+}
+
+interface ReasoningItem {
+  id: string
+  at: number
+  live: boolean
+  summary: Map<number, string>
+  content: Map<number, string>
+}
+
+function orderedParts(parts: Map<number, string>): string {
+  return [...parts]
+    .sort(([a], [b]) => a - b)
+    .map(([, text]) => text)
+    .join('')
+}
+
+/** Only public Responses item/part events supply readable reasoning. */
+function updateReasoning(active: ActiveRequest, event: ConsoleResponsesEvent, at: number): boolean {
+  const outputItem = record(event.item)
+  const part = record(event.part)
+  const itemEvent = event.type === 'response.output_item.added' || event.type === 'response.output_item.done'
+  const summaryEvent = event.type.startsWith('response.reasoning_summary_')
+  const contentEvent =
+    event.type.startsWith('response.reasoning_text.') ||
+    (event.type.startsWith('response.content_part.') && part?.type === 'reasoning_text')
+  if ((!itemEvent || outputItem?.type !== 'reasoning') && !summaryEvent && !contentEvent) return false
+  const publicId = typeof outputItem?.id === 'string' ? outputItem.id : event.item_id
+  const existingIndex = publicId ? [...active.reasoningItems].find(([, item]) => item.id === publicId)?.[0] : undefined
+  const index = event.output_index ?? existingIndex ?? 0
+  let item = active.reasoningItems.get(index)
+  if (!item) {
+    item = {
+      id: publicId ?? `${active.message.id}:reasoning:${index}`,
+      at,
+      live: true,
+      summary: new Map(),
+      content: new Map(),
+    }
+    active.reasoningItems.set(index, item)
+  } else if (publicId) item.id = publicId
+  if (itemEvent) {
+    if (Array.isArray(outputItem?.summary)) {
+      item.summary = new Map(outputItem.summary.map((value, partIndex) => [partIndex, readableParts([value])]))
+    }
+    if (Array.isArray(outputItem?.content)) {
+      item.content = new Map(outputItem.content.map((value, partIndex) => [partIndex, readableParts([value])]))
+    } else if (typeof outputItem?.text === 'string') item.content = new Map([[0, outputItem.text]])
+    item.live = event.type !== 'response.output_item.done' && outputItem?.status !== 'completed'
+  } else {
+    const parts = summaryEvent ? item.summary : item.content
+    const partIndex = (summaryEvent ? event.summary_index : event.content_index) ?? 0
+    if (event.type.endsWith('.delta')) {
+      parts.set(partIndex, (parts.get(partIndex) ?? '') + (event.delta ?? ''))
+    } else if (typeof event.text === 'string') {
+      parts.set(partIndex, event.text)
+    } else if (typeof part?.text === 'string') {
+      parts.set(partIndex, part.text)
+    }
+  }
+  const ordered = [...active.reasoningItems].sort(([a], [b]) => a - b).map(([, value]) => value)
+  active.generation.summary = ordered.map((value) => orderedParts(value.summary)).join('')
+  active.generation.reasoning = ordered.map((value) => orderedParts(value.content)).join('')
+  active.generation.activities = ordered
+    .map((value): ThinkingActivity => ({
+      kind: 'thinking',
+      id: value.id,
+      at: value.at,
+      live: value.live,
+      text: consoleVisibleText(orderedParts(value.summary)) || consoleVisibleText(orderedParts(value.content)),
+    }))
+    .filter((activity) => !!activity.text)
+  return true
 }
 
 export class ConsoleChatController {
@@ -100,6 +220,7 @@ export class ConsoleChatController {
   private loadError: unknown = null
   private catalogError: unknown = null
   private storageError: unknown = null
+  private inputError: ConsoleChatError | null = null
   private writes: Promise<void> = Promise.resolve()
   private starting?: Promise<void>
   private catalogEpoch = 0
@@ -176,6 +297,9 @@ export class ConsoleChatController {
       loadError: this.loadError,
       catalogError: this.catalogError,
       storageError: this.storageError,
+      inputError: this.inputError,
+      historyHasImages: !!current?.messages.some((message) => message.role === 'user' && message.images?.length),
+      modelSupportsImages: model?.supports_image_input === true,
       keyCandidates: this.keys(),
       modelCandidates: candidates,
       selectedKeyId,
@@ -186,7 +310,12 @@ export class ConsoleChatController {
       retryModelAvailable:
         lastMessage?.role === 'assistant' && candidates.some((candidate) => candidate.model_id === lastMessage.routeId),
       blocker: this.loading || this.loadError || this.catalogError ? null : this.blocker(),
-      generations: Object.fromEntries([...this.active].map(([id, request]) => [id, { ...request.generation }])),
+      generations: Object.fromEntries(
+        [...this.active].map(([id, request]) => [
+          id,
+          { ...request.generation, activities: request.generation.activities.map((activity) => ({ ...activity })) },
+        ]),
+      ),
     }
   }
   private publish(): void {
@@ -308,6 +437,7 @@ export class ConsoleChatController {
     this.publish()
   }
   newConversation(): void {
+    this.inputError = null
     this.currentId = null
     this.draftKey = this.preferences.apiKeyId ?? null
     this.draftModel = this.preferences.modelId ?? null
@@ -316,6 +446,7 @@ export class ConsoleChatController {
     this.publish()
   }
   openConversation(id: string | null): void {
+    this.inputError = null
     if (id === null) {
       this.newConversation()
       return
@@ -335,6 +466,7 @@ export class ConsoleChatController {
     const current = this.current()
     if (this.currentId !== null && !current) return
     if (this.clearing || (current && this.deleting.has(current.id))) return
+    this.inputError = null
     const available = this.allowedModels(current?.apiKeyId ?? this.draftKey)
     const selected = available.find((model) => model.id === id)
     if (current) {
@@ -382,17 +514,48 @@ export class ConsoleChatController {
           !this.readOnlyReasonFor(conversation.id)))
     )
   }
-  async send(text: string): Promise<void> {
-    if (!text.trim() || this.snapshot.missingConversation) return
+  private imagesCompatible(model: Route, messages: ConsoleMessage[], images: ConsoleImageAttachment[] = []): boolean {
+    this.inputError = null
+    if (
+      model.supports_image_input === true ||
+      (!images.length && !messages.some((message) => message.role === 'user' && message.images?.length))
+    )
+      return true
+    this.inputError = {
+      code: 'CONSOLE_IMAGE_INPUT_UNSUPPORTED',
+      message: 'This model does not support images in this message or conversation. Choose an image-capable model.',
+    }
+    this.publish()
+    return false
+  }
+  async send(text: string, images: ConsoleImageAttachment[] = []): Promise<boolean> {
+    this.inputError = null
+    if (!text.trim() || this.snapshot.missingConversation) return false
+    if (
+      images.some(
+        (image) =>
+          !['image/png', 'image/jpeg', 'image/webp'].includes(image.mediaType) ||
+          !image.dataUrl.startsWith(`data:${image.mediaType};base64,`) ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(image.dataUrl.slice(image.dataUrl.indexOf(',') + 1)),
+      )
+    ) {
+      this.inputError = {
+        code: 'CONSOLE_IMAGE_ATTACHMENT_INVALID',
+        message: 'Only original PNG, JPEG and WebP images are supported.',
+      }
+      this.publish()
+      return false
+    }
     let conversation = this.current()
     if (!this.canSend(conversation ?? undefined)) {
       this.refreshEligibility()
-      return
+      return false
     }
     const state = this.snapshot
     const key = this.keys().find((candidate) => candidate.id === state.selectedKeyId)
     const model = state.modelCandidates.find((candidate) => candidate.id === state.selectedModelId)
-    if (!key || !model) return
+    if (!key || !model || !this.imagesCompatible(model, conversation?.messages ?? [], images)) return false
+    const isNew = !conversation
     if (!conversation) {
       const firstLine = text.trim().split(/\r?\n/, 1)[0]
       const title = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(firstLine)]
@@ -413,9 +576,16 @@ export class ConsoleChatController {
       this.conversations.push(conversation)
       this.currentId = conversation.id
     }
-    conversation.messages.push({ id: this.id(), role: 'user', text, createdAt: this.time() })
+    const previousMessages = [...conversation.messages]
+    conversation.messages.push({
+      id: this.id(),
+      role: 'user',
+      text,
+      ...(images.length ? { images: images.map((image) => ({ ...image })) } : {}),
+      createdAt: this.time(),
+    })
     this.remember()
-    await this.generate(
+    const result = await this.generate(
       conversation,
       {
         model: model.model_id,
@@ -424,7 +594,19 @@ export class ConsoleChatController {
         reasoning: this.reasoning(model, state.thinkingSelection),
       },
       state.thinkingSelection,
+      previousMessages,
     )
+    if (
+      !result &&
+      conversation.messages.length === previousMessages.length &&
+      isNew &&
+      this.conversations.includes(conversation)
+    ) {
+      this.conversations = this.conversations.filter((item) => item !== conversation)
+      if (this.currentId === conversation.id) this.currentId = null
+      this.publish()
+    }
+    return result
   }
   async retry(): Promise<void> {
     const conversation = this.current()
@@ -435,15 +617,16 @@ export class ConsoleChatController {
     const last = conversation.messages.at(-1)
     if (last?.role !== 'assistant' || last.status !== 'failed') return
     const model = this.allowedModels(conversation.apiKeyId).find((candidate) => candidate.model_id === last.routeId)
-    if (!model) return
+    if (!model || !this.imagesCompatible(model, conversation.messages)) return
     const request: ConsoleResponsesRequest = {
       model: last.routeId,
       stream: true,
       input: replay(conversation.messages.slice(0, -1)),
       reasoning: last.requestReasoning ?? this.reasoning(model, last.thinkingLevel),
     }
+    const previousMessages = [...conversation.messages]
     conversation.messages.pop()
-    await this.generate(conversation, request, last.thinkingLevel)
+    await this.generate(conversation, request, last.thinkingLevel, previousMessages)
   }
   async regenerate(): Promise<void> {
     const conversation = this.current()
@@ -453,7 +636,8 @@ export class ConsoleChatController {
     }
     const last = conversation.messages.at(-1)
     const model = this.snapshot.modelCandidates.find((candidate) => candidate.id === conversation.selectedModelId)
-    if (last?.role !== 'assistant' || !model) return
+    if (last?.role !== 'assistant' || !model || !this.imagesCompatible(model, conversation.messages)) return
+    const previousMessages = [...conversation.messages]
     conversation.messages.pop()
     await this.generate(
       conversation,
@@ -464,13 +648,16 @@ export class ConsoleChatController {
         reasoning: this.reasoning(model, conversation.thinkingSelection),
       },
       conversation.thinkingSelection,
+      previousMessages,
     )
   }
   private async generate(
     conversation: ConsoleConversation,
     request: ConsoleResponsesRequest,
     selection: ConsoleThinkingSelection,
-  ): Promise<void> {
+    previousMessages: ConsoleMessage[],
+  ): Promise<boolean> {
+    const previousUpdatedAt = conversation.updatedAt
     const message: ConsoleAssistantMessage = {
       id: this.id(),
       role: 'assistant',
@@ -485,27 +672,36 @@ export class ConsoleChatController {
     const active: ActiveRequest = {
       abort: new AbortController(),
       message,
-      generation: { text: '', summary: '', reasoning: '' },
+      generation: { text: '', summary: '', reasoning: '', activities: [] },
+      reasoningItems: new Map(),
     }
     conversation.messages.push(message)
     conversation.updatedAt = this.time()
     this.active.set(conversation.id, active)
     this.publish()
-    await this.save(conversation)
+    if (!(await this.save(conversation))) {
+      if (this.active.get(conversation.id) === active) {
+        this.active.delete(conversation.id)
+        conversation.messages = previousMessages
+        conversation.updatedAt = previousUpdatedAt
+        this.publish()
+      }
+      return false
+    }
     const alive = () => this.active.get(conversation.id) === active && this.conversations.includes(conversation)
     try {
-      if (!alive()) return
+      if (!alive()) return false
       const apiKey = await this.options.catalog.revealKey(conversation.apiKeyId)
-      if (!alive()) return
+      if (!alive()) return false
       let terminal = false
       for await (const event of this.options.transport.stream({ apiKey, request, signal: active.abort.signal })) {
-        if (!alive()) return
+        if (!alive()) return false
         const generation = active.generation
         if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta')
           generation.text += event.delta ?? ''
-        else if (event.type === 'response.reasoning_summary_text.delta') generation.summary += event.delta ?? ''
-        else if (event.type === 'response.reasoning_text.delta') generation.reasoning += event.delta ?? ''
-        else if (event.type === 'error' || event.type === 'response.failed') {
+        else if (updateReasoning(active, event, this.now())) {
+          // Per-item lifecycle is independent of the surrounding response.
+        } else if (event.type === 'error' || event.type === 'response.failed') {
           const failure = event.response?.error ??
             event.error ?? { message: event.message ?? 'Response failed', code: event.code }
           throw Object.assign(new Error(failure.message), failure)
@@ -532,26 +728,31 @@ export class ConsoleChatController {
           }
           delete message.partialText
           delete message.partialThinking
+          delete message.partialActivities
+          generation.activities = consoleReasoningActivities(message)
+          this.publish()
           terminal = true
           break
         } else continue
         // 流式检查点按 stopped 持久化，刷新时不依赖卸载阶段的异步写入。
         message.partialText = consoleVisibleText(generation.text)
-        message.partialThinking = consoleVisibleText(generation.summary) || consoleVisibleText(generation.reasoning)
+        message.partialActivities = generation.activities.map((activity) => ({ ...activity, live: false }))
+        message.partialThinking = message.partialActivities.map((activity) => activity.text).join('\n\n')
         conversation.updatedAt = this.time()
         this.publish()
-        await this.save(conversation)
+        if (!(await this.save(conversation))) {
+          active.abort.abort()
+          throw this.storageError
+        }
       }
-      if (!alive()) return
+      if (!alive()) return false
       if (!terminal) throw new Error('Response stream ended before completion')
     } catch (error) {
-      if (!alive()) return
-      if (active.abort.signal.aborted) message.status = 'stopped'
+      if (!alive()) return false
+      if (active.abort.signal.aborted && !this.storageError) message.status = 'stopped'
       else {
         message.status = 'failed'
         message.outputItems = []
-        delete message.partialText
-        delete message.partialThinking
         message.error = chatError(error)
         if (
           message.error.status === 401 ||
@@ -570,11 +771,12 @@ export class ConsoleChatController {
         }
       }
     }
-    if (!alive()) return
+    if (!alive()) return false
     this.active.delete(conversation.id)
     conversation.updatedAt = this.time()
     this.publish()
-    await this.save(conversation)
+    const saved = await this.save(conversation)
+    return saved && (message.status === 'completed' || message.status === 'incomplete')
   }
   async stop(id = this.currentId ?? ''): Promise<void> {
     const active = this.active.get(id)
@@ -586,6 +788,7 @@ export class ConsoleChatController {
     active.message.partialText = consoleVisibleText(active.generation.text)
     active.message.partialThinking =
       consoleVisibleText(active.generation.summary) || consoleVisibleText(active.generation.reasoning)
+    active.message.partialActivities = active.generation.activities.map((activity) => ({ ...activity, live: false }))
     conversation.updatedAt = this.time()
     this.publish()
     await this.save(conversation)
