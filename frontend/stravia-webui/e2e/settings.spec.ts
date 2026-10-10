@@ -489,24 +489,128 @@ test('search activation saves only confirmed configuration without discarding th
 
 test('unloaded settings stay non-editable until a failed baseline is recovered', async ({ page }) => {
   let unavailable = true
-  await page.route('**/api/v1/settings/proxy_enabled', async (route) => {
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     await route.fulfill(
-      unavailable ? { status: 503, json: { error: 'Fixture settings unavailable' } } : { json: { data: 'true' } },
+      unavailable
+        ? { status: 503, json: { error: 'Fixture settings unavailable' } }
+        : { json: { data: JSON.stringify({ url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }) } },
     )
   })
   await page.goto('/settings')
-  await expect(page.getByRole('alert').filter({ hasText: 'Fixture settings unavailable' })).toBeVisible()
-  await expect(page.locator('#proxy-enabled')).toHaveCount(0)
+  await expect(page.locator('#proxy').getByRole('alert')).toBeVisible()
   await expect(page.locator('#proxy-url')).toHaveCount(0)
   await expect(page.locator('#log-retention')).toBeVisible()
   unavailable = false
-  await page
-    .getByRole('alert')
-    .filter({ hasText: 'Some settings could not be' })
-    .getByRole('button', { name: 'Retry', exact: true })
-    .click()
-  await expect(page.locator('#proxy-enabled')).toBeChecked()
-  await expect(page.locator('#proxy-url')).toBeVisible()
+  await page.locator('#proxy').getByRole('button').click()
+  await expect(page.locator('#proxy-url')).toHaveValue('http://127.0.0.1:7890')
+})
+
+test('proxy saves one complete snapshot and retains drafts after failure', async ({ page }) => {
+  let saved = { url: 'http://127.0.0.1:7890', bypass: 'localhost', force_http1: true }
+  const submitted: (typeof saved)[] = []
+  let rejectSave = true
+  let releaseSave: (() => void) | undefined
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const value = JSON.parse(route.request().postDataJSON().value) as typeof saved
+      submitted.push(value)
+      await new Promise<void>((resolve) => {
+        releaseSave = resolve
+      })
+      if (rejectSave) return route.fulfill({ status: 503, json: { error: 'Proxy storage unavailable' } })
+      saved = value
+    }
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings')
+  const url = page.locator('#proxy-url')
+  const bypass = page.locator('#proxy-bypass')
+  const save = page.locator('#proxy').getByRole('button')
+  await url.fill('socks5h://127.0.0.1:1080')
+  await bypass.fill('localhost,.internal')
+  expect(submitted).toHaveLength(0)
+  await save.click()
+  await expect(url).toBeDisabled()
+  await expect(bypass).toBeDisabled()
+  await expect.poll(() => submitted.length).toBe(1)
+  expect(submitted).toEqual([{ url: 'socks5h://127.0.0.1:1080', bypass: 'localhost,.internal', force_http1: true }])
+  releaseSave?.()
+  await expect(page.locator('#proxy').getByRole('alert')).toBeVisible()
+  await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
+  await expect(bypass).toHaveValue('localhost,.internal')
+  expect(saved.url).toBe('http://127.0.0.1:7890')
+  rejectSave = false
+  await save.click()
+  await expect(url).toBeDisabled()
+  await expect.poll(() => submitted.length).toBe(2)
+  releaseSave?.()
+  await expect(url).toBeEnabled()
+  await expect(save).toBeDisabled()
+  await page.reload()
+  await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
+  await expect(bypass).toHaveValue('localhost,.internal')
+  expect(submitted).toHaveLength(2)
+})
+
+test('update proxy preference uses saved configuration without submitting the proxy draft', async ({ page }) => {
+  let savedProxy = { url: '', bypass: 'localhost', force_http1: true }
+  let preference = 'false'
+  let configWrites = 0
+  const preferences: string[] = []
+  let rejectPreference = false
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      configWrites++
+      savedProxy = JSON.parse(route.request().postDataJSON().value)
+    }
+    await route.fulfill({ json: { data: JSON.stringify(savedProxy) } })
+  })
+  await page.route('**/api/v1/settings/update_use_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      preferences.push(route.request().postDataJSON().value)
+      if (rejectPreference) return route.fulfill({ status: 503, json: { error: 'Preference unavailable' } })
+      preference = route.request().postDataJSON().value
+    }
+    await route.fulfill({ json: { data: preference } })
+  })
+  await page.goto('/settings')
+  const toggle = page.locator('#update-use-proxy')
+  const url = page.locator('#proxy-url')
+  await url.fill('http://draft.example:7890')
+  await toggle.click()
+  await expect(page.locator('#updates a[href="#proxy"]')).toBeVisible()
+  await expect(toggle).not.toBeChecked()
+  expect(preferences).toEqual([])
+  expect(configWrites).toBe(0)
+  savedProxy = { ...savedProxy, url: 'http://127.0.0.1:7890' }
+  rejectPreference = true
+  await toggle.click()
+  await expect(page.locator('#updates').getByRole('alert')).toBeVisible()
+  await expect(toggle).not.toBeChecked()
+  await expect(url).toHaveValue('http://draft.example:7890')
+  rejectPreference = false
+  await page.locator('#updates').getByRole('alert').getByRole('button').click()
+  await expect(toggle).toBeChecked()
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
+  expect(preferences).toEqual(['true', 'true', 'false'])
+  expect(configWrites).toBe(0)
+  await expect(url).toHaveValue('http://draft.example:7890')
+})
+
+test('update proxy preference recovers loading failures without displaying an unchecked default', async ({ page }) => {
+  let unavailable = true
+  await page.route('**/api/v1/settings/update_use_proxy', (route) =>
+    route.fulfill(
+      unavailable ? { status: 503, json: { error: 'Preference unavailable' } } : { json: { data: 'true' } },
+    ),
+  )
+  await page.goto('/settings')
+  await expect(page.locator('#updates').getByRole('alert')).toBeVisible()
+  await expect(page.locator('#update-use-proxy')).toHaveCount(0)
+  unavailable = false
+  await page.locator('#updates').getByRole('alert').getByRole('button').click()
+  await expect(page.locator('#update-use-proxy')).toBeChecked()
 })
 
 test('source save failures preserve selection and drafts before the single search switch can enable', async ({

@@ -10,6 +10,9 @@
 
 ### Changed
 
+- **Breaking — outbound proxy settings:** Removed the global proxy switch. The settings page saves one atomic `outbound_proxy` configuration (URL, bypass, and preserved HTTP/1 preference); model and Web Providers independently select it with `use_proxy`. Product updates have a separate immediate `update_use_proxy` preference, including Desktop checks and downloads. SQLite/PostgreSQL migration 0016 preserves effective legacy model routing, leaves Web Provider flags unchanged, migrates the update preference, and removes the four old settings keys; those keys are no longer accepted by the settings API. Catalog and S3 remain direct.
+- Explicit outbound proxies now apply host/IP/domain bypass to model HTTP/WS, Web Access HTTP/browser egress, and update redirects/downloads without weakening target authorization or SSRF checks. Unknown proxy schemes are rejected instead of silently connecting directly, SOCKS5/SOCKS5h transport is enabled, and bypass changes invalidate client/WS reuse identity. See [outbound proxy architecture](docs/design/architecture.md#共享出站代理配置与独立选择) and the [historical investigation](docs/research/outbound-proxy-chain.md).
+
 - Redesigned the Console Chat composer: the API Key sits as a tab above a single borderless, auto-growing input card, and the model/effort picker opens on a localized effort slider (with “Default” as its first stop), with the model list one click away. The header, empty state, and answer actions use compact icon controls, and the send notice below the composer has been removed.
 - Console Chat and request observations now share a flat assistant / muted user message layout. Chat has a docked composer, layered model/effort picker, and item-scoped thinking lifecycle; observations retain manual expansion and show tool activity only from execution, handoff, result, and authoritative Run evidence.
 - Usage analytics now features a “Latency and speed” chart with independent zero-based axes for time to first token (seconds) and full-call TPS (tok/s). Window summaries and same-bucket tooltips preserve unknown values and real zero output; missing hours remain gaps. TPS is weighted over successful Target attempts, includes first-token waiting, and requires complete output/duration coverage. Other duration metrics and existing observation records remain unchanged; no migration or backfill is required.
@@ -29,6 +32,7 @@
 
 ### Fixed
 
+- Restored WebUI CI formatting checks and aligned service-card logo regressions with local SVG precedence. Browser coverage still verifies remote-logo loading and visible fallback when no built-in icon is available; runtime logo selection is unchanged.
 - Markdown in Console Chat and request observations now closes bold/italic emphasis next to CJK text, such as `**名称（别名）**之后`, which CommonMark previously left as literal asterisks. Emphasis follows the CJK-friendly CommonMark draft via `marked-cjk-friendly`.
 - Console Chat no longer shows empty “Thinking” blocks for reasoning items whose summary is blank, whitespace-only, or only hidden comments, during streaming, after completion, or after stop/failure. Signed reasoning items are still stored and replayed unchanged.
 - The navigation sidebar now highlights only one Chat item at a time: the open recent conversation, “All conversations”, or Chat itself when no more specific item is visible.

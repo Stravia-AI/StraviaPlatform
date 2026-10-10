@@ -59,12 +59,17 @@ for (const locale of ['en-US', 'zh-CN']) {
   })
 }
 
-test('service cards localize sign-in methods and prefer catalog logos with local fallback', async ({ page }) => {
+test('service cards filter sign-in methods and use local logos before remote fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
   let failLogo = false
-  let logoRequests = 0
+  let localLogoRequests = 0
+  let remoteLogoRequests = 0
   await page.route('**/api/v1/catalog/providers/openai/logo', async (route) => {
-    logoRequests += 1
+    localLogoRequests += 1
+    await route.fulfill({ status: 404, body: '' })
+  })
+  await page.route('**/api/v1/catalog/providers/openai-compatible/logo', async (route) => {
+    remoteLogoRequests += 1
     if (failLogo) {
       await route.fulfill({ status: 404, body: '' })
     } else {
@@ -78,29 +83,39 @@ test('service cards localize sign-in methods and prefer catalog logos with local
   await page.getByRole('button', { name: /连接.*服务/ }).click()
   const grid = page.locator('[data-provider-grid]')
   const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥$/ })
-  await expect(openAi).toBeVisible()
-  await expect(grid.getByRole('button', { name: /Codex · OAuth 账号/ })).toBeVisible()
-  await expect(grid).not.toContainText(/\binfer\b|model_discovery|config_validation/)
-  await expect(openAi.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai\/logo$/)
-  await expect.poll(() => logoRequests).toBeGreaterThan(0)
+  const compatible = grid.getByRole('button', { name: /^OpenAI Compatible API 密钥$/ })
+  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
   await expect
     .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
     .toBeGreaterThan(0)
+  await expect(compatible.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai-compatible\/logo$/)
+  await expect
+    .poll(() => compatible.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
+    .toBeGreaterThan(0)
+  expect(remoteLogoRequests).toBeGreaterThan(0)
+  expect(localLogoRequests).toBe(0)
 
   const search = page.locator('[data-provider-toolbar] input')
   await search.fill('账号')
   await expect(grid.getByRole('button')).toHaveCount(1)
+  await expect(grid.getByRole('button', { name: /Codex · OAuth 账号/ })).toBeVisible()
   await search.fill('API 密钥')
   await expect(openAi).toBeVisible()
   await expect(grid.getByRole('button', { name: /OAuth 账号/ })).toHaveCount(0)
 
   failLogo = true
+  const successfulLogoRequests = remoteLogoRequests
   await page.reload()
   await page.getByRole('button', { name: /连接.*服务/ }).click()
+  await expect.poll(() => remoteLogoRequests).toBeGreaterThan(successfulLogoRequests)
+  await expect(compatible.locator('img')).toHaveCount(0)
+  await expect(compatible.locator('.route-provider-mark')).toHaveText('O')
+  await expect(compatible.locator('.route-provider-mark')).toBeVisible()
   await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
   await expect
     .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
     .toBeGreaterThan(0)
+  expect(localLogoRequests).toBe(0)
 })
 
 test('model ID suggestions preserve arbitrary text, composition, and form focus', async ({ page }) => {

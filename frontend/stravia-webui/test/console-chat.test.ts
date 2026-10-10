@@ -363,7 +363,10 @@ describe('request and presentation', () => {
     const h = harness({
       onSnapshot: (snapshot) => snapshots.push(snapshot),
       script: function* () {
-        yield { type: status === 'incomplete' ? 'response.incomplete' : 'response.completed', response: { status, output: raw } }
+        yield {
+          type: status === 'incomplete' ? 'response.incomplete' : 'response.completed',
+          response: { status, output: raw },
+        }
       },
     })
     await h.controller.start()
@@ -375,7 +378,12 @@ describe('request and presentation', () => {
       { id: 'readable', text: '  思考原文\n' },
     ])
     expect(consoleAssistantContent(answer)).toEqual({ text: '回答', thinking: '  思考原文\n' })
-    expect(snapshots.flatMap((snapshot) => Object.values(snapshot.generations)).at(-1)?.activities.map(({ id }) => id)).toEqual(['readable'])
+    expect(
+      snapshots
+        .flatMap((snapshot) => Object.values(snapshot.generations))
+        .at(-1)
+        ?.activities.map(({ id }) => id),
+    ).toEqual(['readable'])
     const refreshed = harness({ store: h.store })
     await refreshed.controller.start()
     refreshed.controller.openConversation(h.store.conversations[0].id)
@@ -388,9 +396,14 @@ describe('request and presentation', () => {
   })
   test.each(['stopped', 'failed'] as const)('历史 %s 仅过滤展示活动并保留原始部分文本', (status) => {
     const message = {
-      id: 'history', role: 'assistant' as const, status, routeId: 'model-a', thinkingLevel: 'default' as const,
+      id: 'history',
+      role: 'assistant' as const,
+      status,
+      routeId: 'model-a',
+      thinkingLevel: 'default' as const,
       outputItems: [{ type: 'reasoning', encrypted_content: 'opaque', summary: [] }],
-      createdAt: '2026-01-01T00:00:00Z', partialThinking: ' \n\t',
+      createdAt: '2026-01-01T00:00:00Z',
+      partialThinking: ' \n\t',
       partialActivities: [
         { kind: 'thinking' as const, id: 'empty', at: 0, text: ' <!--private-->\n\t', live: false },
         { kind: 'thinking' as const, id: 'readable', at: 1, text: '  原文\n', live: false },
@@ -533,8 +546,16 @@ describe('stream lifecycle and races', () => {
         expect(Object.values(h.controller.snapshot.generations)[0].summary).toBe(' \n\t')
         yield { type: 'response.reasoning_summary_text.delta', output_index: 0, delta: '思考' }
         expect(activities()).toMatchObject([{ id: 'first', text: ' \n\t思考', live: true }])
-        yield { type: 'response.output_item.done', output_index: 0, item: { type: 'reasoning', id: 'first', summary: [{ text: ' \n\t思考' }] } }
-        yield { type: 'response.output_item.added', output_index: 2, item: { type: 'reasoning', id: 'latest', encrypted_content: 'opaque', summary: [{ text: '\t ' }] } }
+        yield {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'reasoning', id: 'first', summary: [{ text: ' \n\t思考' }] },
+        }
+        yield {
+          type: 'response.output_item.added',
+          output_index: 2,
+          item: { type: 'reasoning', id: 'latest', encrypted_content: 'opaque', summary: [{ text: '\t ' }] },
+        }
         expect(activities()).toMatchObject([{ id: 'first', live: false }])
         yield { type: 'response.reasoning_summary_text.delta', output_index: 2, item_id: 'latest', delta: '最新思考' }
         expect(activities()).toMatchObject([
@@ -654,7 +675,12 @@ describe('stream lifecycle and races', () => {
           yield {
             type: 'response.output_item.added',
             output_index: 2,
-            item: { type: 'reasoning', id: 'empty-signature', encrypted_content: 'opaque', summary: [{ text: ' \n\t' }] },
+            item: {
+              type: 'reasoning',
+              id: 'empty-signature',
+              encrypted_content: 'opaque',
+              summary: [{ text: ' \n\t' }],
+            },
           }
           yield { type: 'response.output_text.delta', delta: 'Partial answer' }
           entered.resolve()

@@ -211,7 +211,17 @@ stravia/
 
 Desktop 与独立 Server 的清单对齐共享依赖的运行期、宿主构建与过程宏特性，以及各平台已共享的底层系统绑定，减少切换入口时的依赖变体。Server 的 `embed-webui` 仍是独立特性：Desktop 不启用 Server 的 WebUI 嵌入，也不会把 Tauri、WebView 或桌面插件引入独立 Server。Desktop 独有的构建路径可以保留自己的依赖变体；这些不是双方都需要编译的单元。首次特性对齐需要重编扩大特性的依赖，之后的复用仍要求 profile、目标平台和编译环境一致。修改共享 Core 源码仍会更新两端的相关工作区产物，不会因此反向重编未变化的第三方依赖。
 
-共享 `reqwest` 启用与 Desktop 相同的 TLS 和系统代理编译特性，但默认 Gateway、Provider Catalog 与 S3 客户端显式直连，不继承环境变量或操作系统代理。Provider 关闭 `use_proxy` 时保持直连；开启时仍由应用配置选择显式代理客户端。编译特性对齐不改变这个出站选择，也不移除现有 TLS provider 或 JSON 默认递归深度保护。
+共享 `reqwest` 启用 TLS、系统代理编译特性与 SOCKS transport，但默认 Gateway、Provider Catalog 与 S3 客户端显式直连，不继承环境变量或操作系统代理。编译特性不改变应用的出站选择，也不移除现有 TLS provider 或 JSON 默认递归深度保护。
+
+### 共享出站代理配置与独立选择
+
+设置页维护共享代理地址及绕过规则，不再提供全局启用开关。`outbound_proxy` 是 settings 中一行 JSON（`url`、`bypass`、`force_http1`）：一次 PUT 提交完整配置，一次读取取得完整快照，验证或持久化失败保留原配置。URL 为空表示尚未配置；非空仅接受可用的 `http`、`https`、`socks5`、`socks5h` 代理地址。保存和使用边界均拒绝未知 scheme，不静默改为直连；错误不回显可能含凭据的 URL，保存并不检查代理在线或认证成功。Core reqwest 的 `socks5` 在本机解析目标，`socks5h` 将目标域名交给代理解析；LocalWeb 保留 ADR-0026 的既有代理侧 DNS 策略（其 `socks5` 规范化为 `socks5h`），不据此推断 Core 的 DNS 行为。读取迁移留下的非法旧 URL 不阻断管理编辑，使用时仍须校验并失败关闭。
+
+模型 Provider/session 与 Web Provider 各自的 `use_proxy` 是唯一选择：关闭明确直连，开启必须使用已保存的有效配置。产品更新有独立的 `update_use_proxy`（缺省 false），用于 Gateway 的 release/manifest 检查及 Desktop updater 检查、下载；改变更新偏好不修改 Provider 或共享代理配置。Provider Catalog 与 S3 不在这一选择范围。`force_http1` 保留既有 Vendor HTTP 专用行为，不改变 Web Access 或产品更新的 HTTP 协商；Vendor WS 本来就使用 HTTP/1。
+
+显式代理的 `bypass` 按逗号分隔主机/IP/域后缀，匹配不区分大小写并忽略条目周围空白；匹配目标直连，其余目标经代理。绕过应用于模型 HTTP/WS、Web Access 的 HTTP/浏览器出口和更新下载/重定向，不依赖进程全局 `NO_PROXY`，也不放宽目标授权或 SSRF 检查。Vendor HTTP client 缓存与 WS 复用身份同时包含 URL、bypass 和 HTTP/1 标志；后续执行采用新快照，在途执行不重新路由，也不承诺立即关闭旧 socket。
+
+SQLite/PostgreSQL 配对迁移 `0016_outbound_proxy_settings.sql` 合并旧地址、bypass 和 HTTP/1 值并删除四个旧代理键，已有新配置不被覆盖。存在旧代理键或尚无新配置时，按旧全局值迁移模型 Provider 的有效选择（缺失视为 false），并将旧全局值迁为更新偏好。没有旧键但已有新配置的记录保留新设计的 Provider 选择。Web Provider 的独立选择保持不变。真实新安装先运行迁移、再创建模型 Provider，因此后创建的显式选择不被改写；旧键管理 API 不再接受读写。
 
 **依赖关系：**
 

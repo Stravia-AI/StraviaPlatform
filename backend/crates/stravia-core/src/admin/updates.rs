@@ -12,6 +12,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::AdminService;
+use crate::outbound_proxy::{OutboundProxySettings, update_uses_proxy};
 use crate::storage::DynStorage;
 
 const UPDATE_STATE_KEY: &str = "product_update_state";
@@ -231,31 +232,21 @@ impl GitHubReleaseSource {
 
     async fn client_with_timeout(&self, timeout: Duration) -> Result<reqwest::Client, SourceError> {
         let settings = self.storage.settings();
-        let proxy_enabled = settings
-            .get("proxy_enabled")
+        let use_proxy = update_uses_proxy(settings)
             .await
-            .map_err(|error| SourceError::new("UPDATE_SETTINGS_UNAVAILABLE", error.to_string()))?
-            .as_deref()
-            .is_some_and(parse_bool_setting);
+            .map_err(|error| SourceError::new("UPDATE_SETTINGS_UNAVAILABLE", error.to_string()))?;
 
         let mut builder = reqwest::Client::builder()
             .timeout(timeout)
             .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION")));
-        if proxy_enabled {
-            let proxy_url = settings
-                .get("proxy_url")
+        if use_proxy {
+            let config = OutboundProxySettings::load(settings)
                 .await
                 .map_err(|error| {
                     SourceError::new("UPDATE_SETTINGS_UNAVAILABLE", error.to_string())
-                })?
-                .unwrap_or_default();
-            if proxy_url.trim().is_empty() {
-                return Err(SourceError::new(
-                    "UPDATE_PROXY_INVALID",
-                    "Outbound proxy is enabled but proxy_url is empty",
-                ));
-            }
-            let proxy = reqwest::Proxy::all(proxy_url.trim())
+                })?;
+            let proxy = config
+                .reqwest_proxy()
                 .map_err(|error| SourceError::new("UPDATE_PROXY_INVALID", error.to_string()))?;
             builder = builder.proxy(proxy);
         } else {
@@ -697,13 +688,6 @@ fn require_https(url: &str, label: &str) -> Result<(), SourceError> {
     Ok(())
 }
 
-fn parse_bool_setting(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn format_connectivity_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         "GitHub update request timed out".to_string()
@@ -930,26 +914,134 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_setting_is_enforced_only_when_enabled() {
-        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        storage
-            .settings()
-            .set("proxy_url", "not a proxy URL")
+    async fn update_proxy_flag_is_independent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}/probe", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/probe", get(|| async { "origin" })),
+            )
             .await
             .unwrap();
+        });
+
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
         let source = GitHubReleaseSource {
             storage: Arc::clone(&storage),
-            allow_http: false,
+            allow_http: true,
         };
-        source.client().await.unwrap();
+        let set_proxy_config = async |url: &str| {
+            storage
+                .settings()
+                .set(
+                    crate::outbound_proxy::SETTINGS_KEY,
+                    &serde_json::to_string(&OutboundProxySettings {
+                        url: url.to_string(),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        };
+
+        let unused_proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused_proxy_url = format!("http://{}", unused_proxy_listener.local_addr().unwrap());
+        drop(unused_proxy_listener);
+
+        set_proxy_config(&unused_proxy_url).await;
+        let client = source.client().await.unwrap();
+        let body = source.get_limited(&client, &origin_url, 32).await.unwrap();
+        assert_eq!(body, b"origin");
+
+        set_proxy_config("not a proxy URL").await;
+        let client = source.client().await.unwrap();
+        let body = source.get_limited(&client, &origin_url, 32).await.unwrap();
+        assert_eq!(body, b"origin");
 
         storage
             .settings()
-            .set("proxy_enabled", "true")
+            .set(crate::outbound_proxy::UPDATE_USE_PROXY_KEY, "true")
             .await
             .unwrap();
         let error = source.client().await.unwrap_err();
         assert_eq!(error.code, "UPDATE_PROXY_INVALID");
+    }
+
+    #[tokio::test]
+    async fn update_proxy_bypass_is_evaluated_on_redirects() {
+        let origin_requests = Arc::new(AtomicUsize::new(0));
+        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_port = origin_listener.local_addr().unwrap().port();
+        let observed_origin_requests = Arc::clone(&origin_requests);
+        let origin = Router::new().route(
+            "/done",
+            get(move || {
+                let requests = Arc::clone(&observed_origin_requests);
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    "origin"
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(origin_listener, origin).await.unwrap();
+        });
+
+        let proxy_requests = Arc::new(AtomicUsize::new(0));
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+        let redirect_url = format!("http://127.0.0.1:{origin_port}/done");
+        let observed_proxy_requests = Arc::clone(&proxy_requests);
+        let proxy = Router::new().fallback(move || {
+            let requests = Arc::clone(&observed_proxy_requests);
+            let redirect_url = redirect_url.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                axum::response::Redirect::temporary(&redirect_url)
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(proxy_listener, proxy).await.unwrap();
+        });
+
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        storage
+            .settings()
+            .set(
+                crate::outbound_proxy::SETTINGS_KEY,
+                &serde_json::to_string(&OutboundProxySettings {
+                    url: proxy_url,
+                    bypass: "127.0.0.1".to_string(),
+                    force_http1: false,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        storage
+            .settings()
+            .set(crate::outbound_proxy::UPDATE_USE_PROXY_KEY, "true")
+            .await
+            .unwrap();
+        let source = GitHubReleaseSource {
+            storage,
+            allow_http: true,
+        };
+        let client = source.client().await.unwrap();
+
+        let body = source
+            .get_limited(
+                &client,
+                &format!("http://localhost:{origin_port}/start"),
+                1024,
+            )
+            .await
+            .unwrap();
+        assert_eq!(body, b"origin");
+        assert_eq!(proxy_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(origin_requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -7,7 +7,6 @@ import { observationConversationActivities } from '$lib/observation-activities'
 import ObservationActivity from '$lib/components/observation-activity.svelte'
 import ConversationMessage from '$lib/components/conversation-message.svelte'
 import type { InteractionDetail, LiveContentBlock } from '$lib/types'
-import { Badge } from '$lib/components/ui/badge'
 import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import ObservationLogViewport from '$lib/components/observation-log-viewport.svelte'
 
@@ -67,7 +66,6 @@ const activities = $derived(observationConversationActivities(detail, liveBlocks
         {@const actor = user ? m.observation_chat_you() : group[0].model || m.observation_chat_model()}
         <ConversationMessage {user} {actor} label={actor}>
           {#each group as message (message.id)}
-            {#if message.unsaved}<Badge variant="outline">{m.observation_live_unsaved()}</Badge>{/if}
             {#if !user}
               {#each activities.get(message.id) ?? [] as activity (activity.id)}
                 {#if activity.kind === 'thinking'}

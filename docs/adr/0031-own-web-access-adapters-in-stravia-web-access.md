@@ -15,13 +15,13 @@ Stravia 将 Web Access 的全部 Web Provider 适配器从 `stravia-core` 迁到
 - 远程适配器留在 core、只接线 Local：同一 seam 两处实现，crate 名与所有权分裂。
 - crate 命名为 `stravia-web-search`：与公开 Web Search 能力撞名。
 - Local 做成不出现在 CRUD 的内置运行时：Web Provider 定义裂开，列表语义要另写一套。
-- 管理面保留 Direct/System/Explicit，或让 Local 永远等于 `proxy_url`：前者与模型 Provider 的开关不一致；后者无法单独直连。
+- 管理面保留 Direct/System/Explicit，或让 Local 永远等于当时的 `proxy_url`：前者与模型 Provider 的开关不一致；后者无法单独直连。
 - 引擎开关放在 Web Access settings 或全局 cookie jar：Exa 在列表里时语义不清，且站点会话互相污染。
 - 本期删除 Codex Search Backend：那是另一条 seam，会把 OAuth 固定模型与 Turn snapshot 绑进本次 adapter 搬家。
 
 ## Consequences
 
-- Web Provider kind 仅为 `local` | `exa` | `zhipu`。每条记录都有 `use_proxy`（默认 `false`）；开启且 `proxy_url` 空则失败，关闭则直连。LocalWeb 运行时仍快照为 Direct 或 Explicit，System 不再出现在 Gateway 管理面。
+- Web Provider kind 仅为 `local` | `exa` | `zhipu`。每条记录都有 `use_proxy`（默认 `false`）；开启必须有可用的共享出站代理配置，关闭则直连。显式代理使用共享 bypass，命中的目标仍直连，且不放宽 SSRF 校验。LocalWeb 运行时仍快照为 Direct 或 Explicit，System 不再出现在 Gateway 管理面。
 - 迁移写入唯一 Local 记录。search/fetch 列表被删空（含去掉 Brave/Tavily 之后）则设为 `[local]`；已有 Exa/Zhipu 只剥已删 kind，不把 Local 插到队首。Brave/Tavily 记录删除，不提供读取兼容。
 - Local 记录拥有 HTML Local Search Engine 的启用状态与引擎私有设置（可含按凭据保管的值）。默认启用 google/bing/brave/baidu；至少启用一个。计算器与 postsearch 不进该记录。本期不接小红书。
 - 不用 Local 时从有序列表移除，不能删除该记录。全关引擎不是合法保存。

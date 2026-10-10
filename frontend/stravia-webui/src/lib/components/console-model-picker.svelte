@@ -109,7 +109,10 @@ async function pickModel(id: string) {
     {#if layer === 'effort'}
       <div class="flex flex-col items-center">
         <p
-          class={['text-base leading-tight font-semibold transition-colors duration-[140ms]', peak ? 'text-peak' : 'text-primary']}
+          class={[
+            'text-base leading-tight font-semibold transition-colors duration-[140ms]',
+            peak ? 'text-peak' : 'text-primary',
+          ]}
           aria-live="polite">
           {effortLabel}
         </p>

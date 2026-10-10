@@ -179,9 +179,8 @@ const settingValues: Record<string, string> = {
     s3: null,
   }),
   log_retention_days: '7',
-  proxy_bypass: '',
-  proxy_enabled: 'false',
-  proxy_url: '',
+  outbound_proxy: JSON.stringify({ url: '', bypass: '', force_http1: false }),
+  update_use_proxy: 'false',
 }
 
 export async function prepareApp(page: Page): Promise<void> {

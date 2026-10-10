@@ -188,9 +188,9 @@ impl WebAccessService {
     }
 
     async fn test_provider_inner(&self, provider: WebProvider) -> Result<(), WebAccessError> {
-        let proxy_url = self.proxy_url_snapshot().await?;
+        let proxy_settings = self.proxy_settings_snapshot().await?;
         let browser_path = self.browser_path_snapshot();
-        let adapter = self.adapter(&provider, proxy_url.as_deref(), browser_path.as_deref())?;
+        let adapter = self.adapter(&provider, &proxy_settings, browser_path.as_deref())?;
         if provider.kind == "local" && !self.local_browser_available().await {
             return Err(WebAccessError::from_code(
                 WebAccessErrorCode::Unavailable,
@@ -258,7 +258,7 @@ impl WebAccessService {
         settings: &WebAccessSettings,
         records: &std::collections::HashMap<String, WebProvider>,
     ) -> Result<WebAccessEngine, WebAccessError> {
-        let proxy_url = self.proxy_url_snapshot().await?;
+        let proxy_settings = self.proxy_settings_snapshot().await?;
         let uses_local = settings
             .search_provider_ids
             .iter()
@@ -286,13 +286,13 @@ impl WebAccessService {
         let search = self.ordered_adapters(
             &settings.search_provider_ids,
             records,
-            proxy_url.as_deref(),
+            &proxy_settings,
             browser_path.as_deref(),
         );
         let fetch = self.ordered_adapters(
             &settings.fetch_provider_ids,
             records,
-            proxy_url.as_deref(),
+            &proxy_settings,
             browser_path.as_deref(),
         );
         Ok(WebAccessEngine::new(search, fetch))
@@ -301,7 +301,7 @@ impl WebAccessService {
         &self,
         ids: &[String],
         records: &std::collections::HashMap<String, WebProvider>,
-        proxy_url: Option<&str>,
+        proxy_settings: &crate::outbound_proxy::OutboundProxySettings,
         browser_path: Option<&std::path::Path>,
     ) -> Vec<Arc<dyn WebProviderAdapter>> {
         let mut adapters = Vec::with_capacity(ids.len());
@@ -312,7 +312,7 @@ impl WebAccessService {
             if provider.kind == "local" && browser_path.is_none() {
                 continue;
             }
-            match self.adapter(provider, proxy_url, browser_path) {
+            match self.adapter(provider, proxy_settings, browser_path) {
                 Ok(adapter) => adapters.push(adapter),
                 Err(error) => adapters.push(Arc::new(UnavailableAdapter {
                     id: provider.id.clone(),
@@ -340,17 +340,17 @@ impl WebAccessService {
     fn adapter(
         &self,
         provider: &WebProvider,
-        proxy_url: Option<&str>,
+        proxy_settings: &crate::outbound_proxy::OutboundProxySettings,
         browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         let outbound = if provider.use_proxy {
-            stravia_web_access::OutboundProxyMode::Explicit(
-                proxy_url
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(unavailable_proxy_configuration)?
-                    .to_string(),
-            )
+            proxy_settings
+                .reqwest_proxy()
+                .map_err(|_| unavailable_proxy_configuration())?;
+            stravia_web_access::OutboundProxyMode::Explicit {
+                url: proxy_settings.url.trim().to_string(),
+                bypass: proxy_settings.bypass.clone(),
+            }
         } else {
             stravia_web_access::OutboundProxyMode::Direct
         };
@@ -429,13 +429,11 @@ impl AdapterFactory for ProductionAdapterFactory {
 }
 
 impl WebAccessService {
-    async fn proxy_url_snapshot(&self) -> Result<Option<String>, WebAccessError> {
-        self.gateway
-            .storage
-            .settings()
-            .get("proxy_url")
+    async fn proxy_settings_snapshot(
+        &self,
+    ) -> Result<crate::outbound_proxy::OutboundProxySettings, WebAccessError> {
+        crate::outbound_proxy::OutboundProxySettings::load(self.gateway.storage.settings())
             .await
-            .map(|value| value.map(|url| url.trim().to_string()))
             .map_err(|_| {
                 WebAccessError::from_code(
                     WebAccessErrorCode::Unavailable,
@@ -453,9 +451,16 @@ fn remote_http_client(
         .no_proxy();
     match outbound {
         stravia_web_access::OutboundProxyMode::Direct => {}
-        stravia_web_access::OutboundProxyMode::Explicit(proxy_url) => {
+        stravia_web_access::OutboundProxyMode::Explicit { url, bypass } => {
+            let settings = crate::outbound_proxy::OutboundProxySettings {
+                url: url.clone(),
+                bypass: bypass.clone(),
+                force_http1: false,
+            };
             builder = builder.proxy(
-                reqwest::Proxy::all(proxy_url).map_err(|_| unavailable_proxy_configuration())?,
+                settings
+                    .reqwest_proxy()
+                    .map_err(|_| unavailable_proxy_configuration())?,
             );
         }
         stravia_web_access::OutboundProxyMode::System => {
@@ -474,7 +479,7 @@ fn provider_failure(failure: ProviderFailure) -> WebAccessError {
 fn unavailable_proxy_configuration() -> WebAccessError {
     WebAccessError::from_code(
         WebAccessErrorCode::Unavailable,
-        "Web Provider proxy is enabled but Gateway proxy_url is empty or invalid",
+        "Web Provider proxy is enabled but Gateway outbound_proxy URL is empty or invalid",
     )
 }
 
@@ -534,5 +539,84 @@ impl WebProviderAdapter for UnavailableAdapter {
             self.error.code,
             self.error.message.clone(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::remote_http_client;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use stravia_web_access::OutboundProxyMode;
+
+    #[tokio::test]
+    async fn remote_bypass_is_reselected_after_proxy_redirect() {
+        let origin_hits = Arc::new(AtomicUsize::new(0));
+        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}/final", origin_listener.local_addr().unwrap());
+        let hits = origin_hits.clone();
+        let origin = tokio::spawn(async move {
+            axum::serve(
+                origin_listener,
+                axum::Router::new().fallback(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        "direct origin"
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+        let hits = proxy_hits.clone();
+        let destination = origin_url.clone();
+        let proxy = tokio::spawn(async move {
+            axum::serve(
+                proxy_listener,
+                axum::Router::new().fallback(move || {
+                    let hits = hits.clone();
+                    let destination = destination.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        axum::response::Redirect::temporary(&destination)
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let client = remote_http_client(&OutboundProxyMode::Explicit {
+            url: proxy_url,
+            bypass: "127.0.0.1".into(),
+        })
+        .unwrap();
+        let response = client
+            .get("http://must-use-proxy.invalid/start")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.url().as_str(), origin_url);
+        assert_eq!(response.text().await.unwrap(), "direct origin");
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(origin_hits.load(Ordering::SeqCst), 1);
+        origin.abort();
+        proxy.abort();
+    }
+
+    #[test]
+    fn remote_proxy_rejects_unsupported_scheme_before_connecting() {
+        assert!(
+            remote_http_client(&OutboundProxyMode::Explicit {
+                url: "ftp://127.0.0.1:8080".into(),
+                bypass: "*".into(),
+            })
+            .is_err()
+        );
     }
 }

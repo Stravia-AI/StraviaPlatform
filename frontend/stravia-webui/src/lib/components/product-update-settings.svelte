@@ -6,6 +6,12 @@ import DownloadIcon from '@lucide/svelte/icons/download'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import { toast } from 'svelte-sonner'
+import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import { admin } from '$lib/admin-client'
+import { localizeBackendErrorMessage } from '$lib/backend-error'
+import * as Field from '$lib/components/ui/field'
+import { Switch } from '$lib/components/ui/switch'
+import RequestFailure from '$lib/components/request-failure.svelte'
 
 import * as Alert from '$lib/components/ui/alert'
 import { Progress } from '$lib/components/ui/progress'
@@ -14,6 +20,41 @@ import { Spinner } from '$lib/components/ui/spinner'
 import { openExternalUrl } from '$lib/open-external'
 import { supportsInAppInstallProgress } from '$lib/product-update'
 import { getProductUpdateCoordinator } from '$lib/product-update.svelte'
+
+const queryClient = useQueryClient()
+const proxyPreferenceQuery = createQuery(() => ({
+  queryKey: ['setting', 'update_use_proxy'],
+  queryFn: () => admin.settings.get('update_use_proxy'),
+}))
+const useProxy = $derived(proxyPreferenceQuery.data === 'true')
+let savingProxy = $state(false)
+let proxyError = $state('')
+let proxyNeedsConfiguration = $state(false)
+let retryProxyValue = $state<boolean>()
+
+async function toggleProxy(value: boolean): Promise<void> {
+  if (savingProxy || proxyPreferenceQuery.data === undefined) return
+  savingProxy = true
+  proxyError = ''
+  proxyNeedsConfiguration = false
+  retryProxyValue = value
+  try {
+    if (value) {
+      const saved = await admin.settings.proxy()
+      if (!saved.url.trim()) {
+        proxyNeedsConfiguration = true
+        return
+      }
+    }
+    await admin.settings.set('update_use_proxy', value ? 'true' : 'false')
+    queryClient.setQueryData(['setting', 'update_use_proxy'], value ? 'true' : 'false')
+    retryProxyValue = undefined
+  } catch (error) {
+    proxyError = localizeBackendErrorMessage(error)
+  } finally {
+    savingProxy = false
+  }
+}
 
 const updates = getProductUpdateCoordinator()
 const available = $derived(updates.status?.available_update ?? null)
@@ -71,6 +112,42 @@ async function checkNow(): Promise<void> {
   </div>
 
   <div class="flex flex-col gap-5">
+    {#if proxyPreferenceQuery.error}
+      <RequestFailure
+        title={m.settings_update_proxy_load_failed()}
+        message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
+        retry={() => void proxyPreferenceQuery.refetch()}
+        retrying={proxyPreferenceQuery.isFetching} />
+    {:else if proxyPreferenceQuery.isPending}
+      <p role="status" class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{m.common_loading()}</p>
+    {:else}
+      <Field.Field orientation="horizontal">
+        <div class="flex-1">
+          <Field.FieldLabel for="update-use-proxy">{m.common_use_proxy()}</Field.FieldLabel>
+          <Field.FieldDescription>{m.settings_update_proxy_help()}</Field.FieldDescription>
+        </div>
+        {#if savingProxy}<Spinner aria-label={m.artifact_saving()} />{/if}
+        <Switch
+          id="update-use-proxy"
+          bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
+          disabled={savingProxy} />
+      </Field.Field>
+    {/if}
+    {#if proxyNeedsConfiguration}
+      <p role="alert" class="text-sm">
+        <a href="#proxy" class="text-primary underline underline-offset-4"
+          >{m.settings_update_proxy_configure_first()}</a>
+      </p>
+    {/if}
+    {#if proxyError}
+      <RequestFailure
+        title={m.settings_update_proxy_save_failed()}
+        message={proxyError}
+        retry={() => {
+          if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
+        }}
+        retrying={savingProxy} />
+    {/if}
     <dl class="flex flex-wrap items-start gap-x-10 gap-y-4 text-sm">
       <div class="min-w-0">
         <dt class="text-muted-foreground">{m.settings_update_current_version()}</dt>

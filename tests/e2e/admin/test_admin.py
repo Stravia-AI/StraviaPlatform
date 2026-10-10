@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+import sqlite3
 import tempfile
 import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -101,7 +102,7 @@ def _model_probe_endpoint(*, forward: bool = False):
 
 def _create_probe_provider(
     env: dict[str, Any], name: str, endpoint: str | None, *,
-    credential: dict[str, Any] | None = None, use_proxy: bool = True, **source: Any,
+    credential: dict[str, Any] | None = None, use_proxy: bool = False, **source: Any,
 ) -> str:
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/providers",
@@ -200,28 +201,26 @@ def test_optional_api_key_provider_discovers_and_infers_without_upstream_auth(
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_model_discovery_uses_saved_proxy_and_preserves_direct_access(admin_env: dict[str, Any]) -> None:
-    settings = {}
-    for key in ("proxy_enabled", "proxy_url"):
-        status, body = http_request(
-            "GET", f"{admin_env['admin']}/api/v1/settings/{key}", headers=admin_env["auth"],
-        )
-        assert status == 200, body
-        settings[key] = body["data"] or ""
+    status, body = http_request(
+        "GET", f"{admin_env['admin']}/api/v1/settings/outbound_proxy", headers=admin_env["auth"],
+    )
+    assert status == 200, body
+    saved = body["data"] or json.dumps({"url": "", "bypass": "", "force_http1": False})
 
-    def set_setting(key: str, value: str) -> None:
+    def set_proxy(url: str, bypass: str = "") -> None:
         status, body = http_request(
-            "PUT", f"{admin_env['admin']}/api/v1/settings/{key}",
-            payload={"value": value}, headers=admin_env["auth"],
+            "PUT", f"{admin_env['admin']}/api/v1/settings/outbound_proxy",
+            payload={"value": json.dumps({"url": url, "bypass": bypass, "force_http1": False})},
+            headers=admin_env["auth"],
         )
         assert status == 200, body
 
     with _model_probe_endpoint() as (origin, upstream), _model_probe_endpoint(forward=True) as (proxy, forwarded):
         endpoint = f"{origin}/selected/models?region=east%2Bwest&limit=2"
-        provider = _create_probe_provider(admin_env, "probe-network-route", endpoint)
+        provider = _create_probe_provider(admin_env, "probe-network-route", endpoint, use_proxy=True)
         provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
         try:
-            set_setting("proxy_url", proxy)
-            set_setting("proxy_enabled", "true")
+            set_proxy(proxy)
             status, body = http_request("GET", f"{provider_url}/test-models", headers=admin_env["auth"])
             assert status == 200 and body["data"] == ["probe-model"], body
             assert forwarded[0]["path"] == endpoint
@@ -234,14 +233,19 @@ def test_model_discovery_uses_saved_proxy_and_preserves_direct_access(admin_env:
             assert status == 200, body
             assert len(forwarded) == 2 and len(upstream) == 2
 
+            set_proxy(proxy, " LOCALHOST , 127.0.0.1 , .internal ")
+            status, body = http_request("GET", f"{provider_url}/test-models", headers=admin_env["auth"])
+            assert status == 200 and body["data"] == ["probe-model"], body
+            assert len(forwarded) == 2 and len(upstream) == 3
+
             status, body = http_request(
                 "PUT", provider_url, payload={"use_proxy": False}, headers=admin_env["auth"],
             )
             assert status == 200, body
-            set_setting("proxy_url", "")
+            set_proxy("")
             status, body = http_request("GET", f"{provider_url}/test-models", headers=admin_env["auth"])
             assert status == 200 and body["data"] == ["probe-model"], body
-            assert len(forwarded) == 2 and len(upstream) == 3
+            assert len(forwarded) == 2 and len(upstream) == 4
 
             status, body = http_request(
                 "PUT", provider_url, payload={"use_proxy": True}, headers=admin_env["auth"],
@@ -254,10 +258,111 @@ def test_model_discovery_uses_saved_proxy_and_preserves_direct_access(admin_env:
                 )
                 assert status == (200 if method == "GET" else 400), body
                 assert "error" in body and "data" not in body, body
-            assert len(upstream) == 3 and len(forwarded) == 2
+            assert len(upstream) == 4 and len(forwarded) == 2
         finally:
-            for key, value in settings.items():
-                set_setting(key, value)
+            status, body = http_request(
+                "PUT", f"{admin_env['admin']}/api/v1/settings/outbound_proxy",
+                payload={"value": saved}, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_outbound_proxy_atomic_save_and_independent_consumers(admin_env: dict[str, Any]) -> None:
+    settings_url = f"{admin_env['admin']}/api/v1/settings"
+
+    def read(key: str) -> str | None:
+        status, body = http_request("GET", f"{settings_url}/{key}", headers=admin_env["auth"])
+        assert status == 200, body
+        return body["data"]
+
+    def save(key: str, value: str) -> tuple[int, Any]:
+        return http_request("PUT", f"{settings_url}/{key}", payload={"value": value}, headers=admin_env["auth"])
+
+    original = read("outbound_proxy") or json.dumps({"url": "", "bypass": "", "force_http1": False})
+    original_update = read("update_use_proxy") or "false"
+    database = Path(admin_env["data_dir"]) / "db" / "gateway.db"
+    with _model_probe_endpoint() as (origin, upstream), _model_probe_endpoint() as (proxy, proxied):
+        config = {"url": proxy, "bypass": "", "force_http1": True}
+        try:
+            status, body = save("outbound_proxy", json.dumps(config))
+            assert status == 200, body
+            confirmed = read("outbound_proxy")
+            for url in ("invalid://127.0.0.1:7890", "ftp://proxy-user:proxy-secret@127.0.0.1:7890"):
+                status, body = save("outbound_proxy", json.dumps({"url": url, "bypass": "127.0.0.1", "force_http1": False}))
+                assert status == 200 and body.get("error") and "ok" not in body, body
+                assert "proxy-user" not in json.dumps(body) and "proxy-secret" not in json.dumps(body)
+                assert read("outbound_proxy") == confirmed
+
+            # Force the real single-row persistence operation to fail, not just validation.
+            with closing(sqlite3.connect(database)) as connection, connection:
+                for operation in ("INSERT", "UPDATE"):
+                    connection.execute(f"""
+                        CREATE TRIGGER reject_outbound_proxy_{operation.lower()}
+                        BEFORE {operation} ON settings WHEN NEW.name = 'outbound_proxy'
+                        BEGIN SELECT RAISE(ABORT, 'local proxy write failure'); END
+                    """)
+            try:
+                status, body = save("outbound_proxy", json.dumps({"url": origin, "bypass": "127.0.0.1", "force_http1": False}))
+                assert status == 200 and body.get("error") and "ok" not in body, body
+                assert read("outbound_proxy") == confirmed
+            finally:
+                with closing(sqlite3.connect(database)) as connection, connection:
+                    for operation in ("insert", "update"):
+                        connection.execute(f"DROP TRIGGER reject_outbound_proxy_{operation}")
+
+            provider = _create_probe_provider(admin_env, "independent-proxy-provider", f"{origin}/models", base_url=origin, use_proxy=True)
+            status, body = http_request(
+                "POST", f"{admin_env['admin']}/api/v1/providers/{provider}/models/sync",
+                payload={}, headers=admin_env["auth"],
+            )
+            assert status == 200 and "error" not in body, body
+            route = _create_model(admin_env, provider, "independent-proxy-route", target_model="probe-model")
+            key = _create_api_key(admin_env, route, "independent-proxy-client")
+
+            def infer(expected_origin: int, expected_proxy: int) -> None:
+                before = (len(upstream), len(proxied))
+                status, body = http_request(
+                    "POST", f"{admin_env['proxy']}/v1/chat/completions",
+                    payload={"model": "independent-proxy-route", "stream": False, "messages": [{"role": "user", "content": "local proxy regression"}]},
+                    headers={"authorization": f"Bearer {key['key']}"},
+                )
+                assert status == 200, body
+                assert body["choices"][0]["message"]["content"] == "local auth probe succeeded", body
+                assert (len(upstream) - before[0], len(proxied) - before[1]) == (expected_origin, expected_proxy)
+
+            for update in ("false", "true", "false"):
+                status, body = save("update_use_proxy", update)
+                assert status == 200, body
+                assert read("update_use_proxy") == update
+                assert read("outbound_proxy") == confirmed
+                infer(0, 1)
+            status, body = save("outbound_proxy", json.dumps({**config, "bypass": "127.0.0.1"}))
+            assert status == 200, body
+            infer(1, 0)
+            status, body = http_request("PUT", f"{admin_env['admin']}/api/v1/providers/{provider}", payload={"use_proxy": False}, headers=admin_env["auth"])
+            assert status == 200, body
+            status, body = save("outbound_proxy", json.dumps(config))
+            assert status == 200, body
+            status, body = save("update_use_proxy", "true")
+            assert status == 200, body
+            infer(1, 0)
+            status, body = save("update_use_proxy", "false")
+            assert status == 200, body
+            status, body = save("outbound_proxy", json.dumps({"url": "", "bypass": "", "force_http1": False}))
+            assert status == 200, body
+            status, body = save("update_use_proxy", "true")
+            assert status == 200 and body.get("error") and "ok" not in body, body
+            assert read("update_use_proxy") == "false"
+            infer(1, 0)
+        finally:
+            status, body = save("update_use_proxy", "false")
+            assert status == 200, body
+            status, body = save("outbound_proxy", original)
+            assert status == 200, body
+            status, body = save("update_use_proxy", original_update)
+            assert status == 200, body
 
 
 @pytest.mark.e2e

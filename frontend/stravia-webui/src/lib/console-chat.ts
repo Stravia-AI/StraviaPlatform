@@ -79,22 +79,24 @@ export function consoleReasoningActivities(message: ConsoleAssistantMessage): Th
     ]
     return activities.filter(hasVisibleThinkingText)
   }
-  return message.outputItems.flatMap((output, index): ThinkingActivity[] => {
-    const item = record(output)
-    if (item?.type !== 'reasoning') return []
-    const text =
-      consoleVisibleText(readableParts(item.summary)) ||
-      consoleVisibleText(readableParts(item.content) || readableParts(item.text))
-    return [
-      {
-        kind: 'thinking',
-        id: typeof item.id === 'string' ? item.id : `${message.id}:reasoning:${index}`,
-        at: Date.parse(message.createdAt),
-        text,
-        live: false,
-      },
-    ]
-  }).filter(hasVisibleThinkingText)
+  return message.outputItems
+    .flatMap((output, index): ThinkingActivity[] => {
+      const item = record(output)
+      if (item?.type !== 'reasoning') return []
+      const text =
+        consoleVisibleText(readableParts(item.summary)) ||
+        consoleVisibleText(readableParts(item.content) || readableParts(item.text))
+      return [
+        {
+          kind: 'thinking',
+          id: typeof item.id === 'string' ? item.id : `${message.id}:reasoning:${index}`,
+          at: Date.parse(message.createdAt),
+          text,
+          live: false,
+        },
+      ]
+    })
+    .filter(hasVisibleThinkingText)
 }
 
 function replay(messages: ConsoleMessage[]): unknown[] {

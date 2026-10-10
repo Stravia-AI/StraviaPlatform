@@ -8,7 +8,7 @@ import { setMode, userPrefersMode } from 'mode-watcher'
 import { toast } from 'svelte-sonner'
 import { onDestroy, onMount } from 'svelte'
 
-import { admin, isTauri, type ArtifactSettings, type ArtifactS3Settings } from '$lib/admin-client'
+import { admin, isTauri, type ArtifactSettings, type ArtifactS3Settings, type ProxySettings } from '$lib/admin-client'
 import SecretInput from '$lib/components/secret-input.svelte'
 import { changeCredentials, getAuthState } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
@@ -118,20 +118,10 @@ const retentionQuery = createQuery(() => ({
   queryKey: ['setting', 'log_retention_days'],
   queryFn: () => admin.settings.get('log_retention_days'),
 }))
-const proxyEnabledQuery = createQuery(() => ({
-  queryKey: ['setting', 'proxy_enabled'],
-  queryFn: () => admin.settings.get('proxy_enabled'),
-}))
-const proxyUrlQuery = createQuery(() => ({
-  queryKey: ['setting', 'proxy_url'],
-  queryFn: () => admin.settings.get('proxy_url'),
-}))
-const proxyBypassQuery = createQuery(() => ({
-  queryKey: ['setting', 'proxy_bypass'],
-  queryFn: () => admin.settings.get('proxy_bypass'),
-}))
+const proxyQuery = createQuery(() => ({ queryKey: ['outbound-proxy-settings'], queryFn: admin.settings.proxy }))
 let editedRetention = $state<string>()
-let proxyDraft = $state<{ enabled: boolean; url: string; bypass: string }>()
+let proxyDraft = $state<ProxySettings>()
+let proxyError = $state('')
 let savingRetention = $state(false)
 let savingProxy = $state(false)
 let currentPassword = $state('')
@@ -141,32 +131,13 @@ let confirmPassword = $state('')
 let savingCredentials = $state(false)
 let credentialsError = $state('')
 
-const proxyReady = $derived.by(() => {
-  // 每个查询都需要跟踪 data，不能让前一个未就绪的字段短路后续订阅。
-  const enabled = proxyEnabledQuery.data
-  const url = proxyUrlQuery.data
-  const bypass = proxyBypassQuery.data
-  return enabled !== undefined && url !== undefined && bypass !== undefined
-})
 const retentionReady = $derived(retentionQuery.data !== undefined)
 const retentionBaseline = $derived((retentionQuery.data ?? '7').trim())
 const retention = $derived(editedRetention ?? retentionBaseline)
 const retentionDirty = $derived(editedRetention != null && retention.trim() !== retentionBaseline)
-const storedProxy = $derived({
-  enabled: ['1', 'true', 'yes', 'on'].includes((proxyEnabledQuery.data ?? '').trim().toLowerCase()),
-  url: proxyUrlQuery.data ?? '',
-  bypass: proxyBypassQuery.data ?? '',
-})
-const proxy = $derived(proxyDraft ?? storedProxy)
-const proxyDirty = $derived(
-  proxyDraft != null &&
-    (proxy.enabled !== storedProxy.enabled ||
-      proxy.url.trim() !== storedProxy.url.trim() ||
-      proxy.bypass.trim() !== storedProxy.bypass.trim()),
-)
-const settingsError = $derived(
-  retentionQuery.error ?? proxyEnabledQuery.error ?? proxyUrlQuery.error ?? proxyBypassQuery.error,
-)
+const proxy = $derived(proxyDraft ?? proxyQuery.data)
+const proxyDirty = $derived(proxyDraft !== undefined && JSON.stringify(proxyDraft) !== JSON.stringify(proxyQuery.data))
+const settingsError = $derived(retentionQuery.error)
 const currentTheme = $derived(userPrefersMode.current ?? 'system')
 
 function scrollToSection(id: string): void {
@@ -222,27 +193,22 @@ async function saveRetention(): Promise<void> {
   }
 }
 
+function editProxy(patch: Partial<ProxySettings>): void {
+  if (proxy && !savingProxy) proxyDraft = { ...proxy, ...patch }
+}
+
 async function saveProxy(): Promise<void> {
-  const url = proxy.url.trim()
-  const bypass = proxy.bypass.trim()
-  if (proxy.enabled && !url) {
-    toast.error(m.settings_set_proxy_url_enabling_proxy())
-    return
-  }
+  if (!proxy || savingProxy) return
+  const value = { ...proxy, url: proxy.url.trim(), bypass: proxy.bypass.trim() }
   savingProxy = true
+  proxyError = ''
   try {
-    await Promise.all([
-      saveSetting('proxy_enabled', proxy.enabled ? 'true' : 'false'),
-      saveSetting('proxy_url', url),
-      saveSetting('proxy_bypass', bypass),
-    ])
-    queryClient.setQueryData(['setting', 'proxy_enabled'], proxy.enabled ? 'true' : 'false')
-    queryClient.setQueryData(['setting', 'proxy_url'], url)
-    queryClient.setQueryData(['setting', 'proxy_bypass'], bypass)
+    await admin.settings.saveProxy(value)
+    queryClient.setQueryData(['outbound-proxy-settings'], value)
     proxyDraft = undefined
     toast.success(m.settings_proxy_settings_saved())
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    proxyError = localizeBackendErrorMessage(error)
   } finally {
     savingProxy = false
   }
@@ -265,12 +231,7 @@ async function saveCredentials(): Promise<void> {
 }
 
 function retrySettings(): void {
-  void Promise.all([
-    retentionQuery.refetch(),
-    proxyEnabledQuery.refetch(),
-    proxyUrlQuery.refetch(),
-    proxyBypassQuery.refetch(),
-  ])
+  void retentionQuery.refetch()
 }
 
 async function setDebug(enabled: boolean): Promise<void> {
@@ -378,10 +339,7 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
       title={m.settings_some_settings_not_loaded()}
       message={localizeBackendErrorMessage(settingsError)}
       retry={retrySettings}
-      retrying={retentionQuery.isFetching ||
-        proxyEnabledQuery.isFetching ||
-        proxyUrlQuery.isFetching ||
-        proxyBypassQuery.isFetching} />
+      retrying={retentionQuery.isFetching} />
   {/if}
 
   <div class="min-w-0">
@@ -580,41 +538,41 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
         <div>
           <h2 id="proxy-title" class="route-section-title">{m.settings_proxy()}</h2>
           <p class="route-section-description">
-            {m.settings_send_model_service_requests_proxy()}
+            {m.settings_proxy_summary()}
           </p>
         </div>
       </div>
-      {#if proxyReady}
+      {#if proxyQuery.error}
+        <RequestFailure
+          title={m.settings_some_settings_not_loaded()}
+          message={localizeBackendErrorMessage(proxyQuery.error)}
+          retry={() => void proxyQuery.refetch()}
+          retrying={proxyQuery.isFetching} />
+      {:else if proxy}
         <Field.FieldGroup>
-          <Field.Field orientation="horizontal"
-            ><div class="flex-1">
-              <Field.FieldLabel for="proxy-enabled">{m.settings_outbound_proxy()}</Field.FieldLabel>
-            </div>
-            <Switch
-              id="proxy-enabled"
-              checked={proxy.enabled}
-              onCheckedChange={(enabled: boolean) => (proxyDraft = { ...proxy, enabled })}
-              disabled={savingProxy} /></Field.Field>
           <Field.Field size="fill"
             ><Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel><Input
               id="proxy-url"
               class="font-technical"
               value={proxy.url}
-              oninput={(event: Event) => (proxyDraft = { ...proxy, url: inputValue(event) })}
+              disabled={savingProxy}
+              oninput={(event: Event) => editProxy({ url: inputValue(event) })}
               placeholder="http://127.0.0.1:7890" /></Field.Field>
           <Field.Field
             ><Field.FieldLabel for="proxy-bypass">{m.settings_bypass_hosts_optional()}</Field.FieldLabel><Input
               id="proxy-bypass"
               value={proxy.bypass}
-              oninput={(event: Event) => (proxyDraft = { ...proxy, bypass: inputValue(event) })}
+              disabled={savingProxy}
+              oninput={(event: Event) => editProxy({ bypass: inputValue(event) })}
               placeholder="localhost,127.0.0.1,.internal" /></Field.Field>
+          {#if proxyError}<Field.FieldError role="alert">{proxyError}</Field.FieldError>{/if}
           <div class="field-actions">
-            <Button disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
+            <Button aria-busy={savingProxy} disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
               >{#if savingProxy}<Spinner data-icon="inline-start" />{:else}<SaveIcon
                   data-icon="inline-start" />{/if}{m.settings_save_proxy()}</Button>
           </div>
         </Field.FieldGroup>
-      {:else if proxyEnabledQuery.isPending || proxyUrlQuery.isPending || proxyBypassQuery.isPending}
+      {:else if proxyQuery.isPending}
         <div class="flex flex-col gap-4" aria-busy="true">
           <Skeleton class="h-10" /><Skeleton class="h-10" /><Skeleton class="h-10" />
         </div>

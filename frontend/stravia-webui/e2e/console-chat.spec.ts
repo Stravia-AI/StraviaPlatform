@@ -144,11 +144,7 @@ function response(text: string) {
     status: 'completed',
     model: 'console-model',
     output,
-    usage: {
-      input_tokens: 11,
-      input_tokens_details: { cached_tokens: 4 } as Record<string, number>,
-      output_tokens: 7,
-    },
+    usage: { input_tokens: 11, input_tokens_details: { cached_tokens: 4 } as Record<string, number>, output_tokens: 7 },
   }
 }
 async function complete(page: Page, index: number, text: string, status = 'completed') {
@@ -410,7 +406,11 @@ test('a failed turn keeps the usage the gateway reported for it', async ({ page 
       response: {
         status: 'failed',
         error: { message: 'Upstream gave up' },
-        usage: { input_tokens: 20, input_tokens_details: { cached_tokens: 5, cache_write_tokens: 2 }, output_tokens: 3 },
+        usage: {
+          input_tokens: 20,
+          input_tokens_details: { cached_tokens: 5, cache_write_tokens: 2 },
+          output_tokens: 3,
+        },
       },
     },
     true,

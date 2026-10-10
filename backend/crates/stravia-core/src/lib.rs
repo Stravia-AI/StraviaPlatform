@@ -19,6 +19,7 @@ pub(crate) mod media;
 pub mod media_generation;
 pub mod migrations;
 pub(crate) mod model_turn;
+pub mod outbound_proxy;
 pub mod performance;
 pub mod plugin;
 pub mod protocol;

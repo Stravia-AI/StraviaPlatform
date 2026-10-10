@@ -4,7 +4,7 @@ status: superseded by ADR-0031
 
 # Give Local Web one snapshotted outbound proxy mode
 
-> 管理面的 Direct / System / Explicit 三档已被 [ADR-0031](0031-own-web-access-adapters-in-stravia-web-access.md) 取代为 `use_proxy` + Gateway `proxy_url`。Internal Web Search、Static Extraction 与 Rendered Extraction 必须共用同一出站快照的约束仍然有效。
+> 管理面的 Direct / System / Explicit 三档已被 [ADR-0031](0031-own-web-access-adapters-in-stravia-web-access.md) 取代为 `use_proxy` + Gateway `outbound_proxy.url`（共享出站代理配置）。Internal Web Search、Static Extraction 与 Rendered Extraction 必须共用同一出站快照的约束仍然有效。
 
 `stravia-web-local` 用构造期快照的 **Local Web Outbound Proxy Mode**（Direct / System / Explicit）覆盖 Internal Web Search、Static Extraction 和 Rendered Extraction（含 Chrome 子资源）。System 只认进程环境变量，不认 OS GUI/PAC/WinHTTP；有可用代理时源站 DNS 交给代理，Chrome 禁止本机源站解析。这样在必须走代理才能出网的环境里，三条路径不会各走各的出口。
 
@@ -13,7 +13,7 @@ status: superseded by ADR-0031
 - wreq 读环境变量、Chrome 跟 OS 默认：两条出站不是同一代理。
 - 代理必填：弄坏 fixture 测试和现有 example。
 - 有代理仍本机解析并钉死源站 IP：真正需要代理的环境会失败，或绕过代理直连。
-- 现在就把 Gateway `proxy_url` 接进来：把模型上游代理和 Local Web 出站缠在一起。
+- 当时就把 Gateway 的 `proxy_url` 接进来：把模型上游代理和 Local Web 出站缠在一起。
 
 ## Consequences
 

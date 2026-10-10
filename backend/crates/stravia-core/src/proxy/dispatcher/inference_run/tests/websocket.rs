@@ -168,17 +168,15 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
     .expect("Gateway");
     let admin = gateway.admin();
     admin
-        .set_setting("proxy_enabled", "false")
+        .set_setting(
+            crate::outbound_proxy::SETTINGS_KEY,
+            &serde_json::json!({
+                "url": proxy_url, "bypass": "127.0.0.1", "force_http1": false
+            })
+            .to_string(),
+        )
         .await
-        .expect("disable Gateway proxy");
-    admin
-        .set_setting("proxy_url", &proxy_url)
-        .await
-        .expect("configure Gateway proxy");
-    admin
-        .set_setting("proxy_force_http1", "false")
-        .await
-        .expect("configure Gateway proxy HTTP version");
+        .expect("configure bypassed Gateway proxy");
     let model = "websocket-proxy-scope";
     configure_route_with_protocol(&gateway, model, &[base_url], "openai", "open-responses").await;
     let provider_id = gateway
@@ -232,9 +230,15 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
 
     gateway
         .admin()
-        .set_setting("proxy_enabled", "true")
+        .set_setting(
+            crate::outbound_proxy::SETTINGS_KEY,
+            &serde_json::json!({
+                "url": proxy_url, "bypass": "", "force_http1": false
+            })
+            .to_string(),
+        )
         .await
-        .expect("enable Gateway proxy");
+        .expect("remove Gateway proxy bypass");
     let response = execute_protocol_request_with_session(
         gateway,
         model,

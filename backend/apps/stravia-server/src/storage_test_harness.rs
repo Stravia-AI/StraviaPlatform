@@ -1,6 +1,6 @@
 use anyhow::{Context, ensure};
 use reqwest::StatusCode;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, postgres::PgPoolOptions};
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,6 +15,165 @@ use stravia_core::provider_models::CreateManualProviderModel;
 use stravia_server::{
     AdminMode, HttpAppConfig, build_http_app, standalone_local_origins, start_http_server,
 };
+
+async fn verify_outbound_proxy_migration(pool: &sqlx::PgPool, schema: &str) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
+        .execute(&mut *connection)
+        .await?;
+    let directory = PathBuf::from("backend/crates/stravia-core/migrations/postgres");
+    let mut files = std::fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    files.sort();
+    for file in files.iter().filter(|path| {
+        path.extension().is_some_and(|extension| extension == "sql")
+            && path.file_name().unwrap().to_string_lossy().as_ref() < "0016"
+    }) {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(std::fs::read_to_string(file)?))
+            .execute(&mut *connection)
+            .await?;
+    }
+    let migration = std::fs::read_to_string(directory.join("0016_outbound_proxy_settings.sql"))?;
+    let legacy_config = serde_json::json!({
+        "url": "socks5h://user:password@127.0.0.1:1080",
+        "bypass": "localhost, .example.test, 127.0.0.1",
+        "force_http1": true
+    });
+    let saved_config = serde_json::json!({
+        "url": "https://127.0.0.1:8443", "bypass": "saved.test", "force_http1": false
+    });
+    // Each transaction starts from the same complete pre-cutover schema and rolls back
+    // both its fixture and the actual migration, including all legacy-key deletions.
+    for (case, global, legacy, saved, expected_enabled) in [
+        ("disabled", Some("false"), true, false, false),
+        ("enabled", Some("true"), true, false, true),
+        ("one", Some(" 1\t"), true, false, true),
+        ("yes", Some("\nYeS\r"), true, false, true),
+        ("on", Some(" ON "), true, false, true),
+        ("trimmed_true", Some("\tTrUe\n"), true, false, true),
+        ("nbsp_true", Some("\u{00a0}true\u{00a0}"), true, false, true),
+        (
+            "mixed_unicode_true",
+            Some("\u{3000}\u{2003}TrUe\u{2003}\u{3000}"),
+            true,
+            false,
+            true,
+        ),
+        ("missing_global", None, true, false, false),
+        ("missing_all_legacy", None, false, false, false),
+        ("saved_config", Some("true"), true, true, true),
+        ("new_only", None, false, true, true),
+        ("saved_config_disabled", Some("false"), true, true, false),
+        ("fresh", None, false, false, true),
+    ] {
+        let mut transaction = connection.begin().await?;
+        // Old rows without any proxy settings used the missing global's false gate;
+        // fresh user Providers are created only after migrations finish.
+        if case != "fresh" {
+            for (id, use_proxy) in [("migration-proxied", true), ("migration-direct", false)] {
+                sqlx::query("INSERT INTO providers (id, name, protocol, base_url, api_key, use_proxy) VALUES ($1, $1, 'openai', 'http://127.0.0.1:8080', 'fixture-key', $2)")
+                    .bind(id).bind(use_proxy).execute(&mut *transaction).await?;
+            }
+        }
+        sqlx::query("INSERT INTO web_providers (id, name, kind, api_key, use_proxy) VALUES ('migration-web-proxied', 'Migration web proxied', 'exa', 'fixture-key', true), ('migration-web-direct', 'Migration web direct', 'exa', 'fixture-key', false)")
+            .execute(&mut *transaction).await?;
+        if legacy {
+            for (name, value) in [
+                ("proxy_url", legacy_config["url"].as_str().unwrap()),
+                ("proxy_bypass", legacy_config["bypass"].as_str().unwrap()),
+                (
+                    "proxy_force_http1",
+                    match case {
+                        "nbsp_true" | "mixed_unicode_true" => global.unwrap(),
+                        _ => "\tYeS\n",
+                    },
+                ),
+            ] {
+                sqlx::query("INSERT INTO settings (name, value) VALUES ($1, $2)")
+                    .bind(name)
+                    .bind(value)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        if let Some(value) = global {
+            sqlx::query("INSERT INTO settings (name, value) VALUES ('proxy_enabled', $1)")
+                .bind(value)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        if saved {
+            sqlx::query("INSERT INTO settings (name, value) VALUES ('outbound_proxy', $1), ('update_use_proxy', 'false')")
+                .bind(saved_config.to_string()).execute(&mut *transaction).await?;
+        }
+        sqlx::raw_sql(sqlx::AssertSqlSafe(migration.clone()))
+            .execute(&mut *transaction)
+            .await?;
+        if case == "fresh" {
+            for (id, use_proxy) in [("migration-proxied", true), ("migration-direct", false)] {
+                sqlx::query("INSERT INTO providers (id, name, protocol, base_url, api_key, use_proxy) VALUES ($1, $1, 'openai', 'http://127.0.0.1:8080', 'fixture-key', $2)")
+                    .bind(id).bind(use_proxy).execute(&mut *transaction).await?;
+            }
+        }
+        let providers: Vec<(String, bool)> = sqlx::query_as("SELECT id, use_proxy FROM providers WHERE id IN ('migration-direct', 'migration-proxied') ORDER BY id")
+            .fetch_all(&mut *transaction).await?;
+        ensure!(
+            providers
+                == vec![
+                    ("migration-direct".into(), false),
+                    ("migration-proxied".into(), expected_enabled)
+                ],
+            "{case}: model proxy flags changed incorrectly"
+        );
+        let web: Vec<(String, bool)> =
+            sqlx::query_as("SELECT id, use_proxy FROM web_providers ORDER BY id")
+                .fetch_all(&mut *transaction)
+                .await?;
+        ensure!(
+            web == vec![
+                ("migration-web-direct".into(), false),
+                ("migration-web-proxied".into(), true),
+                ("web-provider-local".into(), false)
+            ],
+            "{case}: Web proxy flags changed"
+        );
+        let value: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE name = 'outbound_proxy'")
+                .fetch_one(&mut *transaction)
+                .await?;
+        let expected_config = if saved {
+            saved_config.clone()
+        } else if legacy {
+            legacy_config.clone()
+        } else {
+            serde_json::json!({"url": "", "bypass": "", "force_http1": false})
+        };
+        ensure!(
+            serde_json::from_str::<serde_json::Value>(&value)? == expected_config,
+            "{case}: proxy configuration was not preserved"
+        );
+        let update: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE name = 'update_use_proxy'")
+                .fetch_one(&mut *transaction)
+                .await?;
+        let expected_update = if !saved && global.is_some() && expected_enabled {
+            "true"
+        } else {
+            "false"
+        };
+        ensure!(
+            update == expected_update,
+            "{case}: update preference changed incorrectly"
+        );
+        let old_keys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE name IN ('proxy_enabled', 'proxy_url', 'proxy_bypass', 'proxy_force_http1')")
+            .fetch_one(&mut *transaction).await?;
+        ensure!(old_keys == 0, "{case}: legacy proxy keys remain");
+        transaction.rollback().await?;
+        println!("outbound_proxy_migration_{case}=true");
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -131,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
                     "shared RPM removal changed destination limits or other settings"
                 );
                 println!("rpm_migration_preserves_destination_limits=true");
+            }
+            "verify_outbound_proxy_migration" => {
+                verify_outbound_proxy_migration(&pool, &schema).await?;
             }
             "inspect_observation" => {
                 let tables: i64 = sqlx::query_scalar(

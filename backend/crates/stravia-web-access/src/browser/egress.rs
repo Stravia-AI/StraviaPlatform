@@ -633,12 +633,17 @@ mod tests {
     use crate::outbound::{resolve_mode, OutboundProxyMode};
 
     fn snapshot(proxy: Option<Url>, bypass: bool) -> ResolvedProxy {
-        resolve_mode(OutboundProxyMode::System, |key| match key {
-            "HTTP_PROXY" | "HTTPS_PROXY" => proxy.as_ref().map(ToString::to_string),
-            "NO_PROXY" if bypass => Some("*".to_owned()),
-            _ => None,
-        })
-        .unwrap()
+        match proxy {
+            Some(url) => resolve_mode(
+                OutboundProxyMode::Explicit {
+                    url: url.to_string(),
+                    bypass: if bypass { "*" } else { "" }.to_owned(),
+                },
+                |_| None,
+            )
+            .unwrap(),
+            None => ResolvedProxy::direct(),
+        }
     }
 
     async fn exchange(proxy: &EgressProxy, bytes: &[u8]) -> Vec<u8> {

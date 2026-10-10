@@ -849,7 +849,6 @@ test.describe('Interaction Observation canvas', () => {
       text: '\n\n| A | B |\n',
     }
     await sendObservation(page, 'live_content', block)
-    await expect(conversation.getByText('Not yet saved', { exact: true })).toBeVisible()
     const completed = { ...block, revision: 2, text: `${block.text}|---|---|\n| live-cell | other |` }
     await sendObservation(page, 'live_content', completed)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toBeVisible()
@@ -877,7 +876,6 @@ test.describe('Interaction Observation canvas', () => {
     }
     fixture.emit(durable)
     await sendObservation(page, 'observation', durable, durable.sequence)
-    await expect(conversation.getByText('Not yet saved', { exact: true })).toHaveCount(0)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
     expect(await renderedTable.evaluate((element) => element.isConnected)).toBe(true)
     expect(fixture.detailRequests).toHaveLength(1)
@@ -2834,8 +2832,8 @@ test.describe('Interaction Observation canvas', () => {
     await expect(b).toContainText('Waiting ended: Run continued')
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
     await advance(3, 458)
-    await expect(b).toContainText('Returned')
-    await expect(b).toContainText('Waiting ended: Run continued')
+    await expect(b).not.toContainText('Returned')
+    await expect(b).not.toContainText('Waiting ended: Run continued')
     await expect(b.getByText('legitimate late evidence', { exact: true })).toBeVisible()
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
     await page.reload()

@@ -334,7 +334,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .await
         .expect("selected sources");
     admin
-        .set_setting("proxy_url", "http://old-proxy.example:8080")
+        .set_setting("outbound_proxy", r#"{"url":"http://old-proxy.example:8080","bypass":".old.internal","force_http1":false}"#)
         .await
         .expect("old proxy");
 
@@ -385,7 +385,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
     );
 
     admin
-        .set_setting("proxy_url", "http://new-proxy.example:8080")
+        .set_setting("outbound_proxy", r#"{"url":"http://new-proxy.example:8080","bypass":".new.internal","force_http1":false}"#)
         .await
         .expect("new proxy");
     let rescued = old_service
@@ -413,9 +413,10 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         [
             (
                 local.id.clone(),
-                stravia_web_access::OutboundProxyMode::Explicit(
-                    "http://old-proxy.example:8080".into()
-                ),
+                stravia_web_access::OutboundProxyMode::Explicit {
+                    url: "http://old-proxy.example:8080".into(),
+                    bypass: ".old.internal".into(),
+                },
             ),
             (
                 exa.id.clone(),
@@ -484,7 +485,10 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         new_factory.outbounds.lock()[0],
         (
             local.id,
-            stravia_web_access::OutboundProxyMode::Explicit("http://new-proxy.example:8080".into()),
+            stravia_web_access::OutboundProxyMode::Explicit {
+                url: "http://new-proxy.example:8080".into(),
+                bypass: ".new.internal".into(),
+            },
         )
     );
 }

@@ -468,10 +468,11 @@ async fn initialize_desktop(
                 Gateway::new(GatewayConfig {
                     data_dir: data_dir.clone(),
                     product_update_download_supported: true,
-                    catalog_base_url: Some(
-                        stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned(),
-                    ),
-                    catalog_background_refresh: true,
+                    // 桌面冒烟只使用本地快照，避免测试启动直接访问生产 Catalog。
+                    catalog_base_url: (!cfg!(feature = "desktop-e2e")).then(|| {
+                        stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned()
+                    }),
+                    catalog_background_refresh: !cfg!(feature = "desktop-e2e"),
                     ..Default::default()
                 }),
             )

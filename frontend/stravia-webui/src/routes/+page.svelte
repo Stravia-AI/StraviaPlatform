@@ -295,49 +295,49 @@ async function copy(value: string) {
 
               {#if live}<span role="status" class="sr-only">{m.console_chat_generating()}</span>
               {:else}<div class="flex items-center gap-1">
-                {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
-                {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
-                  {#if message.status === 'failed'}<Button
-                      variant="outline"
-                      disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
-                      onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button
-                    >{/if}
-                  {@render iconAction(
-                    m.console_chat_regenerate(),
-                    RefreshCwIcon,
-                    () => void command(() => chat.regenerate()),
-                    !snapshot.selectedModelId ||
-                      Boolean(guide) ||
-                      Boolean(snapshot.catalogError) ||
-                      (snapshot.historyHasImages && !snapshot.modelSupportsImages),
-                    true,
-                  )}
-                {/if}
-                <div
-                  class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
-                  <span class="font-technical break-all">{message.routeId}</span><span
-                    >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
-                      ? m.console_chat_default()
-                      : message.thinkingLevel}</span
-                  ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
-                  {#if usage?.inputTokens !== undefined}<span
-                      >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
-                    >{/if}
-                  {#if usage?.outputTokens !== undefined}<span
-                      >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
-                    >{/if}
-                  {#if usage?.cacheReadTokens !== undefined}<span
-                      >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
-                    >{/if}
-                  {#if usage?.cacheWriteTokens !== undefined}<span
-                      >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
-                    >{/if}
-                  {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
-                    >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
-                    >{:else if message.status === 'completed'}<span role="status">{m.console_chat_completed()}</span
-                    >{/if}
-                </div>
-              </div>{/if}
+                  {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
+                  {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
+                    {#if message.status === 'failed'}<Button
+                        variant="outline"
+                        disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
+                        onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button
+                      >{/if}
+                    {@render iconAction(
+                      m.console_chat_regenerate(),
+                      RefreshCwIcon,
+                      () => void command(() => chat.regenerate()),
+                      !snapshot.selectedModelId ||
+                        Boolean(guide) ||
+                        Boolean(snapshot.catalogError) ||
+                        (snapshot.historyHasImages && !snapshot.modelSupportsImages),
+                      true,
+                    )}
+                  {/if}
+                  <div
+                    class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
+                    <span class="font-technical break-all">{message.routeId}</span><span
+                      >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
+                        ? m.console_chat_default()
+                        : message.thinkingLevel}</span
+                    ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
+                    {#if usage?.inputTokens !== undefined}<span
+                        >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
+                      >{/if}
+                    {#if usage?.outputTokens !== undefined}<span
+                        >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
+                      >{/if}
+                    {#if usage?.cacheReadTokens !== undefined}<span
+                        >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
+                      >{/if}
+                    {#if usage?.cacheWriteTokens !== undefined}<span
+                        >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
+                      >{/if}
+                    {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
+                      >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
+                      >{:else if message.status === 'completed'}<span role="status">{m.console_chat_completed()}</span
+                      >{/if}
+                  </div>
+                </div>{/if}
             </ConversationMessage>
           {/if}
         {/each}

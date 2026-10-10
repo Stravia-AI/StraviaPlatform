@@ -908,36 +908,16 @@ impl Gateway {
         use_proxy: bool,
     ) -> anyhow::Result<EffectiveVendorProxy> {
         if !use_proxy {
-            return Ok(EffectiveVendorProxy::Direct { use_proxy: false });
+            return Ok(EffectiveVendorProxy::Direct);
         }
-        let settings = self.storage.settings();
-        let enabled = settings
-            .get("proxy_enabled")
-            .await?
-            .as_deref()
-            .map(parse_bool_setting)
-            .unwrap_or(false);
-        if !enabled {
-            return Ok(EffectiveVendorProxy::Direct { use_proxy: true });
-        }
-        let proxy_url = settings
-            .get("proxy_url")
-            .await?
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if proxy_url.is_empty() {
-            anyhow::bail!("proxy_url is empty");
-        }
-        let force_http1 = settings
-            .get("proxy_force_http1")
-            .await?
-            .as_deref()
-            .map(parse_bool_setting)
-            .unwrap_or(false);
+        let config =
+            crate::outbound_proxy::OutboundProxySettings::load(self.storage.settings()).await?;
+        config.validate()?;
+        anyhow::ensure!(!config.url.trim().is_empty(), "outbound proxy URL is empty");
         Ok(EffectiveVendorProxy::Explicit {
-            proxy_url,
-            force_http1,
+            proxy_url: config.url,
+            bypass: config.bypass,
+            force_http1: config.force_http1,
         })
     }
 
@@ -953,13 +933,14 @@ impl Gateway {
         };
         let EffectiveVendorProxy::Explicit {
             proxy_url,
+            bypass,
             force_http1,
         } = proxy
         else {
             return Ok(default_client.clone());
         };
         let force_http1 = require_http1 || *force_http1;
-        let cache_key = format!("{proxy_url}|{force_http1}");
+        let cache_key = serde_json::to_string(&(proxy_url, bypass, force_http1))?;
         let slot = usize::from(force_http1);
         let mut cache = self.vendor_client_cache.write().await;
         if let Some(cached) = &cache[slot]
@@ -972,7 +953,12 @@ impl Gateway {
         if force_http1 {
             builder = builder.http1_only();
         }
-        let client = builder.proxy(reqwest::Proxy::all(proxy_url)?).build()?;
+        let config = crate::outbound_proxy::OutboundProxySettings {
+            url: proxy_url.clone(),
+            bypass: bypass.clone(),
+            force_http1,
+        };
+        let client = builder.no_proxy().proxy(config.reqwest_proxy()?).build()?;
 
         cache[slot] = Some(VendorClientCache {
             cache_key,
@@ -983,11 +969,10 @@ impl Gateway {
 }
 
 enum EffectiveVendorProxy {
-    Direct {
-        use_proxy: bool,
-    },
+    Direct,
     Explicit {
         proxy_url: String,
+        bypass: String,
         force_http1: bool,
     },
 }
@@ -995,23 +980,17 @@ enum EffectiveVendorProxy {
 impl EffectiveVendorProxy {
     fn reuse_identity(&self) -> anyhow::Result<String> {
         let encoded = match self {
-            Self::Direct { use_proxy } => serde_json::to_vec(&("direct", use_proxy))?,
+            Self::Direct => serde_json::to_vec(&"direct")?,
             Self::Explicit {
                 proxy_url,
+                bypass,
                 force_http1,
-            } => serde_json::to_vec(&("explicit", proxy_url, force_http1))?,
+            } => serde_json::to_vec(&("explicit", proxy_url, bypass, force_http1))?,
         };
         Ok(stravia_runtime_contract::protocol::ir::canonical::hash_hex(
             &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&encoded),
         ))
     }
-}
-
-fn parse_bool_setting(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 fn to_sql_backend_config(
@@ -1110,7 +1089,7 @@ mod tests {
         let result = async {
             for http1 in [false, true] {
                 let direct = gateway
-                    .client_for_vendor(&EffectiveVendorProxy::Direct { use_proxy: false }, http1)
+                    .client_for_vendor(&EffectiveVendorProxy::Direct, http1)
                     .await?;
                 assert_eq!(
                     direct.get(&origin).send().await?.text().await?,
@@ -1120,6 +1099,7 @@ mod tests {
                     .client_for_vendor(
                         &EffectiveVendorProxy::Explicit {
                             proxy_url: explicit.clone(),
+                            bypass: String::new(),
                             force_http1: http1,
                         },
                         http1,
@@ -1129,7 +1109,28 @@ mod tests {
                     selected.get(&origin).send().await?.text().await?,
                     "explicit proxy"
                 );
+                let bypassed = gateway.client_for_vendor(&EffectiveVendorProxy::Explicit {
+                    proxy_url: explicit.clone(), bypass: " NONMATCH.INVALID 127.0.0.1\tOTHER.INVALID; ".into(), force_http1: http1,
+                }, http1).await?;
+                assert_eq!(bypassed.get(&origin).send().await?.text().await?, "direct origin");
+                let switched = gateway.client_for_vendor(&EffectiveVendorProxy::Explicit {
+                    proxy_url: explicit.clone(), bypass: String::new(), force_http1: http1,
+                }, http1).await?;
+                assert_eq!(switched.get(&origin).send().await?.text().await?, "explicit proxy");
             }
+            let admin = gateway.admin();
+            let saved = serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
+                url: explicit.clone(), bypass: "127.0.0.1".into(), force_http1: false,
+            })?;
+            admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, &saved).await?;
+            let invalid = serde_json::json!({"url":"ftp://user:secret@127.0.0.1:1","bypass":"","force_http1":true}).to_string();
+            let error = admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, &invalid).await.unwrap_err();
+            assert!(!error.to_string().contains("secret"));
+            assert_eq!(admin.get_setting(crate::outbound_proxy::SETTINGS_KEY).await?, Some(saved));
+            assert_eq!(gateway.vendor_client_snapshot(true).await?.http.get(&origin).send().await?.text().await?, "direct origin");
+            admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, r#"{"url":"","bypass":"","force_http1":false}"#).await?;
+            assert!(gateway.vendor_client_snapshot(true).await.is_err());
+            assert_eq!(gateway.vendor_client_snapshot(false).await?.http.get(&origin).send().await?.text().await?, "direct origin");
             anyhow::Ok(())
         }
         .await;
@@ -1178,10 +1179,11 @@ mod tests {
                     let proxy = if proxied {
                         EffectiveVendorProxy::Explicit {
                             proxy_url: origin.clone(),
+                            bypass: String::new(),
                             force_http1: http1,
                         }
                     } else {
-                        EffectiveVendorProxy::Direct { use_proxy: false }
+                        EffectiveVendorProxy::Direct
                     };
                     let client = gateway.client_for_vendor(&proxy, http1).await?;
                     let request_url = if proxied {
@@ -1284,10 +1286,13 @@ mod tests {
             Arc::new(crate::storage::MemoryStorage::new(
                 Vec::new(),
                 Vec::new(),
-                vec![
-                    ("proxy_enabled".into(), "true".into()),
-                    ("proxy_url".into(), proxy_url),
-                ],
+                vec![(
+                    crate::outbound_proxy::SETTINGS_KEY.into(),
+                    serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
+                        url: proxy_url,
+                        ..Default::default()
+                    })?,
+                )],
             )),
         )
         .await?;

@@ -293,9 +293,7 @@ onMount(() => {
         <Sidebar.GroupContent>
           <Sidebar.Menu>
             <Sidebar.MenuItem>
-              <Sidebar.MenuButton
-                isActive={chatNavigationActive}
-                tooltipContent={m.console_chat_chat()}>
+              <Sidebar.MenuButton isActive={chatNavigationActive} tooltipContent={m.console_chat_chat()}>
                 {#snippet child({ props })}
                   <a
                     {...props}
@@ -316,7 +314,9 @@ onMount(() => {
                   <a
                     class={[
                       'flex min-h-10 min-w-0 items-center gap-2 rounded-md px-3 text-sm hover:bg-sidebar-accent',
-                      activeConversationId === conversation.id ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
+                      activeConversationId === conversation.id
+                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                        : '',
                     ]}
                     href={resolve(`/?conversation=${encodeURIComponent(conversation.id)}`)}
                     aria-current={activeConversationId === conversation.id ? 'page' : undefined}

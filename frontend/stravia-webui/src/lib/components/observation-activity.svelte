@@ -66,7 +66,7 @@ const toolStatus = $derived.by(() => {
     case 'waiting':
       return m.observation_activity_waiting_client()
     case 'returned':
-      return m.observation_activity_returned()
+      return ''
     case 'error':
       return m.observation_activity_error()
     case 'missing-result':
@@ -126,9 +126,8 @@ function formatContent(content: unknown): string {
   </Marker.Icon>
   <Marker.Content class="flex-1 [overflow-wrap:anywhere]">
     {label}
-    {#if activity.kind === 'tool'}
+    {#if activity.kind === 'tool' && toolStatus}
       <span class="activity-state">{toolStatus}</span>
-      {#if toolReason && activity.status !== 'missing-result'}<span class="activity-state">{toolReason}</span>{/if}
     {/if}
   </Marker.Content>
   {#if expandable}

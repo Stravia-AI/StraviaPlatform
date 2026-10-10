@@ -94,6 +94,12 @@ export interface ArtifactS3Settings {
   credentials_expires_at: number | null
 }
 
+export interface ProxySettings {
+  url: string
+  bypass: string
+  force_http1: boolean
+}
+
 export interface ArtifactSettings {
   client_base_url: string
   external_signed_downloads: boolean
@@ -378,6 +384,12 @@ export const admin = {
       }),
   },
   settings: {
+    proxy: async (): Promise<ProxySettings> => {
+      const value = await request<string | null>('GET', '/settings/outbound_proxy')
+      return value === null ? { url: '', bypass: '', force_http1: false } : (JSON.parse(value) as ProxySettings)
+    },
+    saveProxy: (settings: ProxySettings) =>
+      request<void>('PUT', '/settings/outbound_proxy', { value: JSON.stringify(settings) }),
     artifacts: async (): Promise<ArtifactSettings> => {
       const value = await request<string | null>('GET', '/settings/artifact_settings')
       return value === null

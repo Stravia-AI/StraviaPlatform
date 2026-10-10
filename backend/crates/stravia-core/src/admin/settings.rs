@@ -1,11 +1,36 @@
 use super::*;
 
+fn reject_removed_proxy_setting(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !matches!(
+            key,
+            "proxy_enabled" | "proxy_url" | "proxy_bypass" | "proxy_force_http1"
+        ),
+        "removed proxy setting; use outbound_proxy instead"
+    );
+    Ok(())
+}
+
 impl AdminService {
     // ── Settings ──
 
     pub async fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
         if key == "artifact_upload_signing_key" {
             anyhow::bail!("reserved internal setting");
+        }
+        reject_removed_proxy_setting(key)?;
+        if key == crate::outbound_proxy::SETTINGS_KEY {
+            let config =
+                crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
+                    .await?;
+            return Ok(Some(serde_json::to_string(&config)?));
+        }
+        if key == crate::outbound_proxy::UPDATE_USE_PROXY_KEY {
+            return Ok(Some(
+                crate::outbound_proxy::update_uses_proxy(self.gw.storage.settings())
+                    .await?
+                    .to_string(),
+            ));
         }
         let value = self.gw.storage.settings().get(key).await?;
         if key == crate::rpm::SETTINGS_KEY {
@@ -28,6 +53,30 @@ impl AdminService {
     pub async fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
         if key == "artifact_upload_signing_key" {
             anyhow::bail!("reserved internal setting");
+        }
+        reject_removed_proxy_setting(key)?;
+        if key == crate::outbound_proxy::SETTINGS_KEY {
+            let mut config =
+                crate::outbound_proxy::OutboundProxySettings::from_setting(Some(value))?;
+            config.normalize();
+            config.validate()?;
+            return self
+                .gw
+                .storage
+                .settings()
+                .set(key, &serde_json::to_string(&config)?)
+                .await;
+        }
+        if key == crate::outbound_proxy::UPDATE_USE_PROXY_KEY {
+            anyhow::ensure!(
+                matches!(value, "true" | "false"),
+                "update_use_proxy must be true or false"
+            );
+            if value == "true" {
+                crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
+                    .await?
+                    .reqwest_proxy()?;
+            }
         }
         if key == crate::media_generation::config::SETTINGS_KEY {
             self.update_media_generation_config(serde_json::from_str(value)?)

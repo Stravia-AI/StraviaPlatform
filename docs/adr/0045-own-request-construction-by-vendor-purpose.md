@@ -19,7 +19,7 @@ superseded_by: 0070-run-all-model-vendors-as-wasm-plugins
 - Vendor 接收已解析的凭据上下文与用途，产出最终 URL 和 headers。它不发送请求、不解析模型列表，也不决定 catalog、静态列表、override 等来源的选择顺序。
 - 默认认证抑制必须同时约束 header 与 URL 中的默认凭据；不能只禁止 `x-api-key`，却继续追加默认 query key。runtime binding 明确提供的 headers 保持原有覆盖优先级。
 - 协议别名只由既有 ProtocolRegistry 解析，不在管理调用方或 Vendor 用途分派之外维护局部别名表。URL 凭据参数使用结构化编码，不直接拼接凭据字符串。
-- 请求发送方按 `Provider.use_proxy` 和现有全局代理规则选择 client，不另造代理策略。两个探测入口的超时与错误呈现继续由各自 owner 拥有。
+- 请求发送方按 `Provider.use_proxy` 独立选择直连或共享出站代理配置，不另造代理策略；不再叠加全局启用开关。两个探测入口的超时与错误呈现继续由各自 owner 拥有。
 
 具体 Rust 类型名称不是本 ADR 的约束；用途显式、知识归属与删除旧路径才是约束。
 

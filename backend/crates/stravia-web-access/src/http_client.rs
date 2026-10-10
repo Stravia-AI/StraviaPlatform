@@ -352,7 +352,8 @@ mod tests {
             Reply::EchoCredentials => {
                 let leaked = request.lines().any(|line| {
                     line.split_once(':').is_some_and(|(name, _)| {
-                        name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("cookie")
+                        name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("cookie")
                     })
                 });
                 ok(if leaked { "leaked" } else { "clean" })
@@ -401,6 +402,61 @@ mod tests {
 
     fn get(url: &str) -> Request {
         Request::new(Method::GET, url.parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn explicit_bypass_reselects_the_route_on_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            assert!(request.starts_with(b"GET /start HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://public.example/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, _) = proxy.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(
+                request.starts_with("GET http://public.example/final HTTP/1.1\r\n"),
+                "{request}"
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nvia-proxy",
+                )
+                .await
+                .unwrap();
+        });
+
+        let web = crate::LocalWeb::new(crate::OutboundProxyMode::Explicit {
+            url: format!("http://{proxy_address}"),
+            bypass: "127.0.0.1".to_owned(),
+        })
+        .unwrap();
+        let response = web
+            .http_client()
+            .fetch(get(&format!("http://{origin_address}/start")))
+            .await
+            .unwrap();
+        assert_eq!(response.0.uri().to_string(), "http://public.example/final");
+        assert_eq!(response.1, b"via-proxy");
+        origin_task.await.unwrap();
+        proxy_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -508,9 +564,7 @@ mod tests {
             Reply::Fixed(
                 "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
-            Reply::Fixed(
-                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal",
-            ),
+            Reply::Fixed("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal"),
         ]);
         let client = client(None, true);
         let manual = client
@@ -622,16 +676,11 @@ mod tests {
             Some(5),
         )
         .unwrap();
-        let error = client
+        // 总截止时间可在请求或读取 body 时触发；约束失败和连接关闭，不绑定内部计时器的错误类型。
+        client
             .fetch(get(&format!("http://{address}/")))
             .await
-            .unwrap_err();
-        assert!(
-            error.chain().any(|cause| cause
-                .downcast_ref::<wreq::Error>()
-                .is_some_and(wreq::Error::is_timeout)),
-            "{error:#}"
-        );
+            .expect_err("stalled response must reach the total deadline");
         let remaining = tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .unwrap()

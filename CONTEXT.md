@@ -803,14 +803,24 @@ _避免使用_：重试、Provider fallback
 Low-Quality Extraction 是被判定为壳页或导航页的 Markdown：过短且含 JavaScript 门提示，或短行占比过高。它触发 Extraction Fallback，不是页面架构。
 _避免使用_：SSR、SPA、低质量页面
 
+## 共享出站代理配置
+
+共享出站代理配置是供模型 Provider、Web Provider 和产品更新选择使用的代理地址与目标绕过规则。它描述可选出口，不是全局启用开关；是否使用它由各消费者独立决定。绕过规则匹配的目标仍直连，不改变目标访问授权。
+_避免使用_：全局代理开关、所有流量代理、系统代理配置
+
+## 产品更新代理偏好
+
+产品更新代理偏好是产品检查和下载是否使用共享出站代理配置的独立选择；它不改变模型或 Web Provider 的选择，也不修改共享代理地址。
+_避免使用_：全局代理开关、模型代理开关
+
 ## Web Provider
 
-Web Provider 是 Local Web Search 中执行 Internal Web Search、Internal Web Fetch 之一或两者的已配置上游；它独立于模型路由的 Target，也不包含 Codex Search Backend。每条记录拥有与模型 Provider 同构的 `use_proxy`：开启时必须有可用的 Gateway `proxy_url`，关闭时直连。
+Web Provider 是 Local Web Search 中执行 Internal Web Search、Internal Web Fetch 之一或两者的已配置上游；它独立于模型路由的 Target，也不包含 Codex Search Backend。每条记录拥有与模型 Provider 同构的 `use_proxy`：开启时必须有可用的共享出站代理配置，关闭时直连。
 _避免使用_：Search Engine、Web Backend
 
 ## Local Web Provider
 
-Local Web Provider 是在进程内执行 Internal Web Search 和/或 Internal Web Fetch 的 Web Provider，不使用第三方 search/fetch API key。每个部署恰好一条且不可删除；不用它时从 search/fetch 有序列表移除，而不是销毁记录。它拥有是否经 Gateway 代理出站的开关，以及各 Local Search Engine 的配置。该开关与模型 Provider 的 `use_proxy` 同构：开启时必须有可用的 Gateway `proxy_url`，关闭时直连。它仍会向公网发出查询和抓取；它不是本地网页索引，也不是 Search Backend，也不是独立于 Web Provider 记录的内置运行时。
+Local Web Provider 是在进程内执行 Internal Web Search 和/或 Internal Web Fetch 的 Web Provider，不使用第三方 search/fetch API key。每个部署恰好一条且不可删除；不用它时从 search/fetch 有序列表移除，而不是销毁记录。它拥有是否经 Gateway 代理出站的开关，以及各 Local Search Engine 的配置。该开关与模型 Provider 的 `use_proxy` 同构：开启时必须有可用的共享出站代理配置，关闭时直连。它仍会向公网发出查询和抓取；它不是本地网页索引，也不是 Search Backend，也不是独立于 Web Provider 记录的内置运行时。
 _避免使用_：元搜索、Metasearch、Search Engine、Local Search、Local Search Backend、内置 Local 运行时
 
 ## Local Search Engine
@@ -820,7 +830,7 @@ _避免使用_：Search Engine（当指 Web Provider）、Metasearch、引擎 Pr
 
 ## Local Web Outbound Proxy Mode
 
-Local Web Outbound Proxy Mode 是 Local Web Provider 对 Internal Web Search、Static Extraction 与 Rendered Extraction（含页面子资源）的单一出站结果，由该记录的 `use_proxy` 与 Gateway `proxy_url` 派生：关闭则直连，开启则全部走 `proxy_url`。它不是独立的 Direct/System/Explicit 管理面选项，也不是操作系统 GUI、PAC 或 WinHTTP 代理。
+Local Web Outbound Proxy Mode 是 Local Web Provider 对 Internal Web Search、Static Extraction 与 Rendered Extraction（含页面子资源）的单一出站结果，由该记录的 `use_proxy` 与共享出站代理配置派生：关闭则直连，开启则使用代理但匹配绕过规则的目标直连。它不是独立的 Direct/System/Explicit 管理面选项，也不是操作系统 GUI、PAC 或 WinHTTP 代理。
 _避免使用_：System 代理档、独立 Local 代理 URL、wreq proxy、browser proxy、系统代理（未限定时）
 
 ## 可逆脱敏（Reversible Redaction）

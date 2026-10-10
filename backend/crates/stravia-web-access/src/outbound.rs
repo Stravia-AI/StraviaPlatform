@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use url::Url;
 
@@ -13,7 +13,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum OutboundProxyMode {
     Direct,
     System,
-    Explicit(String),
+    Explicit { url: String, bypass: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,30 +71,106 @@ impl ResolvedProxy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct NoProxyList {
-    entries: Vec<String>,
+    entries: Vec<NoProxyEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NoProxyEntry {
+    Address(IpAddr),
+    Network { address: IpAddr, prefix: u8 },
+    Domain(String),
 }
 
 impl NoProxyList {
     fn parse(value: &str) -> Self {
         Self {
             entries: value
-                .split([',', ' ', ';'])
+                .split(|separator: char| {
+                    separator == ',' || separator == ';' || separator.is_ascii_whitespace()
+                })
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
-                .map(|entry| entry.to_ascii_lowercase())
+                .map(|entry| {
+                    parse_ip_network(entry)
+                        .map(|(address, prefix)| NoProxyEntry::Network { address, prefix })
+                        .or_else(|| entry.parse::<IpAddr>().ok().map(NoProxyEntry::Address))
+                        .unwrap_or_else(|| NoProxyEntry::Domain(entry.to_owned()))
+                })
                 .collect(),
         }
     }
 
     pub(crate) fn contains(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        self.entries.iter().any(|entry| match entry.as_str() {
-            "*" => true,
-            entry if entry == host => true,
-            entry if entry.starts_with('.') => host.ends_with(entry),
-            entry => host == *entry || host.ends_with(&format!(".{entry}")),
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .trim_end_matches('.');
+        if let Ok(address) = host.parse::<IpAddr>() {
+            return self.entries.iter().any(|entry| match entry {
+                NoProxyEntry::Address(expected) => *expected == address,
+                NoProxyEntry::Network {
+                    address: base,
+                    prefix,
+                } => network_contains(*base, *prefix, address),
+                NoProxyEntry::Domain(domain) => domain == "*",
+            });
+        }
+        self.entries.iter().any(|entry| match entry {
+            NoProxyEntry::Domain(domain) => domain_matches(domain, host),
+            NoProxyEntry::Address(_) | NoProxyEntry::Network { .. } => false,
         })
     }
+}
+
+fn parse_ip_network(value: &str) -> Option<(IpAddr, u8)> {
+    let (address, prefix) = value.split_once('/')?;
+    let address = address.parse::<IpAddr>().ok()?;
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let prefix = prefix.parse::<u8>().ok()?;
+    let bits = match address {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    (prefix <= bits).then_some((address, prefix))
+}
+
+fn network_contains(base: IpAddr, prefix: u8, address: IpAddr) -> bool {
+    match (base, address) {
+        (IpAddr::V4(base), IpAddr::V4(address)) => {
+            prefix == 0 || u32::from(base) >> (32 - prefix) == u32::from(address) >> (32 - prefix)
+        }
+        (IpAddr::V6(base), IpAddr::V6(address)) => {
+            prefix == 0
+                || u128::from(base) >> (128 - prefix) == u128::from(address) >> (128 - prefix)
+        }
+        _ => false,
+    }
+}
+
+fn domain_matches(entry: &str, domain: &str) -> bool {
+    if entry == "*" || entry.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    if entry
+        .strip_prefix('.')
+        .is_some_and(|root| root.eq_ignore_ascii_case(domain))
+    {
+        return true;
+    }
+    if domain.len() <= entry.len()
+        || !domain
+            .get(domain.len().saturating_sub(entry.len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(entry))
+    {
+        return false;
+    }
+    if entry.starts_with('.') {
+        return true;
+    }
+    domain.as_bytes().get(domain.len() - entry.len() - 1) == Some(&b'.')
 }
 
 impl LocalWeb {
@@ -188,12 +264,12 @@ pub(crate) fn resolve_mode(
 ) -> Result<ResolvedProxy, LocalWebError> {
     match mode {
         OutboundProxyMode::Direct => Ok(ResolvedProxy::direct()),
-        OutboundProxyMode::Explicit(value) => {
-            let proxy = parse_proxy_url(&value)?;
+        OutboundProxyMode::Explicit { url, bypass } => {
+            let proxy = parse_proxy_url(&url)?;
             Ok(ResolvedProxy {
                 http: Some(proxy.clone()),
                 https: Some(proxy),
-                no_proxy: NoProxyList::default(),
+                no_proxy: NoProxyList::parse(&bypass),
             })
         }
         OutboundProxyMode::System => {
@@ -244,8 +320,8 @@ fn env_text(env: &impl Fn(&str) -> Option<String>, keys: &[&str]) -> Option<Stri
 }
 
 fn parse_proxy_url(value: &str) -> Result<Url, LocalWebError> {
-    let url = Url::parse(value)
-        .map_err(|_| LocalWebError::invalid_proxy(format!("proxy URL is invalid: {value}")))?;
+    let url =
+        Url::parse(value).map_err(|_| LocalWebError::invalid_proxy("proxy URL is invalid"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err(LocalWebError::invalid_proxy(
             "proxy URL must not include credentials",
@@ -260,7 +336,8 @@ fn parse_proxy_url(value: &str) -> Result<Url, LocalWebError> {
 }
 
 fn normalize_socks(mut url: Url) -> Url {
-    // SOCKS5 的默认模式 会本机解析；统一远端 DNS，保持 Local Web 的代理出站约束。
+    // LocalWeb 的安全策略刻意把 socks5 归一为 socks5h：目标域名始终交给代理解析，
+    // 不执行本地 DNS，也绝不放宽出站目的地校验；核心 reqwest 客户端保留 5/5h 语义。
     if url.scheme() == "socks5" {
         let _ = url.set_scheme("socks5h");
     }
@@ -304,7 +381,10 @@ pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> 
     match value {
         "direct" => Ok(OutboundProxyMode::Direct),
         "system" => Ok(OutboundProxyMode::System),
-        other => Ok(OutboundProxyMode::Explicit(other.to_string())),
+        other => Ok(OutboundProxyMode::Explicit {
+            url: other.to_string(),
+            bypass: String::new(),
+        }),
     }
 }
 
@@ -322,30 +402,68 @@ mod tests {
         move |key| map.get(key).cloned()
     }
 
+    fn explicit(url: impl Into<String>, bypass: impl Into<String>) -> OutboundProxyMode {
+        OutboundProxyMode::Explicit {
+            url: url.into(),
+            bypass: bypass.into(),
+        }
+    }
+
     #[test]
     fn explicit_http_proxy_applies_to_both_schemes() {
-        let snapshot = resolve_mode(
-            OutboundProxyMode::Explicit("http://127.0.0.1:7890".into()),
-            env(&[]),
-        )
-        .unwrap();
+        let snapshot = resolve_mode(explicit("http://127.0.0.1:7890", ""), env(&[])).unwrap();
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
         assert!(!snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
     }
 
     #[test]
     fn explicit_rejects_userinfo_and_socks4() {
-        assert!(resolve_mode(
-            OutboundProxyMode::Explicit("http://user:pass@127.0.0.1:7890".into()),
+        let invalid = resolve_mode(explicit("http://user:pass@127.0.0.1:7890", ""), env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(invalid, "proxy URL must not include credentials");
+        let malformed = resolve_mode(explicit("http://user:pass@", ""), env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(malformed, "proxy URL is invalid");
+        assert!(!malformed.contains("user"));
+        let unsupported = resolve_mode(explicit("socks4://127.0.0.1:1080", ""), env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(unsupported, "unsupported proxy scheme: socks4");
+    }
+
+    #[test]
+    fn explicit_bypass_matches_domains_ips_and_networks() {
+        let snapshot = resolve_mode(
+            explicit(
+                "http://127.0.0.1:7890",
+                "EXAMPLE.com;.Internal\t192.0.2.0/24 2001:DB8::/32",
+            ),
             env(&[]),
         )
-        .is_err());
-        assert!(resolve_mode(
-            OutboundProxyMode::Explicit("socks4://127.0.0.1:1080".into()),
-            env(&[]),
-        )
-        .is_err());
-        assert!(resolve_mode(OutboundProxyMode::Explicit("not a url".into()), env(&[]),).is_err());
+        .unwrap();
+        for url in [
+            "http://example.com/",
+            "https://WWW.EXAMPLE.COM./",
+            "http://service.internal/",
+            "http://192.0.2.44/",
+            "http://[2001:db8::44]/",
+        ] {
+            assert!(snapshot.pins_origin(&Url::parse(url).unwrap()), "{url}");
+        }
+        for url in [
+            "http://notexample.com/",
+            "http://internal.example.net/",
+            "http://192.0.3.44/",
+            "http://[2001:db9::44]/",
+        ] {
+            assert!(!snapshot.pins_origin(&Url::parse(url).unwrap()), "{url}");
+        }
+
+        let wildcard = resolve_mode(explicit("http://127.0.0.1:7890", " * "), env(&[])).unwrap();
+        assert!(wildcard.pins_origin(&Url::parse("https://example.com/").unwrap()));
+        assert!(wildcard.pins_origin(&Url::parse("https://192.0.2.1/").unwrap()));
     }
 
     #[test]
@@ -396,13 +514,13 @@ mod tests {
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let web = LocalWeb::with_browser_path(
-            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
+            explicit(format!("http://{}", listener.local_addr().unwrap()), ""),
             Some(path.clone()),
         )
         .unwrap();
         let adapter = crate::local::build_local_adapter(
             "local".into(),
-            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
+            explicit(format!("http://{}", listener.local_addr().unwrap()), ""),
             [(
                 "google".into(),
                 crate::local::LocalSearchEngineSetting { enabled: true },
@@ -463,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             parse_cli_proxy("http://127.0.0.1:7890").unwrap(),
-            OutboundProxyMode::Explicit("http://127.0.0.1:7890".into())
+            explicit("http://127.0.0.1:7890", "")
         );
     }
 
@@ -506,7 +624,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let web = LocalWeb::new(OutboundProxyMode::Explicit(format!("socks5://{addr}"))).unwrap();
+        let web = LocalWeb::new(explicit(format!("socks5://{addr}"), "")).unwrap();
         let request = wreq::Request::new(
             wreq::Method::GET,
             "http://stravia-origin.invalid/".parse().unwrap(),

@@ -554,7 +554,7 @@ mod tests {
             test_result
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("proxy_url"))
+                .is_some_and(|error| error.contains("outbound_proxy"))
         );
 
         for kind in ["exa", "zhipu"] {

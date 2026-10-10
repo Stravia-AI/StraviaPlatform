@@ -221,8 +221,7 @@ function drop(event: DragEvent) {
           size="icon"
           class="rounded-full"
           aria-label={m.console_chat_stop()}
-          onclick={onstop}
-          ><StopIcon /></Button>
+          onclick={onstop}><StopIcon /></Button>
       {:else}
         <Button
           type="submit"
