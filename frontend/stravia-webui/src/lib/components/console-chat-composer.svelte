@@ -71,7 +71,7 @@ function readImage(file: File): Promise<ConsoleImageAttachment> {
   })
 }
 async function addFiles(files: File[]) {
-  if (!files.length || generating || reading) return
+  if (!files.length || reading) return
   imageError = ''
   reading = true
   const epoch = draftEpoch
@@ -145,15 +145,14 @@ function drop(event: DragEvent) {
     }}
     ondrop={drop}>
     <Field.FieldGroup>
-      <Field.Field orientation="vertical" data-disabled={generating}>
+      <Field.Field orientation="vertical">
         <Field.FieldLabel for="chat-message" class="sr-only">{m.console_chat_message()}</Field.FieldLabel>
         <Textarea
           bind:ref={composer}
           id="chat-message"
           bind:value={text}
           rows={2}
-          class="max-h-56 min-h-12 resize-none rounded-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
-          disabled={generating}
+          class="max-h-40 min-h-12 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
           placeholder={m.console_chat_message_placeholder()}
           onpaste={paste}
           onkeydown={(event: KeyboardEvent) => {
@@ -175,7 +174,6 @@ function drop(event: DragEvent) {
               variant="outline"
               size="icon"
               class="absolute top-0 right-0"
-              disabled={generating}
               aria-label={m.console_chat_remove_image({ name: image.name })}
               onclick={() => (images = images.filter((item) => item.id !== image.id))}><XIcon /></Button>
           </li>
@@ -208,7 +206,7 @@ function drop(event: DragEvent) {
         variant="ghost"
         size="icon"
         class="rounded-full"
-        disabled={generating || reading}
+        disabled={reading}
         aria-busy={reading}
         aria-label={m.console_chat_add_images()}
         onclick={() => fileInput?.click()}><PlusIcon /></Button>

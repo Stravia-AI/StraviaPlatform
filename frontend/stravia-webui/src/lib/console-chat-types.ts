@@ -137,6 +137,8 @@ export interface ConsoleGeneration {
   reasoning: string
   /** 与原始推理文本分离，避免签名项或空白文本生成空折叠块。 */
   activities: ThinkingActivity[]
+  /** 其后已开始正文或工具输出块的思考 item；聊天只在此时收起自动展开的思考，完成、停止或失败本身不收起。 */
+  followedThinkingIds: string[]
 }
 
 export interface ConsoleChatSnapshot {

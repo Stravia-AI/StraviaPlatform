@@ -17,12 +17,15 @@ let {
   liveActive = true,
   liveContentEpoch = 0,
   expansionPolicy = 'manual',
+  followed = false,
   minimumHeadingLevel = 1,
 }: {
   activity: ObservationActivity
   liveActive?: boolean
   liveContentEpoch?: number
   expansionPolicy?: 'manual' | 'chat'
+  /** 聊天策略：其后已开始正文或工具块。只有此信号变为 true 时才收起自动展开的思考。 */
+  followed?: boolean
   minimumHeadingLevel?: 1 | 2
 } = $props()
 const contentId = $props.id()
@@ -38,7 +41,7 @@ const label = $derived(
 let open = $state(false)
 let observedIdentity = ''
 let observedPolicy: 'manual' | 'chat' | undefined
-let wasLive = false
+let wasFollowed = false
 const toolReason = $derived.by(() => {
   if (activity.kind !== 'tool') return ''
   switch (activity.reason) {
@@ -82,11 +85,12 @@ $effect(() => {
   const id = activity.id
   const live = activity.live
   const policy = expansionPolicy
+  const after = followed
   untrack(() => {
     if (observedIdentity !== id || observedPolicy !== policy) {
       observedIdentity = id
       observedPolicy = policy
-      if (policy === 'chat') open = activity.kind === 'thinking' && live
+      if (policy === 'chat') open = activity.kind === 'thinking' && live && !after
       else {
         try {
           open = localStorage.getItem(storageKey) === 'true'
@@ -95,10 +99,11 @@ $effect(() => {
           storageError()
         }
       }
-    } else if (policy === 'chat' && wasLive && !live) {
+    } else if (policy === 'chat' && after && !wasFollowed) {
+      // 收起一次；之后人工展开保持不变。完成、停止或失败本身不收起，正文或工具块开始才收起。
       open = false
     }
-    wasLive = live
+    wasFollowed = after
   })
 })
 

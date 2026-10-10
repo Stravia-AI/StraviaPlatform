@@ -21,6 +21,7 @@
   "observation_activity_interrupted": "Waiting ended: interrupted",
   "console_chat_chat": "Chat",
   "console_chat_all": "All conversations",
+  "console_chat_view_more": "View more",
   "console_chat_new": "New conversation",
   "console_chat_start_new": "Start new conversation",
   "console_chat_key": "API Key",
@@ -43,6 +44,10 @@
   "console_chat_retry": "Retry",
   "console_chat_regenerate": "Regenerate",
   "console_chat_copy": "Copy response",
+  "console_chat_copy_message": "Copy message",
+  "console_chat_edit_message": "Edit message",
+  "console_chat_edit_effect": "Resending replaces everything after this message and generates a new answer with the current model.",
+  "console_chat_resend": "Resend",
 
   "console_chat_generating": "Generating…",
   "console_chat_stopped": "Stopped",

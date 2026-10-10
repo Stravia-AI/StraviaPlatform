@@ -161,6 +161,7 @@ interface ReasoningItem {
   id: string
   at: number
   live: boolean
+  followed: boolean
   summary: Map<number, string>
   content: Map<number, string>
 }
@@ -170,6 +171,28 @@ function orderedParts(parts: Map<number, string>): string {
     .sort(([a], [b]) => a - b)
     .map(([, text]) => text)
     .join('')
+}
+
+/**
+ * 正文增量或非 reasoning 输出项（消息、工具调用）开始时，标记排在它之前的思考。
+ * 缺少 `output_index` 时无法定位，按其后于全部已知思考处理。
+ */
+function followReasoning(active: ActiveRequest, outputIndex: number | undefined): boolean {
+  let changed = false
+  for (const [index, item] of active.reasoningItems) {
+    if (item.followed || (outputIndex !== undefined && index >= outputIndex)) continue
+    item.followed = true
+    changed = true
+  }
+  if (changed) syncFollowedThinking(active)
+  return changed
+}
+
+// 公开 id 可能晚于首个增量到达，因此每次思考更新后都按当前 id 重建。
+function syncFollowedThinking(active: ActiveRequest): void {
+  active.generation.followedThinkingIds = [...active.reasoningItems.values()]
+    .filter((item) => item.followed)
+    .map((item) => item.id)
 }
 
 /** Only public Responses item/part events supply readable reasoning. */
@@ -191,6 +214,7 @@ function updateReasoning(active: ActiveRequest, event: ConsoleResponsesEvent, at
       id: publicId ?? `${active.message.id}:reasoning:${index}`,
       at,
       live: true,
+      followed: false,
       summary: new Map(),
       content: new Map(),
     }
@@ -227,6 +251,7 @@ function updateReasoning(active: ActiveRequest, event: ConsoleResponsesEvent, at
       text: consoleVisibleText(orderedParts(value.summary)) || consoleVisibleText(orderedParts(value.content)),
     }))
     .filter(hasVisibleThinkingText)
+  syncFollowedThinking(active)
   return true
 }
 
@@ -338,7 +363,11 @@ export class ConsoleChatController {
       generations: Object.fromEntries(
         [...this.active].map(([id, request]) => [
           id,
-          { ...request.generation, activities: request.generation.activities.map((activity) => ({ ...activity })) },
+          {
+            ...request.generation,
+            activities: request.generation.activities.map((activity) => ({ ...activity })),
+            followedThinkingIds: [...request.generation.followedThinkingIds],
+          },
         ]),
       ),
     }
@@ -676,6 +705,38 @@ export class ConsoleChatController {
       previousMessages,
     )
   }
+  /**
+   * 以新文本替换一条历史用户消息并按当前模型与强度重新生成；原图片保留，该消息之后的轮次被丢弃。
+   * 本地保存失败时由 `generate` 恢复编辑前的完整历史。
+   */
+  async edit(messageId: string, text: string): Promise<boolean> {
+    this.inputError = null
+    const conversation = this.current()
+    if (!text.trim() || !conversation) return false
+    if (!this.canSend(conversation)) {
+      this.refreshEligibility()
+      return false
+    }
+    const index = conversation.messages.findIndex((message) => message.id === messageId)
+    const original = conversation.messages[index]
+    if (original?.role !== 'user') return false
+    const model = this.snapshot.modelCandidates.find((candidate) => candidate.id === conversation.selectedModelId)
+    const kept = conversation.messages.slice(0, index)
+    if (!model || !this.imagesCompatible(model, kept, original.images)) return false
+    const previousMessages = [...conversation.messages]
+    conversation.messages = [...kept, { ...original, id: this.id(), text, createdAt: this.time() }]
+    return this.generate(
+      conversation,
+      {
+        model: model.model_id,
+        stream: true,
+        input: replay(conversation.messages),
+        reasoning: this.reasoning(model, conversation.thinkingSelection),
+      },
+      conversation.thinkingSelection,
+      previousMessages,
+    )
+  }
   private async generate(
     conversation: ConsoleConversation,
     request: ConsoleResponsesRequest,
@@ -697,7 +758,7 @@ export class ConsoleChatController {
     const active: ActiveRequest = {
       abort: new AbortController(),
       message,
-      generation: { text: '', summary: '', reasoning: '', activities: [] },
+      generation: { text: '', summary: '', reasoning: '', activities: [], followedThinkingIds: [] },
       reasoningItems: new Map(),
     }
     conversation.messages.push(message)
@@ -722,10 +783,14 @@ export class ConsoleChatController {
       for await (const event of this.options.transport.stream({ apiKey, request, signal: active.abort.signal })) {
         if (!alive()) return false
         const generation = active.generation
-        if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta')
+        if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
           generation.text += event.delta ?? ''
-        else if (updateReasoning(active, event, this.now())) {
+          followReasoning(active, event.output_index)
+        } else if (updateReasoning(active, event, this.now())) {
           // Per-item lifecycle is independent of the surrounding response.
+        } else if (event.type === 'response.output_item.added') {
+          // 消息或工具调用等非 reasoning 输出项开始；只有其收起思考时才需要发布。
+          if (!followReasoning(active, event.output_index)) continue
         } else if (event.type === 'error' || event.type === 'response.failed') {
           // 失败终态可能带有已消耗的真实用量；没有报告时保持未知。
           const usage = tokenUsage(event.response?.usage)

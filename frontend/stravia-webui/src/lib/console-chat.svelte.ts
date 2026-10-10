@@ -33,6 +33,7 @@ export class ConsoleChat {
   stopAll = (): Promise<void> => this.#controller.stopAll()
   retry = (): Promise<void> => this.#controller.retry()
   regenerate = (): Promise<void> => this.#controller.regenerate()
+  edit = (messageId: string, text: string): Promise<boolean> => this.#controller.edit(messageId, text)
   rename = (id: string, title: string): Promise<void> => this.#controller.rename(id, title)
   delete = (id: string): Promise<void> => this.#controller.delete(id)
   clearAll = (): Promise<void> => this.#controller.clearAll()

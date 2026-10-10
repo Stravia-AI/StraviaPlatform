@@ -298,62 +298,104 @@ test('paste and drop preserve original images, reject other files and block imag
   expect((await requests(page)).length).toBe(1)
 })
 
-test('reasoning items independently open, respect manual collapse and close on real completion or failure', async ({
+test('auto-opened thinking stays open until a later text or tool block starts and respects manual toggles', async ({
   page,
 }) => {
   await prepareChat(page)
   await page.goto('/')
-  await send(page, 'Reason in two public stages', 1)
+  await send(page, 'Reason in public stages', 1)
   const answer = page.getByRole('article', { name: 'Assistant response' })
-  const first = { type: 'reasoning', id: 'stage-one', summary: [] }
-  await emit(page, 0, { type: 'response.output_item.added', output_index: 0, item: first })
+  const trigger = (id: string) => answer.locator(`[data-activity-id="${id}"]`).getByRole('button')
+  const stage = (id: string, index: number, delta: string) =>
+    emit(page, 0, {
+      type: 'response.reasoning_summary_text.delta',
+      item_id: id,
+      output_index: index,
+      summary_index: 0,
+      delta,
+    })
   await emit(page, 0, {
-    type: 'response.reasoning_summary_text.delta',
-    item_id: 'stage-one',
+    type: 'response.output_item.added',
     output_index: 0,
-    summary_index: 0,
-    delta: 'First public stage',
+    item: { type: 'reasoning', id: 'stage-one', summary: [] },
   })
-  const thinking = answer.getByRole('button', { name: 'Thinking…', exact: true })
-  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
-  await expect(answer.getByText('First public stage', { exact: true })).toBeVisible()
-  await thinking.click()
-  await emit(page, 0, {
-    type: 'response.reasoning_summary_text.delta',
-    item_id: 'stage-one',
-    output_index: 0,
-    summary_index: 0,
-    delta: ' continued',
-  })
-  await expect(thinking).toHaveAttribute('aria-expanded', 'false')
+  await stage('stage-one', 0, 'First public stage')
+  await expect(trigger('stage-one')).toHaveAccessibleName('Thinking…')
+  await expect(trigger('stage-one')).toHaveAttribute('aria-expanded', 'true')
   await emit(page, 0, {
     type: 'response.output_item.done',
     output_index: 0,
-    item: { ...first, summary: [{ type: 'summary_text', text: 'First public stage continued' }] },
+    item: { type: 'reasoning', id: 'stage-one', summary: [{ type: 'summary_text', text: 'First public stage' }] },
   })
-  const thought = answer.getByRole('button', { name: 'Thinking', exact: true })
-  await expect(thought).toHaveAttribute('aria-expanded', 'false')
-  await thought.click()
-  const second = { type: 'reasoning', id: 'stage-two', summary: [] }
-  await emit(page, 0, { type: 'response.output_item.added', output_index: 1, item: second })
+  await expect(trigger('stage-one')).toHaveAccessibleName('Thinking')
+  await expect(trigger('stage-one')).toHaveAttribute('aria-expanded', 'true')
   await emit(page, 0, {
-    type: 'response.reasoning_summary_text.delta',
-    item_id: 'stage-two',
+    type: 'response.output_item.added',
     output_index: 1,
-    summary_index: 0,
-    delta: 'Second public stage',
+    item: { type: 'function_call', id: 'tool-call', name: 'lookup', arguments: '' },
   })
-  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
-  await expect(thought).toHaveAttribute('aria-expanded', 'true')
+  await expect(trigger('stage-one')).toHaveAttribute('aria-expanded', 'false')
+
+  await stage('stage-two', 2, 'Second public stage')
+  await expect(trigger('stage-two')).toHaveAttribute('aria-expanded', 'true')
+  await trigger('stage-two').click()
+  await stage('stage-two', 2, ' continued')
+  await expect(trigger('stage-two')).toHaveAttribute('aria-expanded', 'false')
+  await trigger('stage-two').click()
+  await emit(page, 0, { type: 'response.output_text.delta', output_index: 3, delta: 'Visible answer' })
+  await expect(trigger('stage-two')).toHaveAttribute('aria-expanded', 'false')
+  await trigger('stage-two').click()
+  await emit(page, 0, { type: 'response.output_text.delta', output_index: 3, delta: ' continues' })
+  await expect(trigger('stage-two')).toHaveAttribute('aria-expanded', 'true')
+
+  await stage('stage-three', 4, 'Third public stage')
+  await expect(trigger('stage-three')).toHaveAttribute('aria-expanded', 'true')
   await page.evaluate(() => window.consoleStreams.fail(0, 500, 'Synthetic staged failure'))
+  await expect(answer.getByRole('alert')).toContainText('Synthetic staged failure')
   await expect(answer.getByRole('button', { name: 'Thinking…', exact: true })).toHaveCount(0)
-  const thoughts = answer.getByRole('button', { name: 'Thinking', exact: true })
-  await expect(thoughts.last()).toHaveAttribute('aria-expanded', 'false')
-  await thoughts.last().click()
-  await expect(answer.getByText('Second public stage', { exact: true })).toBeVisible()
+  await expect(trigger('stage-three')).toHaveAttribute('aria-expanded', 'true')
+  await expect(trigger('stage-two')).toHaveAttribute('aria-expanded', 'true')
+  await expect(answer.getByText('Third public stage', { exact: true })).toBeVisible()
   await page.reload()
-  await answer.getByRole('button', { name: 'Thinking', exact: true }).last().click()
-  await expect(answer.getByText('Second public stage', { exact: true })).toBeVisible()
+  await expect(trigger('stage-three')).toHaveAttribute('aria-expanded', 'false')
+  await trigger('stage-three').click()
+  await expect(answer.getByText('Third public stage', { exact: true })).toBeVisible()
+})
+
+test('user messages show their time, copy their text and resend an edit in place of later turns', async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await prepareChat(page)
+  await page.goto('/')
+  await send(page, 'Original question', 1)
+  await complete(page, 0, 'Original answer')
+  await send(page, 'Follow-up question', 2)
+  await complete(page, 1, 'Follow-up answer')
+  const first = page.getByRole('article', { name: 'Your message' }).first()
+  await expect(first.locator('time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/)
+  await first.getByRole('button', { name: 'Copy message', exact: true }).click()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Original question')
+  await first.getByRole('button', { name: 'Edit message', exact: true }).click()
+  const editor = first.getByRole('textbox', { name: 'Edit message', exact: true })
+  await expect(editor).toBeFocused()
+  await editor.press('Escape')
+  await expect(editor).toHaveCount(0)
+  await expect(first).toContainText('Original question')
+  await first.getByRole('button', { name: 'Edit message', exact: true }).click()
+  await editor.fill('Edited question')
+  await first.getByRole('button', { name: 'Resend', exact: true }).click()
+  await expect.poll(async () => (await requests(page)).length).toBe(3)
+  expect((await requests(page))[2].body.input).toEqual([{ role: 'user', content: 'Edited question' }])
+  await expect(page.getByRole('article', { name: 'Your message' })).toHaveCount(1)
+  await expect(page.getByRole('article', { name: 'Your message' })).toContainText('Edited question')
+  await expect(page.getByRole('textbox', { name: 'Edit message', exact: true })).toHaveCount(0)
+  await complete(page, 2, 'Edited answer')
+  await expect(page.getByRole('article', { name: 'Assistant response' })).toHaveCount(1)
+  await page.reload()
+  await expect(page.getByRole('article', { name: 'Your message' })).toContainText('Edited question')
+  await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Edited answer')
 })
 
 test('shared math and Mermaid preserve incomplete and invalid source without external effects', async ({ page }) => {
@@ -475,7 +517,17 @@ test('streams safely, copies only visible output and persists authoritative resp
   // 用量与操作行只在终态出现，流式期间不展示半成品计量。
   await expect(answer.getByRole('button', { name: /Copy/ })).toHaveCount(0)
   await expect(answer).not.toContainText('console-model')
-  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeDisabled()
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  // 发送后立即清空并保持可编辑；下一条只能在本轮结束后发送，长草稿在限高内滚动。
+  await expect(composer).toHaveValue('')
+  await composer.fill(Array.from({ length: 30 }, (_, line) => `Next draft line ${line}`).join('\n'))
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0)
+  const overflow = await composer.evaluate((element) => ({
+    height: element.clientHeight,
+    scroll: element.scrollHeight,
+  }))
+  expect(overflow.height).toBeLessThanOrEqual(160)
+  expect(overflow.scroll).toBeGreaterThan(overflow.height)
   const text =
     '## Final answer\n\n**Safe**\n\n```ts\nconst result = 42\n```\n<!-- stravia-private-marker -->\n<script>window.chatXss = true</script>'
   const terminal = response(text)
@@ -487,6 +539,8 @@ test('streams safely, copies only visible output and persists authoritative resp
   })
   await emit(page, 0, { type: 'response.completed', response: terminal }, true)
   await expect(answer.getByRole('heading', { name: 'Final answer' })).toBeVisible()
+  await expect(composer).toHaveValue(/^Next draft line 0\n/)
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
   await expect(answer).toContainText('Cache read: 4 tokens')
   await expect(answer).toContainText('Cache write: 3 tokens')
   const [copyBox, modelBox] = await Promise.all([
@@ -743,9 +797,9 @@ test('history searches message content, renames, deletes and confirms exact clea
     await complete(page, index, `Unique body needle ${index}`)
   }
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-  await expect(navigation.getByRole('link', { name: /^History title/ })).toHaveCount(5)
+  await expect(navigation.getByRole('link', { name: /^History title/ })).toHaveCount(3)
   const chatLink = navigation.getByRole('link', { name: 'Chat', exact: true })
-  const allLink = navigation.getByRole('link', { name: 'All conversations', exact: true })
+  const allLink = navigation.getByRole('link', { name: 'View more', exact: true })
   await expect(navigation.getByRole('link', { name: 'History title 5', exact: true })).toHaveAttribute(
     'aria-current',
     'page',

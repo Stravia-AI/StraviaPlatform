@@ -75,8 +75,9 @@ const gatewayTone = $derived(
 )
 const currentPath = $derived(page.url.pathname)
 const showRecentConversations = $derived(!sidebarCollapsed || !isDesktopNavigation)
-const recentConversations = $derived(chat.snapshot.conversations.slice(0, 5))
-const showAllConversations = $derived(chat.snapshot.conversations.length > 5)
+const RECENT_CONVERSATION_LIMIT = 3
+const recentConversations = $derived(chat.snapshot.conversations.slice(0, RECENT_CONVERSATION_LIMIT))
+const showAllConversations = $derived(chat.snapshot.conversations.length > RECENT_CONVERSATION_LIMIT)
 // 对话区只高亮当前可见的最具体一项；子项被折叠隐藏或当前对话不在最近列表时，回退到父项。
 const activeConversationId = $derived.by(() => {
   if (currentPath !== '/' || !showRecentConversations) return null
@@ -339,7 +340,7 @@ onMount(() => {
                       allConversationsActive ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
                     ]}
                     aria-current={allConversationsActive ? 'page' : undefined}
-                    onclick={() => (navigationOpen = false)}>{m.console_chat_all()}</a>
+                    onclick={() => (navigationOpen = false)}>{m.console_chat_view_more()}</a>
                 </li>
               {/if}
             </ul>

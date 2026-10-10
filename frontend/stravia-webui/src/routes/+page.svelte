@@ -28,9 +28,11 @@ import * as Tooltip from '$lib/components/ui/tooltip'
 import BrandMark from '$lib/components/brand-mark.svelte'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
+import PencilIcon from '@lucide/svelte/icons/pencil'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SquarePenIcon from '@lucide/svelte/icons/square-pen'
 import { Skeleton } from '$lib/components/ui/skeleton'
+import { Textarea } from '$lib/components/ui/textarea'
 import * as Alert from '$lib/components/ui/alert'
 import * as Empty from '$lib/components/ui/empty'
 const chat = getConsoleChat()
@@ -46,6 +48,9 @@ let images = $state<ConsoleImageAttachment[]>([])
 let composer = $state<HTMLTextAreaElement | null>(null)
 let surface = $state<HTMLElement | null>(null)
 let follow = $state(true)
+let editingId = $state<string | null>(null)
+let editText = $state('')
+let editor = $state<HTMLTextAreaElement | null>(null)
 let scroller: HTMLElement | null = null
 let previousConversation: string | null = null
 let previousAddress: string | null | undefined
@@ -122,6 +127,7 @@ $effect(() => {
   if (id !== previousConversation) {
     previousConversation = id
     follow = true
+    editingId = null
   }
   const messages = conversation?.messages
   const liveText = generation?.text
@@ -162,16 +168,22 @@ async function send() {
   if (!text.trim() || generation || !snapshot.selectedKeyId || !snapshot.selectedModelId) return
   const draft = text
   const attachments = images
+  // 发送即清空，生成期间可以撰写下一条；发送键在本轮结束后才恢复。
+  text = ''
+  images = []
   follow = true
+  let id: string | null = null
+  let sent = false
+  let rolledBack = false
   try {
     const pending = chat.send(draft, attachments)
-    const id = chat.snapshot.currentConversationId
-    // 首次发送建立对话身份不是用户切换对话；错误时必须保留该份草稿。
+    id = chat.snapshot.currentConversationId
+    // 首次发送建立对话身份不是用户切换对话，不能清掉生成期间写下的下一条。
     if (id && page.url.searchParams.get('conversation') !== id) {
       preservedNavigation = id
       await goto(resolve(`/?conversation=${encodeURIComponent(id)}`), { noScroll: true, keepFocus: true })
     }
-    const sent = await pending
+    sent = await pending
     if (
       !sent &&
       id &&
@@ -179,14 +191,17 @@ async function send() {
       page.url.searchParams.get('conversation') === id
     ) {
       preservedNavigation = null
+      rolledBack = true
       await goto(resolve('/'), { noScroll: true, keepFocus: true })
-    }
-    if (sent && chat.snapshot.currentConversationId === id) {
-      if (text === draft) text = ''
-      if (images === attachments) images = []
     }
   } catch (cause) {
     toast.error(localizeBackendErrorMessage(cause))
+  }
+  // 未成功时把草稿还给仍停留在原处的用户；生成期间已写下的下一条优先，不覆盖。
+  const here = page.url.searchParams.get('conversation')
+  if (!sent && !text && !images.length && (rolledBack ? here === null : here === id)) {
+    text = draft
+    images = attachments
   }
   composer?.focus()
 }
@@ -200,6 +215,24 @@ async function copy(value: string) {
     await navigator.clipboard.writeText(consoleVisibleText(value))
     toast.success(m.common_copied_clipboard())
   })
+}
+async function startEdit(id: string, value: string) {
+  editingId = id
+  editText = value
+  await tick()
+  editor?.focus()
+}
+async function submitEdit(id: string) {
+  if (!editText.trim() || generation) return
+  follow = true
+  try {
+    await chat.edit(id, editText)
+  } catch (cause) {
+    toast.error(localizeBackendErrorMessage(cause))
+  }
+  // 编辑生效后原消息被替换；本地保存失败时历史与草稿都恢复，编辑框继续保留。
+  if (editingId === id && !chat.snapshot.currentConversation?.messages.some((message) => message.id === id))
+    editingId = null
 }
 </script>
 
@@ -257,14 +290,67 @@ async function copy(value: string) {
       <div class="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-6">
         {#each conversation.messages as message (message.id)}
           {#if message.role === 'user'}
+            {@const editing = editingId === message.id}
+            {@const userText = message.text}
             <ConversationMessage user label={m.console_chat_user_message()}>
-              <p class="whitespace-pre-wrap">{consoleVisibleText(message.text)}</p>
+              {#if editing}<form
+                  class="flex w-[40rem] max-w-full flex-col gap-2"
+                  onsubmit={(event) => {
+                    event.preventDefault()
+                    void submitEdit(message.id)
+                  }}>
+                  <label for="chat-edit-message" class="sr-only">{m.console_chat_edit_message()}</label>
+                  <Textarea
+                    bind:ref={editor}
+                    id="chat-edit-message"
+                    bind:value={editText}
+                    rows={3}
+                    class="max-h-72 min-h-20 resize-none bg-background dark:bg-background"
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.isComposing) return
+                      if (event.key === 'Escape') {
+                        event.preventDefault()
+                        editingId = null
+                      } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                        event.preventDefault()
+                        void submitEdit(message.id)
+                      }
+                    }} />
+                  <p class="text-xs text-muted-foreground">{m.console_chat_edit_effect()}</p>
+                  <div class="flex justify-end gap-2">
+                    <Button type="button" variant="ghost" onclick={() => (editingId = null)}>{m.common_cancel()}</Button
+                    ><Button
+                      type="submit"
+                      disabled={!editText.trim() ||
+                        Boolean(generation) ||
+                        !snapshot.selectedModelId ||
+                        Boolean(guide) ||
+                        Boolean(snapshot.catalogError)}>{m.console_chat_resend()}</Button>
+                  </div>
+                </form>
+              {:else}<p class="whitespace-pre-wrap">{consoleVisibleText(message.text)}</p>{/if}
               {#if message.images?.length}<div class="flex flex-wrap gap-2">
                   {#each message.images as image (image.id)}<img
                       src={image.dataUrl}
                       alt={image.name}
                       class="max-h-72 max-w-full rounded-lg border object-contain" />{/each}
                 </div>{/if}
+              {#snippet meta()}
+                <div class="flex items-center gap-1">
+                  <time datetime={message.createdAt} class="px-1 font-technical"
+                    >{formatLogTime(message.createdAt)}</time>
+                  {@render iconAction(m.console_chat_copy_message(), CopyIcon, () => void copy(userText), false, true)}
+                  {#if !snapshot.readOnlyReason && !editing}
+                    {@render iconAction(
+                      m.console_chat_edit_message(),
+                      PencilIcon,
+                      () => void startEdit(message.id, consoleVisibleText(userText)),
+                      Boolean(generation),
+                      true,
+                    )}
+                  {/if}
+                </div>
+              {/snippet}
             </ConversationMessage>
           {:else}
             {@const content = consoleAssistantContent(message)}
@@ -275,6 +361,7 @@ async function copy(value: string) {
               {#each activities as activity (activity.id)}<ObservationActivity
                   {activity}
                   expansionPolicy="chat"
+                  followed={live && generation.followedThinkingIds.includes(activity.id)}
                   minimumHeadingLevel={2} />{/each}
               {#if live}<StreamingMarkdown
                   text={consoleVisibleText(generation.text)}

@@ -568,6 +568,61 @@ describe('stream lifecycle and races', () => {
     await h.controller.start()
     expect(await h.controller.send('Explain')).toBe(true)
   })
+  test('thinking is followed only once a later text or tool block starts, not by its own completion', async () => {
+    const h = harness({
+      script: function* () {
+        const followed = () => Object.values(h.controller.snapshot.generations)[0].followedThinkingIds
+        yield { type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'plan', delta: 'Plan' }
+        yield {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: { type: 'reasoning', id: 'plan', summary: [{ text: 'Plan' }] },
+        }
+        expect(followed()).toEqual([])
+        yield { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'call' } }
+        expect(followed()).toEqual(['plan'])
+        yield { type: 'response.reasoning_summary_text.delta', output_index: 2, item_id: 'check', delta: 'Check' }
+        expect(followed()).toEqual(['plan'])
+        yield { type: 'response.output_text.delta', output_index: 3, delta: 'Answer' }
+        expect(followed()).toEqual(['plan', 'check'])
+        yield complete()
+      },
+    })
+    await h.controller.start()
+    expect(await h.controller.send('Explain')).toBe(true)
+  })
+  test('editing a user message keeps its images, drops later turns and replays the edited text', async () => {
+    const image = {
+      id: 'png',
+      name: 'a.png',
+      mediaType: 'image/png' as const,
+      dataUrl: 'data:image/png;base64,aGVsbG8=',
+    }
+    const h = harness({ models: [model('route-a', { supports_image_input: true })] })
+    await h.controller.start()
+    await h.controller.send('First question', [image])
+    await h.controller.send('Second question')
+    const [first] = h.controller.snapshot.currentConversation!.messages
+    expect(await h.controller.edit(first.id, 'Edited question')).toBe(true)
+    const messages = h.controller.snapshot.currentConversation!.messages
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toMatchObject({ role: 'user', text: 'Edited question', images: [image] })
+    expect(messages[0].id).not.toBe(first.id)
+    expect(h.requests[2].request.input).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Edited question' },
+          { type: 'input_image', image_url: image.dataUrl },
+        ],
+      },
+    ])
+    const saved = structuredClone(messages)
+    h.store.failure = new Error('Storage quota exhausted')
+    expect(await h.controller.edit(messages[0].id, 'Unsaved edit')).toBe(false)
+    expect(h.controller.snapshot.currentConversation!.messages).toEqual(saved)
+    expect(h.requests).toHaveLength(3)
+  })
   test('reasoning items retain public identity, output order, per-item completion and authoritative fallback', async () => {
     const snapshots: ConsoleChatSnapshot[] = []
     const h = harness({

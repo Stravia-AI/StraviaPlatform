@@ -21,6 +21,7 @@
   "observation_activity_interrupted": "等待已结束：已中断",
   "console_chat_chat": "对话",
   "console_chat_all": "全部对话",
+  "console_chat_view_more": "查看更多",
   "console_chat_new": "新对话",
   "console_chat_start_new": "开始新对话",
   "console_chat_key": "API 密钥",
@@ -43,6 +44,10 @@
   "console_chat_retry": "重试",
   "console_chat_regenerate": "重新生成",
   "console_chat_copy": "复制回答",
+  "console_chat_copy_message": "复制消息",
+  "console_chat_edit_message": "编辑消息",
+  "console_chat_edit_effect": "重新发送会替换这条消息之后的全部内容，并用当前模型生成新回答。",
+  "console_chat_resend": "重新发送",
 
   "console_chat_generating": "正在生成…",
   "console_chat_stopped": "已停止",
