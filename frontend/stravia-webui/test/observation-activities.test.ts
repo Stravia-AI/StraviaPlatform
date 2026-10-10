@@ -80,6 +80,97 @@ function tools(value: InteractionDetail, id: string): ToolActivity[] {
 }
 
 describe('observation activities', () => {
+  test('keeps handed-off tools waiting after HTTP delivery and closes only returned calls or authoritative waiting', () => {
+    const root = run('root')
+    root.status = 'waiting_client'
+    root.delivery_completed_at = 3
+    event(root, 1, 'client_tool_handoff', { tool_id: 'a', name: 'Read' })
+    event(root, 2, 'client_tool_handoff', { tool_id: 'b', name: 'Read' })
+    event(root, 3, 'run_finished', { status: 'waiting_client' })
+    const value = detail([root])
+    value.interaction.status = 'completed'
+    expect(tools(value, 'root')).toMatchObject([
+      { live: true, status: 'waiting' },
+      { live: true, status: 'waiting' },
+    ])
+    const child = run('child', 'root')
+    event(child, 4, 'client_tool_result', { tool_id: 'a', content: 'failure', is_error: true })
+    value.runs.push(child)
+    expect(tools(value, 'root')).toMatchObject([
+      { live: false, status: 'error', results: [{ content: 'failure', isError: true }] },
+      { live: true, status: 'waiting' },
+    ])
+    root.status = 'superseded'
+    root.terminal_reason = 'superseded'
+    expect(tools(value, 'root')[1]).toMatchObject({ live: false, status: 'missing-result', reason: 'superseded' })
+    event(child, 5, 'client_tool_result', { tool_id: 'b', content: 'late return' })
+    expect(tools(value, 'root')[1]).toMatchObject({
+      live: false,
+      status: 'returned',
+      results: [{ content: 'late return' }],
+    })
+  })
+
+  test('shows authoritative waiting closure reasons without claiming a client execution failure', () => {
+    for (const reason of ['client_disconnected', 'client_wait_expired', 'process_restarted', 'user_interrupted']) {
+      const root = run('root')
+      root.status = 'interrupted'
+      root.terminal_reason = reason
+      event(root, 1, 'client_tool_handoff', { tool_id: 'call', name: 'Bash' })
+      expect(tools(detail([root]), 'root')[0]).toMatchObject({
+        live: false,
+        status: 'missing-result',
+        reason,
+        results: [],
+      })
+      const child = run('late', 'root')
+      event(child, 2, 'client_tool_result', { tool_id: 'call', content: 'late result', is_error: true })
+      expect(tools(detail([root, child]), 'root')[0]).toMatchObject({
+        live: false,
+        status: 'error',
+        reason,
+        results: [{ content: 'late result', isError: true }],
+      })
+    }
+  })
+
+  test('does not guess which same-ID call owns a result when one source Run contains ambiguous calls', () => {
+    const root = run('root')
+    root.status = 'waiting_client'
+    event(root, 1, 'client_tool_handoff', { model_turn_id: 'first', tool_id: 'same', name: 'Read' })
+    event(root, 2, 'client_tool_handoff', { model_turn_id: 'second', tool_id: 'same', name: 'Read' })
+    const child = run('child', 'root')
+    event(child, 3, 'client_tool_result', { tool_id: 'same', content: 'cannot prove owner' })
+    const activities = tools(detail([root, child]), 'root')
+    expect(activities[0].id).not.toBe(activities[1].id)
+    expect(activities).toMatchObject([
+      { live: true, results: [] },
+      { live: true, results: [] },
+    ])
+  })
+
+  test('platform execution outlives response completion and stops on its own finish or missing-observation evidence', () => {
+    const root = run('root')
+    root.status = 'completed'
+    event(root, 1, 'platform_tool_started', { model_turn_id: 'turn', tool_id: 'call', name: 'Search' })
+    event(root, 2, 'run_finished', { status: 'completed' })
+    const value = detail([root])
+    expect(tools(value, 'root')[0]).toMatchObject({ live: true, status: 'running' })
+    event(root, 3, 'platform_tool_finished', { model_turn_id: 'turn', tool_id: 'call', status: 'failed' })
+    expect(tools(value, 'root')[0]).toMatchObject({ live: false, status: 'error', results: [] })
+    root.events.pop()
+    event(root, 3, 'observation_gap', { reason: 'unfinished_observation_activity' })
+    expect(tools(value, 'root')[0]).toMatchObject({ live: false, status: 'missing-result', results: [] })
+    root.events.pop()
+    event(root, 3, 'run_state_changed', { status: 'completed', reason: 'process_restarted' })
+    expect(tools(value, 'root')[0]).toMatchObject({
+      live: false,
+      status: 'missing-result',
+      reason: 'process_restarted',
+      results: [],
+    })
+  })
+
   test('reconciles a durable thinking item with its live block without losing paragraphs', () => {
     const root = run('root')
     root.debug_enabled = false
@@ -209,6 +300,7 @@ describe('observation activities', () => {
       { content: null, isError: true },
     ])
     event(left, 4, 'client_tool_handoff', { tool_id: 'call', name: 'Bash' })
+    event(replay, 5, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
     expect(tools(value, 'left')[0].results.map((entry) => entry.content)).toEqual([null])
     expect(tools(value, 'root')[0].results).toHaveLength(2)
   })

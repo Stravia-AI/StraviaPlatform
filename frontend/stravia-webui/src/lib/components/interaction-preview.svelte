@@ -66,9 +66,9 @@ async function handleKeydown(event: KeyboardEvent) {
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
     {#if text !== null && hasVisibleText}
       {#if tail}
-        <StreamingMarkdown {text} active={animate} {textStart} {snapshotKey} />
+        <StreamingMarkdown {text} active={animate} streaming={active} {textStart} {snapshotKey} />
       {:else}
-        <MarkdownContent {text} />
+        <MarkdownContent {text} streaming={active} />
       {/if}
     {:else if !contextLabel}
       {emptyLabel}

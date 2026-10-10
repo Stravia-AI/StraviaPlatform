@@ -5,10 +5,18 @@ import MarkdownContent from '$lib/components/markdown-content.svelte'
 let {
   text,
   active = false,
+  streaming,
   textStart = 0,
   snapshotKey = 0,
   minimumHeadingLevel = 1,
-}: { text: string; active?: boolean; textStart?: number; snapshotKey?: number; minimumHeadingLevel?: 1 | 2 } = $props()
+}: {
+  text: string
+  active?: boolean
+  streaming?: boolean
+  textStart?: number
+  snapshotKey?: number
+  minimumHeadingLevel?: 1 | 2
+} = $props()
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 // 与后端发布 100ms、工作区合并 100ms 共用 500ms 主动等待预算。
@@ -160,4 +168,4 @@ $effect(() => {
 
 <svelte:document onvisibilitychange={() => flush()} />
 
-<MarkdownContent text={displayed} {minimumHeadingLevel} />
+<MarkdownContent text={displayed} {minimumHeadingLevel} streaming={(streaming ?? active) || displayed !== text} />

@@ -21,6 +21,8 @@ export interface ToolActivity {
   at: number
   name: string
   live: boolean
+  status: 'running' | 'waiting' | 'returned' | 'error' | 'missing-result'
+  reason?: string
   input?: unknown
   results: ActivityToolResult[]
 }
@@ -30,6 +32,8 @@ type ObjectValue = Record<string, unknown>
 interface Call {
   callId: string
   modelTurnId: string
+  source: 'client' | 'platform'
+  sequence: number
   activity: ToolActivity
 }
 interface ClientResult {
@@ -64,26 +68,31 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
         run.events.filter((event) => event.run_id === run.id).map((event) => [event.sequence, event]),
       ).values(),
     ].sort((a, b) => a.sequence - b.sequence)
-    const running =
-      run.status === 'running' &&
-      !events.some(
-        (event) =>
-          event.kind === 'run_finished' ||
-          (event.kind === 'run_state_changed' && object(event.payload).status !== 'running'),
-      )
-    const call = (id: string, name: string, modelTurnId: string, at: number): Call | undefined => {
+    const call = (
+      id: string,
+      name: string,
+      modelTurnId: string,
+      at: number,
+      source: Call['source'],
+      sequence: number,
+    ): Call | undefined => {
       if (!id || !name) return undefined
-      let existing = calls.find((entry) => entry.callId === id)
+      let existing = calls.find(
+        (entry) => entry.callId === id && entry.modelTurnId === modelTurnId && entry.source === source,
+      )
       if (!existing) {
         const activity: ToolActivity = {
           kind: 'tool',
-          id: identity(...prefix, 'tool', id),
+          id: calls.some((entry) => entry.callId === id)
+            ? identity(...prefix, 'tool', id, modelTurnId, source)
+            : identity(...prefix, 'tool', id),
           at,
           name,
-          live: running,
+          live: true,
+          status: source === 'client' ? 'waiting' : 'running',
           results: [],
         }
-        existing = { callId: id, modelTurnId, activity }
+        existing = { callId: id, modelTurnId, source, sequence, activity }
         calls.push(existing)
         activities.push(activity)
       }
@@ -120,15 +129,17 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
         (entry) => entry.callId === id && (!turn || !entry.modelTurnId || entry.modelTurnId === turn),
       )
       if (event.kind === 'platform_tool_started' || event.kind === 'client_tool_handoff') {
-        entry ??= call(id, string(payload.name), turn, event.occurred_at)
+        const source = event.kind === 'client_tool_handoff' ? 'client' : 'platform'
+        if (entry?.source !== source) entry = undefined
+        entry ??= call(id, string(payload.name), turn, event.occurred_at, source, event.sequence)
         if (entry) {
           if (turn) entry.modelTurnId = turn
           entry.activity.at = Math.min(entry.activity.at, event.occurred_at)
           if (Object.hasOwn(payload, 'input')) entry.activity.input = payload.input
-          if (event.kind === 'client_tool_handoff') entry.activity.live = false
         }
-      } else if (event.kind === 'platform_tool_finished' && entry) {
+      } else if (event.kind === 'platform_tool_finished' && entry?.source === 'platform') {
         entry.activity.live = false
+        entry.activity.status = payload.status === 'failed' ? 'error' : 'returned'
         if (Object.hasOwn(payload, 'content')) {
           entry.activity.results.push({
             id: identity(...prefix, 'platform-result', event.sequence),
@@ -146,6 +157,31 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
           block: { tool_use_id: id, content: payload.content, is_error: payload.is_error },
           index: 0,
         })
+      }
+    }
+    for (const entry of calls) {
+      if (entry.source === 'client') {
+        entry.activity.live = run.status === 'waiting_client'
+        if (!entry.activity.live) {
+          entry.activity.status = 'missing-result'
+          const state = events.findLast((event) => event.kind === 'run_state_changed')
+          entry.activity.reason = run.terminal_reason || string(object(state?.payload).reason) || run.status
+        }
+      } else if (
+        entry.activity.live &&
+        events.some(
+          (event) =>
+            (event.kind === 'observation_gap' && object(event.payload).reason === 'unfinished_observation_activity') ||
+            (event.kind === 'run_state_changed' && object(event.payload).reason === 'process_restarted'),
+        )
+      ) {
+        entry.activity.live = false
+        entry.activity.status = 'missing-result'
+        entry.activity.reason = events.some(
+          (event) => event.kind === 'run_state_changed' && object(event.payload).reason === 'process_restarted',
+        )
+          ? 'process_restarted'
+          : 'unfinished_observation_activity'
       }
     }
     activities.sort((a, b) => a.at - b.at)
@@ -178,8 +214,16 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
     const lineage = ancestors(result.run)
     let entry: Call | undefined
     for (const id of lineage) {
-      entry = callsByRun.get(id)?.findLast((call) => call.callId === result.block.tool_use_id)
-      if (entry) break
+      const candidates = callsByRun
+        .get(id)
+        ?.filter(
+          (call) =>
+            call.source === 'client' && call.callId === result.block.tool_use_id && call.sequence < result.sequence,
+        )
+      if (!candidates?.length) continue
+      // Tool ID alone cannot distinguish two calls in the same proven source Run.
+      if (candidates.length === 1) entry = candidates[0]
+      break
     }
     if (!entry) continue
     const fingerprint = JSON.stringify([result.block.content, result.block.is_error === true])
@@ -194,6 +238,8 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
       continue
     attached.push({ runId: result.run.id, call: entry, fingerprint })
     entry.activity.live = false
+    entry.activity.status =
+      result.block.is_error === true || entry.activity.results.some((result) => result.isError) ? 'error' : 'returned'
     entry.activity.results.push({
       id: identity(detail.interaction.id, result.run.id, 'client-result', result.sequence, result.index),
       at: result.at,

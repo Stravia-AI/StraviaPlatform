@@ -1,7 +1,11 @@
 import { expect, test, type Page } from '@playwright/test'
 import { prepareApp } from './prepare-app'
 
-type StreamRequest = { body: { input: unknown[]; model: string }; authorization: string | null; aborted: boolean }
+type StreamRequest = {
+  body: { input: unknown[]; model: string; reasoning?: { summary: string; effort?: string } }
+  authorization: string | null
+  aborted: boolean
+}
 type StreamHarness = {
   requests: StreamRequest[]
   emit: (index: number, event: Record<string, unknown>, close?: boolean) => void
@@ -21,6 +25,7 @@ const model = {
   is_enabled: true,
   supported_thinking_levels: ['low', 'high'],
   default_thinking_level: 'low',
+  supports_image_input: true,
   targets: [{ enabled: true, provider_id: 'provider-console' }],
   created_at: '2026-01-01T00:00:00Z',
 }
@@ -159,6 +164,236 @@ async function complete(page: Page, index: number, text: string, status = 'compl
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0)
 }
 
+const imageBytes = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9l8AAAAASUVORK5CYII=',
+  'base64',
+)
+const imageData = `data:image/png;base64,${imageBytes.toString('base64')}`
+
+test('images require text and survive refresh, replay, failure, retry, regeneration and deletion', async ({ page }) => {
+  await prepareChat(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add images', exact: true }).click()
+  await page.locator('input[type=file]').setInputFiles([
+    { name: 'first.png', mimeType: 'image/png', buffer: imageBytes },
+    { name: 'second.png', mimeType: 'image/png', buffer: imageBytes },
+  ])
+  await expect(page.getByRole('img', { name: 'first.png', exact: true })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'second.png', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Remove second.png', exact: true }).click()
+  await expect(page.getByRole('img', { name: 'second.png', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await send(page, 'Read the original screenshot', 1)
+  const firstInput = {
+    role: 'user',
+    content: [
+      { type: 'input_text', text: 'Read the original screenshot' },
+      { type: 'input_image', image_url: imageData },
+    ],
+  }
+  expect((await requests(page))[0].body.input).toEqual([firstInput])
+  await complete(page, 0, 'The screenshot is preserved')
+  await page.reload()
+  const user = page.getByRole('article', { name: 'Your message' })
+  await expect(user.getByRole('img', { name: 'first.png', exact: true })).toBeVisible()
+  expect(await user.getByRole('img', { name: 'first.png' }).getAttribute('src')).toBe(imageData)
+  await send(page, 'Use the same screenshot again', 1)
+  expect((await requests(page))[0].body.input[0]).toEqual(firstInput)
+  await page.evaluate(() => window.consoleStreams.fail(0, 400, 'Synthetic media rejection'))
+  await expect(page.getByRole('alert')).toContainText('Synthetic media rejection')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Use the same screenshot again')
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect.poll(async () => (await requests(page)).length).toBe(2)
+  expect((await requests(page))[1].body.input[0]).toEqual(firstInput)
+  await complete(page, 1, 'Recovered with original image')
+  await page.getByRole('button', { name: 'Regenerate', exact: true }).click()
+  await expect.poll(async () => (await requests(page)).length).toBe(3)
+  expect((await requests(page))[2].body.input[0]).toEqual(firstInput)
+  await complete(page, 2, 'Regenerated with original image')
+  await page.getByRole('button', { name: 'Conversation actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(user).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByRole('img', { name: 'first.png', exact: true })).toHaveCount(0)
+})
+
+test('paste and drop preserve original images, reject other files and block image-incompatible replay', async ({
+  page,
+}) => {
+  const catalog = await prepareChat(page)
+  catalog.models.push({
+    ...model,
+    id: 'text-model',
+    model_id: 'text-model',
+    display_name: 'Text model',
+    supports_image_input: false,
+  })
+  catalog.keys[0].model_ids.push('text-model')
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Model and reasoning effort', exact: true }).click()
+  await page.getByRole('button', { name: 'Model', exact: true }).click()
+  await page.getByRole('option', { name: /^Console model/ }).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this image draft')
+  await page.evaluate((base64) => {
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
+    const paste = new DataTransfer()
+    paste.items.add(new File([bytes], 'pasted.png', { type: 'image/png' }))
+    document
+      .querySelector('textarea')!
+      .dispatchEvent(new ClipboardEvent('paste', { bubbles: true, clipboardData: paste }))
+  }, imageBytes.toString('base64'))
+  await expect(page.getByRole('img', { name: 'pasted.png', exact: true })).toBeVisible()
+  await page.evaluate((base64) => {
+    const drop = new DataTransfer()
+    drop.items.add(
+      new File([Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))], 'dropped.png', {
+        type: 'image/png',
+      }),
+    )
+    document.querySelector('form')!.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: drop }))
+  }, imageBytes.toString('base64'))
+  await expect(page.getByRole('img', { name: 'dropped.png', exact: true })).toBeVisible()
+  await page
+    .locator('input[type=file]')
+    .setInputFiles({
+      name: 'unsafe.svg',
+      mimeType: 'image/svg+xml',
+      buffer: Buffer.from('<svg onload="window.chatXss=true"/>'),
+    })
+  await expect(page.getByRole('alert')).toContainText('PNG, JPEG and WebP')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Keep this image draft')
+  await page.getByRole('button', { name: 'Model and reasoning effort', exact: true }).click()
+  await page.getByRole('button', { name: 'Model', exact: true }).click()
+  await page.getByRole('option', { name: /^Text model/ }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await expect(page.getByRole('alert').last()).toContainText('Choose an image-capable model')
+  await expect(page.getByRole('img', { name: 'pasted.png', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Model and reasoning effort', exact: true }).click()
+  await page.getByRole('button', { name: 'Model', exact: true }).click()
+  await page.getByRole('option', { name: /^Console model/ }).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => (await requests(page)).length).toBe(1)
+  expect((await requests(page))[0].body.input).toEqual([
+    {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Keep this image draft' },
+        { type: 'input_image', image_url: imageData },
+        { type: 'input_image', image_url: imageData },
+      ],
+    },
+  ])
+  await complete(page, 0, 'Both originals received')
+  await page.getByRole('button', { name: 'Model and reasoning effort', exact: true }).click()
+  await page.getByRole('button', { name: 'Model', exact: true }).click()
+  await page.getByRole('option', { name: /^Text model/ }).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('History still includes images')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Regenerate', exact: true })).toBeDisabled()
+  expect((await requests(page)).length).toBe(1)
+})
+
+test('reasoning items independently open, respect manual collapse and close on real completion or failure', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await page.goto('/')
+  await send(page, 'Reason in two public stages', 1)
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  const first = { type: 'reasoning', id: 'stage-one', summary: [] }
+  await emit(page, 0, { type: 'response.output_item.added', output_index: 0, item: first })
+  await emit(page, 0, {
+    type: 'response.reasoning_summary_text.delta',
+    item_id: 'stage-one',
+    output_index: 0,
+    summary_index: 0,
+    delta: 'First public stage',
+  })
+  const thinking = answer.getByRole('button', { name: 'Thinking…', exact: true })
+  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
+  await expect(answer.getByText('First public stage', { exact: true })).toBeVisible()
+  await thinking.click()
+  await emit(page, 0, {
+    type: 'response.reasoning_summary_text.delta',
+    item_id: 'stage-one',
+    output_index: 0,
+    summary_index: 0,
+    delta: ' continued',
+  })
+  await expect(thinking).toHaveAttribute('aria-expanded', 'false')
+  await emit(page, 0, {
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: { ...first, summary: [{ type: 'summary_text', text: 'First public stage continued' }] },
+  })
+  const thought = answer.getByRole('button', { name: 'Thinking', exact: true })
+  await expect(thought).toHaveAttribute('aria-expanded', 'false')
+  await thought.click()
+  const second = { type: 'reasoning', id: 'stage-two', summary: [] }
+  await emit(page, 0, { type: 'response.output_item.added', output_index: 1, item: second })
+  await emit(page, 0, {
+    type: 'response.reasoning_summary_text.delta',
+    item_id: 'stage-two',
+    output_index: 1,
+    summary_index: 0,
+    delta: 'Second public stage',
+  })
+  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
+  await expect(thought).toHaveAttribute('aria-expanded', 'true')
+  await page.evaluate(() => window.consoleStreams.fail(0, 500, 'Synthetic staged failure'))
+  await expect(answer.getByRole('button', { name: 'Thinking…', exact: true })).toHaveCount(0)
+  const thoughts = answer.getByRole('button', { name: 'Thinking', exact: true })
+  await expect(thoughts.last()).toHaveAttribute('aria-expanded', 'false')
+  await thoughts.last().click()
+  await expect(answer.getByText('Second public stage', { exact: true })).toBeVisible()
+  await page.reload()
+  await answer.getByRole('button', { name: 'Thinking', exact: true }).last().click()
+  await expect(answer.getByText('Second public stage', { exact: true })).toBeVisible()
+})
+
+test('shared math and Mermaid preserve incomplete and invalid source without external effects', async ({ page }) => {
+  await prepareChat(page)
+  const external: string[] = []
+  await page.route('**/attack.invalid/**', (route) => {
+    external.push(route.request().url())
+    return route.abort()
+  })
+  await page.goto('/')
+  await send(page, 'Render formulas and a flow', 1)
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  await emit(page, 0, { type: 'response.output_text.delta', delta: 'Inline $x^2' })
+  await expect(answer).toContainText('$x^2')
+  await expect(answer.locator('math')).toHaveCount(0)
+  await emit(page, 0, {
+    type: 'response.output_text.delta',
+    delta: '$\n\n$$\\frac{1}{2}$$\n\n\\(y+1\\)\n\n\\[z=2\\]\n\n```mermaid\nflowchart LR\nStart --> Finish\n',
+  })
+  await expect(answer.locator('math')).toHaveCount(4)
+  await expect(answer).toContainText('Start --> Finish')
+  await expect(answer.locator('svg').filter({ hasText: 'Finish' })).toHaveCount(0)
+  await emit(page, 0, {
+    type: 'response.output_text.delta',
+    delta:
+      '```\n\n$\\invalidmacro{x}$\n\n```mermaid\nnot a valid diagram\n```\n\n```mermaid\nflowchart LR\nclick Start "https://attack.invalid/click"\n```\n\n$\\includegraphics{https://attack.invalid/image}$',
+  })
+  await expect(answer.locator('svg').filter({ hasText: 'Finish' })).toBeVisible()
+  const text =
+    'Inline $x^2$\n\n$$\\frac{1}{2}$$\n\n\\(y+1\\)\n\n\\[z=2\\]\n\n```mermaid\nflowchart LR\nStart --> Finish\n```\n\n$\\invalidmacro{x}$\n\n```mermaid\nnot a valid diagram\n```\n\n```mermaid\nflowchart LR\nclick Start "https://attack.invalid/click"\n```\n\n$\\includegraphics{https://attack.invalid/image}$'
+  await complete(page, 0, text)
+  await expect(answer.locator('.markdown-render-error')).toHaveCount(4)
+  await expect(answer).toContainText('\\invalidmacro{x}')
+  expect(external).toEqual([])
+  expect(await page.evaluate(() => window.chatXss)).toBeUndefined()
+  await page.reload()
+  await expect(answer.locator('math')).toHaveCount(4)
+  await expect(answer.locator('svg').filter({ hasText: 'Finish' })).toBeVisible()
+})
+
 test('streams safely, copies only visible output and persists authoritative responses across refresh', async ({
   page,
   context,
@@ -185,7 +420,7 @@ test('streams safely, copies only visible output and persists authoritative resp
   await expect(answer.getByRole('heading', { name: 'Final answer' })).toBeVisible()
   await expect(answer.locator('pre')).toContainText('const result = 42')
   await expect(answer.getByText('Checked carefully', { exact: true })).not.toBeVisible()
-  await answer.getByText('Reasoning', { exact: true }).click()
+  await answer.getByRole('button', { expanded: false }).first().click()
   await expect(answer.getByText('Checked carefully', { exact: true })).toBeVisible()
   await expect(answer).not.toContainText('hidden reasoning')
   await expect(answer).toContainText('Input: 7 tokens')
@@ -288,7 +523,7 @@ test('legacy history preserves reasoning and replay without presenting unconvert
   await expect(answers.last()).toContainText('Output: 0 tokens')
   await expect(answers.first()).not.toContainText('Input:')
   await expect(answers.last()).not.toContainText('Input:')
-  await answers.first().getByText('Reasoning', { exact: true }).click()
+  await answers.first().getByRole('button', { expanded: false }).first().click()
   await expect(answers.first()).toContainText('Legacy readable thought')
   await page.reload()
   await expect(answers.first()).not.toContainText('Input:')
@@ -442,13 +677,15 @@ test('history searches message content, renames, deletes and confirms exact clea
   await search.fill('needle 3')
   await expect(page.getByRole('main').getByRole('link', { name: 'History title 3', exact: true })).toBeVisible()
   await expect(page.getByRole('main').getByRole('link', { name: 'History title 2', exact: true })).toHaveCount(0)
-  await page.getByRole('main').getByRole('button', { name: 'Rename', exact: true }).click()
+  await page.getByRole('main').getByRole('button', { name: 'Conversation actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
   const rename = page.getByRole('dialog', { name: 'Rename conversation' })
   await rename.getByRole('textbox').fill('Renamed browser conversation')
   await rename.getByRole('button', { name: /Save|Rename/, exact: true }).click()
   await search.fill('Renamed')
   await expect(page.getByRole('main').getByRole('link', { name: 'Renamed browser conversation' })).toBeVisible()
-  await page.getByRole('main').getByRole('button', { name: 'Delete', exact: true }).click()
+  await page.getByRole('main').getByRole('button', { name: 'Conversation actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete', exact: true }).click()
   await search.fill('')
   await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
@@ -577,16 +814,19 @@ test('keyboard selection determines the identity, model and reasoning used for a
   await page.keyboard.press('End')
   await page.keyboard.press('Enter')
   await expect(keySelector).toContainText('Second key')
+  await page.getByRole('button', { name: 'Model and reasoning effort', exact: true }).focus()
+  await page.keyboard.press('Enter')
   const modelSelector = page.getByRole('button', { name: 'Model', exact: true })
   await modelSelector.focus()
   await page.keyboard.press('Enter')
   await page.keyboard.press('End')
   await page.keyboard.press('Enter')
   await expect(modelSelector).toContainText('Second model')
-  await page.getByRole('button', { name: 'Reasoning effort', exact: true }).focus()
+  await page.getByRole('button', { name: /^Reasoning effort/ }).focus()
   await page.keyboard.press('Enter')
+  await page.getByRole('slider', { name: 'Reasoning effort', exact: true }).focus()
   await page.keyboard.press('End')
-  await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
   await page.getByRole('textbox', { name: 'Message', exact: true }).focus()
   await page.keyboard.type('Selected with keyboard')
   await page.keyboard.press('ControlOrMeta+Enter')
@@ -594,6 +834,7 @@ test('keyboard selection determines the identity, model and reasoning used for a
   const request = (await requests(page))[0]
   expect(request.authorization).toBe('Bearer sk-second-only')
   expect(request.body.model).toBe('second-model')
+  expect(request.body.reasoning).toEqual({ summary: 'auto', effort: 'high' })
   await page.getByRole('button', { name: 'Stop', exact: true }).focus()
   await page.keyboard.press('Enter')
   await expect.poll(async () => (await requests(page))[0].aborted).toBe(true)

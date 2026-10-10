@@ -613,10 +613,12 @@ async function installObservationFixture(
         } else {
           known.visible_tail = visibleTail ?? `Updated at sequence ${event.sequence}`
         }
-        if (event.kind === 'run_finished') {
-          known.status = 'completed'
-          run.status = 'completed'
-          run.finished_at = event.occurred_at
+        if (event.kind === 'run_finished' || event.kind === 'run_state_changed') {
+          const payload = event.payload as { status?: string; reason?: string }
+          known.status = payload.status ?? 'completed'
+          run.status = payload.status ?? 'completed'
+          run.terminal_reason = payload.reason ?? null
+          if (event.kind === 'run_finished') run.finished_at = event.occurred_at
         }
       }
       streamEvents.push(event)
@@ -2703,6 +2705,190 @@ test.describe('Interaction Observation canvas', () => {
     }
   })
 
+  test('paged client handoffs wait after HTTP end, close independently, and retain manual expansion through late returns', async ({
+    page,
+  }) => {
+    let phase = 0
+    const fixture = await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-cinder') return
+      const owner = detail.runs[0]
+      const ordinary = (sequence: number, kind: string, payload: unknown, runId = owner.id): ObservationEvent => ({
+        sequence,
+        kind,
+        payload,
+        run_id: runId,
+        interaction_id: detail.interaction.id,
+        rejection_id: null,
+        occurred_at: startedAt + sequence,
+      })
+      owner.status = phase < 2 ? 'waiting_client' : 'superseded'
+      owner.terminal_reason = phase < 2 ? null : 'superseded'
+      owner.finished_at = startedAt + 3
+      owner.delivery_completed_at = startedAt + 3
+      owner.events = [
+        ordinary(1, 'client_tool_handoff', { tool_id: 'a', name: 'Read A', input: { path: 'a.txt' } }),
+        ordinary(2, 'client_tool_handoff', { tool_id: 'b', name: 'Read B', input: { path: 'b.txt' } }),
+        ordinary(3, 'run_finished', { status: 'waiting_client' }),
+        ...Array.from({ length: 450 }, (_, index) =>
+          ordinary(index + 4, 'client_visible_content', {
+            text: `History paragraph ${index}\n\n`,
+            item: `text:${index}`,
+          }),
+        ),
+        ordinary(454, 'platform_tool_started', { tool_id: 'search', name: 'Search', input: { query: 'fixture' } }),
+      ]
+      if (phase >= 1)
+        owner.events.push(
+          ordinary(455, 'platform_tool_finished', {
+            tool_id: 'search',
+            status: 'failed',
+            content: 'platform failure evidence',
+          }),
+        )
+      if (phase >= 2)
+        owner.events.push(ordinary(457, 'run_state_changed', { status: 'superseded', reason: 'superseded' }))
+      const child = {
+        ...owner,
+        id: 'run-results',
+        parent_run_id: owner.id,
+        started_at: startedAt + 456,
+        events: [] as ObservationEvent[],
+      }
+      if (phase >= 1)
+        child.events.push(
+          ordinary(
+            456,
+            'client_tool_result',
+            { tool_id: 'a', content: 'client error evidence', is_error: true },
+            child.id,
+          ),
+        )
+      if (phase >= 3)
+        child.events.push(
+          ordinary(
+            458,
+            'client_tool_result',
+            { tool_id: 'b', content: 'legitimate late evidence', is_error: false },
+            child.id,
+          ),
+        )
+      detail.runs.push(child)
+    })
+    await installPersistentObservationStream(page)
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    const activity = (name: string) =>
+      conversation
+        .locator('[data-activity-kind="tool"]')
+        .filter({ has: page.getByRole('button', { name: `Tool call ${name}`, exact: true }) })
+    const search = activity('Search')
+    await expect(search).toHaveAttribute('aria-busy', 'true')
+    await expect(search.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+    // The handoff is on older event pages, but its owning Run projection is current.
+    for (let pageIndex = 0; pageIndex < 2; pageIndex++) {
+      const release = fixture.holdNextRead('interaction-cinder')
+      const response = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return url.pathname.endsWith('/interaction-cinder/events') && url.searchParams.has('before_sequence')
+      })
+      await conversation.evaluate((element) => {
+        const loader = element.querySelector('[data-older-loader]')
+        if (!loader) throw new Error('missing older-events loader')
+        element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
+      })
+      await expect(conversation.getByRole('status', { name: 'Loading earlier events', exact: true })).toBeInViewport()
+      release()
+      await response
+      await expect(
+        conversation.getByText(`History paragraph ${pageIndex === 0 ? 51 : 0}`, { exact: true }),
+      ).toHaveCount(1)
+    }
+    const a = activity('Read A')
+    const b = activity('Read B')
+    await expect(a).toHaveAttribute('aria-busy', 'true')
+    await expect(b).toHaveAttribute('aria-busy', 'true')
+    await expect(b).toContainText('Waiting for client result')
+    await b.getByRole('button').click()
+    const advance = async (next: number, sequence: number) => {
+      phase = next
+      const notification: ObservationEvent = {
+        sequence,
+        kind: 'run_state_changed',
+        payload: { status: next < 2 ? 'waiting_client' : 'superseded' },
+        run_id: 'run-interaction-cinder',
+        interaction_id: 'interaction-cinder',
+        rejection_id: null,
+        occurred_at: startedAt + sequence,
+      }
+      fixture.emit(notification)
+      await sendObservation(page, 'observation', notification, sequence)
+    }
+    await advance(1, 456)
+    await expect(a).toHaveAttribute('aria-busy', 'false')
+    await expect(a).toContainText('Failed')
+    await expect(b).toHaveAttribute('aria-busy', 'true')
+    await expect(search).toHaveAttribute('aria-busy', 'false')
+    await expect(search).toContainText('Failed')
+    await advance(2, 457)
+    await expect(b).toHaveAttribute('aria-busy', 'false')
+    await expect(b).toContainText('Waiting ended: Run continued')
+    await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    await advance(3, 458)
+    await expect(b).toContainText('Returned')
+    await expect(b).toContainText('Waiting ended: Run continued')
+    await expect(b.getByText('legitimate late evidence', { exact: true })).toBeVisible()
+    await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    await page.reload()
+    await expect(search).toHaveAttribute('aria-busy', 'false')
+  })
+
+  for (const [reason, label] of [
+    ['client_disconnected', 'Waiting ended: client disconnected'],
+    ['client_wait_expired', 'Waiting ended: idle wait expired'],
+    ['process_restarted', 'Waiting ended: platform restarted'],
+    ['user_interrupted', 'Waiting ended: interrupted'],
+  ]) {
+    test(`authoritative ${reason} ends client waiting without fabricating a tool result`, async ({ page }) => {
+      const fixture = await installObservationFixture(page, false, false, false, (detail) => {
+        if (detail.interaction.id !== 'interaction-cinder') return
+        const owner = detail.runs[0]
+        owner.events = [
+          {
+            sequence: 11,
+            kind: 'client_tool_handoff',
+            payload: { tool_id: 'pending', name: 'Pending', input: null },
+            run_id: owner.id,
+            interaction_id: detail.interaction.id,
+            rejection_id: null,
+            occurred_at: startedAt + 11,
+          },
+          ...owner.events.filter((event) => event.sequence > 11),
+        ]
+        if (owner.status === 'running') owner.status = 'waiting_client'
+      })
+      await installPersistentObservationStream(page)
+      await page.goto('/logs?interaction=interaction-cinder')
+      const activity = page.getByRole('log', { name: 'Conversation' }).locator('[data-activity-kind="tool"]')
+      await expect(activity).toHaveAttribute('aria-busy', 'true')
+      const event: ObservationEvent = {
+        sequence: 12,
+        kind: 'run_state_changed',
+        payload: { status: 'interrupted', reason },
+        run_id: 'run-interaction-cinder',
+        interaction_id: 'interaction-cinder',
+        rejection_id: null,
+        occurred_at: startedAt + 12,
+      }
+      fixture.emit(event)
+      await sendObservation(page, 'observation', event, 12)
+      await expect(activity).toHaveAttribute('aria-busy', 'false')
+      await expect(activity).toContainText(label)
+      await activity.getByRole('button').click()
+      await expect(activity.getByText('Client result', { exact: true })).toHaveCount(0)
+      await expect(activity.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    })
+  }
+
   for (const captureDebug of [false, true]) {
     test(`expands ordinary thinking and tool details with Debug ${captureDebug ? 'on' : 'off'} without storing content`, async ({
       page,
@@ -2936,7 +3122,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     await expect(thinking).toHaveAccessibleName('Thinking')
     await page.reload()
-    await thinking.click()
+    await expect(thinking).toHaveAttribute('aria-expanded', 'true')
     await assertParagraphs()
   })
 
@@ -3299,6 +3485,73 @@ test.describe('Interaction Observation canvas', () => {
     await expect(tooltip.getByRole('cell')).toHaveText(['处理器', 'AMD 锐龙 9 8940HX', '内存', '48GB DDR5'])
   })
 
+  test('shares formula and diagram rendering with expanded thinking while retaining invalid source', async ({
+    page,
+  }) => {
+    const source =
+      'Inline $x^2$ and $\\sqrt{x}$\n\n$$\\frac{1}{2}$$\n\n\\(y+1\\)\n\n\\[z=2\\]\n\n```mermaid\nflowchart LR\nStart --> Middle --> Finish\n```\n\n$\\invalidmacro{x}$\n\n```mermaid\ninvalid diagram\n```'
+    await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-atlas') return
+      const run = detail.runs[0]
+      const visible = run.events.find((event) => event.kind === 'client_visible_content')!
+      // Detail and event-page reads share the recorded events array. Replace it
+      // instead of appending thinking again on every read and reload.
+      run.events = [
+        ...run.events.map((event) =>
+          event === visible
+            ? { ...event, payload: { text: source, block_id: 'shared-markdown', complete: true } }
+            : event,
+        ),
+        { ...visible, sequence: 11, kind: 'model_thinking', payload: { text: source, block_id: 'shared-thinking' } },
+      ]
+    })
+    await installPersistentObservationStream(page)
+    await page.goto('/logs?interaction=interaction-atlas')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    const conversation = inspector.getByRole('log', { name: 'Conversation' })
+    const answer = conversation.getByRole('article', { name: 'Atlas', exact: true })
+    await expect(answer.getByRole('math')).toHaveCount(5)
+    await expect(answer.locator('.katex svg')).toBeVisible()
+    expect(
+      await answer
+        .locator('.katex svg')
+        .evaluate((svg) => svg.getBoundingClientRect().height / Number.parseFloat(getComputedStyle(svg).fontSize)),
+    ).toBeGreaterThan(0.5)
+    await expect(answer.locator('svg:visible').filter({ hasText: 'Finish' })).toBeVisible()
+    expect(
+      await answer
+        .locator('svg')
+        .filter({ hasText: 'Finish' })
+        .evaluate((element) => {
+          const svg = element as SVGSVGElement
+          const content = svg.getBBox()
+          const box = svg.viewBox.baseVal
+          return (
+            content.x >= box.x &&
+            content.y >= box.y &&
+            content.x + content.width <= box.x + box.width &&
+            content.y + content.height <= box.y + box.height
+          )
+        }),
+    ).toBe(true)
+    const thought = answer.getByRole('button', { name: 'Thinking', exact: true })
+    await expect(thought).toHaveAttribute('aria-expanded', 'false')
+    await thought.click()
+    await expect(answer.getByRole('math')).toHaveCount(10)
+    await expect(answer.locator('svg:visible').filter({ hasText: 'Finish' })).toHaveCount(2)
+    await expect(answer).toContainText('\\invalidmacro{x}')
+    await expect(answer.locator('.markdown-render-error')).toHaveCount(4)
+    await page.reload()
+    await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
+    await expect(thought).toHaveAttribute('aria-expanded', 'true')
+    await expect(answer.getByRole('math')).toHaveCount(10)
+    await expect(answer.locator('.katex svg')).toHaveCount(2)
+    await expect(answer.locator('svg:visible').filter({ hasText: 'Finish' })).toHaveCount(2)
+    await expect(answer.locator('code').filter({ hasText: '\\invalidmacro{x}' })).toHaveCount(2)
+    await expect(answer.locator('code').filter({ hasText: 'invalid diagram' })).toHaveCount(2)
+    await expect(answer.locator('.markdown-render-error')).toHaveCount(4)
+  })
+
   test('renders safe Markdown and keeps the newest output line inside the card', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
@@ -3460,7 +3713,8 @@ test.describe('Interaction Observation canvas', () => {
     await expect(page.getByText('1 / 3 chains', { exact: true })).toBeVisible()
     const initialPane = (await page.locator('.svelte-flow__pane').boundingBox())!
     await page.mouse.move(initialPane.x + initialPane.width / 2, initialPane.y + initialPane.height * 0.9)
-    await page.mouse.wheel(0, 1200)
+    // Reach the entire multi-level fixture, not only its first child row.
+    await page.mouse.wheel(0, initialPane.height * 10)
     await expect.poll(() => fixture.forestRequests.some((url) => url.searchParams.has('cursor'))).toBe(true)
     await page.getByRole('button', { name: 'Load and show all chains' }).click()
     await expect(page.getByRole('progressbar', { name: 'Loading all chains' })).toBeVisible()

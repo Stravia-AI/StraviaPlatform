@@ -18,9 +18,15 @@ function identifier(value: unknown): string {
   return item.id
 }
 
+const imageBytes = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9l8AAAAASUVORK5CYII=',
+  'base64',
+)
+const imageData = `data:image/png;base64,${imageBytes.toString('base64')}`
+
 // The browser, IndexedDB, admin APIs and Responses gateway are all real. Only
 // the isolated local provider is synthetic; no production upstream is contacted.
-test('real gateway accepts persisted reasoning replay and attributes both turns to the selected Key', async ({
+test('real gateway accepts original images and persisted reasoning replay under the selected Key', async ({
   browser,
 }) => {
   test.setTimeout(120_000)
@@ -270,7 +276,7 @@ test('real gateway accepts persisted reasoning replay and attributes both turns 
     )
     await api(`/providers/${serviceId}/models`, 'POST', {
       model_id: 'synthetic-reasoner',
-      metadata: { name: 'Synthetic reasoner' },
+      metadata: { name: 'Synthetic reasoner', modalities: { input: ['text', 'image'], output: ['text'] } },
     })
     const modelId = identifier(
       await api('/models', 'POST', {
@@ -288,6 +294,9 @@ test('real gateway accepts persisted reasoning replay and attributes both turns 
     await page.reload()
     await page.getByRole('button', { name: 'API Key', exact: true }).click()
     await page.getByRole('option', { name: 'Selected console ownership', exact: true }).click()
+    await page
+      .locator('input[type=file]')
+      .setInputFiles({ name: 'real-screenshot.png', mimeType: 'image/png', buffer: imageBytes })
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('First real question')
     const firstResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/v1/responses')
     await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -310,18 +319,26 @@ test('real gateway accepts persisted reasoning replay and attributes both turns 
     const firstOutput = record(terminal.response).output
     if (!Array.isArray(firstOutput)) throw new Error('Gateway completed response omitted output items')
     expect(firstOutput.some((item) => record(item).type === 'reasoning')).toBe(true)
+    const firstUser = {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'First real question' },
+        { type: 'input_image', image_url: imageData },
+      ],
+    }
+    const upstreamInput = upstreamRequests[0].input
+    expect(JSON.stringify(upstreamInput)).toContain(imageData)
     await page.reload()
+    await expect(
+      page.getByRole('article', { name: 'Your message' }).getByRole('img', { name: 'real-screenshot.png' }),
+    ).toBeVisible()
     await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('First real gateway answer')
     await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Input: 12 tokens')
     const secondRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/v1/responses')
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Second real question')
     await page.getByRole('button', { name: 'Send', exact: true }).click()
     const replay = record((await secondRequest).postDataJSON())
-    expect(replay.input).toEqual([
-      { role: 'user', content: 'First real question' },
-      ...firstOutput,
-      { role: 'user', content: 'Second real question' },
-    ])
+    expect(replay.input).toEqual([firstUser, ...firstOutput, { role: 'user', content: 'Second real question' }])
     expect(replay).not.toHaveProperty('previous_response_id')
     await expect(page.getByRole('article', { name: 'Assistant response' }).last()).toContainText(
       'Second real gateway answer',
