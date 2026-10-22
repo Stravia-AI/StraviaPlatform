@@ -210,7 +210,7 @@ const providerModelColumns = $derived(
       cell: (context) => renderSnippet(providerModelIdentityCell, context),
       enableSorting: false,
       enableGlobalFilter: true,
-      meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-2' },
+      meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-2', width: 'fill' },
       size: 260,
     }),
     providerModelColumnHelper.accessor('specification', {
@@ -242,6 +242,7 @@ const providerModelColumns = $derived(
       meta: {
         label: () => m.model_specification_reasoning_efforts(),
         cellClass: 'whitespace-normal',
+        width: 'fill',
         exportable: false,
       },
       size: 170,
@@ -517,44 +518,6 @@ function clearManualTemplate(): void {
 }
 </script>
 
-<!-- 自动同步属于服务模型列表级设置：与「同步模型」同处列表头部，单个模型编辑页不显示。 -->
-{#snippet syncStatus()}
-  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-    {#if syncStateQuery.data}
-      <div class="flex items-center gap-3">
-        <Switch
-          id="automatic-model-sync"
-          checked={syncStateQuery.data.automatic_sync}
-          disabled={preferenceSaving}
-          onCheckedChange={(value: boolean) => void saveAutomaticSync(value)} />
-        <label for="automatic-model-sync" class="font-medium">{m.model_changes_automatic()}</label>
-        {#if preferenceSaving}<Spinner />{/if}
-      </div>
-    {/if}
-    {#if displayedSyncSummary}
-      <p class="min-w-0 text-muted-foreground">
-        {m.provider_model_catalog_last_checked()}
-        <time class="font-technical text-xs" datetime={displayedSyncSummary.checked_at}
-          >{formatLogTime(displayedSyncSummary.checked_at)}</time>
-        · {sourceLabel(displayedSyncSummary.source)}
-        {#if summaryDescription(displayedSyncSummary)}
-          · <span class="text-foreground">{summaryDescription(displayedSyncSummary)}</span>{/if}
-        {#if displayedSyncSummary.error}<span class="block text-destructive"
-            >{modelChangeReason(displayedSyncSummary.error)}</span
-          >{/if}
-      </p>
-    {:else if syncStateQuery.isPending}
-      <Spinner />
-    {/if}
-    {#if syncStateQuery.data?.in_progress}<p role="status" class="flex items-center gap-2 text-muted-foreground">
-        <Spinner />{m.model_changes_in_progress()}
-      </p>{/if}
-    {#if syncStateQuery.data?.automatic_sync && syncStateQuery.data.pause_reason}<p class="text-warning">
-        {modelChangeReason(syncStateQuery.data.pause_reason)}
-      </p>{/if}
-  </div>
-{/snippet}
-
 {#snippet providerModelIdentityCell(context: DataTableCellContext<ProviderModelSummary>)}
   {@const model = context.row.original}
   <div class="w-full min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
@@ -573,10 +536,10 @@ function clearManualTemplate(): void {
   {@render modelContext(context.row.original)}
 {/snippet}
 
-{#snippet modelContext(model: ProviderModelSummary)}
+{#snippet modelContext(model: ProviderModelSummary, compact = false)}
   {@const value = model.specification.limit?.context}
 
-  <ModelCellEditor {providerId} {model} field="context">
+  <ModelCellEditor {providerId} {model} field="context" {compact}>
     <span class="font-technical text-sm">
       {value == null ? m.model_specification_not_registered() : formatSpecificationTokens(value)}
     </span>
@@ -587,11 +550,11 @@ function clearManualTemplate(): void {
   {@render modelModalities(context.row.original)}
 {/snippet}
 
-{#snippet modelModalities(model: ProviderModelSummary)}
+{#snippet modelModalities(model: ProviderModelSummary, compact = false)}
   {@const modalities = model.specification.modalities}
 
-  <ModelCellEditor {providerId} {model} field="modalities">
-    <span class="flex flex-col gap-0.5 text-xs">
+  <ModelCellEditor {providerId} {model} field="modalities" {compact}>
+    <span class={['flex gap-0.5 text-xs', compact ? 'flex-wrap gap-x-3' : 'flex-col']}>
       <span role="group" aria-label={m.model_specification_input()} class="flex items-center gap-1.5">
         <span class="text-muted-foreground">{m.model_specification_input()}</span>
         <ModalityIcons values={modalities?.input} tooltip={false} />
@@ -608,10 +571,10 @@ function clearManualTemplate(): void {
   {@render modelEfforts(context.row.original)}
 {/snippet}
 
-{#snippet modelEfforts(model: ProviderModelSummary)}
+{#snippet modelEfforts(model: ProviderModelSummary, compact = false)}
   {@const efforts = model.specification.reasoning_efforts}
 
-  <ModelCellEditor {providerId} {model} field="efforts">
+  <ModelCellEditor {providerId} {model} field="efforts" {compact}>
     <span class="break-words font-technical text-xs">
       {efforts?.length ? efforts.join(', ') : m.model_specification_not_registered()}
     </span>
@@ -622,10 +585,10 @@ function clearManualTemplate(): void {
   {@render modelAvailability(context.row.original)}
 {/snippet}
 
-{#snippet modelAvailability(model: ProviderModelSummary)}
+{#snippet modelAvailability(model: ProviderModelSummary, compact = false)}
   {@const reason = availabilityReason(model)}
 
-  <ModelCellEditor {providerId} {model} field="availability">
+  <ModelCellEditor {providerId} {model} field="availability" {compact}>
     <Badge variant={model.available ? 'secondary' : 'outline'}>
       {model.available ? m.model_specification_available() : m.common_unavailable()}
     </Badge>
@@ -824,27 +787,64 @@ function clearManualTemplate(): void {
 {:else}
   <section class="route-section" aria-labelledby="provider-model-inventory-title">
     <h2 id="provider-model-inventory-title" class="sr-only">{m.provider_model_catalog_models_service()}</h2>
-    <div class="route-section-header items-center">
-      {@render syncStatus()}
-      <div class="flex flex-wrap gap-2">
-        <Button data-model-changes-trigger variant="outline" onclick={() => changesSheet.show(providerId)}
-          >{m.model_changes_title()}</Button>
+    <!-- 工具栏固定两行：第一行是操作与偏好（自动同步、变更记录、手动添加、同步），第二行是上次检查结果与进行中／暂停状态。 -->
+    <div class="mb-3 flex flex-col gap-2" data-testid="model-inventory-toolbar">
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2" data-toolbar-row="actions">
+        {#if syncStateQuery.data}
+          <div class="flex items-center gap-3 text-sm">
+            <Switch
+              id="automatic-model-sync"
+              checked={syncStateQuery.data.automatic_sync}
+              disabled={preferenceSaving}
+              onCheckedChange={(value: boolean) => void saveAutomaticSync(value)} />
+            <label for="automatic-model-sync" class="font-medium">{m.model_changes_automatic()}</label>
+            {#if preferenceSaving}<Spinner />{/if}
+          </div>
+        {/if}
+        <div class="ms-auto flex flex-wrap gap-2">
+          <Button data-model-changes-trigger variant="outline" onclick={() => changesSheet.show(providerId)}
+            >{m.model_changes_title()}</Button>
 
-        <Button variant="outline" onclick={() => (manualOpen = true)}>
-          <PlusIcon data-icon="inline-start" />
-          {m.provider_model_catalog_add_model_manually()}
-        </Button>
+          <Button variant="outline" onclick={() => (manualOpen = true)}>
+            <PlusIcon data-icon="inline-start" />
+            {m.provider_model_catalog_add_model_manually()}
+          </Button>
 
-        <Button variant="outline" onclick={requestSync} disabled={syncing}>
-          {#if syncing}
-            <Spinner data-icon="inline-start" />
-          {:else}
-            <RefreshCwIcon data-icon="inline-start" />
-          {/if}
+          <Button variant="outline" onclick={requestSync} disabled={syncing}>
+            {#if syncing}
+              <Spinner data-icon="inline-start" />
+            {:else}
+              <RefreshCwIcon data-icon="inline-start" />
+            {/if}
 
-          {m.provider_model_catalog_sync_models()}
-        </Button>
+            {m.provider_model_catalog_sync_models()}
+          </Button>
+        </div>
       </div>
+      {#if displayedSyncSummary || syncStateQuery.isPending || syncStateQuery.data?.in_progress || (syncStateQuery.data?.automatic_sync && syncStateQuery.data.pause_reason)}
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" data-toolbar-row="status">
+          {#if displayedSyncSummary}
+            <p class="min-w-0 text-muted-foreground">
+              {m.provider_model_catalog_last_checked()}
+              <time class="font-technical text-xs" datetime={displayedSyncSummary.checked_at}
+                >{formatLogTime(displayedSyncSummary.checked_at)}</time>
+              · {sourceLabel(displayedSyncSummary.source)}
+              {#if summaryDescription(displayedSyncSummary)}
+                · <span class="text-foreground">{summaryDescription(displayedSyncSummary)}</span>{/if}
+              {#if displayedSyncSummary.error}
+                · <span class="text-destructive">{modelChangeReason(displayedSyncSummary.error)}</span>{/if}
+            </p>
+          {:else if syncStateQuery.isPending}
+            <Spinner />
+          {/if}
+          {#if syncStateQuery.data?.in_progress}<p role="status" class="flex items-center gap-2 text-muted-foreground">
+              <Spinner />{m.model_changes_in_progress()}
+            </p>{/if}
+          {#if syncStateQuery.data?.automatic_sync && syncStateQuery.data.pause_reason}<p class="text-warning">
+              {modelChangeReason(syncStateQuery.data.pause_reason)}
+            </p>{/if}
+        </div>
+      {/if}
     </div>
 
     {#if preferenceError}<RequestFailure
@@ -912,46 +912,76 @@ function clearManualTemplate(): void {
         {#each filteredModels as model (model.id)}
           {@const references = modelReferences(model.id)}
           {@const matchingRoute = routeForModel(model.id)}
-          <div class="route-mobile-row">
-            <a
-              class="col-span-2 min-w-0 text-left"
-              href={resolve(`providers/${encodeURIComponent(providerId)}?${modelEditorSearch(model.id)}`)}
-              aria-label={`${model.name} ${model.id}`}>
-              <span class="block truncate font-medium">{model.name}</span>
-              <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-            </a>
-            <div class="col-span-2 grid min-w-0 gap-2">
-              {@render modelContext(model)}
-              {@render modelModalities(model)}
-              {@render modelEfforts(model)}
+          <!-- 紧凑行：身份与「添加／使用」动作成组靠前，其余规格用带标签的 dl，每项保留可见的编辑入口。 -->
+          <article class="grid min-w-0 gap-2 border-b py-3 first:border-t" aria-label={`${model.name} ${model.id}`}>
+            <div class="flex min-w-0 items-start justify-between gap-3">
+              <a
+                class="min-w-0 text-left"
+                href={resolve(`providers/${encodeURIComponent(providerId)}?${modelEditorSearch(model.id)}`)}
+                aria-label={`${model.name} ${model.id}`}>
+                <span class="block truncate font-medium">{model.name}</span>
+                <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
+              </a>
+              <div class="flex shrink-0 items-center">
+                {#if references.length > 0}
+                  <a
+                    class="inline-flex items-center rounded-md px-2 py-1 text-sm font-medium hover:bg-muted"
+                    href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}
+                    >{m.provider_model_catalog_used_by_models({ count: references.length })}</a>
+                {:else if routeReferencesReady}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
+                    disabled={!model.available || Boolean(addingRouteModelId)}
+                    onclick={() => void addModelToRoute(model)}>
+                    {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
+                    {matchingRoute
+                      ? m.provider_model_catalog_add_destination()
+                      : m.provider_model_catalog_create_model()}
+                  </Button>
+                {:else}
+                  <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
+                {/if}
+              </div>
             </div>
-            <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-2">
-              {@render modelAvailability(model)}
-              <Badge variant="outline"
-                >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
-
-              <RpmLimit {providerId} modelId={model.id} modelName={model.name} showLabel />
-
-              {#if references.length > 0}
-                <a
-                  class="inline-flex items-center rounded-md px-2 py-1 text-sm font-medium hover:bg-muted"
-                  href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}
-                  >{m.provider_model_catalog_used_by_models({ count: references.length })}</a>
-              {:else if routeReferencesReady}
-                <button
-                  type="button"
-                  class="inline-flex items-center rounded-md px-2 py-1 text-sm font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-70"
-                  aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
-                  disabled={!model.available || Boolean(addingRouteModelId)}
-                  onclick={() => void addModelToRoute(model)}>
-                  {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
-                  {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
-                </button>
-              {:else}
-                <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
-              {/if}
-            </div>
-          </div>
+            <dl class="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1 text-sm">
+              <div class="flex min-w-0 items-center gap-1.5">
+                <dt class="shrink-0 text-xs text-muted-foreground">{m.model_specification_context()}</dt>
+                <dd class="min-w-0 flex-1">{@render modelContext(model, true)}</dd>
+              </div>
+              <div class="flex min-w-0 items-center gap-1.5">
+                <dt class="shrink-0 text-xs text-muted-foreground">{m.rpm_column()}</dt>
+                <dd class="min-w-0 flex-1">
+                  <RpmLimit {providerId} modelId={model.id} modelName={model.name} compact />
+                </dd>
+              </div>
+              <div class="col-span-2 flex min-w-0 items-center gap-1.5">
+                <dt class="shrink-0 text-xs text-muted-foreground">{m.model_specification_modalities()}</dt>
+                <dd class="min-w-0 flex-1">{@render modelModalities(model, true)}</dd>
+              </div>
+              <div class="col-span-2 flex min-w-0 items-center gap-1.5">
+                <dt class="shrink-0 text-xs text-muted-foreground">{m.model_specification_reasoning_efforts()}</dt>
+                <dd class="min-w-0 flex-1">{@render modelEfforts(model, true)}</dd>
+              </div>
+              <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <dt class="shrink-0 text-xs text-muted-foreground">
+                    {m.provider_model_catalog_model_availability()}
+                  </dt>
+                  <dd class="min-w-0">{@render modelAvailability(model, true)}</dd>
+                </div>
+                <div class="min-w-0">
+                  <dt class="sr-only">{m.provider_model_catalog_how_models_were_added()}</dt>
+                  <dd>
+                    <Badge variant="outline"
+                      >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
+                  </dd>
+                </div>
+              </div>
+            </dl>
+          </article>
         {/each}
       {/if}
     </div>

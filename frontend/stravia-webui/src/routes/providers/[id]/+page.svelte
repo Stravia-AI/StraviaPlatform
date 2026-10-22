@@ -220,12 +220,6 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
     {:else if view === 'routes'}
       <section class="route-section" aria-labelledby="provider-route-references-title">
         <h2 id="provider-route-references-title" class="sr-only">{m.providers_used_models()}</h2>
-        <div class="route-section-header items-center">
-          <p class="route-section-description mt-0">{m.providers_model_usage_summary()}</p>
-          {#if routeReferences.length > 0}<Badge variant="outline" class="font-technical"
-              >{routeReferences.length}</Badge
-            >{/if}
-        </div>
         {#if routesQuery.isPending}
           <div class="grid min-h-32 place-items-center"><Spinner /></div>
         {:else if routesQuery.isError}
@@ -246,16 +240,54 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
             {/if}
           </div>
         {:else}
-          <div class="divide-y border-y">
+          <!-- 带列名的紧凑列：宽时表头 + 三列靠左，窄时每行用标签区分三个值。 -->
+          {@const columns = '@min-[40rem]/route-references:grid-cols-[minmax(10rem,22rem)_minmax(10rem,26rem)_5rem]'}
+          <div role="table" aria-label={m.providers_used_models()} class="@container/route-references border-y">
+            <div
+              role="row"
+              class={[
+                'hidden gap-x-8 border-b py-2 text-xs font-medium text-muted-foreground @min-[40rem]/route-references:grid',
+                columns,
+              ]}>
+              <div role="columnheader">{m.providers_route_client_model()}</div>
+              <div role="columnheader">{m.providers_route_upstream_model()}</div>
+              <div role="columnheader">{m.providers_route_priority()}</div>
+            </div>
             {#each routeReferences as reference (reference.target.id)}
-              <div class="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center">
-                <a class="font-medium hover:underline" href={resolve('/models/[id]', { id: reference.route.model_id })}>
-                  {effectiveModelDisplayName(reference.route)}
-                  {#if logicalModelSecondaryId(reference.route)}
-                    · {reference.route.model_id}{/if}
-                </a>
-                <TechnicalValue value={reference.target.model} copyable />
-                <Badge variant="outline">{m.providers_order()} {reference.target.priority}</Badge>
+              {@const sameId = reference.target.model === reference.route.model_id}
+              <div
+                role="row"
+                class={[
+                  'grid gap-x-8 gap-y-2 py-3 not-first:border-t @min-[40rem]/route-references:items-start',
+                  columns,
+                ]}>
+                <div role="cell" class="min-w-0">
+                  <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
+                    >{m.providers_route_client_model()}</span>
+                  <a
+                    class="block font-medium hover:underline"
+                    href={resolve('/models/[id]', { id: reference.route.model_id })}>
+                    <span class="block break-words">{effectiveModelDisplayName(reference.route)}</span>
+                    {#if logicalModelSecondaryId(reference.route)}
+                      <span class="block break-all font-technical text-xs font-normal text-muted-foreground"
+                        >{reference.route.model_id}</span>
+                    {/if}
+                  </a>
+                </div>
+                <div role="cell" class="min-w-0">
+                  <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
+                    >{m.providers_route_upstream_model()}</span>
+                  {#if sameId}
+                    <span class="text-sm text-muted-foreground">{m.providers_route_same_id()}</span>
+                  {:else}
+                    <TechnicalValue value={reference.target.model} copyable />
+                  {/if}
+                </div>
+                <div role="cell" class="min-w-0">
+                  <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
+                    >{m.providers_route_priority()}</span>
+                  <Badge variant="outline" class="font-technical">{reference.target.priority}</Badge>
+                </div>
               </div>
             {/each}
           </div>

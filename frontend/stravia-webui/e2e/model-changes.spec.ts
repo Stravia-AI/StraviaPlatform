@@ -415,3 +415,60 @@ test('older keyset pages remain whole batches when a newer record arrives', asyn
   await expect(olderBatch).toHaveCount(1)
   await expect(panel.getByRole('button', { name: 'Load older records' })).toHaveCount(0)
 })
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`upstream model toolbar keeps the same two rows with every state present (${locale})`, async ({ page }) => {
+    await prepareApp(page)
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+    await page.route('**/api/v1/providers/*/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
+    await page.route('**/api/v1/providers/*/models/sync-state', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            automatic_sync: true,
+            in_progress: true,
+            pause_reason: 'Provider credentials are invalid',
+            last_check: summary,
+            has_successful_sync: true,
+          },
+        },
+      }),
+    )
+    await page.goto(`/providers/${provider.id}?view=models`)
+    const toolbar = page.getByTestId('model-inventory-toolbar')
+    const status = toolbar.locator('[data-toolbar-row="status"]')
+    await expect(status).toBeVisible()
+    await expect(toolbar.locator('[data-toolbar-row]')).toHaveCount(2)
+
+    // 行数 = 行高 / 行高度；同一行的子项共享同一条基线区间，不因语言换到另一行。
+    const rows = await toolbar.locator('[data-toolbar-row]').evaluateAll((elements) =>
+      elements.map((element) => {
+        const lineHeight = (node: Element) => Number.parseFloat(getComputedStyle(node).lineHeight) || 20
+        const box = element.getBoundingClientRect()
+        const tops = new Set(
+          Array.from(element.querySelectorAll(':scope > *, :scope > * > *'))
+            .filter((child) => child.getBoundingClientRect().height > 0)
+            .map((child) => Math.round(child.getBoundingClientRect().top / 8)),
+        )
+        return {
+          kind: element.getAttribute('data-toolbar-row'),
+          lines: Math.round(box.height / Math.max(lineHeight(element), 36)),
+          tops: tops.size,
+          bottom: box.bottom,
+        }
+      }),
+    )
+    expect(rows.map((row) => row.kind)).toEqual(['actions', 'status'])
+    // 第一行：自动同步、变更记录、手动添加与同步在一条线上；第二行：结果与状态同样各自一行。
+    expect(rows[0].lines).toBe(1)
+    expect(rows[1].lines).toBe(1)
+    const actionButtons = toolbar.locator('[data-toolbar-row="actions"] button:not([role="switch"])')
+    const tops = await actionButtons.evaluateAll((buttons) =>
+      buttons.map((button) => Math.round(button.getBoundingClientRect().top)),
+    )
+    expect(new Set(tops).size).toBe(1)
+    await expect(page.locator('[data-slot="table-container"]').first()).toBeVisible()
+  })
+}

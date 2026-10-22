@@ -163,6 +163,28 @@ for (const surface of ['detail', 'cell'] as const) {
   })
 }
 
+test('cell editors keep optional explanations behind help hints', async ({ page }) => {
+  await setup(page)
+  await page.getByRole('button', { name: 'Reasoning effort model-a', exact: true }).click()
+  const popover = page.getByRole('dialog')
+  await expect(popover.getByLabel('Reasoning effort', { exact: true })).toBeVisible()
+  await expect(popover.getByText('Record the reasoning efforts this model accepts')).toBeHidden()
+  await popover.locator('[data-slot="field-hint"]').hover()
+  await expect(page.locator('[data-slot="tooltip-content"]').first()).toContainText(
+    'Record the reasoning efforts this model accepts',
+  )
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('button', { name: 'Availability when adding models model-a', exact: true }).click()
+  await expect(page.getByRole('dialog').getByText('Controls whether this upstream model can be chosen')).toBeHidden()
+  await page.getByRole('dialog').locator('[data-slot="field-hint"]').hover()
+  await expect(page.locator('[data-slot="tooltip-content"]').first()).toContainText(
+    'Controls whether this upstream model can be chosen',
+  )
+  await expect(page.locator('[data-slot="tooltip-content"]').first()).not.toContainText('immediately')
+})
+
 const discardDialog = (page: Page) => page.getByRole('alertdialog', { name: 'Discard unsaved model changes?' })
 const nameField = (page: Page) => page.locator('#provider-model-name')
 
