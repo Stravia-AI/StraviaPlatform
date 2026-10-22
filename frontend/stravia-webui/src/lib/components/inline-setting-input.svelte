@@ -40,6 +40,7 @@ import { Button } from '#lib/components/ui/button/index.js'
 import { fieldControlWidths } from '#lib/components/ui/field/field-sizes.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
+import { useInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
 import { inlineSaveKeyAction, reconcileInlineDraft } from '#lib/inline-save.js'
 import { cn } from '#lib/utils.js'
 
@@ -86,7 +87,15 @@ $effect.pre(() => {
   trackedSaved = next
 })
 
-onDestroy(() => clearTimeout(signalTimer))
+// 页面提供了草稿登记表时，未保存的草稿会让离开页面或切换分组先确认。
+const draftRegistry = useInlineDraftRegistry()
+const draftToken = Symbol('inline-setting-input')
+$effect(() => draftRegistry?.mark(draftToken, dirty))
+
+onDestroy(() => {
+  clearTimeout(signalTimer)
+  draftRegistry?.release(draftToken)
+})
 
 function revert() {
   draft = value

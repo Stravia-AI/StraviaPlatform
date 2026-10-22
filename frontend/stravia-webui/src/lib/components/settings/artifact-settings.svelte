@@ -236,6 +236,7 @@ function toggleExternalDownloads(enabled: boolean): void {
 <SettingsSheet
   bind:open={s3Open}
   title={m.artifact_s3_settings()}
+  draft={() => [s3Draft, s3ExpiryText]}
   submitLabel={m.artifact_save()}
   saving={s3Saving}
   error={s3Error}
@@ -285,6 +286,7 @@ function toggleExternalDownloads(enabled: boolean): void {
 <SettingsSheet
   bind:open={downloadsOpen}
   title={m.artifact_external_downloads()}
+  draft={() => publicUrlDraft}
   submitLabel={artifact?.external_signed_downloads ? m.artifact_save() : m.artifact_external_downloads_enable()}
   saving={downloadsSaving}
   submitDisabled={!publicUrlDraft.trim()}
