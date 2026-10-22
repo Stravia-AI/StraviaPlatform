@@ -24,16 +24,14 @@ const failed = $derived(state.status === 'failed' || connectionError)
             ? m.server_startup_failed_title()
             : m.desktop_startup_starting_title()}
       </h1>
-      <p class="mt-2 text-sm text-muted-foreground text-pretty">
-        {connectionError
-          ? m.server_startup_connection_action()
-          : state.status === 'failed'
-            ? m.server_startup_failed_action()
-            : m.server_startup_description()}
-      </p>
+      {#if failed}
+        <p class="mt-2 text-sm text-muted-foreground text-pretty">
+          {connectionError ? m.server_startup_connection_action() : m.server_startup_failed_action()}
+        </p>
+      {/if}
     </div>
     {#if failed}
-      <Button onclick={() => window.location.reload()}>{m.server_startup_refresh()}</Button>
+      <Button class="self-start" onclick={() => window.location.reload()}>{m.server_startup_refresh()}</Button>
     {:else}
       <StartupProgress
         progress={state.progress ?? { phase: 'gateway', label: 'Preparing services', completed: 0, total: null }} />
