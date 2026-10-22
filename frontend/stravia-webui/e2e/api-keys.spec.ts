@@ -76,6 +76,11 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(secret).toHaveValue('sk-edited-secret')
   await editor.getByRole('button', { name: 'Show API key', exact: true }).click()
   await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  // 编辑过密钥的草稿：取消先确认，放弃后才关闭。
+  await page
+    .getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    .getByRole('button', { name: 'Discard changes' })
+    .click()
   await expect(editor).toBeHidden()
   expect(writes).toBe(0)
   await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()

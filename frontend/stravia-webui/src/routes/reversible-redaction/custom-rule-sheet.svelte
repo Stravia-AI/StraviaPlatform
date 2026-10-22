@@ -7,6 +7,7 @@ import TrashIcon from '@lucide/svelte/icons/trash-2'
 
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import {
   customRuleFieldError,
   draftFromRule,
@@ -17,6 +18,7 @@ import {
   type CustomRuleFieldError,
 } from '#lib/credential-custom-rule.js'
 import type { CustomCredentialRule } from '#lib/types.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import SecretTextarea from '#lib/components/secret-textarea.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
@@ -43,6 +45,9 @@ let advanced = $state('')
 // 每次打开都重新遮蔽敏感文本。
 let session = $state(0)
 const busy = $derived(saving || deleting)
+// 草稿离开保护：打开时的草稿是基线，任何出口在有改动时先确认。
+const baseline = new DraftBaseline(() => draft)
+const guard = new DraftGuard({ dirty: () => open && baseline.dirty, busy: () => busy })
 
 /** 传入规则进入编辑；传 null 新建。草稿在打开时一次性建立，关闭后丢弃。 */
 export function show(target: CustomCredentialRule | null): void {
@@ -52,6 +57,7 @@ export function show(target: CustomCredentialRule | null): void {
   fieldError = null
   formError = ''
   session += 1
+  baseline.reset()
   open = true
 }
 
@@ -102,8 +108,11 @@ async function remove(): Promise<void> {
 }
 </script>
 
-<Sheet.Root bind:open>
-  <Sheet.Content closeLabel={m.common_close()} class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-xl">
+<Sheet.Root bind:open={() => open, guard.openChange((next) => (open = next))}>
+  <Sheet.Content
+    locked={guard.busy}
+    closeLabel={m.common_close()}
+    class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-xl">
     <Sheet.Header class="border-b pr-12">
       <Sheet.Title>{rule ? m.credential_custom_edit() : m.credential_custom_add()}</Sheet.Title>
       <Sheet.Description>{m.credential_custom_sheet_description()}</Sheet.Description>
@@ -265,13 +274,8 @@ async function remove(): Promise<void> {
               deleteOpen = true
             }}><TrashIcon data-icon="inline-start" />{m.credential_custom_delete()}</Button>
         {/if}
-        <Button
-          type="button"
-          variant="outline"
-          disabled={busy}
-          onclick={() => {
-            open = false
-          }}>{m.common_cancel()}</Button>
+        <Button type="button" variant="outline" disabled={busy} onclick={() => guard.request(() => (open = false))}
+          >{m.common_cancel()}</Button>
         <Button type="submit" disabled={busy} aria-busy={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{rule
             ? m.credential_custom_save()
@@ -295,3 +299,5 @@ async function remove(): Promise<void> {
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<DraftDiscardDialog {guard} />

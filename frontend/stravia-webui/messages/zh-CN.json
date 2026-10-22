@@ -2076,5 +2076,9 @@
   "rpm_edit_label": "{model} 的 RPM 限额：{value}",
   "rpm_limit_help": "限制 Stravia 在任意 60 秒内向此上游模型发送的请求数。所有使用它的模型共同计数，重试也计入。",
   "rpm_requests_per_minute": "每分钟请求数",
-  "rpm_save_limit": "保存限额"
+  "rpm_save_limit": "保存限额",
+  "draft_guard_title": "放弃未保存的更改？",
+  "draft_guard_description": "未保存的更改将会丢失。",
+  "draft_guard_keep_editing": "继续编辑",
+  "draft_guard_discard": "放弃更改"
 }

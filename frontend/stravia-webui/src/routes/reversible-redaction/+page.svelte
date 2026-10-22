@@ -406,7 +406,7 @@ function selectMatch(match: CredentialMatch): void {
               ></Alert.Root>
           {/if}
           <DataTable
-            class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
+            workbench
             data={visibleRows}
             columns={ruleColumns}
             labels={tableLabels}
@@ -414,7 +414,6 @@ function selectMatch(match: CredentialMatch): void {
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
-            scrollHeight="100%"
             loading={rulesQuery.isPending}
             loadingRows={8}
             globalFilterEnabled

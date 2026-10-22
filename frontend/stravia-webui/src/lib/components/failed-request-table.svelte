@@ -98,8 +98,8 @@ const columns = helper.columns([
     {loading}
     ariaLabel={m.observation_failed_requests()}
     getRowId={(row: FailedRequestSummary) => `${row.kind}:${row.id}`}
-    class="isolate min-h-0 flex-1"
-    scrollHeight="100%"
+    class="isolate flex-1"
+    workbench
     stickyHeader
     onRowClick={({ row }: DataTableRowPointerEvent<FailedRequestSummary>) => onselect(row.original)} />
 </div>
@@ -111,13 +111,5 @@ const columns = helper.columns([
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-}
-/* 滚动区域必须在剩余高度内收缩，不能让长表格越过分页操作。 */
-.failed-request-table :global([data-slot='data-table-viewport']) {
-  flex: 1;
-  min-height: 0;
-}
-.failed-request-table :global([data-scroll-area-viewport]) {
-  height: 100%;
 }
 </style>

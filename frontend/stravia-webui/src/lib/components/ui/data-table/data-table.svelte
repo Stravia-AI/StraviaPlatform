@@ -40,6 +40,7 @@ import { exportDataTableCsv } from './export.js'
 import { parseDataTableState, serializeDataTableState } from './state-persistence.js'
 import { dataTableVirtualRange } from './virtual-rows.js'
 import {
+  dataTableColumnWidthDeclarations,
   dataTableFeatures,
   defaultDataTableLabels,
   type DataTable,
@@ -80,6 +81,12 @@ interface Props {
   showGridlines?: boolean
   stripedRows?: boolean
   scrollHeight?: string
+  /**
+   * Workbench list: fills the height its parent offers and scrolls the rows inside it, while a short
+   * list keeps its natural height. The parent must be a flex column (or grid) with a definite height
+   * and `min-height: 0`; toolbar and paginator stay outside the scrolling viewport.
+   */
+  workbench?: boolean
   virtualScrollOptions?: DataTableVirtualScrollOptions
   stickyHeader?: boolean
   sortMode?: DataTableSortMode
@@ -188,7 +195,8 @@ let {
   size = 'default',
   showGridlines = false,
   stripedRows = false,
-  scrollHeight,
+  scrollHeight: scrollHeightProp,
+  workbench = false,
   virtualScrollOptions,
   stickyHeader = false,
   sortMode = 'single',
@@ -295,6 +303,7 @@ let virtualScrollTop = $state(0)
 let virtualViewportHeight = $state(0)
 let openFilterColumnId = $state<string>()
 let filterDraft = $state<DataTableFilterGroup>()
+const scrollHeight = $derived(scrollHeightProp ?? (workbench ? '100%' : undefined))
 const resolvedLabels = $derived({ ...defaultDataTableLabels, ...labels })
 
 function currentState(): DataTableState {
@@ -640,8 +649,15 @@ function columnInlineStyle(
   header = false,
 ): string | undefined {
   const declarations: string[] = []
-  if (resizableColumns || column.getIsPinned()) declarations.push(`width:${column.getSize()}px`)
   const pinned = column.getIsPinned()
+  declarations.push(
+    ...dataTableColumnWidthDeclarations({
+      width: column.columnDef.meta?.width,
+      size: column.getSize(),
+      explicit: Boolean(pinned) || columnSizing[column.id] !== undefined,
+      resizable: resizableColumns,
+    }),
+  )
   if (pinned) {
     declarations.push(
       'position:sticky',
@@ -1124,7 +1140,8 @@ $effect(() => {
 <div
   bind:this={rootElement}
   data-slot="data-table"
-  class={cn('flex min-w-0 flex-col gap-3', className)}
+  data-workbench={workbench ? '' : undefined}
+  class={cn('@container/data-table flex min-w-0 flex-col gap-3', workbench && 'h-full min-h-0', className)}
   style="--data-table-header-background:color-mix(in oklab,var(--muted) 45%,var(--background))">
   {#if showToolbar}
     <div class="flex flex-wrap items-center gap-2" data-slot="data-table-toolbar">
@@ -1138,9 +1155,11 @@ $effect(() => {
           {/if}
         </Button>
       {/if}
-      <div class="ms-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+      <!-- 窄容器中该组 display: contents，搜索排到最前并独占整行，筛选与动作按流式换行；宽容器中右对齐成一行。 -->
+      <div
+        class="contents min-w-0 flex-1 flex-wrap items-center justify-end gap-2 @xl/data-table:ms-auto @xl/data-table:flex">
         {#if globalFilterEnabled}
-          <InputGroup.Root class="w-full min-w-48 sm:w-80">
+          <InputGroup.Root class="order-first w-full min-w-0 @xl/data-table:order-none @xl/data-table:w-80">
             <InputGroup.Input
               id={globalFilterId}
               value={globalFilter}
@@ -1173,12 +1192,12 @@ $effect(() => {
 
   <ScrollArea.Root
     type="auto"
-    class="relative min-w-0 rounded-md border border-border/60"
+    class={cn('relative min-w-0 rounded-md border border-border/60', workbench && 'flex min-h-0 flex-col')}
     data-slot="data-table-viewport">
     <ScrollArea.Viewport
       bind:ref={viewportElement}
-      class="w-full rounded-[inherit] [&_[data-slot=table-container]]:overflow-visible"
-      style={scrollHeight ? `max-height:${scrollHeight}` : undefined}
+      class={cn('w-full rounded-[inherit] [&_[data-slot=table-container]]:overflow-visible', workbench && 'min-h-0')}
+      style={scrollHeightProp ? `max-height:${scrollHeightProp}` : undefined}
       onscroll={handleViewportScroll}>
       <Table.Root
         aria-label={ariaLabel}
