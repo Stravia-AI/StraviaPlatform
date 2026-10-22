@@ -87,7 +87,14 @@ async function save(): Promise<void> {
   {/if}
 </SettingsSection>
 
-<SettingsSheet bind:open title={m.rpm_wait_title()} submitLabel={m.rpm_save()} {saving} {error} onsubmit={save}>
+<SettingsSheet
+  bind:open
+  title={m.rpm_wait_title()}
+  draft={() => draft}
+  submitLabel={m.rpm_save()}
+  {saving}
+  {error}
+  onsubmit={save}>
   <Field.FieldGroup>
     <Field.Field size="number">
       <Field.FieldLabel for="rpm-preferred-wait" hint={m.rpm_default_value({ value: 5000 })}>

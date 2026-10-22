@@ -519,6 +519,12 @@ test('administrator credentials are edited in a sheet that states every session 
   await expect(sheet.getByText('Saving signs out every session.')).toBeVisible()
   const save = sheet.getByRole('button', { name: 'Save credentials', exact: true })
   await expect(save).toBeDisabled()
+  // 无草稿时取消直接关闭，不弹放弃确认。
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: /^Edit/ }).click()
   await sheet.getByLabel('Current password').fill('old-password')
   await sheet.getByLabel('New password').fill('new-password')
   await sheet.getByLabel('Confirm password').fill('different')
@@ -526,6 +532,10 @@ test('administrator credentials are edited in a sheet that states every session 
   await expect(save).toBeDisabled()
   await sheet.getByLabel('Confirm password').fill('new-password')
   await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  const discard = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+  await expect(discard).toBeVisible()
+  expect(submitted).toBeUndefined()
+  await discard.getByRole('button', { name: 'Discard changes', exact: true }).click()
   await expect(sheet).toHaveCount(0)
   expect(submitted).toBeUndefined()
 
@@ -1806,4 +1816,129 @@ test('credential protection separates setting load failure from empty rules and 
   await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await expect(page.getByRole('switch')).toBeEnabled()
   await expect(page.getByRole('switch')).not.toBeChecked()
+})
+
+const discardDialog = (page: Page) => page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+
+test('a settings Sheet closes freely when clean and confirms before discarding a draft', async ({ page }) => {
+  let saved = { url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }
+  const writes: unknown[] = []
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      writes.push(route.request().postDataJSON())
+      saved = JSON.parse(route.request().postDataJSON().value)
+    }
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings?view=network')
+  const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
+  const url = page.locator('#proxy-url')
+
+  // No draft: Escape closes without asking.
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  await expect(sheet).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(sheet).toHaveCount(0)
+  await expect(discardDialog(page)).toHaveCount(0)
+
+  // Draft: Escape asks; keeping the draft leaves the Sheet and the text untouched.
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  await url.fill('socks5h://127.0.0.1:1080')
+  await page.keyboard.press('Escape')
+  await expect(discardDialog(page)).toBeVisible()
+  await discardDialog(page).getByRole('button', { name: 'Keep editing' }).click()
+  await expect(discardDialog(page)).toHaveCount(0)
+  await expect(sheet).toBeVisible()
+  await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
+
+  // Cancel goes through the same confirmation; discarding closes and reopening starts from the saved value.
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(discardDialog(page)).toBeVisible()
+  await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(writes).toHaveLength(0)
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  await expect(url).toHaveValue('http://127.0.0.1:7890')
+
+  // Reverting the draft by hand makes it clean again.
+  await url.fill('http://127.0.0.1:1')
+  await url.fill('http://127.0.0.1:7890')
+  await page.keyboard.press('Escape')
+  await expect(sheet).toHaveCount(0)
+  await expect(discardDialog(page)).toHaveCount(0)
+})
+
+test('a settings Sheet is locked while saving and closes without asking after a successful save', async ({ page }) => {
+  let saved = { url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }
+  let release: (() => void) | undefined
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await new Promise<void>((resolve) => (release = resolve))
+      saved = JSON.parse(route.request().postDataJSON().value)
+    }
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings?view=network')
+  const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  await page.locator('#proxy-url').fill('http://127.0.0.1:9999')
+  await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
+  await expect.poll(() => release !== undefined).toBe(true)
+  await page.keyboard.press('Escape')
+  await expect(sheet).toBeVisible()
+  await expect(discardDialog(page)).toHaveCount(0)
+  release?.()
+  await expect(sheet).toHaveCount(0)
+  await expect(discardDialog(page)).toHaveCount(0)
+  await expect(page.locator('#proxy')).toContainText('http://127.0.0.1:9999')
+})
+
+test('switching settings groups with a dirty inline input asks first and stays quiet when clean', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.route('**/api/v1/settings/outbound_proxy', (route) =>
+    route.fulfill({ json: { data: JSON.stringify({ url: '', bypass: 'localhost', force_http1: true }) } }),
+  )
+  await page.goto('/settings?view=network')
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  const bypass = page.locator('#proxy-bypass')
+
+  // Clean: no prompt.
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await expect(page).toHaveURL(/view=data$/)
+  await expect(discardDialog(page)).toHaveCount(0)
+  await nav.getByRole('link', { name: 'Network' }).click()
+  await expect(page).toHaveURL(/view=network$/)
+
+  // Dirty: the switch is held until the draft is discarded; keeping it leaves group and text unchanged.
+  await bypass.fill('localhost,.internal')
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await expect(discardDialog(page)).toBeVisible()
+  await expect(page).toHaveURL(/view=network$/)
+  await discardDialog(page).getByRole('button', { name: 'Keep editing' }).click()
+  await expect(page).toHaveURL(/view=network$/)
+  await expect(bypass).toHaveValue('localhost,.internal')
+
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/view=data$/)
+  await expect(page.getByRole('heading', { level: 2, name: 'Request history' })).toBeVisible()
+
+  // The discarded draft is gone, and leaving the page is guarded the same way once dirty again.
+  await nav.getByRole('link', { name: 'Network' }).click()
+  await expect(bypass).toHaveValue('localhost')
+  await bypass.fill('changed')
+  await page.getByRole('navigation', { name: 'Primary navigation' }).getByRole('link', { name: 'Models' }).click()
+  await expect(discardDialog(page)).toBeVisible()
+  await expect(page).toHaveURL(/\/settings\?view=network$/)
+  await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/\/models$/)
+
+  // Saving clears the draft: nothing to confirm afterwards.
+  await page.goto('/settings?view=network')
+  await bypass.fill('saved-host')
+  await bypass.press('Enter')
+  await expect(page.locator('#proxy').getByRole('status')).toHaveText('Saved')
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await expect(page).toHaveURL(/view=data$/)
+  await expect(discardDialog(page)).toHaveCount(0)
 })
