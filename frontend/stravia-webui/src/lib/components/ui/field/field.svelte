@@ -4,9 +4,11 @@ import { tv, type VariantProps } from 'tailwind-variants'
 export const fieldVariants = tv({
   base: 'data-[invalid=true]:text-destructive group/field @container/field w-full min-w-0 [--field-control-width:36rem]',
   variants: {
-    orientation: { vertical: '', horizontal: '', responsive: '' },
+    // 左右排布的 Field 以设置列（60rem）为上限，label 与控件的距离不随内容容器放大。
+    orientation: { vertical: '', horizontal: 'max-w-[60rem]', responsive: 'max-w-[60rem]' },
     size: {
       number: '[--field-control-width:7rem]',
+      setting: '[--field-control-width:16rem]',
       datetime: '[--field-control-width:18rem]',
       name: '[--field-control-width:24rem]',
       select: '[--field-control-width:28rem]',
@@ -15,6 +17,7 @@ export const fieldVariants = tv({
   },
   compoundVariants: [
     { orientation: 'vertical', size: 'number', class: 'max-w-[7rem]' },
+    { orientation: 'vertical', size: 'setting', class: 'max-w-[16rem]' },
     { orientation: 'vertical', size: 'datetime', class: 'max-w-[18rem]' },
     { orientation: 'vertical', size: 'name', class: 'max-w-[24rem]' },
     { orientation: 'vertical', size: 'select', class: 'max-w-[28rem]' },

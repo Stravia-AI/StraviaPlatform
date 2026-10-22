@@ -114,6 +114,43 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
 })
 
+test('API Key editor keeps optional help in tooltips and required scope visible at every width', async ({ page }) => {
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+  await page.route('**/api/v1/api-keys', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  for (const width of [1920, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/api-keys')
+    await page.getByRole('button', { name: 'Create first API Key' }).click()
+    const overlay = page.locator('[data-slot="sheet-content"]')
+    await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
+
+    // Optional explanations live only in the question-mark tooltip and never add a visible line under the label.
+    await expect(overlay.locator('[data-slot="field-hint-text"]')).toHaveCount(0)
+    const rpm = overlay.getByRole('group').filter({ has: page.locator('#api-key-rpm-limit') })
+    const help = rpm.getByRole('button', { name: 'More about this field' })
+    await help.focus()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
+    await expect(page.locator('[data-slot="tooltip-content"]')).not.toContainText('internal')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(0)
+
+    // Access scope is required information and stays visible without hover.
+    await expect(overlay.getByText('Lets this key call Stravia tools through MCP.')).toBeVisible()
+    await expect(overlay.getByText(/every current and future model/)).toBeVisible()
+    await expect(
+      overlay.getByText('Adds the selected features to compatible model requests without client changes', {
+        exact: false,
+      }),
+    ).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
+})
+
 test('API Key editor groups and filters allowed model selections', async ({ page }) => {
   const modelId = '4d93a8ac-0d1f-4891-8780-55c2f566c084'
   const secondModelId = 'd414f418-547e-4269-b917-fec9a10c39bb'
@@ -231,4 +268,42 @@ test('API Key editor groups and filters allowed model selections', async ({ page
   await expect(page.locator('#api-key-model-picker')).toHaveCount(0)
   await page.getByRole('button', { name: 'Save API Key' }).click()
   await expect.poll(() => modelIds).toEqual([])
+})
+
+test('API Key direct page titles itself with the key name, falls back to its ID, and keeps recovery when missing', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const apiKey = {
+    id: 'key-direct',
+    key: 'sk-direct',
+    name: 'Direct client',
+    rpm_limit: null,
+    is_enabled: true,
+    mcp_access_enabled: false,
+    transparent_injection_enabled: false,
+    inject_media_understanding: false,
+    inject_media_generation: false,
+    inject_web_search: false,
+    expires_at: null,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
+    model_ids: [],
+  }
+  const unnamedKey = { ...apiKey, id: 'key-unnamed', key: 'sk-unnamed', name: '' }
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/api-keys', (route) => route.fulfill({ json: { data: [apiKey, unnamedKey] } }))
+
+  await page.goto('/api-keys/key-direct')
+  const title = page.getByRole('heading', { level: 1 })
+  await expect(title).toHaveText('Direct client')
+  await expect(page.getByRole('heading', { name: 'Edit API Key' })).toHaveCount(0)
+  await expect(page.locator('header').filter({ has: title }).locator('p')).toHaveCount(0)
+
+  await page.goto('/api-keys/key-unnamed')
+  await expect(title).toHaveText('key-unnamed')
+
+  await page.goto('/api-keys/key-missing')
+  await expect(title).toHaveText('API Key not found')
+  await expect(page.getByRole('link', { name: 'Back to API Keys' })).toHaveAttribute('href', '/api-keys')
 })

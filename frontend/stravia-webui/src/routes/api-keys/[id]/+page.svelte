@@ -43,13 +43,13 @@ async function returnToApiKeys(): Promise<void> {
 }
 </script>
 
-<svelte:head><title>{apiKey?.name ?? m.common_api_key()} · Stravia</title></svelte:head>
+<svelte:head><title>{apiKey ? apiKey.name.trim() || apiKey.id : m.common_api_key()} · Stravia</title></svelte:head>
 
 {#if apiKeysQuery.isPending || modelsQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if apiKeysQuery.isError || modelsQuery.isError}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.common_api_key()} />
+    <PageHeader title={m.common_api_key()} />
     <RequestFailure
       title={m.api_keys_api_keys_not_loaded()}
       message={localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
@@ -59,7 +59,7 @@ async function returnToApiKeys(): Promise<void> {
   </div>
 {:else if !apiKey}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.api_keys_api_key_not_found()} />
+    <PageHeader title={m.api_keys_api_key_not_found()} />
     <Button href="/api-keys" variant="outline">{m.api_keys_back_api_keys()}</Button>
   </div>
 {:else}

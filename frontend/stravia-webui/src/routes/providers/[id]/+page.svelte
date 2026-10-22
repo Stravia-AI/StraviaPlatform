@@ -114,13 +114,14 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
 }
 </script>
 
-<svelte:head><title>{provider?.name ?? m.common_model_service()} · Stravia</title></svelte:head>
+<svelte:head
+  ><title>{provider ? provider.name.trim() || provider.id : m.common_model_service()} · Stravia</title></svelte:head>
 
 {#if providersQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if providersQuery.isError && !provider}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.common_model_service_details()} />
+    <PageHeader title={m.common_model_service_details()} />
     <RequestFailure
       title={m.providers_model_services_not_loaded()}
       message={localizeBackendErrorMessage(providersQuery.error)}
@@ -131,16 +132,13 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
   </div>
 {:else if !provider}
   <div class="route-page">
-    <PageHeader
-      eyebrow={m.common_model_service()}
-      title={m.providers_model_service_not_found()}
-      description={m.providers_saved_model_service_no_longer_available()} />
+    <PageHeader title={m.providers_model_service_not_found()} />
     <Button href="/providers" variant="outline"
       ><ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}</Button>
   </div>
 {:else}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_model_service()} title={provider.name}>
+    <PageHeader title={provider.name.trim() || provider.id}>
       {#snippet meta()}
         {@const credentialInvalid = provider.credential_status === 'invalid'}
         <div class="flex flex-wrap items-center gap-2">

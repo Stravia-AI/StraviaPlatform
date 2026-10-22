@@ -16,7 +16,7 @@ function setSelectedLocale(value: string): void {
 }
 </script>
 
-<Field.Field class={className} size="select">
+<Field.Field class={className} size="setting">
   <Field.FieldLabel for="interface-language" hint={description ? m.locale_language_description() : undefined}>
     {m.locale_language_label()}
   </Field.FieldLabel>

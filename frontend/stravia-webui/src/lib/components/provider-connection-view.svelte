@@ -278,9 +278,10 @@ async function testConnection(): Promise<void> {
 
     <FormSection title={m.provider_connection_view_section_network()}>
       <Field.Field orientation="horizontal" class="justify-between">
-        <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
-          {m.common_use_proxy()}
-        </Field.Label>
+        <Field.Content>
+          <Field.Label for="provider-use-proxy">{m.common_use_proxy()}</Field.Label>
+          <Field.Description>{m.common_send_requests_service_proxy_configured_settings()}</Field.Description>
+        </Field.Content>
         <Switch
           id="provider-use-proxy"
           checked={draft.fields.useProxy}

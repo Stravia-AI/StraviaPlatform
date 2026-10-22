@@ -86,11 +86,7 @@ function lastModel(item: ConsoleConversation) {
 {#snippet actionsCell(context: DataTableCellContext<ConsoleConversation>)}<ConsoleChatActions
     conversation={context.row.original} />{/snippet}
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.console_chat_chat()}
-    title={m.console_chat_all()}
-    description={m.console_chat_local_history()}
-    actions={pageActions} />
+  <PageHeader title={m.console_chat_all()} description={m.console_chat_local_history()} actions={pageActions} />
   {#if snapshot.loadError}<p role="alert" class="text-destructive">{localizeBackendErrorMessage(snapshot.loadError)}</p>
     <Button variant="outline" onclick={() => void chat.start()}>{m.console_chat_retry()}</Button>
   {:else if snapshot.storageError}<p role="alert" class="text-destructive">
