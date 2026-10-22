@@ -261,3 +261,36 @@ test('page header status sits on the title row and stays after the title on narr
   ).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
+
+test('content container caps at 120rem, centers, and keeps one left edge across list and detail pages', async ({
+  page,
+}) => {
+  const container = page.getByRole('main').locator('> div')
+  const containerBox = async () => {
+    const box = await container.boundingBox()
+    return box && { x: Math.round(box.x), width: Math.round(box.width) }
+  }
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/providers')
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  await expect.poll(containerBox).toEqual({ x: 282, width: 1124 })
+
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  // 展开侧栏时主区 2296px，内容达到 120rem 上限，两侧各留 188px。
+  await expect.poll(containerBox).toEqual({ x: 256 + 188, width: 1920 })
+  await page.getByRole('button', { name: 'Collapse navigation' }).click()
+  // 折叠侧栏后主区 2504px，容器仍是 1920px，仅向左移动 104px。
+  await expect.poll(containerBox).toEqual({ x: 48 + 292, width: 1920 })
+
+  await page.getByRole('button', { name: 'Expand navigation' }).click()
+  const titleLeft: Record<string, number> = {}
+  for (const path of ['/providers', '/providers/missing-provider', '/models', '/models/new']) {
+    await page.goto(path)
+    const title = page.getByRole('main').getByRole('heading', { level: 1 })
+    await expect(title).toBeVisible()
+    titleLeft[path] = Math.round((await title.boundingBox())!.x)
+  }
+  expect(new Set(Object.values(titleLeft)).size, JSON.stringify(titleLeft)).toBe(1)
+  await expect.poll(containerBox).toMatchObject({ x: titleLeft['/providers'], width: 1920 })
+})

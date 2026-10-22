@@ -550,7 +550,7 @@ onMount(() => {
       <div class="min-w-0 flex-1 overflow-hidden p-0 md:pr-2 md:pb-2">
         <main
           class="shell-main shell-scrollbar flex h-full min-w-0 flex-col overflow-y-auto bg-background p-4 md:rounded-lg">
-          <div class="mx-auto w-full max-w-[90rem]">
+          <div class="mx-auto w-full max-w-(--content-max-width)">
             {@render children()}
           </div>
         </main>
