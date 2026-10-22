@@ -115,7 +115,6 @@ async function remove(): Promise<void> {
     class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-xl">
     <Sheet.Header class="border-b pr-12">
       <Sheet.Title>{rule ? m.credential_custom_edit() : m.credential_custom_add()}</Sheet.Title>
-      <Sheet.Description>{m.credential_custom_sheet_description()}</Sheet.Description>
     </Sheet.Header>
     <form
       class="flex min-h-0 flex-1 flex-col"
@@ -149,9 +148,9 @@ async function remove(): Promise<void> {
               </Tabs.List>
 
               <Tabs.Content value="simple" class="flex flex-col gap-4">
-                <p class="text-sm text-muted-foreground">{m.credential_custom_mode_simple_help()}</p>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('text')}>
-                  <Field.Label for="custom-rule-text">{m.credential_custom_text()}</Field.Label>
+                  <Field.Label for="custom-rule-text" hint={m.credential_custom_text_help()}
+                    >{m.credential_custom_text()}</Field.Label>
                   <SecretTextarea
                     id="custom-rule-text"
                     bind:value={draft.text}
@@ -161,16 +160,15 @@ async function remove(): Promise<void> {
                     autocapitalize="off"
                     disabled={busy}
                     aria-invalid={!!errorFor('text')}
-                    aria-describedby="custom-rule-text-help custom-rule-text-error" />
-                  <Field.Description id="custom-rule-text-help">{m.credential_custom_text_help()}</Field.Description>
+                    aria-describedby={errorFor('text') ? 'custom-rule-text-error' : undefined} />
                   <Field.Error id="custom-rule-text-error">{errorFor('text')}</Field.Error>
                 </Field.Field>
               </Tabs.Content>
 
               <Tabs.Content value="pattern" class="flex flex-col gap-4">
-                <p class="text-sm text-muted-foreground">{m.credential_custom_mode_pattern_help()}</p>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('regex')}>
-                  <Field.Label for="custom-rule-regex">{m.credential_protection_rule_expression()}</Field.Label>
+                  <Field.Label for="custom-rule-regex" hint={m.credential_custom_regex_help()}
+                    >{m.credential_protection_rule_expression()}</Field.Label>
                   <Input
                     id="custom-rule-regex"
                     class="font-technical"
@@ -179,12 +177,12 @@ async function remove(): Promise<void> {
                     autocapitalize="off"
                     disabled={busy}
                     aria-invalid={!!errorFor('regex')}
-                    aria-describedby="custom-rule-regex-help custom-rule-regex-error" />
-                  <Field.Description id="custom-rule-regex-help">{m.credential_custom_regex_help()}</Field.Description>
+                    aria-describedby={errorFor('regex') ? 'custom-rule-regex-error' : undefined} />
                   <Field.Error id="custom-rule-regex-error">{errorFor('regex')}</Field.Error>
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('secret_group')}>
-                  <Field.Label for="custom-rule-group">{m.credential_custom_group()}</Field.Label>
+                  <Field.Label for="custom-rule-group" hint={m.credential_custom_group_help()}
+                    >{m.credential_custom_group()}</Field.Label>
                   <Input
                     id="custom-rule-group"
                     class="font-technical w-28"
@@ -192,12 +190,12 @@ async function remove(): Promise<void> {
                     bind:value={draft.secretGroup}
                     disabled={busy}
                     aria-invalid={!!errorFor('secret_group')}
-                    aria-describedby="custom-rule-group-help custom-rule-group-error" />
-                  <Field.Description id="custom-rule-group-help">{m.credential_custom_group_help()}</Field.Description>
+                    aria-describedby={errorFor('secret_group') ? 'custom-rule-group-error' : undefined} />
                   <Field.Error id="custom-rule-group-error">{errorFor('secret_group')}</Field.Error>
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('keywords')}>
-                  <Field.Label for="custom-rule-keywords">{m.credential_protection_keywords()}</Field.Label>
+                  <Field.Label for="custom-rule-keywords" hint={m.credential_custom_keywords_help()}
+                    >{m.credential_protection_keywords()}</Field.Label>
                   <Input
                     id="custom-rule-keywords"
                     class="font-technical"
@@ -207,9 +205,7 @@ async function remove(): Promise<void> {
                     autocapitalize="off"
                     disabled={busy}
                     aria-invalid={!!errorFor('keywords')}
-                    aria-describedby="custom-rule-keywords-help custom-rule-keywords-error" />
-                  <Field.Description id="custom-rule-keywords-help"
-                    >{m.credential_custom_keywords_help()}</Field.Description>
+                    aria-describedby={errorFor('keywords') ? 'custom-rule-keywords-error' : undefined} />
                   <Field.Error id="custom-rule-keywords-error">{errorFor('keywords')}</Field.Error>
                 </Field.Field>
                 <Accordion.Root type="single" bind:value={advanced}>
@@ -217,7 +213,8 @@ async function remove(): Promise<void> {
                     <Accordion.Trigger>{m.common_advanced()}</Accordion.Trigger>
                     <Accordion.Content>
                       <Field.Field orientation="vertical" data-invalid={!!errorFor('min_entropy')}>
-                        <Field.Label for="custom-rule-entropy">{m.credential_custom_min_entropy()}</Field.Label>
+                        <Field.Label for="custom-rule-entropy" hint={m.credential_custom_min_entropy_help()}
+                          >{m.credential_custom_min_entropy()}</Field.Label>
                         <Input
                           id="custom-rule-entropy"
                           class="font-technical w-28"
@@ -225,9 +222,7 @@ async function remove(): Promise<void> {
                           bind:value={draft.minEntropy}
                           disabled={busy}
                           aria-invalid={!!errorFor('min_entropy')}
-                          aria-describedby="custom-rule-entropy-help custom-rule-entropy-error" />
-                        <Field.Description id="custom-rule-entropy-help"
-                          >{m.credential_custom_min_entropy_help()}</Field.Description>
+                          aria-describedby={errorFor('min_entropy') ? 'custom-rule-entropy-error' : undefined} />
                         <Field.Error id="custom-rule-entropy-error">{errorFor('min_entropy')}</Field.Error>
                       </Field.Field>
                     </Accordion.Content>
@@ -238,23 +233,20 @@ async function remove(): Promise<void> {
           </Field.Field>
 
           <Field.Field orientation="vertical" data-invalid={!!errorFor('description')}>
-            <Field.Label for="custom-rule-description">{m.credential_custom_description()}</Field.Label>
+            <Field.Label for="custom-rule-description" hint={m.credential_custom_description_help()}
+              >{m.credential_custom_description()}</Field.Label>
             <Input
               id="custom-rule-description"
               bind:value={draft.description}
               disabled={busy}
               aria-invalid={!!errorFor('description')}
-              aria-describedby="custom-rule-description-help custom-rule-description-error" />
-            <Field.Description id="custom-rule-description-help"
-              >{m.credential_custom_description_help()}</Field.Description>
+              aria-describedby={errorFor('description') ? 'custom-rule-description-error' : undefined} />
             <Field.Error id="custom-rule-description-error">{errorFor('description')}</Field.Error>
           </Field.Field>
 
           <Field.Field orientation="horizontal">
-            <Field.Content>
-              <Field.Label for="custom-rule-enabled">{m.credential_custom_enabled()}</Field.Label>
-              <Field.Description>{m.credential_custom_enabled_help()}</Field.Description>
-            </Field.Content>
+            <Field.Label for="custom-rule-enabled" hint={m.credential_custom_enabled_help()}
+              >{m.credential_custom_enabled()}</Field.Label>
             <Switch id="custom-rule-enabled" bind:checked={draft.enabled} disabled={busy} />
           </Field.Field>
 

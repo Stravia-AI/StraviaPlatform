@@ -75,16 +75,13 @@ for (const width of [390, 320]) {
     await expect(toolbar).toBeVisible()
     const search = toolbar.locator('[data-slot="input-group"]').first()
     const filter = toolbar.getByLabel('Rule source')
-    const count = toolbar.getByRole('status')
-    const [toolbarBox, searchBox, filterBox, countBox] = await boxes([toolbar, search, filter, count])
+    const [toolbarBox, searchBox, filterBox] = await boxes([toolbar, search, filter])
 
-    // 搜索整行且在最前；筛选与计数排在其后。
+    // 搜索整行且在最前；筛选排在其后。
     expect(searchBox.width).toBeGreaterThan(toolbarBox.width - 2)
     expect(filterBox.y).toBeGreaterThanOrEqual(searchBox.y + searchBox.height - 0.5)
     expect(overlaps(searchBox, filterBox)).toBe(false)
-    expect(overlaps(filterBox, countBox)).toBe(false)
-    expect(overlaps(searchBox, countBox)).toBe(false)
-    for (const box of [searchBox, filterBox, countBox]) {
+    for (const box of [searchBox, filterBox]) {
       expect(box.x).toBeGreaterThanOrEqual(toolbarBox.x - 0.5)
       expect(box.x + box.width).toBeLessThanOrEqual(toolbarBox.x + toolbarBox.width + 0.5)
     }
