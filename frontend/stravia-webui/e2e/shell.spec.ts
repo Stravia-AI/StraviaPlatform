@@ -289,6 +289,8 @@ test('content container caps at 120rem, centers, and keeps one left edge across 
     await page.goto(path)
     const title = page.getByRole('main').getByRole('heading', { level: 1 })
     await expect(title).toBeVisible()
+    // 标题在数据载入后可能被替换，轮询到稳定的盒子再取位置。
+    await expect.poll(async () => (await title.boundingBox()) !== null).toBe(true)
     titleLeft[path] = Math.round((await title.boundingBox())!.x)
   }
   expect(new Set(Object.values(titleLeft)).size, JSON.stringify(titleLeft)).toBe(1)

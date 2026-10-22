@@ -357,7 +357,12 @@ test('provider editor selects a service before validating its configuration', as
   await expect(apiKey).toHaveAttribute('type', 'text')
   await expect(apiKey).toHaveValue('fixture-only-provider-secret-corrected')
 
+  // 已有草稿时返回选择服务先确认；确认放弃后换服务才清空凭据。
   await page.getByRole('tab', { name: 'Choose provider' }).click()
+  await page
+    .getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+    .getByRole('button', { name: 'Discard changes' })
+    .click()
   await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
   await expect(apiKey).toHaveAttribute('type', 'password')
   await expect(apiKey).toHaveValue('')

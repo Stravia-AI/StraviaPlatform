@@ -1189,6 +1189,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/GPT Available/)
   await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
+  // 指针停在 toast 上会暂停它的计时；节奏调整后确认按钮落在 toast 下方，先移开。
+  await page.mouse.move(0, 0)
   await expect(validationError).toBeHidden({ timeout: 10_000 })
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => createAttempts).toBe(2)

@@ -138,6 +138,7 @@ test('custom rule Sheet confirms before discarding a draft and closes directly w
   await page.keyboard.press('Escape')
   await expect(dialog).toBeVisible()
   await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(dialog).toHaveCount(0)
   await expect(name).toHaveValue('Renamed rule')
 
   await page.mouse.click(8, 400)

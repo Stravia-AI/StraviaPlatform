@@ -123,10 +123,7 @@ const submitMessage = $derived(
 
 // 草稿离开保护：路由离开、刷新与关页在有未保存变更时先确认；提交期间（preview → write → bind）锁定。
 const baseline = new DraftBaseline(() => draft.fields)
-const guard = new DraftGuard({
-  dirty: () => baseline.dirty || Boolean(draft.oauthSessionId),
-  busy: () => draft.submitting,
-})
+const guard = new DraftGuard({ dirty: () => baseline.dirty, busy: () => draft.submitting })
 
 onDestroy(() => draft.dispose())
 

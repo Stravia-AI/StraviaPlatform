@@ -1205,17 +1205,15 @@ test('credential protection table keeps its header above the draggable body scro
   const viewport = scrollArea.locator('[data-scroll-area-viewport]')
   const main = page.getByRole('main')
   const paginator = page.locator('[data-slot="data-table-paginator"]')
-  for (const height of [800, 1039]) {
-    await page.setViewportSize({ width: 1280, height })
-    await expect
-      .poll(async () => {
-        const mainBox = (await main.boundingBox())!
-        const paginatorBox = (await paginator.boundingBox())!
-        const bottomGap = mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
-        return bottomGap >= 0 && bottomGap <= 24
-      })
-      .toBe(true)
+  const bottomGap = async () => {
+    const mainBox = (await main.boundingBox())!
+    const paginatorBox = (await paginator.boundingBox())!
+    return mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
   }
+  // 工作台列表：数据超出剩余高度时分页钉在底部、表体内部滚动；数据放得下时按自然高度，分页紧跟表格。
+  await expect.poll(async () => (await bottomGap()) >= 0 && (await bottomGap()) <= 24).toBe(true)
+  await page.setViewportSize({ width: 1280, height: 1039 })
+  await expect.poll(async () => (await bottomGap()) > 24).toBe(true)
   await page.setViewportSize({ width: 1280, height: 800 })
   const bar = scrollArea.locator('[data-scroll-area-scrollbar][data-orientation="vertical"]')
   const thumb = bar.locator('[data-scroll-area-thumb]')
