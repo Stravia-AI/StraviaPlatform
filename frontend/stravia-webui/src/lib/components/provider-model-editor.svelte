@@ -43,9 +43,9 @@ type StringField = 'name' | 'description'
 type PriceField = keyof ProviderModelPriceForm
 const modalityTargets = ['input', 'output'] as const
 
-// 与响应式 Field 的宽布局阈值和 select 控件列宽保持一致（72rem 起按 2:3 比例），让“添加可选字段”按钮落在控件列起点。
+// 宽布局下的“添加可选字段”按钮贴设置列右缘，与控件右边缘对齐。
 const alignedActions =
-  'flex flex-wrap gap-2 empty:hidden @min-[50rem]/model-editor:ms-auto @min-[50rem]/model-editor:w-[28rem] @min-[72rem]/model-editor:w-[calc((100%-2rem)*3/5)]'
+  'flex flex-wrap gap-2 empty:hidden @min-[50rem]/model-editor:w-full @min-[50rem]/model-editor:max-w-[60rem] @min-[50rem]/model-editor:justify-end'
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },
@@ -292,10 +292,11 @@ export function submit(): void {
     </div>
   </FormSection>
 
-  <FormSection title={m.provider_model_editor_reasoning_efforts()} description={m.provider_model_editor_effort_help()}>
+  <FormSection title={m.provider_model_editor_reasoning_efforts()}>
     <Field.Group class="gap-4">
       <Field.Field size="select">
-        <Field.Label for="provider-model-reasoning-efforts">{m.provider_model_editor_supported_efforts()}</Field.Label>
+        <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
+          >{m.provider_model_editor_supported_efforts()}</Field.Label>
         <Select.Root type="multiple" {disabled} bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
           <Select.Trigger id="provider-model-reasoning-efforts" class="w-full min-w-0" data-effort-values-select>
             {#if metadata.reasoning_efforts?.length}
@@ -337,13 +338,13 @@ export function submit(): void {
     </Field.Group>
   </FormSection>
 
-  <FormSection
-    title={m.provider_model_editor_pricing()}
-    description={m.provider_model_editor_pricing_unit_help()}
-    actions={hasField('cost') ? pricingActions : undefined}>
+  <FormSection title={m.provider_model_editor_pricing()} actions={hasField('cost') ? pricingActions : undefined}>
     {#if hasField('cost')}
       <div class="flex flex-col gap-3">
-        <p class="text-sm font-medium">{m.provider_model_editor_base_pricing()}</p>
+        <p class="flex items-center gap-2 text-sm font-medium">
+          {m.provider_model_editor_base_pricing()}
+          <Field.Help hint={m.provider_model_editor_pricing_unit_help()} />
+        </p>
         <div class="grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]">
           {#each priceFields as field (field.key)}
             <Field.Field orientation="vertical">

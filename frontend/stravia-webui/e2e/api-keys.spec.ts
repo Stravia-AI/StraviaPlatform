@@ -109,6 +109,43 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
 })
 
+test('API Key editor keeps optional help in tooltips and required scope visible at every width', async ({ page }) => {
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+  await page.route('**/api/v1/api-keys', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  for (const width of [1920, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/api-keys')
+    await page.getByRole('button', { name: 'Create first API Key' }).click()
+    const overlay = page.locator('[data-slot="sheet-content"]')
+    await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
+
+    // Optional explanations live only in the question-mark tooltip and never add a visible line under the label.
+    await expect(overlay.locator('[data-slot="field-hint-text"]')).toHaveCount(0)
+    const rpm = overlay.getByRole('group').filter({ has: page.locator('#api-key-rpm-limit') })
+    const help = rpm.getByRole('button', { name: 'More about this field' })
+    await help.focus()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
+    await expect(page.locator('[data-slot="tooltip-content"]')).not.toContainText('internal')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(0)
+
+    // Access scope is required information and stays visible without hover.
+    await expect(overlay.getByText('Lets this key call Stravia tools through MCP.')).toBeVisible()
+    await expect(overlay.getByText(/every current and future model/)).toBeVisible()
+    await expect(
+      overlay.getByText('Adds the selected features to compatible model requests without client changes', {
+        exact: false,
+      }),
+    ).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
+})
+
 test('API Key editor groups and filters allowed model selections', async ({ page }) => {
   const modelId = '4d93a8ac-0d1f-4891-8780-55c2f566c084'
   const secondModelId = 'd414f418-547e-4269-b917-fec9a10c39bb'

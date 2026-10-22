@@ -222,8 +222,8 @@ async function applyStartupToggle(
   {:else if portState}
     <Field.FieldGroup>
       <Field.Field size="fill" data-invalid={validationError != null || displayedOperationError != null}>
-        <Field.FieldLabel for="desktop-fixed-port" hint={m.desktop_client_port_help()}
-          >{m.desktop_client_port()}</Field.FieldLabel>
+        <Field.FieldLabel for="desktop-fixed-port">{m.desktop_client_port()}</Field.FieldLabel>
+        <Field.FieldDescription>{m.desktop_client_port_help()}</Field.FieldDescription>
         <div class="flex min-w-0 flex-col gap-3">
           <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap">
             <InputGroup.Root class="min-w-0 sm:min-w-48 sm:flex-1">
@@ -308,8 +308,8 @@ async function applyStartupToggle(
 
       <Field.Field orientation="horizontal" data-invalid={externalError != null}>
         <div class="flex-1">
-          <Field.FieldLabel for="desktop-external-access" hint={m.desktop_client_external_access_hint()}
-            >{m.desktop_client_external_access()}</Field.FieldLabel>
+          <Field.FieldLabel for="desktop-external-access">{m.desktop_client_external_access()}</Field.FieldLabel>
+          <Field.FieldDescription>{m.desktop_client_external_access_hint()}</Field.FieldDescription>
         </div>
         <Switch
           id="desktop-external-access"

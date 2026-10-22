@@ -215,9 +215,10 @@ async function saveKey(): Promise<void> {
           checked={allowAllModels}
           disabled={models.length === 0}
           onCheckedChange={setAllowAllModels} />
-        <Field.Label for="api-key-allow-all-models" hint={m.api_key_editor_unrestricted_model_scope_help()}>
-          {m.api_key_editor_allow_all_models()}
-        </Field.Label>
+        <Field.Content>
+          <Field.Label for="api-key-allow-all-models">{m.api_key_editor_allow_all_models()}</Field.Label>
+          <Field.Description>{m.api_key_editor_unrestricted_model_scope_help()}</Field.Description>
+        </Field.Content>
       </Field.Field>
       {#if !allowAllModels}
         <Field.Field class="w-auto min-w-52 flex-1">
@@ -313,17 +314,15 @@ async function saveKey(): Promise<void> {
       <Field.Field orientation="horizontal">
         <Switch id="api-key-mcp-access" bind:checked={form.mcpAccessEnabled} />
         <Field.Content>
-          <Field.Label for="api-key-mcp-access" hint={m.api_key_editor_lets_key_call_stravia_tools_mcp()}>
-            {m.api_key_editor_allow_mcp_clients()}
-          </Field.Label>
+          <Field.Label for="api-key-mcp-access">{m.api_key_editor_allow_mcp_clients()}</Field.Label>
+          <Field.Description>{m.api_key_editor_lets_key_call_stravia_tools_mcp()}</Field.Description>
         </Field.Content>
       </Field.Field>
       <Field.Field orientation="horizontal">
         <Switch id="api-key-transparent-injection" bind:checked={form.transparentInjectionEnabled} />
         <Field.Content>
-          <Field.Label for="api-key-transparent-injection" hint={m.api_key_editor_transparent_injection_help()}>
-            {m.api_key_editor_transparent_injection()}
-          </Field.Label>
+          <Field.Label for="api-key-transparent-injection">{m.api_key_editor_transparent_injection()}</Field.Label>
+          <Field.Description>{m.api_key_editor_transparent_injection_help()}</Field.Description>
         </Field.Content>
       </Field.Field>
     </Field.Group>

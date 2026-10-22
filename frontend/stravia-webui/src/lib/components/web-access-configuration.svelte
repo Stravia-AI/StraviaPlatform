@@ -522,11 +522,10 @@ async function deleteProvider(): Promise<void> {
             </Select.Root>
           </Field.Field>
           <Field.Field orientation="horizontal">
-            <div>
-              <Field.Label
-                for="web-provider-use-proxy"
-                hint={m.common_send_requests_service_proxy_configured_settings()}>{m.common_use_proxy()}</Field.Label>
-            </div>
+            <Field.Content>
+              <Field.Label for="web-provider-use-proxy">{m.common_use_proxy()}</Field.Label>
+              <Field.Description>{m.common_send_requests_service_proxy_configured_settings()}</Field.Description>
+            </Field.Content>
             <Switch
               id="web-provider-use-proxy"
               disabled={savingEditor}

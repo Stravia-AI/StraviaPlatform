@@ -356,7 +356,7 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
         </div>
       </div>
       <Field.FieldGroup>
-        <Field.Field size="select"
+        <Field.Field size="setting"
           ><Field.FieldLabel for="theme-preference">{m.settings_theme()}</Field.FieldLabel><Select.Root
             type="single"
             value={currentTheme}
@@ -406,9 +406,8 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
       {:else if artifact}
         <Field.FieldGroup>
           <Field.Field size="fill"
-            ><Field.FieldLabel for="artifact-client-base-url" hint={m.artifact_client_base_help()}
-              >{m.artifact_client_base_url()}</Field.FieldLabel
-            ><Input
+            ><Field.FieldLabel for="artifact-client-base-url">{m.artifact_client_base_url()}</Field.FieldLabel
+            ><Field.FieldDescription>{m.artifact_client_base_help()}</Field.FieldDescription><Input
               id="artifact-client-base-url"
               value={artifact.client_base_url}
               disabled={artifactSaving}
@@ -469,9 +468,8 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
                 disabled={artifactSaving}
                 oninput={(event: Event) => editS3({ session_token: inputValue(event) || null })} /></Field.Field>
             <Field.Field size="datetime"
-              ><Field.FieldLabel for="artifact-s3-expiry" hint={m.artifact_s3_expiry_help()}
-                >{m.artifact_s3_expiry()}</Field.FieldLabel
-              ><Input
+              ><Field.FieldLabel for="artifact-s3-expiry">{m.artifact_s3_expiry()}</Field.FieldLabel
+              ><Field.FieldDescription>{m.artifact_s3_expiry_help()}</Field.FieldDescription><Input
                 id="artifact-s3-expiry"
                 type="number"
                 value={artifact.s3.credentials_expires_at ?? ''}
@@ -597,8 +595,8 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
       {#if retentionReady}
         <Field.FieldGroup>
           <Field.Field size="number"
-            ><Field.FieldLabel for="log-retention" hint={m.settings_automatically_deletes_older_request_history()}
-              >{m.settings_retention_period_days()}</Field.FieldLabel
+            ><Field.FieldLabel for="log-retention">{m.settings_retention_period_days()}</Field.FieldLabel
+            ><Field.FieldDescription>{m.settings_automatically_deletes_older_request_history()}</Field.FieldDescription
             ><Input
               id="log-retention"
               type="number"
