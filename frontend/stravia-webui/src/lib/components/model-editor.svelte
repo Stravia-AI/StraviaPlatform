@@ -4,12 +4,12 @@ import { beforeNavigate, goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import type { Path } from '$app/types'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import CheckIcon from '@lucide/svelte/icons/check'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
-import WaypointsIcon from '@lucide/svelte/icons/waypoints'
 import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
@@ -40,6 +40,8 @@ import {
   addRouteTarget,
   buildRouteTargets,
   createRouteTargetForms,
+  isValidTargetRetryBudget,
+  isValidTargetSeconds,
   moveRouteTargetToDock,
   moveRouteTargetToInsertion,
   moveRouteTargetToLane,
@@ -57,6 +59,7 @@ import ModelIdCombobox from '#lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '#lib/components/model-details-dialog.svelte'
 import ModelSpecification from '#lib/components/model-specification.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
@@ -64,6 +67,7 @@ import { Button } from '#lib/components/ui/button/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
+import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
@@ -221,10 +225,6 @@ function strategyHelp(strategy: RouteSelectionStrategy): string {
     case 'latency_preference':
       return m.model_editor_latency_preference_help()
   }
-}
-
-function strategySummary(strategy: RouteSelectionStrategy): string {
-  return strategyLabel(strategy)
 }
 
 $effect(() => {
@@ -779,21 +779,15 @@ async function saveModel(): Promise<void> {
       'relative mx-auto flex w-full items-center justify-center overflow-hidden transition-[height,border-color,background-color,color] duration-150 motion-reduce:transition-none',
       isDraggingTarget
         ? 'h-10 rounded-lg border border-dashed border-primary/60 bg-primary/5 text-primary'
-        : 'h-5 border border-transparent text-transparent',
+        : 'h-2 border border-transparent text-transparent',
     ]}
     role="group"
     aria-label={insertionLabel(insertion)}
     ondragenter={allowTargetDrop}
     ondragover={allowTargetDrop}
     ondrop={(event) => dropOnInsertion(event, insertion)}>
-    <span
-      class={[
-        'pointer-events-none absolute left-1/2 top-0 h-full w-px -translate-x-1/2',
-        isDraggingTarget ? 'bg-primary/50' : 'bg-border',
-      ]}
-      aria-hidden="true"></span>
     {#if isDraggingTarget}
-      <span class="relative inline-flex items-center gap-2 rounded-md bg-background/90 px-3 py-1 text-sm shadow-xs">
+      <span class="relative inline-flex items-center gap-2 rounded-md bg-background/90 px-3 py-1 text-sm">
         <PlusIcon class="size-4" aria-hidden="true" />
         {insertionLabel(insertion)}
       </span>
@@ -801,35 +795,56 @@ async function saveModel(): Promise<void> {
   </div>
 {/snippet}
 
+{#snippet targetIdentity(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
+  {@const modelIdentity = targetModelIdentity(target, summary)}
+  <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+  <span class="min-w-0">
+    <span class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}
+      >{modelIdentity.label}</span>
+    <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
+      {targetProviderLabel(target)}
+    </span>
+  </span>
+{/snippet}
+
 <div class="route-page min-h-[calc(100svh-5rem)]">
-  <PageHeader
-    title={initialModel ? initialModel.display_name?.trim() || initialModel.model_id : m.common_add_model()} />
+  <PageHeader title={initialModel ? initialModel.display_name?.trim() || initialModel.model_id : m.common_add_model()}>
+    {#snippet meta()}
+      {#if initialModel}
+        <StatusIndicator
+          compact
+          label={initialModel.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
+          tone={initialModel.is_enabled ? 'healthy' : 'neutral'} />
+      {/if}
+    {/snippet}
+  </PageHeader>
 
   <form
-    class="flex flex-1 flex-col gap-6"
+    class="flex flex-1 flex-col gap-8"
     onsubmit={(event) => {
       event.preventDefault()
       void saveModel()
     }}>
-    <section class="route-section" aria-labelledby="route-contract-title">
-      <div class="route-section-header max-sm:flex-col">
-        <div class="min-w-0 flex-1">
+    <section class="route-section content-column" aria-labelledby="route-contract-title">
+      <div class="route-section-header">
+        <div class="flex min-w-0 items-center gap-2">
           <h2 id="route-contract-title" class="route-section-title">{m.model_editor_client_model()}</h2>
-          <p class="route-section-description">
-            {m.model_editor_set_model_name_request_type_client_apps_use()}
-          </p>
-        </div>
-        <div data-slot="model-enabled-control" class="flex shrink-0 items-center gap-2">
-          <Field.Label for="route-enabled">{m.common_enable_action()}</Field.Label>
-          <Switch
-            id="route-enabled"
-            aria-label={m.common_enable_action()}
-            bind:checked={() => form.enabled, (checked: boolean) => (form.enabled = checked)} />
+          <Field.Help hint={m.model_editor_set_model_name_request_type_client_apps_use()} />
         </div>
       </div>
-      <Field.Group class="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <Field.Field orientation="vertical" class="md:col-span-2">
-          <Field.Label for="route-model-id">{m.model_editor_model_id()}</Field.Label>
+      <div>
+        <SettingRow title={m.common_enable_action()} layout="inline">
+          {#snippet children({ titleId })}
+            <div data-slot="model-enabled-control" class="flex shrink-0 items-center">
+              <Switch
+                id="route-enabled"
+                aria-labelledby={titleId}
+                aria-label={m.common_enable_action()}
+                bind:checked={() => form.enabled, (checked: boolean) => (form.enabled = checked)} />
+            </div>
+          {/snippet}
+        </SettingRow>
+        <SettingRow title={m.model_editor_model_id()} labelFor="route-model-id" controlSize="fill">
           <ModelIdCombobox
             id="route-model-id"
             value={form.modelId}
@@ -849,16 +864,14 @@ async function saveModel(): Promise<void> {
               form.modelId = ''
               form.displayName = ''
             }} />
-        </Field.Field>
-        <Field.Field orientation="vertical">
-          <Field.Label for="route-display-name">{m.model_editor_model_name()}</Field.Label>
+        </SettingRow>
+        <SettingRow title={m.model_editor_model_name()} labelFor="route-display-name" controlSize="name">
           <Input
             id="route-display-name"
             bind:value={form.displayName}
             placeholder={m.model_editor_model_name_placeholder()} />
-        </Field.Field>
-        <Field.Field orientation="vertical">
-          <Field.Label for="route-output-modality">{m.route_output_label()}</Field.Label>
+        </SettingRow>
+        <SettingRow title={m.route_output_label()} labelFor="route-output-modality" controlSize="setting">
           <Select.Root
             type="single"
             bind:value={
@@ -890,9 +903,12 @@ async function saveModel(): Promise<void> {
               </Select.Group>
             </Select.Content>
           </Select.Root>
-        </Field.Field>
-        <Field.Field orientation="vertical">
-          <Field.Label for="route-balance">{m.model_editor_how_requests_sent()}</Field.Label>
+        </SettingRow>
+        <SettingRow
+          title={m.model_editor_how_requests_sent()}
+          labelFor="route-balance"
+          hint={strategyHelp(form.balance)}
+          controlSize="setting">
           <Select.Root type="single" bind:value={form.balance}>
             <Select.Trigger id="route-balance" class="w-full" aria-label={m.model_editor_how_requests_sent()}>
               {strategyLabel(form.balance)}
@@ -904,319 +920,277 @@ async function saveModel(): Promise<void> {
               </Select.Group>
             </Select.Content>
           </Select.Root>
-        </Field.Field>
-      </Field.Group>
+        </SettingRow>
+      </div>
       {#if initialModel && !initialModel.output_modality}
-        <p class="text-sm text-warning" role="status">{m.route_output_reconfigure()}</p>
+        <p class="mt-3 text-sm text-warning" role="status">{m.route_output_reconfigure()}</p>
       {/if}
       {#if imageBindingBlocksSwitch}
-        <p class="text-sm text-warning" role="status">
+        <p class="mt-3 text-sm text-warning" role="status">
           {m.route_output_unlink_first()}
 
           <a class="underline underline-offset-2" href={resolve('media-generation')}>{m.route_output_open_media()}</a>
         </p>
       {/if}
-      {#if saveError}<p class="text-sm text-destructive" role="alert">{saveError}</p>{/if}
+      {#if saveError}<p class="mt-3 text-sm text-destructive" role="alert">{saveError}</p>{/if}
     </section>
 
     <section class="route-section" aria-labelledby="route-targets-title">
-      <div class="route-section-header">
-        <div>
+      <div class="route-section-header items-center">
+        <div class="flex min-w-0 items-center gap-2">
           <h2 id="route-targets-title" class="route-section-title">{m.model_editor_request_destinations()}</h2>
-          <p class="route-section-description">{strategyHelp(form.balance)}</p>
+          {#if savedRouteId}<Field.Help hint={m.model_editor_target_status_refresh_note()} />{/if}
         </div>
         <Button type="button" variant="outline" onclick={addTarget}
           ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
       </div>
 
-      {#if savedRouteId}
-        <p class="mb-2 mt-3 text-xs text-muted-foreground">
-          {m.model_editor_target_status_refresh_note()}
-        </p>
-        {#if targetStatusesFailed}
-          <div class="mb-2 mt-3 flex items-center gap-3">
-            <StatusIndicator
-              class="min-w-0 flex-1"
-              tone="error"
-              label={m.model_editor_target_status_unavailable({
-                error: localizeBackendErrorMessage(targetStatusesQuery.error),
-              })} />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={targetStatusesQuery.isFetching}
-              onclick={() => void targetStatusesQuery.refetch()}>
-              {#if targetStatusesQuery.isFetching}<Spinner data-icon="inline-start" />{/if}
-              {m.common_retry()}
-            </Button>
-          </div>
-        {/if}
+      {#if savedRouteId && targetStatusesFailed}
+        <div class="mb-3 flex items-center gap-3">
+          <StatusIndicator
+            class="min-w-0 flex-1"
+            tone="error"
+            label={m.model_editor_target_status_unavailable({
+              error: localizeBackendErrorMessage(targetStatusesQuery.error),
+            })} />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={targetStatusesQuery.isFetching}
+            onclick={() => void targetStatusesQuery.refetch()}>
+            {#if targetStatusesQuery.isFetching}<Spinner data-icon="inline-start" />{/if}
+            {m.common_retry()}
+          </Button>
+        </div>
       {/if}
 
-      <div class="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(16rem,1fr)]">
+      {#if targets.length > 0}
         <div
-          data-slot="target-lane-stack"
-          class="relative min-w-0 px-1 sm:px-4"
-          role="group"
-          aria-label={m.model_editor_enabled_targets()}
-          ondragenter={targetLanes.length === 0 ? allowTargetDrop : undefined}
-          ondragover={targetLanes.length === 0 ? allowTargetDrop : undefined}
-          ondrop={targetLanes.length === 0 ? (event) => dropOnInsertion(event, { position: 'top' }) : undefined}>
+          class="grid gap-4 @min-[60rem]/route-page:grid-cols-[minmax(0,78rem)_minmax(16rem,20rem)] @min-[60rem]/route-page:items-start">
           <div
-            data-slot="target-entry-model"
-            class={[
-              'mx-auto flex min-h-16 w-fit min-w-64 max-w-full items-center gap-3 rounded-xl bg-background px-4 py-3 shadow-sm ring-1 ring-border',
-              isDraggingTarget && 'pointer-events-none',
-            ]}>
-            <span class="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-              <WaypointsIcon class="size-4" aria-hidden="true" />
-            </span>
-            <span class="min-w-0">
-              <span class="block text-xs text-muted-foreground">{m.model_editor_entry_model()}</span>
-              <span class="block truncate font-technical text-sm">
-                {form.modelId.trim() || m.model_editor_model_id_placeholder()}
-              </span>
-            </span>
-          </div>
-
-          {#if targetLanes.length === 0}
-            <div class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']} aria-hidden="true">
-            </div>
-
-            <div
-              data-slot="target-priority-connector"
-              data-position="empty"
-              class={[
-                'relative mx-auto flex min-h-24 w-full items-center justify-center rounded-xl border border-dashed transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
-                isDraggingTarget
-                  ? 'border-primary/60 bg-primary/5 text-primary'
-                  : 'border-border/80 bg-muted/20 text-muted-foreground',
-              ]}
-              role="group"
-              aria-label={m.model_editor_insert_higher_priority()}
-              ondragenter={allowTargetDrop}
-              ondragover={allowTargetDrop}
-              ondrop={(event) => dropOnInsertion(event, { position: 'top' })}>
-              <span class="inline-flex items-center gap-2 text-sm">
-                <PlusIcon class="size-4" aria-hidden="true" />
-                {m.model_editor_insert_higher_priority()}
-              </span>
-            </div>
-            <div class={['mx-auto h-5 w-px', isDraggingTarget ? 'bg-primary/50' : 'bg-border']} aria-hidden="true">
-            </div>
-          {:else}
-            {@render priorityConnector({ position: 'top' }, 'top')}
-            <div class="flex flex-col">
-              {#each targetLanes as lane, laneIndex (lane.priority)}
-                <section
-                  data-slot="target-lane"
-                  data-priority={lane.priority}
-                  class={[
-                    'grid min-h-24 grid-cols-[3.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background shadow-sm transition-[border-color,box-shadow,background-color] duration-150 motion-reduce:transition-none',
-                    isDraggingTarget
-                      ? 'border-dashed border-primary/60 bg-primary/[0.025]'
-                      : 'border-transparent ring-1 ring-border',
-                  ]}
-                  aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
-                  ondragenter={allowTargetDrop}
-                  ondragover={allowTargetDrop}
-                  ondrop={(event) => dropOnLane(event, lane.priority)}>
-                  <div class="flex flex-col items-center justify-center bg-muted/55 px-2 text-center">
-                    <span class="font-technical text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
-                      {m.model_editor_layer()}
-                    </span>
-                    <strong class="font-technical text-lg tabular-nums">{laneIndex + 1}</strong>
-                  </div>
-                  <div class="@container/lane min-w-0 p-2">
-                    <div class={['grid gap-2', lane.targets.length > 1 && '@2xl/lane:grid-cols-2']}>
-                      {#each lane.targets as target (target.key)}
-                        {@const summary = selectedSummary(target)}
-                        {@const status = targetRuntimeStatus(target)}
-                        {@const modelIdentity = targetModelIdentity(target, summary)}
-                        {@const issueLabels = targetIssueLabels(target, summary)}
-                        <div
-                          role="button"
-                          tabindex="0"
-                          aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                          data-slot="target-card"
-                          data-enabled="true"
-                          data-key={target.key}
-                          draggable="true"
-                          class={[
-                            'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
-                            draggedTargetKey === target.key && 'opacity-50',
-                          ]}
-                          onclick={() => editTarget(target)}
-                          onkeydown={(event) => {
-                            if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                              event.preventDefault()
-                              editTarget(target)
-                            }
-                          }}
-                          ondragstart={(event) => startTargetDrag(event, target)}
-                          ondragend={finishTargetDrag}
-                          ondragenter={allowTargetDrop}
-                          ondragover={allowTargetDrop}
-                          ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
-                          <div
-                            class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
-                            <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                            <span class="min-w-0">
-                              <span
-                                class={[
-                                  'block font-medium wrap-anywhere',
-                                  modelIdentity.technical && 'font-technical text-sm',
-                                ]}>{modelIdentity.label}</span>
-                              <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
-                                {targetProviderLabel(target)}
-                              </span>
-                            </span>
-                            {#if targetModalityMismatch(target)}
-                              <StatusIndicator
-                                compact
-                                class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                                label={m.route_output_mismatch()}
-                                tone="error" />
-                            {:else if status}
-                              <StatusIndicator
-                                compact
-                                class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                                label={status.credential_invalid
-                                  ? m.model_editor_target_status_credential_invalid()
-                                  : status.allowance_suspended
-                                    ? m.allowances_suspended()
-                                    : targetStateLabel(status.state, status.cooldown_remaining_ms)}
-                                tone={status.credential_invalid
-                                  ? 'error'
-                                  : status.allowance_suspended
-                                    ? 'warning'
-                                    : status.state === 'available'
-                                      ? 'healthy'
-                                      : 'warning'} />
-                            {/if}
-                          </div>
-                          <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
-                            {#each issueLabels as label (label)}
-                              <Badge variant="destructive">{label}</Badge>
-                            {/each}
-                            <ModelSpecification specification={summary?.specification ?? {}} density="target" />
-                          </div>
-                        </div>
-                      {/each}
-                      {#if isDraggingTarget}
-                        <span class="col-span-full flex min-h-10 items-center justify-end px-3 text-sm text-primary">
-                          {m.model_editor_drop_same_priority()}
-                        </span>
-                      {/if}
-                    </div>
-                  </div>
-                </section>
-
-                {#if laneIndex < targetLanes.length - 1}
-                  {@const lowerLane = targetLanes[laneIndex + 1]}
-                  {@render priorityConnector(
-                    { position: 'between', upperPriority: lane.priority, lowerPriority: lowerLane.priority },
-                    `between-${lane.priority}-${lowerLane.priority}`,
-                  )}
-                {/if}
-              {/each}
-            </div>
-            {@render priorityConnector({ position: 'bottom' }, 'bottom')}
-          {/if}
-
-          <div class={['flex flex-col items-center', isDraggingTarget && 'pointer-events-none']}>
-            <span class="size-2.5 rounded-full bg-primary ring-4 ring-primary/10"></span>
-            <span class="mt-1.5 text-xs text-muted-foreground">{m.model_editor_end()}</span>
-          </div>
-        </div>
-
-        <aside
-          data-slot="target-dock"
-          class="min-w-0 rounded-2xl border border-dashed bg-muted/30 p-3"
-          aria-label={m.model_editor_disabled_targets()}
-          ondragenter={allowTargetDrop}
-          ondragover={allowTargetDrop}
-          ondrop={dropInDock}>
-          <div class="mb-3 flex items-center justify-between gap-3 px-1">
-            <div>
-              <h3 class="font-medium">{m.model_editor_disabled_targets()}</h3>
-              <p class="text-sm text-muted-foreground">{m.model_editor_disabled_targets_help()}</p>
-            </div>
-            <Badge variant="secondary">{disabledTargets.length}</Badge>
-          </div>
-          <div class="flex flex-col gap-2">
-            {#each disabledTargets as target (target.key)}
-              {@const summary = selectedSummary(target)}
-              {@const modelIdentity = targetModelIdentity(target, summary)}
-              {@const issueLabels = targetIssueLabels(target, summary)}
-              <div class="relative">
-                <div
-                  role="button"
-                  tabindex="0"
-                  aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                  data-slot="target-card"
-                  data-key={target.key}
-                  draggable="true"
-                  class={[
-                    'group @container/target flex w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
-                    draggedTargetKey === target.key && 'opacity-50',
-                  ]}
-                  onclick={() => editTarget(target)}
-                  onkeydown={(event) => {
-                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                      event.preventDefault()
-                      editTarget(target)
-                    }
-                  }}
-                  ondragstart={(event) => startTargetDrag(event, target)}
-                  ondragend={finishTargetDrag}>
-                  <div
-                    class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
-                    <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                    <span class="min-w-0">
-                      <span
-                        class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}
-                        >{modelIdentity.label}</span>
-                      <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
-                        {targetProviderLabel(target)}
-                      </span>
-                    </span>
-                    {#if targetModalityMismatch(target)}
-                      <StatusIndicator
-                        compact
-                        class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                        label={m.route_output_mismatch()}
-                        tone="error" />
-                    {/if}
-                  </div>
-                  {#if issueLabels.length > 0}
-                    <div class="flex w-full min-w-0 flex-wrap gap-1.5 pl-6 pt-2">
-                      {#each issueLabels as label (label)}
-                        <Badge variant="destructive">{label}</Badge>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="absolute right-1.5 top-1.5 size-9"
-                  aria-label={m.model_editor_remove_destination_value({ index: targetIndex(target) + 1 })}
-                  onclick={() => removeDisabledTarget(target)}>
-                  <Trash2Icon />
-                </Button>
+            data-slot="target-lane-stack"
+            class="relative min-w-0"
+            role="group"
+            aria-label={m.model_editor_enabled_targets()}
+            ondragenter={targetLanes.length === 0 ? allowTargetDrop : undefined}
+            ondragover={targetLanes.length === 0 ? allowTargetDrop : undefined}
+            ondrop={targetLanes.length === 0 ? (event) => dropOnInsertion(event, { position: 'top' }) : undefined}>
+            {#if targetLanes.length === 0}
+              <div
+                data-slot="target-priority-connector"
+                data-position="empty"
+                class={[
+                  'relative mx-auto flex min-h-16 w-full items-center justify-center rounded-lg border border-dashed transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
+                  isDraggingTarget
+                    ? 'border-primary/60 bg-primary/5 text-primary'
+                    : 'border-border/80 bg-muted/20 text-muted-foreground',
+                ]}
+                role="group"
+                aria-label={m.model_editor_insert_higher_priority()}
+                ondragenter={allowTargetDrop}
+                ondragover={allowTargetDrop}
+                ondrop={(event) => dropOnInsertion(event, { position: 'top' })}>
+                <span class="inline-flex items-center gap-2 text-sm">
+                  <PlusIcon class="size-4" aria-hidden="true" />
+                  {m.model_editor_insert_higher_priority()}
+                </span>
               </div>
             {:else}
-              <div
-                class="flex min-h-28 items-center justify-center rounded-xl border border-dashed bg-background/50 px-4 text-center text-sm text-muted-foreground">
-                {m.model_editor_no_disabled_targets()}
+              {@render priorityConnector({ position: 'top' }, 'top')}
+              <div class="flex flex-col">
+                {#each targetLanes as lane, laneIndex (lane.priority)}
+                  <section
+                    data-slot="target-lane"
+                    data-priority={lane.priority}
+                    class={[
+                      'grid min-h-20 grid-cols-[3rem_minmax(0,1fr)] rounded-lg border transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
+                      isDraggingTarget ? 'border-dashed border-primary/60 bg-primary/[0.025]' : 'border-transparent',
+                    ]}
+                    aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
+                    ondragenter={allowTargetDrop}
+                    ondragover={allowTargetDrop}
+                    ondrop={(event) => dropOnLane(event, lane.priority)}>
+                    <div class="flex flex-col items-center justify-center border-e px-1 text-center">
+                      <span class="font-technical text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
+                        {m.model_editor_layer()}
+                      </span>
+                      <strong class="font-technical text-lg tabular-nums">{laneIndex + 1}</strong>
+                    </div>
+                    <div class="@container/lane min-w-0 p-2">
+                      <div
+                        class={[
+                          'grid gap-2',
+                          lane.targets.length > 1
+                            ? 'grid-cols-[minmax(0,36rem)] @2xl/lane:grid-cols-[repeat(2,minmax(0,36rem))]'
+                            : 'grid-cols-[minmax(0,36rem)]',
+                        ]}>
+                        {#each lane.targets as target (target.key)}
+                          {@const summary = selectedSummary(target)}
+                          {@const status = targetRuntimeStatus(target)}
+                          {@const issueLabels = targetIssueLabels(target, summary)}
+                          <div
+                            role="button"
+                            tabindex="0"
+                            aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                            data-slot="target-card"
+                            data-enabled="true"
+                            data-key={target.key}
+                            draggable="true"
+                            class={[
+                              'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg border bg-card p-3 text-left transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+                              draggedTargetKey === target.key && 'opacity-50',
+                            ]}
+                            onclick={() => editTarget(target)}
+                            onkeydown={(event) => {
+                              if (
+                                event.target === event.currentTarget &&
+                                (event.key === 'Enter' || event.key === ' ')
+                              ) {
+                                event.preventDefault()
+                                editTarget(target)
+                              }
+                            }}
+                            ondragstart={(event) => startTargetDrag(event, target)}
+                            ondragend={finishTargetDrag}
+                            ondragenter={allowTargetDrop}
+                            ondragover={allowTargetDrop}
+                            ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
+                            <div
+                              class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
+                              {@render targetIdentity(target, summary)}
+                              {#if targetModalityMismatch(target)}
+                                <StatusIndicator
+                                  compact
+                                  class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
+                                  label={m.route_output_mismatch()}
+                                  tone="error" />
+                              {:else if status}
+                                <StatusIndicator
+                                  compact
+                                  class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
+                                  label={status.credential_invalid
+                                    ? m.model_editor_target_status_credential_invalid()
+                                    : status.allowance_suspended
+                                      ? m.allowances_suspended()
+                                      : targetStateLabel(status.state, status.cooldown_remaining_ms)}
+                                  tone={status.credential_invalid
+                                    ? 'error'
+                                    : status.allowance_suspended
+                                      ? 'warning'
+                                      : status.state === 'available'
+                                        ? 'healthy'
+                                        : 'warning'} />
+                              {/if}
+                            </div>
+                            <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
+                              {#each issueLabels as label (label)}
+                                <Badge variant="destructive">{label}</Badge>
+                              {/each}
+                              <ModelSpecification specification={summary?.specification ?? {}} density="target" />
+                            </div>
+                          </div>
+                        {/each}
+                        {#if isDraggingTarget}
+                          <span class="col-span-full flex min-h-10 items-center justify-end px-3 text-sm text-primary">
+                            {m.model_editor_drop_same_priority()}
+                          </span>
+                        {/if}
+                      </div>
+                    </div>
+                  </section>
+
+                  {#if laneIndex < targetLanes.length - 1}
+                    {@const lowerLane = targetLanes[laneIndex + 1]}
+                    {@render priorityConnector(
+                      { position: 'between', upperPriority: lane.priority, lowerPriority: lowerLane.priority },
+                      `between-${lane.priority}-${lowerLane.priority}`,
+                    )}
+                  {/if}
+                {/each}
               </div>
-            {/each}
+              {@render priorityConnector({ position: 'bottom' }, 'bottom')}
+            {/if}
           </div>
-        </aside>
-      </div>
+
+          <aside
+            data-slot="target-dock"
+            class={[
+              'min-w-0 self-start rounded-lg border border-dashed p-3 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
+              isDraggingTarget && 'border-primary/60 bg-primary/5',
+            ]}
+            aria-label={m.model_editor_disabled_targets()}
+            ondragenter={allowTargetDrop}
+            ondragover={allowTargetDrop}
+            ondrop={dropInDock}>
+            <div class={['flex items-center justify-between gap-3 px-1', disabledTargets.length > 0 && 'mb-3']}>
+              <div class="flex min-w-0 items-center gap-2">
+                <h3 class="font-medium">{m.model_editor_disabled_targets()}</h3>
+                <Field.Help hint={m.model_editor_disabled_targets_help()} />
+              </div>
+              <Badge variant="secondary">{disabledTargets.length}</Badge>
+            </div>
+            {#if disabledTargets.length > 0}
+              <div class="flex flex-col gap-2">
+                {#each disabledTargets as target (target.key)}
+                  {@const summary = selectedSummary(target)}
+                  {@const issueLabels = targetIssueLabels(target, summary)}
+                  <div class="relative">
+                    <div
+                      role="button"
+                      tabindex="0"
+                      aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                      data-slot="target-card"
+                      data-key={target.key}
+                      draggable="true"
+                      class={[
+                        'group @container/target flex w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
+                        draggedTargetKey === target.key && 'opacity-50',
+                      ]}
+                      onclick={() => editTarget(target)}
+                      onkeydown={(event) => {
+                        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                          event.preventDefault()
+                          editTarget(target)
+                        }
+                      }}
+                      ondragstart={(event) => startTargetDrag(event, target)}
+                      ondragend={finishTargetDrag}>
+                      <div
+                        class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
+                        {@render targetIdentity(target, summary)}
+                        {#if targetModalityMismatch(target)}
+                          <StatusIndicator
+                            compact
+                            class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
+                            label={m.route_output_mismatch()}
+                            tone="error" />
+                        {/if}
+                      </div>
+                      {#if issueLabels.length > 0}
+                        <div class="flex w-full min-w-0 flex-wrap gap-1.5 pl-6 pt-2">
+                          {#each issueLabels as label (label)}
+                            <Badge variant="destructive">{label}</Badge>
+                          {/each}
+                        </div>
+                      {/if}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="absolute right-1.5 top-1.5 size-9"
+                      aria-label={m.model_editor_remove_destination_value({ index: targetIndex(target) + 1 })}
+                      onclick={() => removeDisabledTarget(target)}>
+                      <Trash2Icon />
+                    </Button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </aside>
+        </div>
+      {/if}
 
       <Dialog.Root
         bind:open={targetEditorOpen}
@@ -1231,12 +1205,14 @@ async function saveModel(): Promise<void> {
           {@const target = targetEditorTarget}
           {@const index = targetIndex(target)}
           {@const summary = selectedSummary(target)}
+          {@const firstTokenInvalid = !isValidTargetSeconds(target.firstTokenTimeoutSeconds)}
+          {@const retryBudgetInvalid = !isValidTargetRetryBudget(target.targetRetryBudget)}
+          {@const cooldownInvalid = !isValidTargetSeconds(target.targetCooldownSeconds)}
           <Dialog.Layout class="sm:max-w-4xl">
             {#snippet header()}
               <Dialog.Title id={`target-title-${target.key}`}>
                 {m.model_editor_edit_destination_value({ index: index + 1 })}
               </Dialog.Title>
-              <Dialog.Description>{m.model_editor_target_dialog_help()}</Dialog.Description>
             {/snippet}
             <div aria-labelledby={`target-title-${target.key}`}>
               <div class="mb-4 flex items-center justify-between gap-3 border-b pb-4">
@@ -1318,37 +1294,68 @@ async function saveModel(): Promise<void> {
               </Field.Group>
 
               <Field.Group class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
-                <Field.Field size="number">
-                  <Field.Label for={`target-first-token-timeout-${target.key}`}
+                <Field.Field orientation="vertical" data-invalid={firstTokenInvalid ? 'true' : undefined}>
+                  <Field.Label
+                    for={`target-first-token-timeout-${target.key}`}
+                    hint={m.model_editor_first_token_timeout_help()}
                     >{m.model_editor_first_token_timeout()}</Field.Label>
-                  <Input
-                    id={`target-first-token-timeout-${target.key}`}
-                    type="number"
-                    min="0"
-                    step="0.001"
-                    bind:value={target.firstTokenTimeoutSeconds} />
-                  <Field.Description>{m.model_editor_first_token_timeout_help()}</Field.Description>
+                  <InputGroup.Root class="w-28">
+                    <InputGroup.Input
+                      id={`target-first-token-timeout-${target.key}`}
+                      type="number"
+                      min="0"
+                      step="0.001"
+                      aria-invalid={firstTokenInvalid}
+                      aria-describedby={firstTokenInvalid
+                        ? `target-first-token-timeout-constraint-${target.key}`
+                        : undefined}
+                      bind:value={target.firstTokenTimeoutSeconds} />
+                    <InputGroup.Addon align="inline-end"
+                      ><InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text></InputGroup.Addon>
+                  </InputGroup.Root>
+                  {#if firstTokenInvalid}<Field.Error id={`target-first-token-timeout-constraint-${target.key}`}
+                      >{m.model_editor_seconds_constraint()}</Field.Error
+                    >{/if}
                 </Field.Field>
-                <Field.Field size="number">
-                  <Field.Label for={`target-retry-budget-${target.key}`}
+                <Field.Field orientation="vertical" data-invalid={retryBudgetInvalid ? 'true' : undefined}>
+                  <Field.Label
+                    for={`target-retry-budget-${target.key}`}
+                    hint={m.model_editor_target_retry_budget_help()}
                     >{m.model_editor_target_retry_budget()}</Field.Label>
-                  <Input
-                    id={`target-retry-budget-${target.key}`}
-                    type="number"
-                    min="0"
-                    step="1"
-                    bind:value={target.targetRetryBudget} />
-                  <Field.Description>{m.model_editor_target_retry_budget_help()}</Field.Description>
+                  <InputGroup.Root class="w-28">
+                    <InputGroup.Input
+                      id={`target-retry-budget-${target.key}`}
+                      type="number"
+                      min="0"
+                      step="1"
+                      aria-invalid={retryBudgetInvalid}
+                      aria-describedby={retryBudgetInvalid ? `target-retry-budget-constraint-${target.key}` : undefined}
+                      bind:value={target.targetRetryBudget} />
+                    <InputGroup.Addon align="inline-end"
+                      ><InputGroup.Text>{m.model_editor_unit_times()}</InputGroup.Text></InputGroup.Addon>
+                  </InputGroup.Root>
+                  {#if retryBudgetInvalid}<Field.Error id={`target-retry-budget-constraint-${target.key}`}
+                      >{m.model_editor_retry_budget_constraint()}</Field.Error
+                    >{/if}
                 </Field.Field>
-                <Field.Field size="number">
-                  <Field.Label for={`target-cooldown-${target.key}`}>{m.model_editor_target_cooldown()}</Field.Label>
-                  <Input
-                    id={`target-cooldown-${target.key}`}
-                    type="number"
-                    min="0"
-                    step="0.001"
-                    bind:value={target.targetCooldownSeconds} />
-                  <Field.Description>{m.model_editor_target_cooldown_help()}</Field.Description>
+                <Field.Field orientation="vertical" data-invalid={cooldownInvalid ? 'true' : undefined}>
+                  <Field.Label for={`target-cooldown-${target.key}`} hint={m.model_editor_target_cooldown_help()}
+                    >{m.model_editor_target_cooldown()}</Field.Label>
+                  <InputGroup.Root class="w-28">
+                    <InputGroup.Input
+                      id={`target-cooldown-${target.key}`}
+                      type="number"
+                      min="0"
+                      step="0.001"
+                      aria-invalid={cooldownInvalid}
+                      aria-describedby={cooldownInvalid ? `target-cooldown-constraint-${target.key}` : undefined}
+                      bind:value={target.targetCooldownSeconds} />
+                    <InputGroup.Addon align="inline-end"
+                      ><InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text></InputGroup.Addon>
+                  </InputGroup.Root>
+                  {#if cooldownInvalid}<Field.Error id={`target-cooldown-constraint-${target.key}`}
+                      >{m.model_editor_seconds_constraint()}</Field.Error
+                    >{/if}
                 </Field.Field>
               </Field.Group>
 
@@ -1368,9 +1375,14 @@ async function saveModel(): Promise<void> {
               {#if target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
                 <div class="mt-4 border-t pt-4">
                   <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h4 class="font-medium">{m.model_editor_thinking_map()}</h4>
-                      <p class="text-sm text-muted-foreground">{m.model_editor_thinking_map_help()}</p>
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2">
+                        <h4 class="font-medium">{m.model_editor_thinking_map()}</h4>
+                        <Field.Help hint={m.model_editor_thinking_map_help()} />
+                      </div>
+                      {#if target.id}
+                        <p class="mt-1 text-sm text-muted-foreground">{m.model_editor_thinking_map_immediate()}</p>
+                      {/if}
                     </div>
                     {#if target.id}
                       <Button
@@ -1467,93 +1479,97 @@ async function saveModel(): Promise<void> {
                 type="button"
                 disabled={target.enabled && !targetConfigured(target)}
                 onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
+              <p class="text-sm text-muted-foreground sm:order-first sm:mr-auto sm:self-center">
+                {m.model_editor_target_draft_note()}
+              </p>
             {/snippet}
           </Dialog.Layout>
         {/if}
       </Dialog.Root>
     </section>
 
-    <section class="route-section" aria-labelledby="route-thinking-title">
+    <section class="route-section content-column" aria-labelledby="route-thinking-title">
       <div class="route-section-header">
-        <div>
-          <h2 id="route-thinking-title" class="route-section-title">{m.model_editor_thinking_levels()}</h2>
-          <p class="route-section-description">{m.model_editor_thinking_levels_help()}</p>
-        </div>
+        <h2 id="route-thinking-title" class="route-section-title">{m.model_editor_thinking_section()}</h2>
       </div>
-      <div class="grid grid-cols-2 gap-1 rounded-xl bg-muted/60 p-1 sm:grid-cols-4 xl:grid-cols-7">
-        {#each thinkingLevels as level (level)}
-          {@const blockers = thinkingLevelBlockers(level)}
-          {#if !supportedThinkingLevels.includes(level)}
-            <Tooltip.Root>
-              <Tooltip.Trigger
-                type="button"
-                data-slot="route-thinking-level"
-                data-level={level}
-                data-supported="false"
-                class="flex w-full cursor-help items-center justify-center rounded-lg px-3 py-2 text-muted-foreground outline-none transition-colors hover:bg-background/50 focus-visible:ring-[3px] focus-visible:ring-ring/50">
-                <span class="font-technical">{level}</span>
-              </Tooltip.Trigger>
-              <Tooltip.Content side="top" sideOffset={8} class="max-w-96 flex-col items-start gap-1.5">
-                <p class="font-medium">{m.model_editor_thinking_blocked_by()}</p>
-                <ul class="flex w-full list-disc flex-col gap-0.5 pl-4 text-left">
-                  {#each blockers as blocker (blocker)}
-                    <li>{blocker}</li>
-                  {/each}
-                </ul>
-              </Tooltip.Content>
-            </Tooltip.Root>
-          {:else}
-            <div
-              data-slot="route-thinking-level"
-              data-level={level}
-              data-supported="true"
-              class="flex items-center justify-center rounded-lg bg-background px-3 py-2 shadow-xs">
-              <span class="font-technical">{level}</span>
-            </div>
-          {/if}
-        {/each}
-      </div>
-      <Field.Field orientation="vertical" class="mt-4 sm:max-w-md">
-        <Field.Label for="route-default-thinking-level">{m.model_editor_default_thinking_level()}</Field.Label>
-        <Select.Root type="single" bind:value={form.defaultThinkingLevel}>
-          <Select.Trigger
-            id="route-default-thinking-level"
-            class="w-full"
-            aria-label={m.model_editor_default_thinking_level()}>
-            {defaultThinkingLevelLabel()}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value={UNSPECIFIED_THINKING_LEVEL}>
-                {m.model_editor_thinking_level_provider_default()}
-              </Select.Item>
-              {#each supportedThinkingLevels as level (level)}
-                <Select.Item value={level}>{level}</Select.Item>
-              {/each}
-              {#if defaultThinkingLevelUnsupported}
-                <Select.Item value={form.defaultThinkingLevel}>{form.defaultThinkingLevel}</Select.Item>
+      <div>
+        <SettingRow title={m.model_editor_thinking_levels()} hint={m.model_editor_thinking_levels_help()}>
+          <div
+            role="group"
+            aria-label={m.model_editor_thinking_levels()}
+            class="flex flex-wrap gap-1.5 @min-[50rem]/setting-row:max-w-[32rem] @min-[50rem]/setting-row:justify-end">
+            {#each thinkingLevels as level (level)}
+              {@const blockers = thinkingLevelBlockers(level)}
+              {#if !supportedThinkingLevels.includes(level)}
+                <Tooltip.Root>
+                  <Tooltip.Trigger
+                    type="button"
+                    data-slot="route-thinking-level"
+                    data-level={level}
+                    data-supported="false"
+                    class="inline-flex cursor-help items-center rounded-md border border-dashed px-2 py-0.5 font-technical text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50">
+                    {level}
+                  </Tooltip.Trigger>
+                  <Tooltip.Content side="top" sideOffset={8} class="max-w-96 flex-col items-start gap-1.5">
+                    <p class="font-medium">{m.model_editor_thinking_blocked_by()}</p>
+                    <ul class="flex w-full list-disc flex-col gap-0.5 pl-4 text-left">
+                      {#each blockers as blocker (blocker)}
+                        <li>{blocker}</li>
+                      {/each}
+                    </ul>
+                  </Tooltip.Content>
+                </Tooltip.Root>
+              {:else}
+                <span
+                  data-slot="route-thinking-level"
+                  data-level={level}
+                  data-supported="true"
+                  class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/50 px-2 py-0.5 font-technical text-xs text-foreground">
+                  <CheckIcon class="size-3 text-success" aria-hidden="true" />{level}
+                </span>
               {/if}
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-        <Field.Description>{m.model_editor_default_thinking_level_help()}</Field.Description>
-        {#if defaultThinkingLevelUnsupported}
-          <p data-slot="default-thinking-level-warning" class="text-sm text-destructive">
-            {m.model_editor_default_thinking_level_unavailable({ level: form.defaultThinkingLevel })}
-          </p>
-        {/if}
-      </Field.Field>
+            {/each}
+          </div>
+        </SettingRow>
+        <SettingRow
+          title={m.model_editor_default_thinking_level()}
+          labelFor="route-default-thinking-level"
+          hint={m.model_editor_default_thinking_level_help()}
+          controlSize="setting">
+          <Select.Root type="single" bind:value={form.defaultThinkingLevel}>
+            <Select.Trigger
+              id="route-default-thinking-level"
+              class="w-full"
+              aria-label={m.model_editor_default_thinking_level()}>
+              {defaultThinkingLevelLabel()}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value={UNSPECIFIED_THINKING_LEVEL}>
+                  {m.model_editor_thinking_level_provider_default()}
+                </Select.Item>
+                {#each supportedThinkingLevels as level (level)}
+                  <Select.Item value={level}>{level}</Select.Item>
+                {/each}
+                {#if defaultThinkingLevelUnsupported}
+                  <Select.Item value={form.defaultThinkingLevel}>{form.defaultThinkingLevel}</Select.Item>
+                {/if}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </SettingRow>
+      </div>
+      {#if defaultThinkingLevelUnsupported}
+        <p data-slot="default-thinking-level-warning" class="mt-2 text-sm text-destructive">
+          {m.model_editor_default_thinking_level_unavailable({ level: form.defaultThinkingLevel })}
+        </p>
+      {/if}
     </section>
 
     <div
       data-slot="model-editor-footer"
-      class="sticky bottom-0 z-20 mt-auto flex translate-y-2 flex-wrap items-center justify-between gap-3 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-      <p class="text-sm text-muted-foreground">
-        {targets.length === 1
-          ? m.common_1_destination()
-          : m.model_editor_value_destinations({ target_count: targets.length })} · {strategySummary(form.balance)}
-      </p>
-      <div class="flex gap-2">
+      class="sticky bottom-0 z-20 mt-auto translate-y-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
+      <div class="content-column flex flex-wrap items-center justify-end gap-2">
         <Button href="/models" variant="outline">{m.common_cancel()}</Button>
         <Button type="submit" disabled={saving}
           >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}</Button>

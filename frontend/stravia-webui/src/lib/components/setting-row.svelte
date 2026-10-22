@@ -83,8 +83,11 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
     class={cn(
       'flex min-w-0 gap-2',
       layout === 'inline'
-        ? 'items-start justify-between gap-4'
-        : 'flex-col @min-[50rem]/setting-row:flex-row @min-[50rem]/setting-row:items-start @min-[50rem]/setting-row:justify-between @min-[50rem]/setting-row:gap-8',
+        ? ['justify-between gap-4', description ? 'items-start' : 'items-center']
+        : [
+            'flex-col @min-[50rem]/setting-row:flex-row @min-[50rem]/setting-row:justify-between @min-[50rem]/setting-row:gap-8',
+            description ? '@min-[50rem]/setting-row:items-start' : '@min-[50rem]/setting-row:items-center',
+          ],
     )}>
     <div class="flex min-w-0 flex-1 flex-col gap-0.5">
       <div class="flex min-w-0 items-center gap-2">

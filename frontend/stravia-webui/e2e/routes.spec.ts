@@ -847,26 +847,31 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await expect(enabledSwitch).not.toBeChecked()
 
   await page.setViewportSize({ width: 1568, height: 900 })
-  const clientModel = page.getByRole('region', { name: 'Client model', exact: true })
-  const [nameLabelBox, nameInputBox, displayLabelBox, displayInputBox, balanceLabelBox, balanceTriggerBox] =
-    await Promise.all([
-      clientModel.getByText('Model ID', { exact: true }).boundingBox(),
-      page.locator('#route-model-id').boundingBox(),
-      clientModel.getByText('Display name', { exact: true }).boundingBox(),
-      page.locator('#route-display-name').boundingBox(),
-      clientModel.getByText('How requests are sent', { exact: true }).boundingBox(),
-      page.locator('#route-balance').boundingBox(),
-    ])
-  expect(nameLabelBox).not.toBeNull()
-  expect(nameInputBox).not.toBeNull()
-  expect(displayLabelBox).not.toBeNull()
-  expect(displayInputBox).not.toBeNull()
-  expect(balanceLabelBox).not.toBeNull()
-  expect(balanceTriggerBox).not.toBeNull()
-  expect(Math.abs(nameLabelBox!.x - nameInputBox!.x)).toBeLessThanOrEqual(1)
-  expect(Math.abs(displayLabelBox!.x - displayInputBox!.x)).toBeLessThanOrEqual(1)
-  expect(Math.abs(balanceLabelBox!.x - balanceTriggerBox!.x)).toBeLessThanOrEqual(1)
-  expect(Math.abs(displayInputBox!.width - balanceTriggerBox!.width)).toBeLessThanOrEqual(2)
+  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+  await expect
+    .poll(async () => Math.round(((await page.locator('#route-display-name').boundingBox())?.width ?? 0) / rem))
+    .toBe(24)
+  const [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox] = await Promise.all([
+    page.locator('#route-model-id').boundingBox(),
+    page.locator('#route-display-name').boundingBox(),
+    page.locator('#route-output-modality').boundingBox(),
+    page.locator('#route-balance').boundingBox(),
+    page.getByRole('region', { name: 'Client model', exact: true }).boundingBox(),
+  ])
+  for (const box of [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox]) {
+    expect(box).not.toBeNull()
+  }
+  // 设置列（60rem）左对齐；各控件使用语义宽度并共用同一条右边缘。
+  expect(columnBox!.width).toBeLessThanOrEqual(60 * rem + 1)
+  // Model ID 的输入框不含右侧清除按钮，因此用左边缘 + 语义宽度校验其落点。
+  const controlRight = displayInputBox!.x + displayInputBox!.width
+  for (const box of [outputTriggerBox!, balanceTriggerBox!]) {
+    expect(Math.abs(box.x + box.width - controlRight)).toBeLessThanOrEqual(1)
+  }
+  expect(Math.abs(controlRight - 36 * rem - nameInputBox!.x)).toBeLessThanOrEqual(2)
+  expect(Math.abs(displayInputBox!.width - 24 * rem)).toBeLessThanOrEqual(2)
+  expect(Math.abs(outputTriggerBox!.width - 16 * rem)).toBeLessThanOrEqual(2)
+  expect(Math.abs(balanceTriggerBox!.width - 16 * rem)).toBeLessThanOrEqual(2)
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
   for (const index of [1, 2]) {
@@ -1361,4 +1366,157 @@ test('Destination status reflects runtime state without overwriting the editor d
   await expect(card.getByRole('status')).toHaveText('Available')
   await expect(page.getByRole('status').filter({ hasText: 'Destination status unavailable' })).toHaveCount(0)
   await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')
+})
+
+const geometryProvider = (id: string, name: string) => ({
+  id,
+  name,
+  vendor: 'openai-compatible',
+  channel: 'default',
+  protocol: 'openai-compatible',
+  base_url: `https://${id}.example/v1`,
+  use_proxy: false,
+  is_enabled: true,
+  created_at: '2026-08-17T00:00:00Z',
+  updated_at: '2026-08-17T00:00:00Z',
+})
+
+test('Models empty state is global, never names an arbitrary provider, and points at the provider model list', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [] } }))
+  let providerList = [geometryProvider('alpha', 'Alpha service'), geometryProvider('beta', 'Beta service')]
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providerList } }))
+  const main = page.getByRole('main')
+
+  await page.goto('/models')
+  await expect(main.getByText('No models configured', { exact: true })).toBeVisible()
+  await expect(main).not.toContainText('Alpha service')
+  await expect(main).not.toContainText('Beta service')
+  await expect(main.getByRole('link', { name: 'Browse provider models', exact: true })).toHaveAttribute(
+    'href',
+    '/providers',
+  )
+  await expect(main.getByRole('link', { name: 'Add a model manually', exact: true })).toHaveAttribute(
+    'href',
+    '/models/new',
+  )
+
+  // 只有一个供应商时直接进入它的模型清单。
+  providerList = [geometryProvider('alpha', 'Alpha service')]
+  await page.reload()
+  await expect(main.getByRole('link', { name: 'Browse provider models', exact: true })).toHaveAttribute(
+    'href',
+    '/providers/alpha?view=models',
+  )
+
+  // 没有供应商时仍先引导连接供应商。
+  providerList = []
+  await page.reload()
+  await expect(main.getByText('Connect a provider first', { exact: true })).toBeVisible()
+  await expect(main.getByRole('link', { name: 'Go to providers', exact: true })).toBeVisible()
+  await expect(main.getByRole('link', { name: 'Browse provider models' })).toHaveCount(0)
+})
+
+test('New model keeps the first destination layer on screen and offers a compact add action without empty topology', async ({
+  page,
+}) => {
+  await page.route('**/api/v1/providers', (route) =>
+    route.fulfill({ json: { data: [geometryProvider('geo', 'Geo service')] } }),
+  )
+  await page.route('**/api/v1/providers/geo/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
+  await page.route('**/api/v1/providers/geo/model?*', (route) =>
+    route.fulfill({ json: { data: { id: 'geo-model', metadata: {}, thinking_level_map: [] } } }),
+  )
+
+  // 390：没有任何目标时，首屏可见紧凑的「添加请求目标」，没有空插入区与空停用区。
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/models/new')
+  const add = page.getByRole('button', { name: 'Add destination', exact: true })
+  await expect(add).toBeVisible()
+  await expect(add).toBeInViewport({ ratio: 1 })
+  const footerBox = (await page.locator('[data-slot="model-editor-footer"]').boundingBox())!
+  const addBox = (await add.boundingBox())!
+  expect(addBox.y + addBox.height).toBeLessThanOrEqual(footerBox.y + 0.5)
+  await expect(page.locator('[data-slot="target-priority-connector"]')).toHaveCount(0)
+  await expect(page.locator('[data-slot="target-dock"]')).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+
+  // 1440：预填一个目标时，首个优先级层完整出现在首屏内。
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/models/new?provider=geo&model=geo-model')
+  const lane = page.locator('[data-slot="target-lane"]').first()
+  await expect(lane).toBeVisible()
+  const laneBox = (await lane.boundingBox())!
+  expect(laneBox.y + laneBox.height).toBeLessThanOrEqual(900)
+  // 层外没有装饰圈与阴影。
+  expect(await lane.evaluate((element) => getComputedStyle(element).boxShadow)).toBe('none')
+})
+
+test('Model editor caps target cards at 36rem and keeps the disabled area compact on wide screens', async ({
+  page,
+}) => {
+  const target = (id: string, priority: number, enabled: boolean) => ({
+    id,
+    model_id: 'wide-route',
+    provider_id: 'geo',
+    model: `upstream-${id}`,
+    route_output_modalities: ['text'],
+    enabled,
+    priority,
+    first_token_timeout_ms: 60_000,
+    target_retry_budget: 5,
+    target_cooldown_ms: 120_000,
+    created_at: '2026-08-17T00:00:00Z',
+    thinking_level_map: [],
+  })
+  const saved = {
+    id: 'wide-route',
+    model_id: 'wide-route',
+    display_name: 'Wide route',
+    balance: 'traffic_equalization',
+    output_modality: 'text',
+    image_generation_bound: false,
+    is_enabled: true,
+    supported_thinking_levels: [],
+    created_at: '2026-08-17T00:00:00Z',
+    targets: [
+      target('a', 3, true),
+      target('b', 3, true),
+      target('c', 2, true),
+      target('d', 1, true),
+      target('e', 1, true),
+      target('f', 0, false),
+    ],
+  }
+  await page.route('**/api/v1/providers', (route) =>
+    route.fulfill({ json: { data: [geometryProvider('geo', 'Geo service')] } }),
+  )
+  await page.route('**/api/v1/providers/geo/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
+  await page.route('**/api/v1/models/wide-route', (route) => route.fulfill({ json: { data: saved } }))
+  await page.route('**/api/v1/models/wide-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
+
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/models/wide-route')
+  const cards = page.locator('[data-slot="target-lane"] [data-slot="target-card"]')
+  await expect(cards).toHaveCount(5)
+  const remRem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+  for (const box of await cards.evaluateAll((elements) =>
+    elements.map((element) => element.getBoundingClientRect().width),
+  )) {
+    expect(box).toBeLessThanOrEqual(36 * remRem + 0.5)
+  }
+  // 停用区贴着内容顶部，不被拉伸到与层栈等高。
+  const dock = (await page.locator('[data-slot="target-dock"]').boundingBox())!
+  const stack = (await page.locator('[data-slot="target-lane-stack"]').boundingBox())!
+  const disabledCard = (await page.locator('[data-slot="target-dock"] [data-slot="target-card"]').boundingBox())!
+  expect(Math.abs(dock.y - stack.y)).toBeLessThanOrEqual(2)
+  expect(dock.height).toBeLessThan(disabledCard.height + 120)
+  expect(dock.height).toBeLessThan(stack.height - 100)
+  // 多出的宽度留在右侧：停用区紧跟层栈，而不是被推到容器最右端。
+  const containerRight = await page
+    .locator('[data-slot="target-lane-stack"]')
+    .evaluate((element) => element.parentElement!.getBoundingClientRect().right)
+  expect(containerRight - (dock.x + dock.width)).toBeGreaterThan(100)
 })

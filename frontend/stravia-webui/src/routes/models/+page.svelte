@@ -55,6 +55,10 @@ let deleteOpen = $state(false)
 let actingModelId = $state<string>()
 const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const providers = $derived(providersQuery.data ?? [])
+// 只有一个供应商时直接进入它的模型清单；否则先到供应商列表选择。
+const providerModelsHref = $derived(
+  providers.length === 1 ? `/providers/${encodeURIComponent(providers[0].id)}?view=models` : '/providers',
+)
 
 // 先读取全部查询状态，避免短路跳过订阅后错过先完成的依赖。
 const resourcesPending = $derived.by(() => {
@@ -86,7 +90,7 @@ const modelColumns = modelColumnHelper.columns([
     id: 'display-name',
     header: () => m.models_display_name(),
     cell: (context) => renderSnippet(modelDisplayNameCell, context),
-    meta: { label: () => m.models_display_name() },
+    meta: { label: () => m.models_display_name(), width: 'fill' },
     size: 180,
   }),
   modelColumnHelper.accessor('model_id', {
@@ -98,7 +102,7 @@ const modelColumns = modelColumnHelper.columns([
   modelColumnHelper.accessor('context_window', {
     header: () => m.model_specification_context(),
     cell: (context) => renderSnippet(modelContextCell, context),
-    meta: { label: () => m.model_specification_context(), align: 'end' },
+    meta: { label: () => m.model_specification_context(), align: 'end', width: 'compact' },
     size: 130,
   }),
   // 按严重度排序：表格默认顺序已按名称排好，稳定排序使同级保持名称顺序。
@@ -106,13 +110,13 @@ const modelColumns = modelColumnHelper.columns([
     id: 'destinations',
     header: () => m.models_destinations(),
     cell: (context) => renderSnippet(modelDestinationsCell, context),
-    meta: { label: () => m.models_destinations() },
+    meta: { label: () => m.models_destinations(), width: 'fill' },
     size: 280,
   }),
   modelColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
     cell: (context) => renderSnippet(modelStatusCell, context),
-    meta: { label: () => m.common_status() },
+    meta: { label: () => m.common_status(), width: 'compact' },
     size: 130,
   }),
   modelColumnHelper.display({
@@ -121,7 +125,7 @@ const modelColumns = modelColumnHelper.columns([
     cell: (context) => renderSnippet(modelActionsCell, context),
     enableHiding: false,
     enableSorting: false,
-    meta: { label: () => m.common_actions(), align: 'end', exportable: false },
+    meta: { label: () => m.common_actions(), align: 'end', exportable: false, width: 'compact' },
     size: 64,
   }),
 ])
@@ -305,10 +309,10 @@ async function deleteModel(): Promise<void> {
   <div class="flex justify-end gap-1">{@render modelActions(context.row.original)}</div>
 {/snippet}
 
-<div class={['route-page', { 'route-page-empty': resourcesEmpty }]}>
+<div class={['route-page', resourcesEmpty ? 'route-page-empty' : 'models-page']}>
   <PageHeader title={m.common_models()} actions={models.length > 0 ? addModelAction : undefined} />
 
-  <section class="route-section" aria-labelledby="model-route-table-title">
+  <section class="route-section models-workspace" aria-labelledby="model-route-table-title">
     <h2 id="model-route-table-title" class="sr-only">{m.models_configured_models()}</h2>
 
     {#if resourceError}
@@ -328,24 +332,28 @@ async function deleteModel(): Promise<void> {
       </div>
     {:else if resourcesEmpty}
       <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
-        <Empty.Header
-          ><Empty.Title
-            >{providers.length === 0
-              ? m.models_connect_model_service_first()
-              : m.models_no_models_on_service({ name: providers[0]?.name ?? m.common_model_service() })}</Empty.Title
-          ><Empty.Description
-            >{providers.length === 0
-              ? m.models_connect_ai_service_adding_model()
-              : m.models_add_model_name_apps_request_choose_where_requests()}</Empty.Description
-          ></Empty.Header>
-        <Empty.Content
-          >{#if providers.length === 0}<Button href="/providers">{m.models_go_model_services()}</Button>{:else}<Button
-              href="/models/new">{m.models_add_first_model()}</Button
-            >{/if}</Empty.Content>
+        <Empty.Header>
+          <Empty.Title>
+            {providers.length === 0 ? m.models_connect_model_service_first() : m.models_no_models_configured()}
+          </Empty.Title>
+          <Empty.Description>
+            {providers.length === 0 ? m.models_connect_ai_service_adding_model() : m.models_empty_description()}
+          </Empty.Description>
+        </Empty.Header>
+        <Empty.Content>
+          {#if providers.length === 0}
+            <Button href="/providers">{m.models_go_model_services()}</Button>
+          {:else}
+            <Button href={providerModelsHref}>{m.models_browse_provider_models()}</Button>
+            <Button href="/models/new" variant="outline">{m.models_add_manually()}</Button>
+          {/if}
+        </Empty.Content>
       </Empty.Root>
     {:else if modelsQuery.data !== undefined && providersQuery.data !== undefined}
-      <div class="route-desktop-table">
+      <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
+          workbench
+          stickyHeader
           data={models}
           columns={modelColumns}
           labels={tableLabels}
@@ -437,3 +445,27 @@ async function deleteModel(): Promise<void> {
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<style>
+.models-page {
+  /* 与壳层一致，标题按内容占位，其余高度留给模型列表。 */
+  height: calc(100svh - 5rem);
+}
+.models-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 24rem;
+  flex-direction: column;
+}
+@container route-page (max-width: 52rem) {
+  .models-workspace {
+    flex: none;
+    min-height: 0;
+  }
+}
+@media (max-width: 767px) {
+  .models-page {
+    height: calc(100svh - 4.5rem);
+  }
+}
+</style>

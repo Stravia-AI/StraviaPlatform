@@ -152,6 +152,10 @@ function validSeconds(value: number): boolean {
   )
 }
 
+/** 表单就地提示越界约束时与保存校验使用同一规则。 */
+export const isValidTargetSeconds = validSeconds
+export const isValidTargetRetryBudget = (value: number): boolean => validInteger(value)
+
 function completeTarget(target: RouteTargetForm): boolean {
   return Boolean(target.providerId && target.model.trim())
 }
