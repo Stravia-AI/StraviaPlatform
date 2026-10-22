@@ -91,13 +91,13 @@ const apiKeyColumnHelper = createDataTableColumnHelper<ApiKey>()
 const apiKeyColumns = apiKeyColumnHelper.columns([
   apiKeyColumnHelper.accessor('name', {
     header: () => m.common_name(),
-    meta: { label: () => m.common_name(), cellClass: 'font-medium' },
+    meta: { label: () => m.common_name(), cellClass: 'font-medium', width: 'fill' },
     size: 160,
   }),
   apiKeyColumnHelper.accessor('key', {
     header: () => m.api_keys_masked_secret(),
     cell: (context) => renderSnippet(maskedKeyCell, context),
-    meta: { label: () => m.api_keys_masked_secret() },
+    meta: { label: () => m.api_keys_masked_secret(), width: 'compact' },
     size: 170,
   }),
   apiKeyColumnHelper.accessor((apiKey) => limitsLabel(apiKey), {
@@ -106,6 +106,7 @@ const apiKeyColumns = apiKeyColumnHelper.columns([
     meta: {
       label: () => m.api_keys_limits(),
       cellClass: 'font-technical whitespace-normal text-xs leading-5 text-muted-foreground tabular-nums',
+      width: 'compact',
     },
     size: 190,
   }),
@@ -113,19 +114,23 @@ const apiKeyColumns = apiKeyColumnHelper.columns([
     id: 'modelAccess',
     header: () => m.api_keys_model_access(),
     cell: (context) => renderSnippet(modelAccessCell, context),
-    meta: { label: () => m.api_keys_model_access() },
+    meta: { label: () => m.api_keys_model_access(), width: 'fill' },
     size: 220,
   }),
   apiKeyColumnHelper.accessor('expires_at', {
     header: () => m.api_keys_expires(),
     cell: (context) => expirationLabel(context.getValue()),
-    meta: { label: () => m.api_keys_expires(), cellClass: 'font-technical whitespace-nowrap text-xs tabular-nums' },
+    meta: {
+      label: () => m.api_keys_expires(),
+      cellClass: 'font-technical whitespace-nowrap text-xs tabular-nums',
+      width: 'compact',
+    },
     size: 160,
   }),
   apiKeyColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
     cell: (context) => renderSnippet(apiKeyStatusCell, context),
-    meta: { label: () => m.common_status() },
+    meta: { label: () => m.common_status(), width: 'compact' },
     size: 120,
   }),
   apiKeyColumnHelper.display({
@@ -134,7 +139,7 @@ const apiKeyColumns = apiKeyColumnHelper.columns([
     cell: (context) => renderSnippet(apiKeyActionsCell, context),
     enableHiding: false,
     enableSorting: false,
-    meta: { label: () => m.common_actions(), align: 'end', exportable: false },
+    meta: { label: () => m.common_actions(), align: 'end', exportable: false, width: 'compact' },
     size: 64,
   }),
 ])
@@ -274,10 +279,10 @@ async function deleteKey(): Promise<void> {
   <div class="flex justify-end gap-1">{@render keyActions(context.row.original)}</div>
 {/snippet}
 
-<div class={['route-page', { 'route-page-empty': resourcesEmpty }]}>
+<div class={['route-page api-keys-page', { 'route-page-empty': resourcesEmpty }]}>
   <PageHeader title={m.api_keys_api_keys()} actions={apiKeys.length > 0 ? createKeyAction : undefined} />
 
-  <section class="route-section" aria-labelledby="api-key-table-title">
+  <section class="route-section api-keys-workspace" aria-labelledby="api-key-table-title">
     <h2 id="api-key-table-title" class="sr-only">{m.api_keys_client_credentials()}</h2>
 
     {#if resourceError}
@@ -297,21 +302,20 @@ async function deleteKey(): Promise<void> {
       </div>
     {:else if resourcesEmpty}
       <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10"
-        ><Empty.Header
-          ><Empty.Title>{m.api_keys_no_api_keys_created()}</Empty.Title><Empty.Description
-            >{m.api_keys_secret_copy_notice()}</Empty.Description
-          ></Empty.Header
-        ><Empty.Content><Button onclick={openCreate}>{m.api_keys_create_first_api_key()}</Button></Empty.Content
+        ><Empty.Header><Empty.Title>{m.api_keys_no_api_keys_created()}</Empty.Title></Empty.Header><Empty.Content
+          ><Button onclick={openCreate}>{m.api_keys_create_first_api_key()}</Button></Empty.Content
         ></Empty.Root>
     {:else if apiKeysQuery.data !== undefined && modelsQuery.data !== undefined}
-      <div class="route-desktop-table">
+      <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
+          workbench
           data={apiKeys}
           columns={apiKeyColumns}
           labels={tableLabels}
           getRowId={getApiKeyRowId}
           ariaLabel={m.api_keys_client_credentials()}
           stripedRows
+          stickyHeader
           sortMode="multiple"
           resizableColumns
           onRowClick={handleApiKeyTableRowClick} />
@@ -368,3 +372,27 @@ async function deleteKey(): Promise<void> {
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
+
+<style>
+.api-keys-page {
+  /* 与壳层一致，标题按内容占位，其余高度留给密钥列表。 */
+  height: calc(100svh - 5rem);
+}
+.api-keys-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 24rem;
+  flex-direction: column;
+}
+@container route-page (max-width: 52rem) {
+  .api-keys-workspace {
+    flex: none;
+    min-height: 0;
+  }
+}
+@media (max-width: 767px) {
+  .api-keys-page {
+    height: calc(100svh - 4.5rem);
+  }
+}
+</style>

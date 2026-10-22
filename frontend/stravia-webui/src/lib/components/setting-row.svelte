@@ -16,6 +16,8 @@ export interface SettingRowProps {
   labelFor?: string
   /** 一行必要说明：风险或数据流向、约束、禁用原因。可选解释用 `hint`。 */
   description?: string
+  /** 说明下方的补充内容，用于带入口的禁用原因等需要链接的必要说明；纯文本说明用 `description`。 */
+  note?: Snippet
   /** 可选解释（默认值、单位、示例）。只在标题右侧问号提示中出现，任何宽度一致。 */
   hint?: string
   /** 控件前的等宽 muted 只读值，如版本号、地址、数据量。 */
@@ -49,6 +51,7 @@ let {
   title,
   labelFor,
   description,
+  note,
   hint,
   value,
   controlSize,
@@ -98,6 +101,7 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
       {#if description}
         <p id={descriptionId} class="text-sm leading-normal text-muted-foreground">{description}</p>
       {/if}
+      {@render note?.()}
     </div>
     {#if children || value !== undefined || onedit}
       <div
