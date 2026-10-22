@@ -187,12 +187,13 @@ test('historical peak sets the whole grid scale, missing buckets are zero and nu
 test('widening the viewport queries and renders more earlier history', async ({ page }) => {
   await prepareApp(page)
   const requests = await stubStats(page)
-  await page.setViewportSize({ width: 1280, height: 900 })
+  // Both widths use the 12-column composition (workspace >= 80rem), so the activity column grows with the viewport.
+  await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/stats')
   const { wrapper, cells } = await expectCoverage(page, END - 24 * HOUR, END, requests)
   const before = Number(await wrapper.getAttribute('data-activity-start'))
   const count = await cells.count()
-  await page.setViewportSize({ width: 1920, height: 900 })
+  await page.setViewportSize({ width: 2560, height: 900 })
   await expect.poll(async () => Number(await wrapper.getAttribute('data-activity-start'))).toBeLessThan(before)
   await expectCoverage(page, END - 24 * HOUR, END, requests)
   expect(await cells.count()).toBeGreaterThan(count)
@@ -241,4 +242,266 @@ test('token breakdown keeps net input without adding cache subsets back', async 
   await expect(breakdown).toBeVisible()
   await expect(breakdown.getByText('40', { exact: true })).toBeVisible()
   await expect(breakdown.getByRole('listitem')).toHaveCount(2)
+})
+
+const rem = 16
+
+async function populateResources(page: Page, total = 12) {
+  await page.route('**/api/v1/stats/providers**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: Array.from({ length: total }, (_, index) => ({
+          provider_id: `provider-${index + 1}`,
+          provider: `Service ${String(index + 1).padStart(2, '0')}`,
+          deleted: false,
+          request_count: (total - index) * 100,
+          error_count: index === 0 ? 3 : 0,
+          avg_duration_ms: 100,
+          avg_output_tps: 10 + index,
+        })),
+      },
+    })
+  })
+  await page.route('**/api/v1/stats/api-keys**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: Array.from({ length: total }, (_, index) => ({
+          api_key_id: `key-${index + 1}`,
+          api_key_name: `Client ${String(index + 1).padStart(2, '0')}`,
+          deleted: false,
+          request_count: (total - index) * 100,
+          total_input_tokens: 1_234_567 + index,
+          total_output_tokens: 234_567 + index,
+          cache_read_tokens: 54_321,
+          cache_write_tokens: 4_321,
+          reasoning_tokens: null,
+          last_used_at: END - index * HOUR,
+        })),
+      },
+    })
+  })
+  await page.route('**/api/v1/stats/models**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: ['gpt-5', 'claude-opus', 'gemini-pro', 'deepseek', 'qwen'].map((model, index) => ({
+          model_id: `model-${index}`,
+          deleted: false,
+          model,
+          request_count: 50 - index * 7,
+          total_input_tokens: 100,
+          total_output_tokens: 10,
+          total_reasoning_tokens: null,
+          avg_duration_ms: 100,
+        })),
+      },
+    })
+  })
+}
+
+async function usageBoxes(page: Page) {
+  const region = (name: string) => page.getByRole('region', { name, exact: true })
+  const box = async (name: string) => (await region(name).boundingBox())!
+  return {
+    region,
+    page: (await page.locator('.route-page').boundingBox())!,
+    activity: await box('Token activity'),
+    latency: await box('Latency and speed'),
+    errors: await box('Errors'),
+    breakdown: await box('Token breakdown'),
+    models: await box('Models'),
+    providers: await box('Providers'),
+    keys: await box('API Key usage'),
+  }
+}
+
+test.describe('usage workspace layout', () => {
+  test('2560 spends the added width on history, plots and tables while donuts stay bounded', async ({ page }) => {
+    await prepareApp(page)
+    await stubStats(page)
+    await populateResources(page)
+    await page.setViewportSize({ width: 2560, height: 1440 })
+    await page.goto('/stats')
+    const wrapper = page.locator('[data-activity-start]')
+    await expect(wrapper.locator('.token-activity-cell').first()).toBeVisible()
+    const latencyChart = page.getByLabel('Latency and speed chart', { exact: true })
+    await expect(latencyChart).toBeVisible()
+    const keyTable = page.getByRole('region', { name: 'API Key usage', exact: true }).getByRole('table')
+    await expect(keyTable).toBeVisible()
+    const boxes = await usageBoxes(page)
+    expect(Math.round(boxes.page.width)).toBe(120 * rem)
+
+    // Activity history and the latency plot are the widest analyses, with unchanged 10rem plots.
+    const activityBox = (await wrapper.boundingBox())!
+    const latencyBox = (await latencyChart.boundingBox())!
+    expect(activityBox.width).toBeGreaterThan(60 * rem)
+    expect(latencyBox.width).toBeGreaterThan(30 * rem)
+    expect(Math.abs(activityBox.height - 10 * rem)).toBeLessThanOrEqual(1)
+    expect(Math.abs(latencyBox.height - 10 * rem)).toBeLessThanOrEqual(1)
+    expect(Math.abs(activityBox.y - latencyBox.y)).toBeLessThanOrEqual(1)
+    expect(Math.abs(activityBox.y + activityBox.height - latencyBox.y - latencyBox.height)).toBeLessThanOrEqual(1)
+    const cellSize = await wrapper
+      .locator('.token-activity-cell')
+      .first()
+      .evaluate((el) => el.getBoundingClientRect().width)
+    expect(cellSize).toBeLessThanOrEqual(16)
+
+    // Breakdown donuts stay 10-12rem; the error trend takes the width instead.
+    for (const [name, label] of [
+      ['Token breakdown', 'Token breakdown'],
+      ['Models', 'Share of all requests.'],
+    ] as const) {
+      const donut = boxes.region(name).locator(`div[aria-label="${label}"]`)
+      const donutBox = (await donut.boundingBox())!
+      expect(donutBox.width).toBeGreaterThanOrEqual(10 * rem - 1)
+      expect(donutBox.width).toBeLessThanOrEqual(12 * rem + 1)
+      expect(Math.abs(donutBox.width - donutBox.height)).toBeLessThanOrEqual(1)
+    }
+    expect(boxes.errors.width).toBeGreaterThan(boxes.breakdown.width * 2)
+    expect(boxes.breakdown.width).toBeLessThanOrEqual(24 * rem)
+    expect(boxes.models.width).toBeLessThanOrEqual(24 * rem)
+
+    // Provider and key tables sit side by side only because the 7-column key table stays readable.
+    expect(Math.abs(boxes.providers.y - boxes.keys.y)).toBeLessThanOrEqual(1)
+    expect(boxes.keys.x).toBeGreaterThan(boxes.providers.x + boxes.providers.width - 1)
+    expect(boxes.keys.width).toBeGreaterThanOrEqual(46 * rem)
+    await expect(async () => {
+      const headers = await keyTable
+        .getByRole('columnheader')
+        .evaluateAll((els) =>
+          els.map((el) => ({ text: el.textContent?.trim(), clipped: el.scrollWidth > el.clientWidth + 1 })),
+        )
+      expect(headers).toHaveLength(7)
+      expect(headers.filter((header) => header.clipped)).toEqual([])
+      const scrolls = await keyTable.evaluate((table) => {
+        for (let el = table.parentElement; el; el = el.parentElement) {
+          if (el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== 'visible') return true
+          if (el.matches('section')) break
+        }
+        return false
+      })
+      expect(scrolls).toBe(false)
+    }).toPass()
+    // The identity column absorbs the remaining width.
+    const nameColumn = (await keyTable.getByRole('columnheader').first().boundingBox())!
+    const requestColumn = (await keyTable.getByRole('columnheader').nth(1).boundingBox())!
+    expect(nameColumn.width).toBeGreaterThan(requestColumn.width * 1.5)
+  })
+
+  test('1440 stacks the provider and key tables instead of squeezing the 7-column table', async ({ page }) => {
+    await prepareApp(page)
+    await stubStats(page)
+    await populateResources(page)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/stats')
+    const keyTable = page.getByRole('region', { name: 'API Key usage', exact: true }).getByRole('table')
+    await expect(keyTable).toBeVisible()
+    const boxes = await usageBoxes(page)
+    expect(boxes.keys.y).toBeGreaterThanOrEqual(boxes.providers.y + boxes.providers.height - 1)
+    expect(boxes.keys.width).toBeCloseTo(boxes.page.width, 0)
+    // Analyses stack in reading order below the 80rem workspace.
+    expect(boxes.latency.y).toBeGreaterThanOrEqual(boxes.activity.y + boxes.activity.height - 1)
+  })
+
+  test('the 12-column composition follows workspace width at 80rem and the sidebar toggle, not the viewport', async ({
+    page,
+  }) => {
+    await prepareApp(page)
+    await stubStats(page)
+    await populateResources(page)
+    await page.setViewportSize({ width: 1600, height: 900 })
+    await page.goto('/stats')
+    const sideBySide = async () => {
+      const boxes = await usageBoxes(page)
+      return {
+        width: boxes.page.width,
+        paired: Math.abs(boxes.activity.y - boxes.latency.y) <= 1 && boxes.latency.x > boxes.activity.x,
+        breakdownRow:
+          Math.abs(boxes.errors.y - boxes.breakdown.y) <= 1 && Math.abs(boxes.breakdown.y - boxes.models.y) <= 1,
+      }
+    }
+    await expect(page.locator('[data-activity-start]').locator('.token-activity-cell').first()).toBeVisible()
+    const reference = (await page.locator('.route-page').boundingBox())!.width
+    const chrome = 1600 - reference
+
+    for (const [workspace, wide] of [
+      [80 * rem - 1, false],
+      [80 * rem, true],
+    ] as const) {
+      await page.setViewportSize({ width: workspace + chrome, height: 900 })
+      await expect.poll(async () => Math.round((await sideBySide()).width)).toBe(workspace)
+      await expect.poll(async () => (await sideBySide()).paired).toBe(wide)
+      await expect.poll(async () => (await sideBySide()).breakdownRow).toBe(wide)
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(async () => (await sideBySide()).paired).toBe(false)
+    await page.keyboard.press('Control+b')
+    await expect.poll(async () => (await sideBySide()).paired).toBe(true)
+    await page.keyboard.press('Control+b')
+    await expect.poll(async () => (await sideBySide()).paired).toBe(false)
+  })
+
+  for (const locale of ['en-US', 'zh-CN']) {
+    for (const theme of ['light', 'dark'] as const) {
+      test(`activity and latency boundaries stay aligned without descriptions in ${locale} ${theme}`, async ({
+        page,
+      }) => {
+        await prepareApp(page)
+        await stubStats(page)
+        await page.addInitScript(
+          ({ locale, theme }) => {
+            localStorage.setItem('stravia-locale', locale)
+            localStorage.setItem('stravia-theme', theme)
+          },
+          { locale, theme },
+        )
+        await page.emulateMedia({ colorScheme: theme })
+        await page.setViewportSize({ width: 1600, height: 900 })
+        await page.goto('/stats')
+        await expect(page.locator('html')).toHaveAttribute('lang', locale)
+        const wrapper = page.locator('[data-activity-start]')
+        await expect(wrapper.locator('.token-activity-cell').first()).toBeVisible()
+        const latency = page.locator('[role="slider"]').filter({ has: page.locator('path[aria-label]') })
+        await expect(latency).toBeVisible()
+        await expect(async () => {
+          const activityBox = (await wrapper.boundingBox())!
+          const latencyBox = (await latency.boundingBox())!
+          expect(Math.abs(activityBox.y - latencyBox.y)).toBeLessThanOrEqual(1)
+          expect(Math.abs(activityBox.y + activityBox.height - latencyBox.y - latencyBox.height)).toBeLessThanOrEqual(1)
+          expect(Math.abs(activityBox.height - 10 * rem)).toBeLessThanOrEqual(1)
+        }).toPass()
+        // Sections carry their title, not a descriptive paragraph.
+        await expect(page.locator('.route-section-description')).toHaveCount(0)
+      })
+    }
+  }
+
+  for (const width of [390, 320]) {
+    for (const locale of ['en-US', 'zh-CN']) {
+      test(`${width}px keeps range, readings and every resource reachable without page overflow in ${locale}`, async ({
+        page,
+      }) => {
+        await prepareApp(page)
+        await stubStats(page)
+        await populateResources(page)
+        await page.addInitScript((locale) => localStorage.setItem('stravia-locale', locale), locale)
+        await page.setViewportSize({ width, height: 844 })
+        await page.goto('/stats')
+        await expect(page.locator('html')).toHaveAttribute('lang', locale)
+        const range = page.locator('.range-picker')
+        await expect(range).toBeVisible()
+        const rangeBox = (await range.boundingBox())!
+        expect(rangeBox.x).toBeGreaterThanOrEqual(0)
+        expect(rangeBox.x + rangeBox.width).toBeLessThanOrEqual(width)
+        await page.locator('[role="slider"]').first().scrollIntoViewIfNeeded()
+        await expect(page.locator('[data-activity-start]').locator('.token-activity-cell').first()).toBeVisible()
+        await page.locator('.route-mobile-row').last().scrollIntoViewIfNeeded()
+        await expect(page.locator('.route-mobile-row').last()).toBeVisible()
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1),
+        ).toBe(true)
+        expect(await page.getByRole('main').evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+      })
+    }
+  }
 })

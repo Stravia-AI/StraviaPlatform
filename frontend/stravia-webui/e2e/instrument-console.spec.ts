@@ -1011,3 +1011,49 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
     })
   })
 }
+
+test('Usage analytics keeps optional explanations in help tooltips instead of permanent text', async ({ page }) => {
+  await stubTraffic(page, { requests: 12, errors: 0 })
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await page.goto('/stats')
+  await expect(page.getByRole('group', { name: 'Token activity' })).toBeVisible()
+  await expect(page.getByLabel('Latency and speed chart', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Models', exact: true }).getByRole('listitem')).toHaveCount(1)
+
+  const main = page.getByRole('main')
+  for (const removed of [
+    'First response and output rate over the same period.',
+    'Failed requests by time bucket.',
+    'Requests, errors, and output speed for each provider.',
+    'Client volume, Token usage, cache reads and writes, and last activity.',
+    'Share of total input and output tokens.',
+    'Share of all requests.',
+  ]) {
+    await expect(main.getByText(removed, { exact: true })).toHaveCount(0)
+  }
+  await expect(page.locator('.route-section-description')).toHaveCount(0)
+
+  const tooltip = page.locator('[data-slot="tooltip-content"][data-state$="open"]')
+  for (const [region, text] of [
+    ['Token activity', 'Each cell'],
+    ['Token breakdown', 'Share of total input and output tokens.'],
+    ['Models', 'Share of all requests.'],
+  ] as const) {
+    const trigger = page
+      .getByRole('region', { name: region, exact: true })
+      .getByRole('button', { name: 'More about this field' })
+    await trigger.focus()
+    await expect(tooltip).toContainText(text)
+    const box = (await tooltip.boundingBox())!
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(1600)
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toHaveCount(0)
+  }
+  // Loading mechanics are not product copy.
+  await page
+    .getByRole('region', { name: 'Token activity', exact: true })
+    .getByRole('button', { name: 'More about this field' })
+    .focus()
+  await expect(tooltip).not.toContainText(/coarser|bucket|loads?/i)
+})
