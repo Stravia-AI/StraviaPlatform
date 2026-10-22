@@ -6,6 +6,7 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
+import SearchIcon from '@lucide/svelte/icons/search'
 import { tick } from 'svelte'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
@@ -15,7 +16,14 @@ import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { formatDuration } from '#lib/format.js'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '#lib/logical-model.js'
 
-import type { ImageCapabilityDrift, Provider, ProviderDescriptor, Route, VendorChannelDescriptor } from '#lib/types.js'
+import type {
+  ImageCapabilityDrift,
+  Provider,
+  ProviderDescriptor,
+  ProviderOAuthStatus,
+  Route,
+  VendorChannelDescriptor,
+} from '#lib/types.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import ProviderEditor from '#lib/components/provider-editor.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
@@ -38,6 +46,7 @@ import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
+import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 
 const queryClient = useQueryClient()
@@ -55,6 +64,8 @@ const capabilityDriftsQuery = createQuery(() => ({
 }))
 
 let editorOpen = $state(false)
+// 桌面表格与窄屏列表共用同一搜索状态。
+let query = $state('')
 const changesSheet = getModelChanges()
 let deleteTarget = $state<Provider>()
 let deleteOpen = $state(false)
@@ -69,6 +80,11 @@ let reauthorizationBinding = $state(false)
 let reauthorizationError = $state('')
 let reauthorization = $state<{ begin: () => Promise<void>; consume: () => void }>()
 const providers = $derived(providersQuery.data ?? [])
+const providersEmpty = $derived(!providersQuery.isPending && !providersQuery.isError && providers.length === 0)
+const normalizedQuery = $derived(query.trim().toLocaleLowerCase())
+const visibleProviders = $derived(
+  providers.filter((provider) => providerSearchText(provider).includes(normalizedQuery)),
+)
 const models = $derived(modelsQuery.data ?? [])
 const providerDependenciesUnavailable = $derived(modelsQuery.isPending || modelsQuery.isError)
 
@@ -92,13 +108,13 @@ const providerColumns = providerColumnHelper.columns([
   providerColumnHelper.accessor('protocol', {
     header: () => m.common_protocol(),
     cell: (context) => renderSnippet(providerProtocolCell, context),
-    meta: { label: () => m.common_protocol() },
-    size: 180,
+    meta: { label: () => m.common_protocol(), width: 'compact' },
+    size: 160,
   }),
   providerColumnHelper.accessor('base_url', {
     header: () => m.common_base_url(),
     cell: (context) => renderSnippet(providerBaseUrlCell, context),
-    meta: { label: () => m.common_base_url() },
+    meta: { label: () => m.common_base_url(), width: 'fill' },
     size: 320,
   }),
   providerColumnHelper.accessor(
@@ -112,15 +128,15 @@ const providerColumns = providerColumnHelper.columns([
       id: 'authentication',
       header: () => m.providers_authentication(),
       cell: (context) => renderSnippet(providerAuthenticationCell, context),
-      meta: { label: () => m.providers_authentication() },
-      size: 160,
+      meta: { label: () => m.providers_authentication(), width: 'compact' },
+      size: 140,
     },
   ),
   providerColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
     cell: (context) => renderSnippet(providerStatusCell, context),
-    meta: { label: () => m.common_status() },
-    size: 170,
+    meta: { label: () => m.common_status(), width: 'fill' },
+    size: 200,
   }),
   providerColumnHelper.display({
     id: 'actions',
@@ -128,7 +144,7 @@ const providerColumns = providerColumnHelper.columns([
     cell: (context) => renderSnippet(providerActionsCell, context),
     enableHiding: false,
     enableSorting: false,
-    meta: { label: () => m.common_actions(), align: 'end', exportable: false },
+    meta: { label: () => m.common_actions(), align: 'end', exportable: false, width: 'compact' },
     size: 88,
   }),
 ])
@@ -148,6 +164,48 @@ function providerChannel(provider: Provider): VendorChannelDescriptor | undefine
 
 function providerIcon(provider: Provider): string {
   return profileDescriptor(provider)?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'
+}
+
+function authenticationLabel(provider: Provider): string {
+  return providerChannel(provider)?.auth
+    ? 'OAuth'
+    : (provider.configured_credential_fields?.length ?? 0) > 0
+      ? m.provider_config_credentials()
+      : m.provider_config_no_credentials()
+}
+
+// vendor 技术名不在行内常驻，但仍可搜索。
+function providerSearchText(provider: Provider): string {
+  return [
+    provider.name,
+    provider.vendor,
+    provider.protocol,
+    provider.base_url,
+    authenticationLabel(provider),
+    provider.is_enabled ? m.common_enabled_status() : m.common_disabled_status(),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+}
+
+function oauthStatusLabel(status: ProviderOAuthStatus | undefined): string | undefined {
+  switch (status) {
+    case 'not_connected':
+      return m.providers_oauth_not_connected()
+    case 'pending':
+      return m.providers_oauth_pending()
+    case 'unavailable':
+      return m.providers_oauth_unavailable()
+    case 'quota_exhausted':
+      return m.providers_oauth_quota_exhausted()
+    case 'error':
+      return m.providers_oauth_error()
+    case 'disconnected':
+      return m.providers_oauth_disconnected()
+    default:
+      return undefined
+  }
 }
 
 function openCreate(): void {
@@ -359,9 +417,6 @@ async function copyProvider(): Promise<void> {
     <ProviderMark icon={providerIcon(provider)} name={provider.name} logo={provider.id} />
     <div class="min-w-0">
       <p class="truncate font-medium">{provider.name}</p>
-      {#if provider.vendor}
-        <p class="font-technical truncate text-[0.7rem] text-muted-foreground">{provider.vendor}</p>
-      {/if}
       {#if drifts.length > 0}
         <Badge
           class="mt-1"
@@ -383,13 +438,7 @@ async function copyProvider(): Promise<void> {
 {/snippet}
 
 {#snippet providerAuthenticationCell(context: DataTableCellContext<Provider>)}
-  {@const provider = context.row.original}
-  {@const channel = providerChannel(provider)}
-  {channel?.auth
-    ? 'OAuth'
-    : (provider.configured_credential_fields?.length ?? 0) > 0
-      ? m.provider_config_credentials()
-      : m.provider_config_no_credentials()}
+  {authenticationLabel(context.row.original)}
 {/snippet}
 
 {#snippet providerStatusCell(context: DataTableCellContext<Provider>)}
@@ -419,8 +468,22 @@ async function copyProvider(): Promise<void> {
     <p class="mt-1 text-xs text-destructive">{m.provider_config_plugin_missing()}</p>
   {:else if !providerChannel(provider)}
     <p class="mt-1 text-xs text-destructive">{m.provider_config_channel_missing()}</p>
-  {:else if provider.oauth_status}
-    <p class="mt-1 text-xs text-muted-foreground">OAuth · {provider.oauth_status}</p>
+  {:else}
+    {@render oauthRecovery(provider)}
+  {/if}
+{/snippet}
+
+{#snippet oauthRecovery(provider: Provider)}
+  {@const label = oauthStatusLabel(provider.oauth_status)}
+  {#if label && providerChannel(provider)?.auth}
+    <div class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+      <span>{label}</span>
+      <Button
+        class="h-auto p-0 text-xs"
+        variant="link"
+        disabled={actingProviderId === provider.id || reauthorizationBinding}
+        onclick={() => void reauthorizeProvider(provider)}>{m.providers_reauthorize()}</Button>
+    </div>
   {/if}
 {/snippet}
 
@@ -430,10 +493,10 @@ async function copyProvider(): Promise<void> {
   </div>
 {/snippet}
 
-<div class="route-page providers-page">
+<div class={['route-page', providersEmpty ? 'route-page-empty' : 'providers-page']}>
   <PageHeader title={m.common_model_services()} actions={providers.length > 0 ? providerPageActions : undefined} />
 
-  <section class="route-section providers-workspace" aria-labelledby="provider-table-title">
+  <section class={['route-section', !providersEmpty && 'providers-workspace']} aria-labelledby="provider-table-title">
     <h2 id="provider-table-title" class="sr-only">{m.providers_connected_services()}</h2>
 
     {#if providersQuery.isPending}
@@ -455,11 +518,8 @@ async function copyProvider(): Promise<void> {
         <Button class="mt-3" variant="outline" onclick={() => void providersQuery.refetch()}>{m.common_retry()}</Button>
       </div>
     {:else if providers.length === 0}
-      <Empty.Root class="py-10">
-        <Empty.Header
-          ><Empty.Title>{m.providers_no_model_services_connected()}</Empty.Title><Empty.Description
-            >{m.providers_model_nowhere_without_provider()}</Empty.Description
-          ></Empty.Header>
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
+        <Empty.Header><Empty.Title>{m.providers_no_model_services_connected()}</Empty.Title></Empty.Header>
         <Empty.Content><Button onclick={openCreate}>{m.providers_add_first()}</Button></Empty.Content>
       </Empty.Root>
     {:else}
@@ -472,6 +532,8 @@ async function copyProvider(): Promise<void> {
           getRowId={getProviderRowId}
           ariaLabel={m.providers_table_aria_label()}
           globalFilterEnabled
+          bind:globalFilter={query}
+          globalFilterText={providerSearchText}
           globalFilterPlaceholder={m.providers_table_search()}
           columnToggle
           toolbarLast={modelChangesAction}
@@ -485,8 +547,20 @@ async function copyProvider(): Promise<void> {
       </div>
 
       <div class="route-mobile-list">
-        {@render modelChangesAction()}
-        {#each providers as provider (provider.id)}
+        <div class="mb-3 flex flex-col gap-2">
+          <InputGroup.Root class="w-full min-w-0">
+            <InputGroup.Input
+              bind:value={query}
+              aria-label={m.providers_table_search()}
+              placeholder={m.providers_table_search()} />
+            <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+          </InputGroup.Root>
+          <div class="flex justify-end">{@render modelChangesAction()}</div>
+        </div>
+        {#if visibleProviders.length === 0}
+          <p class="py-6 text-center text-sm text-muted-foreground" role="status">{m.providers_table_no_results()}</p>
+        {/if}
+        {#each visibleProviders as provider (provider.id)}
           {@const drifts = driftsByProvider[provider.id] ?? []}
           {@const credentialInvalid = provider.credential_status === 'invalid'}
           <div class="route-mobile-row">
@@ -496,11 +570,7 @@ async function copyProvider(): Promise<void> {
                 <div class="min-w-0">
                   <p class="truncate font-medium">{provider.name}</p>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    {provider.protocol || m.provider_config_custom_protocol()} · {providerChannel(provider)?.auth
-                      ? 'OAuth'
-                      : (provider.configured_credential_fields?.length ?? 0) > 0
-                        ? m.provider_config_credentials()
-                        : m.provider_config_no_credentials()}
+                    {provider.protocol || m.provider_config_custom_protocol()} · {authenticationLabel(provider)}
                   </p>
                 </div>
               </div>
@@ -526,6 +596,7 @@ async function copyProvider(): Promise<void> {
               {#if credentialInvalid && !provider.is_enabled}
                 <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
               {/if}
+              {@render oauthRecovery(provider)}
               {#if drifts.length > 0}
                 <Badge
                   class="mt-2"
