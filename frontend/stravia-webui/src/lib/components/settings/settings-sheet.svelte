@@ -1,6 +1,8 @@
 <script lang="ts" module>
 import type { Snippet } from 'svelte'
 
+import type { DraftGuard } from '#lib/draft-guard.svelte.js'
+
 export interface SettingsSheetProps {
   open: boolean
   /** 任务标题，如「编辑代理」。 */
@@ -19,6 +21,8 @@ export interface SettingsSheetProps {
   onsubmit: () => void | Promise<void>
   /** 关闭（含取消、遮罩、Escape）后的回调，用于丢弃草稿。 */
   onclose?: () => void
+  /** 草稿离开保护：提供后，有未保存草稿时取消、遮罩、Escape 与路由离开先经过确认；保存中同样锁定。 */
+  guard?: DraftGuard
   children: Snippet
 }
 </script>
@@ -26,6 +30,7 @@ export interface SettingsSheetProps {
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
@@ -41,6 +46,7 @@ let {
   footerNote,
   onsubmit,
   onclose,
+  guard,
   children,
 }: SettingsSheetProps = $props()
 
@@ -51,18 +57,24 @@ function setOpen(next: boolean): void {
   open = next
   if (!next) onclose?.()
 }
+
+function requestOpen(next: boolean): void {
+  if (guard) guard.openChange(setOpen)(next)
+  else setOpen(next)
+}
 </script>
 
 <!--
   设置页的显式保存表面：只读摘要的「编辑」与需要补齐字段的开关都打开它。
   取消、遮罩与 Escape 都等同于取消，保持原值；保存中锁定关闭。
 -->
-<Sheet.Root bind:open={() => open, setOpen}>
+<Sheet.Root bind:open={() => open, requestOpen}>
   <Sheet.Content
     side="right"
     class="route-overlay-content w-full! gap-0 overflow-hidden p-0 sm:max-w-[32rem]!"
     closeLabel={m.common_close()}
-    closeDisabled={saving}>
+    closeDisabled={saving}
+    locked={saving}>
     <Sheet.Header class="border-b pr-12">
       <Sheet.Title>{title}</Sheet.Title>
     </Sheet.Header>
@@ -84,7 +96,7 @@ function setOpen(next: boolean): void {
         {#if footerNote}<p id={noteId} class="me-auto min-w-0 flex-1 text-sm text-muted-foreground">
             {footerNote}
           </p>{/if}
-        <Button type="button" variant="outline" disabled={saving} onclick={() => setOpen(false)}>
+        <Button type="button" variant="outline" disabled={saving} onclick={() => requestOpen(false)}>
           {m.common_cancel()}
         </Button>
         <Button
@@ -98,3 +110,5 @@ function setOpen(next: boolean): void {
     </form>
   </Sheet.Content>
 </Sheet.Root>
+
+{#if guard}<DraftDiscardDialog {guard} />{/if}

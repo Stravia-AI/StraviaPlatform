@@ -1,23 +1,25 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import type { MediaGenerationConfig, MediaGenerationConfigView } from '#lib/types.js'
+import { DraftGuard } from '#lib/draft-guard.svelte.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
+import SettingsSheet from '#lib/components/settings/settings-sheet.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
-import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
-import * as Field from '#lib/components/ui/field/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 
-const UNBOUND_ROUTE = '__media_generation_unbound__'
+const validationTooltipId = 'media-generation-validation-hint'
 const queryClient = useQueryClient()
 
 const configQuery = createQuery(() => ({
@@ -29,26 +31,36 @@ const eligibleRoutesQuery = createQuery(() => ({
   queryFn: admin.mediaGeneration.eligibleRoutes,
 }))
 
-let initialized = $state(false)
-let routeId = $state<string | null>(null)
+// undefined：没有未保存的选择，跟随服务器确认值；被拒绝的选择留在这里直到重试成功或改选。
+let pendingRoute = $state<string | null | undefined>(undefined)
+let routeSaving = $state(false)
+let routeError = $state('')
 let toggleSaving = $state(false)
 let toggleError = $state('')
 let validationTooltipOpen = $state(false)
-let saving = $state(false)
-let saveError = $state('')
+let clearOpen = $state(false)
+let clearSaving = $state(false)
+let clearError = $state('')
+
+// 未保存的路由选择（被拒绝的选择仍留在原处）与解除绑定 Sheet 共用离开保护；保存中锁定。
+const guard = new DraftGuard({
+  dirty: () => pendingRoute !== undefined && pendingRoute !== (configQuery.data?.config.image.route_id ?? null),
+  busy: () => routeSaving || clearSaving,
+})
+
 const eligibleRoutes = $derived(eligibleRoutesQuery.data ?? [])
 const savedRouteId = $derived(configQuery.data?.config.image.route_id ?? null)
-const hasChanges = $derived(Boolean(configQuery.data) && routeId !== savedRouteId)
+const routeDraft = $derived(pendingRoute === undefined ? savedRouteId : pendingRoute)
 const savedConfigurationValid = $derived(
   Boolean(configQuery.data?.validation.valid && configQuery.data.config.image.route_id),
 )
 const toggleDisabled = $derived(
-  saving || toggleSaving || (!configQuery.data?.config.enabled && !savedConfigurationValid),
+  routeSaving || clearSaving || toggleSaving || (!configQuery.data?.config.enabled && !savedConfigurationValid),
 )
-const canSave = $derived(Boolean(configQuery.data) && hasChanges && !saving && !toggleSaving)
-const selectedRoute = $derived(eligibleRoutes.find((route) => route.id === routeId))
-
-const selectedRouteLabel = $derived(routeId ? selectedRoute?.name || routeId : m.media_generation_no_route())
+const selectedRoute = $derived(eligibleRoutes.find((route) => route.id === routeDraft))
+const selectedRouteLabel = $derived(routeDraft ? selectedRoute?.name || routeDraft : m.media_generation_no_route())
+const savedRoute = $derived(eligibleRoutes.find((route) => route.id === savedRouteId))
+const clearSummary = $derived(savedRouteId ? savedRoute?.name || savedRouteId : m.media_generation_no_route())
 
 const validationMessage = $derived.by(() => {
   const validation = configQuery.data?.validation
@@ -57,15 +69,6 @@ const validationMessage = $derived.by(() => {
   if (!validation.code) return validation.message?.trim() ?? ''
 
   return localizeBackendErrorMessage({ code: validation.code, message: validation.message ?? undefined })
-})
-
-$effect(() => {
-  const view = configQuery.data
-
-  if (!view || initialized) return
-
-  routeId = view.config.image.route_id
-  initialized = true
 })
 
 function updateCachedConfig(view: MediaGenerationConfigView): void {
@@ -77,7 +80,8 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
 
   if (
     !current ||
-    saving ||
+    routeSaving ||
+    clearSaving ||
     toggleSaving ||
     enabled === current.config.enabled ||
     (enabled && !savedConfigurationValid)
@@ -88,6 +92,7 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
   toggleSaving = true
   toggleError = ''
   try {
+    // 只提交服务器确认的配置，不顺带提交或丢弃未保存的路由选择。
     const input: MediaGenerationConfig = { enabled, image: { route_id: current.config.image.route_id } }
     updateCachedConfig(await admin.mediaGeneration.config.update(input))
   } catch (error) {
@@ -97,28 +102,61 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
   }
 }
 
-async function saveRoute(): Promise<void> {
+async function persistRoute(routeId: string | null): Promise<void> {
   const current = configQuery.data
 
-  if (!current || !canSave) return
+  if (!current) return
 
-  saving = true
-  saveError = ''
-
+  routeSaving = true
+  routeError = ''
   try {
     const input: MediaGenerationConfig = {
       enabled: current.config.enabled && Boolean(routeId),
       image: { route_id: routeId },
     }
     const view = await admin.mediaGeneration.config.update(input)
-    routeId = view.config.image.route_id
     updateCachedConfig(view)
+    pendingRoute = undefined
     await queryClient.invalidateQueries({ queryKey: ['models'] })
     toast.success(m.media_generation_settings_saved())
   } catch (error) {
-    saveError = localizeBackendErrorMessage(error)
+    // 失败保留选择：草稿不变，服务器确认值不被覆盖，错误留在本次事务内。
+    routeError = localizeBackendErrorMessage(error)
   } finally {
-    saving = false
+    routeSaving = false
+  }
+}
+
+function chooseRoute(value?: string): void {
+  const next = value ?? null
+
+  if (next === routeDraft && !routeError) return
+  pendingRoute = next
+  void persistRoute(next)
+}
+
+function openClear(): void {
+  clearError = ''
+  clearOpen = true
+}
+
+async function unlinkRoute(): Promise<void> {
+  if (clearSaving) return
+  clearSaving = true
+  clearError = ''
+  try {
+    // 解除绑定同时关闭功能，显式保存后才生效。
+    const view = await admin.mediaGeneration.config.update({ enabled: false, image: { route_id: null } })
+    updateCachedConfig(view)
+    pendingRoute = undefined
+    routeError = ''
+    await queryClient.invalidateQueries({ queryKey: ['models'] })
+    clearOpen = false
+    toast.success(m.media_generation_settings_saved())
+  } catch (error) {
+    clearError = localizeBackendErrorMessage(error)
+  } finally {
+    clearSaving = false
   }
 }
 </script>
@@ -135,20 +173,15 @@ async function saveRoute(): Promise<void> {
       retry={() => configQuery.refetch()}
       retrying={configQuery.isFetching} />
   {:else if configQuery.isPending}
-    <div class="flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
-      <Skeleton class="h-24" />
-      <Skeleton class="h-40" />
+    <div class="content-column flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
+      <Skeleton class="h-12" />
+      <Skeleton class="h-12" />
     </div>
   {:else if configQuery.data}
-    <section class="route-section" aria-labelledby="media-generation-gate-title">
-      <div class="route-section-header">
-        <div class="min-w-0 flex-1 basis-64">
-          <h2 id="media-generation-gate-title" class="route-section-title">{m.media_generation_enable()}</h2>
-          <p id="media-generation-gate-description" class="route-section-description">
-            {m.media_generation_enable_help()}
-          </p>
-        </div>
-        <div class="flex shrink-0 items-center gap-3">
+    {@const config = configQuery.data.config}
+    <div class="content-column">
+      <SettingRow title={m.media_generation_enable()} hint={m.media_generation_enable_help()} layout="inline">
+        {#snippet children({ titleId })}
           {#if toggleSaving}<Spinner aria-label={m.media_generation_saving_enabled_state()} />{/if}
           <Tooltip.Root
             open={validationTooltipOpen && !savedConfigurationValid}
@@ -162,15 +195,15 @@ async function saveRoute(): Promise<void> {
                   <span
                     {...props}
                     role="switch"
-                    aria-checked={configQuery.data?.config.enabled ?? false}
+                    aria-checked={config.enabled}
                     aria-disabled="true"
                     aria-busy={toggleSaving}
                     tabindex="0"
-                    aria-labelledby="media-generation-gate-title"
-                    aria-describedby="media-generation-gate-description media-generation-validation-hint"
+                    aria-labelledby={titleId}
+                    aria-describedby={validationTooltipId}
                     class="inline-flex cursor-not-allowed rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
                     <Switch
-                      checked={configQuery.data?.config.enabled ?? false}
+                      checked={config.enabled}
                       disabled
                       aria-hidden="true"
                       tabindex={-1}
@@ -179,118 +212,111 @@ async function saveRoute(): Promise<void> {
                 {:else}
                   <Switch
                     {...props}
-                    bind:checked={
-                      () => configQuery.data?.config.enabled ?? false, (value: boolean) => void toggleEnabled(value)
-                    }
+                    bind:checked={() => config.enabled, (value: boolean) => void toggleEnabled(value)}
                     aria-busy={toggleSaving}
-                    aria-labelledby="media-generation-gate-title"
-                    aria-describedby={savedConfigurationValid
-                      ? 'media-generation-gate-description'
-                      : 'media-generation-gate-description media-generation-validation-hint'} />
+                    aria-labelledby={titleId}
+                    aria-describedby={validationTooltipId} />
                 {/if}
               {/snippet}
             </Tooltip.Trigger>
             <Tooltip.Content
-              id="media-generation-validation-hint"
+              id={validationTooltipId}
               role="tooltip"
               sideOffset={4}
               class="max-w-[min(20rem,calc(100vw-2rem))]">
               {validationMessage || m.media_generation_route_required()}
             </Tooltip.Content>
           </Tooltip.Root>
-        </div>
-      </div>
-
+        {/snippet}
+      </SettingRow>
       {#if toggleError}
-        <Alert.Root variant="destructive"><Alert.Description>{toggleError}</Alert.Description></Alert.Root>
+        <Alert.Root variant="destructive" class="my-3">
+          <Alert.Description>{toggleError}</Alert.Description>
+        </Alert.Root>
       {/if}
-    </section>
 
-    <section class="route-section" aria-labelledby="media-generation-image-route-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="media-generation-image-route-title" class="route-section-title">
-            {m.media_generation_image_route_title()}
-          </h2>
-          <p class="route-section-description">{m.media_generation_image_route_help()}</p>
-        </div>
-        <Button disabled={!canSave} aria-busy={saving} onclick={() => void saveRoute()}>
-          {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_settings()}
-        </Button>
-      </div>
-
-      <div class="flex flex-col gap-3">
-        {#if hasChanges}
-          <p class="text-sm text-muted-foreground" role="status">
-            {routeId ? m.media_generation_route_unsaved() : m.media_generation_route_clear_pending()}
-          </p>
+      <SettingRow
+        title={m.media_generation_image_route_title()}
+        hint={m.media_generation_image_route_hint()}
+        labelFor="media-generation-image-route"
+        controlSize="fill"
+        description={eligibleRoutesQuery.isSuccess && eligibleRoutes.length === 0 && !savedRouteId
+          ? m.media_generation_no_eligible_routes()
+          : undefined}>
+        {#if eligibleRoutesQuery.isPending}
+          <Skeleton class="h-9 min-w-0 flex-1" aria-label={m.media_generation_routes_loading()} aria-busy="true" />
+        {:else}
+          <Select.Root
+            type="single"
+            value={routeDraft ?? ''}
+            onValueChange={chooseRoute}
+            disabled={routeSaving || clearSaving || eligibleRoutes.length === 0}>
+            <Select.Trigger id="media-generation-image-route" class="min-w-0 flex-1">
+              <span class={routeDraft && !selectedRoute?.name ? 'font-technical' : ''}>
+                {selectedRouteLabel}
+              </span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                {#each eligibleRoutes as route (route.id)}
+                  <Select.Item value={route.id} label={route.name || route.id}>
+                    <span class="flex min-w-0 flex-col">
+                      <span class="truncate">{route.name || route.id}</span>
+                      {#if route.name}
+                        <span class="truncate font-technical text-xs text-muted-foreground">{route.id}</span>
+                      {/if}
+                    </span>
+                  </Select.Item>
+                {/each}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+          {#if eligibleRoutesQuery.isSuccess && eligibleRoutes.length === 0 && !savedRouteId}
+            <Button type="button" variant="outline" size="sm" href={resolve('models')}
+              >{m.connect_add_a_model()}</Button>
+          {/if}
+          {#if routeSaving}
+            <Spinner aria-label={m.media_generation_saving_route()} />
+          {/if}
+          {#if routeError}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={routeSaving}
+              onclick={() => void persistRoute(routeDraft)}>{m.common_save_settings()}</Button>
+          {/if}
+          {#if savedRouteId}
+            <Button type="button" variant="outline" size="sm" disabled={routeSaving} onclick={openClear}
+              >{m.media_generation_clear_route()}</Button>
+          {/if}
         {/if}
-        {#if saveError}
-          <Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root>
-        {/if}
-      </div>
-
-      {#if eligibleRoutesQuery.isPending}
-        <div class="flex flex-col gap-3" aria-label={m.media_generation_routes_loading()} aria-busy="true">
-          <Skeleton class="h-5 w-36" />
-          <Skeleton class="h-10 w-full max-w-[28rem]" />
-        </div>
-      {:else if eligibleRoutesQuery.isError}
+      </SettingRow>
+      {#if eligibleRoutesQuery.isError}
         <RequestFailure
           title={m.media_generation_routes_not_loaded()}
           message={localizeBackendErrorMessage(eligibleRoutesQuery.error)}
           retry={() => eligibleRoutesQuery.refetch()}
           retrying={eligibleRoutesQuery.isFetching} />
-      {:else}
-        <Field.Group>
-          <Field.Field size="select">
-            <Field.Label for="media-generation-image-route">{m.media_generation_route_label()}</Field.Label>
-            <Select.Root
-              type="single"
-              value={routeId ?? UNBOUND_ROUTE}
-              onValueChange={(value: string) => {
-                routeId = value === UNBOUND_ROUTE ? null : value
-                saveError = ''
-              }}
-              disabled={saving || toggleSaving}>
-              <Select.Trigger id="media-generation-image-route" class="w-full">
-                <span class={routeId && !selectedRoute?.name ? 'font-technical' : ''}>
-                  {selectedRouteLabel}
-                </span>
-              </Select.Trigger>
-              <Select.Content>
-                <Select.Group>
-                  <Select.Item value={UNBOUND_ROUTE} label={m.media_generation_no_route()}>
-                    {m.media_generation_no_route()}
-                  </Select.Item>
-                  {#each eligibleRoutes as route (route.id)}
-                    <Select.Item value={route.id} label={route.name || route.id}>
-                      <span class="flex min-w-0 flex-col">
-                        <span class="truncate">{route.name || route.id}</span>
-                        {#if route.name}
-                          <span class="truncate font-technical text-xs text-muted-foreground">{route.id}</span>
-                        {/if}
-                      </span>
-                    </Select.Item>
-                  {/each}
-                </Select.Group>
-              </Select.Content>
-            </Select.Root>
-          </Field.Field>
-        </Field.Group>
       {/if}
-    </section>
-  {/if}
-
-  <section class="route-section" aria-labelledby="media-generation-support-title">
-    <div class="route-section-header">
-      <div>
-        <h2 id="media-generation-support-title" class="route-section-title">
-          {m.media_generation_supported_types_title()}
-        </h2>
-        <p class="route-section-description">{m.media_generation_supported_types_help()}</p>
-      </div>
-      <Badge variant="secondary">{m.media_generation_image_type()}</Badge>
+      {#if routeError}
+        <Alert.Root variant="destructive" class="my-3">
+          <Alert.Description>{routeError}</Alert.Description>
+        </Alert.Root>
+      {/if}
     </div>
-  </section>
+  {/if}
 </div>
+
+<SettingsSheet
+  bind:open={clearOpen}
+  title={m.media_generation_clear_route_title()}
+  submitLabel={m.media_generation_clear_route_submit()}
+  footerNote={m.media_generation_clear_route_impact()}
+  submitDisabled={savedRouteId === null}
+  saving={clearSaving}
+  error={clearError}
+  {guard}
+  onsubmit={unlinkRoute}>
+  <SettingRow title={m.media_generation_image_route_title()} value={clearSummary} layout="inline" />
+</SettingsSheet>
