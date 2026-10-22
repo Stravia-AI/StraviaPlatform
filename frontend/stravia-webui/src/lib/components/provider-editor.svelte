@@ -25,6 +25,7 @@ import type { CreateProvider, Provider } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import ProviderMark from '#lib/components/provider-mark.svelte'
@@ -150,9 +151,14 @@ const guard = new DraftGuard({
   busy: () => draft.submitting,
 })
 
-// 每次打开都以当前字段为基线，避免上一次遗留的步骤造成误判。
+// 每次打开都从选择服务开始，并以当前字段为基线，避免上一次遗留的步骤造成误判。
 $effect(() => {
-  if (open) untrack(() => baseline.reset())
+  if (!open) return
+  untrack(() => {
+    step = 'select'
+    selectedOptionKey = ''
+    baseline.reset()
+  })
 })
 
 onDestroy(() => draft.dispose())
@@ -240,7 +246,7 @@ function saveProvider(): void {
     data-provider-option
     data-active={focusedOptionKey === option.key}
     aria-current={focusedOptionKey === option.key ? 'true' : undefined}
-    class="group flex h-full min-h-28 flex-col items-start gap-2.5 rounded-xl border bg-card p-3 text-left transition-[border-color,box-shadow,background-color] hover:border-primary/45 hover:bg-muted/30 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 data-[active=true]:border-primary/45 data-[active=true]:bg-muted/30 data-[active=true]:shadow-sm"
+    class="group flex h-full flex-col items-start rounded-xl border bg-card p-3 text-left transition-[border-color,box-shadow,background-color] hover:border-primary/45 hover:bg-muted/30 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 data-[active=true]:border-primary/45 data-[active=true]:bg-muted/30 data-[active=true]:shadow-sm"
     onfocus={() => (focusedOptionKey = option.key)}
     onkeydown={handleProviderOptionKeydown}
     onclick={() => void chooseOption(option)}>
@@ -259,21 +265,14 @@ function saveProvider(): void {
   </button>
 {/snippet}
 
-<Sheet.Root {open} onOpenChange={guard.openChange(handleOpenChange)}>
+<Sheet.Root bind:open={() => open, guard.openChange(handleOpenChange)}>
   <Sheet.Content
     side="right"
-    class="{step === 'select'
-      ? 'provider-overlay-content'
-      : 'route-overlay-content-md'} w-full! gap-0 overflow-hidden p-0"
+    class="provider-overlay-content w-full! gap-0 overflow-hidden p-0"
     locked={guard.busy}
     closeLabel={m.provider_editor_close_service_setup()}>
     <Sheet.Header class="border-b">
       <Sheet.Title>{step === 'select' ? m.providers_add() : m.provider_editor_connection_details()}</Sheet.Title>
-      <Sheet.Description>
-        {step === 'select'
-          ? m.provider_editor_choose_ai_service_how_want_sign()
-          : m.provider_editor_configuration_help()}
-      </Sheet.Description>
       <Tabs.Root value={step} onValueChange={changeStep} class="mt-3">
         <Tabs.List aria-label={m.provider_editor_connection_setup_steps()}>
           <Tabs.Trigger value="select" disabled={draft.submitting}>{m.provider_editor_choose_service()}</Tabs.Trigger>
@@ -439,11 +438,12 @@ function saveProvider(): void {
                 draft.oauthStateChanged(sessionId, ready)} />
           {/if}
 
-          <Field.Field orientation="horizontal" class="mt-6 justify-between rounded-lg border px-3 py-2">
-            <Field.Content>
-              <Field.Label for="provider-use-proxy">{m.common_use_proxy()}</Field.Label>
-              <Field.Description>{m.common_send_requests_service_proxy_configured_settings()}</Field.Description>
-            </Field.Content>
+          <SettingRow
+            class="mt-4"
+            title={m.common_use_proxy()}
+            labelFor="provider-use-proxy"
+            hint={m.common_send_requests_service_proxy_configured_settings()}
+            layout="inline">
             <Switch
               id="provider-use-proxy"
               checked={draft.fields.useProxy}
@@ -452,7 +452,7 @@ function saveProvider(): void {
                 draft.fields.useProxy = checked
                 draft.useProxyChanged()
               }} />
-          </Field.Field>
+          </SettingRow>
 
           {#if previewIssueError}
             <p class="mt-6 text-sm text-destructive">{previewIssueError}</p>

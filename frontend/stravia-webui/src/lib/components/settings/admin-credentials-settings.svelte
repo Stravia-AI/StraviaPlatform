@@ -60,6 +60,7 @@ async function save(): Promise<void> {
 <SettingsSheet
   bind:open
   title={m.settings_admin_credentials()}
+  draft={() => [adminUsername, currentPassword, newPassword, confirmPassword]}
   submitLabel={m.settings_save_credentials()}
   footerNote={m.settings_credentials_sign_out()}
   {saving}

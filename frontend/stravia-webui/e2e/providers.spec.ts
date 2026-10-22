@@ -262,7 +262,8 @@ test('configured Providers table filters and persists column customization', asy
 
   const table = page.getByRole('table', { name: 'Connected AI providers' })
   await expect(table.getByRole('row')).toHaveCount(3)
-  const search = page.getByPlaceholder('Search providers…')
+  // 窄屏列表有自己的搜索框（桌面宽度下隐藏），按可访问树取可见的那一个。
+  const search = page.getByRole('textbox', { name: 'Search providers…' })
   await search.fill('Alpha')
   await expect(table.getByRole('row')).toHaveCount(2)
   await expect(table).toContainText('Alpha Service')
@@ -423,7 +424,12 @@ test('Provider draft submission locks editing and dismissal until a failed write
     await expect(secret).toHaveValue('fixture-only-provider-secret')
     await expect(page.getByText(/Fixture write rejected/)).toBeVisible()
     expect(writes).toBe(1)
+    // 写入失败后草稿仍在：取消先确认，放弃后才关闭。
     await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await page
+      .getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+      .getByRole('button', { name: 'Discard changes' })
+      .click()
     await expect(page.getByRole('heading', { name: 'Connection details' })).toHaveCount(0)
   } finally {
     previewGate.resolve()
@@ -2413,6 +2419,201 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
   const modelsTable = page.getByRole('table')
   await expect(modelsTable.getByText('GPT New', { exact: true })).toBeVisible()
   await expect(modelsTable.getByText('gpt-new', { exact: true })).toBeVisible()
+})
+
+const listProviders = [
+  {
+    id: 'zeta-provider',
+    name: 'Zeta Service',
+    vendor: 'openai',
+    protocol: 'openai-compatible',
+    base_url: 'https://zeta.example/v1',
+    use_proxy: false,
+    channel: 'default',
+    configured_credential_fields: ['api_key'],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 'alpha-provider',
+    name: 'Alpha Service',
+    vendor: 'openai-codex',
+    protocol: 'open-responses',
+    base_url: 'https://alpha.example/v1',
+    use_proxy: false,
+    channel: 'codex',
+    oauth_status: 'disconnected',
+    configured_credential_fields: [],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+]
+
+for (const width of [390, 320]) {
+  test(`narrow Provider list is searchable by name and vendor at ${width}px`, async ({ page }) => {
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: listProviders } }))
+    await page.setViewportSize({ width, height: 800 })
+    await page.goto('/providers')
+
+    const list = page.locator('.route-mobile-list')
+    const search = page.getByRole('textbox', { name: 'Search providers…' })
+    await expect(search).toBeVisible()
+    const box = (await search.boundingBox())!
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(width)
+    await expect(list.getByText('Zeta Service')).toBeVisible()
+    await expect(list.getByText('Alpha Service')).toBeVisible()
+
+    await search.fill('zeta')
+    await expect(list.getByText('Zeta Service')).toBeVisible()
+    await expect(list.getByText('Alpha Service')).toHaveCount(0)
+
+    // 技术名不在行内常驻，但搜索仍然能命中。
+    await search.fill('openai-codex')
+    await expect(list.getByText('Alpha Service')).toBeVisible()
+    await expect(list.getByText('Zeta Service')).toHaveCount(0)
+    await expect(list.getByText('openai-codex', { exact: true })).toHaveCount(0)
+
+    await search.fill('__missing__')
+    await expect(list.getByText('No providers match your search.')).toBeVisible()
+    await search.fill('')
+    await expect(list.getByText('Zeta Service')).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('Provider list at 2560px is 1920px wide, keeps filling the remaining height, and hides vendor names', async ({
+  page,
+}) => {
+  const many = Array.from({ length: 40 }, (_, index) => ({
+    ...listProviders[0],
+    id: `provider-${index}`,
+    name: `Provider ${index}`,
+  }))
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: many } }))
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/providers')
+  const table = page.getByRole('table', { name: 'Connected AI providers' })
+  await expect(table.getByRole('row').nth(1)).toBeVisible()
+  const viewport = page.locator('[data-slot="data-table-viewport"]')
+  const container = page.getByRole('main').locator('> div')
+  await expect.poll(async () => Math.round((await container.boundingBox())!.width)).toBe(1920)
+  expect(Math.round((await viewport.boundingBox())!.width)).toBeGreaterThan(1800)
+  const bottom = await viewport.evaluate((element) => element.getBoundingClientRect().bottom)
+  expect(bottom).toBeGreaterThan(1440 - 120)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
+  await expect(table.getByText('openai-codex', { exact: true })).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+for (const [locale, label, action] of [
+  ['en-US', 'Signed out', 'Reauthorize'],
+  ['zh-CN', '已退出登录', '重新授权'],
+] as const) {
+  test(`OAuth Provider state is a localized recoverable credential state (${locale})`, async ({ page }) => {
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: listProviders } }))
+    await page.goto('/providers')
+    const row = page.getByRole('row').filter({ hasText: 'Alpha Service' })
+    await expect(row.getByText(label)).toBeVisible()
+    await expect(row.getByText('disconnected')).toHaveCount(0)
+    await expect(row.getByText(/OAuth ·/)).toHaveCount(0)
+    await expect(row.getByRole('button', { name: action, exact: true })).toBeVisible()
+    // 其余行没有 OAuth 状态，不出现该提示。
+    await expect(page.getByRole('row').filter({ hasText: 'Zeta Service' }).getByText(label)).toHaveCount(0)
+  })
+}
+
+test('Providers empty state shows one primary action centered in the remaining area', async ({ page }) => {
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [] } }))
+  for (const [width, height] of [
+    [1440, 900],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height })
+    await page.goto('/providers')
+    const action = page.getByRole('button', { name: 'Add your first provider' })
+    await expect(action).toBeVisible()
+    await expect(page.getByText('A model has nowhere to go until you connect a provider.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Add provider/ })).toHaveCount(0)
+    const empty = page.locator('[data-slot="empty"]')
+    const box = (await empty.boundingBox())!
+    const center = box.y + box.height / 2
+    expect(center).toBeGreaterThan(height * 0.35)
+    expect(center).toBeLessThan(height * 0.65)
+  }
+})
+
+test('Add provider Sheet keeps one width across both steps and uses a flat proxy row', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+  const sheet = page.locator('[data-slot="sheet-content"]')
+  await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
+  // 滑入动画结束后量取（x 稳定在 1440 - 896）。
+  await expect.poll(async () => Math.round((await sheet.boundingBox())!.x)).toBe(544)
+  const picker = (await sheet.boundingBox())!
+  expect(Math.round(picker.width)).toBe(896)
+  await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
+  await expect(page.getByRole('tab', { name: 'Connection details' })).toHaveAttribute('aria-selected', 'true')
+  const configure = (await sheet.boundingBox())!
+  expect(Math.round(configure.width)).toBe(896)
+  expect(Math.round(configure.x)).toBe(Math.round(picker.x))
+  // 代理是草稿的一部分，扁平设置行：没有外框。
+  const proxyRow = page.locator('[data-slot="setting-row"]').filter({ has: page.getByRole('switch') })
+  await expect(proxyRow).toHaveCount(1)
+  expect(await proxyRow.evaluate((row) => getComputedStyle(row).borderTopWidth)).toBe('0px')
+  await expect(page.getByRole('switch', { name: 'Use proxy' })).toBeVisible()
+})
+
+test('Add provider draft asks before every close path and keeps OAuth cancellation out of the way', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/providers')
+  const dialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+  const heading = page.getByRole('heading', { name: 'Connection details' })
+  const open = async () => {
+    await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+    await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
+    await expect(heading).toBeVisible()
+  }
+
+  // 没有改动：每个出口直接关闭。
+  await open()
+  await page.keyboard.press('Escape')
+  await expect(heading).toHaveCount(0)
+  await expect(dialog).toHaveCount(0)
+
+  // 有草稿：Escape、关闭按钮、取消、返回、切换步骤都先确认。
+  await open()
+  await page.getByLabel('Base URL', { exact: true }).fill('https://draft.example/v1')
+  const paths: Array<[string, () => Promise<void>]> = [
+    ['Escape', () => page.keyboard.press('Escape')],
+    ['close button', () => page.getByRole('button', { name: 'Close provider setup' }).click()],
+    ['Cancel', () => page.getByRole('button', { name: 'Cancel', exact: true }).click()],
+    ['Back', () => page.getByRole('button', { name: 'Back', exact: true }).click()],
+    ['Choose provider tab', () => page.getByRole('tab', { name: 'Choose provider' }).click()],
+  ]
+  for (const [name, leave] of paths) {
+    await leave()
+    await expect(dialog, name).toBeVisible()
+    await dialog.getByRole('button', { name: 'Keep editing' }).click()
+    await expect(dialog, name).toHaveCount(0)
+    await expect(heading, name).toBeVisible()
+    await expect(page.getByLabel('Base URL', { exact: true }), name).toHaveValue('https://draft.example/v1')
+  }
+
+  // 确认放弃后关闭，重新打开从选择服务开始且草稿已清空。
+  await page.keyboard.press('Escape')
+  await dialog.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(heading).toHaveCount(0)
+  await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+  await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
+  await expect(page.getByLabel('Base URL', { exact: true })).not.toHaveValue('https://draft.example/v1')
 })
 
 const detailTimestamp = '2026-01-01T00:00:00Z'

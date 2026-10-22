@@ -95,6 +95,8 @@ interface Props {
   globalFilterEnabled?: boolean
   globalFilterId?: string
   globalFilterPlaceholder?: string
+  /** Text a row is searched by. Replaces per-column matching, so hidden facts (like a technical ID) stay searchable. */
+  globalFilterText?: (row: TData) => string
   columnToggle?: boolean
   exportable?: boolean
   exportFilename?: string
@@ -205,6 +207,7 @@ let {
   globalFilterEnabled = false,
   globalFilterId,
   globalFilterPlaceholder,
+  globalFilterText,
   columnToggle = false,
   exportable = false,
   exportFilename = 'table.csv',
@@ -491,7 +494,15 @@ const table = createTable({
     rowPinning = functionalUpdate(updater, rowPinning)
     notifyStateChange()
   },
-  globalFilterFn: 'includesString',
+  get globalFilterFn() {
+    const text = globalFilterText
+    return text
+      ? (row: DataTableRow<TData>, _columnId: string, value: unknown) =>
+          text(row.original)
+            .toLocaleLowerCase()
+            .includes((typeof value === 'string' ? value : '').trim().toLocaleLowerCase())
+      : 'includesString'
+  },
   get enableGlobalFilter() {
     return globalFilterEnabled
   },
