@@ -88,6 +88,7 @@ async function saveBypass(next: string): Promise<string> {
 <SettingsSheet
   bind:open={editorOpen}
   title={m.settings_edit_proxy()}
+  draft={() => urlDraft}
   submitLabel={m.settings_save_proxy()}
   {saving}
   {error}
