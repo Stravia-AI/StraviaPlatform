@@ -94,6 +94,12 @@ async function expectPortSwitch(previousTimeOrigin: number, port: number): Promi
   await expect($('header button[aria-expanded]')).toBeDisplayed()
 }
 
+async function openSettingsGroup(group: 'general' | 'network' | 'data' | 'advanced'): Promise<void> {
+  await $('a[href="/settings"]').click()
+  await $(`nav[aria-label="Settings sections"] a[href="/settings?view=${group}"]`).click()
+  await expect(browser).toHaveUrl(expect.stringContaining(`/settings?view=${group}`))
+}
+
 async function refreshDesktop(): Promise<void> {
   const previousTimeOrigin = await browser.execute(() => performance.timeOrigin)
   // 同步求值把结果留在页面全局，刷新会销毁它；原生通道直接返回结果，不依赖旧文档。
@@ -866,12 +872,13 @@ describe('Stravia desktop smoke', () => {
     try {
       await refreshDesktop()
       await browser.tauri.switchWindow('main')
-      await $('a[href="/settings"]').click()
+      await openSettingsGroup('data')
       const address = await $('#artifact-client-base-url')
       await expect(address).toHaveValue(configuration.client_base_url)
       await address.setValue('https://desktop.example:9443/client/prefix')
-      await $('button=Save file settings').click()
-      await expect($('button=Save file settings')).not.toBeEnabled()
+      // 失焦不提交：只有「保存」才写入。
+      await $('#artifacts button=Save').click()
+      await expect($('#artifacts button=Save')).not.toExist()
       await refreshDesktop()
       await expect($('#artifact-client-base-url')).toHaveValue('https://desktop.example:9443/client/prefix')
       const persisted = JSON.parse((await adminRequest(port, '/settings/artifact_settings')) as string)
@@ -967,7 +974,7 @@ describe('Stravia desktop smoke', () => {
       await expect($('aria/Port settings unavailable')).toBeDisplayed()
       await $('a=Open Client Settings').click()
     } else {
-      await $('a[href="/settings"]').click()
+      await openSettingsGroup('network')
     }
 
     await expect($('//h2[normalize-space()="Client"]')).toBeDisplayed()
@@ -1232,8 +1239,7 @@ describe('Stravia desktop smoke', () => {
 
   it('captures a rejected request through native Request Records and clears retained diagnostics', async () => {
     const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
-    await $('a[href="/settings"]').click()
-    await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+    await openSettingsGroup('advanced')
     const debugSwitch = () => $('#diagnostics-debug')
     await expect(debugSwitch()).toBeEnabled()
     await expect(debugSwitch()).toHaveAttribute('role', 'switch')
@@ -1263,8 +1269,7 @@ describe('Stravia desktop smoke', () => {
     await expect(inspector).toHaveText(expect.stringContaining('HTTP 401'))
     await expect(inspector.$('button=Open interaction')).not.toExist()
 
-    await $('a[href="/settings"]').click()
-    await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+    await openSettingsGroup('advanced')
     await debugSwitch().click()
     await expect(debugSwitch()).toHaveAttribute('aria-checked', 'false')
     await $('a[href="/logs"]').click()

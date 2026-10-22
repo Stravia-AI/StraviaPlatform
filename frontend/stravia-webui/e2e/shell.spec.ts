@@ -65,7 +65,7 @@ test('sidebar stays usable in expanded and compact modes', async ({ page }) => {
 
 test('sidebar preferences survive reloads and ignore shortcuts while editing', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
-  await page.goto('/settings')
+  await page.goto('/settings?view=data')
   await page.getByRole('button', { name: 'Collapse navigation' }).click()
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-sidebar-state'))).toBe('collapsed')
   await page.reload()
@@ -133,18 +133,23 @@ test('nested breadcrumbs keep real parent destinations', async ({ page }) => {
   await expect(page).toHaveURL(/\/models\/new$/)
 })
 
-test('settings lists sections in the main content instead of nesting another sidebar', async ({ page }) => {
+test('settings groups use one in-page navigation instead of nesting another sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
   await page.goto('/settings')
 
-  await expect(page.getByRole('navigation', { name: 'Settings sections' })).toHaveCount(0)
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  await expect(nav).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Select Settings section' })).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Appearance' })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(0)
+
+  await nav.getByRole('link', { name: 'Network' }).click()
   await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(1)
+  await nav.getByRole('link', { name: 'Data' }).click()
   await expect(page.getByRole('region', { name: 'Request history' })).toHaveCount(1)
 
   await page.setViewportSize({ width: 1500, height: 800 })
-  await expect(page.getByRole('region', { name: 'Appearance' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Request history' })).toBeVisible()
 })
 
 test('desktop port controls stay hidden outside the Tauri shell', async ({ page }) => {
@@ -172,16 +177,16 @@ test('system theme follows browser color-scheme changes', async ({ page }) => {
 })
 
 test('settings sections only scroll the main content', async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 800 })
-  await page.goto('/settings')
+  await page.setViewportSize({ width: 900, height: 360 })
+  await page.goto('/settings?view=data')
 
   const trigger = page.getByRole('button', { name: 'Collapse navigation' })
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   const initialTrigger = await trigger.boundingBox()
   const initialNavigation = await navigation.boundingBox()
-  const requestHistory = page.getByRole('region', { name: 'Request history' })
-  await requestHistory.scrollIntoViewIfNeeded()
-  await expect(requestHistory).toBeVisible()
+  const lastSection = page.getByRole('region', { name: 'Files and uploads' })
+  await lastSection.scrollIntoViewIfNeeded()
+  await expect(lastSection).toBeVisible()
   await expect.poll(() => page.getByRole('main').evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
   await expect.poll(async () => (await trigger.boundingBox())?.y).toBe(initialTrigger?.y)
