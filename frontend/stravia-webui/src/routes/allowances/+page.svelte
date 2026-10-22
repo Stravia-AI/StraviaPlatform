@@ -6,7 +6,6 @@ import { useQueryClient } from '@tanstack/svelte-query'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import CircleHelpIcon from '@lucide/svelte/icons/circle-help'
-import Clock3Icon from '@lucide/svelte/icons/clock-3'
 import ShieldCheckIcon from '@lucide/svelte/icons/shield-check'
 import GaugeIcon from '@lucide/svelte/icons/gauge'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
@@ -17,7 +16,6 @@ import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SearchIcon from '@lucide/svelte/icons/search'
-import TrendingDownIcon from '@lucide/svelte/icons/trending-down'
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { toast } from 'svelte-sonner'
 
@@ -50,7 +48,7 @@ import PageHeader from '#lib/components/page-header.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import { Badge, type BadgeVariant } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
-import * as Card from '#lib/components/ui/card/index.js'
+import * as Field from '#lib/components/ui/field/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
@@ -86,6 +84,8 @@ let freshnessFilter = $state<'all' | ProviderAllowanceStatus>('all')
 let valueMode = $state<AllowanceValueMode>('remaining')
 const expandedProviderIds = new SvelteSet<string>()
 let timelineExpanded = $state(false)
+let exhaustedOpen = $state(false)
+let willExhaustOpen = $state(false)
 let hoveredAllowanceId = $state<string | null>(null)
 let focusedAllowanceId = $state<string | null>(null)
 
@@ -106,6 +106,7 @@ function setProviderExpanded(providerId: string, open: boolean): void {
 }
 
 const collator = $derived(new Intl.Collator(localeState.current, { sensitivity: 'base', numeric: true }))
+const hasEntries = $derived(readState.entries.length > 0)
 const entries = $derived.by(() =>
   [...readState.entries].sort(
     (left, right) =>
@@ -125,19 +126,29 @@ const catalogOptions = $derived.by(() => {
 })
 const catalogFilterLabel = $derived(
   catalogFilter === 'all'
-    ? m.allowances_filter_all()
-    : (catalogOptions.find((option) => option.value === catalogFilter)?.label ?? m.allowances_filter_all()),
+    ? m.allowances_filter_catalog_all()
+    : m.allowances_filter_catalog_value({
+        value: catalogOptions.find((option) => option.value === catalogFilter)?.label ?? catalogFilter,
+      }),
 )
 const conditionFilterLabel = $derived(
-  conditionFilter === 'all' ? m.allowances_filter_all() : conditionLabel(conditionFilter),
+  conditionFilter === 'all'
+    ? m.allowances_filter_condition_all()
+    : m.allowances_filter_condition_value({ value: conditionLabel(conditionFilter) }),
 )
 const freshnessFilterLabel = $derived(
-  freshnessFilter === 'all' ? m.allowances_filter_all() : statusPresentation(freshnessFilter).label,
+  freshnessFilter === 'all'
+    ? m.allowances_filter_freshness_all()
+    : m.allowances_filter_freshness_value({ value: statusPresentation(freshnessFilter).label }),
 )
 const visibleProviders = $derived.by((): VisibleProvider[] => {
   const query = searchQuery.trim().toLocaleLowerCase(localeState.current)
   return entries.flatMap((entry) => {
-    if (query && !entry.target.provider_name.toLocaleLowerCase(localeState.current).includes(query)) return []
+    if (query) {
+      const { provider_name, catalog_provider_id, channel } = entry.target
+      const haystack = [provider_name, catalog_provider_id, channel].join('\n').toLocaleLowerCase(localeState.current)
+      if (!haystack.includes(query)) return []
+    }
     if (catalogFilter !== 'all' && catalogValue(entry.target) !== catalogFilter) return []
     // Pending providers have no status yet; keep them visible under any filter
     // since their freshness/condition cannot be evaluated yet.
@@ -285,19 +296,6 @@ function conditionLabel(condition: AllowanceCondition | undefined): string {
   }
 }
 
-function conditionTone(condition: AllowanceCondition | undefined): string {
-  switch (condition) {
-    case 'exhausted':
-      return 'border-destructive/35 bg-destructive/5'
-    case 'tight':
-      return 'border-warning/35 bg-warning/5'
-    case 'normal':
-      return 'border-success/35 bg-success/5'
-    default:
-      return 'border-border bg-muted/30'
-  }
-}
-
 function forecastItemCopy(item: VisibleAllowance): string {
   const provider = item.snapshot.provider_name
   const label = allowanceLabel(item.allowance)
@@ -378,10 +376,6 @@ function resetDisplay(allowance: Allowance): string {
 
 function triggeredSuspension(provider: VisibleProvider, allowance: Allowance): boolean {
   return Boolean(provider.snapshot?.suspension?.triggered_keys.includes(allowance.key))
-}
-
-function providerExpandable(provider: VisibleProvider): boolean {
-  return provider.allowances.length > 0 || Boolean(provider.snapshot?.models.length)
 }
 
 function allowanceLabel(allowance: Allowance): string {
@@ -509,8 +503,8 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       {/if}
     </div>
   {:else if provider.allowances.length > 0}
-    <!-- auto-fill 轨道宽度只取决于容器宽度，使不同服务的同序条目纵向对齐 -->
-    <ul class="grid grid-cols-[repeat(auto-fill,minmax(6.5rem,1fr))] gap-x-4 gap-y-2">
+    <!-- 轨道宽度只取决于容器宽度且有上限：新增宽度容纳更多对齐的额度项，而不是拉长单个进度条 -->
+    <ul class="grid grid-cols-[repeat(auto-fill,minmax(7rem,9rem))] gap-x-4 gap-y-2">
       {#each provider.allowances as allowance (allowance.key)}
         {@const id = allowanceElementId(providerId, allowance.key)}
         <li
@@ -618,6 +612,10 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 {#snippet allowanceDetailTable(provider: VisibleProvider)}
   {@const snapshot = provider.snapshot}
   {@const guardSnapshot = snapshot?.guard_supported ? snapshot : undefined}
+  {#if guardSnapshot}
+    <!-- 风险常驻一句；完整解释在列头问号中 -->
+    <p class="pb-1 text-xs text-muted-foreground">{m.allowances_guard_effect()}</p>
+  {/if}
   <Table.Root
     class="table-fixed"
     aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
@@ -685,47 +683,37 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   {@const presentation = snapshot && snapshot.status !== 'fresh' ? statusPresentation(snapshot.status) : undefined}
   {@const providerCondition = worstAllowanceCondition(provider.allowances.map(effectiveAllowanceCondition))}
   {@const refreshingProvider = provider.refreshing}
-  {@const expandable = providerExpandable(provider)}
-  {@const expanded = expandable && expandedProviderIds.has(providerId)}
+  {@const expanded = expandedProviderIds.has(providerId)}
   {@const hasAlerts =
     provider.credentialInvalid ||
     Boolean(snapshot?.error) ||
     Boolean(snapshot?.missing_guarded_keys?.length) ||
     provider.guardError != null ||
     provider.refreshError != null}
-  <li class="@container border-b last:border-b-0" data-testid={`allowance-provider-${providerId}`}>
+  <li class="@container border-b" data-testid={`allowance-provider-${providerId}`}>
     <Collapsible.Root open={expanded} onOpenChange={(open: boolean) => setProviderExpanded(providerId, open)}>
       <div
         class={cn(
-          'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-3 py-2.5 @3xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
-          expandable && 'transition-colors duration-[140ms] hover:bg-muted/30',
+          'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-2 py-2.5 transition-colors duration-[140ms] hover:bg-muted/30 @2xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
           expanded && 'bg-muted/20',
           highlightedAllowanceId?.startsWith(allowanceElementId(providerId, '')) && 'bg-accent/40',
         )}>
         <div class="flex min-w-0 items-start gap-2">
-          {#if expandable}
-            <ChevronRightIcon
-              class={cn(
-                'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
-                expanded && 'rotate-90',
-              )}
-              aria-hidden="true" />
-          {:else}
-            <span class="size-4 shrink-0" aria-hidden="true"></span>
-          {/if}
+          <ChevronRightIcon
+            class={cn(
+              'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
+              expanded && 'rotate-90',
+            )}
+            aria-hidden="true" />
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
               <h3 class="min-w-0 font-semibold break-words">
-                {#if expandable}
-                  <!-- 伸展命中区让整行可点击展开；行内其他控件以 z-10 浮于其上 -->
-                  <Collapsible.Trigger
-                    class="cursor-pointer rounded-sm text-start after:absolute after:inset-0 after:content-['']"
-                    aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
-                    {provider.target.provider_name}
-                  </Collapsible.Trigger>
-                {:else}
+                <!-- 伸展命中区让整行可点击展开；行内其他控件以 z-10 浮于其上 -->
+                <Collapsible.Trigger
+                  class="cursor-pointer rounded-sm text-start after:absolute after:inset-0 after:content-['']"
+                  aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
                   {provider.target.provider_name}
-                {/if}
+                </Collapsible.Trigger>
               </h3>
               {#if providerCondition}
                 <StatusIndicator
@@ -740,17 +728,14 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
               {#if snapshot?.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
             </div>
-            <p class="font-technical mt-0.5 text-xs break-all text-muted-foreground">
-              {provider.target.catalog_provider_id} / {provider.target.channel}
-            </p>
           </div>
         </div>
-        <div class="col-span-2 ps-6 @3xl:col-span-1 @3xl:col-start-2 @3xl:row-start-1 @3xl:ps-0">
+        <div class="col-span-2 ps-6 @2xl:col-span-1 @2xl:col-start-2 @2xl:row-start-1 @2xl:ps-0">
           {@render allowanceChips(provider)}
         </div>
         <Button
           size="icon"
-          class="relative z-10 col-start-2 row-start-1 @3xl:col-start-3"
+          class="relative z-10 col-start-2 row-start-1 @2xl:col-start-3"
           variant="ghost"
           onclick={() => refreshProvider(provider)}
           disabled={!provider.canRefresh}
@@ -761,11 +746,17 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
         </Button>
       </div>
       {#if hasAlerts}
-        <div class="grid gap-2 px-3 pb-3 @md:ps-9">{@render providerAlerts(provider)}</div>
+        <div class="grid gap-2 px-2 pb-3 @md:ps-8">{@render providerAlerts(provider)}</div>
       {/if}
       <!-- Collapsible.Content 收起时仍保留隐藏 DOM；只在展开时渲染详情，避免每行常驻一份明细与开关 -->
       {#if expanded}
-        <Collapsible.Content class="border-t bg-muted/10 px-3 pb-2 @md:ps-9">
+        <Collapsible.Content class="border-t bg-muted/10 px-2 pb-2 @md:ps-8">
+          <dl class="flex flex-wrap items-baseline gap-x-2 py-2 text-xs text-muted-foreground">
+            <dt>{m.allowances_detail_type()}</dt>
+            <dd class="font-technical break-all">
+              {provider.target.catalog_provider_id} / {provider.target.channel}
+            </dd>
+          </dl>
           {#if provider.allowances.length > 0}
             {@render allowanceDetailTable(provider)}
           {/if}
@@ -810,29 +801,35 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   </Accordion.Root>
 {/snippet}
 
-<div class="allowances-page route-page">
+<div
+  class={[
+    'allowances-page route-page',
+    { 'route-page-empty': !readState.loading && !readState.loadError && !hasEntries },
+  ]}>
   <PageHeader title={m.allowances_title()}>
     {#snippet actions()}
-      <div class="flex flex-wrap items-center justify-end gap-3">
-        <span class="font-technical text-xs text-muted-foreground tabular-nums">
-          {latestFetchedAt
-            ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })
-            : m.allowances_never_updated()}
-        </span>
+      {#if hasEntries}
         <Button onclick={refreshAll} disabled={readState.refreshAllDisabled}>
           {#if readState.refreshingAll}<Spinner
               data-icon="inline-start"
               aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
           {m.allowances_refresh_all()}
         </Button>
-      </div>
+      {/if}
     {/snippet}
   </PageHeader>
 
   {#if readState.loading}
-    <div class="grid gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]" aria-label={m.allowances_loading()}>
-      <Skeleton class="h-96 w-full" />
-      <div class="grid gap-5"><Skeleton class="h-48 w-full" /><Skeleton class="h-56 w-full" /></div>
+    <div class="grid min-w-0 gap-3" aria-label={m.allowances_loading()}>
+      <div class="allowances-filters route-section grid gap-2">
+        <Skeleton class="h-9 w-full" /><Skeleton class="h-9 w-full" /><Skeleton class="h-9 w-full" />
+        <Skeleton class="h-9 w-full" />
+      </div>
+      <Skeleton class="h-7 w-72" />
+      <div class="allowances-split grid min-w-0 gap-3">
+        <Skeleton class="h-96 w-full" />
+        <div class="grid gap-3"><Skeleton class="h-40 w-full" /><Skeleton class="h-40 w-full" /></div>
+      </div>
     </div>
   {:else if readState.loadError && !readState.hasTargets}
     <RequestFailure
@@ -840,120 +837,141 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       message={localizeBackendErrorMessage(readState.loadError)}
       retry={() => reading.retryTargets()}
       retrying={readState.fetching} />
-  {:else if entries.length === 0}
-    <Empty.Root
-      ><Empty.Header
-        ><Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}
-          >{m.allowances_empty_title()}</Empty.Title
-        ><Empty.Description>{m.allowances_empty_description()}</Empty.Description></Empty.Header
-      ><Empty.Content
-        ><Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button></Empty.Content
-      ></Empty.Root>
+  {:else if !hasEntries}
+    <section class="route-section">
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10"
+        ><Empty.Header
+          ><Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}
+            >{m.allowances_empty_title()}</Empty.Title
+          ><Empty.Description>{m.allowances_empty_description()}</Empty.Description></Empty.Header
+        ><Empty.Content
+          ><Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button></Empty.Content
+        ></Empty.Root>
+    </section>
   {:else}
     {#if readState.loadError}<RequestFailure
         title={m.allowances_stale_message()}
         message={localizeBackendErrorMessage(readState.loadError)}
         retry={() => reading.retryTargets()}
         retrying={readState.fetching} />{/if}
-    <section
-      class="route-section grid gap-2 p-2 sm:grid-cols-2 xl:grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(10rem,auto))]">
-      <InputGroup.Root class="min-w-0">
-        <InputGroup.Input
-          type="search"
-          aria-label={m.allowances_search_label()}
-          placeholder={m.allowances_search_placeholder()}
-          bind:value={searchQuery} />
-        <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      </InputGroup.Root>
-      <Select.Root type="single" bind:value={catalogFilter}>
-        <Select.Trigger class="w-full" aria-label={m.allowances_filter_catalog()}>{catalogFilterLabel}</Select.Trigger>
-        <Select.Content>
-          <Select.Group>
-            <Select.Item value="all">{m.allowances_filter_all()}</Select.Item>
-            {#each catalogOptions as option (option.value)}
-              <Select.Item value={option.value}>{option.label}</Select.Item>
-            {/each}
-          </Select.Group>
-        </Select.Content>
-      </Select.Root>
-      <Select.Root type="single" bind:value={conditionFilter}>
-        <Select.Trigger class="w-full" aria-label={m.allowances_filter_condition()}
-          >{conditionFilterLabel}</Select.Trigger>
-        <Select.Content>
-          <Select.Group>
-            <Select.Item value="all">{m.allowances_filter_all()}</Select.Item>
-            <Select.Item value="normal">{m.allowances_condition_normal()}</Select.Item>
-            <Select.Item value="tight">{m.allowances_condition_tight()}</Select.Item>
-            <Select.Item value="exhausted">{m.allowances_condition_exhausted()}</Select.Item>
-          </Select.Group>
-        </Select.Content>
-      </Select.Root>
-      <Select.Root type="single" bind:value={freshnessFilter}>
-        <Select.Trigger class="w-full" aria-label={m.allowances_filter_freshness()}
-          >{freshnessFilterLabel}</Select.Trigger>
-        <Select.Content>
-          <Select.Group>
-            <Select.Item value="all">{m.allowances_filter_all()}</Select.Item>
-            <Select.Item value="fresh">{m.allowances_status_fresh()}</Select.Item>
-            <Select.Item value="stale">{m.allowances_status_stale()}</Select.Item>
-            <Select.Item value="error">{m.allowances_status_error()}</Select.Item>
-          </Select.Group>
-        </Select.Content>
-      </Select.Root>
-    </section>
 
-    <section
-      class={[
-        'relative overflow-hidden rounded-xl border px-4 py-3',
-        conditionTone(allResolved ? overallCondition : undefined),
-      ]}
-      aria-label={m.allowances_condition_title()}>
-      <div class="absolute inset-y-0 left-0 w-1 bg-current opacity-60"></div>
-      {#if !allResolved}
-        <div class="flex items-center justify-center py-6">
-          <Spinner aria-label={m.allowances_loading()} />
-        </div>
-      {:else}
-        <div class="grid items-center gap-3 sm:grid-cols-[minmax(9rem,1fr)_repeat(2,minmax(0,1fr))]">
-          <div>
-            <p class="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
-              {m.allowances_condition_title()}
-            </p>
-            <p class="mt-0.5 text-base font-semibold">{conditionLabel(overallCondition)}</p>
+    <div class="grid min-w-0 gap-3">
+      <section class="allowances-filters route-section grid items-center gap-2">
+        <InputGroup.Root class="allowances-search min-w-0">
+          <InputGroup.Input
+            type="search"
+            aria-label={m.allowances_search_label()}
+            placeholder={m.allowances_search_placeholder()}
+            bind:value={searchQuery} />
+          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+        </InputGroup.Root>
+        <Select.Root type="single" bind:value={catalogFilter}>
+          <Select.Trigger class="w-full justify-between">{catalogFilterLabel}</Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Item value="all">{m.allowances_filter_catalog_all()}</Select.Item>
+              {#each catalogOptions as option (option.value)}
+                <Select.Item value={option.value}>{option.label}</Select.Item>
+              {/each}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+        <Select.Root type="single" bind:value={conditionFilter}>
+          <Select.Trigger class="w-full justify-between">{conditionFilterLabel}</Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Item value="all">{m.allowances_filter_condition_all()}</Select.Item>
+              <Select.Item value="normal">{m.allowances_condition_normal()}</Select.Item>
+              <Select.Item value="tight">{m.allowances_condition_tight()}</Select.Item>
+              <Select.Item value="exhausted">{m.allowances_condition_exhausted()}</Select.Item>
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+        <Select.Root type="single" bind:value={freshnessFilter}>
+          <Select.Trigger class="w-full justify-between">{freshnessFilterLabel}</Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Item value="all">{m.allowances_filter_freshness_all()}</Select.Item>
+              <Select.Item value="fresh">{m.allowances_status_fresh()}</Select.Item>
+              <Select.Item value="stale">{m.allowances_status_stale()}</Select.Item>
+              <Select.Item value="error">{m.allowances_status_error()}</Select.Item>
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      </section>
+
+      <section class="route-section" aria-labelledby="allowance-summary-title">
+        <h2 id="allowance-summary-title" class="sr-only">{m.allowances_summary_title()}</h2>
+        {#if !allResolved}
+          <div class="flex items-center gap-2 text-sm text-muted-foreground">
+            <Spinner aria-label={m.allowances_loading()} />
           </div>
-          <p class="font-technical text-sm tabular-nums">
-            {lowestRemaining == null
-              ? m.allowances_lowest_remaining({ value: '–' })
-              : m.allowances_lowest_remaining({ value: formatAllowancePercent(lowestRemaining, localeState.current) })}
-          </p>
-          <p class="font-technical text-sm tabular-nums">
-            {nextResetAt == null
-              ? m.allowances_no_upcoming_reset()
-              : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
-          </p>
-        </div>
-        {#if emptyWindows.length > 0}
-          <ul class="mt-3 grid gap-1 border-t pt-3 text-sm" data-testid="allowance-empty-windows">
-            {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-              <li>
-                {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-                {#if item.allowance.reset_at != null}
-                  <span class="font-technical text-muted-foreground">
-                    · {m.allowances_reset_at({ time: formatLogTime(item.allowance.reset_at, localeState.current) })}
-                  </span>
+        {:else}
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+            {#if overallCondition}
+              <StatusIndicator
+                compact
+                label={conditionLabel(overallCondition)}
+                tone={conditionStatusTone(overallCondition)} />
+            {/if}
+            <p class="font-technical tabular-nums">
+              {lowestRemaining == null
+                ? m.allowances_lowest_remaining({ value: '–' })
+                : m.allowances_lowest_remaining({
+                    value: formatAllowancePercent(lowestRemaining, localeState.current),
+                  })}
+            </p>
+            <p class="font-technical tabular-nums">
+              {nextResetAt == null
+                ? m.allowances_no_upcoming_reset()
+                : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
+            </p>
+            {#if emptyWindows.length > 0}
+              <Collapsible.Root open={exhaustedOpen} onOpenChange={(open: boolean) => (exhaustedOpen = open)}>
+                <Collapsible.Trigger
+                  class="inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-destructive transition-colors duration-[140ms] hover:underline"
+                  aria-expanded={exhaustedOpen}
+                  aria-controls="allowance-empty-windows">
+                  <ChevronDownIcon
+                    class={cn('size-3.5 transition-transform duration-[140ms]', exhaustedOpen && 'rotate-180')}
+                    aria-hidden="true" />
+                  {m.allowances_exhausted_windows({ count: emptyWindows.length })}
+                </Collapsible.Trigger>
+                {#if exhaustedOpen}
+                  <Collapsible.Content>
+                    <!-- 汇总只定位例外：明细按需展开，不复制矩阵内容 -->
+                    <ul class="mt-1 grid gap-1 text-sm" data-testid="allowance-empty-windows">
+                      {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                        <li>
+                          {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                          {#if item.allowance.reset_at != null}
+                            <span class="font-technical text-muted-foreground tabular-nums">
+                              · {m.allowances_reset_at({
+                                time: formatLogTime(item.allowance.reset_at, localeState.current),
+                              })}
+                            </span>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  </Collapsible.Content>
                 {/if}
-              </li>
-            {/each}
-          </ul>
+              </Collapsible.Root>
+            {/if}
+            {#if latestFetchedAt}
+              <!-- 更新时间压缩为汇总行状态；没有支持对象时整页不渲染（见空态分支） -->
+              <p class="font-technical text-xs whitespace-nowrap text-muted-foreground tabular-nums sm:ms-auto">
+                {m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })}
+              </p>
+            {/if}
+          </div>
         {/if}
-      {/if}
-    </section>
+      </section>
 
-    <div class="grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]">
-      <Card.Root class="min-w-0 gap-0 overflow-hidden" size="sm">
-        <Card.Header class="items-center border-b">
-          <h2 class="text-base font-semibold">{m.allowances_matrix_title()}</h2>
-          <Card.Action>
+      <div class="allowances-split grid min-w-0 gap-3">
+        <section class="allowance-matrix-section route-section min-w-0" aria-labelledby="allowance-matrix-title">
+          <div class="route-section-header items-center">
+            <h2 id="allowance-matrix-title" class="route-section-title">{m.allowances_matrix_title()}</h2>
             <ToggleGroup.Root
               type="single"
               variant="outline"
@@ -964,139 +982,132 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                 >{m.allowances_remaining()}</ToggleGroup.Item>
               <ToggleGroup.Item value="used" class={valueModeItemClass}>{m.allowances_used()}</ToggleGroup.Item>
             </ToggleGroup.Root>
-          </Card.Action>
-        </Card.Header>
-        <Card.Content class="p-0">
+          </div>
           {#if visibleProviders.length === 0}
             <Empty.Root class="p-8"
               ><Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header
               ></Empty.Root>
           {:else}
-            <ul aria-label={m.allowances_matrix_title()}>
+            <ul class="border-t" aria-label={m.allowances_matrix_title()}>
               {#each visibleProviders as provider (provider.target.provider_id)}
                 {@render providerRow(provider)}
               {/each}
             </ul>
           {/if}
-        </Card.Content>
-      </Card.Root>
+        </section>
 
-      <div class="grid min-w-0 gap-3">
-        <Card.Root class="gap-0" size="sm">
-          <Card.Header class="border-b">
-            <div class="flex items-center gap-2">
-              <Clock3Icon class="size-4 text-primary" />
-              <h2 class="text-base font-semibold">{m.allowances_timeline_title()}</h2>
+        <div class="allowances-rail grid min-w-0 gap-3">
+          <section class="route-section" aria-labelledby="allowance-timeline-title">
+            <h2 id="allowance-timeline-title" class="route-section-title">{m.allowances_timeline_title()}</h2>
+            <div id="allowance-reset-timeline">
+              {#if !allResolved}
+                <div class="flex items-center gap-2">
+                  <Spinner aria-label={m.allowances_loading()} />
+                </div>
+              {:else if futureTimeline.length === 0}
+                <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
+              {:else if displayedTimeline.length === 0}
+                <p class="text-sm text-muted-foreground">{m.allowances_timeline_preview_empty()}</p>
+              {:else}
+                <ol class="relative ml-2 border-l" aria-label={m.allowances_timeline_title()}>
+                  {#each displayedTimeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                    {@const id = allowanceElementId(item.snapshot.provider_id, item.allowance.key)}
+                    <li class="relative pb-1 pl-3 last:pb-0">
+                      <span
+                        class="absolute -left-1.5 top-3 size-3 rounded-full border-2 border-background bg-primary"
+                        aria-hidden="true"></span>
+                      <Button
+                        variant="ghost"
+                        class="w-full justify-start px-2 py-2 text-start whitespace-normal"
+                        aria-controls={id}
+                        aria-label={m.allowances_timeline_locate({
+                          provider: item.snapshot.provider_name,
+                          item: allowanceLabel(item.allowance),
+                          time: formatLogTime(item.allowance.reset_at, localeState.current),
+                        })}
+                        onpointerenter={(event: PointerEvent) => {
+                          if (event.pointerType !== 'touch') hoveredAllowanceId = id
+                        }}
+                        onpointerleave={() => (hoveredAllowanceId = null)}
+                        onfocus={() => (focusedAllowanceId = id)}
+                        onblur={() => (focusedAllowanceId = null)}
+                        onclick={() => locateAllowance(id)}>
+                        <span class="grid min-w-0 gap-1">
+                          <span class="font-technical text-sm font-medium tabular-nums">
+                            {formatLogTime(item.allowance.reset_at, localeState.current)}
+                          </span>
+                          <span class="text-sm text-muted-foreground">
+                            {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                          </span>
+                        </span>
+                      </Button>
+                    </li>
+                  {/each}
+                </ol>
+              {/if}
+              {#if allResolved && futureTimeline.length > timelinePreview.length}
+                <Button
+                  variant="ghost"
+                  class="mt-2 w-full"
+                  aria-expanded={timelineExpanded}
+                  aria-controls="allowance-reset-timeline"
+                  onclick={() => (timelineExpanded = !timelineExpanded)}>
+                  {#if timelineExpanded}
+                    <ChevronRightIcon data-icon="inline-start" class="-rotate-90" />
+                    {m.allowances_timeline_collapse()}
+                  {:else}
+                    <ChevronDownIcon data-icon="inline-start" />
+                    {m.allowances_timeline_expand()}
+                  {/if}
+                </Button>
+              {/if}
             </div>
-          </Card.Header>
-          <Card.Content id="allowance-reset-timeline" class="pt-3">
-            {#if !allResolved}
-              <div class="flex items-center justify-center py-6">
-                <Spinner aria-label={m.allowances_loading()} />
-              </div>
-            {:else if futureTimeline.length === 0}
-              <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
-            {:else if displayedTimeline.length === 0}
-              <p class="text-sm text-muted-foreground">{m.allowances_timeline_preview_empty()}</p>
-            {:else}
-              <ol class="relative ml-2 border-l" aria-label={m.allowances_timeline_title()}>
-                {#each displayedTimeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                  {@const id = allowanceElementId(item.snapshot.provider_id, item.allowance.key)}
-                  <li class="relative pb-1 pl-3 last:pb-0">
-                    <span
-                      class="absolute -left-1.5 top-3 size-3 rounded-full border-2 border-background bg-primary"
-                      aria-hidden="true"></span>
-                    <Button
-                      variant="ghost"
-                      class="w-full justify-start px-2 py-2 text-start whitespace-normal"
-                      aria-controls={id}
-                      aria-label={m.allowances_timeline_locate({
-                        provider: item.snapshot.provider_name,
-                        item: allowanceLabel(item.allowance),
-                        time: formatLogTime(item.allowance.reset_at, localeState.current),
-                      })}
-                      onpointerenter={(event: PointerEvent) => {
-                        if (event.pointerType !== 'touch') hoveredAllowanceId = id
-                      }}
-                      onpointerleave={() => (hoveredAllowanceId = null)}
-                      onfocus={() => (focusedAllowanceId = id)}
-                      onblur={() => (focusedAllowanceId = null)}
-                      onclick={() => locateAllowance(id)}>
-                      <span class="grid min-w-0 gap-1">
-                        <span class="font-technical text-sm font-medium tabular-nums">
-                          {formatLogTime(item.allowance.reset_at, localeState.current)}
-                        </span>
-                        <span class="text-sm text-muted-foreground">
-                          {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-                        </span>
-                      </span>
-                    </Button>
-                  </li>
-                {/each}
-              </ol>
-            {/if}
-            {#if allResolved && futureTimeline.length > timelinePreview.length}
-              <Button
-                variant="ghost"
-                class="mt-3 w-full"
-                aria-expanded={timelineExpanded}
-                aria-controls="allowance-reset-timeline"
-                onclick={() => (timelineExpanded = !timelineExpanded)}>
-                {#if timelineExpanded}
-                  <ChevronRightIcon data-icon="inline-start" class="-rotate-90" />
-                  {m.allowances_timeline_collapse()}
-                {:else}
-                  <ChevronDownIcon data-icon="inline-start" />
-                  {m.allowances_timeline_expand()}
-                {/if}
-              </Button>
-            {/if}
-          </Card.Content>
-        </Card.Root>
+          </section>
 
-        <Card.Root class="gap-0" size="sm">
-          <Card.Header class="border-b">
-            <div class="flex items-center gap-2">
-              <TrendingDownIcon class="size-4 text-primary" />
-              <h2 class="text-base font-semibold">{m.allowances_forecast_title()}</h2>
+          <section class="route-section" aria-labelledby="allowance-forecast-title">
+            <div class="flex items-center gap-1.5">
+              <h2 id="allowance-forecast-title" class="route-section-title">{m.allowances_forecast_title()}</h2>
+              <Field.Help hint={m.allowances_forecast_basis()} />
             </div>
-            <Card.Description>{m.allowances_forecast_basis()}</Card.Description>
-          </Card.Header>
-          <Card.Content class="pt-3">
             {#if !allResolved}
-              <div class="flex items-center justify-center py-6">
+              <div class="flex items-center gap-2">
                 <Spinner aria-label={m.allowances_loading()} />
               </div>
             {:else}
-              <div class="grid grid-cols-3 gap-2 text-center">
-                <div
-                  class="rounded-lg bg-destructive/8 px-2 py-3"
+              <!-- 预报三张小卡改为紧凑计数行；截断只属于时间轴，这里统计全部可见额度 -->
+              <ul class="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+                <li
+                  class="font-technical tabular-nums"
                   data-testid="allowance-forecast-exhausted"
                   aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
-                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.exhausted}</p>
-                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_exhausted()}</p>
-                </div>
-                <div
-                  class="rounded-lg bg-warning/8 px-2 py-3"
+                  <span class={cn(forecastSummary.exhausted > 0 && 'font-semibold text-destructive')}>
+                    {forecastSummary.exhausted}
+                  </span>
+                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_exhausted()}</span>
+                </li>
+                <li
+                  class="font-technical tabular-nums"
                   data-testid="allowance-forecast-will-exhaust"
                   aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
-                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p>
-                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust()}</p>
-                </div>
-                <div
-                  class="rounded-lg bg-success/8 px-2 py-3"
+                  <span class={cn(forecastSummary.willExhaust > 0 && 'font-semibold text-warning')}>
+                    {forecastSummary.willExhaust}
+                  </span>
+                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_will_exhaust()}</span>
+                </li>
+                <li
+                  class="font-technical tabular-nums"
                   data-testid="allowance-forecast-no-risk"
                   aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
-                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
-                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk()}</p>
-                </div>
-              </div>
-              {#if forecastSummary.unknown > 0}
-                <p class="mt-3 text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
-                  {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
-                </p>
-              {/if}
-              <p class="mt-4 border-t pt-4 text-sm text-muted-foreground">
+                  <span>{forecastSummary.noRisk}</span>
+                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_no_risk()}</span>
+                </li>
+                {#if forecastSummary.unknown > 0}
+                  <li class="text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
+                    {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+                  </li>
+                {/if}
+              </ul>
+              <p class="font-technical mt-2 text-sm tabular-nums">
                 {forecastSummary.lowestProjected != null
                   ? m.allowances_forecast_lowest({
                       value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
@@ -1106,22 +1117,61 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                     : m.allowances_forecast_no_projection()}
               </p>
               {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
-                <ul class="mt-4 grid gap-2 border-t pt-4">
-                  {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                    <li class="text-sm">{forecastItemCopy(item)}</li>
-                  {/each}
-                </ul>
+                {#if willExhaustOpen}
+                  <ul class="mt-2 grid gap-1 text-sm" data-testid="allowance-forecast-items">
+                    {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                      <li>{forecastItemCopy(item)}</li>
+                    {/each}
+                  </ul>
+                {/if}
+                <button
+                  type="button"
+                  class="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-muted-foreground transition-colors duration-[140ms] hover:text-foreground hover:underline"
+                  aria-expanded={willExhaustOpen}
+                  onclick={() => (willExhaustOpen = !willExhaustOpen)}>
+                  {#if willExhaustOpen}
+                    {m.allowances_forecast_collapse()}
+                  {:else}
+                    {m.allowances_forecast_show_items({
+                      count: forecastSummary.exhaustedItems.length + forecastSummary.willExhaustItems.length,
+                    })}
+                  {/if}
+                </button>
               {/if}
             {/if}
-          </Card.Content>
-        </Card.Root>
+          </section>
+        </div>
       </div>
     </div>
   {/if}
 </div>
 
 <style>
-.allowances-page {
-  gap: 1rem;
+/* 并排结构按工作区（route-page）宽度切换，不按 viewport。 */
+.allowances-filters {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.allowances-filters > :global(.allowances-search) {
+  grid-column: span 2;
+}
+
+@container route-page (min-width: 48rem) {
+  .allowances-filters {
+    grid-template-columns: minmax(12rem, 24rem) repeat(3, minmax(10rem, 15rem));
+  }
+
+  .allowances-filters > :global(.allowances-search) {
+    grid-column: auto;
+  }
+}
+
+@container route-page (min-width: 64rem) {
+  /* 矩阵取剩余宽度，侧栏有界 24–28rem；不再沿用 2:1 拉伸。 */
+  .allowances-split {
+    grid-template-columns: minmax(0, 1fr) clamp(24rem, 28%, 28rem);
+    align-items: start;
+    column-gap: 2rem;
+  }
 }
 </style>
