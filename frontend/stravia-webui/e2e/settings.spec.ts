@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 import type {
   CredentialDiscoveryPage,
@@ -23,7 +23,9 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
-test('file settings retain drafts and confirmed switches across failed atomic saves', async ({ page }) => {
+test('file settings save switches immediately and keep an unsaved address draft across a failed save', async ({
+  page,
+}) => {
   let saved = {
     client_base_url: 'https://client.example:8443/prefix',
     external_signed_downloads: false,
@@ -32,73 +34,118 @@ test('file settings retain drafts and confirmed switches across failed atomic sa
     s3: null,
   }
   let rejectSave = false
+  const writes: (typeof saved)[] = []
   await page.route('**/api/v1/settings/artifact_settings', async (route) => {
     if (route.request().method() === 'PUT') {
       if (rejectSave) return route.fulfill({ status: 503, json: { error: 'File settings unavailable' } })
       saved = JSON.parse(route.request().postDataJSON().value)
+      writes.push(saved)
     }
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
-  await page.goto('/settings')
+  await page.goto('/settings?view=data')
+  const section = page.locator('#artifacts')
   const client = page.locator('#artifact-client-base-url')
   const upload = page.locator('#artifact-upload-injection')
+
+  // Typing alone writes nothing; the switch beside it saves on its own and leaves the draft untouched.
   await client.fill('https://edited.example:9443/deployment')
+  expect(writes).toHaveLength(0)
   await upload.click()
   await expect(upload).toBeChecked()
+  await expect.poll(() => writes.length).toBe(1)
+  expect(saved.upload_prompt_injection).toBe(true)
   expect(saved.client_base_url).toBe('https://client.example:8443/prefix')
   await expect(client).toHaveValue('https://edited.example:9443/deployment')
-  await page.locator('#artifact-external-downloads').click()
-  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://edited.example:9443/deployment')
-  expect(saved.external_signed_downloads).toBe(false)
+
+  // A failed switch returns to the confirmed value and offers a retry; the address draft survives.
   rejectSave = true
-  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
-  await expect(page.getByRole('alert').filter({ hasText: 'File settings unavailable' })).toBeVisible()
-  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+  await upload.click()
+  await expect(section.getByRole('alert').filter({ hasText: 'File settings unavailable' })).toBeVisible()
   await expect(upload).toBeChecked()
-  expect(saved.external_signed_downloads).toBe(false)
+  expect(saved.upload_prompt_injection).toBe(true)
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+
+  // The address saves only on Enter or Save, and keeps the draft when the save fails.
+  await client.press('Enter')
+  await expect(section.locator('p[role="alert"]')).toContainText('File settings unavailable')
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
   rejectSave = false
-  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await section.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+  await expect.poll(() => saved.client_base_url).toBe('https://edited.example:9443/deployment')
+  expect(saved.upload_prompt_injection).toBe(true)
   await page.reload()
   await expect(client).toHaveValue('https://edited.example:9443/deployment')
-  await expect(page.locator('#artifact-external-downloads')).toBeChecked()
+  await expect(upload).toBeChecked()
 })
 
-test('S3 storage remains independent of signed downloads and prefills the selected endpoint', async ({ page }) => {
+test('external signed downloads and S3 storage take effect only after their sheet is saved', async ({ page }) => {
   let saved = {
     client_base_url: 'https://client.example/prefix',
     external_signed_downloads: false,
     file_public_base_url: null as string | null,
     upload_prompt_injection: false,
-    s3: null,
+    s3: null as null | Record<string, unknown>,
   }
+  const writes: (typeof saved)[] = []
   await page.route('**/api/v1/settings/artifact_settings', async (route) => {
-    if (route.request().method() === 'PUT') saved = JSON.parse(route.request().postDataJSON().value)
+    if (route.request().method() === 'PUT') {
+      saved = JSON.parse(route.request().postDataJSON().value)
+      writes.push(saved)
+    }
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
-  await page.goto('/settings')
+  await page.goto('/settings?view=data')
+  const external = page.locator('#artifact-external-downloads')
+  const sheet = page.getByRole('dialog')
+
+  // Cancelling the sheet keeps the original value and writes nothing.
+  await external.click()
+  await expect(sheet.getByLabel('File public access address')).toHaveValue('https://client.example/prefix')
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  await expect(external).not.toBeChecked()
+  expect(writes).toHaveLength(0)
+
+  // Choosing S3 opens its sheet; the storage stays internal until the fields are saved.
   await page.locator('#artifact-storage').click()
   await page.getByRole('option', { name: 'External S3', exact: true }).click()
-  await page.locator('#artifact-s3-endpoint').fill('https://objects.example/storage')
-  await page.locator('#artifact-s3-region').fill('local-region')
-  await page.locator('#artifact-s3-bucket').fill('private-files')
-  await page.locator('#artifact-s3-access_key_id').fill('fixture-access')
-  await page.locator('#artifact-s3-secret_access_key').fill('fixture-secret')
-  await expect(page.locator('#artifact-s3-secret_access_key')).toHaveAttribute('type', 'password')
-  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await sheet.getByLabel('S3 endpoint').fill('https://objects.example/storage')
+  await sheet.getByLabel('S3 region').fill('local-region')
+  await sheet.getByLabel('S3 bucket').fill('private-files')
+  await sheet.getByLabel('S3 access key ID').fill('fixture-access')
+  await expect(sheet.locator('#artifact-s3-secret_access_key')).toHaveAttribute('type', 'password')
+  await sheet.locator('#artifact-s3-secret_access_key').fill('fixture-secret')
+  await sheet.getByLabel('Credentials expire at (optional)').fill('2031-05-06T07:08')
+  expect(writes).toHaveLength(0)
+  await sheet.getByRole('button', { name: 'Save file settings', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(writes).toHaveLength(1)
+  expect(saved.s3).toMatchObject({
+    endpoint: 'https://objects.example/storage',
+    bucket: 'private-files',
+    access_key_id: 'fixture-access',
+    secret_access_key: 'fixture-secret',
+    credentials_expires_at: new Date('2031-05-06T07:08').getTime(),
+  })
+  expect(saved.external_signed_downloads).toBe(false)
+
   await page.reload()
-  await expect(page.locator('#artifact-s3-endpoint')).toHaveValue('https://objects.example/storage')
-  await expect(page.locator('#artifact-external-downloads')).not.toBeChecked()
-  await expect(page.locator('#artifact-public-base-url')).toHaveCount(0)
-  await page.locator('#artifact-external-downloads').click()
-  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://objects.example/storage')
-  await page.locator('#artifact-public-base-url').fill('https://downloads.example/objects')
-  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await expect(page.locator('#artifact-storage')).toHaveText('External S3')
+  await expect(external).not.toBeChecked()
+  await external.click()
+  await expect(sheet.getByLabel('File public access address')).toHaveValue('https://objects.example/storage')
+  await sheet.getByLabel('File public access address').fill('https://downloads.example/objects')
+  await sheet.getByRole('button', { name: 'Enable external downloads', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  await expect(external).toBeChecked()
+  expect(saved).toMatchObject({
+    external_signed_downloads: true,
+    file_public_base_url: 'https://downloads.example/objects',
+  })
   await page.reload()
-  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://downloads.example/objects')
-  await expect(page.locator('#artifact-external-downloads')).toBeChecked()
+  await expect(external).toBeChecked()
 })
 
 for (const locale of ['en-US', 'zh-CN']) {
@@ -122,7 +169,7 @@ for (const locale of ['en-US', 'zh-CN']) {
             },
       ),
     )
-    await page.goto('/settings')
+    await page.goto('/settings?view=data')
     await expect(page.locator('#artifacts').getByRole('alert')).toBeVisible()
     await expect(page.locator('#artifact-upload-injection')).toHaveCount(0)
     failed = false
@@ -131,8 +178,83 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(page.locator('#artifact-client-base-url')).toHaveValue('https://saved.example/path')
     await page.setViewportSize({ width: 320, height: 900 })
     await expect(page.locator('#artifact-client-base-url')).toBeVisible()
+    await expect(page.locator('#artifact-client-base-url')).toBeInViewport()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   })
 }
+
+test('inline settings commit only on Enter or Save, revert on Escape, and keep the draft after an error', async ({
+  page,
+}) => {
+  let saved = '7'
+  let reject = false
+  const writes: string[] = []
+  await page.route('**/api/v1/settings/log_retention_days', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const value = route.request().postDataJSON().value as string
+      writes.push(value)
+      if (reject) return route.fulfill({ status: 503, json: { error: 'Retention storage unavailable' } })
+      saved = value
+      return route.fulfill({ json: { data: null } })
+    }
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/settings?view=data')
+  const retention = page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })
+  const section = page.locator('#logs')
+  const save = section.getByRole('button', { name: 'Save', exact: true })
+  const cancel = section.getByRole('button', { name: 'Cancel', exact: true })
+  await expect(retention).toHaveValue('7')
+  await expect(save).toHaveCount(0)
+
+  // Blur never commits: the draft stays, the row offers Save and Cancel, nothing is written.
+  await retention.fill('30')
+  await page.locator('h1').click()
+  await expect(retention).toHaveValue('30')
+  await expect(save).toBeVisible()
+  await expect(cancel).toBeVisible()
+  expect(writes).toEqual([])
+
+  // Escape restores the saved value and removes the actions.
+  await retention.press('Escape')
+  await expect(retention).toHaveValue('7')
+  await expect(save).toHaveCount(0)
+  expect(writes).toEqual([])
+
+  // A failed save keeps the draft and the actions and explains why.
+  reject = true
+  await retention.fill('30')
+  await retention.press('Enter')
+  await expect(section.getByRole('alert')).toContainText('Retention storage unavailable')
+  await expect(retention).toHaveValue('30')
+  await expect(save).toBeEnabled()
+  expect(saved).toBe('7')
+
+  // Enter saves, shows the signal, and the value becomes the new baseline.
+  reject = false
+  await retention.press('Enter')
+  await expect(section.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible()
+  await expect(save).toHaveCount(0)
+  expect(saved).toBe('30')
+  expect(writes).toEqual(['30', '30'])
+  await page.reload()
+  await expect(retention).toHaveValue('30')
+
+  // The Save button commits as well, and Cancel reverts.
+  await retention.fill('45')
+  await save.click()
+  await expect.poll(() => saved).toBe('45')
+  await retention.fill('60')
+  await cancel.click()
+  await expect(retention).toHaveValue('45')
+
+  // A value outside 1–365 is rejected locally without a request.
+  const before = writes.length
+  await retention.fill('400')
+  await retention.press('Enter')
+  await expect(section.getByRole('alert')).toBeVisible()
+  expect(writes).toHaveLength(before)
+})
 
 test('setup prefills its entry and preserves an edited complete client address after failure', async ({ page }) => {
   let completed = false
@@ -174,111 +296,248 @@ test('setup prefills its entry and preserves an edited complete client address a
   expect(submitted).toBe('https://entry.example:8443/my/stravia')
 })
 
+const boxOf = (page: Page, selector: string) =>
+  page.evaluate((selector) => {
+    const element = document.querySelector(selector)
+    if (!element) throw new Error(`Missing element: ${selector}`)
+    const { x, y, width, height } = element.getBoundingClientRect()
+    return { x, y, width, height, right: x + width, bottom: y + height }
+  }, selector)
+
 test('settings fields align in wide containers and stack in narrow containers', async ({ page }) => {
   await page.setViewportSize({ width: 1500, height: 900 })
   await page.goto('/settings')
-
-  await expect(page.locator('#proxy-url')).toBeVisible()
+  await expect(page.locator('#theme-preference')).toBeVisible()
   await page.evaluate(() => document.fonts.ready.then(() => undefined))
-  // Async sections can shift the entire page between protocol calls. Compare
-  // every field from the same layout snapshot, not mixed pre/post-load boxes.
-  const measureFields = () =>
-    page.evaluate(() => {
-      const selectors = {
-        themeLabel: '[data-slot="field"]:has(#theme-preference) [data-slot="field-label"]',
-        themeControl: '#theme-preference',
-        proxyUrl: '#proxy-url',
-        proxyBypass: '#proxy-bypass',
-        retention: '#log-retention',
-        proxyLabel: 'label[for="proxy-url"]',
-      }
-      const boxes = {} as Record<keyof typeof selectors, { x: number; y: number; width: number; height: number }>
-      for (const name of Object.keys(selectors) as (keyof typeof selectors)[]) {
-        const element = document.querySelector(selectors[name])
-        if (!element) throw new Error(`Missing settings field: ${name}`)
-        const { x, y, width, height } = element.getBoundingClientRect()
-        boxes[name] = { x, y, width, height }
-      }
-      return boxes
-    })
 
-  const {
-    themeLabel: wideThemeLabelBox,
-    themeControl: wideThemeControlBox,
-    proxyUrl: wideProxyUrlBox,
-    proxyBypass: wideProxyBypassBox,
-    retention: wideRetentionBox,
-    proxyLabel: proxyLabelBox,
-  } = await measureFields()
-  expect(wideThemeLabelBox.x + wideThemeLabelBox.width).toBeLessThan(wideThemeControlBox.x)
-  expect(Math.abs(wideProxyUrlBox.x - wideProxyBypassBox.x)).toBeLessThan(1)
-  expect(Math.abs(wideProxyUrlBox.width - wideProxyBypassBox.width)).toBeLessThan(1)
-  // Controls keep their semantic widths (fill 36rem, number 7rem, setting 16rem) and share one right edge.
-  expect(Math.abs(wideProxyUrlBox.width - 576)).toBeLessThan(1)
-  expect(Math.abs(wideRetentionBox.width - 112)).toBeLessThan(1)
-  expect(Math.abs(wideThemeControlBox.width - 256)).toBeLessThan(1)
-  const rightEdge = (box: { x: number; width: number }) => box.x + box.width
-  expect(Math.abs(rightEdge(wideProxyUrlBox) - rightEdge(wideRetentionBox))).toBeLessThan(1)
-  expect(Math.abs(rightEdge(wideProxyUrlBox) - rightEdge(wideThemeControlBox))).toBeLessThan(1)
+  const column = '.settings-column'
+  const wideColumn = await boxOf(page, column)
+  const wideLabel = await boxOf(page, 'label[for="theme-preference"]')
+  const wideTheme = await boxOf(page, '#theme-preference')
+  const wideLanguage = await boxOf(page, '#interface-language')
+  expect(wideLabel.right).toBeLessThan(wideTheme.x)
+  // Semantic widths: setting 16rem, one shared right edge at the settings column.
+  expect(Math.abs(wideTheme.width - 256)).toBeLessThan(1)
+  expect(Math.abs(wideLanguage.width - 256)).toBeLessThan(1)
+  expect(Math.abs(wideTheme.right - wideColumn.right)).toBeLessThan(1)
+  expect(Math.abs(wideLanguage.right - wideColumn.right)).toBeLessThan(1)
+  // The row top-aligns its title with the control (the title is one line, the control 36px).
+  expect(Math.abs(wideLabel.y - wideTheme.y)).toBeLessThan(12)
 
-  expect(
-    Math.abs(proxyLabelBox.y + proxyLabelBox.height / 2 - (wideProxyUrlBox.y + wideProxyUrlBox.height / 2)),
-  ).toBeLessThan(1)
+  await page.goto('/settings?view=data')
+  await expect(page.locator('#log-retention')).toBeVisible()
+  await page.evaluate(() => document.fonts.ready.then(() => undefined))
+  const dataColumn = await boxOf(page, column)
+  const retention = await boxOf(page, '#log-retention')
+  const clientAddress = await boxOf(page, '#artifact-client-base-url')
+  expect(Math.abs(retention.width - 112)).toBeLessThan(1)
+  expect(Math.abs(clientAddress.width - 576)).toBeLessThan(1)
+  expect(Math.abs(retention.right - dataColumn.right)).toBeLessThan(1)
+  expect(Math.abs(clientAddress.right - dataColumn.right)).toBeLessThan(1)
+
+  await page.goto('/settings?view=network')
+  await expect(page.locator('#proxy-bypass')).toBeVisible()
+  const bypass = await boxOf(page, '#proxy-bypass')
+  const networkColumn = await boxOf(page, column)
+  expect(Math.abs(bypass.width - 576)).toBeLessThan(1)
+  expect(Math.abs(bypass.right - networkColumn.right)).toBeLessThan(1)
 
   await page.setViewportSize({ width: 500, height: 900 })
-
-  const {
-    themeLabel: narrowThemeLabelBox,
-    themeControl: narrowThemeControlBox,
-    proxyUrl: narrowProxyUrlBox,
-    proxyBypass: narrowProxyBypassBox,
-    retention: narrowRetentionBox,
-  } = await measureFields()
-  expect(narrowThemeLabelBox.y + narrowThemeLabelBox.height).toBeLessThanOrEqual(narrowThemeControlBox.y)
-  expect(Math.abs(narrowProxyUrlBox.x - narrowProxyBypassBox.x)).toBeLessThan(1)
-  expect(Math.abs(narrowProxyUrlBox.width - narrowProxyBypassBox.width)).toBeLessThan(1)
-  expect(Math.abs(narrowProxyUrlBox.width - narrowRetentionBox.width)).toBeLessThan(1)
-  expect(Math.abs(narrowThemeControlBox.width - narrowProxyUrlBox.width)).toBeLessThan(1)
+  await page.goto('/settings')
+  await expect(page.locator('#theme-preference')).toBeVisible()
+  const narrowLabel = await boxOf(page, 'label[for="theme-preference"]')
+  const narrowTheme = await boxOf(page, '#theme-preference')
+  const narrowLanguage = await boxOf(page, '#interface-language')
+  expect(narrowLabel.bottom).toBeLessThanOrEqual(narrowTheme.y)
+  expect(Math.abs(narrowTheme.width - narrowLanguage.width)).toBeLessThan(1)
+  expect(narrowTheme.width).toBeGreaterThan(256)
+  await page.goto('/settings?view=data')
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
+  const narrowRetention = await boxOf(page, '#log-retention')
+  expect(Math.abs(narrowRetention.width - narrowTheme.width)).toBeLessThan(1)
 })
 
 test('settings fields keep label and control within the settings column on ultra-wide screens', async ({ page }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
-  await page.goto('/settings')
-  await expect(page.locator('#proxy-url')).toBeVisible()
-  await page.evaluate(() => document.fonts.ready.then(() => undefined))
-
-  const geometry = await page.evaluate(() => {
-    const box = (selector: string) => {
-      const element = document.querySelector(selector)
-      if (!element) throw new Error(`Missing settings field: ${selector}`)
-      const { x, width } = element.getBoundingClientRect()
-      return { left: x, right: x + width }
-    }
-    return {
-      themeLabel: box('label[for="theme-preference"]'),
-      theme: box('#theme-preference'),
-      proxyLabel: box('label[for="proxy-url"]'),
-      proxy: box('#proxy-url'),
-      retentionLabel: box('label[for="log-retention"]'),
-      retention: box('#log-retention'),
-    }
-  })
-
-  const settingsColumn = 60 * 16
-  for (const [label, control] of [
-    [geometry.themeLabel, geometry.theme],
-    [geometry.proxyLabel, geometry.proxy],
-    [geometry.retentionLabel, geometry.retention],
-  ]) {
-    expect(control.left - label.right).toBeGreaterThan(0)
-    expect(control.right - label.left).toBeLessThanOrEqual(settingsColumn + 1)
+  const pairs = [
+    ['/settings', 'label[for="theme-preference"]', '#theme-preference'],
+    ['/settings?view=data', 'label[for="log-retention"]', '#log-retention'],
+    ['/settings?view=network', 'label[for="proxy-bypass"]', '#proxy-bypass'],
+  ] as const
+  const edges: number[] = []
+  for (const [url, labelSelector, controlSelector] of pairs) {
+    await page.goto(url)
+    await expect(page.locator(controlSelector)).toBeVisible()
+    await page.evaluate(() => document.fonts.ready.then(() => undefined))
+    const label = await boxOf(page, labelSelector)
+    const control = await boxOf(page, controlSelector)
+    const column = await boxOf(page, '.settings-column')
+    expect(control.x - label.right).toBeGreaterThan(0)
+    expect(control.right - label.x).toBeLessThanOrEqual(60 * 16 + 1)
+    expect(column.width).toBeLessThanOrEqual(60 * 16 + 1)
+    edges.push(control.right - column.x)
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+    ).toBe(true)
   }
-  expect(Math.abs(geometry.proxy.right - geometry.retention.right)).toBeLessThan(1)
-  expect(Math.abs(geometry.proxy.right - geometry.theme.right)).toBeLessThan(1)
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
-    true,
+  // Every control shares the settings column's right edge, whatever its semantic width.
+  expect(Math.max(...edges) - Math.min(...edges)).toBeLessThan(1)
+})
+
+test('settings navigation switches between vertical and horizontal at a 64rem route width', async ({ page }) => {
+  const measure = async () =>
+    page.evaluate(() => {
+      const route = document.querySelector('.route-page')!.getBoundingClientRect().width
+      const nav = document.querySelector('nav[aria-label="Settings sections"]')!
+      const links = [...nav.querySelectorAll('a')].map((link) => {
+        const { x, y, width, height } = link.getBoundingClientRect()
+        const icon = link.querySelector('svg')
+        return { x, y, width, height, iconVisible: icon ? getComputedStyle(icon).display !== 'none' : false }
+      })
+      const navBox = nav.getBoundingClientRect()
+      const column = document.querySelector('.settings-column')!.getBoundingClientRect()
+      const header = document.querySelector('.route-page-header')!.getBoundingClientRect()
+      const firstTitle = document.querySelector('.settings-column h2')!.getBoundingClientRect()
+      return {
+        route,
+        nav: { x: navBox.x, y: navBox.y, width: navBox.width, height: navBox.height, scrollW: nav.scrollWidth },
+        links,
+        column: { x: column.x, width: column.width },
+        headerX: header.x,
+        firstTitleY: firstTitle.y,
+        overflow: document.documentElement.scrollWidth <= innerWidth,
+      }
+    })
+
+  const seen = new Set<string>()
+  for (const width of [1100, 1280, 1310, 1320, 1328, 1336, 1360, 1440, 1920, 2560]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/settings')
+    await expect(page.locator('#theme-preference')).toBeVisible()
+    await page.evaluate(() => document.fonts.ready.then(() => undefined))
+    const m = await measure()
+    const vertical = m.route >= 1024
+    seen.add(vertical ? 'vertical' : 'horizontal')
+    expect(m.overflow).toBe(true)
+    expect(m.links).toHaveLength(5)
+    if (vertical) {
+      // Same links, stacked at the left: 12rem wide, 32px gap to a column of at least 50rem.
+      expect(Math.abs(m.nav.width - 192)).toBeLessThan(1)
+      expect(Math.abs(m.nav.x - m.headerX)).toBeLessThan(1)
+      expect(Math.abs(m.column.x - (m.nav.x + m.nav.width + 32))).toBeLessThan(1)
+      expect(m.column.width).toBeGreaterThanOrEqual(50 * 16 - 1)
+      expect(m.links.every((link) => link.iconVisible)).toBe(true)
+      for (let index = 1; index < m.links.length; index += 1) {
+        expect(m.links[index].y).toBeGreaterThan(m.links[index - 1].y)
+        expect(Math.abs(m.links[index].x - m.links[0].x)).toBeLessThan(1)
+      }
+      expect(Math.abs(m.nav.y - m.firstTitleY)).toBeLessThanOrEqual(12)
+    } else {
+      // Tabs under the header, text only, wrapping instead of scrolling.
+      expect(Math.abs(m.nav.x - m.headerX)).toBeLessThan(1)
+      expect(m.links.every((link) => !link.iconVisible)).toBe(true)
+      expect(m.nav.scrollW).toBeLessThanOrEqual(Math.ceil(m.nav.width))
+      expect(m.column.x).toBeLessThanOrEqual(m.nav.x + 1)
+      expect(m.firstTitleY).toBeGreaterThan(m.nav.y + m.nav.height - 1)
+    }
+  }
+  expect([...seen].sort()).toEqual(['horizontal', 'vertical'])
+})
+
+test('settings groups are links with history, current state, and a General fallback', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/settings')
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Settings')
+  await expect(nav.getByRole('link')).toHaveText(['General', 'Network', 'Data', 'Account', 'Advanced'])
+  await expect(nav.getByRole('link', { name: 'General' })).toHaveAttribute('aria-current', 'page')
+  await expect(page).toHaveTitle('General · Settings · Stravia')
+  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Appearance', 'Updates'])
+
+  await nav.getByRole('link', { name: 'Network' }).click()
+  await expect(page).toHaveURL(/\/settings\?view=network$/)
+  await expect(nav.getByRole('link', { name: 'Network' })).toHaveAttribute('aria-current', 'page')
+  await expect(nav.getByRole('link', { name: 'General' })).not.toHaveAttribute('aria-current', 'page')
+  await expect(page).toHaveTitle('Network · Settings · Stravia')
+  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Proxy'])
+  await nav.getByRole('link', { name: 'Advanced' }).click()
+  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Upstream RPM queue', 'Diagnostics'])
+  await page.goBack()
+  await expect(page).toHaveURL(/view=network$/)
+  await expect(page.getByRole('heading', { level: 2, name: 'Proxy' })).toBeVisible()
+
+  // Unknown or differently-cased values show General without rewriting the address.
+  for (const view of ['billing', 'Network', '']) {
+    await page.goto(`/settings?view=${view}`)
+    await expect(nav.getByRole('link', { name: 'General' })).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByRole('heading', { level: 2, name: 'Appearance' })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/settings\\?view=${view}$`))
+  }
+})
+
+test('the Account group is hidden and falls back to General outside Server hosts', async ({ page }) => {
+  await page.route('**/api/v1/auth/state', (route) =>
+    route.fulfill({ json: { mode: 'desktop', authenticated: true, setup_authorized: false, username: null } }),
   )
+  await page.goto('/settings?view=account')
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  await expect(nav.getByRole('link')).toHaveText(['General', 'Network', 'Data', 'Advanced'])
+  await expect(nav.getByRole('link', { name: 'General' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('heading', { level: 2, name: 'Appearance' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Administrator credentials' })).toHaveCount(0)
+  await expect(page).toHaveURL(/\/settings\?view=account$/)
+})
+
+test('settings groups hide host-specific groups and rows instead of disabling them', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/settings?view=account')
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  await expect(nav.getByRole('link', { name: 'Account' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Administrator credentials'])
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Settings')
+
+  // Server host: no Desktop-only sections anywhere.
+  for (const view of ['general', 'network']) {
+    await page.goto(`/settings?view=${view}`)
+    await expect(page.getByRole('heading', { level: 2 }).first()).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Startup', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Client', exact: true })).toHaveCount(0)
+    await expect(page.locator('#desktop-fixed-port, #desktop-launch-at-login')).toHaveCount(0)
+  }
+})
+
+test('administrator credentials are edited in a sheet that states every session signs out', async ({ page }) => {
+  let submitted: unknown
+  await page.route('**/api/v1/auth/credentials', async (route) => {
+    submitted = route.request().postDataJSON()
+    await route.fulfill({ status: 204 })
+  })
+  await page.goto('/settings?view=account')
+  await expect(page.getByText('playwright-admin', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  const sheet = page.getByRole('dialog', { name: 'Administrator credentials' })
+  await expect(sheet.getByText('Saving signs out every session.')).toBeVisible()
+  const save = sheet.getByRole('button', { name: 'Save credentials', exact: true })
+  await expect(save).toBeDisabled()
+  await sheet.getByLabel('Current password').fill('old-password')
+  await sheet.getByLabel('New password').fill('new-password')
+  await sheet.getByLabel('Confirm password').fill('different')
+  await expect(sheet.getByText('The passwords must match.')).toBeVisible()
+  await expect(save).toBeDisabled()
+  await sheet.getByLabel('Confirm password').fill('new-password')
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(submitted).toBeUndefined()
+
+  await page.getByRole('button', { name: /^Edit/ }).click()
+  await expect(sheet.getByLabel('Current password')).toHaveValue('')
+  await sheet.getByLabel('Current password').fill('old-password')
+  await sheet.getByLabel('New password').fill('new-password')
+  await sheet.getByLabel('Confirm password').fill('new-password')
+  await save.click()
+  await expect
+    .poll(() => submitted)
+    .toEqual({ current_password: 'old-password', username: 'playwright-admin', password: 'new-password' })
 })
 
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {
@@ -541,16 +800,18 @@ test('unloaded settings stay non-editable until a failed baseline is recovered',
         : { json: { data: JSON.stringify({ url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }) } },
     )
   })
-  await page.goto('/settings')
+  await page.goto('/settings?view=network')
   await expect(page.locator('#proxy').getByRole('alert')).toBeVisible()
-  await expect(page.locator('#proxy-url')).toHaveCount(0)
-  await expect(page.locator('#log-retention')).toBeVisible()
+  await expect(page.locator('#proxy-bypass')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^Edit/ })).toHaveCount(0)
   unavailable = false
   await page.locator('#proxy').getByRole('button').click()
+  await expect(page.locator('#proxy')).toContainText('http://127.0.0.1:7890')
+  await page.getByRole('button', { name: /^Edit/ }).click()
   await expect(page.locator('#proxy-url')).toHaveValue('http://127.0.0.1:7890')
 })
 
-test('proxy saves one complete snapshot and retains drafts after failure', async ({ page }) => {
+test('proxy URL saves one complete snapshot from its sheet and retains the draft after failure', async ({ page }) => {
   let saved = { url: 'http://127.0.0.1:7890', bypass: 'localhost', force_http1: true }
   const submitted: (typeof saved)[] = []
   let rejectSave = true
@@ -567,32 +828,55 @@ test('proxy saves one complete snapshot and retains drafts after failure', async
     }
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
-  await page.goto('/settings')
+  await page.goto('/settings?view=network')
+  const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
   const url = page.locator('#proxy-url')
-  const bypass = page.locator('#proxy-bypass')
-  const save = page.locator('#proxy').getByRole('button')
+  await page.getByRole('button', { name: /^Edit/ }).click()
   await url.fill('socks5h://127.0.0.1:1080')
-  await bypass.fill('localhost,.internal')
   expect(submitted).toHaveLength(0)
-  await save.click()
+  await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
   await expect(url).toBeDisabled()
-  await expect(bypass).toBeDisabled()
   await expect.poll(() => submitted.length).toBe(1)
-  expect(submitted).toEqual([{ url: 'socks5h://127.0.0.1:1080', bypass: 'localhost,.internal', force_http1: true }])
+  expect(submitted).toEqual([{ url: 'socks5h://127.0.0.1:1080', bypass: 'localhost', force_http1: true }])
   releaseSave?.()
-  await expect(page.locator('#proxy').getByRole('alert')).toBeVisible()
+  await expect(sheet.getByRole('alert')).toContainText('Proxy storage unavailable')
   await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
-  await expect(bypass).toHaveValue('localhost,.internal')
   expect(saved.url).toBe('http://127.0.0.1:7890')
   rejectSave = false
-  await save.click()
-  await expect(url).toBeDisabled()
+  await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
   await expect.poll(() => submitted.length).toBe(2)
   releaseSave?.()
-  await expect(url).toBeEnabled()
-  await expect(save).toBeDisabled()
+  await expect(sheet).toHaveCount(0)
   await page.reload()
-  await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
+  await expect(page.locator('#proxy')).toContainText('socks5h://127.0.0.1:1080')
+  expect(submitted).toHaveLength(2)
+})
+
+test('bypass hosts save inline with the saved proxy URL and keep the draft after failure', async ({ page }) => {
+  let saved = { url: 'http://127.0.0.1:7890', bypass: 'localhost', force_http1: true }
+  const submitted: (typeof saved)[] = []
+  let rejectSave = true
+  await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const value = JSON.parse(route.request().postDataJSON().value) as typeof saved
+      submitted.push(value)
+      if (rejectSave) return route.fulfill({ status: 503, json: { error: 'Proxy storage unavailable' } })
+      saved = value
+    }
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings?view=network')
+  const bypass = page.locator('#proxy-bypass')
+  await bypass.fill('localhost,.internal')
+  expect(submitted).toHaveLength(0)
+  await bypass.press('Enter')
+  await expect(page.locator('#proxy').getByRole('alert')).toContainText('Proxy storage unavailable')
+  await expect(bypass).toHaveValue('localhost,.internal')
+  expect(submitted).toEqual([{ url: 'http://127.0.0.1:7890', bypass: 'localhost,.internal', force_http1: true }])
+  rejectSave = false
+  await bypass.press('Enter')
+  await expect(page.locator('#proxy').getByRole('status')).toHaveText('Saved')
+  await page.reload()
   await expect(bypass).toHaveValue('localhost,.internal')
   expect(submitted).toHaveLength(2)
 })
@@ -620,10 +904,9 @@ test('update proxy preference uses saved configuration without submitting the pr
   })
   await page.goto('/settings')
   const toggle = page.locator('#update-use-proxy')
-  const url = page.locator('#proxy-url')
-  await url.fill('http://draft.example:7890')
   await toggle.click()
-  await expect(page.locator('#updates a[href="#proxy"]')).toBeVisible()
+  const configure = page.locator('#updates a[href$="view=network#proxy"]')
+  await expect(configure).toBeVisible()
   await expect(toggle).not.toBeChecked()
   expect(preferences).toEqual([])
   expect(configWrites).toBe(0)
@@ -632,7 +915,6 @@ test('update proxy preference uses saved configuration without submitting the pr
   await toggle.click()
   await expect(page.locator('#updates').getByRole('alert')).toBeVisible()
   await expect(toggle).not.toBeChecked()
-  await expect(url).toHaveValue('http://draft.example:7890')
   rejectPreference = false
   await page.locator('#updates').getByRole('alert').getByRole('button').click()
   await expect(toggle).toBeChecked()
@@ -640,7 +922,6 @@ test('update proxy preference uses saved configuration without submitting the pr
   await expect(toggle).not.toBeChecked()
   expect(preferences).toEqual(['true', 'true', 'false'])
   expect(configWrites).toBe(0)
-  await expect(url).toHaveValue('http://draft.example:7890')
 })
 
 test('update proxy preference recovers loading failures without displaying an unchecked default', async ({ page }) => {

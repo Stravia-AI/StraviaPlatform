@@ -194,7 +194,10 @@ for (const destination of ['connection', 'providers', 'narrow-settings']) {
       ).toBeFocused()
     } else {
       await expect(page).toHaveURL(/\/settings$/)
-      await expect(page.locator('header button[aria-expanded]').first()).toBeFocused()
+      // Settings has an in-page group navigation, so the current group link is the nearest visible landmark.
+      await expect(
+        page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'General' }),
+      ).toBeFocused()
     }
   })
 }

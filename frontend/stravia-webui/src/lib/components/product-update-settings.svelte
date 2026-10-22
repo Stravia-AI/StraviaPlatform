@@ -1,15 +1,20 @@
 <script lang="ts">
 import { browser } from '$app/env'
+import { resolve } from '$app/paths'
 import * as m from '#lib/paraglide/messages.js'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
+import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up'
+import CircleCheckIcon from '@lucide/svelte/icons/circle-check'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert'
 import { toast } from 'svelte-sonner'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import * as Field from '#lib/components/ui/field/index.js'
+import SettingRow from '#lib/components/setting-row.svelte'
+import SettingsSection from '#lib/components/settings/settings-section.svelte'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
@@ -19,6 +24,7 @@ import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { supportsInAppInstallProgress } from '#lib/product-update.js'
 import { getProductUpdateCoordinator } from '#lib/product-update.svelte.js'
+import { settingsGroupHref } from '#lib/settings-groups.js'
 
 const queryClient = useQueryClient()
 
@@ -98,77 +104,84 @@ async function checkNow(): Promise<void> {
 }
 </script>
 
-<section id="updates" class="route-section scroll-mt-20 pb-8" aria-labelledby="updates-title">
-  <div class="route-section-header flex-wrap">
-    <div>
-      <h2 id="updates-title" class="route-section-title">{m.settings_update()}</h2>
-      <p class="route-section-description">{m.settings_update_summary()}</p>
-    </div>
-    <Button
-      type="button"
-      variant="outline"
-      disabled={checking || busy || checkUnavailable}
-      aria-describedby={checkUnavailable ? 'update-check-unavailable' : undefined}
-      onclick={() => void checkNow()}>
-      {#if checking}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon data-icon="inline-start" />{/if}
-      {checking ? m.settings_update_checking() : m.settings_update_check_now()}
-    </Button>
-  </div>
+{#snippet checkButton()}
+  <Button
+    type="button"
+    variant="outline"
+    size="sm"
+    disabled={checking || busy || checkUnavailable}
+    aria-describedby={checkUnavailable ? 'update-check-unavailable' : undefined}
+    onclick={() => void checkNow()}>
+    {#if checking}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon data-icon="inline-start" />{/if}
+    {checking ? m.settings_update_checking() : m.settings_update_check_now()}
+  </Button>
+{/snippet}
 
-  <div class="flex flex-col gap-5">
-    {#if proxyPreferenceQuery.error}
-      <RequestFailure
-        title={m.settings_update_proxy_load_failed()}
-        message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
-        retry={() => void proxyPreferenceQuery.refetch()}
-        retrying={proxyPreferenceQuery.isFetching} />
-    {:else if proxyPreferenceQuery.isPending}
-      <p role="status" class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{m.common_loading()}</p>
-    {:else}
-      <Field.Field orientation="horizontal">
-        <div class="flex-1">
-          <Field.FieldLabel for="update-use-proxy">{m.common_use_proxy()}</Field.FieldLabel>
-          <Field.FieldDescription>{m.settings_update_proxy_help()}</Field.FieldDescription>
-        </div>
-        {#if savingProxy}<Spinner aria-label={m.artifact_saving()} />{/if}
-        <Switch
-          id="update-use-proxy"
-          bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
-          disabled={savingProxy} />
-      </Field.Field>
+<SettingsSection id="updates" title={m.settings_update()}>
+  <SettingRow title={m.settings_version()}>
+    <div
+      class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @min-[50rem]/setting-row:max-w-[36rem] @min-[50rem]/setting-row:justify-end">
+      <span class="flex items-center gap-2 font-technical text-sm tabular-nums">
+        <span class="break-all">{updates.status?.current_version ?? '–'}</span>
+        {#if available}
+          <ArrowRightIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span class="break-all text-primary">{available.version}</span>
+        {/if}
+      </span>
+      {#if available}
+        <span class="inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+          <CircleArrowUpIcon class="size-4" aria-hidden="true" />{m.settings_update_status_available()}
+        </span>
+      {:else if updates.status?.last_failure && !checkUnavailable}
+        <span class="inline-flex items-center gap-1.5 text-sm font-medium text-destructive">
+          <TriangleAlertIcon class="size-4" aria-hidden="true" />{m.settings_update_status_failed()}
+        </span>
+      {:else if updates.status?.check_status === 'up-to-date'}
+        <span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+          <CircleCheckIcon class="size-4" aria-hidden="true" />{m.settings_update_status_current()}
+        </span>
+      {/if}
+      {@render checkButton()}
+      {#if !busy}
+        {#if available}
+          {#if updates.status?.skipped}
+            <Button type="button" variant="ghost" size="sm" onclick={() => void updates.clearSkippedVersion()}>
+              {m.settings_update_restore_notifications()}
+            </Button>
+          {:else}
+            <Button type="button" variant="ghost" size="sm" onclick={() => void updates.skipAvailableVersion()}>
+              {m.settings_update_skip()}
+            </Button>
+          {/if}
+          <Button type="button" variant="outline" size="sm" onclick={() => void openExternalUrl(available.release_url)}>
+            <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
+          </Button>
+        {/if}
+        {#if updates.state.phase === 'downloaded'}
+          <Button type="button" size="sm" onclick={() => updates.requestInstallPrompt()}>
+            {m.settings_update_install()}
+          </Button>
+        {/if}
+        {#if available && updates.status?.download_supported && available.download_available && (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
+          <Button type="button" size="sm" onclick={() => void updates.downloadAvailableUpdate()}>
+            <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
+              ? m.settings_update_retry_download()
+              : m.settings_update_download()}
+          </Button>
+        {/if}
+      {/if}
+    </div>
+  </SettingRow>
+
+  <div class="flex flex-col gap-3 pb-3">
+    {#if updates.status?.skipped && available}
+      <p role="status" class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
     {/if}
-    {#if proxyNeedsConfiguration}
-      <p role="alert" class="text-sm">
-        <a href="#proxy" class="text-primary underline underline-offset-4"
-          >{m.settings_update_proxy_configure_first()}</a>
+    {#if !updates.status?.last_success_at || (updates.status?.last_failure && !checkUnavailable)}
+      <p class="text-xs text-muted-foreground">
+        {m.settings_update_last_checked()} <span class="tabular-nums">{lastChecked}</span>
       </p>
     {/if}
-    {#if proxyError}
-      <RequestFailure
-        title={m.settings_update_proxy_save_failed()}
-        message={proxyError}
-        retry={() => {
-          if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
-        }}
-        retrying={savingProxy} />
-    {/if}
-    <dl class="flex flex-wrap items-start gap-x-10 gap-y-4 text-sm">
-      <div class="min-w-0">
-        <dt class="text-muted-foreground">{m.settings_update_current_version()}</dt>
-        <dd class="font-technical mt-2 flex items-center gap-10 text-2xl leading-tight font-medium tabular-nums">
-          <span class="break-all">{updates.status?.current_version ?? '–'}</span>
-          {#if available}<ArrowRightIcon class="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />{/if}
-        </dd>
-      </div>
-      {#if available}
-        <div class="min-w-0">
-          <dt class="text-muted-foreground">{m.settings_update_latest_version()}</dt>
-          <dd class="font-technical mt-2 text-2xl leading-tight font-medium break-all text-primary tabular-nums">
-            {available.version}
-          </dd>
-        </div>
-      {/if}
-    </dl>
 
     {#if checkUnavailable}
       <Alert.Root id="update-check-unavailable" role="status">
@@ -181,21 +194,9 @@ async function checkNow(): Promise<void> {
       </Alert.Root>
     {/if}
 
-    {#if available}
-      <Alert.Root role="status">
-        <Alert.Title>{m.settings_update_available({ version: available.version })}</Alert.Title>
-        {#if updates.status?.skipped}
-          <Alert.Description>{m.settings_update_skipped()}</Alert.Description>
-        {/if}
-      </Alert.Root>
-      {#if available.download_error}
-        <Alert.Root variant="destructive">
-          <Alert.Description>{available.download_error}</Alert.Description>
-        </Alert.Root>
-      {/if}
-    {:else if updates.status?.check_status === 'up-to-date'}
-      <Alert.Root role="status">
-        <Alert.Description>{m.settings_update_up_to_date()}</Alert.Description>
+    {#if available?.download_error}
+      <Alert.Root variant="destructive">
+        <Alert.Description>{available.download_error}</Alert.Description>
       </Alert.Root>
     {/if}
 
@@ -230,40 +231,40 @@ async function checkNow(): Promise<void> {
         <Alert.Description>{updates.state.error}</Alert.Description>
       </Alert.Root>
     {/if}
-
-    <div class="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-t pt-4">
-      <dl class="flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
-        <dt>{m.settings_update_last_checked()}</dt>
-        <dd class="tabular-nums">{lastChecked}</dd>
-      </dl>
-      {#if !busy}
-        <div class="flex flex-wrap items-center gap-2">
-          {#if available}
-            {#if updates.status?.skipped}
-              <Button type="button" variant="ghost" onclick={() => void updates.clearSkippedVersion()}>
-                {m.settings_update_restore_notifications()}
-              </Button>
-            {:else}
-              <Button type="button" variant="ghost" onclick={() => void updates.skipAvailableVersion()}>
-                {m.settings_update_skip()}
-              </Button>
-            {/if}
-            <Button type="button" variant="outline" onclick={() => void openExternalUrl(available.release_url)}>
-              <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
-            </Button>
-          {/if}
-          {#if updates.state.phase === 'downloaded'}
-            <Button type="button" onclick={() => updates.requestInstallPrompt()}>{m.settings_update_install()}</Button>
-          {/if}
-          {#if available && updates.status?.download_supported && available.download_available && (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
-            <Button type="button" onclick={() => void updates.downloadAvailableUpdate()}>
-              <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
-                ? m.settings_update_retry_download()
-                : m.settings_update_download()}
-            </Button>
-          {/if}
-        </div>
-      {/if}
-    </div>
   </div>
-</section>
+
+  {#if proxyPreferenceQuery.error}
+    <RequestFailure
+      title={m.settings_update_proxy_load_failed()}
+      message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
+      retry={() => void proxyPreferenceQuery.refetch()}
+      retrying={proxyPreferenceQuery.isFetching} />
+  {:else if proxyPreferenceQuery.isPending}
+    <p role="status" class="flex items-center gap-2 border-t py-3 text-sm text-muted-foreground">
+      <Spinner />{m.common_loading()}
+    </p>
+  {:else}
+    <SettingRow layout="inline" title={m.settings_update_use_proxy()} labelFor="update-use-proxy">
+      {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
+      <Switch
+        id="update-use-proxy"
+        bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
+        disabled={savingProxy} />
+    </SettingRow>
+  {/if}
+  {#if proxyNeedsConfiguration}
+    <p role="alert" class="pb-3 text-sm">
+      <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4"
+        >{m.settings_update_proxy_configure_first()}</a>
+    </p>
+  {/if}
+  {#if proxyError}
+    <RequestFailure
+      title={m.settings_update_proxy_save_failed()}
+      message={proxyError}
+      retry={() => {
+        if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
+      }}
+      retrying={savingProxy} />
+  {/if}
+</SettingsSection>
