@@ -107,5 +107,7 @@ const responseBlocks = $derived(observationConversationBlocks(detail, liveBlocks
   flex-direction: column;
   gap: 1.5rem;
   padding: 1rem;
+  /* 检查器可被拖宽，正文仍保持阅读宽度。 */
+  max-width: calc(var(--reading-max-width) + 2rem);
 }
 </style>

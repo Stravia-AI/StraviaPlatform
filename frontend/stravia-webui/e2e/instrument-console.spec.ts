@@ -684,7 +684,7 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await expect(page.getByRole('button', { name: 'Create API Key' })).toHaveCount(0)
 
   await page.goto('/logs')
-  await expect(page.getByRole('button', { name: 'Clear history' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'More actions' })).toBeEnabled()
   await expect(page.getByRole('tab', { name: 'Interaction Chains' })).toBeVisible()
 })
 
