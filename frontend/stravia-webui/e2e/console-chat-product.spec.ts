@@ -437,7 +437,8 @@ test('real gateway accepts original images and persisted reasoning replay under 
     expect(await api(`/stats/overview?${statsQuery}`)).toEqual(baseline)
     await page.goto(`${origin}/conversations`)
     await expect(page.getByRole('main').getByRole('link', { name: 'First real question', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+    await page.getByRole('main').getByRole('button', { name: 'More actions', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Clear all conversations', exact: true }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Clear all conversations', exact: true }).click()
     await page.reload()
     await expect(
