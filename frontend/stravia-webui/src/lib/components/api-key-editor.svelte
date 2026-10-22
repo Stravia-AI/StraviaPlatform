@@ -14,6 +14,7 @@ import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels }
 import type { ApiKey, Route } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import * as Command from '#lib/components/ui/command/index.js'
@@ -136,6 +137,7 @@ async function copySecret(secret: string): Promise<void> {
 }
 
 async function saveKey(): Promise<void> {
+  if (saving) return
   if (!form.name.trim()) {
     toast.error(m.api_key_editor_api_key_name_required())
     return
@@ -146,6 +148,7 @@ async function saveKey(): Promise<void> {
   }
 
   saving = true
+  let savedExisting = false
   try {
     const input = {
       key: apiKey || form.customKey ? form.key.trim() : undefined,
@@ -171,259 +174,263 @@ async function saveKey(): Promise<void> {
       toast.success(m.api_key_editor_api_key_created_copy_now_not_shown_again())
     }
     await queryClient.invalidateQueries({ queryKey: ['api-keys'] })
-    if (apiKey) await onSaved?.()
+    savedExisting = apiKey != null
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
     saving = false
   }
+  // 解除保存锁之后再离开：保存中守卫会拦截路由跳转；基线已重置，此时跳转不再算作丢弃草稿。
+  if (savedExisting) await onSaved?.()
 }
 </script>
 
+{#snippet unavailableLink(href: string)}
+  <a href={resolve(href)} class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
+    >{m.api_key_editor_platform_capability_disabled()}</a>
+{/snippet}
+
 {#snippet keyFields()}
   <Field.Group>
-    <Field.Group class="flex-row flex-wrap items-end gap-x-4 gap-y-3">
-      <Field.Field orientation="vertical" class="w-auto min-w-64 flex-1">
-        <Field.Label for="api-key-name">{m.common_name()}</Field.Label>
-        <Input id="api-key-name" bind:value={form.name} required />
-      </Field.Field>
-      {#if apiKey}
-        <Field.Field orientation="horizontal" class="w-28 flex-none">
-          <Switch id="api-key-enabled" bind:checked={form.enabled} />
-          <Field.Label for="api-key-enabled">{m.common_enabled_status()}</Field.Label>
-        </Field.Field>
-      {/if}
-    </Field.Group>
+    <Field.Field size="name">
+      <Field.Label for="api-key-name">{m.common_name()}</Field.Label>
+      <Input id="api-key-name" class="max-w-(--field-control-width)" bind:value={form.name} required />
+    </Field.Field>
     {#if !apiKey}
-      <Field.Field orientation="horizontal">
-        <Switch id="api-key-custom" bind:checked={form.customKey} />
-        <Field.Label for="api-key-custom" hint={m.api_key_editor_custom_api_key_help()}>
-          {m.api_key_editor_custom_api_key()}
-        </Field.Label>
-      </Field.Field>
+      <SettingRow
+        title={m.api_key_editor_custom_api_key()}
+        hint={m.api_key_editor_custom_api_key_help()}
+        layout="inline"
+        class="py-0">
+        {#snippet children({ titleId })}
+          <Switch id="api-key-custom" aria-labelledby={titleId} bind:checked={form.customKey} />
+        {/snippet}
+      </SettingRow>
     {/if}
     {#if apiKey || form.customKey}
-      <Field.Field orientation="vertical">
-        <Field.Label for="api-key-secret">{m.api_key_editor_api_key()}</Field.Label>
-        <SecretInput
-          id="api-key-secret"
-          class="font-technical"
-          bind:value={form.key}
-          resetKey={secretResetKey}
-          showLabel={m.api_key_editor_show_api_key()}
-          hideLabel={m.api_key_editor_hide_api_key()}
-          autocomplete="off"
-          required>
-          {#snippet actions()}
-            <InputGroup.Button type="button" onclick={() => void copySecret(form.key)}>
-              <CopyIcon data-icon="inline-start" />{m.common_copy()}
-            </InputGroup.Button>
-          {/snippet}
-        </SecretInput>
-        <Field.Description>{m.api_key_editor_api_key_help()}</Field.Description>
+      <Field.Field size="fill">
+        <Field.Label for="api-key-secret" hint={m.api_key_editor_api_key_help()}
+          >{m.api_key_editor_api_key()}</Field.Label>
+        <div class="w-full max-w-(--field-control-width) min-w-0">
+          <SecretInput
+            id="api-key-secret"
+            class="font-technical"
+            bind:value={form.key}
+            resetKey={secretResetKey}
+            showLabel={m.api_key_editor_show_api_key()}
+            hideLabel={m.api_key_editor_hide_api_key()}
+            autocomplete="off"
+            required>
+            {#snippet actions()}
+              <InputGroup.Button type="button" onclick={() => void copySecret(form.key)}>
+                <CopyIcon data-icon="inline-start" />{m.common_copy()}
+              </InputGroup.Button>
+            {/snippet}
+          </SecretInput>
+        </div>
       </Field.Field>
     {/if}
-    <Field.Group class="flex-row flex-wrap items-center gap-4">
-      <Field.Field orientation="horizontal" class="w-auto min-w-52 flex-1">
-        <Switch
-          id="api-key-allow-all-models"
-          checked={allowAllModels}
-          disabled={models.length === 0}
-          onCheckedChange={setAllowAllModels} />
-        <Field.Content>
-          <Field.Label for="api-key-allow-all-models">{m.api_key_editor_allow_all_models()}</Field.Label>
-          <Field.Description>{m.api_key_editor_unrestricted_model_scope_help()}</Field.Description>
-        </Field.Content>
-      </Field.Field>
-      {#if !allowAllModels}
-        <Field.Field class="w-auto min-w-52 flex-1">
-          <Popover.Root bind:open={modelPickerOpen}>
-            <Popover.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  id="api-key-model-picker"
-                  type="button"
-                  variant="outline"
-                  class="w-full min-w-0 justify-between font-normal"
-                  role="combobox"
-                  aria-label={m.api_key_editor_select_allowed_models()}
-                  aria-expanded={modelPickerOpen}>
-                  <span class="truncate text-left">
-                    {m.api_key_editor_allowed_model_count({ count: allowedModels.length })}
-                  </span>
-                  <ChevronsUpDownIcon data-icon="inline-end" class="ml-auto opacity-50" />
-                </Button>
-              {/snippet}
-            </Popover.Trigger>
-            <Popover.Content align="start" class="w-(--bits-popover-anchor-width) p-0">
-              <Command.Root label={m.api_key_editor_select_allowed_models()}>
-                <Command.Input
-                  placeholder={m.api_key_editor_search_models()}
-                  aria-label={m.api_key_editor_search_models()} />
-                <Command.List>
-                  <Command.Empty>{m.api_key_editor_no_models_found()}</Command.Empty>
-                  <Command.Group heading={m.api_key_editor_allowed_models()}>
-                    {#each allowedModels as model (model.id)}
-                      <Command.Item
-                        value={model.id}
-                        keywords={[effectiveModelDisplayName(model), model.model_id]}
-                        data-checked
-                        disabled={allowedModels.length === 1}
-                        onSelect={() => setModelChecked(model.id, false)}>
-                        <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
-                        {#if logicalModelSecondaryId(model)}
-                          <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
-                        {/if}
-                      </Command.Item>
-                    {/each}
-                  </Command.Group>
-                  {#if allowedModels.length > 0 && unallowedModels.length > 0}
-                    <Command.Separator />
-                  {/if}
-                  <Command.Group heading={m.api_key_editor_unallowed_models()}>
-                    {#each unallowedModels as model (model.id)}
-                      <Command.Item
-                        value={model.id}
-                        keywords={[effectiveModelDisplayName(model), model.model_id]}
-                        onSelect={() => setModelChecked(model.id, true)}>
-                        <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
-                        {#if logicalModelSecondaryId(model)}
-                          <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
-                        {/if}
-                      </Command.Item>
-                    {/each}
-                  </Command.Group>
-                </Command.List>
-              </Command.Root>
-            </Popover.Content>
-          </Popover.Root>
-        </Field.Field>
-      {/if}
-    </Field.Group>
-    <Field.Group class="flex-row flex-wrap items-end gap-4">
-      <Field.Field orientation="vertical" class="w-auto min-w-52 flex-1">
-        <Field.Label for="api-key-rpm-limit" hint={m.api_key_editor_rpm_limit_help()}>
-          {m.api_key_editor_requests_per_minute()}
-        </Field.Label>
-        <Input
+    <Field.Field size="number">
+      <Field.Label for="api-key-rpm-limit" hint={m.api_key_editor_rpm_limit_help()}>
+        {m.api_key_editor_requests_per_minute()}
+      </Field.Label>
+      <InputGroup.Root class="max-w-(--field-control-width)">
+        <InputGroup.Input
           id="api-key-rpm-limit"
           bind:value={form.rpmLimit}
           min="1"
           step="1"
           type="number"
           placeholder={m.api_key_editor_unlimited()} />
-      </Field.Field>
-      <Field.Field orientation="vertical" class="w-auto min-w-52 flex-1">
-        <Field.Label for="api-key-expires" hint={m.api_key_editor_never_expires_placeholder()}>
-          {m.api_key_editor_expires()}
-        </Field.Label>
-        <Input
-          id="api-key-expires"
-          bind:value={form.expiresAt}
-          type="datetime-local"
-          placeholder={m.api_key_editor_never_expires_placeholder()} />
-      </Field.Field>
-    </Field.Group>
-    <Field.Group class="gap-0!">
-      <Field.Field orientation="horizontal">
-        <Switch id="api-key-mcp-access" bind:checked={form.mcpAccessEnabled} />
-        <Field.Content>
-          <Field.Label for="api-key-mcp-access">{m.api_key_editor_allow_mcp_clients()}</Field.Label>
-          <Field.Description>{m.api_key_editor_lets_key_call_stravia_tools_mcp()}</Field.Description>
-        </Field.Content>
-      </Field.Field>
-      <Field.Field orientation="horizontal">
-        <Switch id="api-key-transparent-injection" bind:checked={form.transparentInjectionEnabled} />
-        <Field.Content>
-          <Field.Label for="api-key-transparent-injection">{m.api_key_editor_transparent_injection()}</Field.Label>
-          <Field.Description>{m.api_key_editor_transparent_injection_help()}</Field.Description>
-        </Field.Content>
-      </Field.Field>
-    </Field.Group>
-    {#if form.transparentInjectionEnabled}
-      <Field.Set>
-        <Field.Legend variant="label">{m.api_key_editor_automatically_exposed_capabilities()}</Field.Legend>
-        <Field.Description>{m.api_key_editor_choose_automatic_capabilities()}</Field.Description>
-        <Field.Group class="flex-row flex-wrap gap-x-4 gap-y-3">
-          <Field.Field orientation="horizontal" class="min-w-52 flex-1 basis-52">
-            <Switch
-              id="api-key-inject-media-understanding"
-              bind:checked={form.injectMediaUnderstanding}
-              disabled={!mediaUnderstandingEnabled} />
-            <Field.Content>
-              <Field.Label for="api-key-inject-media-understanding">
-                {m.api_key_editor_media_understanding()}
-              </Field.Label>
-              {#if !mediaUnderstandingEnabled}
-                <a
-                  href={resolve('media-understanding')}
-                  class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                  >{m.api_key_editor_platform_capability_disabled()}</a>
-              {/if}
-            </Field.Content>
-          </Field.Field>
-          <Field.Field orientation="horizontal" class="min-w-52 flex-1 basis-52">
-            <Switch
-              id="api-key-inject-media-generation"
-              bind:checked={form.injectMediaGeneration}
-              disabled={mediaGenerationStatus !== 'enabled'}
-              aria-busy={mediaGenerationStatus === 'loading'} />
-            <Field.Content>
-              <Field.Label for="api-key-inject-media-generation">
-                {m.api_key_editor_media_generation()}
-              </Field.Label>
-              {#if mediaGenerationStatus === 'disabled'}
-                <a
-                  href={resolve('media-generation')}
-                  class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                  >{m.api_key_editor_platform_capability_disabled()}</a>
-              {:else if mediaGenerationStatus === 'loading'}
-                <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
-              {:else if mediaGenerationStatus === 'unavailable'}
-                <span class="text-sm text-destructive" role="status">
-                  {m.api_key_editor_platform_capability_unavailable()}
-                </span>
-              {/if}
-            </Field.Content>
-          </Field.Field>
-          <Field.Field orientation="horizontal" class="min-w-52 flex-1 basis-52">
-            <Switch id="api-key-inject-web-search" bind:checked={form.injectWebSearch} disabled={!webSearchEnabled} />
-            <Field.Content>
-              <Field.Label for="api-key-inject-web-search">
-                {m.api_key_editor_web_search()}
-              </Field.Label>
-              {#if !webSearchEnabled}
-                <a
-                  href={resolve('web-search')}
-                  class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                  >{m.api_key_editor_platform_capability_disabled()}</a>
-              {/if}
-            </Field.Content>
-          </Field.Field>
-        </Field.Group>
-      </Field.Set>
-    {/if}
+        <InputGroup.Addon align="inline-end">
+          <InputGroup.Text class="font-technical text-xs">{m.api_key_editor_rpm_unit()}</InputGroup.Text>
+        </InputGroup.Addon>
+      </InputGroup.Root>
+    </Field.Field>
+    <Field.Field size="datetime">
+      <Field.Label for="api-key-expires" hint={m.api_key_editor_never_expires_placeholder()}>
+        {m.api_key_editor_expires()}
+      </Field.Label>
+      <Input
+        id="api-key-expires"
+        class="max-w-(--field-control-width)"
+        bind:value={form.expiresAt}
+        type="datetime-local" />
+    </Field.Field>
   </Field.Group>
+  <div class="mt-2 flex flex-col">
+    {#if apiKey}
+      <SettingRow title={m.common_enabled_status()} layout="inline">
+        {#snippet children({ titleId })}
+          <Switch id="api-key-enabled" aria-labelledby={titleId} bind:checked={form.enabled} />
+        {/snippet}
+      </SettingRow>
+    {/if}
+    <SettingRow
+      title={m.api_key_editor_allow_all_models()}
+      description={m.api_key_editor_unrestricted_model_scope_help()}
+      layout="inline">
+      {#snippet children({ titleId, descriptionId })}
+        <Switch
+          id="api-key-allow-all-models"
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId}
+          checked={allowAllModels}
+          disabled={models.length === 0}
+          onCheckedChange={setAllowAllModels} />
+      {/snippet}
+    </SettingRow>
+    {#if !allowAllModels}
+      <SettingRow title={m.api_key_editor_allowed_models()} controlSize="select" nested>
+        <Popover.Root bind:open={modelPickerOpen}>
+          <Popover.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                id="api-key-model-picker"
+                type="button"
+                variant="outline"
+                class="w-full min-w-0 justify-between font-normal"
+                role="combobox"
+                aria-label={m.api_key_editor_select_allowed_models()}
+                aria-expanded={modelPickerOpen}>
+                <span class="truncate text-left">
+                  {m.api_key_editor_allowed_model_count({ count: allowedModels.length })}
+                </span>
+                <ChevronsUpDownIcon data-icon="inline-end" class="ml-auto opacity-50" />
+              </Button>
+            {/snippet}
+          </Popover.Trigger>
+          <Popover.Content align="start" class="w-(--bits-popover-anchor-width) p-0">
+            <Command.Root label={m.api_key_editor_select_allowed_models()}>
+              <Command.Input
+                placeholder={m.api_key_editor_search_models()}
+                aria-label={m.api_key_editor_search_models()} />
+              <Command.List>
+                <Command.Empty>{m.api_key_editor_no_models_found()}</Command.Empty>
+                <Command.Group heading={m.api_key_editor_allowed_models()}>
+                  {#each allowedModels as model (model.id)}
+                    <Command.Item
+                      value={model.id}
+                      keywords={[effectiveModelDisplayName(model), model.model_id]}
+                      data-checked
+                      disabled={allowedModels.length === 1}
+                      onSelect={() => setModelChecked(model.id, false)}>
+                      <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+                      {#if logicalModelSecondaryId(model)}
+                        <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                      {/if}
+                    </Command.Item>
+                  {/each}
+                </Command.Group>
+                {#if allowedModels.length > 0 && unallowedModels.length > 0}
+                  <Command.Separator />
+                {/if}
+                <Command.Group heading={m.api_key_editor_unallowed_models()}>
+                  {#each unallowedModels as model (model.id)}
+                    <Command.Item
+                      value={model.id}
+                      keywords={[effectiveModelDisplayName(model), model.model_id]}
+                      onSelect={() => setModelChecked(model.id, true)}>
+                      <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+                      {#if logicalModelSecondaryId(model)}
+                        <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                      {/if}
+                    </Command.Item>
+                  {/each}
+                </Command.Group>
+              </Command.List>
+            </Command.Root>
+          </Popover.Content>
+        </Popover.Root>
+      </SettingRow>
+    {/if}
+    <SettingRow
+      title={m.api_key_editor_allow_mcp_clients()}
+      description={m.api_key_editor_lets_key_call_stravia_tools_mcp()}
+      layout="inline">
+      {#snippet children({ titleId, descriptionId })}
+        <Switch
+          id="api-key-mcp-access"
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId}
+          bind:checked={form.mcpAccessEnabled} />
+      {/snippet}
+    </SettingRow>
+    <SettingRow
+      title={m.api_key_editor_transparent_injection()}
+      description={m.api_key_editor_transparent_injection_help()}
+      layout="inline">
+      {#snippet children({ titleId, descriptionId })}
+        <Switch
+          id="api-key-transparent-injection"
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId}
+          bind:checked={form.transparentInjectionEnabled} />
+      {/snippet}
+    </SettingRow>
+    {#if form.transparentInjectionEnabled}
+      <SettingRow title={m.api_key_editor_media_understanding()} layout="inline" nested>
+        {#snippet note()}
+          {#if !mediaUnderstandingEnabled}{@render unavailableLink('media-understanding')}{/if}
+        {/snippet}
+        {#snippet children({ titleId })}
+          <Switch
+            id="api-key-inject-media-understanding"
+            aria-labelledby={titleId}
+            bind:checked={form.injectMediaUnderstanding}
+            disabled={!mediaUnderstandingEnabled} />
+        {/snippet}
+      </SettingRow>
+      <SettingRow title={m.api_key_editor_media_generation()} layout="inline" nested>
+        {#snippet note()}
+          {#if mediaGenerationStatus === 'disabled'}
+            {@render unavailableLink('media-generation')}
+          {:else if mediaGenerationStatus === 'loading'}
+            <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
+          {:else if mediaGenerationStatus === 'unavailable'}
+            <span class="text-sm text-destructive" role="status">
+              {m.api_key_editor_platform_capability_unavailable()}
+            </span>
+          {/if}
+        {/snippet}
+        {#snippet children({ titleId })}
+          <Switch
+            id="api-key-inject-media-generation"
+            aria-labelledby={titleId}
+            bind:checked={form.injectMediaGeneration}
+            disabled={mediaGenerationStatus !== 'enabled'}
+            aria-busy={mediaGenerationStatus === 'loading'} />
+        {/snippet}
+      </SettingRow>
+      <SettingRow title={m.api_key_editor_web_search()} layout="inline" nested>
+        {#snippet note()}
+          {#if !webSearchEnabled}{@render unavailableLink('web-search')}{/if}
+        {/snippet}
+        {#snippet children({ titleId })}
+          <Switch
+            id="api-key-inject-web-search"
+            aria-labelledby={titleId}
+            bind:checked={form.injectWebSearch}
+            disabled={!webSearchEnabled} />
+        {/snippet}
+      </SettingRow>
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet editorForm(pageMode: boolean)}
   <form
-    class={pageMode ? 'flex flex-1 flex-col gap-6' : 'route-overlay-form'}
+    class={pageMode ? 'content-column flex flex-1 flex-col gap-6' : 'route-overlay-form'}
     onsubmit={(event) => {
       event.preventDefault()
       void saveKey()
     }}>
     {#if pageMode}
-      <section class="route-section" aria-labelledby="api-key-credentials-title">
-        <div class="route-section-header">
-          <div>
-            <h2 id="api-key-credentials-title" class="route-section-title">{m.api_keys_client_credentials()}</h2>
-            <p class="route-section-description">{m.api_key_editor_configuration_summary()}</p>
-          </div>
-        </div>
+      <!-- 保存中整组字段只读：fieldset[disabled] 同时锁定输入框、开关与选择器。 -->
+      <fieldset class="m-0 flex min-w-0 flex-col gap-6 border-0 p-0" disabled={saving}>
         {@render keyFields()}
-      </section>
+      </fieldset>
       <div
         class="sticky bottom-0 z-20 mt-auto flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
         <Button href={resolve('api-keys')} variant="outline" disabled={saving}>{m.common_cancel()}</Button>
@@ -433,7 +440,11 @@ async function saveKey(): Promise<void> {
         </Button>
       </div>
     {:else}
-      <div class="route-overlay-body">{@render keyFields()}</div>
+      <div class="route-overlay-body">
+        <fieldset class="m-0 flex min-w-0 flex-col gap-6 border-0 p-0" disabled={saving}>
+          {@render keyFields()}
+        </fieldset>
+      </div>
       <Sheet.Footer class="route-overlay-footer"
         ><Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => setOpen(false))}
           >{m.common_cancel()}</Button
@@ -458,7 +469,6 @@ async function saveKey(): Promise<void> {
       closeLabel={m.api_key_editor_close_api_key_editor()}>
       <Sheet.Header class="border-b">
         <Sheet.Title>{apiKey ? m.api_key_editor_edit_api_key() : m.common_create_api_key()}</Sheet.Title>
-        <Sheet.Description>{m.api_key_editor_configuration_summary()}</Sheet.Description>
       </Sheet.Header>
 
       {#if createdSecret}
