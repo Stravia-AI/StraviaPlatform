@@ -2554,6 +2554,8 @@ test('Add provider Sheet keeps one width across both steps and uses a flat proxy
   await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
   await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
+  // 滑入动画结束后量取（x 稳定在 1440 - 896）。
+  await expect.poll(async () => Math.round((await sheet.boundingBox())!.x)).toBe(544)
   const picker = (await sheet.boundingBox())!
   expect(Math.round(picker.width)).toBe(896)
   await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
