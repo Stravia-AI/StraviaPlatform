@@ -171,6 +171,37 @@ const imageBytes = Buffer.from(
 )
 const imageData = `data:image/png;base64,${imageBytes.toString('base64')}`
 
+test('title row, messages and composer stay at the 56rem reading width while the content container widens', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  await send(page, 'Measure the reading column', 1)
+  await complete(page, 0, 'Reading column answer')
+  const title = page.getByRole('heading', { level: 1 }).locator('xpath=..')
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true }).locator('xpath=ancestor::form')
+  const container = page.getByRole('main').locator('> div')
+  for (const [viewport, containerWidth] of [
+    [{ width: 1440, height: 900 }, 1124],
+    [{ width: 2560, height: 1440 }, 1920],
+  ] as const) {
+    await page.setViewportSize(viewport)
+    await expect.poll(async () => Math.round((await container.boundingBox())!.width)).toBe(containerWidth)
+    await expect
+      .poll(() =>
+        Promise.all([title, answer, composer].map(async (locator) => Math.round((await locator.boundingBox())!.width))),
+      )
+      .toEqual([896, 896, 896])
+    const [titleBox, answerBox, composerBox] = await Promise.all(
+      [title, answer, composer].map(async (locator) => (await locator.boundingBox())!),
+    )
+    expect(titleBox.x).toBeCloseTo(answerBox.x, 0)
+    expect(composerBox.x).toBeCloseTo(answerBox.x, 0)
+  }
+})
+
 test.describe('mobile viewport', () => {
   test.use({ isMobile: true, hasTouch: true })
 

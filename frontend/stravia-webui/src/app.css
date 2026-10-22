@@ -67,6 +67,10 @@
   --shadow-2xl: 0 36px 96px rgb(17 20 23 / 0.24), 0 8px 24px rgb(17 20 23 / 0.14);
   --tracking-normal: 0em;
   --spacing: 0.25rem;
+  /* 内容宽度契约（DESIGN.md spacing）：容器、设置列、阅读列。组件通过这些变量取值，不写死 rem。 */
+  --content-max-width: 120rem;
+  --content-column-max-width: 60rem;
+  --reading-max-width: 56rem;
 }
 
 .dark {
@@ -345,6 +349,13 @@ html[lang='zh-CN'] .font-structural {
   min-width: 0;
   flex-direction: column;
   gap: 1.5rem;
+}
+
+/* 设置列：配置页、详情页表单与设置行的宽度上限，左对齐，剩余宽度留在右侧。 */
+.content-column {
+  width: 100%;
+  min-width: 0;
+  max-width: var(--content-column-max-width);
 }
 
 .route-page-header {
