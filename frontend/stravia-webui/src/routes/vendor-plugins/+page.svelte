@@ -453,10 +453,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   ondragover={handleFileDragOver}
   ondragleave={handleFileDragLeave}
   ondrop={handleFileDrop}>
-  <PageHeader
-    eyebrow={m.vendor_plugins_eyebrow()}
-    title={m.vendor_plugins_title()}
-    description={m.vendor_plugins_summary()}>
+  <PageHeader title={m.vendor_plugins_title()}>
     {#snippet actions()}
       <Button variant="outline" disabled={pluginsQuery.isFetching} onclick={() => pluginsQuery.refetch()}>
         {#if pluginsQuery.isFetching}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon

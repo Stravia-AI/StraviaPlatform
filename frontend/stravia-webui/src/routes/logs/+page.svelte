@@ -254,12 +254,7 @@ async function downloadBundle(): Promise<void> {
 {/snippet}
 
 <div class="route-page observation-page">
-  <PageHeader
-    eyebrow={m.common_monitor()}
-    title={m.common_request_history()}
-    description={m.observation_page_summary()}
-    meta={liveMeta}
-    actions={headerActions} />
+  <PageHeader title={m.common_request_history()} meta={liveMeta} actions={headerActions} />
 
   {#if clearResult?.skipped_active}
     <Alert.Root variant="warning" role="status">

@@ -275,11 +275,7 @@ async function deleteKey(): Promise<void> {
 {/snippet}
 
 <div class={['route-page', { 'route-page-empty': resourcesEmpty }]}>
-  <PageHeader
-    eyebrow={m.common_setup()}
-    title={m.api_keys_api_keys()}
-    description={m.api_keys_page_summary()}
-    actions={apiKeys.length > 0 ? createKeyAction : undefined} />
+  <PageHeader title={m.api_keys_api_keys()} actions={apiKeys.length > 0 ? createKeyAction : undefined} />
 
   <section class="route-section" aria-labelledby="api-key-table-title">
     <h2 id="api-key-table-title" class="sr-only">{m.api_keys_client_credentials()}</h2>

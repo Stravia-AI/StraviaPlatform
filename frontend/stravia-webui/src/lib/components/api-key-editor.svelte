@@ -431,10 +431,7 @@ async function saveKey(): Promise<void> {
 
 {#if presentation === 'page'}
   <div class="route-page min-h-[calc(100svh-5rem)]">
-    <PageHeader
-      eyebrow={m.common_setup()}
-      title={m.api_key_editor_edit_api_key()}
-      description={m.api_key_editor_configuration_summary()} />
+    <PageHeader title={apiKey?.name.trim() || apiKey?.id || m.api_key_editor_edit_api_key()} />
     {@render editorForm(true)}
   </div>
 {:else}

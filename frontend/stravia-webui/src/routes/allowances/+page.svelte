@@ -811,7 +811,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 {/snippet}
 
 <div class="allowances-page route-page">
-  <PageHeader eyebrow={m.common_monitor()} title={m.allowances_title()} description={m.allowances_page_summary()}>
+  <PageHeader title={m.allowances_title()}>
     {#snippet actions()}
       <div class="flex flex-wrap items-center justify-end gap-3">
         <span class="font-technical text-xs text-muted-foreground tabular-nums">

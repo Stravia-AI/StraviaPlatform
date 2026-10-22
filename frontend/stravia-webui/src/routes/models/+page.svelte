@@ -306,11 +306,7 @@ async function deleteModel(): Promise<void> {
 {/snippet}
 
 <div class={['route-page', { 'route-page-empty': resourcesEmpty }]}>
-  <PageHeader
-    eyebrow={m.common_setup()}
-    title={m.common_models()}
-    description={m.models_give_apps_stable_model_names_choose_which_connected()}
-    actions={models.length > 0 ? addModelAction : undefined} />
+  <PageHeader title={m.common_models()} actions={models.length > 0 ? addModelAction : undefined} />
 
   <section class="route-section" aria-labelledby="model-route-table-title">
     <h2 id="model-route-table-title" class="sr-only">{m.models_configured_models()}</h2>

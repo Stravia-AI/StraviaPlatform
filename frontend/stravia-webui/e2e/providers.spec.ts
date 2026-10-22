@@ -81,6 +81,49 @@ for (const locale of ['en-US', 'zh-CN']) {
   })
 }
 
+test('Provider detail header names the provider, keeps status on the title row, and keeps recovery when missing', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = {
+    id: 'unnamed-provider',
+    name: '',
+    vendor: 'openai',
+    channel: 'default',
+    protocol: 'openai-compatible',
+    base_url: 'https://fixture.invalid/v1',
+    use_proxy: false,
+    configured_credential_fields: ['api_key'],
+    is_enabled: true,
+    credential_status: 'invalid',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  await page.route('**/api/v1/providers/unnamed-provider/models', (route) =>
+    route.fulfill({ json: { data: { models: [] } } }),
+  )
+
+  await page.goto('/providers/unnamed-provider?view=connection')
+  const title = page.getByRole('heading', { level: 1 })
+  await expect(title).toHaveText('unnamed-provider')
+  const header = page.locator('header').filter({ has: title })
+  await expect(header.locator('p')).toHaveCount(0)
+  const status = header.getByRole('status').filter({ hasText: 'Credential invalid' })
+  await expect(status).toBeVisible()
+  const titleBox = (await title.boundingBox())!
+  const statusBox = (await status.boundingBox())!
+  expect(statusBox.x).toBeGreaterThanOrEqual(titleBox.x + titleBox.width)
+  expect(Math.abs(statusBox.y + statusBox.height / 2 - (titleBox.y + titleBox.height / 2))).toBeLessThan(
+    titleBox.height / 2,
+  )
+
+  await page.goto('/providers/missing-provider')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Provider not found')
+  await expect(page.getByRole('main').getByText('This saved provider is no longer available.')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'Back to providers' })).toHaveAttribute('href', '/providers')
+})
+
 test('service cards filter sign-in methods and use local logos before remote fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
   let failLogo = false

@@ -189,3 +189,75 @@ test('settings sections only scroll the main content', async ({ page }) => {
   await trigger.click()
   await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible()
 })
+
+const standardPages = [
+  '/allowances',
+  '/api-keys',
+  '/connect',
+  '/logs',
+  '/media-generation',
+  '/media-understanding',
+  '/models',
+  '/providers',
+  '/reversible-redaction',
+  '/settings',
+  '/stats',
+  '/vendor-plugins',
+  '/web-search',
+]
+
+for (const path of standardPages) {
+  test(`page header on ${path} is one title row without eyebrow or description`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.route('**/api/v1/media-understanding', (route) =>
+      route.fulfill({ json: { data: { enabled: false, state: 'disabled', eligible_models: [] } } }),
+    )
+    await page.route('**/api/v1/reversible-redaction/rules', (route) =>
+      route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),
+    )
+    await page.route('**/api/v1/reversible-redaction/discoveries**', (route) =>
+      route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+    )
+    await page.goto(path)
+    const title = page.getByRole('heading', { level: 1 })
+    await expect(title).toHaveCount(1)
+    const header = page.locator('header').filter({ has: title })
+    await expect(header.locator('p')).toHaveCount(0)
+    const box = (await header.boundingBox())!
+    expect(box.height).toBeLessThan(48)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('All conversations keeps only the one-sentence local history risk under its title', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/conversations')
+  const title = page.getByRole('heading', { level: 1, name: 'All conversations' })
+  await expect(title).toBeVisible()
+  const note = page.locator('header').filter({ has: title }).locator('p')
+  await expect(note).toHaveCount(1)
+  await expect(note).toHaveText('History stays in this browser; clearing site data deletes it.')
+})
+
+test('page header status sits on the title row and stays after the title on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/logs')
+  const title = page.getByRole('heading', { level: 1 })
+  const header = page.locator('header').filter({ has: title })
+  const status = header.getByRole('status')
+  await expect(status).toBeVisible()
+  const wideTitle = (await title.boundingBox())!
+  const wideStatus = (await status.boundingBox())!
+  expect(wideStatus.x).toBeGreaterThanOrEqual(wideTitle.x + wideTitle.width)
+  expect(Math.abs(wideStatus.y + wideStatus.height / 2 - (wideTitle.y + wideTitle.height / 2))).toBeLessThan(
+    wideTitle.height / 2,
+  )
+
+  await page.setViewportSize({ width: 320, height: 800 })
+  const narrowTitle = (await title.boundingBox())!
+  const narrowStatus = (await status.boundingBox())!
+  expect(
+    narrowStatus.x >= narrowTitle.x + narrowTitle.width || narrowStatus.y >= narrowTitle.y + narrowTitle.height - 1,
+  ).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
