@@ -1495,9 +1495,13 @@ test.describe('Interaction Observation canvas', () => {
           )
           .toEqual({ gap: 0, overflow: 0, horizontalOverflow: 0 })
       }
-      const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
-      await expect(table).toBeVisible()
-      const lastRowTime = table.getByRole('button').last()
+      // 窄工作区（容器 ≤52rem）以行列表取代表格。
+      const failures = page.getByRole(viewport.width <= 500 ? 'list' : 'table', {
+        name: 'Failed Requests',
+        exact: true,
+      })
+      await expect(failures).toBeVisible()
+      const lastRowTime = failures.getByRole('button').last()
       await scrollListToBottom(lastRowTime)
       await expect(lastRowTime).toBeInViewport()
       await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeInViewport()
@@ -1589,7 +1593,8 @@ test.describe('Interaction Observation canvas', () => {
 
     await page.setViewportSize({ width: 320, height: 740 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
-    await table.getByRole('button').last().click()
+    const list = page.getByRole('list', { name: 'Failed Requests', exact: true })
+    await list.getByRole('button').last().click()
     const dialog = page.getByRole('dialog', { name: 'Observation details' })
     await expect(dialog.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
     await expect(dialog.getByText(longMessage, { exact: true })).toBeVisible()
@@ -1626,7 +1631,6 @@ test.describe('Interaction Observation canvas', () => {
       .getByRole('button', { name: logTime(startedAt + 220_000), exact: true })
     await rowTime.click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
-    await expect(inspector.getByText('Failed request details', { exact: true })).toBeVisible()
     await expect(inspector.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
     await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
     await expect(inspector.getByText('req-rejection-decode', { exact: true })).toBeVisible()
@@ -1653,6 +1657,131 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
     expect(detailAttempts).toBe(2)
     await page.unroute('**/api/v1/observations/failed-requests/rejection/**', failDetail)
+  })
+
+  test('a wide workspace keeps the inspector bounded and the canvas readable while it is resized', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.setViewportSize({ width: 2560, height: 1440 })
+    await installObservationFixture(page)
+    await page.goto('/logs')
+    const cinder = node(page, 'Cinder', 'running')
+    await expect(cinder).toBeVisible()
+    await cinder.getByRole('heading', { name: 'Cinder', exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('heading', { name: 'Cinder', exact: true, level: 2 })).toBeVisible()
+    const workspace = page.locator('.observation-workspace')
+    const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+    const workspaceBox = (await workspace.boundingBox())!
+    // 120rem 容器：新增宽度归工作区，检查器不随 viewport 拉宽。
+    expect(workspaceBox.width).toBeGreaterThan(110 * rem)
+    const defaultWidth = (await inspector.boundingBox())!.width
+    expect(defaultWidth).toBeGreaterThanOrEqual(38 * rem)
+    expect(defaultWidth).toBeLessThanOrEqual(48 * rem)
+
+    const cameraBefore = await viewportTransform(page)
+    const resize = page.getByRole('slider', { name: 'Resize details panel' })
+    await resize.focus()
+    for (let step = 0; step < 6; step++) await resize.press('ArrowRight')
+    await expect.poll(async () => (await inspector.boundingBox())!.width).toBeGreaterThan(defaultWidth + 4 * rem)
+    const handle = (await resize.boundingBox())!
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(handle.x - 1500, handle.y + handle.height / 2, { steps: 4 })
+    await page.mouse.up()
+    // 拖到极限仍受 56rem 上限约束，画布保留远大于最小宽度的可见区域。
+    await expect.poll(async () => (await inspector.boundingBox())!.width).toBeLessThanOrEqual(56 * rem + 1)
+    const widest = (await inspector.boundingBox())!
+    expect(widest.width).toBeGreaterThan(54 * rem)
+    expect(workspaceBox.width - widest.width).toBeGreaterThan(40 * rem)
+
+    // 调整检查器不重置相机；运行中的节点保持可读尺寸与选中详情。
+    const cameraAfter = await viewportTransform(page)
+    expect(cameraAfter.zoom).toBeCloseTo(cameraBefore.zoom, 5)
+    expect(cameraAfter.x).toBeCloseTo(cameraBefore.x, 1)
+    expect(cameraAfter.y).toBeCloseTo(cameraBefore.y, 1)
+    expect(cameraAfter.zoom).toBeGreaterThanOrEqual(0.9)
+    await expect(cinder).toBeInViewport()
+    expect((await cinder.boundingBox())!.width).toBeGreaterThan(250)
+    await expect(inspector.getByRole('heading', { name: 'Cinder', exact: true, level: 2 })).toBeVisible()
+    // 正文独立限宽：对话区域不随检查器无限拉宽。
+    const message = inspector.getByRole('log', { name: 'Conversation' }).getByRole('article').first()
+    expect((await message.boundingBox())!.width).toBeLessThanOrEqual(58 * rem)
+
+    // 较窄的工作区同样给画布保留最小宽度。
+    await page.setViewportSize({ width: 1100, height: 900 })
+    await expect
+      .poll(async () => (await workspace.boundingBox())!.width - (await inspector.boundingBox())!.width)
+      .toBeGreaterThanOrEqual(18 * rem - 1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1100)
+  })
+
+  test('narrow failed requests show model, actual error and time first without lateral scrolling', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    const message = `Upstream closed the connection while streaming the response body after ${'many retries '.repeat(12)}`
+    fixture.addFailure(
+      failedRequest('narrow-run', 'run', startedAt + 250_000, {
+        duration_ms: 2_500,
+        api_key_name: 'Ops key',
+        model_display_name: 'Ember Pro',
+        services: [{ id: 'provider-ember', name: 'Ember Provider' }],
+        error: { source: 'upstream', code: 'upstream_error', message, status_code: 502 },
+      }),
+    )
+    fixture.addFailure(
+      failedRequest('narrow-rejection', 'rejection', startedAt + 200_000, {
+        error: { source: null, code: 'invalid_request', message: null, status_code: 400 },
+      }),
+    )
+    await page.goto('/logs')
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 })
+      await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+      const list = page.getByRole('list', { name: 'Failed Requests', exact: true })
+      await expect(list).toBeVisible()
+      await expect(page.getByRole('table', { name: 'Failed Requests', exact: true })).toBeHidden()
+      const rows = list.getByRole('listitem')
+      const first = rows.first()
+      const parts = {
+        model: first.getByText('Ember Pro', { exact: true }),
+        time: first.getByRole('button', { name: logTime(startedAt + 250_000), exact: true }),
+        error: first.getByText(/^Upstream closed the connection/),
+        http: first.getByText('HTTP 502', { exact: true }),
+        facts: first.getByRole('definition'),
+      }
+      for (const part of Object.values(parts)) await expect(part.first()).toBeVisible()
+      // 识别信息与实际错误位于次要事实之前，且全部落在视口内，不需要横向寻找。
+      const boxes = {
+        model: (await parts.model.boundingBox())!,
+        time: (await parts.time.boundingBox())!,
+        error: (await parts.error.boundingBox())!,
+        facts: (await parts.facts.first().boundingBox())!,
+      }
+      expect(boxes.model.y).toBeLessThan(boxes.error.y)
+      expect(boxes.error.y).toBeLessThan(boxes.facts.y)
+      expect(Math.abs(boxes.time.y - boxes.model.y)).toBeLessThan(boxes.error.y - boxes.model.y)
+      for (const box of Object.values(boxes)) {
+        expect(box.x).toBeGreaterThanOrEqual(0)
+        expect(box.x + box.width).toBeLessThanOrEqual(width)
+      }
+      await expect(first).toContainText('Ops key')
+      await expect(first).toContainText('Ember Provider')
+      await expect(first).toContainText('Upstream')
+      await expect(first).toContainText('2.5 s')
+      // 未知值保持可见，完整 HTTP 状态保留。
+      const unknown = rows.nth(1)
+      await expect(unknown).toContainText('invalid_request')
+      await expect(unknown).toContainText('HTTP 400')
+      await expect(unknown).toContainText('Unauthenticated')
+      await expect(unknown.getByText('—', { exact: true })).toHaveCount(4)
+      expect(await list.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width)
+    }
+    await page
+      .getByRole('list', { name: 'Failed Requests', exact: true })
+      .getByRole('button', { name: logTime(startedAt + 250_000), exact: true })
+      .click()
+    const dialog = page.getByRole('dialog', { name: 'Observation details' })
+    await expect(dialog.getByText(message.trim(), { exact: true })).toBeVisible()
   })
 
   test('returns from a failure to its linked interaction node even after the interaction completed', async ({
@@ -4218,7 +4347,8 @@ test.describe('Interaction Observation canvas', () => {
     await expect(diagnostics.getByRole('switch', { name: 'Debug' })).toBeVisible()
     await expect(diagnostics).toContainText('1.1 GiB')
     await page.goto('/logs')
-    await page.getByRole('button', { name: 'Clear history', exact: true }).click()
+    await page.getByRole('button', { name: 'More actions', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Clear history', exact: true }).click()
     await page
       .getByRole('alertdialog', { name: 'Clear history' })
       .getByRole('button', { name: 'Clear history', exact: true })
