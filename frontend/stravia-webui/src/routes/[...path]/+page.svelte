@@ -9,15 +9,19 @@ const requestedPath = $derived(page.url.pathname)
 
 <svelte:head><title>{m.not_found_page_not_found()} · Stravia</title></svelte:head>
 
-<main class="grid place-items-center p-4 sm:p-6">
-  <section class="w-full max-w-2xl border-y py-10" aria-labelledby="not-found-title">
-    <p class="font-structural text-[0.72rem] font-semibold tracking-[0.14em] text-primary uppercase">404 · Stravia</p>
-    <h1 id="not-found-title" class="font-structural mt-3 text-[1.625rem] leading-8 font-semibold">
-      {m.not_found_page_not_found()}
-    </h1>
-    <p class="mt-2 text-sm leading-6 text-muted-foreground">
+<main class="grid place-items-center p-4 sm:p-8">
+  <section class="flex w-full max-w-2xl min-w-0 flex-col gap-4" aria-labelledby="not-found-title">
+    <div class="flex items-baseline gap-3">
+      <span
+        class="shrink-0 rounded-md border px-2 py-0.5 font-mono text-sm font-semibold text-muted-foreground tabular-nums"
+        >404</span>
+      <h1 id="not-found-title" class="font-structural text-2xl font-semibold text-balance">
+        {m.not_found_page_not_found()}
+      </h1>
+    </div>
+    <p class="text-sm leading-6 [overflow-wrap:anywhere] text-muted-foreground">
       {m.not_found_page_value_does_not_exist_have_moved({ requestedPath: requestedPath })}
     </p>
-    <Button class="mt-5" href="/">{m.common_go_overview()}</Button>
+    <Button class="self-start" href="/">{m.common_go_overview()}</Button>
   </section>
 </main>
