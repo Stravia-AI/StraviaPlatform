@@ -7,10 +7,12 @@ import CopyIcon from '@lucide/svelte/icons/copy'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 
 import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
 
 import type { ApiKey, Route } from '#lib/types.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
@@ -66,6 +68,9 @@ let saving = $state(false)
 let createdSecret = $state<string>()
 const secretResetKey = $derived(`${open}:${apiKey?.id ?? 'new'}`)
 let modelPickerOpen = $state(false)
+// 草稿离开保护：创建成功后密钥只读展示，不再是草稿。
+const baseline = new DraftBaseline(() => form)
+const guard = new DraftGuard({ dirty: () => !createdSecret && baseline.dirty, busy: () => saving })
 const allowAllModels = $derived(form.modelIds.length === 0)
 const sortedModels = $derived(sortLogicalModels(models))
 const allowedModels = $derived(sortedModels.filter((model) => form.modelIds.includes(model.id)))
@@ -112,6 +117,14 @@ function setAllowAllModels(checked: boolean): void {
   if (models.length > 0) form.modelIds = models.map((model) => model.id)
 }
 
+function setOpen(next: boolean): void {
+  if (!next) {
+    form = keyForm()
+    baseline.reset()
+  }
+  open = next
+}
+
 async function copySecret(secret: string): Promise<void> {
   if (!secret) return
   try {
@@ -148,11 +161,13 @@ async function saveKey(): Promise<void> {
     }
     if (apiKey) {
       await admin.apiKeys.update(apiKey.id, { ...input, is_enabled: form.enabled })
+      baseline.reset()
       if (presentation === 'sheet') open = false
       toast.success(m.api_key_editor_api_key_saved())
     } else {
       const created = await admin.apiKeys.create(input)
       createdSecret = created.key
+      baseline.reset()
       toast.success(m.api_key_editor_api_key_created_copy_now_not_shown_again())
     }
     await queryClient.invalidateQueries({ queryKey: ['api-keys'] })
@@ -411,7 +426,7 @@ async function saveKey(): Promise<void> {
       </section>
       <div
         class="sticky bottom-0 z-20 mt-auto flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-        <Button href={resolve('api-keys')} variant="outline">{m.common_cancel()}</Button>
+        <Button href={resolve('api-keys')} variant="outline" disabled={saving}>{m.common_cancel()}</Button>
 
         <Button type="submit" disabled={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{m.api_key_editor_save_api_key()}
@@ -420,7 +435,8 @@ async function saveKey(): Promise<void> {
     {:else}
       <div class="route-overlay-body">{@render keyFields()}</div>
       <Sheet.Footer class="route-overlay-footer"
-        ><Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })}>{m.common_cancel()}</Sheet.Close
+        ><Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => setOpen(false))}
+          >{m.common_cancel()}</Button
         ><Button type="submit" disabled={saving}
           >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.api_key_editor_save_api_key()}</Button
         ></Sheet.Footer>
@@ -434,10 +450,11 @@ async function saveKey(): Promise<void> {
     {@render editorForm(true)}
   </div>
 {:else}
-  <Sheet.Root bind:open>
+  <Sheet.Root bind:open={() => open, guard.openChange(setOpen)}>
     <Sheet.Content
       side="right"
       class="route-overlay-content w-full! gap-0 overflow-hidden p-0"
+      locked={guard.busy}
       closeLabel={m.api_key_editor_close_api_key_editor()}>
       <Sheet.Header class="border-b">
         <Sheet.Title>{apiKey ? m.api_key_editor_edit_api_key() : m.common_create_api_key()}</Sheet.Title>
@@ -476,3 +493,5 @@ async function saveKey(): Promise<void> {
     </Sheet.Content>
   </Sheet.Root>
 {/if}
+
+<DraftDiscardDialog {guard} />

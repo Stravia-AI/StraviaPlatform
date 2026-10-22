@@ -11,6 +11,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin, isTauri } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { formatDuration } from '#lib/format.js'
 import type {
   LocalSearchEngineConfigs,
@@ -19,6 +20,7 @@ import type {
   WebProvider,
   WebProviderKind,
 } from '#lib/types.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
@@ -91,6 +93,17 @@ function defaultLocalEngines(): LocalSearchEngineConfigs {
 
 let editorLocalEngines = $state<LocalSearchEngineConfigs>(defaultLocalEngines())
 
+// 草稿离开保护：打开编辑器时的字段是基线；保存中锁定关闭。
+const editorBaseline = new DraftBaseline(() => ({
+  editorName,
+  editorKind,
+  editorSecret,
+  editorUseProxy,
+  editorLocalEngines,
+  browserPathDraft,
+}))
+const editorGuard = new DraftGuard({ dirty: () => editorOpen && editorBaseline.dirty, busy: () => savingEditor })
+
 function supportsFetch(provider: WebProvider): boolean {
   return provider.capabilities.fetch
 }
@@ -105,6 +118,7 @@ function openCreate(): void {
   editorError = ''
   browserPathDraft = undefined
   browserPathError = undefined
+  editorBaseline.reset()
   editorOpen = true
 }
 
@@ -118,6 +132,7 @@ function openEdit(provider: WebProvider): void {
   editorError = ''
   browserPathDraft = undefined
   browserPathError = undefined
+  editorBaseline.reset()
   editorOpen = true
   if (provider.kind === 'local') void browserQuery.refetch()
 }
@@ -489,8 +504,8 @@ async function deleteProvider(): Promise<void> {
   </div>
 {/if}
 
-<Sheet.Root bind:open={editorOpen}>
-  <Sheet.Content side="right" class="route-overlay-content w-full! gap-0 overflow-hidden p-0">
+<Sheet.Root bind:open={() => editorOpen, editorGuard.openChange((next) => (editorOpen = next))}>
+  <Sheet.Content side="right" class="route-overlay-content w-full! gap-0 overflow-hidden p-0" locked={editorGuard.busy}>
     <Sheet.Header class="border-b">
       <Sheet.Title
         >{editingProvider
@@ -613,7 +628,11 @@ async function deleteProvider(): Promise<void> {
           >{/if}
       </div>
       <Sheet.Footer class="route-overlay-footer">
-        <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })}>{m.common_cancel()}</Sheet.Close>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={savingEditor}
+          onclick={() => editorGuard.request(() => (editorOpen = false))}>{m.common_cancel()}</Button>
         <Button
           type="submit"
           aria-busy={savingEditor}
@@ -626,6 +645,8 @@ async function deleteProvider(): Promise<void> {
     </form>
   </Sheet.Content>
 </Sheet.Root>
+
+<DraftDiscardDialog guard={editorGuard} />
 
 <AlertDialog.Root bind:open={deleteOpen}>
   <AlertDialog.Content>

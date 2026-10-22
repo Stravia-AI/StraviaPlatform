@@ -1,13 +1,13 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { beforeNavigate } from '$app/navigation'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SearchIcon from '@lucide/svelte/icons/search'
-import { onDestroy } from 'svelte'
+import { onDestroy, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
 import { ProviderConnectionDraft, type ProviderConnectionSubmission } from '#lib/provider-connection-draft.svelte.js'
@@ -22,6 +22,7 @@ import {
 } from '#lib/provider-options.js'
 
 import type { CreateProvider, Provider } from '#lib/types.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
@@ -116,6 +117,7 @@ const draft = new ProviderConnectionDraft({
   },
   hooks: {
     onSaved: async (savedProvider) => {
+      baseline.reset()
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['models'] }),
@@ -140,10 +142,17 @@ const previewIssueError = $derived(
     .join(' ') || (previewIssues.length > 0 ? m.provider_config_fix_issues_before_save() : ''),
 )
 
-// 提交期间（preview → write → bind）封住应用内导航；刷新/关页由 onbeforeunload 原生提示。
-beforeNavigate((navigation) => {
-  if (navigation.shallow && navigation.type === 'goto') return
-  if (draft.submitting) navigation.cancel()
+// 草稿离开保护：选定服务后的字段（或已开始的 OAuth 授权）是草稿；提交期间（preview → write → bind）锁定一切出口。
+const baseline = new DraftBaseline(() => draft.fields)
+const guard = new DraftGuard({
+  dirty: () =>
+    open && step === 'configure' && Boolean(selectedOption) && (baseline.dirty || Boolean(draft.oauthSessionId)),
+  busy: () => draft.submitting,
+})
+
+// 每次打开都以当前字段为基线，避免上一次遗留的步骤造成误判。
+$effect(() => {
+  if (open) untrack(() => baseline.reset())
 })
 
 onDestroy(() => draft.dispose())
@@ -176,6 +185,7 @@ async function chooseOption(option: ProviderOption): Promise<void> {
 
   selectedOptionKey = option.key
   await draft.resetConnection(fields)
+  baseline.reset()
   step = 'configure'
 }
 
@@ -185,7 +195,7 @@ async function goBack(): Promise<void> {
 }
 
 function changeStep(value: string): void {
-  if (value === 'select') void goBack()
+  if (value === 'select') guard.request(goBack)
   else if (selectedOption) step = 'configure'
 }
 
@@ -224,14 +234,6 @@ function saveProvider(): void {
 }
 </script>
 
-<svelte:window
-  onbeforeunload={(event: BeforeUnloadEvent) => {
-    if (draft.submitting) {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-  }} />
-
 {#snippet providerOptionCard(option: ProviderOption)}
   <button
     type="button"
@@ -257,16 +259,14 @@ function saveProvider(): void {
   </button>
 {/snippet}
 
-<Sheet.Root bind:open onOpenChange={handleOpenChange}>
+<Sheet.Root {open} onOpenChange={guard.openChange(handleOpenChange)}>
   <Sheet.Content
     side="right"
     class="{step === 'select'
       ? 'provider-overlay-content'
       : 'route-overlay-content-md'} w-full! gap-0 overflow-hidden p-0"
-    closeLabel={m.provider_editor_close_service_setup()}
-    closeDisabled={draft.submitting}
-    escapeKeydownBehavior={draft.submitting ? 'ignore' : 'close'}
-    interactOutsideBehavior={draft.submitting ? 'ignore' : 'close'}>
+    locked={guard.busy}
+    closeLabel={m.provider_editor_close_service_setup()}>
     <Sheet.Header class="border-b">
       <Sheet.Title>{step === 'select' ? m.providers_add() : m.provider_editor_connection_details()}</Sheet.Title>
       <Sheet.Description>
@@ -460,7 +460,7 @@ function saveProvider(): void {
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">
-          <Button type="button" variant="outline" disabled={draft.submitting} onclick={() => void goBack()}
+          <Button type="button" variant="outline" disabled={draft.submitting} onclick={() => guard.request(goBack)}
             >{m.provider_editor_back()}</Button>
           <div class="flex items-center gap-2">
             <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })} disabled={draft.submitting}>
@@ -476,3 +476,5 @@ function saveProvider(): void {
     {/if}
   </Sheet.Content>
 </Sheet.Root>
+
+<DraftDiscardDialog {guard} />

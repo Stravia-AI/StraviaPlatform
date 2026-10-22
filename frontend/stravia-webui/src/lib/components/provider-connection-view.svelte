@@ -1,16 +1,17 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { beforeNavigate } from '$app/navigation'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { onDestroy, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { formatDuration } from '#lib/format.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
 import { ProviderConnectionDraft, type ProviderConnectionSubmission } from '#lib/provider-connection-draft.svelte.js'
 import type { Provider, UpdateProvider } from '#lib/types.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import FormSection from '#lib/components/form-section.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
@@ -83,6 +84,7 @@ const draft = new ProviderConnectionDraft({
   },
   hooks: {
     onSaved: async (saved) => {
+      baseline.reset()
       connectionError = ''
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
@@ -92,6 +94,7 @@ const draft = new ProviderConnectionDraft({
       onSaved?.(saved)
     },
     onPartialSave: (saved) => {
+      baseline.reset()
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
@@ -118,11 +121,9 @@ const submitMessage = $derived(
       : '',
 )
 
-// 提交期间（preview → write → bind）封住页面内导航；刷新/关页由 onbeforeunload 原生提示。
-beforeNavigate((navigation) => {
-  if (navigation.shallow && navigation.type === 'goto') return
-  if (draft.submitting) navigation.cancel()
-})
+// 草稿离开保护：路由离开、刷新与关页在有未保存变更时先确认；提交期间（preview → write → bind）锁定。
+const baseline = new DraftBaseline(() => draft.fields)
+const guard = new DraftGuard({ dirty: () => baseline.dirty, busy: () => draft.submitting })
 
 onDestroy(() => draft.dispose())
 
@@ -136,7 +137,12 @@ $effect(() => {
       additions[field.key] = false
     }
   }
-  if (Object.keys(additions).length > 0) draft.fields.values = { ...additions, ...draft.fields.values }
+  if (Object.keys(additions).length > 0) {
+    // 补齐默认值不是用户改动：基线干净时一并更新基线。
+    const clean = untrack(() => !baseline.dirty)
+    draft.fields.values = { ...additions, ...draft.fields.values }
+    if (clean) untrack(() => baseline.reset())
+  }
 })
 
 function save(): void {
@@ -179,14 +185,6 @@ async function testConnection(): Promise<void> {
   }
 }
 </script>
-
-<svelte:window
-  onbeforeunload={(event: BeforeUnloadEvent) => {
-    if (draft.submitting) {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-  }} />
 
 <section class="route-section" aria-labelledby="provider-connection-title">
   <!-- 页签已经写明「连接设置」，可见标题只会重复；保留语义标题供辅助技术定位。 -->
@@ -309,3 +307,5 @@ async function testConnection(): Promise<void> {
     </div>
   </form>
 </section>
+
+<DraftDiscardDialog {guard} />

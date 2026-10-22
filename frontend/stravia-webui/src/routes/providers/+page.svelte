@@ -465,7 +465,7 @@ async function copyProvider(): Promise<void> {
     {:else}
       <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
-          class="h-full min-h-0 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0"
+          workbench
           data={providers}
           columns={providerColumns}
           labels={providerTableLabels}
@@ -476,7 +476,6 @@ async function copyProvider(): Promise<void> {
           columnToggle
           toolbarLast={modelChangesAction}
           stripedRows
-          scrollHeight="100%"
           stickyHeader
           sortMode="multiple"
           resizableColumns
