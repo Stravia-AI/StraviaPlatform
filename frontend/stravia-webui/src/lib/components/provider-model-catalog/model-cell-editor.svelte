@@ -3,6 +3,7 @@ import type { Snippet } from 'svelte'
 import { untrack } from 'svelte'
 import { useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
+import PencilIcon from '@lucide/svelte/icons/pencil'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import * as m from '#lib/paraglide/messages.js'
 import { admin } from '#lib/admin-client.js'
@@ -30,9 +31,11 @@ interface Props {
   providerId: string
   model: ProviderModelSummary
   field: 'context' | 'modalities' | 'efforts' | 'availability'
+  /** 窄屏紧凑行：触发器更矮，并显示编辑图标让入口可见。 */
+  compact?: boolean
   children: Snippet
 }
-let { providerId, model, field, children }: Props = $props()
+let { providerId, model, field, compact = false, children }: Props = $props()
 const queryClient = useQueryClient()
 const uid = $props.id()
 const targets = ['input', 'output'] as const
@@ -178,9 +181,13 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
         {...props}
         type="button"
         variant="ghost"
-        class="w-full min-w-0 justify-start whitespace-normal text-left"
+        class={[
+          'w-full min-w-0 justify-start whitespace-normal text-left',
+          compact && 'h-auto min-h-7 gap-1.5 px-1.5 py-0.5',
+        ]}
         aria-label={`${label} ${model.id}`}>
         {@render children()}
+        {#if compact}<PencilIcon class="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />{/if}
       </Button>
     {/snippet}
   </Popover.Trigger>
@@ -255,7 +262,7 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
             {/each}
           {:else if field === 'efforts'}
             <Field.Field>
-              <Field.Label for={`${uid}-efforts`}>{label}</Field.Label>
+              <Field.Label for={`${uid}-efforts`} hint={m.provider_model_editor_effort_help()}>{label}</Field.Label>
               <Select.Root type="multiple" bind:value={efforts} disabled={saving}>
                 <Select.Trigger id={`${uid}-efforts`} class="w-full min-w-0"
                   ><span class="truncate">{efforts.join(', ') || m.provider_model_editor_select_efforts()}</span
@@ -266,7 +273,6 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
                       >{/each}</Select.Group
                   ></Select.Content>
               </Select.Root>
-              <Field.Description>{m.provider_model_editor_effort_help()}</Field.Description>
             </Field.Field>
             <Field.Field>
               <Field.Label for={`${uid}-custom`}>{m.provider_model_editor_custom_effort()}</Field.Label>
@@ -294,7 +300,8 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
             </Field.Field>
           {:else}
             <Field.Field>
-              <Field.Label for={`${uid}-availability`}>{label}</Field.Label>
+              <Field.Label for={`${uid}-availability`} hint={m.provider_model_editor_visibility_help()}
+                >{label}</Field.Label>
               <Select.Root
                 type="single"
                 value={policy}
@@ -314,7 +321,6 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
                     <Select.Item value="force_disabled">{m.common_don_t_allow()}</Select.Item>
                   </Select.Group></Select.Content>
               </Select.Root>
-              <Field.Description>{m.provider_model_editor_visibility_help()}</Field.Description>
             </Field.Field>
           {/if}
         </Field.Group>

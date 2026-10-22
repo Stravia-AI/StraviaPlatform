@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 import type { ProviderDescriptor } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
@@ -1892,15 +1892,10 @@ test('Provider detail separates connection, inventory, references, and guarded m
   const connectionSection = page
     .locator('section')
     .filter({ has: page.getByRole('heading', { name: 'Connection settings', level: 2 }) })
+  // 表单位于 60rem 设置列，不随 120rem 容器拉伸。
   await expect
-    .poll(async () => {
-      const [sectionBox, formBox] = await Promise.all([
-        connectionSection.boundingBox(),
-        connectionSection.locator('form').boundingBox(),
-      ])
-      return sectionBox && formBox ? Math.round((formBox.width / sectionBox.width) * 100) : 0
-    })
-    .toBeGreaterThanOrEqual(95)
+    .poll(async () => Math.round((await connectionSection.locator('form').boundingBox())?.width ?? 0))
+    .toBeLessThanOrEqual(960)
   await providerViews.getByRole('link', { name: 'Upstream models' }).click()
   await expect(page.getByRole('link', { name: 'Connection settings' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Upstream models' })).toHaveAttribute('aria-current', 'page')
@@ -2012,6 +2007,9 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await page.getByRole('link', { name: 'Linked models' }).click()
   await expect(page.getByRole('link', { name: 'client-model' })).toBeVisible()
   await expect(page.getByText('retired-model', { exact: true })).toBeVisible()
+  const references = page.getByRole('table', { name: 'Linked models' })
+  await expect(references.getByRole('columnheader')).toHaveText(['Client model', 'Upstream model', 'Priority'])
+  await expect(page.getByText('These models send requests to this provider')).toHaveCount(0)
   routeQueryFails = true
   await page.goto(`/providers/${provider.id}?view=models`)
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
@@ -2616,4 +2614,415 @@ test('Add provider draft asks before every close path and keeps OAuth cancellati
   await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
   await page.getByRole('button', { name: /^OpenAI Compatible / }).click()
   await expect(page.getByLabel('Base URL', { exact: true })).not.toHaveValue('https://draft.example/v1')
+})
+
+const detailTimestamp = '2026-01-01T00:00:00Z'
+
+function detailProvider(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    name: `Provider ${id}`,
+    vendor: 'openai',
+    channel: 'default',
+    protocol: 'openai-compatible',
+    base_url: 'https://fixture.invalid/v1',
+    use_proxy: false,
+    vendor_options: {},
+    configured_credential_fields: ['api_key'],
+    is_enabled: true,
+    created_at: detailTimestamp,
+    updated_at: detailTimestamp,
+    ...overrides,
+  }
+}
+
+async function mockProviderDetail(
+  page: Page,
+  providers: Array<ReturnType<typeof detailProvider>>,
+  options: { updates?: unknown[]; models?: unknown[]; routes?: unknown[]; syncState?: unknown } = {},
+) {
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: options.routes ?? [] } }))
+  await page.route('**/api/v1/providers**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (path === '/providers' && request.method() === 'GET') {
+      await route.fulfill({ json: { data: providers } })
+    } else if (/^\/providers\/[^/]+\/models$/.test(path) && request.method() === 'GET') {
+      await route.fulfill({ json: { data: { models: options.models ?? [] } } })
+    } else if (path.endsWith('/models/sync-state') && request.method() === 'GET') {
+      if (options.syncState) await route.fulfill({ json: { data: options.syncState } })
+      else await route.fulfill({ status: 404, json: { error: 'not found' } })
+    } else if (/^\/providers\/[^/]+$/.test(path) && request.method() === 'PUT') {
+      options.updates?.push(request.postDataJSON())
+      await route.fulfill({ json: { data: providers.find((item) => path.endsWith(item.id)) } })
+    } else {
+      await route.fallback()
+    }
+  })
+}
+
+test('Provider connection draft confirms before tab switch, route leave and reload, and Cancel restores saved values', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('draft-provider', { name: 'Saved name' })
+  const updates: unknown[] = []
+  await mockProviderDetail(page, [provider], { updates })
+  await page.goto('/providers/draft-provider?view=connection')
+
+  const name = page.getByLabel('Connection name')
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+  const dialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+  const tabs = page.getByRole('navigation', { name: 'Provider details' })
+  await expect(name).toHaveValue('Saved name')
+
+  // 没有改动：Cancel 不可用，切换页签与刷新都不打扰。
+  await expect(cancel).toBeDisabled()
+  const cleanUnload = await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(event)
+    return event.defaultPrevented
+  })
+  expect(cleanUnload).toBe(false)
+
+  await name.fill('Edited name')
+  await expect(cancel).toBeEnabled()
+
+  // 刷新：有未保存改动时交给浏览器的原生离开提示。
+  const dirtyUnload = await page.evaluate(() => {
+    const event = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(event)
+    return event.defaultPrevented
+  })
+  expect(dirtyUnload).toBe(true)
+
+  // 切换页签。
+  await tabs.getByRole('link', { name: 'Linked models' }).click()
+  await expect(dialog).toBeVisible()
+  await expect(page).toHaveURL(/view=connection/)
+  await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(name).toHaveValue('Edited name')
+
+  // 路由离开。
+  await page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('link', { name: 'Providers' }).click()
+  await expect(dialog).toBeVisible()
+  await expect(page).toHaveURL(/\/providers\/draft-provider/)
+  await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(name).toHaveValue('Edited name')
+
+  // Cancel 同样经过确认，放弃后回到已保存的值。
+  await cancel.click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(name).toHaveValue('Edited name')
+  await cancel.click()
+  await dialog.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(name).toHaveValue('Saved name')
+  await expect(cancel).toBeDisabled()
+
+  // 代理开关属于草稿：改动后离开同样确认，放弃后不产生任何保存请求。
+  await page.getByRole('switch', { name: 'Use proxy' }).click()
+  await expect(cancel).toBeEnabled()
+  await tabs.getByRole('link', { name: 'Linked models' }).click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/view=routes/)
+  expect(updates).toEqual([])
+
+  // 放弃后回到连接页：显示已保存的值，切换页签不再确认。
+  await tabs.getByRole('link', { name: 'Connection settings' }).click()
+  await expect(page.getByRole('switch', { name: 'Use proxy' })).not.toBeChecked()
+  await expect(page.getByLabel('Connection name')).toHaveValue('Saved name')
+  await tabs.getByRole('link', { name: 'Linked models' }).click()
+  await expect(page).toHaveURL(/view=routes/)
+  await expect(dialog).toHaveCount(0)
+})
+
+test('Provider connection actions stay in view and lock while saving, and a saved draft leaves without confirmation', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 500 })
+  const provider = detailProvider('lock-provider', {
+    vendor: 'openai-compatible',
+    configured_credential_fields: ['apiKey'],
+  })
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+  const updates: unknown[] = []
+  await mockProviderDetail(page, [provider])
+  await page.route('**/api/v1/providers/lock-provider', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    updates.push(route.request().postDataJSON())
+    await gate
+    await route.fulfill({ json: { data: { ...provider, name: 'Saved once' } } })
+  })
+  await page.goto('/providers/lock-provider?view=connection')
+  const name = page.getByLabel('Connection name')
+  const save = page.getByRole('button', { name: 'Save connection' })
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true })
+  await name.fill('Saved once')
+
+  // 固定操作区在视口内，取消在前、保存在后。
+  const [cancelBox, saveBox] = [(await cancel.boundingBox())!, (await save.boundingBox())!]
+  expect(saveBox.y + saveBox.height).toBeLessThanOrEqual(500)
+  expect(cancelBox.x).toBeLessThan(saveBox.x)
+
+  await save.click()
+  await expect(name).toBeDisabled()
+  await expect(cancel).toBeDisabled()
+  await expect(save).toBeDisabled()
+  // 保存中路由离开被锁定，且不弹出确认。
+  await page.getByRole('navigation', { name: 'Provider details' }).getByRole('link', { name: 'Linked models' }).click()
+  await expect(page).toHaveURL(/view=connection/)
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
+  release()
+  await expect(name).toBeEnabled()
+  expect(updates).toHaveLength(1)
+
+  // 保存成功后草稿即为基线：离开不再确认。
+  await page.getByRole('navigation', { name: 'Provider details' }).getByRole('link', { name: 'Linked models' }).click()
+  await expect(page).toHaveURL(/view=routes/)
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
+})
+
+test('Provider connection form keeps one right edge at 60rem and shows the side column only with real status', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  const withStatus = detailProvider('status-provider', {
+    vendor: 'openai-compatible',
+    configured_credential_fields: [],
+    credential_status: 'invalid',
+    credential_invalid_at: '2026-10-01T10:00:00Z',
+    allowance_suspension: { suspended_at: '2026-09-01T12:00:00Z', triggered_keys: ['weekly'], earliest_reset_at: null },
+  })
+  const clean = detailProvider('clean-provider')
+  await mockProviderDetail(page, [withStatus, clean], {
+    syncState: {
+      automatic_sync: true,
+      in_progress: false,
+      pause_reason: null,
+      has_successful_sync: true,
+      last_check: {
+        checked_at: '2026-10-12T10:00:00.000Z',
+        source: 'manual_sync',
+        record_id: 'record',
+        added: 2,
+        missing: 0,
+        restored: 0,
+        deprecated: 0,
+        deprecation_cleared: 0,
+        specification_updated: 0,
+        outcome: 'success',
+        error: null,
+      },
+    },
+  })
+
+  await page.goto('/providers/status-provider?view=connection')
+  const form = page.locator('form').filter({ has: page.getByRole('button', { name: 'Save connection' }) })
+  const controls = [
+    page.getByLabel('Connection name'),
+    page.getByLabel('Base URL'),
+    page.locator('[data-slot="input-group"]').filter({ has: page.getByLabel('API key', { exact: true }) }),
+  ]
+  const labelBox = (await page.locator('label[for="provider-name"]').boundingBox())!
+  const boxes = await Promise.all(controls.map(async (control) => (await control.boundingBox())!))
+  const formBox = (await form.boundingBox())!
+  expect(formBox.width).toBeLessThanOrEqual(960)
+  // 名称、地址、密钥同宽、同一左右边缘；label 到控件右缘的距离受 60rem 约束。
+  for (const box of boxes) {
+    expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1)
+  }
+  expect(boxes[0].width).toBeLessThanOrEqual(576 + 1)
+  expect(boxes[0].x + boxes[0].width - labelBox.x).toBeLessThanOrEqual(960)
+  expect(boxes[0].x + boxes[0].width).toBeLessThanOrEqual(formBox.x + formBox.width + 1)
+
+  // 说明只进问号：复述 label 的说明省略，真正的数据流向说明保留在问号里。
+  const apiKeyField = page.locator('[data-slot="field"]').filter({ has: page.getByLabel('API key', { exact: true }) })
+  await expect(apiKeyField.locator('[data-slot="field-hint"]')).toHaveCount(1)
+  await expect(page.getByText('Credential sent to the configured endpoint.')).toBeHidden()
+  await apiKeyField.locator('[data-slot="field-hint"]').hover()
+  await expect(page.locator('[data-slot="tooltip-content"]').first()).toContainText(
+    'Credential sent to the configured endpoint.',
+  )
+  const proxyRow = page
+    .locator('[data-slot="setting-row"]')
+    .filter({ has: page.getByRole('switch', { name: 'Use proxy' }) })
+  await expect(proxyRow.locator('[data-slot="field-hint"]')).toHaveCount(1)
+  await expect(page.getByText('Send requests to this service through the proxy configured in Settings.')).toBeHidden()
+
+  // 辅助栏：只含真实状态，位于表单右侧、与表单顶部对齐。
+  const aside = page.getByRole('complementary', { name: 'Connection status' })
+  await expect(aside).toBeVisible()
+  await expect(aside).toContainText('Rejected by the provider since')
+  await expect(aside).toContainText('Paused since')
+  await expect(aside).toContainText('weekly')
+  await expect(aside).toContainText('Last model sync')
+  const asideBox = (await aside.boundingBox())!
+  expect(asideBox.x).toBeGreaterThanOrEqual(formBox.x + formBox.width)
+  expect(Math.abs(asideBox.y - formBox.y)).toBeLessThanOrEqual(40)
+
+  // 没有任何真实状态时不显示辅助栏。
+  await page.route('**/api/v1/providers/clean-provider/models/sync-state', (route) =>
+    route.fulfill({ status: 404, json: { error: 'not found' } }),
+  )
+  await page.goto('/providers/clean-provider?view=connection')
+  await expect(page.getByRole('button', { name: 'Save connection' })).toBeVisible()
+  await expect(page.getByRole('complementary', { name: 'Connection status' })).toHaveCount(0)
+})
+
+test('Provider upstream model table fills the 120rem container at 2560', async ({ page }) => {
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  const provider = detailProvider('wide-provider')
+  await mockProviderDetail(page, [provider], {
+    models: [
+      {
+        id: 'wide-model',
+        name: 'Wide Model',
+        available: true,
+        source_kind: 'discovered',
+        snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+        selection_policy: 'auto',
+        specification: { limit: { context: 128000 }, modalities: null },
+        revision: 1,
+      },
+    ],
+  })
+  await page.goto('/providers/wide-provider?view=models')
+  const table = page.getByRole('table', { name: 'Models from this provider' })
+  await expect(table).toBeVisible()
+  const container = page.locator('.route-page')
+  const tableBox = (await table.boundingBox())!
+  const containerBox = (await container.boundingBox())!
+  expect(containerBox.width).toBeLessThanOrEqual(1920 + 1)
+  expect(Math.abs(tableBox.width - containerBox.width)).toBeLessThanOrEqual(2)
+  expect(tableBox.width).toBeGreaterThanOrEqual(1900)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+const compactModel = (id: string, name: string, specification: Record<string, unknown>) => ({
+  id,
+  name,
+  available: true,
+  source_kind: 'discovered',
+  snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+  selection_policy: 'auto',
+  specification,
+  revision: 1,
+})
+
+for (const width of [390, 320]) {
+  test(`narrow upstream model rows are compact labelled facts with visible editors (${width}px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 })
+    const provider = detailProvider('mobile-provider')
+    await mockProviderDetail(page, [provider], {
+      models: [
+        compactModel('mobile-a', 'Mobile A', {
+          limit: { context: 128000 },
+          modalities: { input: ['text', 'image'], output: ['text'] },
+          reasoning_efforts: ['low', 'medium', 'high'],
+        }),
+        compactModel('mobile-b', 'Mobile B', { limit: null, modalities: null }),
+      ],
+    })
+    await page.goto('/providers/mobile-provider?view=models')
+    const row = page.locator('article').filter({ hasText: 'mobile-a' })
+    await expect(row).toBeVisible()
+    const box = (await row.boundingBox())!
+    // 现状约 304px；紧凑行显著更矮。
+    expect(box.height).toBeLessThan(width === 390 ? 240 : 290)
+
+    // 带标签的 dl：每个事实都有可见的名称。
+    const labels = row.locator('dt:not(.sr-only)')
+    await expect(labels).toHaveText(['Context', 'RPM limit', 'Modalities', 'Reasoning effort', 'Model availability'])
+
+    // 四类单元格的编辑入口都可见且在视口内。
+    for (const name of [
+      'Context tokens mobile-a',
+      'Modalities mobile-a',
+      'Reasoning effort mobile-a',
+      'Availability when adding models mobile-a',
+    ]) {
+      const trigger = row.getByRole('button', { name, exact: true })
+      await expect(trigger).toBeVisible()
+      const triggerBox = (await trigger.boundingBox())!
+      expect(triggerBox.x).toBeGreaterThanOrEqual(0)
+      expect(triggerBox.x + triggerBox.width).toBeLessThanOrEqual(width)
+      expect(triggerBox.height).toBeGreaterThanOrEqual(24)
+    }
+    await row.getByRole('button', { name: 'Context tokens mobile-a', exact: true }).click()
+    await expect(page.getByRole('dialog').getByRole('spinbutton')).toBeVisible()
+    await page.keyboard.press('Escape')
+
+    // 添加／使用动作与身份同一行、靠前。
+    const action = row.getByRole('button', { name: /Add .*mobile-a|Create .*mobile-a|mobile-a/ }).first()
+    await expect(action).toBeVisible()
+    const identity = (await row.getByRole('link', { name: /Mobile A/ }).boundingBox())!
+    const actionBox = (await row
+      .getByRole('button', { name: /route|model/i })
+      .first()
+      .boundingBox())!
+    expect(actionBox.y).toBeLessThan(identity.y + identity.height)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('Linked models list labels both identities and only collapses an upstream ID identical to the client ID', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('linked-provider')
+  const route = (id: string, modelId: string, displayName: string, upstream: string, priority: number) => ({
+    id,
+    model_id: modelId,
+    display_name: displayName,
+    balance: 'priority',
+    target_provider: provider.id,
+    target_model: upstream,
+    is_enabled: true,
+    created_at: detailTimestamp,
+    targets: [
+      {
+        id: `target-${id}`,
+        model_id: id,
+        provider_id: provider.id,
+        model: upstream,
+        weight: 100,
+        priority,
+        created_at: detailTimestamp,
+      },
+    ],
+  })
+  await mockProviderDetail(page, [provider], {
+    routes: [route('r-different', 'coding', 'Coding', 'gpt-5.4', 1), route('r-same', 'gpt-5.4', '', 'gpt-5.4', 2)],
+  })
+  await page.goto('/providers/linked-provider?view=routes')
+  const list = page.getByRole('table', { name: 'Linked models' })
+  await expect(list.getByRole('columnheader')).toHaveText(['Client model', 'Upstream model', 'Priority'])
+  const different = list.getByRole('row').filter({ hasText: 'Coding' })
+  await expect(different.getByRole('cell')).toHaveCount(3)
+  await expect(different.getByRole('cell').nth(0)).toContainText('coding')
+  await expect(different.getByRole('cell').nth(1)).toContainText('gpt-5.4')
+  await expect(different.getByRole('cell').nth(2)).toContainText('1')
+  const same = list.getByRole('row').filter({ hasText: 'Same ID' })
+  await expect(same.getByRole('cell').nth(0)).toContainText('gpt-5.4')
+  await expect(same.getByRole('cell').nth(1)).toContainText('Same ID')
+  await expect(page.getByText('These models send requests to this provider')).toHaveCount(0)
+
+  // 优先级紧挨着标识列，而不是被推到容器边缘。
+  const [clientHeader, priorityHeader] = await Promise.all([
+    list.getByRole('columnheader', { name: 'Client model' }).boundingBox(),
+    list.getByRole('columnheader', { name: 'Priority' }).boundingBox(),
+  ])
+  expect(priorityHeader!.x - clientHeader!.x).toBeLessThan(900)
+
+  // 窄屏：三个值各自带标签，没有表头也能读懂。
+  await page.setViewportSize({ width: 390, height: 844 })
+  const narrow = list.getByRole('row').filter({ hasText: 'Coding' })
+  await expect(narrow.getByRole('cell').nth(0)).toContainText('Client model')
+  await expect(narrow.getByRole('cell').nth(1)).toContainText('Upstream model')
+  await expect(narrow.getByRole('cell').nth(2)).toContainText('Priority')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
