@@ -7,6 +7,7 @@ import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import type { MediaGenerationConfig, MediaGenerationConfigView } from '#lib/types.js'
 import { DraftGuard } from '#lib/draft-guard.svelte.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
@@ -42,7 +43,7 @@ let clearOpen = $state(false)
 let clearSaving = $state(false)
 let clearError = $state('')
 
-// 未保存的路由选择（被拒绝的选择仍留在原处）与解除绑定 Sheet 共用离开保护；保存中锁定。
+// 未保存的路由选择（被拒绝的选择仍留在原处）离开页面前需确认；保存中锁定。
 const guard = new DraftGuard({
   dirty: () => pendingRoute !== undefined && pendingRoute !== (configQuery.data?.config.image.route_id ?? null),
   busy: () => routeSaving || clearSaving,
@@ -316,7 +317,9 @@ async function unlinkRoute(): Promise<void> {
   submitDisabled={savedRouteId === null}
   saving={clearSaving}
   error={clearError}
-  {guard}
+  draft={() => null}
   onsubmit={unlinkRoute}>
   <SettingRow title={m.media_generation_image_route_title()} value={clearSummary} layout="inline" />
 </SettingsSheet>
+
+<DraftDiscardDialog {guard} />

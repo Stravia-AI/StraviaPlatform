@@ -6,7 +6,6 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
@@ -34,10 +33,6 @@ let modelId = $state('')
 let thinkingLevel = $state<ThinkingLevel | ''>('')
 let saving = $state(false)
 let saveError = $state('')
-
-// 绑定草稿：打开 Sheet 时的模型与等级是基线；保存中锁定关闭，失败保留草稿。
-const baseline = new DraftBaseline(() => ({ modelId, thinkingLevel }))
-const guard = new DraftGuard({ dirty: () => editorOpen && baseline.dirty, busy: () => saving })
 
 const eligibleModels = $derived(sortLogicalModels(configQuery.data?.eligible_models ?? []))
 const selectedModel = $derived(configQuery.data?.eligible_models.find((model) => model.id === modelId))
@@ -85,7 +80,6 @@ function openEditor(): void {
   modelId = savedModel?.id ?? ''
   thinkingLevel = supportedThinkingLevel(savedModel, config.thinking_level)
   saveError = ''
-  baseline.reset()
   editorOpen = true
 }
 
@@ -121,7 +115,6 @@ async function save(): Promise<void> {
       thinking_level: thinkingLevel || null,
     })
     queryClient.setQueryData(['media-understanding-config'], config)
-    baseline.reset()
     editorOpen = false
     toast.success(m.media_understanding_settings_saved())
   } catch (error) {
@@ -215,7 +208,7 @@ function selectThinkingLevel(value?: string): void {
   submitDisabled={!hasChanges || !draftValid}
   {saving}
   error={saveError}
-  {guard}
+  draft={() => ({ modelId, thinkingLevel })}
   onsubmit={save}>
   <Field.Group>
     <Field.Field size="select">
