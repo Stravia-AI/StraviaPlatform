@@ -25,6 +25,8 @@ export interface InlineSettingInputProps {
   disabled?: boolean
   /** 等宽字体，用于 URL、标识等技术值。 */
   technical?: boolean
+  /** 输入框后的单位后缀（如「秒」），属于控件的一部分，随控件右缘对齐。 */
+  suffix?: string
   class?: string
 }
 </script>
@@ -35,6 +37,7 @@ import { onDestroy, untrack } from 'svelte'
 
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import { fieldControlWidths } from '#lib/components/ui/field/field-sizes.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { inlineSaveKeyAction, reconcileInlineDraft } from '#lib/inline-save.js'
@@ -57,6 +60,7 @@ let {
   describedby,
   disabled = false,
   technical = false,
+  suffix,
   class: className,
 }: InlineSettingInputProps = $props()
 
@@ -130,28 +134,33 @@ function onkeydown(event: KeyboardEvent) {
 <!-- 失焦不提交：只有 Enter 或「保存」才写入。有改动时出现「保存」「取消」；成功后短暂显示 signal「已保存」。 -->
 <div data-slot="inline-setting-input" class={cn('flex w-full min-w-0 flex-col gap-1', className)}>
   <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-    <Input
-      {id}
-      {type}
-      {inputmode}
-      {min}
-      {max}
-      {step}
-      {placeholder}
-      {autocomplete}
-      aria-label={label}
-      aria-labelledby={labelledby}
-      aria-describedby={cn(describedby, error && errorId) || undefined}
-      aria-invalid={error ? true : undefined}
-      aria-busy={saving || undefined}
-      disabled={disabled || saving}
-      class={cn(
-        'w-full @min-[50rem]/setting-row:w-(--setting-control-width,100%) @min-[50rem]/setting-row:min-w-0',
-        technical && 'font-technical',
-      )}
-      value={draft}
-      oninput={(event: Event) => (draft = (event.currentTarget as HTMLInputElement).value)}
-      {onkeydown} />
+    <div
+      class={suffix ? 'flex w-full min-w-0 items-center gap-2 @min-[50rem]/setting-row:w-auto' : 'contents'}
+      style:--setting-control-width={suffix ? fieldControlWidths.number : undefined}>
+      <Input
+        {id}
+        {type}
+        {inputmode}
+        {min}
+        {max}
+        {step}
+        {placeholder}
+        {autocomplete}
+        aria-label={label}
+        aria-labelledby={labelledby}
+        aria-describedby={cn(describedby, error && errorId) || undefined}
+        aria-invalid={error ? true : undefined}
+        aria-busy={saving || undefined}
+        disabled={disabled || saving}
+        class={cn(
+          'w-full @min-[50rem]/setting-row:w-(--setting-control-width,100%) @min-[50rem]/setting-row:min-w-0',
+          technical && 'font-technical',
+        )}
+        value={draft}
+        oninput={(event: Event) => (draft = (event.currentTarget as HTMLInputElement).value)}
+        {onkeydown} />
+      {#if suffix}<span class="shrink-0 text-sm text-muted-foreground">{suffix}</span>{/if}
+    </div>
     {#if dirty || saving}
       <div class="flex shrink-0 items-center gap-2">
         <Button

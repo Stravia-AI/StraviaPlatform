@@ -544,7 +544,7 @@ describe('Stravia desktop smoke', () => {
     await browser.tauri.switchWindow('main')
     await $('a[href="/web-search"]').click()
     const localRow = await $(
-      '//*[@id="web-search-sources"]//div[contains(@class,"grid")][.//p[normalize-space()="Local"]]',
+      '//*[@id="web-search-sources"]//div[contains(@class,"py-3")][.//p[normalize-space()="Local"]]',
     )
     await localRow.$('button=Edit').click()
     const chooser = await $('#web-provider-browser-choose')

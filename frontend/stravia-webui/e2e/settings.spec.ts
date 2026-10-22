@@ -541,15 +541,16 @@ test('administrator credentials are edited in a sheet that states every session 
 })
 
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {
-  const searchConfig = {
+  let searchConfig = {
     revision: 3,
     enabled: true,
-    backend: { kind: 'local', model_id: 'model-search' },
+    backend: { kind: 'local', model_id: 'model-search' } as { kind: string; model_id?: string; route_id?: string },
     max_turns: 6,
     total_time_seconds: 180,
     updated_at: '2026-08-17T00:00:00Z',
     limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
   }
+  const searchSaves: unknown[] = []
   const mediaConfig = {
     enabled: true,
     model_id: 'model-media',
@@ -566,6 +567,11 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   } satisfies MediaUnderstandingConfigView
 
   await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      searchSaves.push(input)
+      searchConfig = { ...searchConfig, ...input, revision: searchConfig.revision + 1 }
+    }
     await route.fulfill({ json: { data: searchConfig } })
   })
   await page.route('**/api/v1/web-search/eligible-models', async (route) => {
@@ -610,26 +616,63 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(page.getByRole('switch')).toHaveCount(1)
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toBeVisible()
-  const localTurns = page.locator('#search-max-turns')
-  await localTurns.fill('9')
-
-  await page.locator('#search-backend').click()
+  await expect(page.locator('#search-max-turns')).toHaveValue('6')
+  await expect(page.locator('#search-total-seconds')).toHaveValue('180')
+  // 预算行不属于绑定：绑定 Sheet 内的方式与目标只是草稿，保存前不请求也不改变页面。
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
+  const sheet = page.getByRole('dialog', { name: 'Edit search method' })
+  await expect(sheet.locator('#search-local-model')).toHaveText('Search model')
+  await sheet.locator('#search-backend').click()
   await page.getByRole('option', { name: 'External Route' }).click()
-  await expect(page.getByText('Search Route', { exact: true })).toBeVisible()
-  await expect(page.locator('#search-external-route')).toHaveText('Select a Search Route')
-  await page.locator('#search-external-route').click()
+  await expect(sheet.getByText('Search Route', { exact: true })).toBeVisible()
+  await expect(sheet.locator('#search-external-route')).toHaveText('Select a Search Route')
+  await expect(sheet.getByRole('button', { name: 'Save search method', exact: true })).toBeDisabled()
+  await sheet.locator('#search-external-route').click()
   await page.getByRole('option', { name: 'External search' }).click()
-  await expect(page.locator('#search-external-route')).toHaveText('External search')
+  await expect(sheet.locator('#search-external-route')).toHaveText('External search')
+  // 切换方式不提交半个绑定，也不丢掉另一种方式的草稿。
+  await sheet.locator('#search-backend').click()
+  await page.getByRole('option', { name: 'Use a Stravia model' }).click()
+  await expect(sheet.locator('#search-local-model')).toHaveText('Search model')
+  await sheet.locator('#search-backend').click()
+  await page.getByRole('option', { name: 'External Route' }).click()
+  await expect(sheet.locator('#search-external-route')).toHaveText('External search')
+  expect(searchSaves).toHaveLength(0)
+  await expect(page.locator('#web-search-sources')).toBeVisible()
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(searchSaves).toEqual([
+    {
+      revision: 3,
+      enabled: true,
+      backend: { kind: 'external', route_id: 'external-search' },
+      max_turns: 6,
+      total_time_seconds: 180,
+      updated_at: '2026-08-17T00:00:00Z',
+    },
+  ])
   await expect(page.locator('#web-search-sources')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toHaveCount(0)
+  await expect(page.getByText('External search', { exact: true })).toBeVisible()
 
-  await page.locator('#search-backend').click()
+  // 切回 Local：原预算仍在，Local 来源重新出现。
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
+  await sheet.locator('#search-backend').click()
   await page.getByRole('option', { name: 'Use a Stravia model' }).click()
-  await expect(page.locator('#search-local-model')).toHaveText('Search model')
-  await page.locator('#search-local-model').click()
+  await expect(sheet.locator('#search-local-model')).toHaveText('Select a model')
+  await sheet.locator('#search-local-model').click()
   await expect(page.getByText('search-model', { exact: true })).toBeVisible()
   await page.getByRole('option', { name: 'Search model' }).click()
-  await expect(localTurns).toHaveValue('9')
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  await expect(page.locator('#web-search-sources')).toBeVisible()
+  expect(searchSaves[1]).toMatchObject({
+    revision: 4,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+  })
+  await expect(page.locator('#search-max-turns')).toHaveValue('6')
 })
 
 test('media settings can repair an unavailable binding and preserve the draft after a failed save', async ({
@@ -762,9 +805,11 @@ test('search activation saves only confirmed configuration without discarding th
   await page.goto('/web-search')
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   const turns = page.locator('#search-max-turns')
+  const seconds = page.locator('#search-total-seconds')
   await turns.fill('9')
-  const unsaved = page.getByRole('status').filter({ hasText: 'Unsaved changes' })
-  await expect(unsaved).toBeVisible()
+  await seconds.fill('240')
+  const turnsRow = page.locator('[data-slot=setting-row]').filter({ has: turns })
+  await expect(turnsRow.getByRole('button', { name: 'Save', exact: true })).toBeVisible()
   const toggle = page.getByRole('switch', { name: 'Enable web search', exact: true })
   await toggle.click()
   await expect(toggle).not.toBeChecked()
@@ -780,15 +825,19 @@ test('search activation saves only confirmed configuration without discarding th
     },
   ])
   await expect(turns).toHaveValue('9')
-  await expect(unsaved).toBeVisible()
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
-  await expect(unsaved).toHaveCount(0)
+  await expect(seconds).toHaveValue('240')
+  await expect(turnsRow.getByRole('button', { name: 'Save', exact: true })).toBeVisible()
+  // 行内保存只携带本行：另一行的草稿不被提交，也不被清除。
+  await turns.press('Enter')
+  await expect(turnsRow.getByText('Saved', { exact: true })).toBeVisible()
   expect(submitted).toHaveLength(2)
-  expect(submitted[1]).toMatchObject({ revision: 4, enabled: false, max_turns: 9 })
+  expect(submitted[1]).toMatchObject({ revision: 4, enabled: false, max_turns: 9, total_time_seconds: 180 })
+  await expect(seconds).toHaveValue('240')
   await page.reload()
   await expect(toggle).not.toBeChecked()
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   await expect(turns).toHaveValue('9')
+  await expect(seconds).toHaveValue('180')
 })
 
 test('unloaded settings stay non-editable until a failed baseline is recovered', async ({ page }) => {
@@ -1293,6 +1342,350 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(searchCheckbox).toBeDisabled()
   })
 }
+
+const searchLimits = { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 }
+
+test('binding and budget saves recover from revision conflicts without losing input', async ({ page }) => {
+  let server = {
+    revision: 3,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+  }
+  const accepted: Array<Record<string, unknown>> = []
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      if (input.revision !== server.revision) {
+        await route.fulfill({ status: 409, json: { error: 'Fixture revision conflict' } })
+        return
+      }
+      accepted.push(input)
+      server = { ...server, ...input, revision: server.revision + 1 }
+    }
+    await route.fulfill({ json: { data: { ...server, limits: searchLimits } } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          { id: 'model-search', model_id: 'search-model', display_name: 'Search model' },
+          { id: 'model-second', model_id: 'second-model', display_name: 'Second model' },
+        ],
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-access/settings', (route) =>
+    route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [] } }))
+  await page.goto('/web-search')
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const turns = page.locator('#search-max-turns')
+  const seconds = page.locator('#search-total-seconds')
+  const sheet = page.getByRole('dialog', { name: 'Edit search method' })
+
+  // 绑定：另一处已提交新修订，旧快照被拒绝；Sheet 与选择原样保留，确认值刷新后重试成功。
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
+  await sheet.locator('#search-local-model').click()
+  await page.getByRole('option', { name: 'Second model' }).click()
+  server = { ...server, revision: 4, max_turns: 7 }
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet.getByRole('alert')).toContainText('Fixture revision conflict')
+  await expect(sheet.locator('#search-local-model')).toHaveText('Second model')
+  expect(accepted).toHaveLength(0)
+  await expect(turns).toHaveValue('7')
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(accepted).toEqual([
+    {
+      revision: 4,
+      enabled: false,
+      backend: { kind: 'local', model_id: 'model-second' },
+      max_turns: 7,
+      total_time_seconds: 180,
+      updated_at: '2026-09-01T00:00:00Z',
+    },
+  ])
+
+  // 预算：同样保留输入与错误，重试只覆盖本行。
+  await seconds.fill('300')
+  server = { ...server, revision: server.revision + 1, total_time_seconds: 200 }
+  await seconds.press('Enter')
+  const row = page.locator('[data-slot=setting-row]').filter({ has: seconds })
+  await expect(row.getByRole('alert')).toContainText('Fixture revision conflict')
+  await expect(seconds).toHaveValue('300')
+  await expect(row.getByRole('button', { name: 'Save', exact: true })).toBeVisible()
+  await expect.poll(() => accepted.length).toBe(1)
+  await seconds.press('Enter')
+  await expect(row.getByText('Saved', { exact: true })).toBeVisible()
+  expect(accepted[1]).toMatchObject({
+    revision: 6,
+    backend: { kind: 'local', model_id: 'model-second' },
+    max_turns: 7,
+    total_time_seconds: 300,
+  })
+  await expect(turns).toHaveValue('7')
+})
+
+test('binding sheet and source editor guard dirty drafts and lock while saving', async ({ page }) => {
+  let providerSaveStatus = 503
+  let releaseProviderSave: (() => void) | undefined
+  const providerSaves: unknown[] = []
+  await page.route('**/api/v1/web-search/config', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          revision: 1,
+          enabled: false,
+          backend: { kind: 'local', model_id: 'model-search' },
+          max_turns: 6,
+          total_time_seconds: 180,
+          updated_at: '2026-09-01T00:00:00Z',
+          limits: searchLimits,
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          { id: 'model-search', model_id: 'search-model', display_name: 'Search model' },
+          { id: 'model-second', model_id: 'second-model', display_name: 'Second model' },
+        ],
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-access/settings', (route) =>
+    route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
+  await page.route('**/api/v1/web-providers/source-exa', async (route) => {
+    if (route.request().method() === 'PUT') {
+      providerSaves.push(route.request().postDataJSON())
+      await new Promise<void>((resolve) => {
+        releaseProviderSave = resolve
+      })
+      if (providerSaveStatus !== 200) {
+        await route.fulfill({ status: providerSaveStatus, json: { error: 'Fixture provider save unavailable' } })
+        return
+      }
+    }
+    await route.fulfill({ json: { data: searchSource } })
+  })
+  await page.goto('/web-search')
+  const discard = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+
+  // 绑定 Sheet：未改动直接关闭；有草稿时询问，继续编辑保留，放弃后下次从确认值打开。
+  const methodSheet = page.getByRole('dialog', { name: 'Edit search method' })
+  const editMethod = page.getByRole('button', { name: 'Edit search method', exact: true })
+  await editMethod.click()
+  await methodSheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(methodSheet).toHaveCount(0)
+  await editMethod.click()
+  await methodSheet.locator('#search-local-model').click()
+  await page.getByRole('option', { name: 'Second model' }).click()
+  await page.keyboard.press('Escape')
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(methodSheet.locator('#search-local-model')).toHaveText('Second model')
+  await methodSheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await discard.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(methodSheet).toHaveCount(0)
+  await editMethod.click()
+  await expect(methodSheet.locator('#search-local-model')).toHaveText('Search model')
+  await methodSheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  // 来源编辑 Sheet：同样的离开保护。
+  const sources = page.locator('#web-search-sources')
+  const editor = page.getByRole('dialog', { name: 'Edit search service' })
+  const name = editor.locator('#web-provider-name')
+  const save = editor.getByRole('button', { name: 'Save service', exact: true })
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(editor).toHaveCount(0)
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  await name.fill('Renamed source')
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(name).toHaveValue('Renamed source')
+  await page.keyboard.press('Escape')
+  await discard.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(editor).toHaveCount(0)
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  await expect(name).toHaveValue('Search source')
+  await name.fill('Renamed source')
+
+  // 保存中锁定编辑与关闭；失败保留输入与错误，可重试。
+  await save.click()
+  await expect.poll(() => providerSaves.length).toBe(1)
+  await expect(name).toBeDisabled()
+  await expect(editor.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(editor).toBeVisible()
+  expect(providerSaves).toEqual([{ name: 'Renamed source', use_proxy: false }])
+  releaseProviderSave?.()
+  await expect(editor.getByRole('alert')).toContainText('Fixture provider save unavailable')
+  await expect(name).toHaveValue('Renamed source')
+  providerSaveStatus = 200
+  await save.click()
+  await expect.poll(() => providerSaves.length).toBe(2)
+  releaseProviderSave?.()
+  await expect(editor).toHaveCount(0)
+})
+
+test('search and page sources keep independent priorities with disabled boundary arrows', async ({ page }) => {
+  const alpha: WebProvider = { ...searchSource, id: 'source-alpha', name: 'Alpha' }
+  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: 'zhipu' }
+  let rejectSave = true
+  let saved: WebAccessSettings = { search_provider_ids: [alpha.id, beta.id], fetch_provider_ids: [beta.id, alpha.id] }
+  const writes: WebAccessSettings[] = []
+  await page.route('**/api/v1/web-search/config', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          revision: 1,
+          enabled: false,
+          backend: { kind: 'local', model_id: 'model-search' },
+          max_turns: 6,
+          total_time_seconds: 180,
+          updated_at: '2026-09-01T00:00:00Z',
+          limits: searchLimits,
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [alpha, beta] } }))
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (route.request().method() === 'PUT') {
+      writes.push(route.request().postDataJSON())
+      if (rejectSave) {
+        await route.fulfill({ status: 503, json: { error: 'Fixture ordering unavailable' } })
+        return
+      }
+      saved = route.request().postDataJSON()
+    }
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/web-search')
+  const sources = page.locator('#web-search-sources')
+  const up = (name: string, capability: string) =>
+    sources.getByRole('button', { name: `Move ${name} up in ${capability}`, exact: true })
+  const down = (name: string, capability: string) =>
+    sources.getByRole('button', { name: `Move ${name} down in ${capability}`, exact: true })
+
+  await expect(up('Alpha', 'Search sources')).toBeDisabled()
+  await expect(down('Beta', 'Search sources')).toBeDisabled()
+  await expect(up('Beta', 'Page sources')).toBeDisabled()
+  await expect(down('Alpha', 'Page sources')).toBeDisabled()
+
+  // 失败：回到确认顺序，且不改变预算行草稿。
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const turns = page.locator('#search-max-turns')
+  await turns.fill('9')
+  await down('Alpha', 'Search sources').click()
+  await expect(sources.getByRole('alert')).toContainText('Fixture ordering unavailable')
+  await expect(up('Alpha', 'Search sources')).toBeDisabled()
+  await expect(turns).toHaveValue('9')
+
+  rejectSave = false
+  await down('Alpha', 'Search sources').click()
+  await expect(up('Beta', 'Search sources')).toBeDisabled()
+  await expect(down('Alpha', 'Search sources')).toBeDisabled()
+  expect(saved).toEqual({ search_provider_ids: [beta.id, alpha.id], fetch_provider_ids: [beta.id, alpha.id] })
+  // 网页读取顺序不受搜索顺序影响，反之亦然。
+  await expect(up('Beta', 'Page sources')).toBeDisabled()
+  await down('Beta', 'Page sources').click()
+  await expect(up('Alpha', 'Page sources')).toBeDisabled()
+  expect(saved).toEqual({ search_provider_ids: [beta.id, alpha.id], fetch_provider_ids: [alpha.id, beta.id] })
+  expect(writes.at(-1)).toEqual(saved)
+  await expect(turns).toHaveValue('9')
+  await expect(page.getByRole('switch')).toHaveCount(1)
+})
+
+test('web search keeps one settings column with aligned actions and operable sources at every width', async ({
+  page,
+}) => {
+  const alpha: WebProvider = { ...searchSource, id: 'source-alpha', name: 'Alpha', last_test_success: true }
+  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: 'zhipu' }
+  await page.route('**/api/v1/web-search/config', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          revision: 1,
+          enabled: false,
+          backend: { kind: 'local', model_id: 'model-search' },
+          max_turns: 6,
+          total_time_seconds: 180,
+          updated_at: '2026-09-01T00:00:00Z',
+          limits: searchLimits,
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [alpha, beta] } }))
+  let savedSources: WebAccessSettings = { search_provider_ids: [alpha.id], fetch_provider_ids: [alpha.id] }
+  await page.route('**/api/v1/web-access/settings', (route) => {
+    if (route.request().method() === 'PUT') savedSources = route.request().postDataJSON()
+    return route.fulfill({ json: { data: savedSources } })
+  })
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/web-search')
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const remSize = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+  const column = (await page.locator('.content-column').boundingBox())!
+  expect(column.width).toBeLessThanOrEqual(60 * remSize + 1)
+  const header = (await page.getByRole('heading', { level: 1, name: 'Web search' }).boundingBox())!
+  expect(Math.abs(column.x - header.x)).toBeLessThanOrEqual(1)
+  const edit = (await page.getByRole('button', { name: 'Edit search method', exact: true }).boundingBox())!
+  const steps = (await page.locator('#search-max-turns').boundingBox())!
+  const suffix = (await page.locator('[data-slot=setting-row]').getByText('seconds', { exact: true }).boundingBox())!
+  const editRight = edit.x + edit.width
+  expect(Math.abs(steps.x + steps.width - editRight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(suffix.x + suffix.width - editRight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(steps.width - 7 * remSize)).toBeLessThanOrEqual(1)
+  const seconds = (await page.locator('#search-total-seconds').boundingBox())!
+  expect(Math.abs(seconds.width - 7 * remSize)).toBeLessThanOrEqual(1)
+  await expect(page.getByRole('switch')).toHaveCount(1)
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    const sources = page.locator('#web-search-sources')
+    for (const control of [
+      sources.getByRole('button', { name: 'Test' }).first(),
+      sources.getByRole('button', { name: 'Edit', exact: true }).first(),
+      sources.getByRole('button', { name: 'Delete' }).first(),
+      page.locator('#web-access-search-source-beta'),
+      page.locator('#web-access-fetch-source-beta'),
+    ]) {
+      await control.scrollIntoViewIfNeeded()
+      const box = (await control.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(width)
+    }
+    await expect(sources.getByRole('button', { name: 'Move Alpha down in Search sources', exact: true })).toBeDisabled()
+    // 说明在任何宽度都只在问号里，不常驻成小字。
+    await page.mouse.move(0, 0)
+    await expect(page.getByText('Allowed range', { exact: false })).toHaveCount(0)
+    const hint = page.locator('[data-slot=field-hint]').first()
+    await hint.scrollIntoViewIfNeeded()
+    await hint.hover()
+    await expect(page.locator('[data-slot=tooltip-content]').first()).toContainText('Allowed range: 1–20.')
+  }
+  await page.locator('#web-access-search-source-beta').click()
+  await expect(page.locator('#web-access-search-source-beta')).toBeChecked()
+})
 
 test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {
   const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
