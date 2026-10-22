@@ -337,11 +337,7 @@ function selectMatch(match: CredentialMatch): void {
 {/snippet}
 
 <div class={['route-page', { 'rules-workspace': tab === 'rules' }]}>
-  <PageHeader
-    eyebrow={m.app_shell_nav_advanced_features()}
-    title={m.reversible_redaction_title()}
-    description={m.credential_protection_workspace_summary()}
-    actions={pageActions} />
+  <PageHeader title={m.reversible_redaction_title()} actions={pageActions} />
 
   <section class="route-section" aria-labelledby="redaction-setting-title">
     <div class="route-section-header">

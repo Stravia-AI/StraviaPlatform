@@ -2,26 +2,26 @@
 import type { Snippet } from 'svelte'
 
 interface Props {
-  eyebrow: string
   title: string
+  /** Only for essential risk or data-flow notes the title cannot carry; omitted by default. */
   description?: string
   actions?: Snippet
+  /** Resource or live status shown on the title row, after the title. */
   meta?: Snippet
 }
 
-let { eyebrow, title, description, actions, meta }: Props = $props()
+let { title, description, actions, meta }: Props = $props()
 </script>
 
 <header class="route-page-header">
   <div class="min-w-0">
-    <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-      <p class="font-structural text-[0.72rem] font-semibold tracking-[0.14em] text-primary uppercase">{eyebrow}</p>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h1
+        class="min-w-0 font-structural text-[1.625rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] sm:text-[1.875rem]">
+        {title}
+      </h1>
       {#if meta}{@render meta()}{/if}
     </div>
-    <h1
-      class="font-structural text-[1.625rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance sm:text-[1.875rem]">
-      {title}
-    </h1>
     {#if description}
       <p class="mt-2 max-w-3xl text-sm leading-[1.5] text-pretty text-muted-foreground">{description}</p>
     {/if}

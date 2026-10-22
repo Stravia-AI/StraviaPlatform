@@ -238,10 +238,7 @@ async function save(): Promise<void> {
 <svelte:head><title>{m.web_search_title()} · Stravia</title></svelte:head>
 
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.app_shell_nav_advanced_features()}
-    title={m.web_search_title()}
-    description={m.web_search_feature_summary()} />
+  <PageHeader title={m.web_search_title()} />
 
   {#if configQuery.isError}
     <RequestFailure

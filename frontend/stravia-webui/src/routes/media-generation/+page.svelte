@@ -126,10 +126,7 @@ async function saveRoute(): Promise<void> {
 <svelte:head><title>{m.media_generation_title()} · Stravia</title></svelte:head>
 
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.app_shell_nav_advanced_features()}
-    title={m.media_generation_title()}
-    description={m.media_generation_feature_summary()} />
+  <PageHeader title={m.media_generation_title()} />
 
   {#if configQuery.isError}
     <RequestFailure

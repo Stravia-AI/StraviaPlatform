@@ -431,11 +431,7 @@ async function copyProvider(): Promise<void> {
 {/snippet}
 
 <div class="route-page providers-page">
-  <PageHeader
-    eyebrow={m.common_setup()}
-    title={m.common_model_services()}
-    description={m.providers_connect_ai_services_handle_requests_models()}
-    actions={providers.length > 0 ? providerPageActions : undefined} />
+  <PageHeader title={m.common_model_services()} actions={providers.length > 0 ? providerPageActions : undefined} />
 
   <section class="route-section providers-workspace" aria-labelledby="provider-table-title">
     <h2 id="provider-table-title" class="sr-only">{m.providers_connected_services()}</h2>

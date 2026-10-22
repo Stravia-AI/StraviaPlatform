@@ -417,12 +417,7 @@ function retryAll(): void {
 {/snippet}
 
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.common_monitor()}
-    title={m.stats_usage_statistics()}
-    description={m.stats_page_summary()}
-    meta={liveMeta}
-    actions={rangeAction} />
+  <PageHeader title={m.stats_usage_statistics()} meta={liveMeta} actions={rangeAction} />
   {#if analyticsPending}
     <MetricStrip loading loadingLabel={m.stats_loading_analytics_metrics()} placeholderCount={6} />
     <div class="grid gap-6 min-[1280px]:grid-cols-12">

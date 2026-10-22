@@ -28,7 +28,7 @@ const model = $derived(routeQuery.data)
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if providersQuery.isError || routeQuery.isError}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.common_model()} />
+    <PageHeader title={m.common_model()} />
     <RequestFailure
       title={m.models_models_not_loaded()}
       message={localizeBackendErrorMessage(providersQuery.error ?? routeQuery.error)}
@@ -38,7 +38,7 @@ const model = $derived(routeQuery.data)
   </div>
 {:else if !model}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.models_model_not_found()} />
+    <PageHeader title={m.models_model_not_found()} />
     <Button href="/models" variant="outline">{m.models_back_models()}</Button>
   </div>
 {:else}

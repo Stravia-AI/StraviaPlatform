@@ -803,9 +803,7 @@ async function saveModel(): Promise<void> {
 
 <div class="route-page min-h-[calc(100svh-5rem)]">
   <PageHeader
-    eyebrow={m.common_setup()}
-    title={initialModel ? m.model_editor_edit_model() : m.common_add_model()}
-    description={m.model_editor_choose_model_name_apps_use_where_stravia_send()} />
+    title={initialModel ? initialModel.display_name?.trim() || initialModel.model_id : m.common_add_model()} />
 
   <form
     class="flex flex-1 flex-col gap-6"

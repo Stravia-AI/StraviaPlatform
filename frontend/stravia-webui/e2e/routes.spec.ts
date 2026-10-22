@@ -670,7 +670,8 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
   const modelLink = page.getByRole('main').getByRole('link', { name: 'Team GPT', exact: true })
   await expect(modelLink).toHaveAttribute('href', '/models/gpt-5.4')
   await modelLink.click()
-  await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Team GPT')
+  await expect(page.getByRole('heading', { name: 'Edit model' })).toHaveCount(0)
   const editModelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
   const editDisplayName = page.getByLabel('Display name', { exact: true })
   await expect(editModelId).toHaveValue('gpt-5.4')
@@ -1317,11 +1318,14 @@ test('Destination status reflects runtime state without overwriting the editor d
 
   await page.goto('/models/status-route')
 
+  const resourceTitle = page.getByRole('heading', { level: 1 })
+  await expect(resourceTitle).toHaveText('status-route')
   const card = page.locator('[data-slot="target-card"][data-key="target-1"]')
   await expect(card).toContainText('Cooling down')
   await expect(card.getByRole('status')).toContainText('left')
 
   await page.locator('#route-display-name').fill('My unsaved label')
+  await expect(resourceTitle).toHaveText('status-route')
   statusMode = 'paused'
   await expect(card.getByRole('status')).toHaveText('Allowance paused')
   statusMode = 'invalid'

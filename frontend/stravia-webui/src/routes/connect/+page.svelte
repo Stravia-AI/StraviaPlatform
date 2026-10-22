@@ -233,10 +233,7 @@ function cliModelName(modelId: string): string | undefined {
 {/snippet}
 
 <div class="route-page connect-page">
-  <PageHeader
-    eyebrow={m.common_setup()}
-    title={m.connect_connect_apps()}
-    description={m.connect_choose_client_or_code_copy_result()} />
+  <PageHeader title={m.connect_connect_apps()} />
 
   {#if resourcesPending}
     <div class="grid w-full max-w-72 grid-cols-2 gap-1" aria-label={m.connect_loading_output_modes()}>
