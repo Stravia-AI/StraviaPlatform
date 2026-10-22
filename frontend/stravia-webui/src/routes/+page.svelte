@@ -285,7 +285,7 @@ async function submitEdit(id: string) {
       ></Empty.Root>
   {:else}
     {#if conversation?.messages.length}
-      <div class="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-6">
+      <div class="flex w-full flex-col gap-6 pb-6">
         {#each conversation.messages as message (message.id)}
           {#if message.role === 'user'}
             {@const editing = editingId === message.id}
@@ -464,7 +464,7 @@ async function submitEdit(id: string) {
         ></Empty.Root>
     {/if}
     {#if snapshot.readOnlyReason}
-      <Alert.Root role="status" class="mx-auto mt-auto max-w-4xl"
+      <Alert.Root role="status" class="mt-auto"
         ><Alert.Title>{m.console_chat_read_only()}</Alert.Title><Alert.Description
           ><p>{readOnlyText}</p>
           <Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_other_key()}</Button
@@ -516,21 +516,22 @@ async function submitEdit(id: string) {
 <style>
 .chat-surface {
   display: flex;
+  width: 100%;
+  max-width: var(--reading-max-width);
   min-width: 0;
   min-height: var(--chat-workspace-height, calc(100svh - 5rem));
   flex-direction: column;
   gap: 1.5rem;
+  margin-inline: auto;
 }
 .composer-dock {
   position: sticky;
   bottom: -1rem;
   display: flex;
   width: 100%;
-  max-width: 56rem;
   min-width: 0;
   flex-direction: column;
   gap: 0.5rem;
-  align-self: center;
   margin-top: auto;
   padding-block: 0.75rem max(1rem, env(safe-area-inset-bottom));
   background: var(--background);
