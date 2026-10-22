@@ -5,6 +5,9 @@ import { createQuery } from '@tanstack/svelte-query'
 import { tick } from 'svelte'
 
 import { isTauri } from '#lib/admin-client.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
+import { DraftGuard } from '#lib/draft-guard.svelte.js'
+import { provideInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
 import { getAuthState } from '#lib/auth.js'
 import AdminCredentialsSettings from '#lib/components/settings/admin-credentials-settings.svelte'
 import AppearanceSettings from '#lib/components/settings/appearance-settings.svelte'
@@ -20,6 +23,10 @@ import ProductUpdateSettings from '#lib/components/product-update-settings.svelt
 import RpmManagement from '#lib/components/rpm-management.svelte'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { availableSettingsGroups, resolveSettingsGroup } from '#lib/settings-groups.js'
+
+// 行内输入的未保存草稿：切换分组或离开设置页前确认，没有草稿时不打扰。
+const inlineDrafts = provideInlineDraftRegistry()
+const guard = new DraftGuard({ dirty: () => inlineDrafts.dirty, busy: () => false })
 
 const authStateQuery = createQuery(() => ({ queryKey: ['auth-state'], queryFn: getAuthState }))
 
@@ -84,6 +91,8 @@ $effect(() => {
     </div>
   </div>
 </div>
+
+<DraftDiscardDialog {guard} />
 
 <style>
 .settings-layout {
