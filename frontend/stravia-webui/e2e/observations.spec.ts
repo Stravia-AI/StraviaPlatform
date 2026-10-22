@@ -4215,7 +4215,8 @@ test.describe('Interaction Observation canvas', () => {
 
     await page.goto('/settings?view=advanced')
     const diagnostics = page.getByRole('region', { name: 'Diagnostics' })
-    await expect(diagnostics).toContainText('Currently saved: 1.1 GiB.')
+    await expect(diagnostics.getByRole('switch', { name: 'Debug' })).toBeVisible()
+    await expect(diagnostics).toContainText('1.1 GiB')
     await page.goto('/logs')
     await page.getByRole('button', { name: 'Clear history', exact: true }).click()
     await page
@@ -4224,7 +4225,8 @@ test.describe('Interaction Observation canvas', () => {
       .click()
     await expect(page.getByRole('alertdialog', { name: 'Clear history' })).toBeHidden()
     await page.goto('/settings?view=advanced')
-    await expect(diagnostics).toContainText('Currently saved: 0 B.')
+    await expect(diagnostics.getByRole('switch', { name: 'Debug' })).toBeVisible()
+    await expect(diagnostics).not.toContainText('GiB')
   })
 
   test('clears retained Debug data while Debug stays enabled', async ({ page }) => {
