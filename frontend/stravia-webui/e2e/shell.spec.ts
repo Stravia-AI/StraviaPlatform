@@ -273,7 +273,7 @@ test('content container caps at 120rem, centers, and keeps one left edge across 
 
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/providers')
-  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  await expect(container.getByRole('heading', { level: 1 })).toBeVisible()
   await expect.poll(containerBox).toEqual({ x: 282, width: 1124 })
 
   await page.setViewportSize({ width: 2560, height: 1440 })
@@ -287,7 +287,8 @@ test('content container caps at 120rem, centers, and keeps one left edge across 
   const titleLeft: Record<string, number> = {}
   for (const path of ['/providers', '/providers/missing-provider', '/models', '/models/new']) {
     await page.goto(path)
-    const title = page.getByRole('main').getByRole('heading', { level: 1 })
+    // 刷新后先出现启动页（自带 main 与 h1），页头必须限定在应用壳层容器内，否则会量到随后被卸载的启动标题。
+    const title = container.getByRole('heading', { level: 1 })
     await expect(title).toBeVisible()
     titleLeft[path] = Math.round((await title.boundingBox())!.x)
   }
