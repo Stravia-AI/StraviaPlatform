@@ -320,7 +320,7 @@ test('real management persists root and destination RPM limits and queue setting
   await page.setViewportSize({ width: 1280, height: 800 })
 
   const readRpm = async () => JSON.parse(await api<string>(page, '/settings/rpm_admission')) as RpmConfig
-  await goto('/settings')
+  await goto('/settings?view=advanced')
   const queue = page.locator('section[aria-labelledby="rpm-wait-title"]')
   await queue.locator('#rpm-preferred-wait').fill('1500')
   await queue.locator('#rpm-total-wait').fill('9000')
@@ -364,7 +364,7 @@ test('real management persists root and destination RPM limits and queue setting
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
   await page.reload()
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
-  await goto('/settings')
+  await goto('/settings?view=advanced')
   await queue.locator('#rpm-total-wait').fill('10000')
   await saveQueueSettings()
   expect(await readDestination()).toEqual({ provider_id: provider.id, model: 'rpm-upstream', rpm_limit: 30 })
@@ -472,7 +472,7 @@ test('real management persists root and destination RPM limits and queue setting
   await rpmDialog.getByRole('button', { name: '保存限额', exact: true }).click()
   await expect(rpmDialog).toBeHidden()
   expect(await readDestination()).toBeUndefined()
-  await goto('/settings')
+  await goto('/settings?view=advanced')
   await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('16')
   await queue.locator('#rpm-queue-capacity').fill('24')
   await saveQueueSettings()
