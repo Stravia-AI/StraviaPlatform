@@ -462,3 +462,279 @@ test.describe('statistics local time across DST', () => {
     })
   }
 })
+
+test.describe('statistics range dialog validation', () => {
+  test.use({ timezoneId: 'UTC' })
+
+  test('states the quarter-hour rule once and reports each problem next to its field', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    const requests = await fixture(page)
+    await page.goto('/stats')
+    await expectWindow(requests, { start: LIVE_END - 24 * HOUR, end: LIVE_END })
+    await page.getByRole('button', { name: 'Date and time range', exact: true }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText(/quarter-hour/)).toHaveCount(1)
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+
+    const start = dialog.getByLabel('Start', { exact: true })
+    const end = dialog.getByLabel('End', { exact: true })
+    const apply = dialog.getByRole('button', { name: 'Apply range', exact: true })
+    const before = requests.length
+
+    await start.fill('2026-10-01T00:01')
+    const startError = dialog.locator('[data-slot="field"]:has(#stats-start)').getByRole('alert')
+    const endError = dialog.locator('[data-slot="field"]:has(#stats-end)').getByRole('alert')
+    await expect(startError).toBeVisible()
+    await expect(endError).toHaveCount(0)
+    await expect(start).toHaveAttribute('aria-invalid', 'true')
+    await expect(apply).toBeDisabled()
+
+    await start.fill('2026-10-04T00:15')
+    await end.fill('2026-10-04T00:15')
+    await expect(endError).toContainText('later than the start')
+    await expect(startError).toHaveCount(0)
+
+    await start.fill('2026-10-10T00:00')
+    await end.fill('2026-10-12T00:00')
+    await expect(endError).toContainText('current 15-minute interval')
+    await expect(apply).toBeDisabled()
+    expect(requests).toHaveLength(before)
+
+    await start.fill('2026-10-01T00:00')
+    await end.fill('2026-10-04T00:15')
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+    await expect(dialog.getByText(/quarter-hour/)).toHaveCount(1)
+    await expect(apply).toBeEnabled()
+  })
+})
+
+const resourceTotal = 12
+const providerRows = Array.from({ length: resourceTotal }, (_, index) => ({
+  provider_id: `provider-${index + 1}`,
+  provider: `Service ${String(index + 1).padStart(2, '0')}`,
+  deleted: false,
+  // Backend order is by volume, so the smallest rows sit outside the default top eight.
+  request_count: (resourceTotal - index) * 100,
+  error_count: index === 0 ? 3 : 0,
+  avg_duration_ms: 100,
+  avg_output_tps: 10 + index,
+}))
+const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
+  api_key_id: `key-${index + 1}`,
+  api_key_name: `Client ${String(index + 1).padStart(2, '0')}`,
+  deleted: false,
+  request_count: (resourceTotal - index) * 100,
+  total_input_tokens: 1_000 + index,
+  total_output_tokens: 200 + index,
+  cache_read_tokens: 50,
+  cache_write_tokens: 5,
+  reasoning_tokens: null,
+  last_used_at: NOW - index * HOUR,
+}))
+
+async function resourceFixture(page: Page) {
+  return fixture(page, async (route, url) => {
+    const endpoint = url.pathname.split('/').at(-1)
+    if (endpoint === 'providers') await route.fulfill({ json: { data: providerRows } })
+    else if (endpoint === 'api-keys') await route.fulfill({ json: { data: keyRows } })
+    else return false
+    return true
+  })
+}
+
+test.describe('statistics resource breakdowns', () => {
+  test.use({ timezoneId: 'UTC' })
+
+  for (const [name, regionName, label, firstOutside] of [
+    ['providers', 'Providers', 'Service', 'Service 09'],
+    ['API Keys', 'API Key usage', 'Client', 'Client 09'],
+  ] as const) {
+    test(`more than eight ${name} are labelled as the top eight and can be viewed in full`, async ({ page }) => {
+      await page.clock.setFixedTime(NOW)
+      await page.setViewportSize({ width: 1600, height: 1000 })
+      await resourceFixture(page)
+      await page.goto('/stats')
+      const region = page.getByRole('region', { name: regionName, exact: true })
+      const rows = region.getByRole('table').getByRole('row')
+      await expect(rows).toHaveCount(1 + 8)
+      await expect(region.getByText('Top 8 of 12', { exact: true })).toBeVisible()
+      await expect(region.getByRole('cell', { name: `${label} 08`, exact: true })).toBeVisible()
+      await expect(region.getByRole('cell', { name: firstOutside, exact: true })).toHaveCount(0)
+
+      await region.getByRole('button', { name: 'View all 12', exact: true }).click()
+      await expect(rows).toHaveCount(1 + 12)
+      await expect(region.getByRole('cell', { name: `${label} 12`, exact: true })).toBeVisible()
+      await expect(region.getByText('Top 8 of 12')).toHaveCount(0)
+
+      await region.getByRole('button', { name: 'Show top 8', exact: true }).click()
+      await expect(rows).toHaveCount(1 + 8)
+      await expect(region.getByRole('button', { name: 'View all 12', exact: true })).toBeVisible()
+    })
+
+    test(`sorting ${name} covers the whole collection before the top eight are taken`, async ({ page }) => {
+      await page.clock.setFixedTime(NOW)
+      await page.setViewportSize({ width: 1600, height: 1000 })
+      await resourceFixture(page)
+      await page.goto('/stats')
+      const region = page.getByRole('region', { name: regionName, exact: true })
+      const table = region.getByRole('table')
+      await expect(table.getByRole('row').nth(1)).toContainText(`${label} 01`)
+
+      const header = table.getByRole('columnheader', { name: /Requests/ })
+      await header.getByRole('button').click()
+      if ((await header.getAttribute('aria-sort')) !== 'ascending') await header.getByRole('button').click()
+      await expect(header).toHaveAttribute('aria-sort', 'ascending')
+      // The smallest row was ninth or later in backend order; it leads once the full set is sorted.
+      await expect(table.getByRole('row').nth(1)).toContainText(`${label} 12`)
+      await expect(table.getByRole('row')).toHaveCount(1 + 8)
+      await expect(region.getByRole('cell', { name: `${label} 01`, exact: true })).toHaveCount(0)
+
+      await region.getByRole('button', { name: 'View all 12', exact: true }).click()
+      await expect(table.getByRole('row')).toHaveCount(1 + 12)
+      await expect(table.getByRole('row').nth(1)).toContainText(`${label} 12`)
+      await expect(table.getByRole('row').nth(12)).toContainText(`${label} 01`)
+    })
+
+    test(`${name} stay complete and reachable in the narrow list`, async ({ page }) => {
+      await page.clock.setFixedTime(NOW)
+      await page.setViewportSize({ width: 320, height: 800 })
+      await resourceFixture(page)
+      await page.goto('/stats')
+      const region = page.getByRole('region', { name: regionName, exact: true })
+      const list = region.locator('.route-mobile-row')
+      await expect(list).toHaveCount(8)
+      await expect(region.getByText('Top 8 of 12', { exact: true })).toBeVisible()
+      const viewAll = region.getByRole('button', { name: 'View all 12', exact: true })
+      await viewAll.scrollIntoViewIfNeeded()
+      const box = (await viewAll.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(320)
+      await viewAll.click()
+      await expect(list).toHaveCount(12)
+      await expect(list.last()).toContainText(`${label} 12`)
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1),
+      ).toBe(true)
+    })
+  }
+
+  test('zero error counts are neutral and only real errors are destructive', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await resourceFixture(page)
+    await page.goto('/stats')
+    const providers = page.getByRole('region', { name: 'Providers', exact: true })
+    const colorOf = (locator: ReturnType<Page['locator']>) => locator.evaluate((el) => getComputedStyle(el).color)
+    const failing = providers.getByRole('row').filter({ hasText: 'Service 01' })
+    const healthy = providers.getByRole('row').filter({ hasText: 'Service 02' })
+    const errorsColumn = 2
+    const failingColor = await colorOf(failing.getByRole('cell').nth(errorsColumn))
+    const healthyColor = await colorOf(healthy.getByRole('cell').nth(errorsColumn))
+    await expect(failing.getByRole('cell').nth(errorsColumn)).toHaveText('3')
+    await expect(healthy.getByRole('cell').nth(errorsColumn)).toHaveText('0')
+    expect(healthyColor).toBe(await colorOf(healthy.getByRole('cell').nth(1)))
+    expect(failingColor).not.toBe(healthyColor)
+
+    await page.setViewportSize({ width: 390, height: 900 })
+    const failingList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 01' })
+    const healthyList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 02' })
+    const failingError = failingList.getByText('3 errors', { exact: true })
+    const healthyError = healthyList.getByText('0 errors', { exact: true })
+    expect(await colorOf(failingError)).toBe(failingColor)
+    expect(await colorOf(healthyError)).not.toBe(failingColor)
+  })
+})
+
+test.describe('statistics report without traffic', () => {
+  test.use({ timezoneId: 'UTC' })
+
+  const emptyOverview = {
+    total_requests: 0,
+    error_count: 0,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    total_cache_read_tokens: 0,
+    total_cache_write_tokens: 0,
+    total_reasoning_tokens: null,
+    avg_duration_ms: null,
+    avg_first_token_ms: null,
+    avg_output_tps: null,
+  }
+  const emptyReport = async (route: Route, url: URL) => {
+    const endpoint = url.pathname.split('/').at(-1)
+    await route.fulfill({ json: { data: endpoint === 'overview' ? emptyOverview : [] } })
+    return true
+  }
+
+  test('says there is no traffic once while the activity grid stays a zero grid', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await fixture(page, emptyReport)
+    await page.goto('/stats')
+    await expect(page.getByText('No usage recorded in this time range.', { exact: true })).toHaveCount(1)
+
+    const activity = page.getByRole('group', { name: 'Token activity' })
+    const cells = activity.locator('.token-activity-cell')
+    await expect(cells.first()).toBeVisible()
+    expect(await cells.count()).toBeGreaterThan(8)
+    expect(await cells.evaluateAll((els) => els.every((el) => el.getAttribute('data-level') === '0'))).toBe(true)
+    expect(
+      await cells.evaluateAll((els) => els.every((el) => /· 0 tokens$/.test(el.getAttribute('aria-label') ?? ''))),
+    ).toBe(true)
+
+    // Every other section keeps only a short state line: no repeated bordered empty cards.
+    for (const [region, text] of [
+      ['Latency and speed', 'No latency or speed data.'],
+      ['Errors', 'No error data.'],
+      ['Token breakdown', 'No token data.'],
+      ['Models', 'No model traffic.'],
+      ['Providers', 'No provider traffic.'],
+      ['API Key usage', 'No API Key traffic.'],
+    ] as const) {
+      const section = page.getByRole('region', { name: region, exact: true })
+      await expect(section.getByText(text, { exact: true })).toBeVisible()
+      await expect(section.locator('[data-slot="empty"]')).toHaveCount(0)
+      // Latency shares its grid rows with the always-present zero activity grid.
+      if (region !== 'Latency and speed') expect((await section.boundingBox())!.height).toBeLessThan(200)
+    }
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed section is reported as failed, not merged into the no-traffic state', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await fixture(page, async (route, url) => {
+      if (url.pathname.endsWith('/models')) {
+        await route.fulfill({ status: 500, json: { error: 'Model statistics unavailable' } })
+        return true
+      }
+      return emptyReport(route, url)
+    })
+    await page.goto('/stats')
+    const models = page.getByRole('region', { name: 'Models', exact: true })
+    await expect(models.getByRole('alert')).toContainText('Model statistics unavailable')
+    await expect(models.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
+    await expect(models.getByText('No model traffic.')).toHaveCount(0)
+    await expect(page.getByText('Some usage data could not be refreshed')).toBeVisible()
+    // The successful empty summary and the other sections remain honest about what they know.
+    await expect(page.getByText('No usage recorded in this time range.', { exact: true })).toHaveCount(1)
+    await expect(
+      page.getByRole('region', { name: 'Providers', exact: true }).getByText('No provider traffic.'),
+    ).toBeVisible()
+  })
+
+  test('a failed summary is not presented as an empty report', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await fixture(page, async (route, url) => {
+      if (url.pathname.endsWith('/overview')) {
+        await route.fulfill({ status: 500, json: { error: 'Summary unavailable' } })
+        return true
+      }
+      return emptyReport(route, url)
+    })
+    await page.goto('/stats')
+    await expect(page.getByText('Usage summary unavailable')).toBeVisible()
+    await expect(page.getByText('No usage recorded in this time range.')).toHaveCount(0)
+  })
+})
