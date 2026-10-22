@@ -188,3 +188,112 @@ test('Claude requires all four mappings while other clients do not ask for a def
   }
   await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
 })
+
+test('Wide workspace uses side labels and 16rem selects sharing one right edge, including Claude mappings', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await setup(page, [key('Personal')])
+  await page.goto('/connect')
+  await page.locator('#cli-tool').click()
+  await page.getByRole('option', { name: 'Claude Code', exact: true }).click()
+  const ids = ['cli-tool', 'cli-key', 'cli-default-model', 'cli-haiku-model', 'cli-sonnet-model', 'cli-opus-model']
+  await expect(page.locator('#cli-opus-model')).toBeVisible()
+  const workspace = (await page.locator('.connect-page').boundingBox())!
+  expect(Math.abs(workspace.width - 1920)).toBeLessThanOrEqual(1)
+  const boxes = []
+  for (const id of ids) boxes.push((await page.locator(`#${id}`).boundingBox())!)
+  const right = boxes[0].x + boxes[0].width
+  for (const box of boxes) {
+    expect(box.width).toBeLessThanOrEqual(256 + 0.5)
+    expect(Math.abs(box.x + box.width - right)).toBeLessThanOrEqual(0.5)
+  }
+  // 标签在控件左侧、同一行。
+  const label = (await page.locator('label[for="cli-key"]').boundingBox())!
+  expect(label.x + label.width).toBeLessThan(boxes[1].x)
+  expect(label.y).toBeLessThan(boxes[1].y + boxes[1].height)
+  expect(label.y + label.height).toBeGreaterThan(boxes[1].y)
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('Narrow control column stacks label above a bounded select and splits only at workspace width', async ({
+  page,
+}) => {
+  await setup(page, [key('Personal')])
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/connect')
+  const select = page.locator('#cli-key')
+  await expect(select).toBeVisible()
+  const label = (await page.locator('label[for="cli-key"]').boundingBox())!
+  const stacked = (await select.boundingBox())!
+  expect(label.y + label.height).toBeLessThanOrEqual(stacked.y)
+  expect(stacked.width).toBeGreaterThan(256)
+  expect(stacked.width).toBeLessThanOrEqual(448 + 0.5)
+  // 两栏：控制列在左、预览在右。
+  const preview = (await page.locator('pre.route-code-plane').boundingBox())!
+  expect(preview.x).toBeGreaterThan(stacked.x + stacked.width)
+  // 工作区不足 68rem：单栏，预览在控件之下，页面不横向溢出。
+  await page.setViewportSize({ width: 1100, height: 900 })
+  await expect
+    .poll(async () => (await page.locator('pre.route-code-plane').boundingBox())!.x)
+    .toBeLessThan((await select.boundingBox())!.x + 1)
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
+test('Optional explanations live in help tooltips and no descriptive copy repeats the header or client', async ({
+  page,
+}) => {
+  await setup(page, [key('Personal')])
+  await page.goto('/connect')
+  await expect(page.locator('pre.route-code-plane')).toBeVisible()
+  for (const text of [
+    'OpenAI coding CLI tool',
+    'All models available to this API Key will be included in the client configuration.',
+  ]) {
+    await expect(page.getByText(text)).toHaveCount(0)
+  }
+  await page.getByRole('button', { name: 'More about this field' }).first().focus()
+  await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('OpenAI coding CLI tool')
+  // 已选可用密钥：不出现阻碍原因，创建仍是可达的次要入口。
+  await expect(page.getByText('No eligible API Key')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Create an API Key', exact: true })).toBeVisible()
+})
+
+test('Choosing client and key is local view state and never sends a save request', async ({ page }) => {
+  const writes: string[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() !== 'GET' &&
+      url.pathname.startsWith('/api/') &&
+      !url.pathname.endsWith('/connect-clients/preview') &&
+      !url.pathname.endsWith('/updates/check')
+    )
+      writes.push(`${request.method()} ${url.pathname}`)
+  })
+  await setup(page, [key('Personal'), key('Separate')])
+  await page.goto('/connect')
+  await page.locator('#cli-key').click()
+  await page.getByRole('option', { name: /Separate/ }).click()
+  await page.locator('#cli-tool').click()
+  await page.getByRole('option', { name: 'OpenCode', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /^(Save|Cancel)/ })).toHaveCount(0)
+  expect(writes).toEqual([])
+})
+
+test('On a phone the preview starts earlier than the old layout and keeps its minimum height', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await setup(page, [key('Personal')])
+  await page.goto('/connect')
+  const preview = page.locator('pre.route-code-plane')
+  await expect(preview).toBeVisible()
+  const box = await preview.evaluate((el) => {
+    const rect = el.getBoundingClientRect()
+    return { top: rect.top + window.scrollY, height: rect.height }
+  })
+  // 旧布局预览起于 y≈705（含眉题、描述与工具说明）。
+  expect(box.top).toBeLessThan(705)
+  expect(box.height).toBeGreaterThanOrEqual(384)
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
