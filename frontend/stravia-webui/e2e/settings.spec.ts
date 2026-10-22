@@ -213,9 +213,13 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(wideThemeLabelBox.x + wideThemeLabelBox.width).toBeLessThan(wideThemeControlBox.x)
   expect(Math.abs(wideProxyUrlBox.x - wideProxyBypassBox.x)).toBeLessThan(1)
   expect(Math.abs(wideProxyUrlBox.width - wideProxyBypassBox.width)).toBeLessThan(1)
-  expect(
-    Math.abs(wideProxyUrlBox.x + wideProxyUrlBox.width - (wideRetentionBox.x + wideRetentionBox.width)),
-  ).toBeLessThan(1)
+  // Controls keep their semantic widths (fill 36rem, number 7rem, setting 16rem) and share one right edge.
+  expect(Math.abs(wideProxyUrlBox.width - 576)).toBeLessThan(1)
+  expect(Math.abs(wideRetentionBox.width - 112)).toBeLessThan(1)
+  expect(Math.abs(wideThemeControlBox.width - 256)).toBeLessThan(1)
+  const rightEdge = (box: { x: number; width: number }) => box.x + box.width
+  expect(Math.abs(rightEdge(wideProxyUrlBox) - rightEdge(wideRetentionBox))).toBeLessThan(1)
+  expect(Math.abs(rightEdge(wideProxyUrlBox) - rightEdge(wideThemeControlBox))).toBeLessThan(1)
 
   expect(
     Math.abs(proxyLabelBox.y + proxyLabelBox.height / 2 - (wideProxyUrlBox.y + wideProxyUrlBox.height / 2)),
@@ -234,7 +238,47 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(Math.abs(narrowProxyUrlBox.x - narrowProxyBypassBox.x)).toBeLessThan(1)
   expect(Math.abs(narrowProxyUrlBox.width - narrowProxyBypassBox.width)).toBeLessThan(1)
   expect(Math.abs(narrowProxyUrlBox.width - narrowRetentionBox.width)).toBeLessThan(1)
+  expect(Math.abs(narrowThemeControlBox.width - narrowProxyUrlBox.width)).toBeLessThan(1)
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
+})
+
+test('settings fields keep label and control within the settings column on ultra-wide screens', async ({ page }) => {
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/settings')
+  await expect(page.locator('#proxy-url')).toBeVisible()
+  await page.evaluate(() => document.fonts.ready.then(() => undefined))
+
+  const geometry = await page.evaluate(() => {
+    const box = (selector: string) => {
+      const element = document.querySelector(selector)
+      if (!element) throw new Error(`Missing settings field: ${selector}`)
+      const { x, width } = element.getBoundingClientRect()
+      return { left: x, right: x + width }
+    }
+    return {
+      themeLabel: box('label[for="theme-preference"]'),
+      theme: box('#theme-preference'),
+      proxyLabel: box('label[for="proxy-url"]'),
+      proxy: box('#proxy-url'),
+      retentionLabel: box('label[for="log-retention"]'),
+      retention: box('#log-retention'),
+    }
+  })
+
+  const settingsColumn = 60 * 16
+  for (const [label, control] of [
+    [geometry.themeLabel, geometry.theme],
+    [geometry.proxyLabel, geometry.proxy],
+    [geometry.retentionLabel, geometry.retention],
+  ]) {
+    expect(control.left - label.right).toBeGreaterThan(0)
+    expect(control.right - label.left).toBeLessThanOrEqual(settingsColumn + 1)
+  }
+  expect(Math.abs(geometry.proxy.right - geometry.retention.right)).toBeLessThan(1)
+  expect(Math.abs(geometry.proxy.right - geometry.theme.right)).toBeLessThan(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
+    true,
+  )
 })
 
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {

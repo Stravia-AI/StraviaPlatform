@@ -277,18 +277,14 @@ html[lang='zh-CN'] .font-structural {
   letter-spacing: 0;
 }
 
+/* Field 依据自身容器宽度重排：达到 50rem 时左侧 label、右侧控件，控件按语义宽度贴右缘；可选解释始终只在问号提示中。 */
 @container field (min-width: 50rem) {
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] {
     display: grid;
-    grid-template-columns: minmax(12rem, 1fr) minmax(0, var(--field-control-width));
+    grid-template-columns: minmax(0, 1fr) minmax(0, var(--field-control-width));
     align-items: center;
     column-gap: 2rem;
     row-gap: 0.35rem;
-  }
-
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']:has(> [data-slot='field-label'][data-has-hint='true']) {
-    align-items: start;
   }
 
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-label'] {
@@ -303,40 +299,42 @@ html[lang='zh-CN'] .font-structural {
     min-width: 0;
   }
 
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-description'],
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-error'] {
     grid-column: 2;
   }
 
-  [data-slot='field'][data-orientation='responsive'] [data-slot='field-hint'] {
-    display: none;
+  /* 常驻 Description 与 label 组成文本栈，与控件顶部对齐；控件跨越两行，错误留在控件列。 */
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description']) {
+    align-items: start;
   }
 
-  [data-slot='field'][data-orientation='responsive'] [data-slot='field-hint-text'] {
-    display: block;
+  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-description'] {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description'])
+    > :not([data-slot='field-label']):not([data-slot='field-description']):not([data-slot='field-error']) {
+    grid-row: 1 / span 2;
+  }
+
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description'])
+    > [data-slot='field-error'] {
+    grid-row: 3;
   }
 }
 
-/* 超宽单栏表单中固定宽度的控件列会让标签与控件之间出现大片空白；此时按 2:3 分配标签列与控件列。数字与时间保留语义宽度。 */
-@container field (min-width: 72rem) {
-  [data-slot='field'][data-orientation='responsive']:not([data-size='number']):not([data-size='datetime'])
-    > [data-slot='field-layout'] {
-    grid-template-columns: minmax(12rem, 2fr) minmax(var(--field-control-width), 3fr);
-  }
-}
-
+/* 组合表单的操作条跟随设置列右缘，与控件右边缘对齐；不再固定宽度。 */
 .field-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.5rem;
-}
-
-@container field-group (min-width: 50rem) {
-  .field-actions {
-    width: 36rem;
-    align-self: flex-end;
-  }
+  width: 100%;
+  max-width: 60rem;
 }
 
 .route-page {

@@ -345,9 +345,10 @@ async function save(): Promise<void> {
 
         {#if backendKind === 'local'}
           <Field.Field size="select">
-            <Field.Label for="search-local-model" hint={m.web_search_eligible_model_help()}>
-              {m.web_search_model_used()}
-            </Field.Label>
+            <Field.Label for="search-local-model">{m.web_search_model_used()}</Field.Label>
+            {#if eligibleModelsQuery.isSuccess && eligibleModels.length === 0}
+              <Field.Description>{m.web_search_eligible_model_help()}</Field.Description>
+            {/if}
             <Select.Root
               type="single"
               bind:value={localModelId}
