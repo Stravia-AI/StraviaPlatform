@@ -497,6 +497,8 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次
 - 原生工具只有 `parameters.native_tools` 中的 WebSearch、CodeExecution、ImageGeneration、ToolSearch、Custom 与 Namespace 六种；`tool_choice` 用 `Allowed{names, required}` 与 `Native(kind)` 表达受限选择，不保留原始 JSON 选择。统一变体之外的托管工具（如 `file_search`、`mcp`、`computer`、`web_fetch`）入口丢弃。
 - 各入口的原生搜索声明（包括 Gemini `googleSearch`）统一为 `WebSearch` 后，由平台搜索 Hook 接管并受联网搜索能力 Gate 约束；能力不可用时返回 `403 web_search_unavailable`，不因上游协议能表达原生搜索而绕过平台配置直接透传。业务工具 schema 与消息载体的保真不依赖启用搜索。
 - 显式 `false`、`0`、空数组／对象与省略不同，不能用 truthy/default 判断抹平。显式 null 或显式清空记为 `parameters.resets` 中的 `ParameterReset`，续接继承据此区分“沿用父请求”和“本轮清除”；出口从不发送显式 null。
+- 客户端未设置输出 Token 上限时，`generation.max_tokens` 保持缺省，目标标准协议的可选上限字段不补默认值。Anthropic Messages 的 `max_tokens` 为必填，普通 Anthropic 与 Claude Code 目标优先使用模型快照中上游原生 `max_tokens` 的正整数值（不超过 `u32::MAX`）；缺失或无效时由 codec 回退为 64,000。该值来自 [Anthropic ModelInfo](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/model_info.py) 的型号输出上限，不从上下文窗口推导；回退不是“无限”，也不保证未知型号接受。补值只作用于本次目标投影，不改写客户端控制或历史；Claude Code 在自动补值时收缩思考预算而不抬高输出上限，无法容纳合法预算时明确失败，显式上限沿用既有处理。
+- Command Code 与 Devin 是私有 CLI 协议，保留逆向得到的线上默认值：客户端未设置时分别发送 64,000／128,000，不套用标准协议的缺省透传规则。Command Code 的显式上限仍受既有 200,000 上界约束，Devin 的显式上限保持原值；显式 `0` 不等于缺省。
 - `reasoning.level` 是唯一 canonical effort 档位，`budget_tokens`、`mode`、`summary` 与本次尝试的 `target_control` 各自独立。旧 `reasoning.effort`、`enabled`、`display` 仅在私有读取 DTO 中补充缺失的 canonical 控制；SDK format-1 序列化桥接可以生成旧拼写，供已安装插件读取，但它们不是第二个运行时字段。
 
 **入口 headers 与目标投影：**
@@ -1072,7 +1074,9 @@ SQLite 与 PostgreSQL 的 Provider Model 创建、规格编辑、选择策略修
 
 Catalog 读取与 Generated Mapping 的准备在事务前完成，事务中的校验回调不重新进入 Storage。SQLite 使用 `BEGIN IMMEDIATE`；PostgreSQL 按 `models` → `model_backends` 顺序获取事务级 `SHARE ROW EXCLUSIVE` 表锁，串行化期间的 Route 写入，避免漏掉并发新绑定的 Target；Memory 在统一锁序下先准备再写回。存储在提交前准备完整启用 Route 快照。Route module 跨存储调用持有当前实例的缓存写锁，提交后不再执行可失败的读取或逐条发布：成功返回后，新请求使用完整的新配置。其他实例仍通过 epoch 异步刷新，不承诺同时切换，也不把数据库与内存描述为同一事务。
 
-管理列表的每个 Provider Model 返回 `specification`。Core 从已保存 metadata 投影仅含 `context` 的 `limit`、`modalities`（`input`、`output`）与 `reasoning_efforts` 明确字符串列表；模态缺失或为 `null` 时，列表、详情、手动模型准备、能力查询和运行时统一回退为 `input: ["text"]`、`output: ["text"]`。显式模态列表（包括空列表）保持不变；其他缺失规格保持未知，Effort 列表不含 `default` 或 `null` 默认选项。回退不改写已保存 metadata、revision 或 snapshot state，也不使 ID-only discovery 被误判为已经导入规格；既有记录无需迁移或重新同步。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata 及有效模态。模型元数据不再登记五项支持功能、`interleaved`、输入／输出 Token 上限或开关／预算推理规格；退休键不作为未知扩展保留。
+管理列表的每个 Provider Model 返回 `specification`。Core 从已保存 metadata 投影仅含 `context` 的 `limit`、`modalities`（`input`、`output`）与 `reasoning_efforts` 明确字符串列表；模态缺失或为 `null` 时，列表、详情、手动模型准备、能力查询和运行时统一回退为 `input: ["text"]`、`output: ["text"]`。显式模态列表（包括空列表）保持不变；其他缺失规格保持未知，Effort 列表不含 `default` 或 `null` 默认选项。回退不改写已保存 metadata、revision 或 snapshot state，也不使 ID-only discovery 被误判为已经导入规格；既有记录无需迁移或重新同步。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata 及有效模态。通用模型规格不再登记五项支持功能、`interleaved`、`limit.input`／`limit.output` 或开关／预算推理规格；退休键不作为未知扩展保留。
+
+Vendor 可以保留执行必需的原生 metadata。Anthropic 的模型发现保留顶层 `max_tokens`，仅用于补齐 Messages 必填字段，不恢复通用 `limit.output`，不加入列表规格、Route 或客户端配置。已有快照缺少该原生值时按上方回退规则发送；重新同步尚未人工接管的快照，或显式 re-import 已编辑快照，才能取得发现源新提供的值。
 
 WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开模态、Effort 和结构化价格。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格筛选在既有状态中保存上下文下限、输入模态、输出模态和 Effort 的 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中值存在于 Core 返回的有效规格中，其中缺失模态的模型可以匹配文本输入和文本输出；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
 

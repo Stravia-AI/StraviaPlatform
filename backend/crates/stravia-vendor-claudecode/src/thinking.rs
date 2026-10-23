@@ -18,7 +18,8 @@ const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const EFFORTS_WITHOUT_XHIGH: [&str; 4] = ["low", "medium", "high", "max"];
 /// 手动预算模式的最小 `budget_tokens`。
 const MIN_BUDGET: u64 = 1024;
-/// 预算之外为正文与工具调用保留的输出空间（与 oh-my-pi `OUTPUT_FALLBACK_BUFFER` 一致）。
+/// 显式输出上限高于思考预算时为正文与工具调用保留的空间
+/// （与 oh-my-pi `OUTPUT_FALLBACK_BUFFER` 一致）。
 const OUTPUT_BUFFER: u64 = 4000;
 const CLEAR_THINKING_EDIT: &str = "clear_thinking_20251015";
 
@@ -306,15 +307,34 @@ fn drop_clear_thinking(object: &mut Map<String, Value>) {
     }
 }
 
+/// 客户端显式给出输出上限时，为思考预算保留正文空间；未给出上限时保持缺省，
+/// 不根据思考预算或型号规格推导 `max_tokens`（必填回退属于编码器）。
 fn raise_max_tokens(object: &mut Map<String, Value>, budget: u64) {
+    let Some(current) = object.get("max_tokens").and_then(Value::as_u64) else {
+        return;
+    };
     let floor = budget + OUTPUT_BUFFER;
-    if object
-        .get("max_tokens")
-        .and_then(Value::as_u64)
-        .is_none_or(|current| current < floor)
-    {
+    if current < floor {
         object.insert("max_tokens".into(), json!(floor));
     }
+}
+
+/// 自动补出的 `max_tokens` 是发现到的型号上限或编码器的必填回退，不能被思考
+/// 预算抬高；反过来把预算压进上限，并尽量为正文保留 [`OUTPUT_BUFFER`]。
+/// 返回 `None` 表示上限放不下合法预算（预算须不小于 [`MIN_BUDGET`] 且小于上限）。
+fn fit_budget_within_default(object: &Map<String, Value>, budget: u64) -> Option<u64> {
+    let Some(limit) = object.get("max_tokens").and_then(Value::as_u64) else {
+        return Some(budget);
+    };
+    if limit <= MIN_BUDGET {
+        return None;
+    }
+    Some(
+        budget
+            .min(limit.saturating_sub(OUTPUT_BUFFER))
+            .max(MIN_BUDGET)
+            .min(limit - 1),
+    )
 }
 
 /// The CLI accepts an omitted or summarized thinking transcript, not canonical
@@ -352,12 +372,19 @@ pub(crate) fn preserve_implicit_summary_intent(
     }
 }
 
-/// 改写 `thinking`、`output_config.effort`、`max_tokens` 与强制 `tool_choice`，
-/// 使请求落在目标型号的接受范围内。无法识别的型号原样透传。
-pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilities) {
+/// 改写 `thinking`、`output_config.effort`、显式给出的 `max_tokens` 与强制
+/// `tool_choice`，使请求落在目标型号的接受范围内。`auto_output_limit` 表示
+/// `max_tokens` 由发现数据或编码器必填回退补出，此时保留该上限并收缩思考预算，
+/// 不把它当作可抬高的显式选择。无法识别的型号原样透传。
+/// 自动上限容不下合法思考预算时返回错误，不静默关闭客户端请求的思考。
+pub(crate) fn normalize(
+    object: &mut Map<String, Value>,
+    caps: &ModelCapabilities,
+    auto_output_limit: bool,
+) -> Result<(), String> {
     sanitize_display(object);
     let Some(profile) = ModelProfile::of_request(object, caps) else {
-        return;
+        return Ok(());
     };
     if profile.known.is_none()
         && caps.thinking != Some(false)
@@ -375,14 +402,14 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
                 set_effort(object, None);
             }
         }
-        return;
+        return Ok(());
     }
     if caps.thinking == Some(false) {
         // 型号声明不支持思考：任何思考控制都会 400，整体移除。
         object.remove("thinking");
         drop_clear_thinking(object);
         set_effort(object, None);
-        return;
+        return Ok(());
     }
     let thinking = object.get("thinking").and_then(Value::as_object);
     let kind = thinking
@@ -439,7 +466,7 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
         };
         drop_clear_thinking(object);
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
-        return;
+        return Ok(());
     }
 
     if !on {
@@ -452,7 +479,7 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
             object.insert("thinking".into(), thinking);
         }
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
-        return;
+        return Ok(());
     }
 
     let manual = if !profile.supports_adaptive() {
@@ -468,19 +495,26 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
         object.remove("thinking");
         drop_clear_thinking(object);
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
-        return;
+        return Ok(());
     }
 
     if manual {
-        let budget = budget
+        let mut budget = budget
             .unwrap_or_else(|| budget_from_effort(effort))
             .max(MIN_BUDGET);
+        if auto_output_limit {
+            budget = fit_budget_within_default(object, budget)
+                .ok_or("Anthropic enabled thinking requires max_tokens greater than 1024")?;
+        }
         let mut thinking = json!({ "type": "enabled", "budget_tokens": budget });
         if let Some(display) = display {
             thinking["display"] = Value::String(display);
         }
         object.insert("thinking".into(), thinking);
-        raise_max_tokens(object, budget);
+        // 自动补出的上限不得被预算抬高；显式上限沿用既有抬高规则。
+        if !auto_output_limit {
+            raise_max_tokens(object, budget);
+        }
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
     } else {
         let mut thinking = json!({ "type": "adaptive" });
@@ -496,6 +530,7 @@ pub(crate) fn normalize(object: &mut Map<String, Value>, caps: &ModelCapabilitie
         let effort = effort.or_else(|| budget.map(effort_from_budget));
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
     }
+    Ok(())
 }
 
 /// `thinking.display` 接受官方 `summarized` / `omitted` / `updates`。Open Responses 入口把
@@ -547,7 +582,12 @@ mod tests {
                 &ModelCapabilities::default(),
                 Some(display),
             );
-            normalize(body.as_object_mut().unwrap(), &ModelCapabilities::default());
+            normalize(
+                body.as_object_mut().unwrap(),
+                &ModelCapabilities::default(),
+                false,
+            )
+            .unwrap();
             assert_eq!(
                 body["thinking"],
                 json!({"type":"adaptive","display":expected})
@@ -562,17 +602,28 @@ mod tests {
         run_with(model, extra, &ModelCapabilities::default())
     }
 
+    /// 未配置输出上限的请求体：`max_tokens` 缺省。
     fn run_with(model: &str, extra: Value, caps: &ModelCapabilities) -> Value {
         let mut body = json!({
             "model": model,
-            "max_tokens": 2048,
             "messages": [{"role": "user", "content": "hi"}],
         });
         body.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        normalize(body.as_object_mut().unwrap(), caps);
+        normalize(body.as_object_mut().unwrap(), caps, false).unwrap();
         body
+    }
+
+    fn run_with_limit(
+        model: &str,
+        max_tokens: u64,
+        extra: Value,
+        caps: &ModelCapabilities,
+    ) -> Value {
+        let mut extra = extra;
+        extra["max_tokens"] = json!(max_tokens);
+        run_with(model, extra, caps)
     }
 
     fn adaptive(effort: &str) -> Value {
@@ -629,13 +680,16 @@ mod tests {
     }
 
     #[test]
-    fn manual_only_models_turn_effort_into_budget_and_raise_max_tokens() {
+    fn manual_only_models_turn_effort_into_budget() {
         let body = run("claude-sonnet-4-5", adaptive("high"));
         assert_eq!(
             body["thinking"],
             json!({"type": "enabled", "budget_tokens": 16384})
         );
-        assert_eq!(body["max_tokens"], 16384 + OUTPUT_BUFFER);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "thinking budget must not become an output limit"
+        );
         assert!(
             body.get("output_config").is_none(),
             "no effort on Sonnet 4.5"
@@ -646,13 +700,95 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["output_config"]["effort"], "high");
 
-        // `Enabled` 没有预算时补最小预算；已足够的 max_tokens 不改动。
-        let body = run(
+        // `Enabled` 没有预算时补最小预算。
+        let body = run("claude-haiku-4-5", json!({"thinking": {"type": "enabled"}}));
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+    }
+
+    #[test]
+    fn normalize_does_not_invent_an_output_limit() {
+        // 客户端给出预算但没有输出上限：预算原样发送，不补 max_tokens。
+        // 必填回退属于编码器，normalize 不重新发明默认值。
+        let body = run_with(
+            "claude-sonnet-4-5",
+            json!({"thinking":{"type":"enabled","budget_tokens":16000}}),
+            &caps(false, true, &[]),
+        );
+        assert_eq!(body["thinking"]["budget_tokens"], 16000);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn explicit_output_limit_keeps_room_above_the_thinking_budget() {
+        // 显式上限低于预算加正文缓冲时抬高到下限。
+        let body = run_with_limit(
+            "claude-sonnet-4-5",
+            2048,
+            json!({"thinking":{"type":"enabled","budget_tokens":16000}}),
+            &caps(false, true, &[]),
+        );
+        assert_eq!(body["thinking"]["budget_tokens"], 16000);
+        assert_eq!(body["max_tokens"], 16000 + OUTPUT_BUFFER);
+
+        // 已足够的显式上限不改动。
+        let body = run_with_limit(
             "claude-haiku-4-5",
-            json!({"max_tokens": 64000, "thinking": {"type": "enabled"}}),
+            64000,
+            json!({"thinking": {"type": "enabled"}}),
+            &ModelCapabilities::default(),
         );
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
         assert_eq!(body["max_tokens"], 64000);
+
+        // 恰好等于下限时保持原值。
+        let body = run_with_limit(
+            "claude-sonnet-4-5",
+            16000 + OUTPUT_BUFFER,
+            json!({"thinking":{"type":"enabled","budget_tokens":16000}}),
+            &caps(false, true, &[]),
+        );
+        assert_eq!(body["max_tokens"], 16000 + OUTPUT_BUFFER);
+    }
+
+    #[test]
+    fn automatic_output_limit_is_kept_and_the_budget_fits_below_it() {
+        // 发现到的型号上限：预算超出时压到上限内，并保留正文缓冲。
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 32000,
+            "thinking": {"type": "enabled", "budget_tokens": 63000},
+        });
+        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        assert_eq!(body["max_tokens"], 32000);
+        assert_eq!(body["thinking"]["budget_tokens"], 32000 - OUTPUT_BUFFER);
+
+        // 预算已能放下时原样保留。
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 32000,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+        });
+        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        assert_eq!(body["max_tokens"], 32000);
+        assert_eq!(body["thinking"]["budget_tokens"], 16000);
+
+        // 上限放不下缓冲加最小预算时保留最小合法预算，而不是抬高上限。
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 3000,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+        });
+        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        assert_eq!(body["max_tokens"], 3000);
+        assert_eq!(body["thinking"]["budget_tokens"], MIN_BUDGET);
+
+        // 上限无法容纳最小预算时明确失败，不能静默关闭思考或抬高上限。
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": MIN_BUDGET,
+            "thinking": {"type": "adaptive"},
+        });
+        assert!(normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).is_err());
     }
 
     #[test]
@@ -850,17 +986,6 @@ mod tests {
         for field in ["thinking", "output_config", "context_management"] {
             assert!(body.get(field).is_none(), "{field} must be removed");
         }
-    }
-
-    #[test]
-    fn manual_budget_preserves_explicit_budget_and_required_output_space() {
-        let body = run_with(
-            "claude-sonnet-4-5",
-            json!({"thinking":{"type":"enabled","budget_tokens":16000}}),
-            &caps(false, true, &[]),
-        );
-        assert_eq!(body["thinking"]["budget_tokens"], 16000);
-        assert_eq!(body["max_tokens"], 16000 + OUTPUT_BUFFER);
     }
 
     #[test]

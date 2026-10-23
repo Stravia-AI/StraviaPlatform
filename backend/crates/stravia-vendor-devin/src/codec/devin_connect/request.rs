@@ -118,9 +118,9 @@ impl DevinClientPlatform {
     }
 }
 
-/// CompletionConfiguration defaults per current CLI captures: max_tokens is
-/// the full 128k window and max_newlines caps line count, not tokens.
-const WIRE_DEFAULT_MAX_TOKENS: u64 = 128_000;
+/// 私有协议沿用 CLI 逆向得到的 CompletionConfiguration 默认值。
+/// max_newlines 限制行数，与 Token 上限不同。
+const WIRE_DEFAULT_MAX_TOKENS: u32 = 128_000;
 const WIRE_MAX_NEWLINES: u64 = 400;
 const DEFAULT_TEMPERATURE: f64 = 1.0;
 /// Exactly 0 → upstream "internal error" (live-verified); clamp to epsilon.
@@ -573,11 +573,7 @@ fn completion_config(req: &AiRequest) -> Vec<u8> {
     write_varint_field(
         &mut out,
         2,
-        u64::from(
-            req.generation
-                .max_tokens
-                .unwrap_or(WIRE_DEFAULT_MAX_TOKENS as u32),
-        ),
+        u64::from(req.generation.max_tokens.unwrap_or(WIRE_DEFAULT_MAX_TOKENS)),
     );
     write_varint_field(&mut out, 3, WIRE_MAX_NEWLINES);
     write_fixed64_field(&mut out, 5, temperature);
@@ -2399,6 +2395,31 @@ mod tests {
                 fields
                     .iter()
                     .any(|field| field.number == 16 && field.scalar == 1)
+            );
+        }
+    }
+
+    /// 缺省值遵循 CLI 逆向契约；显式 0 与未配置不同，不能被默认值覆盖。
+    #[test]
+    fn completion_config_follows_cli_default_and_preserves_explicit_limits() {
+        let mut req = AiRequest::new("m", vec![text_item(Role::User, "hello")]);
+        for (requested, expected) in [
+            (None, 128_000),
+            (Some(0), 0),
+            (Some(1), 1),
+            (Some(4_096), 4_096),
+            (Some(u32::MAX), u32::MAX),
+        ] {
+            req.generation.max_tokens = requested;
+            let fields = top_level(&req);
+            let config = sub_message(&fields, 8, 0);
+            assert_eq!(
+                config
+                    .iter()
+                    .filter(|field| field.number == 2)
+                    .map(|field| field.scalar)
+                    .collect::<Vec<_>>(),
+                vec![u64::from(expected)]
             );
         }
     }

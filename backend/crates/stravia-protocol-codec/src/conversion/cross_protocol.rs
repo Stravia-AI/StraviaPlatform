@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn omitted_output_token_limits_are_only_filled_for_required_protocols() {
+    let protocols = [
+        (
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            json!({"model": "model", "messages": [{"role": "user", "content": "hello"}]}),
+            "/max_tokens",
+        ),
+        (
+            OPEN_RESPONSES_2026_04_24,
+            json!({"model": "model", "input": "hello"}),
+            "/max_output_tokens",
+        ),
+        (
+            ANTHROPIC_MESSAGES_2023_06_01,
+            json!({"model": "model", "messages": [{"role": "user", "content": "hello"}]}),
+            "/max_tokens",
+        ),
+        (
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            json!({"model": "model", "contents": [{"role": "user", "parts": [{"text": "hello"}]}]}),
+            "/generationConfig/maxOutputTokens",
+        ),
+    ];
+
+    for (ingress, body, _) in &protocols {
+        for (egress, _, limit_pointer) in &protocols {
+            let pair = ProtocolTransform::global().bind(*ingress, *egress).unwrap();
+            let request = pair.decode_request(body.clone()).unwrap();
+            let encoded = pair.encode_request(request).unwrap();
+            if *egress == ANTHROPIC_MESSAGES_2023_06_01 {
+                assert_eq!(
+                    encoded.body.pointer(limit_pointer),
+                    Some(&json!(64_000)),
+                    "{ingress} -> {egress} must satisfy the required output limit"
+                );
+            } else {
+                assert!(
+                    encoded.body.pointer(limit_pointer).is_none(),
+                    "{ingress} -> {egress} synthesized an optional output token limit: {}",
+                    encoded.body
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn openai_to_anthropic_thinking_blocks() {
     let mut resp = IrAiResponse::new("msg_1", "minimax-m2.7");
     resp.push_reasoning("reasoning summary", None);

@@ -53,6 +53,24 @@ fn encodes_generate_envelope() {
 }
 
 #[test]
+fn output_limit_follows_cli_default_and_preserves_explicit_cap() {
+    for (requested, expected) in [
+        (None, 64_000),
+        (Some(0), 0),
+        (Some(1), 1),
+        (Some(64_000), 64_000),
+        (Some(200_000), 200_000),
+        (Some(200_001), 200_000),
+        (Some(u32::MAX), 200_000),
+    ] {
+        let mut request = AiRequest::new("model", Vec::new());
+        request.generation.max_tokens = requested;
+        let body = CommandCodeGenerateV1.encode_request(request).unwrap();
+        assert_eq!(body["params"]["max_tokens"], json!(expected));
+    }
+}
+
+#[test]
 fn encodes_tools_without_type_and_aliases_names() {
     let mut request = AiRequest::new(
         "claude-sonnet-4-6",

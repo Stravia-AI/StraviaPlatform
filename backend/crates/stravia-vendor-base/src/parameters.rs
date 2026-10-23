@@ -32,6 +32,9 @@ pub(crate) fn encode(
         == Some(true);
     let endpoint =
         stravia_protocol_codec::registry::ProtocolRegistry::global().resolve_alias(protocol);
+    if endpoint == Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01) {
+        stravia_vendor_common::common::apply_anthropic_output_limit(provider, &mut request);
+    }
     let mut encoded = crate::encode_inference_request(protocol, request)?;
     if let Some(body) = encoded.body.as_object_mut() {
         body.extend(sampling);
@@ -186,6 +189,127 @@ mod tests {
             }),
             client_headers: Vec::new(),
             operation_metadata: BTreeMap::new(),
+        }
+    }
+
+    fn anthropic_provider(max_tokens: Option<Value>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider_id: "anthropic".into(),
+            channel: "default".into(),
+            base_url: "https://api.anthropic.com".into(),
+            protocol: "anthropic-messages".into(),
+            options: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+            model: Some("claude-sonnet-4-5".into()),
+            model_metadata: Some(ModelMetadata {
+                extensions: max_tokens
+                    .map(|value| BTreeMap::from([("max_tokens".into(), value)]))
+                    .unwrap_or_default(),
+                ..Default::default()
+            }),
+            client_headers: Vec::new(),
+            operation_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn anthropic_omitted_limit_uses_native_model_metadata() {
+        for max_tokens in [json!(128_000), json!(8192), json!(u32::MAX)] {
+            let body = encode(
+                &anthropic_provider(Some(max_tokens.clone())),
+                "anthropic-messages",
+                AiRequest::new("claude-sonnet-4-5", vec![]),
+            )
+            .unwrap()
+            .body;
+            assert_eq!(body["max_tokens"], max_tokens);
+        }
+    }
+
+    #[test]
+    fn anthropic_untrusted_model_metadata_falls_back_to_codec_default() {
+        for metadata in [
+            json!(0),
+            json!(-1),
+            json!(u32::MAX as u64 + 1),
+            json!("128000"),
+            json!(1.5),
+            json!(null),
+        ] {
+            let body = encode(
+                &anthropic_provider(Some(metadata.clone())),
+                "anthropic-messages",
+                AiRequest::new("claude-sonnet-4-5", vec![]),
+            )
+            .unwrap()
+            .body;
+            assert_eq!(body["max_tokens"], 64_000, "{metadata}");
+        }
+        let body = encode(
+            &anthropic_provider(None),
+            "anthropic-messages",
+            AiRequest::new("claude-sonnet-4-5", vec![]),
+        )
+        .unwrap()
+        .body;
+        assert_eq!(body["max_tokens"], 64_000);
+
+        let mut target = anthropic_provider(None);
+        target.model_metadata = None;
+        let body = encode(
+            &target,
+            "anthropic-messages",
+            AiRequest::new("claude-sonnet-4-5", vec![]),
+        )
+        .unwrap()
+        .body;
+        assert_eq!(body["max_tokens"], 64_000);
+    }
+
+    #[test]
+    fn anthropic_explicit_limit_wins_over_model_metadata() {
+        for explicit in [2048, 200_000] {
+            let mut request = AiRequest::new("claude-sonnet-4-5", vec![]);
+            request.generation.max_tokens = Some(explicit);
+            let body = encode(
+                &anthropic_provider(Some(json!(128_000))),
+                "anthropic-messages",
+                request,
+            )
+            .unwrap()
+            .body;
+            assert_eq!(body["max_tokens"], explicit);
+        }
+    }
+
+    #[test]
+    fn native_model_output_limit_is_not_injected_into_other_protocols() {
+        let mut target = provider();
+        target
+            .model_metadata
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert("max_tokens".into(), json!(128_000));
+        let request = AiRequest::new(
+            "model",
+            vec![stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                    std::sync::Arc::new("hello".into()),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        for (protocol, limit_pointer) in [
+            ("openai-chat-completions", "/max_tokens"),
+            ("open-responses", "/max_output_tokens"),
+            ("google-gemini", "/generationConfig/maxOutputTokens"),
+        ] {
+            let body = encode(&target, protocol, request.clone()).unwrap().body;
+            assert!(body.pointer(limit_pointer).is_none(), "{protocol}");
         }
     }
 

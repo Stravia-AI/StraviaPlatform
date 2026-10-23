@@ -1032,6 +1032,17 @@ fn canonical_reasoning_modes_and_levels_project_without_target_controls() {
 }
 
 #[test]
+fn enabled_thinking_without_output_limit_preserves_reasoning_budget() {
+    let mut request = parameter_request();
+    request.reasoning.mode = Some("enabled".into());
+    request.reasoning.budget_tokens = Some(50_000);
+
+    let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
+
+    assert_eq!(body["thinking"]["budget_tokens"], 50_000);
+}
+
+#[test]
 fn enabled_thinking_rejects_an_impossible_generation_budget() {
     let mut request = parameter_request();
     request.generation.max_tokens = Some(1024);

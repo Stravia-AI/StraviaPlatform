@@ -88,6 +88,32 @@ pub fn encode_inference_request(
     Ok(encoded)
 }
 
+/// 仅为 Anthropic Messages 端点补齐上游必填的 `max_tokens`。
+///
+/// Anthropic Messages 协议要求请求必须携带 `max_tokens`，因此调用方只能在
+/// 已确认出站端点为 `ANTHROPIC_MESSAGES_2023_06_01` 时调用本函数；其他协议
+/// 不得因模型元数据而注入输出上限。
+///
+/// 函数先执行 `AiRequest::normalize_parameters`，让显式客户端上限（含旧版
+/// 参数别名）优先，绝不覆盖已有值。仅当上限仍为空时，才从模型元数据
+/// `extensions["max_tokens"]` 读取原生模型声明的最大输出 token 数——该字段
+/// 来自 Anthropic `GET /v1/models` 的顶层 `max_tokens`，只接受
+/// `1..=u32::MAX` 的整数；缺失、`0`、负值、超出 `u32` 或错误类型都视为未知
+/// 并保持为空，由 codec 回退到 64000，而不是从上下文窗口推导。
+pub fn apply_anthropic_output_limit(provider: &ProviderSnapshot, request: &mut AiRequest) {
+    request.normalize_parameters();
+    if request.generation.max_tokens.is_some() {
+        return;
+    }
+    request.generation.max_tokens = provider
+        .model_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extensions.get("max_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0);
+}
+
 pub fn header_pairs(headers: &http::HeaderMap) -> Result<Vec<(String, String)>, PluginError> {
     headers
         .iter()
@@ -1159,6 +1185,77 @@ mod tests {
             parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
             Some(Duration::from_secs(37))
         );
+    }
+
+    fn anthropic_provider(max_tokens: Option<Value>) -> ProviderSnapshot {
+        use std::collections::BTreeMap;
+        use stravia_vendor_sdk::ModelMetadata;
+
+        ProviderSnapshot {
+            provider_id: "anthropic".into(),
+            channel: "default".into(),
+            base_url: "https://api.anthropic.com".into(),
+            protocol: "anthropic-messages".into(),
+            options: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+            model: Some("claude-sonnet-4-5".into()),
+            model_metadata: Some(ModelMetadata {
+                extensions: max_tokens
+                    .map(|value| BTreeMap::from([("max_tokens".into(), value)]))
+                    .unwrap_or_default(),
+                ..Default::default()
+            }),
+            client_headers: Vec::new(),
+            operation_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn anthropic_output_limit_only_fills_absent_limits_from_trusted_metadata() {
+        use serde_json::json;
+
+        for explicit in [2048, 200_000] {
+            let mut request = AiRequest::new("claude", vec![]);
+            request.generation.max_tokens = Some(explicit);
+            apply_anthropic_output_limit(&anthropic_provider(Some(json!(128_000))), &mut request);
+            assert_eq!(request.generation.max_tokens, Some(explicit));
+        }
+
+        for max_tokens in [1, 128_000, u32::MAX] {
+            let mut request = AiRequest::new("claude", vec![]);
+            apply_anthropic_output_limit(
+                &anthropic_provider(Some(json!(max_tokens))),
+                &mut request,
+            );
+            assert_eq!(request.generation.max_tokens, Some(max_tokens));
+        }
+
+        for metadata in [
+            json!(0),
+            json!(-1),
+            json!(u32::MAX as u64 + 1),
+            json!("128000"),
+            json!(1.5),
+            json!(null),
+        ] {
+            let mut request = AiRequest::new("claude", vec![]);
+            apply_anthropic_output_limit(&anthropic_provider(Some(metadata.clone())), &mut request);
+            assert_eq!(request.generation.max_tokens, None, "{metadata}");
+        }
+
+        let mut request = AiRequest::new("claude", vec![]);
+        apply_anthropic_output_limit(&anthropic_provider(None), &mut request);
+        assert_eq!(request.generation.max_tokens, None);
+
+        // 规范化先于缺省判断：旧版参数别名仍算显式上限。
+        let mut request = AiRequest::new("claude", vec![]);
+        request
+            .meta
+            .vendor
+            .ingress
+            .insert("maxOutputTokens".into(), json!(4096));
+        apply_anthropic_output_limit(&anthropic_provider(Some(json!(128_000))), &mut request);
+        assert_eq!(request.generation.max_tokens, Some(4096));
     }
 
     #[test]

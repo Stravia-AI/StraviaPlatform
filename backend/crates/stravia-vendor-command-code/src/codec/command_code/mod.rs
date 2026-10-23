@@ -32,6 +32,7 @@ pub struct CommandCodeGenerateV1;
 /// provider 侧的 `device_project_dir()` 复用此值,保持信封与指纹自洽。
 pub const DEFAULT_WORKING_DIR: &str = r"C:\Users\dev\projects\app";
 const DEFAULT_ENVIRONMENT: &str = "win32";
+// 私有协议沿用 CLI 逆向得到的默认值，不套用标准协议的缺省透传规则。
 const DEFAULT_MAX_TOKENS: u32 = 64_000;
 const MAX_TOKENS_CAP: u32 = 200_000;
 
@@ -83,9 +84,9 @@ impl CommandCodeGenerateV1 {
         let mut params = Map::from_iter([
             ("model".into(), Value::String(request.model)),
             ("messages".into(), Value::Array(messages)),
-            ("max_tokens".into(), json!(max_tokens)),
             ("stream".into(), Value::Bool(true)),
             ("system".into(), Value::Array(system)),
+            ("max_tokens".into(), max_tokens.into()),
             (
                 "tools".into(),
                 Value::Array(

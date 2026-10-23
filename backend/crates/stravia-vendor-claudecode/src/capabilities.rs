@@ -141,6 +141,18 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
         }
         model.metadata.insert("limit".into(), Value::Object(limit));
     }
+    // 原生 `max_tokens` 是该型号 `max_tokens` 参数的上限。Anthropic Messages
+    // 必填该字段，推理时优先使用这里的型号上限；只接受正整数，未知型号由
+    // 编码器回退。已退休的 `limit.output` 不恢复。
+    if let Some(max_tokens) = entry
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=u64::from(u32::MAX)).contains(value))
+    {
+        model
+            .metadata
+            .insert("max_tokens".into(), json!(max_tokens));
+    }
     let Some(capabilities) = entry.get("capabilities").filter(|value| value.is_object()) else {
         return Some(model);
     };
@@ -256,6 +268,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(model.metadata["limit"], json!({"context": 1_000_000}));
+        assert!(model.metadata["limit"].get("output").is_none());
+        assert_eq!(model.metadata["max_tokens"], 128_000);
         // 思考常开的型号不提供 `none`（关闭）档。
         assert_eq!(
             model.metadata["reasoning_efforts"],
@@ -266,6 +280,29 @@ mod tests {
             model.capabilities,
             ["image_input", "structured_output", "reasoning"]
         );
+    }
+
+    #[test]
+    fn discovery_keeps_only_positive_native_output_limits() {
+        for (wire, expected) in [
+            (json!(64_000), Some(64_000)),
+            (json!(1), Some(1)),
+            (json!(u32::MAX), Some(u64::from(u32::MAX))),
+            (json!(0), None),
+            (json!(-1), None),
+            (json!(64_000.5), None),
+            (json!("64000"), None),
+            (json!(u64::from(u32::MAX) + 1), None),
+        ] {
+            // 无 `capabilities` 的对象也走早退路径，输出上限仍必须保留。
+            let model = discovered_model(&json!({"id": "m", "max_tokens": wire})).unwrap();
+            assert_eq!(
+                model.metadata.get("max_tokens").and_then(Value::as_u64),
+                expected,
+                "wire max_tokens {wire}"
+            );
+            assert!(model.metadata.get("limit").is_none());
+        }
     }
 
     #[test]

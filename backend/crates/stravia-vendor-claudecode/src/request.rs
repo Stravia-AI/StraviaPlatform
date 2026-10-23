@@ -149,12 +149,15 @@ pub(crate) struct ShapedRequest {
 }
 
 /// 塑形 codec 产出的请求体并序列化为最终线上字节（已写入 `cch`）。
-/// 会话仅由宿主的 principal/target scoped operation metadata 派生。
+/// `auto_output_limit` 表示 `max_tokens` 来自发现数据或编码器的必填回退，
+/// 此时思考预算需让位于该上限。会话仅由宿主的 principal/target scoped
+/// operation metadata 派生。
 pub(crate) fn shape(
     mut body: Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
     caps: &ModelCapabilities,
+    auto_output_limit: bool,
     fallback_session_id: impl FnOnce() -> String,
 ) -> Result<ShapedRequest, String> {
     let object = body
@@ -167,7 +170,7 @@ pub(crate) fn shape(
         .get_mut("thinking")
         .and_then(Value::as_object_mut)
         .and_then(|thinking| thinking.remove("block_binding"));
-    thinking::normalize(object, caps);
+    thinking::normalize(object, caps, auto_output_limit)?;
     if let Some(block_binding) = block_binding
         && let Some(thinking) = object.get_mut("thinking").and_then(Value::as_object_mut)
         && matches!(
@@ -791,9 +794,26 @@ mod tests {
     }
 
     fn shaped_with(body: Value, caps: &ModelCapabilities) -> (Value, ShapedRequest) {
-        let shaped = shape(body, DEFAULT_CLIENT_VERSION, &identity(), caps, || {
-            "fallback-session".into()
-        })
+        shaped_with_limit_origin(body, caps, false)
+    }
+
+    fn shaped_auto(body: Value) -> (Value, ShapedRequest) {
+        shaped_with_limit_origin(body, &ModelCapabilities::default(), true)
+    }
+
+    fn shaped_with_limit_origin(
+        body: Value,
+        caps: &ModelCapabilities,
+        auto_output_limit: bool,
+    ) -> (Value, ShapedRequest) {
+        let shaped = shape(
+            body,
+            DEFAULT_CLIENT_VERSION,
+            &identity(),
+            caps,
+            auto_output_limit,
+            || "fallback-session".into(),
+        )
         .expect("request shapes");
         (
             serde_json::from_slice(&shaped.body).expect("shaped body is JSON"),
@@ -859,6 +879,38 @@ mod tests {
         }));
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["content"][0]["text"], "first turn");
+    }
+
+    #[test]
+    fn explicit_output_limit_is_raised_only_for_the_thinking_budget() {
+        // 显式上限：沿用既有规则，不足预算加正文空间时抬高。
+        let (body, _) = shaped(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 2048,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(body["thinking"]["budget_tokens"], 16000);
+        assert_eq!(body["max_tokens"], 16000 + 4000);
+
+        // 显式上限已足够时原样保留。
+        let (body, _) = shaped(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64000,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(body["max_tokens"], 64000);
+
+        // 自动补出的上限（发现数据或编码器必填回退）不能被预算抬高；预算让位。
+        let (body, _) = shaped_auto(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 32000,
+            "thinking": {"type": "enabled", "budget_tokens": 63000},
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        assert_eq!(body["max_tokens"], 32000);
+        assert_eq!(body["thinking"]["budget_tokens"], 32000 - 4000);
     }
 
     #[test]

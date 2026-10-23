@@ -76,13 +76,15 @@ impl AnthropicEncoder {
             Value::Array(normalize_anthropic_messages(raw_messages))
         };
 
-        let max_tokens = req.generation.max_tokens.unwrap_or(4096);
+        // Messages 必须携带 max_tokens；已知型号上限由目标适配层填入，
+        // 未知时沿用 omp 的 64,000 回退，不把上下文窗口当作输出上限。
+        let max_tokens = req.generation.max_tokens.unwrap_or(64_000);
 
         let mut body = object([
             ("model", Value::String(req.model)),
             ("messages", messages_val),
-            ("max_tokens", max_tokens.into()),
             ("stream", Value::Bool(req.stream.enabled)),
+            ("max_tokens", max_tokens.into()),
         ]);
 
         let obj = body.as_object_mut().unwrap();
@@ -441,8 +443,6 @@ fn encode_thinking(
     if mode == "disabled" {
         return Ok(Some(serde_json::json!({"type": "disabled"})));
     }
-    // Enabled thinking needs at least 1024 tokens and room for output.
-    // Do not silently alter an explicitly chosen generation limit.
     if max_tokens <= 1024 {
         anyhow::bail!("Anthropic enabled thinking requires max_tokens greater than 1024");
     }
@@ -453,7 +453,8 @@ fn encode_thinking(
             Some(ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max) => 16384,
             _ => 1024,
         })
-        .clamp(1024, max_tokens - 1);
+        .max(1024)
+        .min(max_tokens - 1);
     Ok(Some(
         serde_json::json!({"type": "enabled", "budget_tokens": budget}),
     ))
@@ -515,10 +516,9 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
         .and_then(|v| v.as_str())
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("anthropic payload missing model"))?;
-    let _max_tokens = obj
-        .get("max_tokens")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow::anyhow!("anthropic payload missing max_tokens"))?;
+    obj.get("max_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("anthropic payload missing unsigned integer max_tokens"))?;
     let messages = obj
         .get("messages")
         .and_then(|v| v.as_array())

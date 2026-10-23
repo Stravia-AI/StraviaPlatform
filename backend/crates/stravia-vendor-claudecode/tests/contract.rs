@@ -23,8 +23,8 @@ use stravia_vendor_runtime::{
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
-    AuthRequest, AuthResponse, AuthStep, ErrorKind, OperationInput, OperationOutput,
-    ProviderSnapshot,
+    AuthRequest, AuthResponse, AuthStep, DiscoverRequest, ErrorKind, OperationInput,
+    OperationOutput, ProviderSnapshot,
 };
 
 const UPSTREAM: &str = "https://api.anthropic.com";
@@ -470,6 +470,124 @@ async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], expected);
         assert!(body.get("output_config").is_none());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() {
+    let (runtime, plugin) = load_plugin().await;
+    // 发现数据里的原生 `max_tokens` 是该型号的输出上限，进入模型元数据扩展；
+    // 已退休的 `limit.output` 不恢复。
+    let discovery = Arc::new(MockServices {
+        routes: vec![(
+            "https://api.anthropic.com/v1/models",
+            200,
+            "application/json",
+            json!({
+                "data": [{
+                    "id": "claude-sonnet-4-5",
+                    "display_name": "Claude Sonnet 4.5",
+                    "max_input_tokens": 200_000,
+                    "max_tokens": 32_000,
+                    "capabilities": {
+                        "thinking": {"supported": true, "types": {
+                            "adaptive": {"supported": false},
+                            "enabled": {"supported": true}}},
+                        "effort": {"supported": false}
+                    }
+                }]
+            })
+            .to_string(),
+        )],
+        ..MockServices::default()
+    });
+    let OperationOutput::Discover(catalog) = run(
+        &runtime,
+        &plugin,
+        &discovery,
+        OperationInput::Discover {
+            provider: signed_in(),
+            request: DiscoverRequest { cursor: None },
+        },
+    )
+    .await
+    .expect("model discovery succeeds") else {
+        panic!("expected Discover output");
+    };
+    let discovered = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "claude-sonnet-4-5")
+        .expect("discovered model");
+    assert_eq!(discovered.metadata["max_tokens"], 32_000);
+    assert!(discovered.metadata["limit"].get("output").is_none());
+    let discovered_extensions = discovered.metadata.clone();
+    let invalid_extensions = BTreeMap::from([("max_tokens".into(), json!(0))]);
+
+    for (explicit, requested_budget, extensions, expected_limit, expected_budget) in [
+        // 显式上限优先于发现数据；已足够时原样发送。
+        (
+            Some(24_000),
+            16_000,
+            Some(&discovered_extensions),
+            24_000,
+            16_000,
+        ),
+        // 无显式上限：使用发现到的型号上限。
+        (None, 16_000, Some(&discovered_extensions), 32_000, 16_000),
+        // 自动补出的型号上限不被思考预算抬高，预算收缩到上限内。
+        (
+            None,
+            63_000,
+            Some(&discovered_extensions),
+            32_000,
+            32_000 - 4_000,
+        ),
+        // 发现数据缺失或不可信：编码器必填回退 64,000。
+        (None, 16_000, None, 64_000, 16_000),
+        // 编码器的必填回退同样不被预算抬高。
+        (None, 63_000, None, 64_000, 64_000 - 4_000),
+        (None, 16_000, Some(&invalid_extensions), 64_000, 16_000),
+    ] {
+        let services = Arc::new(MockServices {
+            routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+            ..MockServices::default()
+        });
+        let mut body = json!({
+            "model": "claude-sonnet-4-5",
+            "thinking": {"type": "enabled", "budget_tokens": requested_budget},
+            "messages": [{"role": "user", "content": "Read a."}]
+        });
+        if let Some(explicit) = explicit {
+            body["max_tokens"] = json!(explicit);
+        }
+        let request = anthropic_client_request(body);
+        let mut provider = signed_in();
+        provider.model_metadata = extensions.map(|extensions| stravia_vendor_sdk::ModelMetadata {
+            extensions: extensions.clone(),
+            ..Default::default()
+        });
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await
+        .expect("inference with the required output limit succeeds");
+
+        let requests = services.requests.lock();
+        assert_eq!(requests.len(), 1);
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            sent["thinking"],
+            json!({"type": "enabled", "budget_tokens": expected_budget})
+        );
+        assert_eq!(
+            sent.get("max_tokens").and_then(Value::as_u64),
+            Some(expected_limit)
+        );
     }
 }
 

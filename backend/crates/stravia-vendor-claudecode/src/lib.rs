@@ -214,6 +214,12 @@ fn infer(
     mut request: AiRequest,
 ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
     request.model = required_model(provider)?.to_owned();
+    // `max_tokens` 是 Anthropic Messages 的必填线上字段。先归一化参数，区分客户端
+    // 显式给出的上限与发现数据/编码器回退补出的上限：前者沿用既有抬高规则，
+    // 后者不得被思考预算突破型号上限。
+    request.normalize_parameters();
+    let auto_output_limit = request.generation.max_tokens.is_none();
+    common::apply_anthropic_output_limit(provider, &mut request);
     let protocol = ANTHROPIC_MESSAGES_2023_06_01.to_string();
     let display = request
         .reasoning
@@ -241,9 +247,14 @@ fn infer(
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
     thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
-    let shaped = request::shape(encoded.body, client_version, &identity, &caps, || {
-        fallback_session_id(provider)
-    })
+    let shaped = request::shape(
+        encoded.body,
+        client_version,
+        &identity,
+        &caps,
+        auto_output_limit,
+        || fallback_session_id(provider),
+    )
     .map_err(invalid)?;
     let headers = request::inference_headers(
         access_token(provider)?,
@@ -516,6 +527,7 @@ mod tests {
                 parent_session_id: Some(&parent),
             },
             &capabilities::ModelCapabilities::default(),
+            false,
             || fallback_session_id(&provider),
         ).unwrap();
         let body: Value = serde_json::from_slice(&shaped.body).unwrap();
