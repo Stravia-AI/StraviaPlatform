@@ -9,6 +9,7 @@ pub(super) async fn configure_gateway_extensions(
 ) -> anyhow::Result<()> {
     agent_definitions.push(stravia_web_search::local_search_definition());
     agent_definitions.push(stravia_media::media_definition());
+    agent_definitions.push(stravia_media::audio_definition());
     gateway
         .agent_definitions
         .synchronize(agent_definitions)
@@ -75,15 +76,28 @@ pub(super) async fn configure_gateway_extensions(
         stravia_runtime_contract::agent::AgentDefinitionId::new(stravia_media::MEDIA_DEFINITION_ID),
         stravia_media::MEDIA_DEFINITION_REVISION,
         agent::CapabilityModelAuthorization::MediaUnderstanding,
+    )
+    .with_capability_model_authorization(
+        stravia_runtime_contract::agent::AgentDefinitionId::new(stravia_media::AUDIO_DEFINITION_ID),
+        stravia_media::AUDIO_DEFINITION_REVISION,
+        agent::CapabilityModelAuthorization::MediaUnderstanding,
     );
     if let Some(store) = gateway.media_derivatives.as_ref() {
-        runner = runner.with_output_validator(
-            stravia_runtime_contract::agent::AgentDefinitionId::new(
-                stravia_media::MEDIA_DEFINITION_ID,
-            ),
-            stravia_media::MEDIA_DEFINITION_REVISION,
-            Arc::new(stravia_media::MediaReportValidator::new(Arc::clone(store))),
-        );
+        runner = runner
+            .with_output_validator(
+                stravia_runtime_contract::agent::AgentDefinitionId::new(
+                    stravia_media::MEDIA_DEFINITION_ID,
+                ),
+                stravia_media::MEDIA_DEFINITION_REVISION,
+                Arc::new(stravia_media::MediaReportValidator::new(Arc::clone(store))),
+            )
+            .with_output_validator(
+                stravia_runtime_contract::agent::AgentDefinitionId::new(
+                    stravia_media::AUDIO_DEFINITION_ID,
+                ),
+                stravia_media::AUDIO_DEFINITION_REVISION,
+                Arc::new(stravia_media::MediaReportValidator::new(Arc::clone(store))),
+            );
     }
     if let Some(store) = gateway.media_derivatives.as_ref() {
         *gateway.media_understanding.write().await =
@@ -223,7 +237,8 @@ impl agent::AgentToolAuthorizer for GatewayAgentToolAuthorizer {
         let security = crate::proxy::security::Security::new(self.storage.auth());
         let capability_owned = definition_id.as_str()
             == stravia_web_search::LOCAL_SEARCH_DEFINITION_ID
-            || definition_id.as_str() == stravia_media::MEDIA_DEFINITION_ID;
+            || definition_id.as_str() == stravia_media::MEDIA_DEFINITION_ID
+            || definition_id.as_str() == stravia_media::AUDIO_DEFINITION_ID;
         if capability_owned {
             security.authorize_principal_capability(principal).await
         } else {

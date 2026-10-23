@@ -21,6 +21,12 @@ pub trait MediaAgentHost: Send + Sync {
         parent: &AgentTurnId,
         definition: &AgentDefinitionId,
     ) -> Result<Vec<ArtifactId>, AgentRunError>;
+    /// 续接 Turn 所属的 Definition，用于在没有新 Artifact 时判定模态。
+    async fn parent_definition_id(
+        &self,
+        principal: &Principal,
+        parent: &AgentTurnId,
+    ) -> Result<AgentDefinitionId, AgentRunError>;
     fn run(&self, input: AgentInput) -> AgentEventStream;
 }
 
@@ -56,6 +62,8 @@ pub struct MediaTarget {
 pub struct MediaRoute {
     pub id: String,
     pub is_enabled: bool,
+    /// Route 声明的输出模态为文本。图片输出的生成 Route 即使接受图片输入，也不能承担理解。
+    pub text_output: bool,
     pub targets: Vec<MediaTarget>,
 }
 #[derive(Debug)]

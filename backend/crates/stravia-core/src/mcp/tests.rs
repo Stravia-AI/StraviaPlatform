@@ -514,11 +514,14 @@ async fn media_test_app_with_answer(
         .expect("Media Model");
     gateway
         .admin()
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: true,
-            model_id: Some(model.id.into()),
-            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: Some(model.id.into()),
+                thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
+            },
+        )
         .await
         .expect("enable Media Understanding");
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1057,11 +1060,14 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         .expect("Media config");
     app.gateway
         .admin()
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: false,
-            model_id: current.model_id,
-            thinking_level: current.thinking_level,
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: false,
+                model_id: current.image.model_id,
+                thinking_level: current.image.thinking_level,
+            },
+        )
         .await
         .expect("disable Media Understanding");
 

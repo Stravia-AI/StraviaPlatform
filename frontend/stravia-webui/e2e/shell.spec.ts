@@ -215,7 +215,14 @@ for (const path of standardPages) {
   test(`page header on ${path} is one title row without eyebrow or description`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.route('**/api/v1/media-understanding', (route) =>
-      route.fulfill({ json: { data: { enabled: false, state: 'disabled', eligible_models: [] } } }),
+      route.fulfill({
+        json: {
+          data: {
+            image: { enabled: false, state: 'disabled', eligible_models: [] },
+            audio: { enabled: false, state: 'disabled', eligible_models: [] },
+          },
+        },
+      }),
     )
     await page.route('**/api/v1/reversible-redaction/rules', (route) =>
       route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),

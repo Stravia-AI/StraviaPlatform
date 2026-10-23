@@ -13,9 +13,14 @@ pub(super) async fn get_media_understanding_handler(
 
 pub(super) async fn update_media_understanding_handler(
     State(gw): State<Gateway>,
+    Path(kind): Path<stravia_media::MediaKind>,
     Json(input): Json<MediaUnderstandingConfigUpdate>,
 ) -> impl IntoResponse {
-    match gw.admin().update_media_understanding_config(input).await {
+    match gw
+        .admin()
+        .update_media_understanding_config(kind, input)
+        .await
+    {
         Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
         Err(error) => media_understanding_config_error(error),
     }

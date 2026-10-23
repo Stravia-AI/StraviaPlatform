@@ -76,6 +76,7 @@ import type {
   EligibleSearchModel,
   ExternalSearchRoute,
   MediaUnderstandingConfigView,
+  MediaUnderstandingKind,
   UpdateMediaUnderstandingConfig,
   MediaGenerationConfig,
   MediaGenerationConfigView,
@@ -266,8 +267,8 @@ export const admin = {
   },
   mediaUnderstanding: {
     get: () => request<MediaUnderstandingConfigView>('GET', '/media-understanding'),
-    update: (input: UpdateMediaUnderstandingConfig) =>
-      request<MediaUnderstandingConfigView>('PUT', '/media-understanding', input),
+    update: (kind: MediaUnderstandingKind, input: UpdateMediaUnderstandingConfig) =>
+      request<MediaUnderstandingConfigView>('PUT', `/media-understanding/${kind}`, input),
   },
   mediaGeneration: {
     config: {

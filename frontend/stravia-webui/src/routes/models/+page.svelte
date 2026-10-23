@@ -154,8 +154,11 @@ const deletesWebSearchRoute = $derived(
     webSearchQuery.data.backend.model_id === deleteTarget.id,
   ),
 )
-const deletesMediaUnderstandingRoute = $derived(
-  Boolean(deleteTarget && mediaUnderstandingQuery.data?.model_id === deleteTarget.id),
+const deletesImageUnderstandingRoute = $derived(
+  Boolean(deleteTarget && mediaUnderstandingQuery.data?.image.model_id === deleteTarget.id),
+)
+const deletesAudioUnderstandingRoute = $derived(
+  Boolean(deleteTarget && mediaUnderstandingQuery.data?.audio.model_id === deleteTarget.id),
 )
 
 function destinationSummary(model: Route): RouteDestinationSummary {
@@ -430,9 +433,14 @@ async function deleteModel(): Promise<void> {
           {m.models_web_search_no_longer_has_model()}
         </p>
       {/if}
-      {#if deletesMediaUnderstandingRoute}
+      {#if deletesImageUnderstandingRoute}
         <p class="text-sm text-warning">
           {m.models_image_understanding_no_longer_have_model_use()}
+        </p>
+      {/if}
+      {#if deletesAudioUnderstandingRoute}
+        <p class="text-sm text-warning">
+          {m.models_audio_understanding_no_longer_have_model_use()}
         </p>
       {/if}
     </div>

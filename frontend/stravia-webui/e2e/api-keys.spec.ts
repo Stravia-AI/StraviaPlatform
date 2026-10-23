@@ -42,7 +42,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     await route.fulfill({ json: { data: { enabled: false } } })
   })
   await page.route('**/api/v1/media-understanding', async (route) => {
-    await route.fulfill({ json: { data: { enabled: false } } })
+    await route.fulfill({ json: { data: { image: { enabled: false }, audio: { enabled: false } } } })
   })
   await page.route('**/api/v1/media-generation/config', async (route) => {
     await route.fulfill({
@@ -365,7 +365,9 @@ async function mockLayoutKey(page: Page, update?: (route: Route) => Promise<void
     else await route.fulfill({ json: { data: advancedKey } })
   })
   await page.route('**/api/v1/web-search/config', (route) => route.fulfill({ json: { data: { enabled: true } } }))
-  await page.route('**/api/v1/media-understanding', (route) => route.fulfill({ json: { data: { enabled: false } } }))
+  await page.route('**/api/v1/media-understanding', (route) =>
+    route.fulfill({ json: { data: { image: { enabled: false }, audio: { enabled: false } } } }),
+  )
   await page.route('**/api/v1/media-generation/config', (route) =>
     route.fulfill({
       json: {

@@ -51,7 +51,9 @@ const mediaGenerationQuery = createQuery(() => ({
   queryFn: admin.mediaGeneration.config.get,
 }))
 const webSearchStatus = $derived(capabilityStatus(webSearchQuery, (config) => config.enabled))
-const mediaUnderstandingStatus = $derived(capabilityStatus(mediaUnderstandingQuery, (config) => config.enabled))
+const mediaUnderstandingStatus = $derived(
+  capabilityStatus(mediaUnderstandingQuery, (config) => config.image.enabled || config.audio.enabled),
+)
 const mediaGenerationStatus = $derived(capabilityStatus(mediaGenerationQuery, (config) => config.config.enabled))
 let editorOpen = $state(false)
 let editorApiKey = $state<ApiKey>()

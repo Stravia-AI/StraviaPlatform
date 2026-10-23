@@ -169,11 +169,14 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
         .expect("parent Model");
     let search_model = configure_route_with_id(&gateway, "read-scope-search", &[search_url]).await;
     admin
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: true,
-            model_id: Some(parent.id.clone().into()),
-            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: Some(parent.id.clone().into()),
+                thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
+            },
+        )
         .await
         .expect("enable Media Understanding");
     let source = admin
@@ -373,11 +376,14 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .await
         .expect("Media Model");
     admin
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: true,
-            model_id: Some(media_model.id.into()),
-            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: Some(media_model.id.into()),
+                thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
+            },
+        )
         .await
         .expect("enable Media Understanding");
     let api_key = admin
@@ -745,11 +751,14 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
         .expect("independent Media Understanding Route");
     gateway
         .admin()
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: true,
-            model_id: Some(media_model.id.into()),
-            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: Some(media_model.id.into()),
+                thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
+            },
+        )
         .await
         .expect("enable Media Understanding for bridge");
     let key = gateway
@@ -869,11 +878,14 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
 
     gateway
         .admin()
-        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
-            enabled: false,
-            model_id: None,
-            thinking_level: None,
-        })
+        .update_media_understanding_config(
+            stravia_media::MediaKind::Image,
+            stravia_media::admin::MediaUnderstandingConfigUpdate {
+                enabled: false,
+                model_id: None,
+                thinking_level: None,
+            },
+        )
         .await
         .expect("restore unavailable bridge for unsupported Target assertion");
     let unsupported_response = execute_non_stream_request_with_headers(

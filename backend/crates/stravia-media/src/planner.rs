@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use stravia_runtime_contract::Principal;
 
 use crate::host::MediaRoute as Route;
+use crate::types::MediaKind;
 use stravia_runtime_contract::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
     HookSession, ReadExposureScope, RequestKind, RequestPatch, ResponsePatch, SessionContext,
@@ -139,7 +140,8 @@ impl HookSession for MediaPlanningSession {
                     "No eligible Target can continue Media Understanding",
                 ));
             }
-            if !transparent_bridge_available(&self.gateway, &self.principal, read_scope).await {
+            if !transparent_bridge_available(&self.gateway, &self.principal, read_scope, None).await
+            {
                 return Ok(reject(
                     503,
                     "media_understanding_unavailable",
@@ -193,7 +195,13 @@ impl HookSession for MediaPlanningSession {
             });
         }
         if bridge_targets.is_empty()
-            || !transparent_bridge_available(&self.gateway, &self.principal, read_scope).await
+            || !transparent_bridge_available(
+                &self.gateway,
+                &self.principal,
+                read_scope,
+                Some(MediaKind::Image),
+            )
+            .await
         {
             return Ok(reject(
                 400,
@@ -260,13 +268,18 @@ impl HookSession for MediaPlanningSession {
     }
 }
 
+/// `kind` 为 `None` 时只要任一模态可用即可（续接已有媒体结果，模态由父 Turn 决定）。
 async fn transparent_bridge_available(
     gateway: &crate::host::MediaRuntime,
     principal: &Principal,
     read_scope: ReadExposureScope,
+    kind: Option<MediaKind>,
 ) -> bool {
-    super::platform::is_available(gateway, principal).await
-        && (read_scope.media() || gateway.host.transparent_injection_enabled(principal).await)
+    let available = match kind {
+        Some(kind) => super::platform::is_available(gateway, principal, kind).await,
+        None => super::platform::is_any_available(gateway, principal).await,
+    };
+    available && (read_scope.media() || gateway.host.transparent_injection_enabled(principal).await)
 }
 
 fn materialize_media_turns(
@@ -410,6 +423,7 @@ mod tests {
         let route = Route {
             id: "media-route".into(),
             is_enabled: true,
+            text_output: true,
             targets: vec![
                 crate::host::MediaTarget {
                     provider_id: "native".into(),

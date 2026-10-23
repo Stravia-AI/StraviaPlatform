@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Media understanding now accepts WAV, MP3, FLAC, OGG, AAC and AIFF audio through `StraviaRead` and the media bridge. Audio has its own enable switch, model and thinking level on the Media understanding page, separate from images and documents. Admin API change: `GET /api/v1/media-understanding` now returns `{ image, audio }`, and settings are saved per kind with `PUT /api/v1/media-understanding/{kind}` (`image` or `audio`) instead of `PUT /api/v1/media-understanding`.
+
 ### Changed
 
 - The destination provider selector in the model editor is now a searchable combobox.

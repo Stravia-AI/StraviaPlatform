@@ -74,9 +74,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             "/media-generation/eligible-routes",
             get(eligible_media_generation_routes),
         )
+        .route("/media-understanding", get(get_media_understanding_handler))
         .route(
-            "/media-understanding",
-            get(get_media_understanding_handler).put(update_media_understanding_handler),
+            "/media-understanding/{kind}",
+            put(update_media_understanding_handler),
         )
         .route("/catalog/providers", get(catalog_providers_handler))
         .route("/catalog/models", get(canonical_models_handler))

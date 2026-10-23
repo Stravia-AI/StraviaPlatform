@@ -15,6 +15,21 @@ pub(super) struct ParentAgentSnapshot {
 }
 
 impl AgentRunner {
+    /// 父 Turn 所属的 Definition；调用方据此在没有新 Artifact 时判定续接的模态。
+    pub(crate) async fn parent_definition_id(
+        &self,
+        principal: &Principal,
+        parent: &AgentTurnId,
+    ) -> Result<AgentDefinitionId, AgentRunError> {
+        let context = self.load_parent_context(principal, Some(parent)).await?;
+        context
+            .snapshot
+            .map(|snapshot| snapshot.definition_id)
+            .ok_or_else(|| {
+                AgentRunError::new("parent_turn_unavailable", "Parent Turn is unavailable")
+            })
+    }
+
     pub(crate) async fn parent_artifact_ids(
         &self,
         principal: &Principal,
@@ -41,7 +56,8 @@ impl AgentRunner {
                 continue;
             };
             for block in blocks {
-                let ContentBlock::Image { source, .. } = block else {
+                let (ContentBlock::Image { source, .. } | ContentBlock::Audio { source }) = block
+                else {
                     continue;
                 };
                 let id = match source {

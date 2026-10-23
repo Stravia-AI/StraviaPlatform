@@ -10,12 +10,13 @@ use stravia_runtime_contract::hook::{
 };
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 
-use super::{MediaUnderstandingInput, MediaUnderstandingService};
+use super::{MediaKind, MediaUnderstandingInput, MediaUnderstandingService};
 
 pub const MEDIA_TOOL_ID: &str = "media-understanding";
-pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts and Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) using OCR, description, comparison, or visual reasoning.";
+pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts and Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) using OCR, description, comparison, or visual reasoning, or WAV, MP3, FLAC, OGG, AAC, or AIFF audio Artifacts by transcription, summary, or answering questions about the audio. A call must not mix audio with images or documents.";
 pub const MEDIA_TOOL_NAME: &str = "StraviaRead";
 
+/// 目标是否能原生接收图片输入；只描述输入，不代表适合承担理解。
 pub fn model_is_image_capable(model: &crate::host::MediaRoute) -> bool {
     model.is_enabled
         && !model.targets.is_empty()
@@ -26,9 +27,28 @@ pub fn model_is_image_capable(model: &crate::host::MediaRoute) -> bool {
 }
 
 pub fn supports_image(input_modalities: &[String]) -> bool {
+    supports_modality(input_modalities, "image")
+}
+
+pub fn supports_audio(input_modalities: &[String]) -> bool {
+    supports_modality(input_modalities, "audio")
+}
+
+fn supports_modality(input_modalities: &[String], modality: &str) -> bool {
     input_modalities
         .iter()
-        .any(|modality| modality.eq_ignore_ascii_case("image"))
+        .any(|declared| declared.eq_ignore_ascii_case(modality))
+}
+
+/// 能否绑定为某类理解模型：已启用，Route 声明文本输出，且每个 Target 都接受该模态的输入。
+pub fn model_is_eligible(model: &crate::host::MediaRoute, kind: MediaKind) -> bool {
+    model.is_enabled
+        && model.text_output
+        && !model.targets.is_empty()
+        && model.targets.iter().all(|target| match kind {
+            MediaKind::Image => supports_image(&target.input_modalities),
+            MediaKind::Audio => supports_audio(&target.input_modalities),
+        })
 }
 
 pub fn tools(gateway: &crate::host::MediaRuntime) -> Vec<Arc<dyn PlatformTool>> {
@@ -44,13 +64,13 @@ pub fn input_schema() -> Value {
             "prompt": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The OCR, description, comparison, or visual reasoning task. UTF-8 encoding must not exceed 64 KiB."
+                "description": "The OCR, description, comparison, visual reasoning, transcription, or audio question task. UTF-8 encoding must not exceed 64 KiB."
             },
             "artifacts": {
                 "type": "array",
                 "maxItems": 8,
                 "default": [],
-                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_path; duplicate paths within one call are rejected.",
+                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts, or WAV, MP3, FLAC, OGG, AAC, or AIFF audio source Artifacts, in stable order; one call must not mix audio with images or documents. Retained ancestor sources are reused when continuing previous_path; duplicate paths within one call are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -108,22 +128,36 @@ pub fn output_schema() -> Value {
     })
 }
 
-pub async fn is_available(gateway: &crate::host::MediaRuntime, principal: &Principal) -> bool {
+pub async fn is_available(
+    gateway: &crate::host::MediaRuntime,
+    principal: &Principal,
+    kind: MediaKind,
+) -> bool {
     let service = gateway.host.service().await;
     let Some(service) = service else {
         return false;
     };
-    let Some(model_id) = service.model_id().await else {
+    let Some(model_id) = service.model_id(kind).await else {
         return false;
     };
     let model = gateway.host.active_route(&model_id).await;
     let Some(model) = model else {
         return false;
     };
-    if !model_is_image_capable(&model) {
+    if !model_is_eligible(&model, kind) {
         return false;
     }
     gateway.host.authorize_capability(principal).await
+}
+
+/// 任一模态可用即视为多模态理解入口可见；具体调用再按所需模态单独判定。
+pub async fn is_any_available(gateway: &crate::host::MediaRuntime, principal: &Principal) -> bool {
+    for kind in MediaKind::ALL {
+        if is_available(gateway, principal, kind).await {
+            return true;
+        }
+    }
+    false
 }
 
 pub async fn execute_until(
@@ -133,7 +167,7 @@ pub async fn execute_until(
     cancellation: CancellationToken,
     deadline: std::time::Instant,
 ) -> Result<Value, Value> {
-    if !is_available(gateway, &principal).await {
+    if !is_any_available(gateway, &principal).await {
         return Err(unavailable_error());
     }
     let input: MediaUnderstandingInput = serde_json::from_value(arguments).map_err(|_| {
@@ -146,8 +180,15 @@ pub async fn execute_until(
     })?;
     let service: MediaUnderstandingService =
         gateway.host.service().await.ok_or_else(unavailable_error)?;
+    let kind = service
+        .resolve_kind(&principal, &input)
+        .await
+        .map_err(|error| serde_json::json!({ "error": error }))?;
+    if !is_available(gateway, &principal, kind).await {
+        return Err(unavailable_error());
+    }
     let result = service
-        .execute_until(principal, input, cancellation, deadline)
+        .execute_until(principal, kind, input, cancellation, deadline)
         .await
         .map_err(|error| serde_json::json!({ "error": error }))?;
     serde_json::to_value(result).map_err(|_| {

@@ -10,7 +10,7 @@
 
 Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的图片 path 调用；默认描述与 OCR，Artifact Reference 的指定问题放在 `?question=` 中。普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
-用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时支持静态 JPEG、PNG 与 WebP 图片，以及 Office 文档（DOCX、XLSX、PPTX、DOC、XLS、PPT）的 Markdown 提取与内嵌图片归一化；页面不展示或承诺未来格式。
+用户可见名称采用“多模态理解”，为未来 PDF 和视频扩展保留产品语义。运行时支持静态 JPEG、PNG 与 WebP 图片，Office 文档（DOCX、XLSX、PPTX、DOC、XLS、PPT）的 Markdown 提取与内嵌图片归一化，以及 WAV、MP3、FLAC、OGG、AAC、AIFF 音频；页面不展示或承诺未来格式。图片（含文档）与音频是两种独立模态：各自拥有 internal Definition、启用开关、逻辑 Model 与思考等级，一次理解调用不得混用音频与图片/文档。
 
 平台 Gate 开启后，每个有效 API Key 都能通过统一入口显式请求理解。关闭后，该分流不可调用，但所属 Artifact 的 `?download=1` 不受媒体开关影响。API Key 的 Transparent Injection 只选择本次自动暴露的能力，不承担显式授权；执行层仍检查本次暴露范围。
 
@@ -92,7 +92,7 @@ bridge 会：
 
 ## 5. 内部执行
 
-Media Understanding 使用 `id = "media-understanding"`、Revision 3 的 internal Agent Definition。它不出现在 Agent Admin list，也不生成通用 `agent_*` surface。
+图片与文档使用 `id = "media-understanding"`、Revision 3 的 internal Agent Definition；音频使用 `id = "audio-understanding"`、Revision 1 的 internal Agent Definition。两者共用同一套执行、Report 校验与 capability-owned authorization，只在模型绑定、输入模态与 Artifact 策略上不同。它们不出现在 Agent Admin list，也不生成通用 `agent_*` surface。
 
 执行复用：
 
@@ -113,7 +113,9 @@ Media Understanding 使用 `id = "media-understanding"`、Revision 3 的 interna
 - static `image/webp`；
 - Office 文档：DOCX、XLSX、PPTX、DOC、XLS、PPT（各自的标准 MIME）。
 
-运行时依据实际 container 解码，不只信 MIME。GIF、animated WebP、HEIC/HEIF、SVG、PDF、视频和音频会返回明确的不支持错误。Office 文档校验声明 MIME 与 container magic（ZIP 或 Compound File Binary），ZIP 族先做条目数与声明解压总量 preflight，再由 `office_oxide` 解析；加密、损坏、ODF、XLSB 及 MIME 与 container 不一致的输入返回明确错误。
+运行时依据实际 container 解码，不只信 MIME。GIF、animated WebP、HEIC/HEIF、SVG、PDF 和视频会返回明确的不支持错误。Office 文档校验声明 MIME 与 container magic（ZIP 或 Compound File Binary），ZIP 族先做条目数与声明解压总量 preflight，再由 `office_oxide` 解析；加密、损坏、ODF、XLSB 及 MIME 与 container 不一致的输入返回明确错误。
+
+音频只校验声明 MIME 与容器魔数（WAV、MP3、FLAC、OGG、AAC/ADTS、AIFF），不解码也不转码，字节原样交给音频理解模型；具体 Target 能否接受某种封装由传输层按协议判定。单个音频源与单次 Turn 的音频合计上限均为 20 MiB。音频与图片/文档不得出现在同一次理解调用中；续接 Turn 沿用父 Turn 的 Definition 与模态。
 
 每个图片 source Artifact 首次使用时生成 write-once JPEG derivative：应用 orientation、白底合成 alpha、限制尺寸、移除 metadata，并把 mapping 持久化。公开 contract 和 Media Report 始终引用 source Artifact，不暴露 derivative ID。
 
@@ -138,8 +140,10 @@ Core Admin 与 Server/Desktop 共用：
 
 ```text
 GET /api/v1/media-understanding
-PUT /api/v1/media-understanding
+PUT /api/v1/media-understanding/{kind}
 ```
+
+`GET` 返回 `{ "image": <view>, "audio": <view> }`；`PUT` 的 `{kind}` 为 `image` 或 `audio`，body 为 `{ enabled, model_id, thinking_level }`，只修改该模态并返回完整视图。每个 `<view>` 含 `enabled`、`model_id`、`thinking_level`、`state` 与 `eligible_models`。音频的候选 Model 要求所有已启用 Target 支持音频输入且输出文本；图片沿用既有的图片输入规则。
 
 WebUI route：
 
@@ -147,7 +151,7 @@ WebUI route：
 /media-understanding
 ```
 
-页面只显示：
+页面按“图片与文档”“音频”两个区段，每段只显示：
 
 - enabled；
 - logical Model；
@@ -176,7 +180,8 @@ Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既
 - Transparent Injection 关闭时显式 MCP 仍可用；
 - Gate 关闭时保存的注入选择保留但不生效；
 - native vision Target 优先于 bridge；
-- 只有每个 Target 都支持图片输入的已启用逻辑 Model 才会出现在配置列表；
+- 只有每个 Target 都支持图片输入的已启用逻辑 Model 才会出现在图片配置列表；只有每个 Target 都支持音频输入且输出文本的已启用逻辑 Model 才会出现在音频配置列表；
+- 图片与音频的绑定、启用状态互不影响；
 - 配置的思考等级必须由逻辑 Model 的每个 Target 支持，并应用到每次内部 Model Turn；
 - 无 native Target 时 bridge 仍可执行完整 Media Report；
 - JPEG/PNG/WebP 成功，不支持的未来格式返回明确错误；

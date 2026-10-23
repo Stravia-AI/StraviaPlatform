@@ -75,6 +75,12 @@ pub enum PreparedMedia {
     Document(PreparedDocument),
 }
 
+/// 已通过 MIME、大小与魔数校验的音频源；没有 derivative，模型直接收到源 Artifact。
+#[derive(Debug, Clone)]
+pub struct PreparedAudio {
+    pub source: ArtifactRef,
+}
+
 impl PreparedMedia {
     /// The declared source Artifact.
     pub fn source(&self) -> &ArtifactRef {
@@ -291,6 +297,74 @@ impl MediaInputPreprocessor {
                 #[cfg(any(test, feature = "test-support"))]
                 derivative_bytes,
             }));
+        }
+        check_normalization_budget(cancellation, deadline)?;
+        Ok(prepared)
+    }
+
+    /// 读取 Artifact 元数据中的 MIME，用于在预处理前判定理解模态。
+    pub async fn inspect_mime(
+        &self,
+        principal: &Principal,
+        id: &ArtifactId,
+    ) -> Result<String, MediaPreprocessError> {
+        self.store
+            .inspect_artifact(principal, id)
+            .await
+            .map(|artifact| artifact.mime_type)
+            .map_err(MediaPreprocessError::from)
+    }
+
+    /// 音频源不生成 derivative：校验 MIME、大小与容器魔数后，源 Artifact 原样交给模型。
+    pub async fn preprocess_audio_until(
+        &self,
+        principal: &Principal,
+        source_ids: &[ArtifactId],
+        cancellation: &stravia_runtime_contract::CancellationToken,
+        deadline: Instant,
+    ) -> Result<Vec<PreparedAudio>, MediaPreprocessError> {
+        use crate::audio::{
+            MAX_AUDIO_SOURCE_BYTES, MAX_AUDIO_TURN_BYTES, bytes_match_mime, is_supported_audio_mime,
+        };
+        check_normalization_budget(cancellation, deadline)?;
+        if source_ids.len() > MAX_MEDIA_ARTIFACTS {
+            return Err(MediaPreprocessError::TooManyArtifacts);
+        }
+        let mut seen = HashSet::with_capacity(source_ids.len());
+        let mut total = 0_u64;
+        let mut prepared = Vec::with_capacity(source_ids.len());
+        for source_id in source_ids {
+            check_normalization_budget(cancellation, deadline)?;
+            if !seen.insert(source_id.clone()) {
+                return Err(MediaPreprocessError::DuplicateArtifact);
+            }
+            let source = self
+                .store
+                .inspect_artifact(principal, source_id)
+                .await
+                .map_err(MediaPreprocessError::from)?;
+            if !is_supported_audio_mime(&source.mime_type) {
+                return Err(MediaPreprocessError::UnsupportedType);
+            }
+            if source.size == 0 || source.size > MAX_AUDIO_SOURCE_BYTES {
+                return Err(MediaPreprocessError::SourceTooLarge);
+            }
+            total = total
+                .checked_add(source.size)
+                .ok_or(MediaPreprocessError::SourceAggregateTooLarge)?;
+            if total > MAX_AUDIO_TURN_BYTES {
+                return Err(MediaPreprocessError::SourceAggregateTooLarge);
+            }
+            let (_, prefix) = self
+                .store
+                .read_artifact_prefix(principal, source_id, 16)
+                .await
+                .map_err(MediaPreprocessError::from)?;
+            check_normalization_budget(cancellation, deadline)?;
+            if !bytes_match_mime(&source.mime_type, &prefix) {
+                return Err(MediaPreprocessError::MimeMismatch);
+            }
+            prepared.push(PreparedAudio { source });
         }
         check_normalization_budget(cancellation, deadline)?;
         Ok(prepared)
