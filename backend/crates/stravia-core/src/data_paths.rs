@@ -71,6 +71,12 @@ impl<'a> DataPaths<'a> {
         self.root.join("cache")
     }
 
+    /// Wasmtime 官方持久编译缓存目录，位于数据目录内、与 Provider Catalog
+    /// 共用 `cache` 根；目录创建与权限由运行时负责。
+    pub fn wasmtime_cache(&self) -> PathBuf {
+        self.catalog_root().join("wasmtime")
+    }
+
     pub fn desktop_port(&self) -> PathBuf {
         self.root.join("state/desktop-port.json")
     }

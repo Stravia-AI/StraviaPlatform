@@ -552,13 +552,13 @@ mod tests {
     #[tokio::test]
     async fn native_session_is_reused_until_app_exit_revokes_it() {
         let data = tempfile::tempdir().expect("isolated native identity");
-        let storage = Gateway::open_storage(&GatewayConfig {
+        let prepared = Gateway::prepare(GatewayConfig {
             data_dir: data.path().to_path_buf(),
             ..Default::default()
         })
         .await
         .expect("native identity storage");
-        let auth = AdminAuth::new(storage);
+        let auth = AdminAuth::new(Arc::clone(prepared.storage()));
         let session = NativeAdminSession::initialize(auth.clone())
             .await
             .expect("native identity should initialize");

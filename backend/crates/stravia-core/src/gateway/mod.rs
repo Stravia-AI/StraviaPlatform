@@ -52,6 +52,13 @@ pub enum RuntimeStorageKind {
     Postgres,
 }
 
+/// 已完成连接、迁移和健康检查的存储；尚未启动 Gateway 后台任务。
+/// 配置与真实连接池一起保留，随后消费此值启动 Gateway，不再重复打开数据库。
+pub struct PreparedGateway {
+    config: GatewayConfig,
+    runtime: StorageRuntime,
+}
+
 pub struct Gateway {
     pub config: GatewayConfig,
     pub storage: DynStorage,

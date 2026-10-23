@@ -17,6 +17,8 @@ pub enum LoadError {
     DescriptorInvalid(String),
     #[error("plugin canonical format {actual} is not supported (expected {expected})")]
     CanonicalFormat { actual: u32, expected: u32 },
+    #[error("persistent compilation cache is unavailable: {0}")]
+    CompilationCache(String),
 }
 
 /// Execution failures format only host-owned summaries. Guest-provided error

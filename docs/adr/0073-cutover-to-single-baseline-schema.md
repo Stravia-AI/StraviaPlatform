@@ -25,6 +25,8 @@ SQLite 与 PostgreSQL 的历史 SQLx migration 已合并为 `0001_baseline.sql`�
 
 SQLite 重建表时只在固定连接上临时关闭外键检查，迁移后校验全部外键并恢复检查；失败或取消不能把外键关闭的连接放回池。PostgreSQL 的迁移专用连接在结束时关闭，避免失败或取消遗留会话级迁移锁。
 
+当连续成功历史已覆盖当前 migration 列表时，只校验历史与 checksum，不探测或重新运行已经完成的数据转换。SQLite 在返回前仍启用并确认外键约束，但不在每次普通重启时执行全库 `foreign_key_check`；只有待升级路径保留迁移前、后的全量外键检查。该取舍使无升级的迁移预检不再扫描业务行，但不把启动成功当作全库完整性证明；既有坏数据不会因此自动修复，新写入仍受外键约束。离线复制优化继续执行完整性与外键检查。
+
 ## 边界
 
 本决定取代 [ADR-0041](0041-own-database-connection-in-config-file.md) 中"旧布局停机后经 `stravia-tools migrate-data` 复制转换"的路径：`migrate-data` 只搬迁与优化具有受支持迁移前缀的数据根，不修改源 schema，由目标宿主启动时应用剩余迁移。旧布局与基线前 schema 仍拒绝；`--config`（旧 `database.path` 转换）与 `--webview-from`（旧 WebView 目录）入口仍移除。配置文件作为数据库连接唯一来源、统一数据根等契约本身不变。
