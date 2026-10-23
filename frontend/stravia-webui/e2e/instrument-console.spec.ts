@@ -1044,7 +1044,7 @@ test('Usage analytics keeps optional explanations in help tooltips instead of pe
     'Failed requests by time bucket.',
     'Requests, errors, and output speed for each provider.',
     'Client volume, Token usage, cache reads and writes, and last activity.',
-    'Share of total input and output tokens.',
+    'Share of reported input, output, cache-read, and cache-write tokens.',
     'Share of all requests.',
   ]) {
     await expect(main.getByText(removed, { exact: true })).toHaveCount(0)
@@ -1054,7 +1054,7 @@ test('Usage analytics keeps optional explanations in help tooltips instead of pe
   const tooltip = page.locator('[data-slot="tooltip-content"][data-state$="open"]')
   for (const [region, text] of [
     ['Token activity', 'Each cell'],
-    ['Token breakdown', 'Share of total input and output tokens.'],
+    ['Token breakdown', 'Share of reported input, output, cache-read, and cache-write tokens.'],
     ['Models', 'Share of all requests.'],
   ] as const) {
     const trigger = page
