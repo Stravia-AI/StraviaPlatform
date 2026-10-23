@@ -77,7 +77,8 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
   data-layout={layout}
   data-nested={nested ? 'true' : undefined}
   class={cn(
-    '@container/setting-row w-full min-w-0 max-w-[60rem] py-3',
+    // 单行设置保持 44px 的可点行高：标题行高 19.25px 加 24px 内边距只有 43.25px，低于触控与可读下限。
+    '@container/setting-row w-full min-w-0 max-w-[60rem] py-3 min-h-11',
     '[[data-slot=setting-row]+&]:border-t',
     nested && 'ms-2 w-auto max-w-[calc(60rem-0.5rem)] border-s ps-4',
     className,

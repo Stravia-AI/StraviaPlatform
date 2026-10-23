@@ -1300,7 +1300,10 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     .filter({ hasText: /GPT Test.*gpt-test/ })
     .click()
 
-  await expect(page.getByText('gpt-test', { exact: true })).toBeVisible()
+  // 编辑器替换模型清单后，模型 ID 只出现在编辑器页头：桌面表格与移动列表也在 DOM 中，需限定可见表面。
+  const modelEditor = page.locator('section[aria-labelledby="provider-model-editor-title"]')
+  await expect(modelEditor.getByRole('heading', { name: 'GPT Test', exact: true })).toBeVisible()
+  await expect(modelEditor.getByRole('button', { name: 'gpt-test', exact: true })).toBeVisible()
   const extensionFields = page.getByRole('button', { name: 'Extension fields (read only) · 1', exact: true })
   await expect(extensionFields).toHaveAttribute('aria-expanded', 'false')
   await extensionFields.click()

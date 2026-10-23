@@ -1,4 +1,4 @@
-import { openSync, truncateSync } from 'node:fs'
+import { truncateSync, writeFileSync } from 'node:fs'
 
 import { expect, test } from '@playwright/test'
 
@@ -384,7 +384,9 @@ test('importing several files validates each one, advances the queue, and keeps 
 
 test('a file over the 64 MiB limit is rejected before upload', async ({ page }, testInfo) => {
   const hugePath = testInfo.outputPath('huge.wasm')
-  truncateSync(openSync(hugePath, 'w'), 64 * 1024 * 1024 + 1)
+  // truncateSync 的 fd 形式只在 Bun 下可用；用路径形式，Node runner 也能运行本用例。
+  writeFileSync(hugePath, '')
+  truncateSync(hugePath, 64 * 1024 * 1024 + 1)
   await prepareApp(page)
   let importRequests = 0
   await page.route('**/api/v1/vendor-plugins', (route) => route.fulfill({ json: { data: [readyBase] } }))

@@ -1,4 +1,4 @@
-import { expect, test as base, type Page } from '@playwright/test'
+import { expect, test as base, type Locator, type Page } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -321,29 +321,36 @@ test('real management persists root and destination RPM limits and queue setting
 
   const readRpm = async () => JSON.parse(await api<string>(page, '/settings/rpm_admission')) as RpmConfig
   await goto('/settings?view=advanced')
+  // 队列设置以只读摘要呈现，编辑在 Sheet 中显式保存。
   const queue = page.locator('section[aria-labelledby="rpm-wait-title"]')
-  await queue.locator('#rpm-preferred-wait').fill('1500')
-  await queue.locator('#rpm-total-wait').fill('9000')
-  await queue.locator('#rpm-queue-capacity').fill('16')
-  const saveQueue = queue.locator('button[type="submit"]')
-  const saveQueueSettings = async () => {
+  const openQueue = async () => {
+    await queue.getByRole('button', { name: 'Edit', exact: true }).click()
+    const sheet = page.locator('[data-slot="sheet-content"]')
+    await expect(sheet.getByRole('heading', { name: 'Upstream RPM queue' })).toBeVisible()
+    return sheet
+  }
+  const saveQueueSettings = async (sheet: Locator) => {
     const [response] = await Promise.all([
       page.waitForResponse(
         (response) =>
           new URL(response.url()).pathname === '/api/v1/settings/rpm_admission' &&
           response.request().method() === 'PUT',
       ),
-      saveQueue.click(),
+      sheet.getByRole('button', { name: 'Save RPM settings', exact: true }).click(),
     ])
     expect(response.ok()).toBe(true)
-    await expect(saveQueue).toBeDisabled()
+    await expect(sheet).toBeHidden()
   }
-  await saveQueueSettings()
+  let queueSheet = await openQueue()
+  await queueSheet.locator('#rpm-preferred-wait').fill('1500')
+  await queueSheet.locator('#rpm-total-wait').fill('9000')
+  await queueSheet.locator('#rpm-queue-capacity').fill('16')
+  await saveQueueSettings(queueSheet)
   expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 9000, queue_capacity: 16 })
   await page.reload()
-  await expect(queue.locator('#rpm-preferred-wait')).toHaveValue('1500')
-  await expect(queue.locator('#rpm-total-wait')).toHaveValue('9000')
-  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('16')
+  await expect(queue).toContainText(/1,?500 ms/)
+  await expect(queue).toContainText(/9,?000 ms/)
+  await expect(queue).toContainText('16')
   await page.screenshot({ path: test.info().outputPath('rpm-queue-en.png'), fullPage: true })
 
   const catalogUrl = `/providers/${encodeURIComponent(provider.id)}?view=models`
@@ -365,8 +372,9 @@ test('real management persists root and destination RPM limits and queue setting
   await page.reload()
   await expect(rpmTrigger).toHaveAccessibleName('RPM limit for rpm-upstream: 30 RPM')
   await goto('/settings?view=advanced')
-  await queue.locator('#rpm-total-wait').fill('10000')
-  await saveQueueSettings()
+  queueSheet = await openQueue()
+  await queueSheet.locator('#rpm-total-wait').fill('10000')
+  await saveQueueSettings(queueSheet)
   expect(await readDestination()).toEqual({ provider_id: provider.id, model: 'rpm-upstream', rpm_limit: 30 })
   await goto(catalogUrl)
   await rpmTrigger.click()
@@ -473,11 +481,22 @@ test('real management persists root and destination RPM limits and queue setting
   await expect(rpmDialog).toBeHidden()
   expect(await readDestination()).toBeUndefined()
   await goto('/settings?view=advanced')
-  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('16')
-  await queue.locator('#rpm-queue-capacity').fill('24')
-  await saveQueueSettings()
+  await expect(queue).toContainText('16')
+  await queue.getByRole('button', { name: '编辑', exact: true }).click()
+  const zhQueueSheet = page.locator('[data-slot="sheet-content"]')
+  await expect(zhQueueSheet.getByRole('heading', { name: '上游 RPM 排队' })).toBeVisible()
+  await zhQueueSheet.locator('#rpm-queue-capacity').fill('24')
+  const [zhQueueResponse] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === '/api/v1/settings/rpm_admission' && response.request().method() === 'PUT',
+    ),
+    zhQueueSheet.getByRole('button', { name: '保存 RPM 设置', exact: true }).click(),
+  ])
+  expect(zhQueueResponse.ok()).toBe(true)
+  await expect(zhQueueSheet).toBeHidden()
   await page.reload()
-  await expect(queue.locator('#rpm-queue-capacity')).toHaveValue('24')
+  await expect(queue).toContainText('24')
   expect((await readRpm()).queue_capacity).toBe(24)
   expect(await queue.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)

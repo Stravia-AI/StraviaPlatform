@@ -794,6 +794,16 @@ html[lang='zh-CN'] .font-structural {
   }
 }
 
+/* 信息型 Tooltip（内容标记 pointer-events-none）连同浮层容器一起不参与命中测试：
+   小目标密集排列时（如活动方格），提示会盖住相邻目标，导致无法连续悬停。 */
+[data-bits-floating-content-wrapper]:has(> [data-slot='tooltip-content'].pointer-events-none) {
+  pointer-events: none;
+}
+
+[data-slot='tooltip-content'].pointer-events-none {
+  pointer-events: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
