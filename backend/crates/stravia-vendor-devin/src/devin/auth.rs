@@ -80,13 +80,16 @@ fn start(
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(code_verifier.as_bytes()));
     let auth_url = if manual {
+        // 与 `devin auth login --force-manual-token-flow` 打印的链接一致：不带 redirect_uri，
+        // 页面登录后直接展示授权码，由用户粘贴回来再用 code_verifier 兑换。
         build_url(
-            &format!("{WEBAPP_URL}/windsurf/signin"),
+            AUTHORIZE_URL,
             &[
-                ("response_type", "token"),
-                ("client_id", CLIENT_ID),
-                ("redirect_uri", MANUAL_REDIRECT_URI),
                 ("state", &state),
+                ("prompt", "select_account"),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+                ("cli_pkce_marker", "1"),
             ],
         )
     } else {
@@ -134,19 +137,13 @@ fn exchange(
 ) -> Result<AuthResponse, PluginError> {
     let pending = read_pending(host)?;
     if pending.manual {
-        let token = manual_token(callback_url).ok_or_else(|| {
+        let code = manual_code(callback_url).ok_or_else(|| {
             error(
                 ErrorKind::Invalid,
-                "manual Devin callback is missing a session token",
+                "manual Devin input is missing the authorization code",
             )
         })?;
-        return Ok(credentials_response(
-            token,
-            None,
-            provider_base_url(provider),
-            None,
-            None,
-        ));
+        return exchange_code(host, provider, &pending.code_verifier, &code);
     }
     let callback = url::Url::parse(callback_url)
         .map_err(|_| error(ErrorKind::Invalid, "invalid Devin OAuth callback URL"))?;
@@ -184,9 +181,18 @@ fn exchange(
                 "Devin OAuth callback is missing the authorization code",
             )
         })?;
+    exchange_code(host, provider, &pending.code_verifier, code)
+}
+
+fn exchange_code(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    code_verifier: &str,
+    code: &str,
+) -> Result<AuthResponse, PluginError> {
     let body = serde_json::to_vec(&serde_json::json!({
         "code": code,
-        "codeVerifier": pending.code_verifier,
+        "codeVerifier": code_verifier,
     }))
     .map_err(|err| {
         error(
@@ -381,26 +387,20 @@ fn build_url(base: &str, params: &[(&str, &str)]) -> String {
     format!("{base}?{query}")
 }
 
-fn manual_token(input: &str) -> Option<String> {
+/// 手动模式粘贴的内容：授权页展示的授权码本身，或包含 `code=` 的回调 URL/查询串。
+fn manual_code(input: &str) -> Option<String> {
     let raw = input.trim();
     if raw.is_empty() {
         return None;
     }
-    if !raw.contains('=') {
-        return Some(raw.to_string());
-    }
     for part in raw.split(['?', '#', '&']) {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        if matches!(key, "session_token" | "access_token" | "api_key" | "token") {
-            let decoded = urlencoding::decode(value).ok()?.into_owned();
-            if !decoded.trim().is_empty() {
-                return Some(decoded);
-            }
+        if let Some(value) = part.strip_prefix("code=") {
+            let decoded = urlencoding::decode(value).ok()?.trim().to_string();
+            return (!decoded.is_empty()).then_some(decoded);
         }
     }
-    None
+    // 没有 `code=` 的 URL/查询串不是授权码，不能原样送去兑换。
+    (!raw.contains("://") && !raw.contains('&')).then(|| raw.to_string())
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> PluginError {
@@ -408,5 +408,28 @@ fn error(kind: ErrorKind, message: impl Into<String>) -> PluginError {
         kind,
         message: message.into(),
         upstream_status: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manual_code;
+
+    #[test]
+    fn manual_code_accepts_a_bare_code_or_a_code_parameter() {
+        assert_eq!(manual_code("  abc-123 \n").as_deref(), Some("abc-123"));
+        assert_eq!(manual_code("code=abc%2B123").as_deref(), Some("abc+123"));
+        assert_eq!(
+            manual_code("http://localhost/cb?state=s&code=abc#frag").as_deref(),
+            Some("abc")
+        );
+    }
+
+    #[test]
+    fn manual_code_rejects_input_without_a_code() {
+        assert_eq!(manual_code("  "), None);
+        assert_eq!(manual_code("code="), None);
+        assert_eq!(manual_code("https://app.devin.ai/auth?state=s"), None);
+        assert_eq!(manual_code("state=s&other=1"), None);
     }
 }

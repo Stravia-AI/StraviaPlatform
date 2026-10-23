@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Devin manual sign-in now follows the Devin CLI: it opens the `app.devin.ai` authorization page (previously a `/windsurf/signin` URL that returned 404), and the pasted authorization code is exchanged with PKCE for the session token instead of being stored as the token itself.
 - Selected values in the Connect clients selectors (client, API format, model, API key, Claude mappings) now truncate inside the control instead of pushing the chevron out of view.
 - The time-range preset selector on the Usage and Request history pages is wide enough for its longest label, so its chevron no longer overflows the control.
 

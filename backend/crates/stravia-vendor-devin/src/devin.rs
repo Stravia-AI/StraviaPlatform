@@ -121,8 +121,8 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                     }),
                     manual_input: Some(AuthManualInput {
                         input_type: AuthManualInputType::Text,
-                        label: crate::messages::manual_token(),
-                        description: Some(crate::messages::manual_token_description()),
+                        label: crate::messages::manual_code(),
+                        description: Some(crate::messages::manual_code_description()),
                         secret: true,
                     }),
                 }),

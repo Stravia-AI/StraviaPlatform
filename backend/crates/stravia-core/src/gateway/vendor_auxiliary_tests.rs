@@ -35,6 +35,8 @@ const DEVIN_TOKEN_PATH: &str =
     "/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode";
 const DEVIN_ALLOWANCE_PATH: &str = "/exa.seat_management_pb.SeatManagementService/GetUserStatus";
 const DEVIN_MODELS_PATH: &str = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
+const DEVIN_MANUAL_CODE: &str = "devin-manual-code";
+const DEVIN_CONTRACT_TOKEN: &str = "devin-contract-token";
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -415,6 +417,72 @@ async fn start_devin_session(
             },
         )
         .await
+}
+
+/// 手动登录会产生一次真实的授权码兑换；这里应答该兑换，让其余路径复用同一个会话令牌。
+fn devin_token_response(request: &ObservedRequest) -> Option<LocalResponse> {
+    (request.path == DEVIN_TOKEN_PATH).then(|| {
+        LocalResponse::json(json!({
+            "sessionToken": DEVIN_CONTRACT_TOKEN,
+            "apiServerUrl": DEVIN_BASE_URL
+        }))
+    })
+}
+
+/// 走手动授权码流程登录；`server` 必须通过 `devin_token_response` 应答兑换请求。
+async fn sign_in_devin_manually(
+    gateway: &Gateway,
+    server: &mut LocalTlsServer,
+) -> anyhow::Result<crate::auth::AuthSessionInitData> {
+    let authorization = gateway
+        .admin()
+        .init_oauth_session(
+            AuthSessionCandidate {
+                vendor_id: "devin".into(),
+                channel: "devin".into(),
+                provider_id: None,
+                base_url: DEVIN_BASE_URL.into(),
+                protocol: Some("devin-connect".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            OAuthSessionStartOptions {
+                callback_mode: OAuthCallbackMode::Manual,
+                redirect_uri: "chisel-show-auth-token".into(),
+                listener_port: None,
+                fallback_reason: None,
+            },
+        )
+        .await?;
+    let auth_url = authorization
+        .auth_url
+        .as_deref()
+        .context("manual Devin authorization URL")?;
+    gateway
+        .admin()
+        .complete_oauth_session(
+            &authorization.session_id,
+            AuthCompletionInput {
+                input: AuthCompletionValue::Manual {
+                    value: DEVIN_MANUAL_CODE.into(),
+                },
+            },
+        )
+        .await?;
+    let exchange = tokio::time::timeout(Duration::from_secs(10), server.requests.recv())
+        .await?
+        .context("manual Devin code exchange")?;
+    assert_eq!(exchange.path, DEVIN_TOKEN_PATH);
+    let body: Value = serde_json::from_slice(&exchange.body)?;
+    assert_eq!(body["code"], DEVIN_MANUAL_CODE);
+    let verifier = body["codeVerifier"].as_str().context("PKCE verifier")?;
+    assert_eq!(
+        query_parameter(auth_url, "code_challenge")?,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()))
+    );
+    Ok(authorization)
 }
 
 fn devin_oauth_provider(name: &str) -> CreateProvider {
@@ -1669,7 +1737,10 @@ async fn guard_save_after_suspension_submission_gets_successor_evidence() -> any
     let server_release = release_successor.clone();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_calls = calls.clone();
-    let mut server = local_tls_server(2, move |_| {
+    let mut server = local_tls_server(3, move |request| {
+        if let Some(response) = devin_token_response(request) {
+            return response;
+        }
         let successor = server_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0;
         // Devin retains exhausted daily/weekly windows, unlike DeepSeek's
         // zero-balance currency filtering. Omitted percentages are proto3 zero.
@@ -1715,38 +1786,7 @@ async fn guard_save_after_suspension_submission_gets_successor_evidence() -> any
         .build()?;
     gateway.vendor_http_client = client.clone();
     gateway.vendor_websocket_client = client;
-    let authorization = gateway
-        .admin()
-        .init_oauth_session(
-            AuthSessionCandidate {
-                vendor_id: "devin".into(),
-                channel: "devin".into(),
-                provider_id: None,
-                base_url: DEVIN_BASE_URL.into(),
-                protocol: Some("devin-connect".into()),
-                options: Default::default(),
-                credentials: Default::default(),
-                use_proxy: false,
-            },
-            OAuthSessionStartOptions {
-                callback_mode: OAuthCallbackMode::Manual,
-                redirect_uri: "chisel-show-auth-token".into(),
-                listener_port: None,
-                fallback_reason: None,
-            },
-        )
-        .await?;
-    gateway
-        .admin()
-        .complete_oauth_session(
-            &authorization.session_id,
-            AuthCompletionInput {
-                input: AuthCompletionValue::Manual {
-                    value: "session_token=devin-contract-token".into(),
-                },
-            },
-        )
-        .await?;
+    let authorization = sign_in_devin_manually(&gateway, &mut server).await?;
     let provider = gateway
         .admin()
         .create_provider_with_oauth_session(
@@ -1888,7 +1928,8 @@ async fn guard_save_after_suspension_submission_gets_successor_evidence() -> any
             .unwrap(),
         snapshot
     );
-    assert_eq!(server.task.await??.len(), 2);
+    // 一次授权码兑换加两次额度请求。
+    assert_eq!(server.task.await??.len(), 3);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     Ok(())
 }
@@ -2285,45 +2326,17 @@ async fn devin_slow_model_discovery_publishes_the_confirmed_inventory() -> anyho
     config.extend(proto_string(22, "contract-delayed-model"));
     config.extend(proto_len(23, &proto_string(23, "contract-delayed-model")));
     let body = proto_len(1, &config);
-    let mut server = local_tls_server(1, move |_| {
+    let mut server = local_tls_server(2, move |request| {
+        if let Some(response) = devin_token_response(request) {
+            return response;
+        }
         let mut response = LocalResponse::protobuf(body.clone());
         response.release = Some(Arc::clone(&server_release));
         response
     })
     .await?;
     let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
-    let authorization = gateway
-        .admin()
-        .init_oauth_session(
-            AuthSessionCandidate {
-                vendor_id: "devin".into(),
-                channel: "devin".into(),
-                provider_id: None,
-                base_url: DEVIN_BASE_URL.into(),
-                protocol: Some("devin-connect".into()),
-                options: Default::default(),
-                credentials: Default::default(),
-                use_proxy: false,
-            },
-            OAuthSessionStartOptions {
-                callback_mode: OAuthCallbackMode::Manual,
-                redirect_uri: "chisel-show-auth-token".into(),
-                listener_port: None,
-                fallback_reason: None,
-            },
-        )
-        .await?;
-    gateway
-        .admin()
-        .complete_oauth_session(
-            &authorization.session_id,
-            AuthCompletionInput {
-                input: AuthCompletionValue::Manual {
-                    value: "session_token=devin-contract-token".into(),
-                },
-            },
-        )
-        .await?;
+    let authorization = sign_in_devin_manually(&gateway, &mut server).await?;
     let provider = gateway
         .admin()
         .create_provider_with_oauth_session(
@@ -2380,41 +2393,13 @@ async fn devin_slow_model_discovery_publishes_the_confirmed_inventory() -> anyho
 #[tokio::test]
 async fn devin_allowance_uses_real_tls_protobuf_request_and_decodes_credit_windows()
 -> anyhow::Result<()> {
-    let mut server =
-        local_tls_server(1, |_| LocalResponse::protobuf(devin_allowance_fixture())).await?;
+    let mut server = local_tls_server(2, |request| {
+        devin_token_response(request)
+            .unwrap_or_else(|| LocalResponse::protobuf(devin_allowance_fixture()))
+    })
+    .await?;
     let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
-    let authorization = gateway
-        .admin()
-        .init_oauth_session(
-            AuthSessionCandidate {
-                vendor_id: "devin".into(),
-                channel: "devin".into(),
-                provider_id: None,
-                base_url: DEVIN_BASE_URL.into(),
-                protocol: Some("devin-connect".into()),
-                options: Default::default(),
-                credentials: Default::default(),
-                use_proxy: false,
-            },
-            OAuthSessionStartOptions {
-                callback_mode: OAuthCallbackMode::Manual,
-                redirect_uri: "chisel-show-auth-token".into(),
-                listener_port: None,
-                fallback_reason: None,
-            },
-        )
-        .await?;
-    gateway
-        .admin()
-        .complete_oauth_session(
-            &authorization.session_id,
-            AuthCompletionInput {
-                input: AuthCompletionValue::Manual {
-                    value: "session_token=devin-contract-token".into(),
-                },
-            },
-        )
-        .await?;
+    let authorization = sign_in_devin_manually(&gateway, &mut server).await?;
     let provider = gateway
         .admin()
         .create_provider_with_oauth_session(
@@ -2508,6 +2493,99 @@ async fn devin_allowance_uses_real_tls_protobuf_request_and_decodes_credit_windo
             .any(|window| window == b"devin-contract-token")
     );
     server.task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn devin_manual_flow_opens_the_cli_code_page_and_exchanges_the_pasted_code()
+-> anyhow::Result<()> {
+    let mut server = local_tls_server(1, |request| {
+        devin_token_response(request).expect("only the code exchange is expected")
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
+    let authorization = sign_in_devin_manually(&gateway, &mut server).await?;
+
+    // 与 `devin auth login --force-manual-token-flow` 相同：app.devin.ai 授权页，
+    // 不带 redirect_uri，页面直接展示可粘贴的授权码。
+    let auth_url = reqwest::Url::parse(authorization.auth_url.as_deref().expect("auth URL"))?;
+    assert_eq!(
+        auth_url.origin().ascii_serialization(),
+        "https://app.devin.ai"
+    );
+    assert_eq!(auth_url.path(), "/auth/cli/continue");
+    assert_eq!(
+        query_parameter(auth_url.as_str(), "code_challenge_method")?,
+        "S256"
+    );
+    assert_eq!(query_parameter(auth_url.as_str(), "cli_pkce_marker")?, "1");
+    assert!(auth_url.query_pairs().all(|(key, _)| key != "redirect_uri"));
+
+    let provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &authorization.session_id,
+            devin_oauth_provider("Devin manual code"),
+        )
+        .await?;
+    let credential = gateway
+        .storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("manual OAuth credential");
+    assert_eq!(credential.access_token, DEVIN_CONTRACT_TOKEN);
+    server.task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn devin_manual_input_without_a_code_is_rejected_before_any_exchange() -> anyhow::Result<()> {
+    let mut server = local_tls_server(1, |request| {
+        devin_token_response(request).expect("only the code exchange is expected")
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(&server, &["devin"]).await?;
+    let session = gateway
+        .admin()
+        .init_oauth_session(
+            AuthSessionCandidate {
+                vendor_id: "devin".into(),
+                channel: "devin".into(),
+                provider_id: None,
+                base_url: DEVIN_BASE_URL.into(),
+                protocol: Some("devin-connect".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            OAuthSessionStartOptions {
+                callback_mode: OAuthCallbackMode::Manual,
+                redirect_uri: "chisel-show-auth-token".into(),
+                listener_port: None,
+                fallback_reason: None,
+            },
+        )
+        .await?;
+    gateway
+        .admin()
+        .complete_oauth_session(
+            &session.session_id,
+            AuthCompletionInput {
+                input: AuthCompletionValue::Manual {
+                    value: "https://app.devin.ai/somewhere?state=abc".into(),
+                },
+            },
+        )
+        .await
+        .expect_err("a URL without a code is not an authorization code");
+    assert!(server.requests.try_recv().is_err());
+    gateway
+        .admin()
+        .cancel_oauth_session(&session.session_id)
+        .await?;
+    gateway.shutdown().await;
+    server.task.abort();
     Ok(())
 }
 

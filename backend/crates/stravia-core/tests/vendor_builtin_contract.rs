@@ -15,10 +15,10 @@ use stravia_core::admin::provider_allowance::{
 use stravia_core::auth::types::{
     AuthSessionCandidate, OAuthCallbackMode, OAuthSessionStartOptions,
 };
-use stravia_core::auth::{AuthCompletionInput, AuthCompletionValue};
 use stravia_core::config::GatewayConfig;
 use stravia_core::db::models::{
-    CreateApiKey, CreateProvider, CreateRoute, ProviderCredentialInput, ProviderSourceInput,
+    CreateApiKey, CreateProvider, CreateProviderRecord, CreateRoute, ProviderCredentialInput,
+    ProviderSourceInput, UpsertOAuthCredential,
 };
 use stravia_core::provider_models::CreateManualProviderModel;
 use stravia_core::storage::MemoryStorage;
@@ -2985,55 +2985,36 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     .await?;
     let (_directory, gateway) = gateway().await?;
     install_distributed_vendor_plugin(&gateway, "devin").await?;
-    let authorization = gateway
-        .admin()
-        .init_oauth_session(
-            AuthSessionCandidate {
-                vendor_id: "devin".into(),
-                channel: "devin".into(),
-                provider_id: None,
-                base_url: base_url.clone(),
-                protocol: Some("devin-connect".into()),
-                options: Default::default(),
-                credentials: Default::default(),
-                use_proxy: false,
-            },
-            OAuthSessionStartOptions {
-                callback_mode: OAuthCallbackMode::Manual,
-                redirect_uri: "chisel-show-auth-token".into(),
-                listener_port: None,
-                fallback_reason: None,
-            },
-        )
+    // 授权码兑换只发往固定的 server.codeium.com；这里不经过真实登录，直接写入已授权的凭据。
+    let provider = gateway
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "Devin contract provider".into(),
+            vendor: Some("devin".into()),
+            protocol: "devin-connect".into(),
+            base_url,
+            preset_key: None,
+            channel: Some("devin".into()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
+            auth_mode: "oauth".into(),
+            use_proxy: false,
+        })
         .await?;
     gateway
-        .admin()
-        .complete_oauth_session(
-            &authorization.session_id,
-            AuthCompletionInput {
-                input: AuthCompletionValue::Manual {
-                    value: "session_token=devin-test-token".into(),
-                },
-            },
-        )
-        .await?;
-    let provider = gateway
-        .admin()
-        .create_provider_with_oauth_session(
-            &authorization.session_id,
-            CreateProvider {
-                name: Some("Devin contract provider".into()),
-                source: ProviderSourceInput::Custom {
-                    vendor: "devin".into(),
-                    channel: "devin".into(),
-                    protocol: Some("devin-connect".into()),
-                    base_url,
-                    models_source: None,
-                    static_models: None,
-                },
-                credential: ProviderCredentialInput::None,
-                vendor_options: Default::default(),
-                use_proxy: false,
+        .storage
+        .oauth_credentials()
+        .upsert(
+            &provider.id,
+            UpsertOAuthCredential {
+                driver_key: "devin".into(),
+                scheme: "oauth_auth_code_pkce".into(),
+                access_token: "devin-test-token".into(),
+                ..UpsertOAuthCredential::default()
             },
         )
         .await?;

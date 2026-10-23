@@ -1,8 +1,8 @@
 {
   "channel_devin": "Devin",
   "channel_description": "Devin CLI OAuth 与 Connect-RPC API",
-  "manual_token": "Devin 令牌",
-  "manual_token_description": "粘贴 Devin CLI 授权流程返回的令牌。",
+  "manual_code": "授权码",
+  "manual_code_description": "粘贴登录 Devin 后页面显示的授权码。",
   "authentication": "身份验证",
   "session_token": "会话令牌",
   "session_token_description": "通过 OAuth 获取的 Devin 会话令牌，或手动粘贴的 Windsurf 令牌"

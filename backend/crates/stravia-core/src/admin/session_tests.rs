@@ -32,7 +32,7 @@ async fn manual_oauth_session_exposes_its_effective_callback_contract() -> anyho
 }
 
 #[tokio::test]
-async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<()> {
+async fn declared_manual_input_is_validated_by_the_guest() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway_with_vendors(&["devin"]).await?;
     let init = gw
         .admin()
@@ -60,18 +60,24 @@ async fn declared_manual_input_completes_through_the_guest() -> anyhow::Result<(
         init.manual_input.as_ref().map(|input| input.input_type),
         Some(stravia_vendor_sdk::AuthManualInputType::Text)
     );
-    let status = gw
-        .admin()
+    // 没有授权码的输入由 guest 拒绝，不触发任何上游兑换；会话保持可重试。
+    gw.admin()
         .complete_oauth_session(
             &init.session_id,
             AuthCompletionInput {
                 input: AuthCompletionValue::Manual {
-                    value: "session_token=test-session-token".into(),
+                    value: "https://app.devin.ai/auth?state=test-state".into(),
                 },
             },
         )
-        .await?;
-    assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
+        .await
+        .expect_err("input without an authorization code must be rejected by the guest");
+    assert!(
+        gw.admin()
+            .get_auth_session_record(&init.session_id)
+            .await?
+            .is_some()
+    );
     gw.shutdown().await;
     drop(gw);
     data_dir.close()?;
