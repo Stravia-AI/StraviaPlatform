@@ -106,6 +106,7 @@ impl ProviderAllowanceState {
                 self.inner.cache.remove(CACHE_DOMAIN, identity).await;
                 snapshot.status = ProviderAllowanceStatus::Error;
                 snapshot.plan_label = None;
+                snapshot.account_label = None;
                 snapshot.fetched_at = None;
                 snapshot.allowances.clear();
                 snapshot.models.clear();
@@ -184,6 +185,7 @@ impl CacheEntry {
             + snapshot.catalog_provider_id.len()
             + snapshot.channel.len()
             + snapshot.plan_label.as_ref().map_or(0, String::len)
+            + snapshot.account_label.as_ref().map_or(0, String::len)
             + snapshot.fetched_at.as_ref().map_or(0, String::len)
             + snapshot
                 .error
@@ -1046,16 +1048,20 @@ fn map_allowance_response(
         provider_name: provider.name.clone(),
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
-        plan_label: response
-            .plan_label
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
+        plan_label: trimmed_label(response.plan_label),
+        account_label: trimmed_label(response.account_label),
         status: ProviderAllowanceStatus::Fresh,
         allowances,
         models,
         fetched_at: Some(chrono::Utc::now().to_rfc3339()),
         error: None,
     })
+}
+
+fn trimmed_label(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allowance> {
@@ -1419,6 +1425,7 @@ fn error_snapshot(provider: &Provider, error: ProviderAllowanceError) -> Provide
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: None,
+        account_label: None,
         status: ProviderAllowanceStatus::Error,
         fetched_at: None,
         allowances: Vec::new(),
@@ -1444,6 +1451,7 @@ fn stale_or_error_snapshot(
         catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: previous.plan_label.clone(),
+        account_label: previous.account_label.clone(),
         status: ProviderAllowanceStatus::Stale,
         fetched_at: previous.fetched_at.clone(),
         allowances: previous.allowances.clone(),
@@ -1463,6 +1471,7 @@ mod tests {
             catalog_provider_id: "catalog".into(),
             channel: "default".into(),
             plan_label: None,
+            account_label: None,
             status,
             allowances: vec![map_allowance(sdk_item("USD")).expect("allowance")],
             models: Vec::new(),
@@ -1671,6 +1680,7 @@ mod tests {
             catalog_provider_id: "vendor".into(),
             channel: "default".into(),
             plan_label: None,
+            account_label: None,
             status: ProviderAllowanceStatus::Fresh,
             allowances: vec![map_allowance(item).expect("allowance")],
             models: Vec::new(),

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, GuestHost, HttpRequest, ModelAllowance,
@@ -47,7 +48,12 @@ pub(crate) fn execute(
     }
     let payload: Value = serde_json::from_slice(&body)
         .map_err(|_| retryable("Claude usage returned invalid JSON"))?;
-    parse(&payload).ok_or_else(|| retryable("Claude usage response has no allowance windows"))
+    let mut response = parse(&payload)
+        .ok_or_else(|| retryable("Claude usage response has no allowance windows"))?;
+    // 只取登录时保存的邮箱；`organization_name` 是组织名，不是账号标识。
+    response.account_label =
+        first_account_label([provider.credentials.get("email").and_then(Value::as_str)]);
+    Ok(response)
 }
 
 fn parse(payload: &Value) -> Option<AllowanceResponse> {
@@ -109,6 +115,7 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
             .map(|(model, allowances)| ModelAllowance { model, allowances })
             .collect(),
         plan_label: None,
+        account_label: None,
     })
 }
 

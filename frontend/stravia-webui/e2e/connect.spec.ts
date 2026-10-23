@@ -216,6 +216,24 @@ test('Wide workspace uses side labels and 16rem selects sharing one right edge, 
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
+test('Long selected values truncate inside the 16rem select and keep the chevron visible', async ({ page }) => {
+  await setup(page, [key('Production-automation-credential')])
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/connect')
+  await page.getByRole('tab', { name: 'Code', exact: true }).click()
+  await page.locator('#code-model').click()
+  await page.getByRole('option', { name: /My model/ }).click()
+  await expect(page.locator('#code-key')).toContainText('Production-automation-credential')
+  for (const id of ['code-protocol', 'code-model', 'code-key']) {
+    const trigger = page.locator(`#${id}`)
+    await expect(trigger).toBeVisible()
+    const overflow = await trigger.evaluate((el) => el.scrollWidth - el.clientWidth)
+    expect(overflow, `${id} content must not overflow its trigger`).toBeLessThanOrEqual(0)
+  }
+  const truncated = await page.locator('#code-key > span').evaluate((el) => el.scrollWidth > el.clientWidth)
+  expect(truncated).toBe(true)
+})
+
 test('Narrow control column stacks label above a bounded select and splits only at workspace width', async ({
   page,
 }) => {

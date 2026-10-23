@@ -1142,6 +1142,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
 
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 2 provider', { exact: true }).click()
+  await page.getByPlaceholder('Search providers').fill('Provider A')
+  await expect(page.getByRole('option', { name: 'Provider B' })).toHaveCount(0)
   await page.getByRole('option', { name: 'Provider A' }).click()
   await page.getByLabel('Destination 2 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()

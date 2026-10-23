@@ -285,7 +285,8 @@ function cliModelName(modelId: string): string | undefined {
               <Field.FieldGroup>
                 <ConnectControlRow label={m.connect_client()} labelFor="cli-tool" hint={selectedTool.description()}>
                   <Select.Root type="single" bind:value={cliToolId}>
-                    <Select.Trigger id="cli-tool" class="w-full">{selectedTool.name}</Select.Trigger>
+                    <Select.Trigger id="cli-tool" class="w-full min-w-0"
+                      ><span class="truncate">{selectedTool.name}</span></Select.Trigger>
                     <Select.Content
                       ><Select.Group
                         >{#each CLI_TOOLS as tool (tool.id)}<Select.Item value={tool.id} label={tool.name}
@@ -309,10 +310,12 @@ function cliModelName(modelId: string): string | undefined {
                       }
                     }
                     disabled={cliKeys.length === 0}>
-                    <Select.Trigger id="cli-key" class="w-full"
-                      >{selectedCliKey
-                        ? `${selectedCliKey.name} · ${maskApiKey(selectedCliKey.key)}`
-                        : m.connect_select_api_key()}</Select.Trigger>
+                    <Select.Trigger id="cli-key" class="w-full min-w-0"
+                      ><span class="truncate"
+                        >{selectedCliKey
+                          ? `${selectedCliKey.name} · ${maskApiKey(selectedCliKey.key)}`
+                          : m.connect_select_api_key()}</span
+                      ></Select.Trigger>
                     <Select.Content
                       ><Select.Group
                         >{#each cliKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
@@ -328,8 +331,10 @@ function cliModelName(modelId: string): string | undefined {
                   {#each claudeMappingRows as row (row.id)}
                     <ConnectControlRow label={row.label()} labelFor={row.id}>
                       <Select.Root type="single" bind:value={claudeModelIds[row.key]}>
-                        <Select.Trigger id={row.id} class="w-full"
-                          >{cliModelName(claudeModelIds[row.key]) ?? m.common_select_model()}</Select.Trigger>
+                        <Select.Trigger id={row.id} class="w-full min-w-0"
+                          ><span class="truncate"
+                            >{cliModelName(claudeModelIds[row.key]) ?? m.common_select_model()}</span
+                          ></Select.Trigger>
                         <Select.Content
                           ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
@@ -433,8 +438,9 @@ function cliModelName(modelId: string): string | undefined {
                   labelFor="code-protocol"
                   hint={codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}>
                   <Select.Root type="single" bind:value={codeProtocol}>
-                    <Select.Trigger id="code-protocol" class="w-full"
-                      >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</Select.Trigger>
+                    <Select.Trigger id="code-protocol" class="w-full min-w-0"
+                      ><span class="truncate">{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
+                      ></Select.Trigger>
                     <Select.Content
                       ><Select.Group
                         >{#each codeProtocols as protocol (protocol.id)}<Select.Item
@@ -446,9 +452,11 @@ function cliModelName(modelId: string): string | undefined {
                 </ConnectControlRow>
                 <ConnectControlRow label={m.common_model()} labelFor="code-model">
                   <Select.Root type="single" bind:value={codeModelId} disabled={models.length === 0}>
-                    <Select.Trigger id="code-model" class="w-full"
-                      >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
-                        (models.length ? m.common_select_model() : m.connect_add_model_first())}</Select.Trigger>
+                    <Select.Trigger id="code-model" class="w-full min-w-0"
+                      ><span class="truncate"
+                        >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
+                          (models.length ? m.common_select_model() : m.connect_add_model_first())}</span
+                      ></Select.Trigger>
                     <Select.Content><Select.Group>{@render logicalModelItems(models)}</Select.Group></Select.Content>
                   </Select.Root>
                 </ConnectControlRow>
@@ -462,10 +470,12 @@ function cliModelName(modelId: string): string | undefined {
                       }
                     }
                     disabled={codeKeys.length === 0}>
-                    <Select.Trigger id="code-key" class="w-full"
-                      >{selectedCodeKey
-                        ? `${selectedCodeKey.name} · ${maskApiKey(selectedCodeKey.key)}`
-                        : m.connect_select_api_key()}</Select.Trigger>
+                    <Select.Trigger id="code-key" class="w-full min-w-0"
+                      ><span class="truncate"
+                        >{selectedCodeKey
+                          ? `${selectedCodeKey.name} · ${maskApiKey(selectedCodeKey.key)}`
+                          : m.connect_select_api_key()}</span
+                      ></Select.Trigger>
                     <Select.Content
                       ><Select.Group
                         >{#each codeKeys as key (key.id)}<Select.Item value={key.id} label={key.name}

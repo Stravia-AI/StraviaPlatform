@@ -4,7 +4,16 @@
 
 ### Changed
 
+- The destination provider selector in the model editor is now a searchable combobox.
+- The Allowances remaining/used switch now uses the shared Tabs segmented style like other view switches, and the unused Toggle and ToggleGroup components are removed.
+- The Allowances page no longer repeats the pause-on-exhaustion sentence under every provider; the column help tooltip and each switch's label still explain it.
+- Allowance details now show the upstream account (email, else username, else nickname) instead of the provider type, for providers whose upstream reports one: Claude Code, Antigravity, Codex, Command Code, Kilo, Grok and GitHub Copilot. Providers without a readable identity show no account row. Vendor plugins can report it through the optional `account_label` field of the allowance response.
 - Navigation pages now share a centered 120rem content container. Configuration fields stay within a left-aligned 60rem settings column, while Console Chat keeps a centered 56rem reading width. Page headers omit redundant eyebrows and descriptions, field explanations use accessible help tooltips, and necessary risk and data-flow information stays visible. Settings use task-based groups with inline saves or explicit multi-field Sheets; resource Sheets share unsaved-draft confirmation and saving locks.
+
+### Fixed
+
+- Selected values in the Connect clients selectors (client, API format, model, API key, Claude mappings) now truncate inside the control instead of pushing the chevron out of view.
+- The time-range preset selector on the Usage and Request history pages is wide enough for its longest label, so its chevron no longer overflows the control.
 
 ## [0.5.3] - 2026-10-23
 

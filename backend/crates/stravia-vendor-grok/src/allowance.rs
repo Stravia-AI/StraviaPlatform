@@ -36,7 +36,13 @@ pub(crate) fn execute(
     let headers = response.headers()?;
     check_grpc_status(&headers)?;
     let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
-    parse_xai(&body, current_unix_ms()?).map_err(|()| invalid_response())
+    let mut parsed = parse_xai(&body, current_unix_ms()?).map_err(|()| invalid_response())?;
+    // 额度接口不返回身份；`email` 在登录或刷新令牌时从 id_token 保存，旧凭据下次刷新后才有。
+    parsed.account_label = stravia_vendor_common::account::first_account_label([provider
+        .credentials
+        .get("email")
+        .and_then(serde_json::Value::as_str)]);
+    Ok(parsed)
 }
 
 fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
@@ -115,6 +121,7 @@ fn parse_xai(body: &[u8], now: i64) -> Result<AllowanceResponse, ()> {
         allowances: vec![allowance],
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     })
 }
 

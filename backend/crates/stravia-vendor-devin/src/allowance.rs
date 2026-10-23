@@ -157,6 +157,7 @@ fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {
         allowances,
         models: Vec::new(),
         plan_label,
+        account_label: None,
     })
 }
 

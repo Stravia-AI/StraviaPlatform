@@ -59,6 +59,7 @@ import ModelIdCombobox from '#lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '#lib/components/model-details-dialog.svelte'
 import ModelSpecification from '#lib/components/model-specification.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
+import ProviderCombobox from '#lib/components/provider-combobox.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
@@ -1239,26 +1240,15 @@ async function saveModel(): Promise<void> {
               <Field.Group class="grid gap-4 lg:grid-cols-2">
                 <Field.Field size="select">
                   <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
-                  <Select.Root
-                    type="single"
+                  <ProviderCombobox
+                    id={`target-provider-${target.key}`}
                     value={target.providerId}
-                    onValueChange={(value: string) => value && void changeProvider(target, value)}>
-                    <Select.Trigger
-                      id={`target-provider-${target.key}`}
-                      class="w-full"
-                      aria-label={m.model_editor_destination_value_model_service({ index: index + 1 })}>
-                      {providers.find((provider) => provider.id === target.providerId)?.name ??
-                        m.model_editor_choose_model_service()}
-                    </Select.Trigger>
-                    <Select.Content>
-                      <Select.Group>
-                        {#each availableProviders as provider (provider.id)}<Select.Item
-                            value={provider.id}
-                            label={provider.name}>{provider.name}</Select.Item
-                          >{/each}
-                      </Select.Group>
-                    </Select.Content>
-                  </Select.Root>
+                    providers={availableProviders}
+                    placeholder={m.model_editor_choose_model_service()}
+                    searchPlaceholder={m.model_editor_search_providers()}
+                    emptyText={m.provider_editor_no_matching_services()}
+                    ariaLabel={m.model_editor_destination_value_model_service({ index: index + 1 })}
+                    onSelect={(value: string) => void changeProvider(target, value)} />
                 </Field.Field>
 
                 <Field.Field size="fill">

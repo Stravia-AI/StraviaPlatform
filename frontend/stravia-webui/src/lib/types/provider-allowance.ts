@@ -61,6 +61,7 @@ export interface ProviderAllowanceSnapshot {
   catalog_provider_id: string
   channel: string
   plan_label?: string
+  account_label?: string
   status: ProviderAllowanceStatus
   allowances: Allowance[]
   models: ModelAllowance[]

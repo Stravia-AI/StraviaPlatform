@@ -267,6 +267,7 @@ mod tests {
             catalog_provider_id: "catalog".into(),
             channel: "default".into(),
             plan_label: None,
+            account_label: None,
             status,
             allowances: vec![allowance("account")],
             models: vec![ModelAllowance {

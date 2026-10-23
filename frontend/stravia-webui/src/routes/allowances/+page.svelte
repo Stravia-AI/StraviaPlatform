@@ -54,7 +54,7 @@ import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import * as Table from '#lib/components/ui/table/index.js'
-import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js'
+import * as Tabs from '#lib/components/ui/tabs/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 import AllowanceSuspension from '#lib/components/allowance-suspension.svelte'
 import { cn } from '#lib/utils.js'
@@ -94,7 +94,7 @@ onMount(() => {
 })
 
 function changeValueMode(next: string): void {
-  // 单选 ToggleGroup 再次点击当前项会给出空值；保持当前选择
+  // Tabs 回调给出 string；收窄为 ValueMode
   if (next !== 'remaining' && next !== 'used') return
   valueMode = next
   localStorage.setItem(VALUE_MODE_STORAGE_KEY, next)
@@ -172,7 +172,6 @@ const visibleAllowances = $derived(
   ),
 )
 const valueModeLabel = $derived(valueMode === 'used' ? m.allowances_used() : m.allowances_remaining())
-const valueModeItemClass = 'data-[state=on]:bg-accent data-[state=on]:text-accent-foreground'
 const overallCondition = $derived(
   worstAllowanceCondition(visibleAllowances.map(({ allowance }) => effectiveAllowanceCondition(allowance))),
 )
@@ -612,10 +611,6 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 {#snippet allowanceDetailTable(provider: VisibleProvider)}
   {@const snapshot = provider.snapshot}
   {@const guardSnapshot = snapshot?.guard_supported ? snapshot : undefined}
-  {#if guardSnapshot}
-    <!-- 风险常驻一句；完整解释在列头问号中 -->
-    <p class="pb-1 text-xs text-muted-foreground">{m.allowances_guard_effect()}</p>
-  {/if}
   <Table.Root
     class="table-fixed"
     aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
@@ -751,12 +746,12 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       <!-- Collapsible.Content 收起时仍保留隐藏 DOM；只在展开时渲染详情，避免每行常驻一份明细与开关 -->
       {#if expanded}
         <Collapsible.Content class="border-t bg-muted/10 px-2 pb-2 @md:ps-8">
-          <dl class="flex flex-wrap items-baseline gap-x-2 py-2 text-xs text-muted-foreground">
-            <dt>{m.allowances_detail_type()}</dt>
-            <dd class="font-technical break-all">
-              {provider.target.catalog_provider_id} / {provider.target.channel}
-            </dd>
-          </dl>
+          {#if snapshot?.account_label}
+            <dl class="flex flex-wrap items-baseline gap-x-2 py-2 text-xs text-muted-foreground">
+              <dt>{m.allowances_detail_account()}</dt>
+              <dd class="break-all" data-testid={`allowance-account-${providerId}`}>{snapshot.account_label}</dd>
+            </dl>
+          {/if}
           {#if provider.allowances.length > 0}
             {@render allowanceDetailTable(provider)}
           {/if}
@@ -970,16 +965,12 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
         <section class="allowance-matrix-section route-section min-w-0" aria-labelledby="allowance-matrix-title">
           <div class="route-section-header items-center">
             <h2 id="allowance-matrix-title" class="route-section-title">{m.allowances_matrix_title()}</h2>
-            <ToggleGroup.Root
-              type="single"
-              variant="outline"
-              size="sm"
-              bind:value={() => valueMode, changeValueMode}
-              aria-label={m.allowances_value_mode()}>
-              <ToggleGroup.Item value="remaining" class={valueModeItemClass}
-                >{m.allowances_remaining()}</ToggleGroup.Item>
-              <ToggleGroup.Item value="used" class={valueModeItemClass}>{m.allowances_used()}</ToggleGroup.Item>
-            </ToggleGroup.Root>
+            <Tabs.Root bind:value={() => valueMode, changeValueMode}>
+              <Tabs.List aria-label={m.allowances_value_mode()}>
+                <Tabs.Trigger value="remaining">{m.allowances_remaining()}</Tabs.Trigger>
+                <Tabs.Trigger value="used">{m.allowances_used()}</Tabs.Trigger>
+              </Tabs.List>
+            </Tabs.Root>
           </div>
           {#if visibleProviders.length === 0}
             <Empty.Root class="p-8"

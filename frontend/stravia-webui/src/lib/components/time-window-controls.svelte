@@ -65,8 +65,8 @@ let {
 
 <div class="window-controls">
   <Select.Root type="single" {value} onValueChange={(next: string) => onpreset(next)}>
-    <Select.Trigger aria-label={selectLabel} class="w-28">
-      {selectedLabel}
+    <Select.Trigger aria-label={selectLabel} class="w-40 min-w-0">
+      <span class="truncate">{selectedLabel}</span>
     </Select.Trigger>
     <Select.Content portalProps={{ to: portalTarget }}>
       <Select.Group>

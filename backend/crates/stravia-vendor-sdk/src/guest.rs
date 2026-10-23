@@ -628,6 +628,11 @@ pub struct AllowanceResponse {
     #[serde(default)]
     pub models: Vec<ModelAllowance>,
     pub plan_label: Option<String>,
+    /// One human-readable identity of the upstream account (email, else
+    /// username, else nickname). Never an opaque ID, token, or organization.
+    /// Absent when the upstream cannot report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

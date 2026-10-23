@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common::plugin_error;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
@@ -18,12 +19,16 @@ pub(crate) fn execute(
         "retrieveUserQuotaSummary",
         &json!({"project": project}),
     )?;
-    parse(&payload).ok_or_else(|| {
+    let mut response = parse(&payload).ok_or_else(|| {
         plugin_error(
             ErrorKind::upstream_unknown(),
             "Upstream quota summary has no valid allowances or an unsupported shape",
         )
-    })
+    })?;
+    // 登录时由 Google id_token 的 `email`、`name` 声明保存。
+    let stored = |key: &str| provider.credentials.get(key).and_then(Value::as_str);
+    response.account_label = first_account_label([stored("email"), stored("name")]);
+    Ok(response)
 }
 
 fn text<'a>(object: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
@@ -63,6 +68,7 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
         allowances: items.into_values().collect(),
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     })
 }
 

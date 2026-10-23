@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use base64::Engine;
 use serde_json::{Map, Value};
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot,
@@ -46,11 +49,24 @@ pub(super) fn execute(
         });
     }
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES)?;
-    parse(&body).ok_or_else(|| PluginError {
+    let mut parsed = parse(&body).ok_or_else(|| PluginError {
         kind: ErrorKind::upstream_unknown(),
         message: "upstream allowance response has an unsupported shape".into(),
         upstream_status: None,
-    })
+    })?;
+    parsed.account_label = account_label(&provider.credentials);
+    Ok(parsed)
+}
+
+/// usage 接口不返回身份；登录时保存的 OIDC `id_token` 带有 `email`、`name` 声明。
+fn account_label(credentials: &BTreeMap<String, Value>) -> Option<String> {
+    let id_token = credentials.get("raw")?.get("id_token")?.as_str()?;
+    let payload = id_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    first_account_label(["email", "name"].map(|claim| claims.get(claim).and_then(Value::as_str)))
 }
 
 fn account_id(provider: &ProviderSnapshot, access_token: &str) -> Option<String> {
@@ -145,6 +161,7 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
         allowances,
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     })
 }
 
@@ -281,8 +298,39 @@ fn window_label(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use std::collections::BTreeMap;
+
+    use base64::Engine;
+    use serde_json::{Value, json};
     use stravia_vendor_sdk::AllowanceAmount;
+
+    use super::{account_label, parse};
+
+    fn credentials_with_id_token(claims: Value) -> BTreeMap<String, Value> {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+        BTreeMap::from([(
+            "raw".to_owned(),
+            json!({"id_token": format!("header.{payload}.signature")}),
+        )])
+    }
+
+    #[test]
+    fn account_label_prefers_email_then_name_from_the_stored_id_token() {
+        let both = credentials_with_id_token(json!({"email": " a@example.test ", "name": "Alice"}));
+        assert_eq!(account_label(&both).as_deref(), Some("a@example.test"));
+        let name_only = credentials_with_id_token(json!({"email": " ", "name": "Alice"}));
+        assert_eq!(account_label(&name_only).as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn account_label_is_absent_without_a_readable_id_token_identity() {
+        assert_eq!(account_label(&BTreeMap::new()), None);
+        // 只有不透明的账户 ID 声明时不得退化成展示 ID。
+        let opaque = credentials_with_id_token(json!({"sub": "user-opaque-id"}));
+        assert_eq!(account_label(&opaque), None);
+        let broken = BTreeMap::from([("raw".to_owned(), json!({"id_token": "not-a-jwt"}))]);
+        assert_eq!(account_label(&broken), None);
+    }
 
     fn assert_credits(amount: &AllowanceAmount, value: &str) {
         assert_eq!(amount.value, value);

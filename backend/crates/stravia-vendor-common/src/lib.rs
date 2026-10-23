@@ -1,5 +1,6 @@
 //! Shared request, response, error, URL, and thinking utilities for Stravia vendor guests.
 
+pub mod account;
 pub mod common;
 pub mod icons;
 pub mod thinking;

@@ -30,6 +30,7 @@ pub(super) fn parse(value: Value) -> Result<AllowanceResponse, PluginError> {
         }],
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     })
 }
 pub(super) fn execute(
@@ -38,5 +39,10 @@ pub(super) fn execute(
 ) -> Result<AllowanceResponse, PluginError> {
     token(provider)?;
     // 已验证的组织由 headers() 附加组织头，此时返回组织共享余额。
-    parse(http_json(host, provider, "GET", "/api/profile/balance")?)
+    let mut response = parse(http_json(host, provider, "GET", "/api/profile/balance")?)?;
+    // 设备码授权和刷新时已从 /api/profile 保存 email、name。
+    let stored = |key: &str| provider.credentials.get(key).and_then(Value::as_str);
+    response.account_label =
+        stravia_vendor_common::account::first_account_label([stored("email"), stored("name")]);
+    Ok(response)
 }

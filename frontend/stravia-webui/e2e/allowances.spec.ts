@@ -16,6 +16,7 @@ const freshSnapshot = {
   catalog_provider_id: 'openai-codex',
   channel: 'codex',
   plan_label: 'Pro',
+  account_label: 'alpha@example.test',
   status: 'fresh',
   fetched_at: '2026-09-01T12:00:00Z',
   allowances: [
@@ -668,9 +669,20 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   )
 
   await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  // 详情只展示上游账号标识；供应商目录 ID / 渠道不再展示，没有标识的供应商不出现该行
+  await expect(page.getByTestId('allowance-account-provider-alpha')).toHaveText('alpha@example.test')
+  await expect(matrix.getByText('Account', { exact: true })).toHaveCount(1)
+  await expect(matrix.getByText('openai-codex / codex')).toHaveCount(0)
   await matrix.getByLabel('Show model allowances for Alpha account').click()
   await matrix.getByText('gpt-5.3-codex-spark').click()
   await expect(matrix.getByText(/Resets/).last()).toBeVisible()
+  await matrix.getByRole('button', { name: 'Beta account allowance details' }).click()
+  await expect(matrix.getByRole('button', { name: 'Beta account allowance details' })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  )
+  await expect(page.getByTestId('allowance-account-provider-beta')).toHaveCount(0)
+  await expect(matrix.getByText('openai / codex')).toHaveCount(0)
 
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
@@ -761,14 +773,14 @@ test('switches every allowance value between remaining and used and remembers th
   const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const alpha = matrix.getByTestId('allowance-provider-provider-alpha')
   const beta = matrix.getByTestId('allowance-provider-provider-beta')
-  const remaining = page.getByRole('radio', { name: 'Remaining' })
-  const used = page.getByRole('radio', { name: 'Used' })
-  await expect(remaining).toHaveAttribute('aria-checked', 'true')
+  const remaining = page.getByRole('tab', { name: 'Remaining' })
+  const used = page.getByRole('tab', { name: 'Used' })
+  await expect(remaining).toHaveAttribute('aria-selected', 'true')
   await expect(alpha).toContainText('44.38%')
   await expect(alpha).toContainText('9.99 CNY')
 
   await used.click()
-  await expect(used).toHaveAttribute('aria-checked', 'true')
+  await expect(used).toHaveAttribute('aria-selected', 'true')
   await expect(alpha).toContainText('55.63%')
   await expect(alpha).not.toContainText('44.38%')
   await expect(beta).toContainText('111.25%')
@@ -783,9 +795,9 @@ test('switches every allowance value between remaining and used and remembers th
   )
 
   await used.click()
-  await expect(used).toHaveAttribute('aria-checked', 'true')
+  await expect(used).toHaveAttribute('aria-selected', 'true')
   await page.reload()
-  await expect(page.getByRole('radio', { name: 'Used' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByRole('tab', { name: 'Used' })).toHaveAttribute('aria-selected', 'true')
   await expect(matrix.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
 })
 
@@ -1006,8 +1018,8 @@ test('keeps provider details and timeline expansion across filters and refreshes
   await alpha.getByRole('button', { name: 'Alpha account allowance details' }).click()
   const details = alpha.getByRole('table', { name: 'Alpha account allowance details' })
   await expect(details).toBeVisible()
-  // 供应商类型等元数据只在展开详情中
-  await expect(alpha.getByText('openai-codex / codex')).toBeVisible()
+  // 账号标识等元数据只在展开详情中
+  await expect(alpha.getByText('alpha@example.test')).toBeVisible()
   await page.getByRole('button', { name: 'Expand all' }).click()
   const timeline = page.getByRole('list', { name: 'Reset timeline' })
   await expect(timeline.getByRole('button', { name: /^Locate / })).toHaveCount(14)

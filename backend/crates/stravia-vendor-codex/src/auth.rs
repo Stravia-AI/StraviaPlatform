@@ -157,7 +157,30 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
         ("refresh_token", refresh_token),
         ("scope", SCOPE),
     ]);
-    credentials_response(token_request(host, form)?, Some(refresh_token))
+    let mut response = credentials_response(token_request(host, form)?, Some(refresh_token))?;
+    if let AuthResponse::Credentials { values, .. } = &mut response {
+        inherit_id_token(values, &provider.credentials);
+    }
+    Ok(response)
+}
+
+/// 刷新结果会整体替换已保存凭据，而刷新响应不保证重发 `id_token`；
+/// 缺失时沿用旧值，额度页的账号标识才不会在首次刷新后消失。
+fn inherit_id_token(values: &mut BTreeMap<String, Value>, previous: &BTreeMap<String, Value>) {
+    let readable = |value: &&Value| value.as_str().is_some_and(|token| !token.trim().is_empty());
+    let Some(raw) = values.get_mut("raw").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if raw.get("id_token").filter(readable).is_some() {
+        return;
+    }
+    if let Some(token) = previous
+        .get("raw")
+        .and_then(|raw| raw.get("id_token"))
+        .filter(readable)
+    {
+        raw.insert("id_token".into(), token.clone());
+    }
 }
 
 fn token_request(host: &GuestHost, form: String) -> Result<TokenResponse, PluginError> {
@@ -374,7 +397,38 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    fn refreshed_values(token: Value) -> BTreeMap<String, Value> {
+        let AuthResponse::Credentials { values, .. } =
+            credentials_response(serde_json::from_value(token).unwrap(), Some("old")).unwrap()
+        else {
+            panic!("expected credentials");
+        };
+        values
+    }
+
+    #[test]
+    fn refresh_keeps_the_saved_id_token_only_when_the_response_has_none() {
+        let previous = BTreeMap::from([("raw".to_owned(), json!({"id_token": "old.jwt.sig"}))]);
+        for token in [
+            json!({"access_token": "new"}),
+            json!({"access_token": "new", "id_token": " "}),
+        ] {
+            let mut values = refreshed_values(token);
+            inherit_id_token(&mut values, &previous);
+            assert_eq!(values["raw"]["id_token"], "old.jwt.sig");
+        }
+        let mut values =
+            refreshed_values(json!({"access_token": "new", "id_token": "new.jwt.sig"}));
+        inherit_id_token(&mut values, &previous);
+        assert_eq!(values["raw"]["id_token"], "new.jwt.sig");
+        let mut values = refreshed_values(json!({"access_token": "new"}));
+        inherit_id_token(&mut values, &BTreeMap::new());
+        assert!(values["raw"].get("id_token").is_none());
+    }
 
     #[test]
     fn refresh_conversion_preserves_credentials_and_rejects_malformed_upstream() {

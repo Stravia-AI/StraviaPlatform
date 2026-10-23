@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
@@ -27,6 +28,7 @@ pub(crate) fn execute(
         commandcode_request(&base_url, credential, "/alpha/billing/credits", &params),
     )?;
     let mut parsed = parse_credits(&credits).ok_or_else(invalid_response)?;
+    parsed.account_label = commandcode_account_label(&whoami);
 
     let subscription_body = optional_request(
         host,
@@ -191,6 +193,7 @@ fn parse_credits(body: &[u8]) -> Option<AllowanceResponse> {
         allowances,
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     })
 }
 
@@ -200,6 +203,16 @@ fn commandcode_org_id(body: &[u8]) -> Option<String> {
         .pointer("/org/id")
         .and_then(non_empty)
         .map(str::to_owned)
+}
+
+fn commandcode_account_label(body: &[u8]) -> Option<String> {
+    let payload: Value = serde_json::from_slice(body).ok()?;
+    let user = |field: &str| payload.pointer("/user").and_then(|user| user.get(field));
+    first_account_label(
+        ["email", "userName", "name"]
+            .into_iter()
+            .map(|field| user(field).and_then(Value::as_str)),
+    )
 }
 
 struct CommandCodeSubscription {
@@ -418,5 +431,37 @@ fn invalid_response() -> PluginError {
         kind: ErrorKind::upstream_unknown(),
         message: "upstream allowance response has an unsupported shape".into(),
         upstream_status: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commandcode_account_label;
+
+    #[test]
+    fn account_label_prefers_email_then_user_name_then_name() {
+        let label = |user: &str| {
+            commandcode_account_label(
+                format!(r#"{{"user":{user},"org":{{"id":"org-1"}}}}"#).as_bytes(),
+            )
+        };
+        assert_eq!(
+            label(r#"{"email":"a@example.test","userName":"alice","name":"Alice"}"#).as_deref(),
+            Some("a@example.test")
+        );
+        assert_eq!(
+            label(r#"{"email":" ","userName":"alice","name":"Alice"}"#).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(label(r#"{"name":"Alice"}"#).as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn account_label_ignores_organization_and_malformed_bodies() {
+        assert_eq!(
+            commandcode_account_label(br#"{"org":{"id":"org-1","name":"Acme"}}"#),
+            None
+        );
+        assert_eq!(commandcode_account_label(b"not json"), None);
     }
 }

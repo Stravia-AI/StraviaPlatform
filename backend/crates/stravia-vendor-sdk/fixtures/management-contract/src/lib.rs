@@ -428,6 +428,7 @@ fn allowance(
         allowances,
         models,
         plan_label: Some(format!("fixture-{}", Profile::current().version())),
+        account_label: Some(format!("  account-{}  ", Profile::current().version())),
     })
 }
 

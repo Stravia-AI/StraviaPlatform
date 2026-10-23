@@ -49,6 +49,10 @@ pub struct ProviderAllowanceSnapshot {
     pub channel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_label: Option<String>,
+    /// Human-readable upstream account identity reported by the vendor
+    /// (email, username or nickname); absent when the vendor has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub status: ProviderAllowanceStatus,
     pub allowances: Vec<Allowance>,
     pub models: Vec<ModelAllowance>,

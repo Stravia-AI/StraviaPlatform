@@ -712,11 +712,30 @@ fn xai_auth_refresh(
         .finish()
         .into_bytes();
     match token_request(host, token_endpoint, body, Some(refresh_token))? {
-        TokenResult::Ready(response) => Ok(response),
+        TokenResult::Ready(mut response) => {
+            if let AuthResponse::Credentials { values, .. } = &mut response {
+                inherit_email(values, &provider.credentials);
+            }
+            Ok(response)
+        }
         TokenResult::Pending(_) => Err(common::plugin_error(
             ErrorKind::upstream_unknown(),
             "xAI refresh unexpectedly remained pending",
         )),
+    }
+}
+
+/// 刷新结果会整体替换已保存凭据，而刷新响应不保证重发 `id_token`；
+/// 缺失时沿用已保存的邮箱，额度页的账号标识才不会在首次刷新后消失。
+fn inherit_email(values: &mut BTreeMap<String, Value>, previous: &BTreeMap<String, Value>) {
+    if values.contains_key("email") {
+        return;
+    }
+    if let Some(email) = previous
+        .get("email")
+        .filter(|value| value.as_str().is_some_and(|email| !email.trim().is_empty()))
+    {
+        values.insert("email".into(), email.clone());
     }
 }
 
@@ -806,12 +825,18 @@ fn token_response(
             ),
         );
     }
-    if let Some(subject) = value
+    let claims = value
         .get("id_token")
         .and_then(Value::as_str)
-        .and_then(jwt_subject)
-    {
-        values.insert("subject_id".into(), Value::String(subject));
+        .and_then(jwt_claims);
+    if let Some(claims) = &claims {
+        if let Some(subject) = claim_text(claims, &["email", "sub"]) {
+            values.insert("subject_id".into(), Value::String(subject));
+        }
+        // `subject_id` 在没有邮箱时退化为不透明的 `sub`，额度页的账号标识只认邮箱。
+        if let Some(email) = claim_text(claims, &["email"]) {
+            values.insert("email".into(), Value::String(email));
+        }
     }
     values.insert("raw".into(), value);
     Ok(TokenResult::Ready(AuthResponse::Credentials {
@@ -875,19 +900,22 @@ fn required_json_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, Plug
         })
 }
 
-fn jwt_subject(token: &str) -> Option<String> {
+fn jwt_claims(token: &str) -> Option<Value> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
         .ok()?;
-    let claims: Value = serde_json::from_slice(&decoded).ok()?;
-    claims
-        .get("email")
-        .or_else(|| claims.get("sub"))
-        .and_then(Value::as_str)
+    serde_json::from_slice(&decoded).ok()
+}
+
+/// 按顺序返回第一个去空白后非空的字符串声明。
+fn claim_text(claims: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .filter_map(|name| claims.get(*name).and_then(Value::as_str))
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .find(|value| !value.is_empty())
         .map(str::to_owned)
 }
 
@@ -972,6 +1000,49 @@ mod tests {
             .err()
             .expect("missing access token must fail");
         assert!(!matches!(error.kind, ErrorKind::Auth));
+    }
+
+    fn id_token(claims: Value) -> String {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("header.{payload}.signature")
+    }
+
+    fn credential_values(id_token: String) -> BTreeMap<String, Value> {
+        let result = token_response(
+            json!({"access_token":"new","id_token":id_token}),
+            "https://auth.x.ai/oauth2/token",
+            None,
+        )
+        .unwrap();
+        let TokenResult::Ready(AuthResponse::Credentials { values, .. }) = result else {
+            panic!("expected credentials");
+        };
+        values
+    }
+
+    #[test]
+    fn email_claim_is_stored_for_the_allowance_page_but_opaque_subject_is_not() {
+        let with_email =
+            credential_values(id_token(json!({"email":" a@example.test ","sub":"u-1"})));
+        assert_eq!(with_email["email"], "a@example.test");
+        assert_eq!(with_email["subject_id"], "a@example.test");
+        let subject_only = credential_values(id_token(json!({"sub":"u-1"})));
+        assert_eq!(subject_only["subject_id"], "u-1");
+        assert!(!subject_only.contains_key("email"));
+    }
+
+    #[test]
+    fn refresh_keeps_the_saved_email_only_when_the_response_has_none() {
+        let previous = BTreeMap::from([("email".to_owned(), json!("old@example.test"))]);
+        let mut without_identity = credential_values(String::new());
+        inherit_email(&mut without_identity, &previous);
+        assert_eq!(without_identity["email"], "old@example.test");
+        let mut renewed = credential_values(id_token(json!({"email": "new@example.test"})));
+        inherit_email(&mut renewed, &previous);
+        assert_eq!(renewed["email"], "new@example.test");
+        let mut nothing_saved = credential_values(String::new());
+        inherit_email(&mut nothing_saved, &BTreeMap::new());
+        assert!(!nothing_saved.contains_key("email"));
     }
 
     #[test]

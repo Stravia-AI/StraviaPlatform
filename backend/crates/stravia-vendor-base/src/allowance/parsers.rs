@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_sdk::{AllowanceAmount, AllowanceItem, AllowanceResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ pub(super) fn response(allowances: Vec<AllowanceItem>) -> AllowanceResponse {
         allowances,
         models: Vec::new(),
         plan_label: None,
+        account_label: None,
     }
 }
 
@@ -233,7 +235,10 @@ fn parse_github_copilot(payload: &Value) -> Result<AllowanceResponse, ()> {
         );
     }
     allowance.resets_at_unix_ms = payload.get("quota_reset_date").and_then(timestamp_millis);
-    Ok(response(vec![allowance]))
+    let mut parsed = response(vec![allowance]);
+    // GitHub 在该响应里只给用户名 `login`，没有邮箱。
+    parsed.account_label = first_account_label([payload.get("login").and_then(Value::as_str)]);
+    Ok(parsed)
 }
 
 fn parse_kimi(payload: &Value) -> Result<AllowanceResponse, ()> {
@@ -396,6 +401,7 @@ fn parse_zai(payload: &Value) -> Result<AllowanceResponse, ()> {
         allowances,
         models: Vec::new(),
         plan_label: data.get("level").and_then(non_empty).map(str::to_owned),
+        account_label: None,
     })
 }
 
@@ -599,6 +605,7 @@ fn parse_wafer(payload: &Value) -> Result<AllowanceResponse, ()> {
             .get("plan_tier")
             .and_then(non_empty)
             .map(str::to_owned),
+        account_label: None,
     })
 }
 
@@ -797,5 +804,25 @@ fn period_window_seconds(period: &str) -> Option<u64> {
         "monthly" | "month" => Some(30 * 86_400),
         "yearly" | "year" => Some(365 * 86_400),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Monitor, parse};
+
+    #[test]
+    fn copilot_reports_the_github_login_as_the_account() {
+        let body = br#"{"login":" octocat ","quota_snapshots":{"premium_interactions":{"entitlement":300,"remaining":120}}}"#;
+        let response = parse(Monitor::GitHubCopilot, body).unwrap();
+        assert_eq!(response.account_label.as_deref(), Some("octocat"));
+        let anonymous =
+            br#"{"quota_snapshots":{"premium_interactions":{"entitlement":300,"remaining":120}}}"#;
+        assert_eq!(
+            parse(Monitor::GitHubCopilot, anonymous)
+                .unwrap()
+                .account_label,
+            None
+        );
     }
 }

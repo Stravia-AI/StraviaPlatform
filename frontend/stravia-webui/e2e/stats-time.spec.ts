@@ -91,6 +91,17 @@ async function chooseRange(page: Page, start: string, end: string) {
 test.describe('statistics absolute time windows', () => {
   test.use({ timezoneId: 'UTC' })
 
+  test('the preset select keeps its chevron inside the control for the longest Chinese label', async ({ page }) => {
+    await page.clock.setFixedTime(NOW)
+    await fixture(page)
+    await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
+    await page.goto('/stats')
+    const trigger = page.locator('[data-slot="select-trigger"]')
+    await expect(trigger).toContainText('最近 24 小时')
+    expect(await trigger.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
+    expect(await trigger.locator('span').evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
+  })
+
   test('selected views retain each preset while activity independently queries earlier history', async ({ page }) => {
     await page.clock.setFixedTime(NOW)
     const requests = await fixture(page)

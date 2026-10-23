@@ -1874,6 +1874,8 @@ async fn compatible_update_keeps_old_management_work_and_routes_new_work_to_v2()
     new_request.reply(UpstreamReply::allowance("82"));
     let allowance = new_allowance.await??.expect("allowance snapshot");
     assert_eq!(allowance.plan_label.as_deref(), Some("fixture-2.0.0"));
+    // 插件回传的账号标识带首尾空白，核心层须裁剪后再暴露。
+    assert_eq!(allowance.account_label.as_deref(), Some("account-2.0.0"));
 
     old_request.reply(UpstreamReply::models());
     let summary = old_discovery.await??;
