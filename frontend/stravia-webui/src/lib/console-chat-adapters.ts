@@ -12,13 +12,6 @@ import type {
 } from '#lib/console-chat-types.js'
 
 const DATABASE_NAME = 'stravia-console-chat'
-// 这些事件之后响应已经收口；消费者据此结束循环时不应再断开响应体。
-const TERMINAL_EVENTS: Record<string, true> = {
-  'response.completed': true,
-  'response.incomplete': true,
-  'response.failed': true,
-  error: true,
-}
 const DATABASE_VERSION = 2
 const CONVERSATIONS = 'conversations'
 const PREFERENCES = 'preferences'
@@ -206,8 +199,6 @@ export const fetchResponsesTransport: ResponsesTransport = {
       },
     })
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-    // 收到终态事件后网关已经收口，此时主动取消会把完整送达的响应标记为 aborted。
-    let terminal = false
     try {
       while (!signal.aborted) {
         const { done, value } = await reader.read()
@@ -217,16 +208,13 @@ export const fetchResponsesTransport: ResponsesTransport = {
           return
         }
         parser.feed(value)
-        for (const event of events.splice(0)) {
-          if (TERMINAL_EVENTS[event.type]) terminal = true
-          yield event
-        }
+        for (const event of events.splice(0)) yield event
       }
       signal.throwIfAborted()
     } finally {
-      // 用户停止或提前离开时才关闭响应体，确保网关不继续执行已经离开的请求。
+      // 终态收口或用户停止都会关闭响应体，确保网关不继续执行已经离开的请求。
       try {
-        if (!terminal) await reader.cancel()
+        await reader.cancel()
       } finally {
         reader.releaseLock()
       }
