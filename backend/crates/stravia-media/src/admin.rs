@@ -4,6 +4,7 @@ use stravia_runtime_contract::agent::AgentDefinitionConfig;
 
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
+use crate::types::MediaKind;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -30,13 +31,20 @@ pub struct EligibleMediaModel {
     pub supported_thinking_levels: Vec<ThinkingLevel>,
 }
 
+/// 单个模态（图片/音频）的配置与有效状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MediaUnderstandingConfigView {
+pub struct MediaUnderstandingKindView {
     pub enabled: bool,
     pub model_id: Option<String>,
     pub thinking_level: Option<ThinkingLevel>,
     pub state: MediaUnderstandingState,
     pub eligible_models: Vec<EligibleMediaModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MediaUnderstandingConfigView {
+    pub image: MediaUnderstandingKindView,
+    pub audio: MediaUnderstandingKindView,
 }
 
 #[derive(Debug, Clone, thiserror::Error, Serialize)]
@@ -62,8 +70,24 @@ impl MediaAdmin {
     pub async fn get_media_understanding_config(
         &self,
     ) -> Result<MediaUnderstandingConfigView, MediaUnderstandingConfigError> {
-        let record = self.media_definition().await?;
-        let eligible_models = self.list_eligible_media_models().await?;
+        let models = self.host.models().await.map_err(|_| config_unavailable())?;
+        Ok(MediaUnderstandingConfigView {
+            image: self.kind_view(MediaKind::Image, &models).await?,
+            audio: self.kind_view(MediaKind::Audio, &models).await?,
+        })
+    }
+
+    async fn kind_view(
+        &self,
+        kind: MediaKind,
+        models: &[MediaAdminModel],
+    ) -> Result<MediaUnderstandingKindView, MediaUnderstandingConfigError> {
+        let record = self
+            .host
+            .config(kind)
+            .await
+            .map_err(|_| config_unavailable())?;
+        let eligible_models = eligible_models(kind, models);
         let state = if !record.enabled {
             MediaUnderstandingState::Disabled
         } else if !self.host.storage_available() {
@@ -80,7 +104,7 @@ impl MediaAdmin {
         } else {
             MediaUnderstandingState::Unavailable
         };
-        Ok(MediaUnderstandingConfigView {
+        Ok(MediaUnderstandingKindView {
             enabled: record.enabled,
             model_id: record.model_id,
             thinking_level: record.thinking_level,
@@ -91,6 +115,7 @@ impl MediaAdmin {
 
     pub async fn update_media_understanding_config(
         &self,
+        kind: MediaKind,
         update: MediaUnderstandingConfigUpdate,
     ) -> Result<MediaUnderstandingConfigView, MediaUnderstandingConfigError> {
         if update.enabled && !self.host.storage_available() {
@@ -106,7 +131,8 @@ impl MediaAdmin {
                     "Media Understanding requires a logical Model",
                 )
             })?;
-            let eligible_models = self.list_eligible_media_models().await?;
+            let models = self.host.models().await.map_err(|_| config_unavailable())?;
+            let eligible_models = eligible_models(kind, &models);
             let model = eligible_models
                 .iter()
                 .find(|model| model.id == model_id)
@@ -130,11 +156,14 @@ impl MediaAdmin {
             }
         }
         self.host
-            .patch_config(AgentDefinitionConfig {
-                enabled: update.enabled,
-                model_id: update.model_id,
-                thinking_level: update.thinking_level,
-            })
+            .patch_config(
+                kind,
+                AgentDefinitionConfig {
+                    enabled: update.enabled,
+                    model_id: update.model_id,
+                    thinking_level: update.thinking_level,
+                },
+            )
             .await
             .map_err(|_| {
                 MediaUnderstandingConfigError::new(
@@ -144,29 +173,21 @@ impl MediaAdmin {
             })?;
         self.get_media_understanding_config().await
     }
+}
 
-    async fn list_eligible_media_models(
-        &self,
-    ) -> Result<Vec<EligibleMediaModel>, MediaUnderstandingConfigError> {
-        let mut eligible = Vec::new();
-        for model in self.host.models().await.map_err(|_| config_unavailable())? {
-            if crate::platform::model_is_image_capable(&model.route) {
-                eligible.push(model.view);
-            }
-        }
-        eligible.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then(left.model_id.cmp(&right.model_id))
-        });
-        Ok(eligible)
-    }
-
-    async fn media_definition(
-        &self,
-    ) -> Result<AgentDefinitionConfig, MediaUnderstandingConfigError> {
-        self.host.config().await.map_err(|_| config_unavailable())
-    }
+/// 候选模型按模态过滤：必须启用、文本输出，且每个 Target 都接受该模态输入。
+fn eligible_models(kind: MediaKind, models: &[MediaAdminModel]) -> Vec<EligibleMediaModel> {
+    let mut eligible = models
+        .iter()
+        .filter(|model| crate::platform::model_is_eligible(&model.route, kind))
+        .map(|model| model.view.clone())
+        .collect::<Vec<_>>();
+    eligible.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
+            .then(left.model_id.cmp(&right.model_id))
+    });
+    eligible
 }
 
 fn config_unavailable() -> MediaUnderstandingConfigError {
@@ -183,8 +204,8 @@ pub struct MediaAdminModel {
 #[async_trait]
 pub trait MediaAdminHost: Send + Sync {
     fn storage_available(&self) -> bool;
-    async fn config(&self) -> Result<AgentDefinitionConfig, ()>;
-    async fn patch_config(&self, config: AgentDefinitionConfig) -> Result<(), ()>;
+    async fn config(&self, kind: MediaKind) -> Result<AgentDefinitionConfig, ()>;
+    async fn patch_config(&self, kind: MediaKind, config: AgentDefinitionConfig) -> Result<(), ()>;
     async fn models(&self) -> Result<Vec<MediaAdminModel>, ()>;
 }
 pub struct MediaAdmin {
@@ -203,11 +224,15 @@ mod tests {
             false
         }
 
-        async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+        async fn config(&self, _kind: MediaKind) -> Result<AgentDefinitionConfig, ()> {
             Ok(AgentDefinitionConfig::default())
         }
 
-        async fn patch_config(&self, _config: AgentDefinitionConfig) -> Result<(), ()> {
+        async fn patch_config(
+            &self,
+            _kind: MediaKind,
+            _config: AgentDefinitionConfig,
+        ) -> Result<(), ()> {
             panic!("unexpected config patch")
         }
 
@@ -224,11 +249,15 @@ mod tests {
             false
         }
 
-        async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+        async fn config(&self, _kind: MediaKind) -> Result<AgentDefinitionConfig, ()> {
             panic!("unexpected config lookup")
         }
 
-        async fn patch_config(&self, _config: AgentDefinitionConfig) -> Result<(), ()> {
+        async fn patch_config(
+            &self,
+            _kind: MediaKind,
+            _config: AgentDefinitionConfig,
+        ) -> Result<(), ()> {
             panic!("unexpected config patch")
         }
 
@@ -244,20 +273,65 @@ mod tests {
             .await
             .expect("Media Understanding config");
 
-        assert_eq!(config.state, MediaUnderstandingState::Disabled);
+        assert_eq!(config.image.state, MediaUnderstandingState::Disabled);
+        assert_eq!(config.audio.state, MediaUnderstandingState::Disabled);
     }
 
     #[tokio::test]
     async fn enabling_media_requires_runtime_storage() {
         let error = MediaAdmin::new(Arc::new(UnavailableHost))
-            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
-                enabled: true,
-                model_id: None,
-                thinking_level: None,
-            })
+            .update_media_understanding_config(
+                MediaKind::Audio,
+                MediaUnderstandingConfigUpdate {
+                    enabled: true,
+                    model_id: None,
+                    thinking_level: None,
+                },
+            )
             .await
             .expect_err("Media runtime storage should be required");
 
         assert_eq!(error.code, "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE");
+    }
+
+    fn admin_model(id: &str, text_output: bool, input_modalities: &[&str]) -> MediaAdminModel {
+        MediaAdminModel {
+            route: crate::host::MediaRoute {
+                id: id.into(),
+                is_enabled: true,
+                text_output,
+                targets: vec![crate::host::MediaTarget {
+                    provider_id: "provider".into(),
+                    model: id.into(),
+                    input_modalities: input_modalities.iter().map(|m| (*m).into()).collect(),
+                }],
+            },
+            view: EligibleMediaModel {
+                id: id.into(),
+                model_id: id.into(),
+                display_name: id.into(),
+                supported_thinking_levels: vec![ThinkingLevel::Medium],
+            },
+        }
+    }
+
+    #[test]
+    fn candidates_require_the_kinds_input_and_text_output() {
+        let models = vec![
+            admin_model("vision-chat", true, &["text", "image"]),
+            admin_model("image-generator", false, &["text", "image"]),
+            admin_model("audio-chat", true, &["text", "audio"]),
+            admin_model("omni", true, &["text", "image", "audio"]),
+            admin_model("text-only", true, &["text"]),
+        ];
+        let ids = |kind| {
+            eligible_models(kind, &models)
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(MediaKind::Image), ["omni", "vision-chat"]);
+        assert_eq!(ids(MediaKind::Audio), ["audio-chat", "omni"]);
     }
 }

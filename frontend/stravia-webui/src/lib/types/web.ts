@@ -97,13 +97,17 @@ export interface ExternalSearchRoute {
 
 export type MediaUnderstandingState = 'disabled' | 'unavailable' | 'available'
 
-export interface MediaUnderstandingConfigView {
+export type MediaUnderstandingKind = 'image' | 'audio'
+
+export interface MediaUnderstandingKindConfig {
   enabled: boolean
   model_id?: string | null
   thinking_level?: ThinkingLevel | null
   state: MediaUnderstandingState
   eligible_models: EligibleMediaModel[]
 }
+
+export type MediaUnderstandingConfigView = Record<MediaUnderstandingKind, MediaUnderstandingKindConfig>
 
 export interface UpdateMediaUnderstandingConfig {
   enabled: boolean

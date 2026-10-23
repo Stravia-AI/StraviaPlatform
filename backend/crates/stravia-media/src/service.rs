@@ -10,8 +10,8 @@ use stravia_runtime_contract::agent::{AgentDefinitionId, AgentEvent, AgentInput}
 use super::store::MediaDerivativeStore;
 use super::types::MediaArtifactReference;
 use super::{
-    MEDIA_DEFINITION_ID, MediaInputPreprocessor, MediaPreprocessError, MediaReport,
-    MediaUnderstandingInput, MediaUnderstandingResult,
+    MediaInputPreprocessor, MediaKind, MediaPreprocessError, MediaReport, MediaUnderstandingInput,
+    MediaUnderstandingResult,
 };
 
 pub const MAX_MEDIA_PROMPT_BYTES: usize = 64 * 1024;
@@ -52,11 +52,56 @@ impl MediaUnderstandingService {
         }
     }
 
-    pub async fn model_id(&self) -> Option<String> {
+    pub async fn model_id(&self, kind: MediaKind) -> Option<String> {
         self.runner
-            .definition_model_with_thinking_level(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
+            .definition_model_with_thinking_level(&AgentDefinitionId::new(kind.definition_id()))
             .await
             .map(|(model_id, _)| model_id)
+    }
+
+    /// 判定本次调用属于哪种理解模态：新 Artifact 的 MIME 决定模态，且不能混用；
+    /// 仅续接时沿用父 Turn 的 Definition。
+    pub async fn resolve_kind(
+        &self,
+        principal: &Principal,
+        input: &MediaUnderstandingInput,
+    ) -> Result<MediaKind, MediaUnderstandingError> {
+        validate_input(input)?;
+        let mut resolved: Option<MediaKind> = None;
+        for artifact in &input.artifacts {
+            let mime_type = self
+                .preprocessor
+                .inspect_mime(principal, &artifact.artifact_id)
+                .await
+                .map_err(safe_preprocess_error)?;
+            let kind = MediaKind::of_mime(&mime_type);
+            if *resolved.get_or_insert(kind) != kind {
+                return Err(MediaUnderstandingError::new(
+                    "media_kind_mixed",
+                    "Audio cannot be combined with images or documents in one Media Turn",
+                ));
+            }
+        }
+        if let Some(kind) = resolved {
+            return Ok(kind);
+        }
+        let parent = input.previous_turn_id.as_ref().ok_or_else(|| {
+            MediaUnderstandingError::new(
+                "media_artifact_required",
+                "A root Media Turn requires at least one Artifact",
+            )
+        })?;
+        let definition = self
+            .runner
+            .parent_definition_id(principal, parent)
+            .await
+            .map_err(safe_agent_error)?;
+        MediaKind::from_definition_id(definition.as_str()).ok_or_else(|| {
+            MediaUnderstandingError::new(
+                "media_turn_unavailable",
+                "Media Understanding Turn is unavailable",
+            )
+        })
     }
     pub async fn prepare_sources(
         &self,
@@ -75,13 +120,14 @@ impl MediaUnderstandingService {
     pub async fn execute_until(
         &self,
         principal: Principal,
+        kind: MediaKind,
         input: MediaUnderstandingInput,
         cancellation: CancellationToken,
         deadline: std::time::Instant,
     ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
         let started = std::time::Instant::now();
         let mut execution =
-            Box::pin(self.execute_inner(principal, input, cancellation.clone(), deadline));
+            Box::pin(self.execute_inner(principal, kind, input, cancellation.clone(), deadline));
         let outcome = tokio::select! {
             biased;
             result = &mut execution => Ok(result),
@@ -125,12 +171,13 @@ impl MediaUnderstandingService {
     async fn execute_inner(
         &self,
         principal: Principal,
+        kind: MediaKind,
         input: MediaUnderstandingInput,
         cancellation: CancellationToken,
         deadline: std::time::Instant,
     ) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
         validate_input(&input)?;
-        let definition_id = AgentDefinitionId::new(MEDIA_DEFINITION_ID);
+        let definition_id = AgentDefinitionId::new(kind.definition_id());
         let ancestor_derivatives = if let Some(parent) = input.previous_turn_id.as_ref() {
             self.runner
                 .parent_artifact_ids(&principal, parent, &definition_id)
@@ -144,24 +191,40 @@ impl MediaUnderstandingService {
             .iter()
             .map(|artifact| artifact.artifact_id.clone())
             .collect::<Vec<_>>();
-        let prepared = self
-            .preprocessor
-            .preprocess_until(&principal, &source_ids, &cancellation, deadline)
-            .await
-            .map_err(safe_preprocess_error)?;
-        tracing::info!(
-            source_bytes = prepared
-                .iter()
-                .map(|media| media.source().size)
-                .sum::<u64>(),
-            derivative_bytes = prepared
-                .iter()
-                .map(|media| media.derivative().size)
-                .sum::<u64>(),
-            "Media preprocessing completed"
-        );
-        let (media, appended, mut turn_limitations) =
-            media_attachments(&prepared, &ancestor_derivatives);
+        let (media, appended, mut turn_limitations) = match kind {
+            MediaKind::Image => {
+                let prepared = self
+                    .preprocessor
+                    .preprocess_until(&principal, &source_ids, &cancellation, deadline)
+                    .await
+                    .map_err(safe_preprocess_error)?;
+                tracing::info!(
+                    source_bytes = prepared
+                        .iter()
+                        .map(|media| media.source().size)
+                        .sum::<u64>(),
+                    derivative_bytes = prepared
+                        .iter()
+                        .map(|media| media.derivative().size)
+                        .sum::<u64>(),
+                    "Media preprocessing completed"
+                );
+                media_attachments(&prepared, &ancestor_derivatives)
+            }
+            MediaKind::Audio => {
+                let prepared = self
+                    .preprocessor
+                    .preprocess_audio_until(&principal, &source_ids, &cancellation, deadline)
+                    .await
+                    .map_err(safe_preprocess_error)?;
+                tracing::info!(
+                    source_bytes = prepared.iter().map(|audio| audio.source.size).sum::<u64>(),
+                    "Audio preprocessing completed"
+                );
+                let (media, appended) = audio_attachments(&prepared, &ancestor_derivatives);
+                (media, appended, Vec::new())
+            }
+        };
         let prompt = serde_json::json!({
             "task": input.prompt,
             "media": media,
@@ -341,6 +404,31 @@ fn media_attachments(
         }
     }
     (media, attachments.appended, attachments.limitations)
+}
+
+/// 音频源直接作为附件交给模型；已在祖先 Turn 上下文中的源只声明、不重复附加。
+/// 数量与字节预算已由音频预处理校验。
+fn audio_attachments(
+    prepared: &[super::preprocessor::PreparedAudio],
+    ancestors: &[stravia_runtime_contract::artifact::ArtifactId],
+) -> (
+    Vec<serde_json::Value>,
+    Vec<stravia_runtime_contract::artifact::ArtifactId>,
+) {
+    let mut seen: HashSet<_> = ancestors.iter().cloned().collect();
+    let mut media = Vec::with_capacity(prepared.len());
+    let mut appended = Vec::new();
+    for (index, audio) in prepared.iter().enumerate() {
+        media.push(serde_json::json!({
+            "path": audio.source.id.reference(),
+            "ordinal": index + 1,
+            "kind": "audio",
+        }));
+        if seen.insert(audio.source.id.clone()) {
+            appended.push(audio.source.id.clone());
+        }
+    }
+    (media, appended)
 }
 
 fn validate_input(input: &MediaUnderstandingInput) -> Result<(), MediaUnderstandingError> {

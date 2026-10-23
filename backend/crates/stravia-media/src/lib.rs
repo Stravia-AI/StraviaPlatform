@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod audio;
 pub mod definition;
 pub mod documents;
 pub mod host;
@@ -12,7 +13,8 @@ pub mod types;
 pub mod validator;
 
 pub use definition::{
-    MEDIA_DEFINITION_ID, MEDIA_DEFINITION_REVISION, MEDIA_TOTAL_WALL_TIME, media_definition,
+    AUDIO_DEFINITION_ID, AUDIO_DEFINITION_REVISION, MEDIA_DEFINITION_ID, MEDIA_DEFINITION_REVISION,
+    MEDIA_TOTAL_WALL_TIME, audio_definition, media_definition,
 };
 pub use ingest::{MediaRunSnapshotStore, contains_images, snapshot_and_rewrite};
 pub use planner::hook as planning_hook;
@@ -22,5 +24,5 @@ pub use preprocessor::{
 };
 pub use service::{DERIVATIVE_STAGING_RETENTION, MediaUnderstandingService, safe_preprocess_error};
 pub use store::MediaDerivativeStore;
-pub use types::{MediaReport, MediaUnderstandingInput, MediaUnderstandingResult};
+pub use types::{MediaKind, MediaReport, MediaUnderstandingInput, MediaUnderstandingResult};
 pub use validator::MediaReportValidator;

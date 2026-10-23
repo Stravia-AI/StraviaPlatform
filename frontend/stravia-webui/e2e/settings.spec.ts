@@ -4,6 +4,7 @@ import type {
   CredentialDiscoveryPage,
   CredentialRuleCatalog,
   MediaUnderstandingConfigView,
+  MediaUnderstandingKindConfig,
   UpdateMediaUnderstandingConfig,
   WebAccessSettings,
   WebProvider,
@@ -18,6 +19,14 @@ const searchSource: WebProvider = {
   capabilities: { search: true, fetch: true },
   created_at: '2026-09-01T00:00:00Z',
   updated_at: '2026-09-01T00:00:00Z',
+}
+
+const disabledAudio: MediaUnderstandingKindConfig = {
+  enabled: false,
+  model_id: null,
+  thinking_level: null,
+  state: 'disabled',
+  eligible_models: [],
 }
 
 test.beforeEach(async ({ page }) => {
@@ -563,18 +572,34 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   }
   const searchSaves: unknown[] = []
   const mediaConfig = {
-    enabled: true,
-    model_id: 'model-media',
-    thinking_level: 'high',
-    state: 'available',
-    eligible_models: [
-      {
-        id: 'model-media',
-        model_id: 'multimodal-model',
-        display_name: 'Multimodal model',
-        supported_thinking_levels: ['off', 'medium', 'high'],
-      },
-    ],
+    image: {
+      enabled: true,
+      model_id: 'model-media',
+      thinking_level: 'high',
+      state: 'available',
+      eligible_models: [
+        {
+          id: 'model-media',
+          model_id: 'multimodal-model',
+          display_name: 'Multimodal model',
+          supported_thinking_levels: ['off', 'medium', 'high'],
+        },
+      ],
+    },
+    audio: {
+      enabled: false,
+      model_id: null,
+      thinking_level: null,
+      state: 'disabled',
+      eligible_models: [
+        {
+          id: 'model-audio',
+          model_id: 'listener-model',
+          display_name: 'Listener model',
+          supported_thinking_levels: ['medium'],
+        },
+      ],
+    },
   } satisfies MediaUnderstandingConfigView
 
   await page.route('**/api/v1/web-search/config', async (route) => {
@@ -615,7 +640,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(navigation.getByRole('link', { name: 'Web search' })).toBeVisible()
   const title = page.getByRole('heading', { level: 1, name: 'Media understanding', exact: true })
   await expect(title).toBeVisible()
-  const enable = page.getByRole('switch', { name: 'Enable media understanding' })
+  const enable = page.getByRole('switch', { name: 'Enable image understanding' })
   await expect(enable).toBeChecked()
   const column = page.locator('.content-column').first()
   const columnBox = (await column.boundingBox())!
@@ -624,15 +649,20 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   expect(await page.locator('header').filter({ has: title }).getByRole('switch').count()).toBe(0)
   await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)
   await expect(page.getByText('Multimodal model · high', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+  await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
   const mediaSheet = page.locator('[data-slot="sheet-content"]')
-  await expect(mediaSheet.locator('#media-model')).toHaveText('Multimodal model')
-  await mediaSheet.locator('#media-model').click()
+  await expect(mediaSheet.locator('#media-model-image')).toHaveText('Multimodal model')
+  await mediaSheet.locator('#media-model-image').click()
   await expect(page.getByText('multimodal-model', { exact: true })).toBeVisible()
   await page.getByRole('option', { name: 'Multimodal model' }).click()
-  await expect(mediaSheet.locator('#media-thinking-level')).toHaveText('high')
+  await expect(mediaSheet.locator('#media-thinking-level-image')).toHaveText('high')
   await mediaSheet.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(mediaSheet).toHaveCount(0)
+  // 音频理解独立于图片：尚未绑定模型时开关不可用。
+  const audioEnable = page.getByRole('switch', { name: 'Enable audio understanding' })
+  await expect(audioEnable).not.toBeChecked()
+  await expect(audioEnable).toBeDisabled()
+  await expect(page.getByText('Not configured', { exact: true })).toBeVisible()
 
   await navigation.getByRole('link', { name: 'Web search' }).click()
   await expect(page).toHaveURL(/\/web-search$/)
@@ -704,7 +734,7 @@ test('media settings can repair an unavailable binding and preserve the draft af
   page,
 }) => {
   let rejectSave = true
-  let config: MediaUnderstandingConfigView = {
+  let config: MediaUnderstandingKindConfig = {
     enabled: true,
     model_id: 'media-fixture',
     thinking_level: 'high',
@@ -719,7 +749,7 @@ test('media settings can repair an unavailable binding and preserve the draft af
     ],
   }
   const submitted: unknown[] = []
-  await page.route('**/api/v1/media-understanding', async (route) => {
+  await page.route('**/api/v1/media-understanding**', async (route) => {
     if (route.request().method() === 'PUT') {
       const input = route.request().postDataJSON()
       submitted.push(input)
@@ -729,22 +759,22 @@ test('media settings can repair an unavailable binding and preserve the draft af
       }
       config = { ...config, ...input, state: 'available' }
     }
-    await route.fulfill({ json: { data: config } })
+    await route.fulfill({ json: { data: { image: config, audio: disabledAudio } } })
   })
   await page.goto('/media-understanding')
   const unavailable = page.getByRole('status').filter({ hasText: 'Saved media settings are unavailable' })
   await expect(unavailable).toBeVisible()
   await expect(page.getByText('Fixture vision · high', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+  await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
-  await expect(sheet.locator('#media-model')).toHaveText('Fixture vision')
-  await expect(sheet.locator('#media-thinking-level')).toHaveText('medium')
-  const save = sheet.getByRole('button', { name: 'Save understanding model', exact: true })
+  await expect(sheet.locator('#media-model-image')).toHaveText('Fixture vision')
+  await expect(sheet.locator('#media-thinking-level-image')).toHaveText('medium')
+  const save = sheet.getByRole('button', { name: 'Save image understanding model', exact: true })
   await expect(save).toBeEnabled()
   await save.click()
   await expect(sheet.getByRole('alert').filter({ hasText: 'Fixture media save unavailable' })).toBeVisible()
-  await expect(sheet.locator('#media-model')).toHaveText('Fixture vision')
-  await expect(sheet.locator('#media-thinking-level')).toHaveText('medium')
+  await expect(sheet.locator('#media-model-image')).toHaveText('Fixture vision')
+  await expect(sheet.locator('#media-thinking-level-image')).toHaveText('medium')
   await expect(unavailable).toBeVisible()
   rejectSave = false
   await save.click()
@@ -758,7 +788,7 @@ test('media settings can repair an unavailable binding and preserve the draft af
 })
 
 test('media activation saves only confirmed configuration without discarding the model draft', async ({ page }) => {
-  let config: MediaUnderstandingConfigView = {
+  let config: MediaUnderstandingKindConfig = {
     enabled: true,
     model_id: 'media-fixture',
     thinking_level: 'high',
@@ -773,18 +803,18 @@ test('media activation saves only confirmed configuration without discarding the
     ],
   }
   const submitted: unknown[] = []
-  await page.route('**/api/v1/media-understanding', async (route) => {
+  await page.route('**/api/v1/media-understanding**', async (route) => {
     if (route.request().method() === 'PUT') {
       const input = route.request().postDataJSON()
       submitted.push(input)
       config = { ...config, ...input }
     }
-    await route.fulfill({ json: { data: config } })
+    await route.fulfill({ json: { data: { image: config, audio: disabledAudio } } })
   })
   await page.goto('/media-understanding')
-  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+  await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
-  await sheet.locator('#media-thinking-level').click()
+  await sheet.locator('#media-thinking-level-image').click()
   await page.getByRole('option', { name: 'medium', exact: true }).click()
   // 有未保存的绑定草稿时，Escape 先确认；保留编辑后草稿仍在。
   const discard = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
@@ -792,24 +822,24 @@ test('media activation saves only confirmed configuration without discarding the
   await expect(discard).toBeVisible()
   await discard.getByRole('button', { name: 'Keep editing' }).click()
   await expect(discard).toHaveCount(0)
-  await expect(sheet.locator('#media-thinking-level')).toHaveText('medium')
+  await expect(sheet.locator('#media-thinking-level-image')).toHaveText('medium')
   await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
   await discard.getByRole('button', { name: 'Discard changes' }).click()
   await expect(sheet).toHaveCount(0)
   expect(submitted).toEqual([])
   await expect(page.getByText('Fixture vision · high', { exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
-  await sheet.locator('#media-thinking-level').click()
+  await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
+  await sheet.locator('#media-thinking-level-image').click()
   await page.getByRole('option', { name: 'medium', exact: true }).click()
   expect(submitted).toEqual([])
-  await sheet.getByRole('button', { name: 'Save understanding model', exact: true }).click()
+  await sheet.getByRole('button', { name: 'Save image understanding model', exact: true }).click()
   await expect(sheet).toHaveCount(0)
   expect(submitted).toEqual([{ enabled: true, model_id: 'media-fixture', thinking_level: 'medium' }])
   await expect(page.getByText('Fixture vision · medium', { exact: true })).toBeVisible()
 
   // 独立启停只提交服务器确认的配置。
-  const toggle = page.getByRole('switch', { name: 'Enable media understanding' })
+  const toggle = page.getByRole('switch', { name: 'Enable image understanding' })
   await toggle.click()
   await expect(toggle).not.toBeChecked()
   await expect(toggle).toBeEnabled()
@@ -817,6 +847,72 @@ test('media activation saves only confirmed configuration without discarding the
   await page.reload()
   await expect(toggle).not.toBeChecked()
   await expect(page.getByText('Fixture vision · medium', { exact: true })).toBeVisible()
+})
+
+test('audio understanding saves to its own endpoint without touching the image binding', async ({ page }) => {
+  const image: MediaUnderstandingKindConfig = {
+    enabled: true,
+    model_id: 'media-fixture',
+    thinking_level: 'high',
+    state: 'available',
+    eligible_models: [
+      {
+        id: 'media-fixture',
+        model_id: 'vision-fixture',
+        display_name: 'Fixture vision',
+        supported_thinking_levels: ['medium', 'high'],
+      },
+    ],
+  }
+  let audio: MediaUnderstandingKindConfig = {
+    enabled: false,
+    model_id: null,
+    thinking_level: null,
+    state: 'disabled',
+    eligible_models: [
+      {
+        id: 'audio-fixture',
+        model_id: 'listener-fixture',
+        display_name: 'Listener model',
+        supported_thinking_levels: ['medium', 'high'],
+      },
+    ],
+  }
+  const submitted: { path: string; body: UpdateMediaUnderstandingConfig }[] = []
+  await page.route('**/api/v1/media-understanding**', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON() as UpdateMediaUnderstandingConfig
+      submitted.push({ path: new URL(route.request().url()).pathname, body })
+      audio = { ...audio, ...body, state: body.model_id ? 'available' : 'disabled' }
+    }
+    await route.fulfill({ json: { data: { image, audio } } })
+  })
+  await page.goto('/media-understanding')
+  const audioToggle = page.getByRole('switch', { name: 'Enable audio understanding' })
+  await expect(audioToggle).toBeDisabled()
+  await page.getByRole('button', { name: 'Edit Audio understanding model' }).click()
+  const sheet = page.locator('[data-slot="sheet-content"]')
+  await sheet.locator('#media-model-audio').click()
+  await page.getByRole('option', { name: 'Listener model' }).click()
+  await expect(sheet.locator('#media-thinking-level-audio')).toHaveText('medium')
+  await sheet.getByRole('button', { name: 'Save audio understanding model', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(submitted).toEqual([
+    {
+      path: '/api/v1/media-understanding/audio',
+      body: { enabled: false, model_id: 'audio-fixture', thinking_level: 'medium' },
+    },
+  ])
+  await expect(page.getByText('Listener model · medium', { exact: true })).toBeVisible()
+  await expect(audioToggle).toBeEnabled()
+  await audioToggle.click()
+  await expect(audioToggle).toBeChecked()
+  expect(submitted.at(-1)).toEqual({
+    path: '/api/v1/media-understanding/audio',
+    body: { enabled: true, model_id: 'audio-fixture', thinking_level: 'medium' },
+  })
+  await expect(page.getByText('Fixture vision · high', { exact: true })).toBeVisible()
+  await expect(page.getByRole('switch', { name: 'Enable image understanding' })).toBeChecked()
 })
 
 test('an ineligible saved understanding binding stays visible and clearable at 390 and 320', async ({ page }) => {
@@ -828,7 +924,7 @@ test('an ineligible saved understanding binding stays visible and clearable at 3
       supported_thinking_levels: ['medium'] as const,
     },
   ]
-  let config: MediaUnderstandingConfigView = {
+  let config: MediaUnderstandingKindConfig = {
     enabled: false,
     model_id: 'removed-model',
     thinking_level: 'high',
@@ -836,13 +932,13 @@ test('an ineligible saved understanding binding stays visible and clearable at 3
     eligible_models: [...eligible],
   }
   const submitted: unknown[] = []
-  await page.route('**/api/v1/media-understanding', async (route) => {
+  await page.route('**/api/v1/media-understanding**', async (route) => {
     if (route.request().method() === 'PUT') {
       const input = route.request().postDataJSON() as UpdateMediaUnderstandingConfig
       submitted.push(input)
       config = { ...config, ...input, state: input.model_id ? 'available' : 'unavailable' }
     }
-    await route.fulfill({ json: { data: config } })
+    await route.fulfill({ json: { data: { image: config, audio: disabledAudio } } })
   })
   for (const width of [390, 320]) {
     config = {
@@ -859,10 +955,10 @@ test('an ineligible saved understanding binding stays visible and clearable at 3
     await expect(page.getByRole('status').filter({ hasText: 'Saved media settings are unavailable' })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 
-    await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+    await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
     const sheet = page.locator('[data-slot="sheet-content"]')
-    await expect(sheet.locator('#media-model')).toHaveText('Select a model')
-    const save = sheet.getByRole('button', { name: 'Save understanding model', exact: true })
+    await expect(sheet.locator('#media-model-image')).toHaveText('Select a model')
+    const save = sheet.getByRole('button', { name: 'Save image understanding model', exact: true })
     // 功能关闭时允许保存空选择，清除失效绑定。
     await expect(save).toBeEnabled()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
@@ -879,7 +975,7 @@ test('media understanding Sheet locks submit, cancel and close while saving', as
   const gate = new Promise<void>((resolve) => {
     release = resolve
   })
-  let config: MediaUnderstandingConfigView = {
+  let config: MediaUnderstandingKindConfig = {
     enabled: true,
     model_id: 'media-fixture',
     thinking_level: 'high',
@@ -893,19 +989,19 @@ test('media understanding Sheet locks submit, cancel and close while saving', as
       },
     ],
   }
-  await page.route('**/api/v1/media-understanding', async (route) => {
+  await page.route('**/api/v1/media-understanding**', async (route) => {
     if (route.request().method() === 'PUT') {
       await gate
       config = { ...config, ...(route.request().postDataJSON() as UpdateMediaUnderstandingConfig) }
     }
-    await route.fulfill({ json: { data: config } })
+    await route.fulfill({ json: { data: { image: config, audio: disabledAudio } } })
   })
   await page.goto('/media-understanding')
-  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+  await page.getByRole('button', { name: 'Edit Image understanding model' }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
-  await sheet.locator('#media-thinking-level').click()
+  await sheet.locator('#media-thinking-level-image').click()
   await page.getByRole('option', { name: 'medium', exact: true }).click()
-  const save = sheet.getByRole('button', { name: /Save understanding model/ })
+  const save = sheet.getByRole('button', { name: /Save image understanding model/ })
   await save.click()
   await expect(save).toBeDisabled()
   await expect(save).toHaveAttribute('aria-busy', 'true')

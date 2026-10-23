@@ -111,6 +111,32 @@ impl MediaDerivativeStore {
         Ok((reader.artifact, Bytes::from(bytes)))
     }
 
+    /// 只读取开头至多 `len` 字节，用于校验容器魔数而不把整个大文件读入内存。
+    pub async fn read_artifact_prefix(
+        &self,
+        principal: &Principal,
+        id: &ArtifactId,
+        len: usize,
+    ) -> Result<(ArtifactRef, Vec<u8>), MediaStoreError> {
+        let reader = self
+            .artifacts
+            .open(principal, id)
+            .await
+            .map_err(MediaStoreError::from)?;
+        let ArtifactSource::LocalPath(path) = &reader.source else {
+            return Err(MediaStoreError::Corrupt);
+        };
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|_| MediaStoreError::Corrupt)?;
+        let mut prefix = Vec::with_capacity(len);
+        file.take(len as u64)
+            .read_to_end(&mut prefix)
+            .await
+            .map_err(|_| MediaStoreError::Corrupt)?;
+        Ok((reader.artifact, prefix))
+    }
+
     pub async fn find_derivative(
         &self,
         principal: &Principal,

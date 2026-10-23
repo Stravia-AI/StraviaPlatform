@@ -42,6 +42,13 @@ impl MediaAgentHost for AgentHost {
             .parent_artifact_ids(principal, parent, definition)
             .await
     }
+    async fn parent_definition_id(
+        &self,
+        principal: &Principal,
+        parent: &AgentTurnId,
+    ) -> Result<AgentDefinitionId, AgentRunError> {
+        self.0.parent_definition_id(principal, parent).await
+    }
     fn run(&self, input: AgentInput) -> AgentEventStream {
         self.0.run(input)
     }
@@ -178,6 +185,7 @@ pub(crate) async fn route_metadata(
     MediaRoute {
         id: route.id.clone().into(),
         is_enabled: route.is_enabled,
+        text_output: route.output_modality == Some(crate::db::models::RouteOutputModality::Text),
         targets,
     }
 }

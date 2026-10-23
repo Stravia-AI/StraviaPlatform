@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Media understanding now accepts WAV, MP3, FLAC, OGG, AAC and AIFF audio through `StraviaRead` and the media bridge. Audio has its own enable switch, model and thinking level on the Media understanding page, separate from images and documents. Admin API change: `GET /api/v1/media-understanding` now returns `{ image, audio }`, and settings are saved per kind with `PUT /api/v1/media-understanding/{kind}` (`image` or `audio`) instead of `PUT /api/v1/media-understanding`.
+
 ### Changed
 
 - Traffic Equalization now uses a rolling one-hour usage window and atomically selects and reserves eligible destinations using in-flight request counts, then weighted traffic. Existing cache affinity, conversation affinity, and continuation constraints retain precedence; load balancing does not redirect eligible cached prefixes to uncached destinations.

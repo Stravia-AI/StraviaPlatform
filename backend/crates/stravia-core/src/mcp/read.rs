@@ -33,7 +33,7 @@ pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
 const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned stravia://artifacts/<artifact-id> path. Add ?download=1 to obtain download information without model execution. Public reads wait up to 60 seconds, then return a durable execution path and status. Read stravia://tool-executions/<id>?wait=<non-negative seconds> for status and original result or error; omitted wait returns immediately, and explicit waits may exceed 60 seconds within the query deadline. Cancelling a query stops only its wait. Local cancellation cannot guarantee upstream work or quota consumption stops.";
 const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_path are search query parameters. Public HTTP(S) resource options use #stravia?.";
-const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_path for explicit continuation.";
+const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown; WAV, MP3, FLAC, OGG, AAC or AIFF audio is understood by transcription and summary. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_path for explicit continuation.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -108,8 +108,11 @@ impl ReadTool {
     async fn capabilities(&self, principal: &Principal) -> ReadExposureScope {
         ReadExposureScope::new(
             networking_available(&self.gateway, principal).await,
-            stravia_media::platform::is_available(&crate::media::runtime(&self.gateway), principal)
-                .await,
+            stravia_media::platform::is_any_available(
+                &crate::media::runtime(&self.gateway),
+                principal,
+            )
+            .await,
         )
     }
 
@@ -389,10 +392,11 @@ impl ReadTool {
                 bytes,
             } => {
                 let image = image_mime(&content_type);
+                let audio = audio_mime(&content_type);
                 let office = stravia_media::documents::is_office_document(&content_type);
                 require(
                     if !resource_path.options.download
-                        && (image || (office && resource_path.options.question.is_some()))
+                        && (image || audio || (office && resource_path.options.question.is_some()))
                     {
                         context.read_scope.media() && enabled.media()
                     } else {
@@ -469,6 +473,12 @@ impl ReadTool {
                 download(&self.gateway, &context.principal, &id, None),
             )
             .await?;
+        }
+        if audio_mime(&artifact.mime_type) {
+            drop(reader);
+            return self
+                .read_audio(id, &artifact.mime_type, options, context)
+                .await;
         }
         if image_mime(&artifact.mime_type) {
             drop(reader);
@@ -550,6 +560,15 @@ impl ReadTool {
         options: ReadOptions,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
+        if audio_mime(&content_type) && !options.download {
+            let artifact = match artifact {
+                Some(artifact) => artifact,
+                None => self.store_bytes(&content_type, bytes, &context).await?,
+            };
+            return self
+                .read_audio(artifact.id, &content_type, options, context)
+                .await;
+        }
         let image = image_mime(&content_type);
         if image && !options.download {
             require(
@@ -654,6 +673,32 @@ impl ReadTool {
         .await
     }
 
+    async fn read_audio(
+        &self,
+        id: ArtifactId,
+        content_type: &str,
+        options: ReadOptions,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        require(
+            !options.raw && options.lines.is_none() && options.cursor.is_none(),
+            "Audio does not support raw, lines or cursor",
+        )?;
+        require(
+            stravia_media::audio::is_supported_audio_mime(content_type),
+            "Unsupported audio type",
+        )?;
+        self.understand(
+            id,
+            options
+                .question
+                .unwrap_or_else(|| "Transcribe the audio and summarize its content.".into()),
+            options.previous_path,
+            context,
+        )
+        .await
+    }
+
     /// Office document reads: `?question` routes into Media Understanding;
     /// otherwise the extracted Markdown becomes an ordinary paginated text
     /// snapshot. `?download` is handled by callers before this point; `?raw`
@@ -746,7 +791,7 @@ impl ReadTool {
         require(
             before_execution(
                 &context.cancellation,
-                stravia_media::platform::is_available(
+                stravia_media::platform::is_any_available(
                     &crate::media::runtime(&self.gateway),
                     &context.principal,
                 ),
@@ -769,6 +814,22 @@ impl ReadTool {
                 .map_err(artifact_error)
         })
         .await??;
+        let kind = stravia_media::MediaKind::of_mime(&reader.artifact.mime_type);
+        require(
+            before_execution(
+                &context.cancellation,
+                stravia_media::platform::is_available(
+                    &crate::media::runtime(&self.gateway),
+                    &context.principal,
+                    kind,
+                ),
+            )
+            .await?,
+            match kind {
+                stravia_media::MediaKind::Image => "Image understanding is unavailable",
+                stravia_media::MediaKind::Audio => "Audio understanding is unavailable",
+            },
+        )?;
         // Media preprocessing acquires its own guard for the actual byte read.
         // Do not hold a second store connection while awaiting that execution.
         drop(reader);
@@ -793,6 +854,12 @@ fn image_mime(content_type: &str) -> bool {
     base_mime(content_type)
         .get(..6)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+}
+
+fn audio_mime(content_type: &str) -> bool {
+    base_mime(content_type)
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("audio/"))
 }
 
 fn supported_image(content_type: &str) -> bool {

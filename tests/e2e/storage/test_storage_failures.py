@@ -446,9 +446,18 @@ def configure_background_media(env, parent_route):
         'first_token_timeout_ms': 120_000, 'target_retry_budget': 0, 'target_cooldown_ms': 0}]}, env['auth'])
     assert status == 200, body
     vision = body['data']['id']
-    status, body = http_request('PUT', env['admin'] + '/api/v1/media-understanding', {
+    status, body = http_request('PUT', env['admin'] + '/api/v1/media-understanding/image', {
         'enabled': True, 'model_id': vision, 'thinking_level': 'medium'}, env['auth'])
     assert status == 200, body
+    # 每个模态独立保存：图片绑定不改变音频，也不能把仅支持图片输入的 Model 绑定为音频理解模型。
+    assert body['data']['image']['model_id'] == vision, body
+    assert body['data']['audio']['enabled'] is False and body['data']['audio']['model_id'] is None, body
+    status, body = http_request('PUT', env['admin'] + '/api/v1/media-understanding/audio', {
+        'enabled': True, 'model_id': vision, 'thinking_level': 'medium'}, env['auth'])
+    assert status == 400 and body['code'] == 'MEDIA_UNDERSTANDING_MODEL_UNAVAILABLE', body
+    status, body = http_request('GET', env['admin'] + '/api/v1/media-understanding', headers=env['auth'])
+    assert status == 200 and body['data']['image']['enabled'] is True, body
+    assert body['data']['audio']['eligible_models'] == [], body
     status, body = http_request('POST', env['admin'] + '/api/v1/api-keys', {
         'name': 'background-media-key', 'model_ids': [parent_route],
         'transparent_injection_enabled': True, 'inject_media_understanding': True,

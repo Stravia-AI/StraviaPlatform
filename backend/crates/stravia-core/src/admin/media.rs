@@ -1,7 +1,7 @@
 use super::AdminService;
 use async_trait::async_trait;
 use std::sync::Arc;
-use stravia_media::MEDIA_DEFINITION_ID;
+use stravia_media::MediaKind;
 use stravia_media::admin::{
     EligibleMediaModel, MediaUnderstandingConfigError, MediaUnderstandingConfigUpdate,
     MediaUnderstandingConfigView,
@@ -16,20 +16,20 @@ impl MediaAdminHost for AdminHost {
     fn storage_available(&self) -> bool {
         self.0.gw.media_derivatives.is_some()
     }
-    async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+    async fn config(&self, kind: MediaKind) -> Result<AgentDefinitionConfig, ()> {
         self.0
             .gw
             .agent_definitions
-            .get_current(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
+            .get_current(&AgentDefinitionId::new(kind.definition_id()))
             .await
             .map(|record| record.config)
             .map_err(|_| ())
     }
-    async fn patch_config(&self, config: AgentDefinitionConfig) -> Result<(), ()> {
+    async fn patch_config(&self, kind: MediaKind, config: AgentDefinitionConfig) -> Result<(), ()> {
         self.0
             .gw
             .agent_definitions
-            .patch_config(&AgentDefinitionId::new(MEDIA_DEFINITION_ID), config)
+            .patch_config(&AgentDefinitionId::new(kind.definition_id()), config)
             .await
             .map(|_| ())
             .map_err(|_| ())
@@ -62,10 +62,11 @@ impl AdminService {
     }
     pub async fn update_media_understanding_config(
         &self,
+        kind: MediaKind,
         update: MediaUnderstandingConfigUpdate,
     ) -> Result<MediaUnderstandingConfigView, MediaUnderstandingConfigError> {
         MediaAdmin::new(Arc::new(AdminHost(self.clone())))
-            .update_media_understanding_config(update)
+            .update_media_understanding_config(kind, update)
             .await
     }
 }
@@ -189,12 +190,75 @@ mod tests {
             })
             .await
             .expect("mixed Model");
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                "listener",
+                crate::provider_models::CreateManualProviderModel {
+                    metadata: serde_json::json!({
+                        "id": "listener",
+                        "reasoning_efforts": ["medium"],
+                        "modalities": { "input": ["text", "audio"], "output": ["text"] }
+                    }),
+                    template_id: None,
+                },
+            )
+            .await
+            .expect("audio Provider Model");
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                "painter",
+                crate::provider_models::CreateManualProviderModel {
+                    metadata: serde_json::json!({
+                        "id": "painter",
+                        "reasoning_efforts": ["medium"],
+                        "modalities": { "input": ["text", "image"], "output": ["image"] }
+                    }),
+                    template_id: None,
+                },
+            )
+            .await
+            .expect("image-output Provider Model");
+        let target = |model: &str| crate::db::models::CreateTarget {
+            provider_id: provider.id.clone(),
+            model: model.into(),
+            enabled: true,
+            priority: None,
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
+            thinking_level_map: Vec::new(),
+        };
+        let audio_model = admin
+            .create_model(crate::db::models::CreateRoute {
+                output_modality: crate::db::models::RouteOutputModality::Text,
+                model_id: "Audio Route".into(),
+                display_name: None,
+                balance: Some("traffic_equalization".into()),
+                targets: vec![target("listener")],
+                default_thinking_level: None,
+            })
+            .await
+            .expect("audio Model");
+        let painter_model = admin
+            .create_model(crate::db::models::CreateRoute {
+                output_modality: crate::db::models::RouteOutputModality::Image,
+                model_id: "Painter Route".into(),
+                display_name: None,
+                balance: Some("traffic_equalization".into()),
+                targets: vec![target("painter")],
+                default_thinking_level: None,
+            })
+            .await
+            .expect("image-output Model");
 
         let before_update = admin
             .get_media_understanding_config()
             .await
             .expect("Media config");
         let eligible = before_update
+            .image
             .eligible_models
             .iter()
             .find(|candidate| candidate.id == model.id.as_str())
@@ -206,43 +270,105 @@ mod tests {
         );
         assert!(
             !before_update
+                .image
                 .eligible_models
                 .iter()
                 .any(|candidate| candidate.id == mixed_model.id.as_str())
         );
+        assert!(
+            !before_update
+                .image
+                .eligible_models
+                .iter()
+                .any(|candidate| candidate.id == painter_model.id.as_str()),
+            "an image-output Route accepts images but cannot answer in text"
+        );
+        let audio_ids = before_update
+            .audio
+            .eligible_models
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(audio_ids, [audio_model.id.as_str()]);
 
         let unsupported_error = admin
-            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
-                enabled: true,
-                model_id: Some(model.id.clone().into()),
-                thinking_level: Some(ThinkingLevel::Max),
-            })
+            .update_media_understanding_config(
+                MediaKind::Image,
+                MediaUnderstandingConfigUpdate {
+                    enabled: true,
+                    model_id: Some(model.id.clone().into()),
+                    thinking_level: Some(ThinkingLevel::Max),
+                },
+            )
             .await
             .expect_err("hidden Thinking Level should be rejected");
         assert_eq!(
             unsupported_error.code,
             "MEDIA_UNDERSTANDING_THINKING_LEVEL_UNAVAILABLE"
         );
+        let wrong_modality = admin
+            .update_media_understanding_config(
+                MediaKind::Audio,
+                MediaUnderstandingConfigUpdate {
+                    enabled: true,
+                    model_id: Some(model.id.clone().into()),
+                    thinking_level: Some(ThinkingLevel::Medium),
+                },
+            )
+            .await
+            .expect_err("an image-only Model cannot be the audio understanding Model");
+        assert_eq!(wrong_modality.code, "MEDIA_UNDERSTANDING_MODEL_UNAVAILABLE");
 
         let updated = admin
-            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
-                enabled: true,
-                model_id: Some(model.id.clone().into()),
-                thinking_level: Some(ThinkingLevel::Medium),
-            })
+            .update_media_understanding_config(
+                MediaKind::Image,
+                MediaUnderstandingConfigUpdate {
+                    enabled: true,
+                    model_id: Some(model.id.clone().into()),
+                    thinking_level: Some(ThinkingLevel::Medium),
+                },
+            )
             .await
             .expect("eligible Media config");
 
-        assert_eq!(updated.state, MediaUnderstandingState::Available);
-        assert_eq!(updated.model_id.as_deref(), Some(model.id.as_str()));
-        assert_eq!(updated.thinking_level, Some(ThinkingLevel::Medium));
+        assert_eq!(updated.image.state, MediaUnderstandingState::Available);
+        assert_eq!(updated.image.model_id.as_deref(), Some(model.id.as_str()));
+        assert_eq!(updated.image.thinking_level, Some(ThinkingLevel::Medium));
+        assert_eq!(
+            updated.audio.state,
+            MediaUnderstandingState::Disabled,
+            "saving the image binding must not enable audio understanding"
+        );
+        let audio_updated = admin
+            .update_media_understanding_config(
+                MediaKind::Audio,
+                MediaUnderstandingConfigUpdate {
+                    enabled: true,
+                    model_id: Some(audio_model.id.clone().into()),
+                    thinking_level: Some(ThinkingLevel::Medium),
+                },
+            )
+            .await
+            .expect("eligible audio config");
+        assert_eq!(
+            audio_updated.audio.state,
+            MediaUnderstandingState::Available
+        );
+        assert_eq!(
+            audio_updated.image.model_id.as_deref(),
+            Some(model.id.as_str())
+        );
         let persisted = admin
             .get_media_understanding_config()
             .await
             .expect("persisted Media configuration");
         assert_eq!(
-            (persisted.model_id, persisted.thinking_level),
+            (persisted.image.model_id, persisted.image.thinking_level),
             (Some(model.id.into()), Some(ThinkingLevel::Medium))
+        );
+        assert_eq!(
+            (persisted.audio.model_id, persisted.audio.thinking_level),
+            (Some(audio_model.id.into()), Some(ThinkingLevel::Medium))
         );
     }
 }

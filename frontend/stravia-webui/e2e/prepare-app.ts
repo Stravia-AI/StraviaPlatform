@@ -345,6 +345,11 @@ export async function prepareApp(page: Page): Promise<void> {
       })
       return
     }
+    if (path === '/media-understanding') {
+      const disabled = { enabled: false, model_id: null, thinking_level: null, state: 'disabled', eligible_models: [] }
+      await route.fulfill({ json: { data: { image: disabled, audio: disabled } } })
+      return
+    }
     if (path === '/media-generation/config') {
       await route.fulfill({
         json: {

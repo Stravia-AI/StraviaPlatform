@@ -28,7 +28,9 @@ const mediaGenerationQuery = createQuery(() => ({
 }))
 
 const webSearchStatus = $derived(capabilityStatus(webSearchQuery, (config) => config.enabled))
-const mediaUnderstandingStatus = $derived(capabilityStatus(mediaUnderstandingQuery, (config) => config.enabled))
+const mediaUnderstandingStatus = $derived(
+  capabilityStatus(mediaUnderstandingQuery, (config) => config.image.enabled || config.audio.enabled),
+)
 const mediaGenerationStatus = $derived(capabilityStatus(mediaGenerationQuery, (config) => config.config.enabled))
 
 const apiKey = $derived(apiKeysQuery.data?.find((item) => item.id === apiKeyId))

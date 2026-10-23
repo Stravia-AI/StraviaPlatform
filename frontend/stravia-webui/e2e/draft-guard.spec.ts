@@ -28,7 +28,9 @@ async function mockApiKeys(page: Page, options: { update?: (route: Route) => Pro
     else await route.fulfill({ json: { data: apiKey } })
   })
   await page.route('**/api/v1/web-search/config', (route) => route.fulfill({ json: { data: { enabled: false } } }))
-  await page.route('**/api/v1/media-understanding', (route) => route.fulfill({ json: { data: { enabled: false } } }))
+  await page.route('**/api/v1/media-understanding', (route) =>
+    route.fulfill({ json: { data: { image: { enabled: false }, audio: { enabled: false } } } }),
+  )
   await page.route('**/api/v1/media-generation/config', (route) =>
     route.fulfill({
       json: {

@@ -85,6 +85,9 @@ enum DeclaredKind {
     /// Extracted Markdown arrives as entry `text`; the manifest derivative
     /// proves it came from the declared document Artifact.
     Document,
+    /// Audio bytes arrive as a transcript audio block carrying the source
+    /// Artifact id itself; audio has no derivative.
+    Audio,
 }
 
 struct DeclaredSource {
@@ -112,6 +115,7 @@ fn declared_sources(text: &str, declared: &mut Vec<DeclaredSource>) {
         };
         let kind = match entry.get("kind").and_then(|kind| kind.as_str()) {
             Some("document") => DeclaredKind::Document,
+            Some("audio") => DeclaredKind::Audio,
             _ => DeclaredKind::Image,
         };
         declared.push(DeclaredSource {
@@ -155,6 +159,7 @@ impl MediaReportValidator {
         transcript: &[AiItem],
     ) -> Result<(HashSet<ArtifactId>, Vec<ArtifactId>), AgentRunError> {
         let mut shown = HashSet::new();
+        let mut shown_audio = HashSet::new();
         let mut declared = Vec::new();
         for message in transcript {
             // Declarations are request-authored: only the Turn prompts built by
@@ -175,10 +180,12 @@ impl MediaReportValidator {
                 continue;
             };
             for block in blocks {
-                let ContentBlock::Image { source, .. } = block else {
-                    continue;
+                let (source, audio) = match block {
+                    ContentBlock::Image { source, .. } => (source, false),
+                    ContentBlock::Audio { source } => (source, true),
+                    _ => continue,
                 };
-                let derivative_id = match source {
+                let shown_id = match source {
                     MediaSource::Url(reference) => plain_artifact_id(reference),
                     MediaSource::FileId { file_id, .. } => plain_artifact_id(file_id),
                     _ => None,
@@ -189,7 +196,11 @@ impl MediaReportValidator {
                         "Media transcript evidence is invalid",
                     )
                 })?;
-                shown.insert(derivative_id);
+                if audio {
+                    shown_audio.insert(shown_id);
+                } else {
+                    shown.insert(shown_id);
+                }
             }
         }
         // Forward verification: a source is evidence only when it was actually
@@ -201,6 +212,12 @@ impl MediaReportValidator {
         let mut retained = HashSet::new();
         for source in declared {
             match source.kind {
+                DeclaredKind::Audio => {
+                    if shown_audio.contains(&source.id) {
+                        retained.insert(source.id.clone());
+                        evidence.insert(source.id);
+                    }
+                }
                 DeclaredKind::Image => {
                     // Embedded document images are attached under their own
                     // Artifact id; declared sources appear via their mapped
