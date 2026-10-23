@@ -6,9 +6,9 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { SvelteFlowProvider } from '@xyflow/svelte'
 import MaximizeIcon from '@lucide/svelte/icons/maximize'
 import MinimizeIcon from '@lucide/svelte/icons/minimize'
+import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal'
-import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '#lib/admin-client.js'
@@ -36,6 +36,7 @@ import * as Alert from '#lib/components/ui/alert/index.js'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
+import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
@@ -51,7 +52,9 @@ let draftEnd = $state('')
 let workspaceEl = $state<HTMLElement>()
 let fullscreenButton = $state<HTMLButtonElement | null>(null)
 let fullscreen = $state(false)
-let inspectorWidth = $state(46)
+// 检查器默认宽度（rem）；按所在工作区钳制，不随 viewport 变化。
+let inspectorWidth = $state(40)
+let workspaceWidth = $state(0)
 let canvas = $state<{
   focusLatest(): Promise<void>
   fitAfterAllLoaded(): Promise<void>
@@ -248,18 +251,23 @@ async function downloadBundle(): Promise<void> {
       ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if ws.activeFilterCount}<span
           >· {ws.activeFilterCount}</span
         >{/if}</Button>
-    <Button variant="destructive" onclick={() => (clearOpen = true)}
-      ><Trash2Icon data-icon="inline-start" />{m.observation_clear_history()}</Button>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}
+            ><MoreHorizontalIcon /></Button>
+        {/snippet}
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content class="w-48" align="end">
+        <DropdownMenu.Item variant="destructive" onSelect={() => (clearOpen = true)}
+          >{m.observation_clear_history()}</DropdownMenu.Item>
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
   </div>
 {/snippet}
 
 <div class="route-page observation-page">
-  <PageHeader
-    eyebrow={m.common_monitor()}
-    title={m.common_request_history()}
-    description={m.observation_page_summary()}
-    meta={liveMeta}
-    actions={headerActions} />
+  <PageHeader title={m.common_request_history()} meta={liveMeta} actions={headerActions} />
 
   {#if clearResult?.skipped_active}
     <Alert.Root variant="warning" role="status">
@@ -269,16 +277,23 @@ async function downloadBundle(): Promise<void> {
 
   <section
     bind:this={workspaceEl}
+    bind:clientWidth={workspaceWidth}
     class={['observation-workspace', { 'workspace-fullscreen': fullscreen }]}
     aria-labelledby="observation-workspace-title">
     <h2 id="observation-workspace-title" class="sr-only">{m.observation_interaction_chains()}</h2>
     <div class="workspace-toolbar">
-      <Tabs.Root value={ws.activeTab} onValueChange={(value: string) => void ws.tabChanged(value)}>
-        <Tabs.List
-          ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
-            value="failures">{m.observation_failed_requests()}</Tabs.Trigger
-          ></Tabs.List>
-      </Tabs.Root>
+      <div class="toolbar-tabs">
+        <Tabs.Root value={ws.activeTab} onValueChange={(value: string) => void ws.tabChanged(value)}>
+          <Tabs.List
+            ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
+              value="failures">{m.observation_failed_requests()}</Tabs.Trigger
+            ></Tabs.List>
+        </Tabs.Root>
+        {#if ws.activeTab === 'failures'}
+          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status"
+            >{ws.failures.length} / {ws.failureTotal}</span>
+        {/if}
+      </div>
       <TimeWindowControls
         presets={windowPresets}
         value={windowPresetValue}
@@ -373,6 +388,7 @@ async function downloadBundle(): Promise<void> {
             onolder={ws.loadOlderEvents}
             loading={ws.detailLoading}
             width={inspectorWidth}
+            containerWidth={workspaceWidth}
             onwidthchange={(value: number) => (inspectorWidth = value)}
             onclose={ws.closeInspector}
             onbundle={() => void downloadBundle()}
@@ -383,10 +399,7 @@ async function downloadBundle(): Promise<void> {
       </div>
     {:else}
       <div class="failures-view">
-        <header class="flex items-center justify-between gap-3 border-b p-4">
-          <h2 class="sr-only">{m.observation_failed_requests()}</h2>
-          <span class="font-technical text-xs text-muted-foreground">{ws.failures.length} / {ws.failureTotal}</span>
-        </header>
+        <h2 class="sr-only">{m.observation_failed_requests()}</h2>
         {#if ws.failureError}
           <RequestFailure
             message={localizeBackendErrorMessage(ws.failureError)}
@@ -421,6 +434,7 @@ async function downloadBundle(): Promise<void> {
               : undefined}
             loading={ws.detailLoading}
             width={inspectorWidth}
+            containerWidth={workspaceWidth}
             onwidthchange={(value: number) => (inspectorWidth = value)}
             onclose={ws.closeInspector}
             onbundle={() => void downloadBundle()} />{/if}
@@ -432,7 +446,10 @@ async function downloadBundle(): Promise<void> {
 <Dialog.Root bind:open={rangeOpen}>
   <Dialog.Content portalProps={{ to: fullscreen ? workspaceEl : undefined }}>
     <Dialog.Header>
-      <Dialog.Title>{m.observation_date_time_range()}</Dialog.Title>
+      <div class="flex items-center gap-1.5">
+        <Dialog.Title>{m.observation_date_time_range()}</Dialog.Title>
+        <Field.Help hint={m.observation_range_local_time()} />
+      </div>
       <Dialog.Description>{m.observation_range_help()}</Dialog.Description>
     </Dialog.Header>
     <form
@@ -451,7 +468,7 @@ async function downloadBundle(): Promise<void> {
             required
             bind:value={draftStart}
             aria-invalid={!validDraftRange}
-            aria-describedby="observation-range-help" />
+            aria-describedby={validDraftRange ? undefined : 'observation-range-help'} />
         </Field.Field>
         <Field.Field data-invalid={!validDraftRange || undefined}>
           <Field.FieldLabel for="observation-end">{m.observation_end_time()}</Field.FieldLabel>
@@ -462,12 +479,14 @@ async function downloadBundle(): Promise<void> {
             required
             bind:value={draftEnd}
             aria-invalid={!validDraftRange}
-            aria-describedby="observation-range-help" />
+            aria-describedby={validDraftRange ? undefined : 'observation-range-help'} />
         </Field.Field>
       </Field.FieldGroup>
-      <p id="observation-range-help" class="text-sm text-muted-foreground" role="status">
-        {validDraftRange ? m.observation_range_local_time() : m.observation_range_invalid()}
-      </p>
+      {#if !validDraftRange}
+        <p id="observation-range-help" class="text-sm text-destructive" role="alert">
+          {m.observation_range_invalid()}
+        </p>
+      {/if}
       <Dialog.Footer>
         <Button variant="outline" onclick={() => (rangeOpen = false)}>{m.common_cancel()}</Button>
         <Button type="submit" disabled={!validDraftRange}>{m.observation_apply_range()}</Button>
@@ -477,11 +496,16 @@ async function downloadBundle(): Promise<void> {
 </Dialog.Root>
 
 <Sheet.Root bind:open={filterOpen}
-  ><Sheet.Content side="right" class="w-full! max-w-none! sm:max-w-sm!" closeLabel={m.observation_close_filters()}
+  ><Sheet.Content
+    side="right"
+    class="w-full! max-w-none! sm:max-w-sm!"
+    closeLabel={m.observation_close_filters()}
+    aria-describedby={undefined}
     ><Sheet.Header
-      ><Sheet.Title>{m.observation_filters()}</Sheet.Title><Sheet.Description
-        >{m.observation_filters_description()}</Sheet.Description
-      ></Sheet.Header>
+      ><div class="flex items-center gap-1.5">
+        <Sheet.Title>{m.observation_filters()}</Sheet.Title>
+        <Field.Help hint={m.observation_filters_description()} />
+      </div></Sheet.Header>
     <div class="route-overlay-body">
       <Field.FieldGroup>
         <Field.Field
@@ -623,6 +647,12 @@ async function downloadBundle(): Promise<void> {
   border-bottom: 1px solid var(--border);
   padding: 0.55rem 0.75rem;
 }
+.toolbar-tabs {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+}
 .observation-workspace.workspace-fullscreen,
 .observation-workspace:fullscreen {
   position: fixed;
@@ -666,7 +696,6 @@ async function downloadBundle(): Promise<void> {
   min-height: 0;
   overflow: hidden;
 }
-.failures-view > header,
 .failures-view > .border-t {
   flex-shrink: 0;
 }

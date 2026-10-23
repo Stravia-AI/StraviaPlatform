@@ -1,6 +1,6 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { onMount } from 'svelte'
+import { onMount, tick } from 'svelte'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
@@ -12,6 +12,7 @@ import { observationStatusLabel } from '#lib/observation-labels.js'
 import type { CredentialDiscoverySummary, CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib/types.js'
 
 import PageHeader from '#lib/components/page-header.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -35,7 +36,6 @@ import {
   DataTable,
   createDataTableColumnHelper,
   type DataTableCellContext,
-  type DataTableInstance,
   type DataTableRowPointerEvent,
 } from '#lib/components/ui/data-table/index.js'
 
@@ -109,18 +109,18 @@ const ruleColumns = ruleColumn.columns([
     {
       id: 'rule',
       header: () => m.credential_protection_rule_name(),
-      meta: { label: () => m.credential_protection_rule_name() },
+      meta: { label: () => m.credential_protection_rule_name(), width: 'compact' },
       cell: (context) => renderSnippet(ruleNameCell, context),
-      size: 380,
+      size: 288,
     },
   ),
   ruleColumn.accessor((row) => (row.origin === 'builtin' ? row.rule.keywords.join(' ') : ''), {
     id: 'conditions',
     header: () => m.credential_protection_rule_conditions(),
-    meta: { label: () => m.credential_protection_rule_conditions() },
+    meta: { label: () => m.credential_protection_rule_conditions(), width: 'fill' },
     cell: (context) => renderSnippet(ruleConditionsCell, context),
     enableSorting: false,
-    size: 440,
+    size: 320,
   }),
 ])
 
@@ -148,6 +148,7 @@ let inputElement = $state<HTMLTextAreaElement | null>(null)
 let testing = $state(false)
 let testError = $state(false)
 let matches = $state.raw<CredentialMatch[]>()
+let resultsPane = $state<HTMLElement | null>(null)
 
 onMount(() => {
   void loadDiscoveries(false)
@@ -161,7 +162,6 @@ async function setEnabled(enabled: boolean): Promise<void> {
   try {
     await admin.settings.set(settingKey, value)
     queryClient.setQueryData(queryKey, value)
-    toast.success(m.reversible_redaction_saved())
   } catch (error) {
     saveError = localizeBackendErrorMessage(error)
     toast.error(saveError)
@@ -246,6 +246,9 @@ async function testText(): Promise<void> {
   } finally {
     testing = false
   }
+  // 窄屏结果堆叠在操作之后：运行结束后让结果落入视口。
+  await tick()
+  resultsPane?.scrollIntoView({ block: 'nearest', behavior: 'instant' })
 }
 
 function clearTest(): void {
@@ -337,36 +340,31 @@ function selectMatch(match: CredentialMatch): void {
 {/snippet}
 
 <div class={['route-page', { 'rules-workspace': tab === 'rules' }]}>
-  <PageHeader
-    eyebrow={m.app_shell_nav_advanced_features()}
-    title={m.reversible_redaction_title()}
-    description={m.credential_protection_workspace_summary()}
-    actions={pageActions} />
+  <PageHeader title={m.reversible_redaction_title()} actions={pageActions} />
 
-  <section class="route-section" aria-labelledby="redaction-setting-title">
-    <div class="route-section-header">
-      <div class="min-w-0 flex-1 basis-64">
-        <h2 id="redaction-setting-title" class="route-section-title">{m.reversible_redaction_enable()}</h2>
-        <p id="redaction-setting-description" class="route-section-description">
-          {m.credential_protection_scope_brief()}
-        </p>
-      </div>
-      <div class="flex shrink-0 items-center gap-3">
-        {#if saving}<Spinner />{/if}
+  <section class="route-section" aria-label={m.reversible_redaction_enable()}>
+    <SettingRow
+      layout="inline"
+      title={m.reversible_redaction_enable()}
+      description={m.credential_protection_scope_brief()}>
+      {#snippet children({ titleId, descriptionId })}
+        {#if settingQuery.isPending}
+          <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
+        {:else if saving}
+          <Spinner aria-label={m.settings_saving()} />
+        {/if}
         <Switch
           id="reversible-redaction-enabled"
           bind:checked={() => storedEnabled, (checked: boolean) => void setEnabled(checked)}
           disabled={!settingQuery.isSuccess || saving}
           aria-busy={saving}
-          aria-labelledby="redaction-setting-title"
-          aria-describedby="redaction-setting-description" />
-      </div>
-    </div>
-    {#if !settingQuery.isSuccess || saveError}
+          aria-labelledby={titleId}
+          aria-describedby={descriptionId} />
+      {/snippet}
+    </SettingRow>
+    {#if settingQuery.isError || saveError}
       <div class="flex flex-col gap-3">
-        {#if settingQuery.isPending}
-          <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
-        {:else if settingQuery.isError}
+        {#if settingQuery.isError}
           <Alert.Root variant="destructive"
             ><Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description></Alert.Root>
           <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}
@@ -406,6 +404,7 @@ function selectMatch(match: CredentialMatch): void {
               ></Alert.Root>
           {/if}
           <DataTable
+            workbench
             class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
             data={visibleRows}
             columns={ruleColumns}
@@ -414,7 +413,6 @@ function selectMatch(match: CredentialMatch): void {
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
-            scrollHeight="100%"
             loading={rulesQuery.isPending}
             loadingRows={8}
             globalFilterEnabled
@@ -424,23 +422,18 @@ function selectMatch(match: CredentialMatch): void {
             pagination={{ pageIndex: 0, pageSize: 10 }}
             pageSizeOptions={[10, 25, 50]}
             onRowClick={({ row }: DataTableRowPointerEvent<RuleRow>) => openRule(row.original)}>
-            {#snippet toolbar(table: DataTableInstance<RuleRow>)}
-              <div class="flex flex-wrap items-center gap-3">
-                <Select.Root type="single" bind:value={originFilter}>
-                  <Select.Trigger class="w-40" aria-label={m.credential_custom_filter_label()}
-                    >{originFilterLabel}</Select.Trigger>
-                  <Select.Content>
-                    <Select.Group>
-                      <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
-                      <Select.Item value="builtin">{m.credential_custom_filter_builtin()}</Select.Item>
-                      <Select.Item value="custom">{m.credential_custom_filter_custom()}</Select.Item>
-                    </Select.Group>
-                  </Select.Content>
-                </Select.Root>
-                <p class="text-sm text-muted-foreground" role="status">
-                  {m.credential_protection_rule_count({ count: formatNumber(table.getFilteredRowModel().rows.length) })}
-                </p>
-              </div>
+            {#snippet toolbar()}
+              <Select.Root type="single" bind:value={originFilter}>
+                <Select.Trigger class="w-40" aria-label={m.credential_custom_filter_label()}
+                  >{originFilterLabel}</Select.Trigger>
+                <Select.Content>
+                  <Select.Group>
+                    <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
+                    <Select.Item value="builtin">{m.credential_custom_filter_builtin()}</Select.Item>
+                    <Select.Item value="custom">{m.credential_custom_filter_custom()}</Select.Item>
+                  </Select.Group>
+                </Select.Content>
+              </Select.Root>
             {/snippet}
             {#snippet empty()}
               <Empty.Root
@@ -463,13 +456,10 @@ function selectMatch(match: CredentialMatch): void {
 
     <Tabs.Content value="records" class="min-w-0">
       <section class="workspace-panel" aria-labelledby="credential-discoveries-title">
-        <div class="route-section-header">
-          <div>
-            <h2 id="credential-discoveries-title" class="sr-only">
-              {m.credential_protection_discoveries_title()}
-            </h2>
-            <p class="route-section-description">{m.credential_protection_records_brief()}</p>
-          </div>
+        <div class="route-section-header justify-end">
+          <h2 id="credential-discoveries-title" class="sr-only">
+            {m.credential_protection_discoveries_title()}
+          </h2>
           <Button variant="outline" size="sm" disabled={discoveriesLoading} onclick={() => void loadDiscoveries(false)}>
             <RefreshCwIcon data-icon="inline-start" />{m.credential_protection_discoveries_refresh()}
           </Button>
@@ -585,8 +575,7 @@ function selectMatch(match: CredentialMatch): void {
                     id="credential-test-input"
                     bind:ref={inputElement}
                     bind:value={testInput}
-                    rows={12}
-                    class="min-h-72 max-h-[36rem] resize-y font-mono"
+                    class="min-h-40 max-h-[36rem] resize-y font-mono @3xl/route-page:min-h-72"
                     spellcheck={false}
                     autocomplete="off"
                     autocapitalize="off"
@@ -611,7 +600,12 @@ function selectMatch(match: CredentialMatch): void {
               {m.credential_protection_tester_flow()}
             </p>
           </div>
-          <div class="test-results-pane" aria-labelledby="test-results-title" aria-busy={testing}>
+          <div
+            bind:this={resultsPane}
+            class="test-results-pane"
+            role="region"
+            aria-labelledby="test-results-title"
+            aria-busy={testing}>
             <h3 id="test-results-title" class="mb-4 text-sm font-medium">{m.credential_protection_results_title()}</h3>
             {#if testing}
               <Empty.Root
@@ -683,7 +677,15 @@ function selectMatch(match: CredentialMatch): void {
     {#if selectedRule}
       <div class="flex min-w-0 flex-col gap-5 px-4 pb-6">
         <section aria-labelledby="rule-keywords-title">
-          <h3 id="rule-keywords-title" class="mb-2 text-sm font-medium">{m.credential_protection_keywords()}</h3>
+          <div class="mb-2 flex items-center gap-2">
+            <h3 id="rule-keywords-title" class="text-sm font-medium">{m.credential_protection_keywords()}</h3>
+            {#if selectedRule.keywords.length}
+              <Field.Help
+                hint={selectedRule.skip_report
+                  ? m.credential_protection_component_keywords_help()
+                  : m.credential_protection_keywords_help()} />
+            {/if}
+          </div>
           {#if selectedRule.keywords.length}
             <div class="flex flex-wrap gap-1.5">
               {#each selectedRule.keywords as keyword (keyword)}
@@ -691,11 +693,6 @@ function selectMatch(match: CredentialMatch): void {
                   ><code class="whitespace-normal break-all">{keyword}</code></Badge>
               {/each}
             </div>
-            <p class="mt-2 text-xs text-muted-foreground">
-              {selectedRule.skip_report
-                ? m.credential_protection_component_keywords_help()
-                : m.credential_protection_keywords_help()}
-            </p>
           {:else}
             <p class="text-sm text-muted-foreground">{m.credential_protection_no_keywords()}</p>
           {/if}
@@ -706,8 +703,10 @@ function selectMatch(match: CredentialMatch): void {
         </section>
         {#if selectedRule.filter.trim()}
           <section aria-labelledby="rule-exclusions-title">
-            <h3 id="rule-exclusions-title" class="mb-2 text-sm font-medium">{m.credential_protection_exclusions()}</h3>
-            <p class="mb-2 text-xs text-muted-foreground">{m.credential_protection_exclusions_help()}</p>
+            <div class="mb-2 flex items-center gap-2">
+              <h3 id="rule-exclusions-title" class="text-sm font-medium">{m.credential_protection_exclusions()}</h3>
+              <Field.Help hint={m.credential_protection_exclusions_help()} />
+            </div>
             <pre class="rule-code">{selectedRule.filter.trim()}</pre>
           </section>
         {/if}
@@ -754,7 +753,9 @@ function selectMatch(match: CredentialMatch): void {
                 </dd>
                 <dt>{m.credential_protection_priority()}</dt>
                 <dd class="font-mono">{formatNumber(selectedRule.specificity)}</dd>
-                <dt>{m.credential_protection_confidence()}</dt>
+                <dt class="flex items-center gap-1.5">
+                  {m.credential_protection_confidence()}<Field.Help hint={m.credential_protection_confidence_help()} />
+                </dt>
                 <dd>{confidenceLabel(selectedRule.confidence)}</dd>
                 <dt>{m.credential_protection_rule_usage()}</dt>
                 <dd>
@@ -763,7 +764,6 @@ function selectMatch(match: CredentialMatch): void {
                     : m.credential_protection_standalone()}
                 </dd>
               </dl>
-              <p class="mt-3 text-xs text-muted-foreground">{m.credential_protection_confidence_help()}</p>
             </Accordion.Content>
           </Accordion.Item>
         </Accordion.Root>
@@ -828,14 +828,21 @@ function selectMatch(match: CredentialMatch): void {
 <style>
 .rules-workspace {
   display: grid;
-  grid-template-rows: auto auto minmax(24rem, 1fr);
-  /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给规则工作区。 */
-  height: calc(100svh - 5rem);
+  /* 低窗口至少保留 24rem 的列表工作区（外加页签与面板上内边距）。 */
+  grid-template-rows: auto auto minmax(calc(24rem + 4.5rem), 1fr);
+  /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给规则工作区；超出时页面滚动并保留底部内边距。 */
+  min-height: calc(100svh - 5rem);
 }
 @media (max-width: 767px) {
   .rules-workspace {
-    height: calc(100svh - 4.5rem);
+    min-height: calc(100svh - 4.5rem);
+    /* 窄屏的工具栏与分页器各占多行，表体需要更多高度才能看到足够的行。 */
+    grid-template-rows: auto auto minmax(calc(34rem + 4.5rem), 1fr);
   }
+}
+/* 工作区行不以表格内容撑高，而是吸收剩余高度，表体在其中滚动。 */
+.rules-workspace > :global([data-slot='tabs']) {
+  contain: size;
 }
 .workspace-panel {
   min-width: 0;

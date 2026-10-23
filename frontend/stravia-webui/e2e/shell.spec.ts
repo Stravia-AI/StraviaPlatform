@@ -65,7 +65,7 @@ test('sidebar stays usable in expanded and compact modes', async ({ page }) => {
 
 test('sidebar preferences survive reloads and ignore shortcuts while editing', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
-  await page.goto('/settings')
+  await page.goto('/settings?view=data')
   await page.getByRole('button', { name: 'Collapse navigation' }).click()
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-sidebar-state'))).toBe('collapsed')
   await page.reload()
@@ -133,18 +133,23 @@ test('nested breadcrumbs keep real parent destinations', async ({ page }) => {
   await expect(page).toHaveURL(/\/models\/new$/)
 })
 
-test('settings lists sections in the main content instead of nesting another sidebar', async ({ page }) => {
+test('settings groups use one in-page navigation instead of nesting another sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
   await page.goto('/settings')
 
-  await expect(page.getByRole('navigation', { name: 'Settings sections' })).toHaveCount(0)
+  const nav = page.getByRole('navigation', { name: 'Settings sections' })
+  await expect(nav).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Select Settings section' })).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Appearance' })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(0)
+
+  await nav.getByRole('link', { name: 'Network' }).click()
   await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(1)
+  await nav.getByRole('link', { name: 'Data' }).click()
   await expect(page.getByRole('region', { name: 'Request history' })).toHaveCount(1)
 
   await page.setViewportSize({ width: 1500, height: 800 })
-  await expect(page.getByRole('region', { name: 'Appearance' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Request history' })).toBeVisible()
 })
 
 test('desktop port controls stay hidden outside the Tauri shell', async ({ page }) => {
@@ -172,20 +177,128 @@ test('system theme follows browser color-scheme changes', async ({ page }) => {
 })
 
 test('settings sections only scroll the main content', async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 800 })
-  await page.goto('/settings')
+  await page.setViewportSize({ width: 900, height: 360 })
+  await page.goto('/settings?view=data')
 
   const trigger = page.getByRole('button', { name: 'Collapse navigation' })
   const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
   const initialTrigger = await trigger.boundingBox()
   const initialNavigation = await navigation.boundingBox()
-  const requestHistory = page.getByRole('region', { name: 'Request history' })
-  await requestHistory.scrollIntoViewIfNeeded()
-  await expect(requestHistory).toBeVisible()
+  const lastSection = page.getByRole('region', { name: 'Files and uploads' })
+  await lastSection.scrollIntoViewIfNeeded()
+  await expect(lastSection).toBeVisible()
   await expect.poll(() => page.getByRole('main').evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
   await expect.poll(async () => (await trigger.boundingBox())?.y).toBe(initialTrigger?.y)
   await expect.poll(async () => (await navigation.boundingBox())?.y).toBe(initialNavigation?.y)
   await trigger.click()
   await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible()
+})
+
+const standardPages = [
+  '/allowances',
+  '/api-keys',
+  '/connect',
+  '/logs',
+  '/media-generation',
+  '/media-understanding',
+  '/models',
+  '/providers',
+  '/reversible-redaction',
+  '/settings',
+  '/stats',
+  '/vendor-plugins',
+  '/web-search',
+]
+
+for (const path of standardPages) {
+  test(`page header on ${path} is one title row without eyebrow or description`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.route('**/api/v1/media-understanding', (route) =>
+      route.fulfill({ json: { data: { enabled: false, state: 'disabled', eligible_models: [] } } }),
+    )
+    await page.route('**/api/v1/reversible-redaction/rules', (route) =>
+      route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),
+    )
+    await page.route('**/api/v1/reversible-redaction/discoveries**', (route) =>
+      route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+    )
+    await page.goto(path)
+    const title = page.getByRole('heading', { level: 1 })
+    await expect(title).toHaveCount(1)
+    const header = page.locator('header').filter({ has: title })
+    await expect(header.locator('p')).toHaveCount(0)
+    const box = (await header.boundingBox())!
+    expect(box.height).toBeLessThan(48)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('All conversations keeps only the one-sentence local history risk under its title', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/conversations')
+  const title = page.getByRole('heading', { level: 1, name: 'All conversations' })
+  await expect(title).toBeVisible()
+  const note = page.locator('header').filter({ has: title }).locator('p')
+  await expect(note).toHaveCount(1)
+  await expect(note).toHaveText('History stays in this browser; clearing site data deletes it.')
+})
+
+test('page header status sits on the title row and stays after the title on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/logs')
+  const title = page.getByRole('heading', { level: 1 })
+  const header = page.locator('header').filter({ has: title })
+  const status = header.getByRole('status')
+  await expect(status).toBeVisible()
+  const wideTitle = (await title.boundingBox())!
+  const wideStatus = (await status.boundingBox())!
+  expect(wideStatus.x).toBeGreaterThanOrEqual(wideTitle.x + wideTitle.width)
+  expect(Math.abs(wideStatus.y + wideStatus.height / 2 - (wideTitle.y + wideTitle.height / 2))).toBeLessThan(
+    wideTitle.height / 2,
+  )
+
+  await page.setViewportSize({ width: 320, height: 800 })
+  const narrowTitle = (await title.boundingBox())!
+  const narrowStatus = (await status.boundingBox())!
+  expect(
+    narrowStatus.x >= narrowTitle.x + narrowTitle.width || narrowStatus.y >= narrowTitle.y + narrowTitle.height - 1,
+  ).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('content container caps at 120rem, centers, and keeps one left edge across list and detail pages', async ({
+  page,
+}) => {
+  const container = page.getByRole('main').locator('> div')
+  const containerBox = async () => {
+    const box = await container.boundingBox()
+    return box && { x: Math.round(box.x), width: Math.round(box.width) }
+  }
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/providers')
+  await expect(container.getByRole('heading', { level: 1 })).toBeVisible()
+  await expect.poll(containerBox).toEqual({ x: 282, width: 1124 })
+
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  // 展开侧栏时主区 2296px，内容达到 120rem 上限，两侧各留 188px。
+  await expect.poll(containerBox).toEqual({ x: 256 + 188, width: 1920 })
+  await page.getByRole('button', { name: 'Collapse navigation' }).click()
+  // 折叠侧栏后主区 2504px，容器仍是 1920px，仅向左移动 104px。
+  await expect.poll(containerBox).toEqual({ x: 48 + 292, width: 1920 })
+
+  await page.getByRole('button', { name: 'Expand navigation' }).click()
+  const titleLeft: Record<string, number> = {}
+  for (const path of ['/providers', '/providers/missing-provider', '/models', '/models/new']) {
+    await page.goto(path)
+    // 刷新后先出现启动页（自带 main 与 h1），页头必须限定在应用壳层容器内，否则会量到随后被卸载的启动标题。
+    const title = container.getByRole('heading', { level: 1 })
+    await expect(title).toBeVisible()
+    // 标题在数据载入后可能被替换，轮询到稳定的盒子再取位置。
+    await expect.poll(async () => (await title.boundingBox()) !== null).toBe(true)
+    titleLeft[path] = Math.round((await title.boundingBox())!.x)
+  }
+  expect(new Set(Object.values(titleLeft)).size, JSON.stringify(titleLeft)).toBe(1)
+  await expect.poll(containerBox).toMatchObject({ x: titleLeft['/providers'], width: 1920 })
 })

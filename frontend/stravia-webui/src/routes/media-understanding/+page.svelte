@@ -8,11 +8,13 @@ import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
 import PageHeader from '#lib/components/page-header.svelte'
+import SettingRow from '#lib/components/setting-row.svelte'
+import SettingsSheet from '#lib/components/settings/settings-sheet.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
-import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
+import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import type { EligibleMediaModel, ThinkingLevel } from '#lib/types.js'
@@ -24,19 +26,37 @@ const configQuery = createQuery(() => ({
   queryFn: admin.mediaUnderstanding.get,
 }))
 
-let initialized = $state(false)
 let toggleSaving = $state(false)
 let toggleError = $state('')
+let editorOpen = $state(false)
 let modelId = $state('')
 let thinkingLevel = $state<ThinkingLevel | ''>('')
 let saving = $state(false)
 let saveError = $state('')
+
+const eligibleModels = $derived(sortLogicalModels(configQuery.data?.eligible_models ?? []))
+const selectedModel = $derived(configQuery.data?.eligible_models.find((model) => model.id === modelId))
+const savedModel = $derived(configQuery.data?.eligible_models.find((model) => model.id === configQuery.data?.model_id))
 const hasChanges = $derived(
   configQuery.data !== undefined &&
     (modelId !== (configQuery.data.model_id ?? '') || thinkingLevel !== (configQuery.data.thinking_level ?? '')),
 )
-const eligibleModels = $derived(sortLogicalModels(configQuery.data?.eligible_models ?? []))
-const selectedModel = $derived(configQuery.data?.eligible_models.find((model) => model.id === modelId))
+const draftValid = $derived(
+  Boolean(selectedModel && thinkingLevel && selectedModel.supported_thinking_levels.includes(thinkingLevel)),
+)
+const bindingSummary = $derived.by(() => {
+  const config = configQuery.data
+
+  if (!config?.model_id) return m.common_not_configured()
+
+  // 已保存但不再合格的绑定仍显示原始技术 ID，不伪装成「未配置」。
+  const name = savedModel?.display_name ?? config.model_id
+
+  return config.thinking_level ? `${name} · ${config.thinking_level}` : name
+})
+
+// 与改动前一致：功能关闭时允许保存空选择以清除失效绑定；开启时必须选到有效模型。
+const canSaveDraft = $derived(configQuery.data !== undefined && hasChanges && (!configQuery.data.enabled || draftValid))
 
 const savedBindingReady = $derived.by(() => {
   const config = configQuery.data
@@ -48,15 +68,6 @@ const savedBindingReady = $derived.by(() => {
   return Boolean(model && config.thinking_level && model.supported_thinking_levels.includes(config.thinking_level))
 })
 
-const canSave = $derived(
-  Boolean(configQuery.data) &&
-    hasChanges &&
-    !saving &&
-    !toggleSaving &&
-    (!configQuery.data?.enabled ||
-      Boolean(selectedModel && thinkingLevel && selectedModel.supported_thinking_levels.includes(thinkingLevel))),
-)
-
 function supportedThinkingLevel(
   model: EligibleMediaModel | undefined,
   preferred?: ThinkingLevel | null,
@@ -67,18 +78,16 @@ function supportedThinkingLevel(
   return model.supported_thinking_levels[0] ?? ''
 }
 
-$effect(() => {
+function openEditor(): void {
   const config = configQuery.data
 
-  if (!config || initialized) return
+  if (!config) return
 
-  initialized = true
-
-  const model = config.eligible_models.find((candidate) => candidate.id === config.model_id)
-
-  modelId = model?.id ?? ''
-  thinkingLevel = supportedThinkingLevel(model, config.thinking_level)
-})
+  modelId = savedModel?.id ?? ''
+  thinkingLevel = supportedThinkingLevel(savedModel, config.thinking_level)
+  saveError = ''
+  editorOpen = true
+}
 
 async function toggleEnabled(enabled: boolean): Promise<void> {
   const current = configQuery.data
@@ -100,22 +109,22 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!canSave || !configQuery.data) return
+  const current = configQuery.data
+
+  if (!current || saving || !canSaveDraft) return
   saving = true
   saveError = ''
   try {
     const config = await admin.mediaUnderstanding.update({
-      enabled: configQuery.data.enabled,
+      enabled: current.enabled,
       model_id: modelId || null,
       thinking_level: thinkingLevel || null,
     })
-    modelId = config.model_id ?? ''
-    thinkingLevel = config.thinking_level ?? ''
     queryClient.setQueryData(['media-understanding-config'], config)
+    editorOpen = false
     toast.success(m.media_understanding_settings_saved())
   } catch (error) {
     saveError = localizeBackendErrorMessage(error)
-    toast.error(saveError)
   } finally {
     saving = false
   }
@@ -137,10 +146,7 @@ function selectThinkingLevel(value?: string): void {
 <svelte:head><title>{m.media_understanding_title()} · Stravia</title></svelte:head>
 
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.app_shell_nav_advanced_features()}
-    title={m.media_understanding_title()}
-    description={m.media_understanding_feature_summary()} />
+  <PageHeader title={m.media_understanding_title()} />
 
   {#if configQuery.isError}
     <RequestFailure
@@ -148,112 +154,108 @@ function selectThinkingLevel(value?: string): void {
       message={localizeBackendErrorMessage(configQuery.error)}
       retry={() => configQuery.refetch()}
       retrying={configQuery.isFetching} />
-  {/if}
-  {#if configQuery.isPending}
-    <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
-  {/if}
-  {#if configQuery.data}
-    <section class="route-section" aria-labelledby="media-service-title">
-      <div class="route-section-header">
-        <div class="min-w-0 flex-1 basis-64">
-          <h2 id="media-service-title" class="route-section-title">{m.media_understanding_enable()}</h2>
-          <p id="media-service-description" class="route-section-description">
-            {m.media_understanding_model_requirement()}
-          </p>
-        </div>
-        <div class="flex shrink-0 items-center gap-3">
+  {:else if configQuery.isPending}
+    <div class="content-column flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
+      <Skeleton class="h-12" />
+      <Skeleton class="h-12" />
+    </div>
+  {:else if configQuery.data}
+    {@const config = configQuery.data}
+    <div class="content-column">
+      <SettingRow
+        title={m.media_understanding_enable()}
+        hint={m.media_understanding_model_requirement()}
+        description={!config.enabled && !savedBindingReady ? m.common_enable_requires_saved_settings() : undefined}
+        layout="inline">
+        {#snippet children({ titleId, descriptionId })}
           {#if toggleSaving}<Spinner />{/if}
           <Switch
-            bind:checked={() => configQuery.data?.enabled ?? false, (value: boolean) => void toggleEnabled(value)}
-            disabled={saving || toggleSaving || (!configQuery.data.enabled && !savedBindingReady)}
+            bind:checked={() => config.enabled, (value: boolean) => void toggleEnabled(value)}
+            disabled={saving || toggleSaving || (!config.enabled && !savedBindingReady)}
             aria-busy={toggleSaving}
-            aria-labelledby="media-service-title"
-            aria-describedby="media-service-description" />
-        </div>
-      </div>
-      <div class="flex flex-col gap-3">
-        {#if !configQuery.data.enabled && !savedBindingReady}
-          <p class="text-sm text-muted-foreground" role="status">{m.common_enable_requires_saved_settings()}</p>
-        {/if}
-        {#if toggleError}<Alert.Root variant="destructive"
-            ><Alert.Description>{toggleError}</Alert.Description></Alert.Root
-          >{/if}
-        {#if configQuery.data.state === 'unavailable'}
-          <Alert.Root variant="warning" role="status"
-            ><Alert.Description>{m.media_understanding_saved_unavailable()}</Alert.Description></Alert.Root>
-        {/if}
-      </div>
-    </section>
-
-    <section class="route-section" aria-labelledby="media-model-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="media-model-title" class="route-section-title">
-            {m.media_understanding_model_title()}
-          </h2>
-          <p class="route-section-description">
-            {m.media_understanding_model_role_help()}
-          </p>
-        </div>
-        <Button disabled={!canSave} aria-busy={saving} onclick={() => void save()}>
-          {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_settings()}
-        </Button>
-      </div>
-      <div class="flex flex-col gap-3">
-        {#if hasChanges}<p class="text-sm text-muted-foreground" role="status">{m.common_settings_unsaved()}</p>{/if}
-        {#if saveError}<Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root
-          >{/if}
-      </div>
-      {#if configQuery.data?.eligible_models.length === 0}
-        <Empty.Root class="border-y py-6">
-          <Empty.Header
-            ><Empty.Description>{m.media_understanding_add_logical_model()}</Empty.Description></Empty.Header>
-          <Empty.Content><Button href={resolve('models')}>{m.connect_add_a_model()}</Button></Empty.Content>
-        </Empty.Root>
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId} />
+        {/snippet}
+      </SettingRow>
+      {#if config.eligible_models.length === 0}
+        <SettingRow
+          title={m.media_understanding_model_title()}
+          hint={m.media_understanding_model_role_help()}
+          description={m.media_understanding_add_logical_model()}>
+          <Button variant="outline" size="sm" href={resolve('models')}>{m.connect_add_a_model()}</Button>
+        </SettingRow>
       {:else}
-        <Field.Group>
-          <Field.Field size="select">
-            <Field.Label for="media-model">{m.media_understanding_model_label()}</Field.Label>
-            <Select.Root type="single" value={modelId} disabled={saving} onValueChange={selectModel}>
-              <Select.Trigger id="media-model" class="w-full">
-                {selectedModel?.display_name ?? m.media_understanding_select_model()}
-              </Select.Trigger>
-              <Select.Content
-                ><Select.Group>
-                  {#each eligibleModels as model (model.id)}
-                    {@const secondaryId = logicalModelSecondaryId(model)}
-                    <Select.Item value={model.id} label={model.display_name}>
-                      <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                      {#if secondaryId}
-                        <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
-                      {/if}
-                    </Select.Item>
-                  {/each}
-                </Select.Group></Select.Content>
-            </Select.Root>
-          </Field.Field>
-          <Field.Field size="select">
-            <Field.Label for="media-thinking-level">
-              {m.media_understanding_thinking_level_label()}
-            </Field.Label>
-            <Select.Root
-              type="single"
-              value={thinkingLevel}
-              disabled={saving || !selectedModel}
-              onValueChange={selectThinkingLevel}>
-              <Select.Trigger id="media-thinking-level" class="w-full">
-                {thinkingLevel || m.media_understanding_select_thinking_level()}
-              </Select.Trigger>
-              <Select.Content
-                ><Select.Group>
-                  {#each selectedModel?.supported_thinking_levels ?? [] as level (level)}
-                    <Select.Item value={level} label={level}>{level}</Select.Item>
-                  {/each}
-                </Select.Group></Select.Content>
-            </Select.Root>
-          </Field.Field>
-        </Field.Group>
+        <SettingRow
+          title={m.media_understanding_model_title()}
+          hint={m.media_understanding_model_role_help()}
+          value={bindingSummary}
+          onedit={openEditor} />
       {/if}
-    </section>
+    </div>
+    {#if toggleError || config.state === 'unavailable'}
+      <div class="content-column flex flex-col gap-3">
+        {#if toggleError}
+          <Alert.Root variant="destructive"><Alert.Description>{toggleError}</Alert.Description></Alert.Root>
+        {/if}
+        {#if config.state === 'unavailable'}
+          <Alert.Root variant="warning" role="status">
+            <Alert.Description>{m.media_understanding_saved_unavailable()}</Alert.Description>
+          </Alert.Root>
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
+
+<SettingsSheet
+  bind:open={editorOpen}
+  title={m.media_understanding_edit_binding()}
+  submitLabel={m.media_understanding_save_binding()}
+  submitDisabled={!canSaveDraft}
+  {saving}
+  error={saveError}
+  draft={() => ({ modelId, thinkingLevel })}
+  onsubmit={save}>
+  <Field.Group>
+    <Field.Field size="select">
+      <Field.Label for="media-model">{m.media_understanding_model_label()}</Field.Label>
+      <Select.Root type="single" value={modelId} disabled={saving} onValueChange={selectModel}>
+        <Select.Trigger id="media-model" class="w-full">
+          {selectedModel?.display_name ?? m.media_understanding_select_model()}
+        </Select.Trigger>
+        <Select.Content
+          ><Select.Group>
+            {#each eligibleModels as model (model.id)}
+              {@const secondaryId = logicalModelSecondaryId(model)}
+              <Select.Item value={model.id} label={model.display_name}>
+                <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
+                {#if secondaryId}
+                  <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
+                {/if}
+              </Select.Item>
+            {/each}
+          </Select.Group></Select.Content>
+      </Select.Root>
+    </Field.Field>
+    <Field.Field size="select">
+      <Field.Label for="media-thinking-level">
+        {m.media_understanding_thinking_level_label()}
+      </Field.Label>
+      <Select.Root
+        type="single"
+        value={thinkingLevel}
+        disabled={saving || !selectedModel}
+        onValueChange={selectThinkingLevel}>
+        <Select.Trigger id="media-thinking-level" class="w-full">
+          {thinkingLevel || m.media_understanding_select_thinking_level()}
+        </Select.Trigger>
+        <Select.Content
+          ><Select.Group>
+            {#each selectedModel?.supported_thinking_levels ?? [] as level (level)}
+              <Select.Item value={level} label={level}>{level}</Select.Item>
+            {/each}
+          </Select.Group></Select.Content>
+      </Select.Root>
+    </Field.Field>
+  </Field.Group>
+</SettingsSheet>

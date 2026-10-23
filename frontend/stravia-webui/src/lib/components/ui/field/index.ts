@@ -2,6 +2,7 @@ import Content from './field-content.svelte'
 import Description from './field-description.svelte'
 import Error from './field-error.svelte'
 import Group from './field-group.svelte'
+import Help from './field-help.svelte'
 import Label from './field-label.svelte'
 import Legend from './field-legend.svelte'
 import Separator from './field-separator.svelte'
@@ -16,6 +17,7 @@ export {
   Group,
   Content,
   Label,
+  Help,
   Title,
   Description,
   Separator,
@@ -26,6 +28,7 @@ export {
   Group as FieldGroup,
   Content as FieldContent,
   Label as FieldLabel,
+  Help as FieldHelp,
   Title as FieldTitle,
   Description as FieldDescription,
   Separator as FieldSeparator,

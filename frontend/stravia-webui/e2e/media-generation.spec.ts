@@ -101,13 +101,18 @@ for (const enabled of [false, true]) {
     await page.getByRole('option', { name: 'Text', exact: true }).click()
     await page.getByRole('link', { name: 'Open media generation', exact: true }).click()
     await page.getByRole('button', { name: 'Discard changes', exact: true }).click()
-    const routeSelect = page.getByRole('button', { name: 'Model Route', exact: true })
-    await expect(routeSelect).toContainText('historical-image-route')
-    await routeSelect.click()
-    await page.getByRole('option', { name: 'No route selected', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toBeEnabled()
-    await page.getByRole('button', { name: 'Save settings', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Image route', exact: true })).toContainText('historical-image-route')
+    // 取消不改变配置；保存才解绑并关闭功能。
+    const sheet = page.locator('[data-slot="sheet-content"]')
+    await page.getByRole('button', { name: 'Unlink image route', exact: true }).click()
+    await expect(sheet.getByText('Unlinking the image route also turns off media generation.')).toBeVisible()
+    await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(sheet).toHaveCount(0)
+    expect(config).toEqual({ enabled, image: { route_id: 'historical-image-route' } })
+    await page.getByRole('button', { name: 'Unlink image route', exact: true }).click()
+    await sheet.getByRole('button', { name: 'Unlink route', exact: true }).click()
     await expect.poll(() => config).toEqual({ enabled: false, image: { route_id: null } })
+    await expect(sheet).toHaveCount(0)
     await expect(page.getByRole('switch', { name: 'Enable media generation' })).not.toBeChecked()
 
     await page
@@ -158,20 +163,19 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     await page.getByRole('switch', { name: zh ? '启用媒体生成' : 'Enable media generation' }).click()
     await expect.poll(() => writes.length).toBe(1)
     expect(writes[0]).toEqual({ enabled: false, image: { route_id: 'historical-image-route' } })
-    const routeSelect = page.getByRole('button', { name: zh ? '模型路由' : 'Model Route', exact: true })
-    await routeSelect.click()
-    await page.getByRole('option', { name: zh ? '未选择路由' : 'No route selected', exact: true }).click()
+    await page.getByRole('button', { name: zh ? '解除图片路由' : 'Unlink image route', exact: true }).click()
+    const sheet = page.locator('[data-slot="sheet-content"]')
+    await expect(sheet).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     expect(writes).toHaveLength(1)
-    await page.getByRole('button', { name: zh ? '保存设置' : 'Save settings', exact: true }).click()
+    await sheet.getByRole('button', { name: zh ? '解除路由' : 'Unlink route', exact: true }).click()
     await expect.poll(() => writes.length).toBe(2)
     expect(writes[1]).toEqual({ enabled: false, image: { route_id: null } })
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   })
 }
 
-test('media generation saves its gate independently from a route draft and recovers from a rejected route', async ({
-  page,
-}) => {
+test('media generation saves its gate independently and recovers from a rejected route', async ({ page }) => {
   let config = { enabled: false, image: { route_id: 'route-a' as string | null } }
   let validation = { valid: true, code: null as string | null, message: null as string | null }
   const writes: (typeof config)[] = []
@@ -213,32 +217,78 @@ test('media generation saves its gate independently from a route draft and recov
   })
 
   await page.goto('/media-generation')
-  await expect(page.getByRole('heading', { name: 'Media generation', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Media generation', exact: true })).toBeVisible()
   await page
     .getByRole('navigation', { name: 'Primary navigation' })
     .getByRole('link', { name: /Media generation/ })
     .click()
   await expect(page).toHaveURL(/\/media-generation$/)
+  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)
 
-  const routeSelect = page.getByRole('button', { name: 'Model Route', exact: true })
+  // 完整有效的路由选择即时保存且不弹成功 toast；被拒绝时选择回到服务器确认值并显示错误。
+  const routeSelect = page.getByRole('button', { name: 'Image route', exact: true })
   await routeSelect.click()
   await page.getByRole('option', { name: 'Image Route B' }).click()
-  await expect(page.getByText('The route selection has unsaved changes.')).toBeVisible()
-
-  await page.getByRole('switch', { name: 'Enable media generation' }).click()
-  await expect.poll(() => writes.length).toBe(1)
-  expect(writes[0]).toEqual({ enabled: true, image: { route_id: 'route-a' } })
-  await expect(page.getByRole('switch', { name: 'Enable media generation' })).toBeChecked()
-  await expect(routeSelect).toContainText('Image Route B')
-
-  await page.getByRole('button', { name: 'Save settings' }).click()
   await expect(page.getByText(/not compatible with image generation/i)).toBeVisible()
-  await expect(routeSelect).toContainText('Image Route B')
-  expect(config).toEqual({ enabled: true, image: { route_id: 'route-a' } })
+  await expect(routeSelect).toContainText('Image Route A')
+  await expect(page.getByText('Media generation settings saved.')).toHaveCount(0)
+  expect(config).toEqual({ enabled: false, image: { route_id: 'route-a' } })
 
-  await page.getByRole('button', { name: 'Save settings' }).click()
-  await expect(page.getByText('Media generation settings saved.')).toBeVisible()
+  // 独立启停只提交服务器确认的配置。
+  await page.getByRole('switch', { name: 'Enable media generation' }).click()
+  await expect.poll(() => writes.length).toBe(2)
+  expect(writes[1]).toEqual({ enabled: true, image: { route_id: 'route-a' } })
+  await expect(page.getByRole('switch', { name: 'Enable media generation' })).toBeChecked()
+
+  // 即时保存页没有未保存草稿：离开不询问，重新选择即可完成上次被拒绝的路由。
+  await page
+    .getByRole('navigation', { name: 'Primary navigation' })
+    .getByRole('link', { name: 'Models', exact: true })
+    .click()
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
+  await page
+    .getByRole('navigation', { name: 'Primary navigation' })
+    .getByRole('link', { name: /Media generation/ })
+    .click()
+  await expect(routeSelect).toContainText('Image Route A')
+  await routeSelect.click()
+  await page.getByRole('option', { name: 'Image Route B' }).click()
   await expect.poll(() => config).toEqual({ enabled: true, image: { route_id: 'route-b' } })
+  await expect(routeSelect).toContainText('Image Route B')
+  await expect(page.getByText(/not compatible with image generation/i)).toHaveCount(0)
+  await expect(page.getByText('Media generation settings saved.')).toHaveCount(0)
+})
+
+test('media generation unlink Sheet locks submit, cancel and close while saving', async ({ page }) => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let config = { enabled: true, image: { route_id: 'route-a' as string | null } }
+  await page.route('**/api/v1/media-generation/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await gate
+      config = route.request().postDataJSON()
+    }
+    await route.fulfill({ json: { data: { config, validation: { valid: true, code: null, message: null } } } })
+  })
+  await page.route('**/api/v1/media-generation/eligible-routes', (route) =>
+    route.fulfill({ json: { data: [{ id: 'route-a', name: 'Image Route A' }] } }),
+  )
+  await page.goto('/media-generation')
+  await page.getByRole('button', { name: 'Unlink image route', exact: true }).click()
+  const sheet = page.locator('[data-slot="sheet-content"]')
+  const submit = sheet.getByRole('button', { name: /Unlink route/ })
+  await submit.click()
+  await expect(submit).toBeDisabled()
+  await expect(submit).toHaveAttribute('aria-busy', 'true')
+  await expect(sheet.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+  await expect(sheet.getByRole('button', { name: 'Close', exact: true })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(sheet).toBeVisible()
+  release()
+  await expect(sheet).toHaveCount(0)
+  await expect.poll(() => config).toEqual({ enabled: false, image: { route_id: null } })
 })
 
 test('empty media generation configuration stays usable in Chinese dark mode at 320px', async ({ page }) => {
@@ -267,6 +317,8 @@ test('empty media generation configuration stays usable in Chinese dark mode at 
   await expect(page.locator('html')).toHaveClass(/\bdark\b/)
   await expect(page.getByRole('heading', { name: '媒体生成', exact: true })).toBeVisible()
   await expect(page.getByRole('switch', { name: '启用媒体生成' })).toBeDisabled()
+  await expect(page.getByRole('link', { name: '添加模型' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '保存设置' })).toHaveCount(0)
   const gateHint = page.getByRole('switch', { name: '启用媒体生成', exact: true })
   await gateHint.focus()
   await expect(page.getByRole('tooltip')).toContainText('请先选择并保存图片路由')
@@ -320,10 +372,14 @@ test.describe('media generation switch guidance', () => {
     await expect(tooltip).toContainText('Choose and save an image route')
     expect(writes).toEqual([])
 
-    await page.getByRole('button', { name: 'Model Route', exact: true }).click()
+    await gate.focus()
+    await expect(tooltip).toContainText('Choose and save an image route')
+    await expect(gate).toHaveAccessibleDescription(/Choose and save an image route/)
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Image route', exact: true }).click()
     await page.getByRole('option', { name: 'Image model' }).click()
-    await expect(gate).toBeDisabled()
-    await page.getByRole('button', { name: 'Save settings', exact: true }).click()
     await expect(gate).toBeEnabled()
     await gate.hover()
     await expect(tooltip).toHaveCount(0)
@@ -335,3 +391,34 @@ test.describe('media generation switch guidance', () => {
     ])
   })
 })
+
+for (const width of [2560, 390]) {
+  test(`media settings column stays within 60rem and aligned with the title at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.route('**/api/v1/media-generation/config', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            config: { enabled: false, image: { route_id: 'image' } },
+            validation: { valid: true, code: null, message: null },
+          },
+        },
+      }),
+    )
+    await page.route('**/api/v1/media-generation/eligible-routes', (route) =>
+      route.fulfill({ json: { data: [{ id: 'image', name: 'Image model' }] } }),
+    )
+    await page.goto('/media-generation')
+    const title = page.getByRole('heading', { level: 1, name: 'Media generation', exact: true })
+    await expect(title).toBeVisible()
+    const gate = page.getByRole('switch', { name: 'Enable media generation' })
+    await expect(gate).toBeVisible()
+    const column = (await page.locator('.content-column').first().boundingBox())!
+    expect(column.width).toBeLessThanOrEqual(960)
+    expect(Math.abs(column.x - (await title.boundingBox())!.x)).toBeLessThan(2)
+    expect(await page.locator('header').filter({ has: title }).getByRole('switch').count()).toBe(0)
+    await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Supported media' })).toHaveCount(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}

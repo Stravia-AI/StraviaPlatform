@@ -22,7 +22,7 @@ const initialModelId = $derived(page.url.searchParams.get('model') ?? '')
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if providersQuery.isError}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.common_add_model()} />
+    <PageHeader title={m.common_add_model()} />
     <RequestFailure
       title={m.providers_model_services_not_loaded()}
       message={localizeBackendErrorMessage(providersQuery.error)}

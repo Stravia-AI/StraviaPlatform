@@ -2,7 +2,7 @@
 import * as m from '#lib/paraglide/messages.js'
 import { SvelteMap } from 'svelte/reactivity'
 import { localeState } from '#lib/localization.svelte.js'
-import { resolvePluginText } from '#lib/plugin-text.js'
+import { resolvePluginText, restatesLabel } from '#lib/plugin-text.js'
 import { visibleProviderConfigFields } from '#lib/provider-connection-draft.js'
 import type { ProviderValidationIssue, VendorConfigField, LocalizedText } from '#lib/types.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -22,6 +22,8 @@ interface Props {
   satisfiedSecretFields?: string[]
   issues?: ProviderValidationIssue[]
   idPrefix: string
+  /** 供应商显示名；只复述「供应商 + label」的插件说明不会显示。 */
+  vendorName?: string
   disabled?: boolean
   onChanged?: () => void
 }
@@ -35,6 +37,7 @@ let {
   satisfiedSecretFields = [],
   issues = [],
   idPrefix,
+  vendorName = '',
   disabled = false,
   onChanged,
 }: Props = $props()
@@ -55,6 +58,14 @@ const groups = $derived.by(() => {
   }
   return [...entries]
 })
+
+/** 可选说明只进问号；复述 label 的说明没有信息量，直接省略。 */
+function fieldHint(field: VendorConfigField): string | undefined {
+  if (!field.description) return undefined
+  const description = resolvePluginText(field.description, localeState.current)
+  const label = resolvePluginText(field.label, localeState.current)
+  return restatesLabel(description, label, vendorName) ? undefined : description
+}
 
 function fieldIssues(key: string): ProviderValidationIssue[] {
   return issues.filter((issue) => issue.field === key)
@@ -105,9 +116,7 @@ function setText(field: VendorConfigField, value: string): void {
             class="justify-between rounded-lg border px-3 py-2 sm:col-span-2"
             data-invalid={invalid || undefined}>
             <div>
-              <Field.Label
-                for={controlId}
-                hint={field.description ? resolvePluginText(field.description, localeState.current) : undefined}
+              <Field.Label for={controlId} hint={fieldHint(field)}
                 >{resolvePluginText(field.label, localeState.current)}</Field.Label>
               {#if field.required}<Field.Description>{m.provider_config_required()}</Field.Description>{/if}
             </div>
@@ -123,9 +132,7 @@ function setText(field: VendorConfigField, value: string): void {
           </Field.Field>
         {:else}
           <Field.Field size="fill" class="sm:col-span-2" data-invalid={invalid || undefined}>
-            <Field.Label
-              for={controlId}
-              hint={field.description ? resolvePluginText(field.description, localeState.current) : undefined}
+            <Field.Label for={controlId} hint={fieldHint(field)}
               >{resolvePluginText(field.label, localeState.current)}</Field.Label>
             {#if field.kind.type === 'bool'}
               <Select.Root

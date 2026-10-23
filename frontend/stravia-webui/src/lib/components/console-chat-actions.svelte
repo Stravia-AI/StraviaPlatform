@@ -56,13 +56,22 @@ async function remove() {
 
 <div class="flex flex-wrap items-center gap-1">
   {#if clearAll}
-    <Button
-      variant="outline"
-      disabled={!chat.snapshot.conversations.length}
-      onclick={() => {
-        error = ''
-        deleteOpen = true
-      }}>{m.console_chat_clear()}</Button>
+    {#if chat.snapshot.conversations.length}
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger
+          aria-label={m.common_more_actions()}
+          class={buttonVariants({ variant: 'outline', size: 'icon' })}><EllipsisIcon /></DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end"
+          ><DropdownMenu.Group>
+            <DropdownMenu.Item
+              variant="destructive"
+              onSelect={() => {
+                error = ''
+                deleteOpen = true
+              }}>{m.console_chat_clear()}</DropdownMenu.Item>
+          </DropdownMenu.Group></DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
   {:else if conversation}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
@@ -88,10 +97,7 @@ async function remove() {
 </div>
 <Dialog.Root bind:open={renameOpen}>
   <Dialog.Content>
-    <Dialog.Header
-      ><Dialog.Title>{m.console_chat_rename_title()}</Dialog.Title><Dialog.Description
-        >{m.console_chat_rename_description()}</Dialog.Description
-      ></Dialog.Header>
+    <Dialog.Header><Dialog.Title>{m.console_chat_rename_title()}</Dialog.Title></Dialog.Header>
     <form
       class="flex flex-col gap-4"
       onsubmit={(event) => {

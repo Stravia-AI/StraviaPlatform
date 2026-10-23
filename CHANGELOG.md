@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Navigation pages now share a centered 120rem content container. Configuration fields stay within a left-aligned 60rem settings column, while Console Chat keeps a centered 56rem reading width. Page headers omit redundant eyebrows and descriptions, field explanations use accessible help tooltips, and necessary risk and data-flow information stays visible. Settings use task-based groups with inline saves or explicit multi-field Sheets; resource Sheets share unsaved-draft confirmation and saving locks.
+
 ## [0.5.3] - 2026-10-23
 
 ### Verification

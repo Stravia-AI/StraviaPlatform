@@ -437,8 +437,11 @@ test('real gateway accepts original images and persisted reasoning replay under 
     expect(await api(`/stats/overview?${statsQuery}`)).toEqual(baseline)
     await page.goto(`${origin}/conversations`)
     await expect(page.getByRole('main').getByRole('link', { name: 'First real question', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+    await page.getByRole('main').getByRole('button', { name: 'More actions', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Clear all conversations', exact: true }).click()
     await page.getByRole('alertdialog').getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+    // 清空在 IndexedDB 事务提交后才关闭确认框；重载必须等提交完成，否则会读到旧列表。
+    await expect(page.getByRole('alertdialog')).toBeHidden()
     await page.reload()
     await expect(
       page.getByRole('main').getByRole('link', { name: 'Start new conversation', exact: true }),

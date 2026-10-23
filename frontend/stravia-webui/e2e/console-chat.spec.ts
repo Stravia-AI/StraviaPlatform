@@ -115,6 +115,10 @@ async function prepareChat(page: Page) {
   return catalog
 }
 
+async function openClearAll(page: Page) {
+  await page.getByRole('main').getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Clear all conversations', exact: true }).click()
+}
 async function requests(page: Page) {
   return page.evaluate(() => window.consoleStreams.requests)
 }
@@ -170,6 +174,37 @@ const imageBytes = Buffer.from(
   'base64',
 )
 const imageData = `data:image/png;base64,${imageBytes.toString('base64')}`
+
+test('title row, messages and composer stay at the 56rem reading width while the content container widens', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/')
+  await send(page, 'Measure the reading column', 1)
+  await complete(page, 0, 'Reading column answer')
+  const title = page.getByRole('heading', { level: 1 }).locator('xpath=..')
+  const answer = page.getByRole('article', { name: 'Assistant response' })
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true }).locator('xpath=ancestor::form')
+  const container = page.getByRole('main').locator('> div')
+  for (const [viewport, containerWidth] of [
+    [{ width: 1440, height: 900 }, 1124],
+    [{ width: 2560, height: 1440 }, 1920],
+  ] as const) {
+    await page.setViewportSize(viewport)
+    await expect.poll(async () => Math.round((await container.boundingBox())!.width)).toBe(containerWidth)
+    await expect
+      .poll(() =>
+        Promise.all([title, answer, composer].map(async (locator) => Math.round((await locator.boundingBox())!.width))),
+      )
+      .toEqual([896, 896, 896])
+    const [titleBox, answerBox, composerBox] = await Promise.all(
+      [title, answer, composer].map(async (locator) => (await locator.boundingBox())!),
+    )
+    expect(titleBox.x).toBeCloseTo(answerBox.x, 0)
+    expect(composerBox.x).toBeCloseTo(answerBox.x, 0)
+  }
+})
 
 test.describe('mobile viewport', () => {
   test.use({ isMobile: true, hasTouch: true })
@@ -964,6 +999,8 @@ test('history searches message content, renames, deletes and confirms exact clea
   await page.getByRole('main').getByRole('button', { name: 'Conversation actions', exact: true }).click()
   await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
   const rename = page.getByRole('dialog', { name: 'Rename conversation' })
+  await expect(rename).not.toContainText('Choose a title')
+  await expect(rename.getByRole('textbox', { name: 'Title' })).toBeVisible()
   await rename.getByRole('textbox').fill('Renamed browser conversation')
   await rename.getByRole('button', { name: /Save|Rename/, exact: true }).click()
   await expect(rename).toHaveCount(0)
@@ -974,14 +1011,14 @@ test('history searches message content, renames, deletes and confirms exact clea
   await page.getByRole('alertdialog').getByRole('button', { name: 'Delete', exact: true }).click()
   await expect(page.getByRole('alertdialog')).toHaveCount(0)
   await search.fill('')
-  await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+  await openClearAll(page)
   const clear = page.getByRole('alertdialog', { name: 'Clear all conversations?' })
   await expect(clear).toContainText('5')
   await expect(clear).toContainText(/cannot be undone|cannot be recovered|permanent/i)
   await clear.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(clear).toHaveCount(0)
   await expect(page.getByRole('main').getByRole('link', { name: /^History title/ })).toHaveCount(5)
-  await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+  await openClearAll(page)
   await page.getByRole('alertdialog').getByRole('button', { name: 'Clear all conversations', exact: true }).click()
   await page.goto('/conversations')
   await page.reload()
@@ -1263,7 +1300,7 @@ test('failed IndexedDB clear keeps history and the confirmation retryable', asyn
       return clear.call(this)
     }
   })
-  await page.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+  await openClearAll(page)
   const confirmation = page.getByRole('alertdialog')
   await confirmation.getByRole('button', { name: 'Clear all conversations', exact: true }).click()
   await expect(confirmation.getByRole('alert')).toContainText('Local deletion unavailable')
@@ -1274,4 +1311,163 @@ test('failed IndexedDB clear keeps history and the confirmation retryable', asyn
   await expect(confirmation).toHaveCount(0)
   await page.reload()
   await expect(page.getByRole('main').getByRole('link', { name: 'Start new conversation', exact: true })).toBeVisible()
+})
+
+async function seedHistory(page: Page, count: number) {
+  await page.goto('/api/v1/auth/state')
+  await page.evaluate(async (total) => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('stravia-console-chat', 1)
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore('conversations', { keyPath: 'id' })
+        request.result.createObjectStore('preferences')
+      }
+      request.onerror = () => reject(request.error ?? new Error('History database open failed'))
+      request.onsuccess = () => {
+        const database = request.result
+        const transaction = database.transaction(['conversations', 'preferences'], 'readwrite')
+        for (let index = 0; index < total; index++) {
+          const label = String(index).padStart(2, '0')
+          const stamp = new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString()
+          transaction.objectStore('conversations').put({
+            id: `seed-${label}`,
+            title: `Seeded conversation ${label}`,
+            apiKeyId: 'key-console',
+            apiKeyName: 'Console key',
+            selectedModelId: 'console-model',
+            thinkingSelection: 'default',
+            createdAt: stamp,
+            updatedAt: stamp,
+            messages: [
+              { id: `u-${label}`, role: 'user', text: `Question ${label}`, createdAt: stamp },
+              {
+                id: `a-${label}`,
+                role: 'assistant',
+                status: 'completed',
+                routeId: 'console-model',
+                thinkingLevel: 'default',
+                createdAt: stamp,
+                outputItems: [
+                  { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `Answer ${label}` }] },
+                ],
+              },
+            ],
+          })
+        }
+        transaction.objectStore('preferences').put({ apiKeyId: 'key-console', modelId: 'console-model' }, 'selection')
+        transaction.oncomplete = () => {
+          database.close()
+          resolve()
+        }
+        transaction.onabort = () => {
+          database.close()
+          reject(transaction.error ?? new Error('History seed transaction aborted'))
+        }
+      }
+    })
+  }, count)
+}
+
+test('long history scrolls inside the table, keeps the last row and its actions reachable, and uses the 1920px workspace', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await seedHistory(page, 40)
+  await page.setViewportSize({ width: 1440, height: 700 })
+  await page.goto('/conversations')
+  const viewport = page.locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
+  await expect(viewport).toBeVisible()
+  await expect(page.getByRole('row')).toHaveCount(41)
+  expect(await viewport.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  const main = page.getByRole('main')
+  expect(await main.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1)
+  const lastRow = page.getByRole('row').last()
+  await viewport.evaluate((element) => element.scrollTo({ top: element.scrollHeight }))
+  await expect(lastRow).toBeInViewport()
+  await lastRow.getByRole('button', { name: 'Conversation actions', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeInViewport()
+  await page.keyboard.press('Escape')
+
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  const container = main.locator('> div')
+  await expect.poll(async () => Math.round((await container.boundingBox())!.width)).toBe(1920)
+  const table = page.locator('[data-slot="data-table"]')
+  await expect.poll(async () => Math.round((await table.boundingBox())!.width)).toBe(1920)
+  const headings = page.getByRole('main').getByRole('heading', { level: 1 })
+  await expect(headings).toHaveCount(1)
+  const [titleBox, newBox] = await Promise.all([
+    page.getByRole('main').getByRole('link', { name: 'New conversation', exact: true }).boundingBox(),
+    page.getByRole('main').getByRole('button', { name: 'More actions', exact: true }).boundingBox(),
+  ])
+  expect(newBox!.x + newBox!.width).toBeLessThanOrEqual(titleBox!.x + titleBox!.width + 400)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('a short history keeps natural row height and column widths stay semantic', async ({ page }) => {
+  await prepareChat(page)
+  await seedHistory(page, 3)
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.goto('/conversations')
+  const viewport = page.locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
+  await expect(viewport).toBeVisible()
+  expect((await viewport.boundingBox())!.height).toBeLessThan(300)
+  const rows = page.getByRole('row')
+  const heights = await Promise.all((await rows.all()).slice(1).map(async (row) => (await row.boundingBox())!.height))
+  for (const height of heights) expect(height).toBeLessThan(90)
+  const title = page.getByRole('columnheader', { name: 'Title' })
+  const count = page.getByRole('columnheader', { name: 'Messages' })
+  const [titleBox, countBox] = await Promise.all([title.boundingBox(), count.boundingBox()])
+  expect(titleBox!.width).toBeGreaterThan(countBox!.width * 4)
+  await expect(page.getByRole('main')).not.toContainText('Rename conversation')
+})
+
+for (const width of [390, 320]) {
+  test(`narrow history: search, row menu and conversation stay usable at ${width}px`, async ({ page }) => {
+    await prepareChat(page)
+    await seedHistory(page, 12)
+    await page.setViewportSize({ width, height: 800 })
+    await page.goto('/conversations')
+    const main = page.getByRole('main')
+    const search = page.getByRole('searchbox', { name: 'Search conversations' })
+    await search.fill('Question 07')
+    const link = main.getByRole('link', { name: 'Seeded conversation 07', exact: true })
+    await expect(link).toBeVisible()
+    await expect(main.getByRole('link', { name: 'Seeded conversation 06', exact: true })).toHaveCount(0)
+    const row = main.locator('article', { hasText: 'Seeded conversation 07' })
+    for (const label of ['API Key', 'Model', 'Messages', 'Last activity'])
+      await expect(row.getByText(label, { exact: true })).toBeVisible()
+    const menu = row.getByRole('button', { name: 'Conversation actions', exact: true })
+    const [linkBox, menuBox, rowBox] = await Promise.all([link.boundingBox(), menu.boundingBox(), row.boundingBox()])
+    // 菜单与标题首行对齐，位于右侧，不独占末行。
+    expect(menuBox!.y).toBeLessThan(linkBox!.y + linkBox!.height)
+    expect(menuBox!.x).toBeGreaterThan(linkBox!.x + 20)
+    expect(menuBox!.y + menuBox!.height).toBeLessThan(rowBox!.y + rowBox!.height - 40)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await menu.click()
+    await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeInViewport()
+    await expect(page.getByRole('menuitem', { name: 'Delete', exact: true })).toBeInViewport()
+    await page.keyboard.press('Escape')
+    await link.click()
+    await expect(page).toHaveURL(/\/\?conversation=seed-07$/)
+    await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Answer 07')
+  })
+}
+
+test('clear all lives in the More menu and confirms the exact count even while a search filters the list', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await seedHistory(page, 12)
+  await page.goto('/conversations')
+  const main = page.getByRole('main')
+  await expect(main.getByRole('button', { name: 'Clear all conversations', exact: true })).toHaveCount(0)
+  await page.getByRole('searchbox', { name: 'Search conversations' }).fill('Question 03')
+  await expect(main.getByRole('link', { name: /^Seeded conversation/ })).toHaveCount(1)
+  await openClearAll(page)
+  const clear = page.getByRole('alertdialog', { name: 'Clear all conversations?' })
+  await expect(clear).toContainText('All 12 conversations')
+  await clear.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('searchbox', { name: 'Search conversations' }).fill('')
+  await expect(main.getByRole('link', { name: /^Seeded conversation/ })).toHaveCount(12)
+  await expect(main.getByText('History stays in this browser; clearing site data deletes it.')).toBeVisible()
 })

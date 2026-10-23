@@ -612,25 +612,28 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('Showing the last successful result because this refresh failed.')).toBeVisible()
   await expect(matrix.getByText('Reconnect this provider or update its credential.')).toBeVisible()
 
-  const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
-  const forecastPanel = page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
+  const conditionSummary = page.getByRole('region', { name: 'Allowance summary' })
+  const forecastPanel = page.getByRole('region', { name: 'Exhaustion forecast' })
   await expect(conditionSummary.getByText('Exhausted', { exact: true })).toBeVisible()
-  await expect(conditionSummary.getByText(/Lowest remaining/)).toBeVisible()
+  await expect(conditionSummary.getByText(/Lowest usable remaining/)).toBeVisible()
+  // 汇总只统计并定位例外；耗尽项明细按需展开
   const emptyWindows = page.getByTestId('allowance-empty-windows')
+  await expect(emptyWindows).toHaveCount(0)
+  await conditionSummary.getByRole('button', { name: 'Exhausted items (1)' }).click()
   await expect(emptyWindows).toContainText('Beta account')
   await expect(emptyWindows).toContainText('Weekly window')
   await expect(emptyWindows).not.toContainText('Alpha account')
   await expect(page.getByRole('heading', { name: 'Reset timeline' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Exhaustion forecast' })).toBeVisible()
-  await expect(page.getByText('Based on the current window')).toBeVisible()
+  // 预报依据收进问号，不再常驻
+  await expect(page.getByText('Based on the current window')).toHaveCount(0)
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
   await expect(forecastPanel.getByTestId('allowance-forecast-will-exhaust')).toHaveAttribute(
     'aria-label',
     'Will exhaust 0',
   )
   await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
+  await forecastPanel.getByRole('button', { name: 'Exception details (1)' }).click()
   await expect(forecastPanel).toContainText('exhausted at')
   await expect(forecastPanel).not.toContainText('may exhaust')
 
@@ -708,7 +711,7 @@ test('renders provider shells first and fills each group as its snapshot arrives
   await page.goto('/allowances')
 
   const matrix = page.getByRole('list', { name: 'Allowance matrix' })
-  const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
+  const conditionSummary = page.getByRole('region', { name: 'Allowance summary' })
   // 组头先行渲染；快照到达前行区与聚合区各自转圈，不出全屏骨架
   await expect(matrix.getByText('Alpha account')).toBeVisible()
   await expect(matrix.getByTestId('allowance-loading-provider-alpha')).toBeVisible()
@@ -816,19 +819,17 @@ test('does not treat an exhausted allowance without a reset date as exhausted', 
 
   const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const provider = matrix.getByTestId('allowance-provider-provider-alpha')
-  const forecastPanel = page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
+  const forecastPanel = page.getByRole('region', { name: 'Exhaustion forecast' })
   await expect(matrix.getByText('0 USD')).toBeVisible()
   await expect(provider.getByText('Exhausted', { exact: true })).toHaveCount(0)
   await expect(
-    page.getByRole('region', { name: 'Allowance condition' }).getByText('Normal', { exact: true }),
+    page.getByRole('region', { name: 'Allowance summary' }).getByText('Normal', { exact: true }),
   ).toBeVisible()
   await expect(page.getByTestId('allowance-empty-windows')).toHaveCount(0)
   await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
   await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
 
-  await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
+  await selectFilter(page, 'All allowance states', 'Exhausted')
   await expect(page.getByText('No allowances match these filters.')).toBeVisible()
 })
 
@@ -838,12 +839,8 @@ test('search and all filters drive the same visible collection', async ({ page }
   await page.goto('/allowances')
 
   const search = page.getByLabel('Search providers')
-  const timelinePanel = page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('heading', { name: 'Reset timeline' }) })
-  const forecastPanel = page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
+  const timelinePanel = page.getByRole('region', { name: 'Reset timeline' })
+  const forecastPanel = page.getByRole('region', { name: 'Exhaustion forecast' })
   await search.fill('alpha')
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
@@ -855,7 +852,7 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByText('No allowances match these filters.')).toBeVisible()
   await search.fill('')
 
-  await selectFilter(page, 'Filter by provider type', 'openai / codex')
+  await selectFilter(page, 'All provider types', 'openai / codex')
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).toContainText('Beta account')
@@ -867,8 +864,8 @@ test('search and all filters drive the same visible collection', async ({ page }
   )
   await expect(forecastPanel).toContainText('Current windows are already exhausted')
 
-  await selectFilter(page, 'Filter by provider type', 'All')
-  await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
+  await selectFilter(page, 'Provider type: openai / codex', 'All provider types')
+  await selectFilter(page, 'All allowance states', 'Exhausted')
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
   await expect(timelinePanel).toContainText('Beta account')
@@ -879,8 +876,8 @@ test('search and all filters drive the same visible collection', async ({ page }
     'Will exhaust 0',
   )
 
-  await selectFilter(page, 'Filter by allowance condition', 'All')
-  await selectFilter(page, 'Filter by data freshness', 'Unavailable')
+  await selectFilter(page, 'Allowance state: Exhausted', 'All allowance states')
+  await selectFilter(page, 'All data states', 'Unavailable')
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Gamma account')).toBeVisible()
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Alpha account')
@@ -899,6 +896,10 @@ test('renders the empty and request-error states with recovery guidance', async 
   await expect(page.getByRole('heading', { name: 'No allowance data available' })).toBeVisible()
   await expect(page.getByText(/Enable and connect a supported provider/)).toBeVisible()
   await expect(page.getByRole('link', { name: 'Manage providers' })).toHaveAttribute('href', '/providers')
+  // 没有支持对象时不显示无关的刷新入口与更新时间
+  await expect(page.getByRole('button', { name: 'Refresh all' })).toHaveCount(0)
+  await expect(page.getByText('Not updated yet')).toHaveCount(0)
+  await expect(page.getByText(/^Updated /)).toHaveCount(0)
 
   await page.unroute('**/api/v1/provider-allowances**')
   await page.route('**/api/v1/provider-allowances**', async (route) => {
@@ -907,11 +908,241 @@ test('renders the empty and request-error states with recovery guidance', async 
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Provider allowances could not be loaded.' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Refresh all' })).toHaveCount(0)
   await page.unroute('**/api/v1/provider-allowances**')
   await mockAllowances(page, [freshSnapshot])
   await page.getByRole('button', { name: 'Retry' }).click()
   await expect(page.getByRole('list', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Refresh all' })).toBeVisible()
+  await expect(page.getByText(/^Updated /)).toBeVisible()
+})
+
+const NOW = Date.parse('2026-09-02T12:00:00Z')
+const HOUR = 3_600_000
+
+function resetWindow(key: string, resetAt: number | undefined, condition = 'normal') {
+  return {
+    key,
+    guarded: false,
+    label: `Window ${key}`,
+    kind: 'quota_window',
+    used: { value: 10, unit: 'tokens' },
+    remaining: { value: 90, unit: 'tokens' },
+    limit: { value: 100, unit: 'tokens' },
+    used_percent: 10,
+    reset_at: resetAt,
+    condition,
+    forecast: { status: 'no_risk' },
+  }
+}
+
+function timelineSnapshot() {
+  return {
+    ...freshSnapshot,
+    allowances: [
+      // 168 小时内 12 条，其中第一条 tight；超出 168 小时 1 条（tight）；已过去与未知各 1 条不入轴
+      ...Array.from({ length: 12 }, (_, index) =>
+        resetWindow(
+          `w${String(index + 1).padStart(2, '0')}`,
+          NOW + (index + 1) * 3 * HOUR,
+          index === 0 ? 'tight' : 'normal',
+        ),
+      ),
+      resetWindow('far', NOW + 10 * 24 * HOUR, 'tight'),
+      resetWindow('past', NOW - HOUR),
+      resetWindow('unknown', undefined),
+    ],
+    models: [],
+  }
+}
+
+test('timeline previews 10 resets within 168 hours, expands to all future resets and follows filters', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date(NOW))
+  await mockAllowances(page, [timelineSnapshot()])
+  await page.goto('/allowances')
+
+  const timeline = page.getByRole('list', { name: 'Reset timeline' })
+  const entries = timeline.getByRole('button', { name: /^Locate / })
+  await expect(entries).toHaveCount(10)
+  await expect(timeline.getByRole('button', { name: /Window far/ })).toHaveCount(0)
+  const expand = page.getByRole('button', { name: 'Expand all' })
+  await expect(expand).toHaveAttribute('aria-expanded', 'false')
+
+  await expand.click()
+  // 全部未来重置：12 + 1；过去与未知从不入轴
+  await expect(entries).toHaveCount(13)
+  await expect(timeline.getByRole('button', { name: /Window far/ })).toHaveCount(1)
+  await expect(timeline.getByRole('button', { name: /Window past/ })).toHaveCount(0)
+  await expect(timeline.getByRole('button', { name: /Window unknown/ })).toHaveCount(0)
+  // 矩阵不受时间轴截断
+  const provider = page.getByTestId('allowance-provider-provider-alpha')
+  await expect(provider.getByText('Window w12', { exact: true })).toBeVisible()
+  await expect(provider.getByText('Window past', { exact: true })).toBeVisible()
+  await expect(provider.getByText('Window unknown', { exact: true })).toBeVisible()
+
+  // 展开全部仍服从筛选，且展开状态跨筛选保留
+  await selectFilter(page, 'All allowance states', 'Tight')
+  await expect(entries).toHaveCount(2)
+  await expect(page.getByRole('button', { name: 'Collapse', exact: true })).toHaveAttribute('aria-expanded', 'true')
+  await selectFilter(page, 'Allowance state: Tight', 'All allowance states')
+  await expect(entries).toHaveCount(13)
+
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click()
+  await expect(entries).toHaveCount(10)
+})
+
+test('keeps provider details and timeline expansion across filters and refreshes without extra requests', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date(NOW))
+  const snapshots = structuredClone([timelineSnapshot(), staleSnapshot])
+  const posts = await mockAllowances(page, snapshots)
+  await page.goto('/allowances')
+
+  const alpha = page.getByTestId('allowance-provider-provider-alpha')
+  await alpha.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  const details = alpha.getByRole('table', { name: 'Alpha account allowance details' })
+  await expect(details).toBeVisible()
+  // 供应商类型等元数据只在展开详情中
+  await expect(alpha.getByText('openai-codex / codex')).toBeVisible()
+  await page.getByRole('button', { name: 'Expand all' }).click()
+  const timeline = page.getByRole('list', { name: 'Reset timeline' })
+  await expect(timeline.getByRole('button', { name: /^Locate / })).toHaveCount(14)
+  const requests: string[] = []
+  page.on('request', (request) => requests.push(request.url()))
+
+  // 筛选使该供应商离开再回来，展开状态保留
+  await page.getByLabel('Search providers').fill('beta')
+  await expect(alpha).toHaveCount(0)
+  await page.getByLabel('Search providers').fill('')
+  await expect(alpha.getByRole('table', { name: 'Alpha account allowance details' })).toBeVisible()
+  await selectFilter(page, 'All provider types', 'openai-codex / codex')
+  await expect(page.getByTestId('allowance-provider-provider-beta')).toHaveCount(0)
+  await expect(alpha.getByRole('table', { name: 'Alpha account allowance details' })).toBeVisible()
+  await selectFilter(page, 'Provider type: openai-codex / codex', 'All provider types')
+
+  // 搜索也命中供应商类型与渠道
+  await page.getByLabel('Search providers').fill('openai-codex')
+  await expect(alpha).toBeVisible()
+  await expect(page.getByTestId('allowance-provider-provider-beta')).toHaveCount(0)
+  await page.getByLabel('Search providers').fill('')
+
+  // 展开与筛选不产生请求
+  expect(requests.filter((url) => url.includes('provider-allowances'))).toEqual([])
+
+  await page.getByRole('button', { name: 'Refresh all' }).click()
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
+  await expect(alpha.getByRole('table', { name: 'Alpha account allowance details' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Collapse', exact: true })).toHaveAttribute('aria-expanded', 'true')
+})
+
+test('filters always name their dimension and stay reachable on narrow viewports', async ({ page }) => {
+  await mockAllowances(page, [freshSnapshot, staleSnapshot, errorSnapshot])
+  await page.goto('/allowances')
+  for (const name of ['All provider types', 'All allowance states', 'All data states']) {
+    await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
+  }
+  await selectFilter(page, 'All data states', 'Stale')
+  await expect(page.getByRole('button', { name: 'Data state: Stale', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'All provider types', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'All allowance states', exact: true })).toBeVisible()
+})
+
+for (const width of [390, 320]) {
+  test(`narrow Chinese layout at ${width}px keeps filter dimensions, quotas and pause reasons readable`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 800 })
+    await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
+    await page.clock.setFixedTime(new Date('2026-09-02T12:00:00Z'))
+    await mockAllowances(page, [
+      {
+        ...freshSnapshot,
+        suspension: {
+          suspended_at: '2026-09-01T12:00:00Z',
+          triggered_keys: ['weekly'],
+          earliest_reset_at: 1788883200000,
+        },
+      },
+      staleSnapshot,
+    ])
+    await page.goto('/allowances')
+
+    for (const name of ['全部供应商类型', '全部额度状态', '全部数据状态']) {
+      const filter = page.getByRole('button', { name, exact: true })
+      await expect(filter).toBeVisible()
+      const box = (await filter.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(width)
+    }
+    // 首批额度不被汇总埋在折叠线以下
+    const matrix = page.getByRole('list', { name: '额度矩阵' })
+    const alpha = matrix.getByTestId('allowance-provider-provider-alpha')
+    await expect(alpha.getByText('每周窗口', { exact: true })).toBeVisible()
+    const firstQuota = (await alpha.getByText('每周窗口', { exact: true }).boundingBox())!
+    expect(firstQuota.y).toBeLessThan(800)
+    // 暂停原因通过暂停提示直接可达，且点击不会展开该行
+    const pause = alpha.getByTestId('allowance-suspension')
+    await pause.click()
+    await expect(page.getByRole('tooltip')).toContainText('触发条目：weekly')
+    await expect(alpha.getByRole('button', { name: 'Alpha account 额度详情' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
+    // 时间轴定位可达
+    const locate = page.getByRole('list', { name: '重置时间轴' }).getByRole('button').first()
+    await locate.scrollIntoViewIfNeeded()
+    await locate.click()
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(overflow).toBeLessThanOrEqual(0)
+  })
+}
+
+test('uses wide workspace for more aligned quota tracks with a bounded rail', async ({ page }) => {
+  const wide = {
+    ...freshSnapshot,
+    allowances: Array.from({ length: 9 }, (_, index) => resetWindow(`q${index + 1}`, 1788883200000 + index * HOUR)),
+    models: [],
+  }
+  await mockAllowances(page, [wide])
+  const tracks = async () =>
+    page.getByTestId('allowance-provider-provider-alpha').evaluate((row) => {
+      const items = [...row.querySelectorAll('ul > li[id^="allowance-"]')] as HTMLElement[]
+      const firstTop = items[0].getBoundingClientRect().top
+      const firstRow = items.filter((item) => Math.abs(item.getBoundingClientRect().top - firstTop) < 2)
+      return {
+        perRow: firstRow.length,
+        maxWidth: Math.max(...items.map((item) => item.getBoundingClientRect().width)),
+        meters: Math.max(
+          ...[...row.querySelectorAll('[role="progressbar"]')].map((meter) => meter.getBoundingClientRect().width),
+        ),
+      }
+    })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/allowances')
+  await expect(page.getByTestId('allowance-provider-provider-alpha')).toBeVisible()
+  const narrow = await tracks()
+
+  await page.setViewportSize({ width: 2560, height: 1440 })
+  await expect.poll(async () => (await tracks()).perRow).toBeGreaterThan(narrow.perRow)
+  const wideTracks = await tracks()
+  // 轨道与进度条保持有界，新增宽度只用于容纳更多额度
+  expect(wideTracks.maxWidth).toBeLessThanOrEqual(9 * 16 + 1)
+  expect(wideTracks.meters).toBeLessThanOrEqual(14 * 4 + 1)
+  const rail = page.getByRole('region', { name: 'Reset timeline' })
+  const railBox = (await rail.boundingBox())!
+  expect(railBox.width).toBeLessThanOrEqual(28 * 16 + 1)
+  expect(railBox.width).toBeGreaterThanOrEqual(24 * 16 - 1)
+  const matrixBox = (await page.getByRole('region', { name: 'Allowance matrix' }).boundingBox())!
+  expect(matrixBox.width).toBeGreaterThan(railBox.width * 2)
 })
 
 test('keeps the matrix and side panels usable on a narrow Chinese viewport', async ({ page }) => {

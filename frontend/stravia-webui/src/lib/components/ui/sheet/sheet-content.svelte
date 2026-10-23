@@ -17,7 +17,7 @@ let {
   class: className,
   side = 'right',
   showCloseButton = true,
-  closeDisabled = false,
+  locked = false,
   closeLabel = 'Close',
   portalProps,
   children,
@@ -26,7 +26,7 @@ let {
   portalProps?: WithoutChildrenOrChild<ComponentProps<typeof SheetPortal>>
   side?: Side
   showCloseButton?: boolean
-  closeDisabled?: boolean
+  locked?: boolean
   closeLabel?: string
   children: Snippet
 } = $props()
@@ -42,10 +42,12 @@ let {
       'fixed z-50 flex flex-col gap-4 bg-popover bg-clip-padding text-sm text-popover-foreground shadow-lg transition duration-[220ms] ease-[cubic-bezier(0.2,0,0,1)] data-[side=bottom]:inset-x-0 data-[side=bottom]:bottom-0 data-[side=bottom]:h-auto data-[side=bottom]:border-t data-[side=left]:inset-y-0 data-[side=left]:left-0 data-[side=left]:h-full data-[side=left]:w-3/4 data-[side=left]:border-r data-[side=right]:inset-y-0 data-[side=right]:right-0 data-[side=right]:h-full data-[side=right]:w-3/4 data-[side=right]:border-l data-[side=top]:inset-x-0 data-[side=top]:top-0 data-[side=top]:h-auto data-[side=top]:border-b data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-[side=bottom]:data-open:slide-in-from-bottom-10 data-[side=left]:data-open:slide-in-from-left-10 data-[side=right]:data-open:slide-in-from-right-10 data-[side=top]:data-open:slide-in-from-top-10 data-closed:animate-out data-closed:fade-out-0 data-[side=bottom]:data-closed:slide-out-to-bottom-10 data-[side=left]:data-closed:slide-out-to-left-10 data-[side=right]:data-closed:slide-out-to-right-10 data-[side=top]:data-closed:slide-out-to-top-10',
       className,
     )}
-    {...restProps}>
+    {...restProps}
+    escapeKeydownBehavior={locked ? 'ignore' : (restProps.escapeKeydownBehavior ?? 'close')}
+    interactOutsideBehavior={locked ? 'ignore' : (restProps.interactOutsideBehavior ?? 'close')}>
     {@render children?.()}
     {#if showCloseButton}
-      <SheetPrimitive.Close data-slot="sheet-close" disabled={closeDisabled}>
+      <SheetPrimitive.Close data-slot="sheet-close" disabled={locked}>
         {#snippet child({ props })}
           <Button variant="ghost" class="absolute top-2 right-2" size="icon" {...props}>
             <XIcon />

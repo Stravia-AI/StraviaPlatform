@@ -1,790 +1,118 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import DownloadIcon from '@lucide/svelte/icons/download'
-import SaveIcon from '@lucide/svelte/icons/save'
-import { listen } from '@tauri-apps/api/event'
-import { setMode, userPrefersMode } from 'mode-watcher'
-import { toast } from 'svelte-sonner'
-import { onDestroy, onMount } from 'svelte'
+import { page } from '$app/state'
+import { createQuery } from '@tanstack/svelte-query'
+import { tick } from 'svelte'
 
-import {
-  admin,
-  isTauri,
-  type ArtifactSettings,
-  type ArtifactS3Settings,
-  type ProxySettings,
-} from '#lib/admin-client.js'
-import SecretInput from '#lib/components/secret-input.svelte'
-import { changeCredentials, getAuthState } from '#lib/auth.js'
-import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import { formatBytes } from '#lib/format.js'
-import DesktopClientSettings from '#lib/components/desktop-client-settings.svelte'
-import LanguageSelector from '#lib/components/language-selector.svelte'
+import { isTauri } from '#lib/admin-client.js'
+import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
+import { DraftGuard } from '#lib/draft-guard.svelte.js'
+import { provideInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
+import { getAuthState } from '#lib/auth.js'
+import AdminCredentialsSettings from '#lib/components/settings/admin-credentials-settings.svelte'
+import AppearanceSettings from '#lib/components/settings/appearance-settings.svelte'
+import ArtifactSettings from '#lib/components/settings/artifact-settings.svelte'
+import DesktopServiceSettings from '#lib/components/settings/desktop-service-settings.svelte'
+import DesktopStartupSettings from '#lib/components/settings/desktop-startup-settings.svelte'
+import DiagnosticsSettings from '#lib/components/settings/diagnostics-settings.svelte'
+import ProxySettings from '#lib/components/settings/proxy-settings.svelte'
+import RequestHistorySettings from '#lib/components/settings/request-history-settings.svelte'
+import SettingsNav from '#lib/components/settings/settings-nav.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import ProductUpdateSettings from '#lib/components/product-update-settings.svelte'
 import RpmManagement from '#lib/components/rpm-management.svelte'
-import RequestFailure from '#lib/components/request-failure.svelte'
-import { Badge } from '#lib/components/ui/badge/index.js'
-import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
-import { Button } from '#lib/components/ui/button/index.js'
-import * as Field from '#lib/components/ui/field/index.js'
-import { Input } from '#lib/components/ui/input/index.js'
-import * as Select from '#lib/components/ui/select/index.js'
-import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
-import { Switch } from '#lib/components/ui/switch/index.js'
-import { inputValue } from '#lib/utils.js'
+import { availableSettingsGroups, resolveSettingsGroup, settingsGroupLabels } from '#lib/settings-groups.js'
 
-const queryClient = useQueryClient()
-const artifactQuery = createQuery(() => ({ queryKey: ['artifact-settings'], queryFn: admin.settings.artifacts }))
-const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
-let debugConfirmOpen = $state(false)
-let debugClearOpen = $state(false)
-let changingDebug = $state(false)
-let clearingDebug = $state(false)
-let downloadingPerformance = $state<'metrics' | 'timeline' | null>(null)
-let performanceDownloadHref: string | undefined
-let performanceDownloadDisposed = false
-let performanceDownloadUnlisten: (() => void) | undefined
-let cancelPerformanceDownload: (() => void) | undefined
+// 行内输入的未保存草稿：切换分组或离开设置页前确认，没有草稿时不打扰。
+const inlineDrafts = provideInlineDraftRegistry()
+const guard = new DraftGuard({ dirty: () => inlineDrafts.dirty, busy: () => false })
 
-interface DesktopDownloadFinished {
-  url: string
-  path: string | null
-  success: boolean
-}
-let artifactDraft = $state<ArtifactSettings>()
-let artifactSaving = $state(false)
-let artifactError = $state('')
-const artifact = $derived(artifactDraft ?? artifactQuery.data)
-const artifactDirty = $derived(
-  artifactDraft !== undefined && JSON.stringify(artifactDraft) !== JSON.stringify(artifactQuery.data),
-)
-
-function editArtifact(patch: Partial<ArtifactSettings>): void {
-  if (artifact) artifactDraft = { ...artifact, ...patch }
-}
-
-function editS3(patch: Partial<ArtifactS3Settings>): void {
-  if (artifact?.s3) editArtifact({ s3: { ...artifact.s3, ...patch } })
-}
-
-function selectArtifactStorage(value: string): void {
-  if (!artifact || value === (artifact.s3 ? 's3' : 'internal')) return
-  const s3 =
-    value === 's3'
-      ? {
-          endpoint: '',
-          region: '',
-          bucket: '',
-          access_key_id: '',
-          secret_access_key: '',
-          session_token: null,
-          credentials_expires_at: null,
-        }
-      : null
-  editArtifact({ s3 })
-}
-
-async function saveArtifact(value: ArtifactSettings, completeDraft: boolean): Promise<void> {
-  artifactSaving = true
-  artifactError = ''
-  try {
-    await admin.settings.saveArtifacts(value)
-    queryClient.setQueryData(['artifact-settings'], value)
-    if (completeDraft) artifactDraft = undefined
-    toast.success(m.artifact_saved())
-  } catch (error) {
-    artifactError = localizeBackendErrorMessage(error)
-  } finally {
-    artifactSaving = false
-  }
-}
-
-async function toggleArtifact(
-  key: 'upload_prompt_injection' | 'external_signed_downloads',
-  enabled: boolean,
-): Promise<void> {
-  const saved = artifactQuery.data
-  if (!saved) return
-  if (key === 'external_signed_downloads' && enabled && !saved.file_public_base_url) {
-    editArtifact({
-      external_signed_downloads: true,
-      file_public_base_url: artifact?.file_public_base_url || artifact?.s3?.endpoint || artifact?.client_base_url || '',
-    })
-    return
-  }
-  const next = { ...saved, [key]: enabled }
-  await saveArtifact(next, false)
-  if (!artifactError && artifactDraft) artifactDraft = { ...artifactDraft, [key]: enabled }
-}
 const authStateQuery = createQuery(() => ({ queryKey: ['auth-state'], queryFn: getAuthState }))
-const retentionQuery = createQuery(() => ({
-  queryKey: ['setting', 'log_retention_days'],
-  queryFn: () => admin.settings.get('log_retention_days'),
-}))
-const proxyQuery = createQuery(() => ({ queryKey: ['outbound-proxy-settings'], queryFn: admin.settings.proxy }))
-let editedRetention = $state<string>()
-let proxyDraft = $state<ProxySettings>()
-let proxyError = $state('')
-let savingRetention = $state(false)
-let savingProxy = $state(false)
-let currentPassword = $state('')
-let adminUsername = $state('')
-let newPassword = $state('')
-let confirmPassword = $state('')
-let savingCredentials = $state(false)
-let credentialsError = $state('')
 
-const retentionReady = $derived(retentionQuery.data !== undefined)
-const retentionBaseline = $derived((retentionQuery.data ?? '7').trim())
-const retention = $derived(editedRetention ?? retentionBaseline)
-const retentionDirty = $derived(editedRetention != null && retention.trim() !== retentionBaseline)
-const proxy = $derived(proxyDraft ?? proxyQuery.data)
-const proxyDirty = $derived(proxyDraft !== undefined && JSON.stringify(proxyDraft) !== JSON.stringify(proxyQuery.data))
-const settingsError = $derived(retentionQuery.error)
-const currentTheme = $derived(userPrefersMode.current ?? 'system')
+const isServer = $derived(authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable')
+const groups = $derived(availableSettingsGroups({ server: isServer }))
+const requested = $derived(page.url.searchParams.get('view'))
+// 账号分组取决于异步的认证状态：加载期间保持请求的分组，避免先闪回「通用」。
+const waitingForHost = $derived(requested === 'account' && authStateQuery.isPending)
+const group = $derived(waitingForHost ? 'account' : resolveSettingsGroup(requested, groups))
+const groupTitle = $derived(settingsGroupLabels[group]())
 
-function scrollToSection(id: string): void {
-  const section = document.getElementById(id)
-
-  const scrollContainer = section?.closest<HTMLElement>('.shell-scrollbar')
-  if (!section || !scrollContainer) return
-
-  const scrollMarginTop = Number.parseFloat(getComputedStyle(section).scrollMarginTop) || 0
-  scrollContainer.scrollTop +=
-    section.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top - scrollMarginTop
-}
-
-function handleThemeValueChange(value: string): void {
-  if (value === 'system' || value === 'light' || value === 'dark') setMode(value)
-}
-
-onMount(() => {
-  if (!isTauri || window.location.hash !== '#client') return
-  requestAnimationFrame(() => scrollToSection('client'))
+// 跨页入口附带分区锚点（如 `?view=network#client`）：分组渲染后滚动到该分区。
+$effect(() => {
+  const hash = page.url.hash.slice(1)
+  void group
+  if (!hash) return
+  void tick().then(() => {
+    const section = document.getElementById(hash)
+    const container = section?.closest<HTMLElement>('.shell-scrollbar')
+    if (!section || !container) return
+    container.scrollTop += section.getBoundingClientRect().top - container.getBoundingClientRect().top - 16
+  })
 })
-
-onDestroy(() => {
-  performanceDownloadDisposed = true
-  cancelPerformanceDownload?.()
-  performanceDownloadUnlisten?.()
-  performanceDownloadUnlisten = undefined
-  if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
-  performanceDownloadHref = undefined
-})
-
-async function saveSetting(key: string, value: string): Promise<void> {
-  await admin.settings.set(key, value)
-  await queryClient.invalidateQueries({ queryKey: ['setting', key] })
-}
-
-async function saveRetention(): Promise<void> {
-  const value = Number.parseInt(retention, 10)
-  if (!Number.isInteger(value) || value < 1 || value > 365) {
-    toast.error(m.settings_retention_must_whole_number_between_1_365())
-    return
-  }
-  savingRetention = true
-  try {
-    await saveSetting('log_retention_days', String(value))
-    queryClient.setQueryData(['setting', 'log_retention_days'], String(value))
-    editedRetention = undefined
-    toast.success(m.settings_request_history_settings_saved())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    savingRetention = false
-  }
-}
-
-function editProxy(patch: Partial<ProxySettings>): void {
-  if (proxy && !savingProxy) proxyDraft = { ...proxy, ...patch }
-}
-
-async function saveProxy(): Promise<void> {
-  if (!proxy || savingProxy) return
-  const value = { ...proxy, url: proxy.url.trim(), bypass: proxy.bypass.trim() }
-  savingProxy = true
-  proxyError = ''
-  try {
-    await admin.settings.saveProxy(value)
-    queryClient.setQueryData(['outbound-proxy-settings'], value)
-    proxyDraft = undefined
-    toast.success(m.settings_proxy_settings_saved())
-  } catch (error) {
-    proxyError = localizeBackendErrorMessage(error)
-  } finally {
-    savingProxy = false
-  }
-}
-
-async function saveCredentials(): Promise<void> {
-  const username = adminUsername.trim() || authStateQuery.data?.username?.trim() || ''
-  if (!username || !currentPassword || !newPassword || newPassword !== confirmPassword) return
-
-  savingCredentials = true
-  credentialsError = ''
-  try {
-    await changeCredentials(currentPassword, username, newPassword)
-    window.location.assign('/login')
-  } catch (error) {
-    credentialsError = localizeBackendErrorMessage(error)
-  } finally {
-    savingCredentials = false
-  }
-}
-
-function retrySettings(): void {
-  void retentionQuery.refetch()
-}
-
-async function setDebug(enabled: boolean): Promise<void> {
-  if (changingDebug || debugQuery.isFetching || debugQuery.error || !debugQuery.data) return
-  changingDebug = true
-  try {
-    const confirmed = await admin.observations.setDebug(enabled)
-    queryClient.setQueryData(['observation-debug'], confirmed)
-    debugConfirmOpen = false
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    changingDebug = false
-  }
-}
-
-async function clearDebugData(): Promise<void> {
-  if (clearingDebug || debugQuery.isFetching || debugQuery.error || !debugQuery.data) return
-  clearingDebug = true
-  try {
-    const confirmed = await admin.observations.clearDebug()
-    queryClient.setQueryData(['observation-debug'], confirmed)
-    debugClearOpen = false
-    toast.success(m.observation_debug_cleared())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    clearingDebug = false
-  }
-}
-
-async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> {
-  if (downloadingPerformance) return
-  downloadingPerformance = kind
-  try {
-    const blob = await admin.performance[kind]()
-    if (performanceDownloadDisposed) return
-    if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
-    const href = URL.createObjectURL(blob)
-    performanceDownloadHref = href
-    let completed: PromiseWithResolvers<DesktopDownloadFinished | null> | undefined
-    if (isTauri) {
-      completed = Promise.withResolvers<DesktopDownloadFinished | null>()
-      cancelPerformanceDownload = () => completed?.resolve(null)
-      performanceDownloadUnlisten = await listen<DesktopDownloadFinished>('desktop-download-finished', (event) => {
-        if (event.payload.url === href) {
-          cancelPerformanceDownload = undefined
-          // The native download completion is the only reliable success signal.
-          completed?.resolve(event.payload)
-        }
-      })
-      if (performanceDownloadDisposed) return
-    }
-    const link = document.createElement('a')
-    link.href = href
-    link.download = kind === 'metrics' ? 'stravia-performance-metrics.prom' : 'stravia-performance-trace.json'
-    document.body.append(link)
-    try {
-      link.click()
-    } catch (error) {
-      if (!isTauri) {
-        URL.revokeObjectURL(href)
-        performanceDownloadHref = undefined
-      }
-      throw error
-    } finally {
-      link.remove()
-    }
-    if (completed) {
-      const result = await completed.promise
-      if (!performanceDownloadDisposed && result) {
-        if (result.success) {
-          toast.success(
-            result.path
-              ? m.settings_diagnostics_download_saved_to({ path: result.path })
-              : m.settings_diagnostics_download_completed(),
-          )
-        } else {
-          toast.error(m.settings_diagnostics_download_failed())
-        }
-      }
-    }
-  } catch (error) {
-    if (!performanceDownloadDisposed) toast.error(localizeBackendErrorMessage(error))
-  } finally {
-    performanceDownloadUnlisten?.()
-    performanceDownloadUnlisten = undefined
-    cancelPerformanceDownload = undefined
-    if (isTauri && performanceDownloadHref) {
-      URL.revokeObjectURL(performanceDownloadHref)
-      performanceDownloadHref = undefined
-    }
-    downloadingPerformance = null
-  }
-}
 </script>
 
-<svelte:head><title>{m.settings_settings()} · Stravia</title></svelte:head>
+<svelte:head><title>{groupTitle} · {m.settings_settings()} · Stravia</title></svelte:head>
 
 <div class="route-page">
-  <PageHeader eyebrow={m.common_system_label()} title={m.settings_settings()} description={m.settings_page_summary()} />
+  <PageHeader title={m.settings_settings()} />
 
-  {#if settingsError}
-    <RequestFailure
-      title={m.settings_some_settings_not_loaded()}
-      message={localizeBackendErrorMessage(settingsError)}
-      retry={retrySettings}
-      retrying={retentionQuery.isFetching} />
-  {/if}
-
-  <div class="min-w-0">
-    <section id="appearance" class="scroll-mt-20 pb-8" aria-labelledby="appearance-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="appearance-title" class="route-section-title">{m.settings_appearance()}</h2>
-        </div>
-      </div>
-      <Field.FieldGroup>
-        <Field.Field size="select"
-          ><Field.FieldLabel for="theme-preference">{m.settings_theme()}</Field.FieldLabel><Select.Root
-            type="single"
-            value={currentTheme}
-            onValueChange={handleThemeValueChange}
-            ><Select.Trigger id="theme-preference" class="w-full" aria-label={m.settings_theme_preference()}>
-              {currentTheme === 'system'
-                ? m.settings_follow_system_label()
-                : currentTheme === 'light'
-                  ? m.settings_light()
-                  : m.settings_dark()}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                <Select.Item value="system" label={m.settings_follow_system_label()}>
-                  {m.settings_follow_system_label()}
-                </Select.Item>
-                <Select.Item value="light" label={m.settings_light()}>{m.settings_light()}</Select.Item>
-                <Select.Item value="dark" label={m.settings_dark()}>{m.settings_dark()}</Select.Item>
-              </Select.Group>
-            </Select.Content>
-          </Select.Root></Field.Field>
-        <LanguageSelector description={false} />
-      </Field.FieldGroup>
-    </section>
-
-    {#if isTauri}
-      <DesktopClientSettings />
-    {/if}
-
-    <section id="artifacts" class="route-section scroll-mt-20 pb-8" aria-labelledby="artifacts-title">
-      <div class="route-section-header">
-        <div>
-          <div class="flex items-center gap-2">
-            <h2 id="artifacts-title" class="route-section-title">{m.artifact_settings_title()}</h2>
-            <Badge variant="secondary">{m.common_beta()}</Badge>
-          </div>
-          <p class="route-section-description">{m.artifact_settings_help()}</p>
-        </div>
-      </div>
-      {#if artifactQuery.error}<RequestFailure
-          title={m.artifact_load_failed()}
-          message={localizeBackendErrorMessage(artifactQuery.error)}
-          retry={() => {
-            void artifactQuery.refetch()
-          }}
-          retrying={artifactQuery.isFetching} />
-      {:else if artifact}
-        <Field.FieldGroup>
-          <Field.Field size="fill"
-            ><Field.FieldLabel for="artifact-client-base-url" hint={m.artifact_client_base_help()}
-              >{m.artifact_client_base_url()}</Field.FieldLabel
-            ><Input
-              id="artifact-client-base-url"
-              value={artifact.client_base_url}
-              disabled={artifactSaving}
-              oninput={(event: Event) => editArtifact({ client_base_url: inputValue(event) })} /></Field.Field>
-          <Field.Field
-            ><Field.FieldLabel for="artifact-storage">{m.artifact_storage()}</Field.FieldLabel><Select.Root
-              type="single"
-              value={artifact.s3 ? 's3' : 'internal'}
-              onValueChange={selectArtifactStorage}
-              disabled={artifactSaving}
-              ><Select.Trigger id="artifact-storage"
-                >{artifact.s3 ? m.artifact_s3_storage() : m.artifact_internal_storage()}</Select.Trigger
-              ><Select.Content
-                ><Select.Group
-                  ><Select.Item value="internal">{m.artifact_internal_storage()}</Select.Item><Select.Item value="s3"
-                    >{m.artifact_s3_storage()}</Select.Item
-                  ></Select.Group
-                ></Select.Content
-              ></Select.Root
-            ></Field.Field>
-          {#if artifact.s3}
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-endpoint">{m.artifact_s3_endpoint()}</Field.FieldLabel><Input
-                id="artifact-s3-endpoint"
-                value={artifact.s3.endpoint ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ endpoint: inputValue(event) })} /></Field.Field>
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-region">{m.artifact_s3_region()}</Field.FieldLabel><Input
-                id="artifact-s3-region"
-                value={artifact.s3.region ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ region: inputValue(event) })} /></Field.Field>
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-bucket">{m.artifact_s3_bucket()}</Field.FieldLabel><Input
-                id="artifact-s3-bucket"
-                value={artifact.s3.bucket ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ bucket: inputValue(event) })} /></Field.Field>
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-access_key_id">{m.artifact_s3_access_key()}</Field.FieldLabel><Input
-                id="artifact-s3-access_key_id"
-                value={artifact.s3.access_key_id ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ access_key_id: inputValue(event) })} /></Field.Field>
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-secret_access_key">{m.artifact_s3_secret_key()}</Field.FieldLabel
-              ><SecretInput
-                id="artifact-s3-secret_access_key"
-                value={artifact.s3.secret_access_key ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ secret_access_key: inputValue(event) })} /></Field.Field>
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-s3-session_token">{m.artifact_s3_session_token()}</Field.FieldLabel
-              ><SecretInput
-                id="artifact-s3-session_token"
-                value={artifact.s3.session_token ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editS3({ session_token: inputValue(event) || null })} /></Field.Field>
-            <Field.Field size="datetime"
-              ><Field.FieldLabel for="artifact-s3-expiry" hint={m.artifact_s3_expiry_help()}
-                >{m.artifact_s3_expiry()}</Field.FieldLabel
-              ><Input
-                id="artifact-s3-expiry"
-                type="number"
-                value={artifact.s3.credentials_expires_at ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => {
-                  const raw = inputValue(event)
-                  editS3({ credentials_expires_at: raw === '' ? null : Number(raw) })
-                }} /></Field.Field>
-          {/if}
-          <Field.Field orientation="horizontal"
-            ><div class="flex-1">
-              <Field.FieldLabel for="artifact-external-downloads">{m.artifact_external_downloads()}</Field.FieldLabel>
-            </div>
-            <Switch
-              id="artifact-external-downloads"
-              checked={artifact.external_signed_downloads}
-              disabled={artifactSaving || !artifactQuery.data?.client_base_url}
-              onCheckedChange={(value: boolean) => {
-                void toggleArtifact('external_signed_downloads', value)
-              }} /></Field.Field>
-          {#if artifact.external_signed_downloads}
-            <Field.Field size="fill"
-              ><Field.FieldLabel for="artifact-public-base-url">{m.artifact_public_base_url()}</Field.FieldLabel><Input
-                id="artifact-public-base-url"
-                value={artifact.file_public_base_url ?? ''}
-                disabled={artifactSaving}
-                oninput={(event: Event) => editArtifact({ file_public_base_url: inputValue(event) })} /></Field.Field>
-            <p class="text-sm text-muted-foreground">
-              {artifact.s3 ? m.artifact_s3_warning() : m.artifact_public_warning()}
-            </p>
-            <p class="text-sm text-muted-foreground">{m.artifact_transfer_warning()}</p>
-          {/if}
-          <Field.Field orientation="horizontal"
-            ><div class="flex-1">
-              <Field.FieldLabel for="artifact-upload-injection">{m.artifact_upload_injection()}</Field.FieldLabel>
-            </div>
-            <Switch
-              id="artifact-upload-injection"
-              checked={artifactQuery.data?.upload_prompt_injection ?? false}
-              disabled={artifactSaving || !artifactQuery.data?.client_base_url}
-              onCheckedChange={(value: boolean) => {
-                void toggleArtifact('upload_prompt_injection', value)
-              }} /></Field.Field>
-          <p class="text-sm text-muted-foreground">{m.artifact_upload_help()}</p>
-          {#if !artifactQuery.data?.client_base_url}<p class="text-sm text-muted-foreground">
-              {m.artifact_save_address_first()}
-            </p>{/if}
-          {#if artifactDirty}<p role="status" class="text-sm text-muted-foreground">{m.artifact_unsaved()}</p>{/if}
-          {#if artifactError}<Field.FieldError role="alert">{artifactError}</Field.FieldError>{/if}
-          <div class="field-actions">
-            <Button
-              disabled={!artifactDirty || artifactSaving}
-              aria-busy={artifactSaving}
-              onclick={() => {
-                if (artifact) void saveArtifact(artifact, true)
-              }}
-              >{#if artifactSaving}<Spinner data-icon="inline-start" />{/if}{artifactSaving
-                ? m.artifact_saving()
-                : m.artifact_save()}</Button>
-          </div>
-        </Field.FieldGroup>
-      {:else}<div class="flex flex-col gap-4" aria-busy="true">
-          <Skeleton class="h-10" /><Skeleton class="h-10" />
-        </div>{/if}
-    </section>
-
-    <div id="rpm" class="scroll-mt-20 pb-8"><RpmManagement /></div>
-    <section id="proxy" class="route-section scroll-mt-20 pb-8" aria-labelledby="proxy-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="proxy-title" class="route-section-title">{m.settings_proxy()}</h2>
-          <p class="route-section-description">
-            {m.settings_proxy_summary()}
-          </p>
-        </div>
-      </div>
-      {#if proxyQuery.error}
-        <RequestFailure
-          title={m.settings_some_settings_not_loaded()}
-          message={localizeBackendErrorMessage(proxyQuery.error)}
-          retry={() => void proxyQuery.refetch()}
-          retrying={proxyQuery.isFetching} />
-      {:else if proxy}
-        <Field.FieldGroup>
-          <Field.Field size="fill"
-            ><Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel><Input
-              id="proxy-url"
-              class="font-technical"
-              value={proxy.url}
-              disabled={savingProxy}
-              oninput={(event: Event) => editProxy({ url: inputValue(event) })}
-              placeholder="http://127.0.0.1:7890" /></Field.Field>
-          <Field.Field
-            ><Field.FieldLabel for="proxy-bypass">{m.settings_bypass_hosts_optional()}</Field.FieldLabel><Input
-              id="proxy-bypass"
-              value={proxy.bypass}
-              disabled={savingProxy}
-              oninput={(event: Event) => editProxy({ bypass: inputValue(event) })}
-              placeholder="localhost,127.0.0.1,.internal" /></Field.Field>
-          {#if proxyError}<Field.FieldError role="alert">{proxyError}</Field.FieldError>{/if}
-          <div class="field-actions">
-            <Button aria-busy={savingProxy} disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
-              >{#if savingProxy}<Spinner data-icon="inline-start" />{:else}<SaveIcon
-                  data-icon="inline-start" />{/if}{m.settings_save_proxy()}</Button>
-          </div>
-        </Field.FieldGroup>
-      {:else if proxyQuery.isPending}
-        <div class="flex flex-col gap-4" aria-busy="true">
-          <Skeleton class="h-10" /><Skeleton class="h-10" /><Skeleton class="h-10" />
-        </div>
-      {/if}
-    </section>
-
-    <section id="logs" class="route-section scroll-mt-20 pb-8" aria-labelledby="logs-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="logs-title" class="route-section-title">{m.common_request_history()}</h2>
-          <p class="route-section-description">
-            {m.settings_request_history_summary()}
-          </p>
-        </div>
-      </div>
-      {#if retentionReady}
-        <Field.FieldGroup>
-          <Field.Field size="number"
-            ><Field.FieldLabel for="log-retention" hint={m.settings_automatically_deletes_older_request_history()}
-              >{m.settings_retention_period_days()}</Field.FieldLabel
-            ><Input
-              id="log-retention"
-              type="number"
-              min="1"
-              max="365"
-              value={retention}
-              oninput={(event: Event) => (editedRetention = inputValue(event))} /></Field.Field>
-          <div class="field-actions">
-            <Button disabled={!retentionDirty || savingRetention} onclick={() => void saveRetention()}
-              >{#if savingRetention}<Spinner data-icon="inline-start" />{:else}<SaveIcon
-                  data-icon="inline-start" />{/if}{m.settings_save_request_history()}</Button>
-          </div>
-        </Field.FieldGroup>
-      {:else if retentionQuery.isPending}
-        <Skeleton class="h-10" aria-busy="true" />
-      {/if}
-    </section>
-
-    <section id="diagnostics" class="route-section scroll-mt-20 pb-8" aria-labelledby="diagnostics-title">
-      <div class="route-section-header">
-        <div>
-          <h2 id="diagnostics-title" class="route-section-title">{m.settings_diagnostics()}</h2>
-          <p class="route-section-description">{m.settings_diagnostics_summary()}</p>
-        </div>
-      </div>
-      {#if debugQuery.error}
-        <RequestFailure
-          title={m.settings_diagnostics_load_failed()}
-          message={localizeBackendErrorMessage(debugQuery.error)}
-          retry={() => void debugQuery.refetch()}
-          retrying={debugQuery.isFetching} />
-      {:else if debugQuery.data}
-        <Field.FieldGroup>
-          <Field.Field orientation="horizontal">
-            <div class="flex-1">
-              <Field.FieldLabel for="diagnostics-debug">{m.settings_diagnostics_debug()}</Field.FieldLabel>
-            </div>
-            <Switch
-              id="diagnostics-debug"
-              bind:checked={
-                () => debugQuery.data?.enabled ?? false,
-                (enabled) => (enabled ? (debugConfirmOpen = true) : void setDebug(false))
-              }
-              disabled={changingDebug || clearingDebug || debugQuery.isFetching}
-              aria-busy={changingDebug} />
-            {#if changingDebug}<Spinner aria-label={m.settings_diagnostics_saving()} />{/if}
-          </Field.Field>
-          <p class="text-sm text-muted-foreground">{m.observation_debug_disable_retains()}</p>
-          <p class="text-sm text-muted-foreground">
-            {m.observation_debug_retained({ retained: formatBytes(debugQuery.data.retained_bytes) })}
-          </p>
-          <p class="text-sm text-muted-foreground">{m.settings_diagnostics_timeline_description()}</p>
-          <div class="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              disabled={downloadingPerformance !== null}
-              aria-busy={downloadingPerformance === 'metrics'}
-              onclick={() => void downloadPerformance('metrics')}>
-              {#if downloadingPerformance === 'metrics'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
-                  data-icon="inline-start" />{/if}
-              {m.settings_diagnostics_download_metrics()}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={downloadingPerformance !== null}
-              aria-busy={downloadingPerformance === 'timeline'}
-              onclick={() => void downloadPerformance('timeline')}>
-              {#if downloadingPerformance === 'timeline'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
-                  data-icon="inline-start" />{/if}
-              {m.settings_diagnostics_download_timeline()}
-            </Button>
-            {#if debugQuery.data.enabled || debugQuery.data.retained_bytes > 0}
-              <Button
-                variant="destructive"
-                disabled={clearingDebug || changingDebug || debugQuery.isFetching}
-                onclick={() => (debugClearOpen = true)}>{m.observation_clear_debug()}</Button>
-            {/if}
-          </div>
-        </Field.FieldGroup>
+  <div class="settings-layout">
+    <SettingsNav {groups} current={group} />
+    <div class="settings-column">
+      {#if group === 'general'}
+        <AppearanceSettings />
+        {#if isTauri}<DesktopStartupSettings />{/if}
+        <ProductUpdateSettings />
+      {:else if group === 'network'}
+        <ProxySettings />
+        {#if isTauri}<DesktopServiceSettings />{/if}
+      {:else if group === 'data'}
+        <RequestHistorySettings />
+        <ArtifactSettings />
+      {:else if group === 'account'}
+        {#if isServer}
+          <AdminCredentialsSettings />
+        {:else}
+          <Skeleton class="h-9" aria-busy="true" />
+        {/if}
       {:else}
-        <Skeleton class="h-10" aria-busy="true" />
+        <RpmManagement />
+        <DiagnosticsSettings />
       {/if}
-    </section>
-
-    {#if authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable'}
-      <section id="credentials" class="route-section scroll-mt-20 pb-8" aria-labelledby="credentials-title">
-        <div class="route-section-header">
-          <div>
-            <h2 id="credentials-title" class="route-section-title">{m.settings_admin_credentials()}</h2>
-            <p class="route-section-description">{m.settings_admin_credentials_summary()}</p>
-          </div>
-        </div>
-        <form
-          onsubmit={(event) => {
-            event.preventDefault()
-            void saveCredentials()
-          }}>
-          <Field.FieldGroup>
-            <Field.Field data-invalid={credentialsError ? true : undefined}>
-              <Field.FieldLabel for="current-password">{m.settings_current_password()}</Field.FieldLabel>
-              <Input
-                id="current-password"
-                type="password"
-                bind:value={currentPassword}
-                autocomplete="current-password"
-                aria-invalid={credentialsError ? true : undefined} />
-            </Field.Field>
-            <Field.Field>
-              <Field.FieldLabel for="admin-username">{m.login_username()}</Field.FieldLabel>
-              <Input
-                id="admin-username"
-                bind:value={adminUsername}
-                placeholder={authStateQuery.data.username ?? ''}
-                autocomplete="username" />
-              <Field.FieldDescription>{m.settings_username_unchanged_help()}</Field.FieldDescription>
-            </Field.Field>
-            <Field.Field>
-              <Field.FieldLabel for="new-password">{m.settings_new_password()}</Field.FieldLabel>
-              <Input id="new-password" type="password" bind:value={newPassword} autocomplete="new-password" />
-            </Field.Field>
-            <Field.Field
-              data-invalid={confirmPassword.length > 0 && newPassword !== confirmPassword ? true : undefined}>
-              <Field.FieldLabel for="confirm-password">{m.setup_confirm_password()}</Field.FieldLabel>
-              <Input
-                id="confirm-password"
-                type="password"
-                bind:value={confirmPassword}
-                autocomplete="new-password"
-                aria-invalid={confirmPassword.length > 0 && newPassword !== confirmPassword} />
-              {#if confirmPassword.length > 0 && newPassword !== confirmPassword}
-                <Field.FieldError>{m.setup_passwords_must_match()}</Field.FieldError>
-              {:else if credentialsError}
-                <Field.FieldError>{credentialsError}</Field.FieldError>
-              {/if}
-            </Field.Field>
-            <div class="field-actions">
-              <Button
-                type="submit"
-                disabled={savingCredentials || !currentPassword || !newPassword || newPassword !== confirmPassword}>
-                {#if savingCredentials}<Spinner data-icon="inline-start" />{:else}<SaveIcon
-                    data-icon="inline-start" />{/if}
-                {m.settings_save_credentials()}
-              </Button>
-            </div>
-          </Field.FieldGroup>
-        </form>
-      </section>
-    {/if}
-
-    <ProductUpdateSettings />
+    </div>
   </div>
 </div>
 
-<AlertDialog.Root bind:open={debugConfirmOpen}>
-  {#if debugQuery.data && !debugQuery.error}<AlertDialog.Content>
-      <AlertDialog.Header>
-        <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
-        <AlertDialog.Description>
-          {m.observation_debug_warning({ retention_days: debugQuery.data.retention_days })}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-        <AlertDialog.Action disabled={changingDebug || debugQuery.isFetching} onclick={() => void setDebug(true)}>
-          {changingDebug ? m.observation_enabling() : m.observation_enable_debug()}
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    </AlertDialog.Content>{/if}
-</AlertDialog.Root>
+<DraftDiscardDialog {guard} />
 
-<AlertDialog.Root bind:open={debugClearOpen}>
-  {#if debugQuery.data && !debugQuery.error}<AlertDialog.Content>
-      <AlertDialog.Header>
-        <AlertDialog.Title>{m.observation_clear_debug()}</AlertDialog.Title>
-        <AlertDialog.Description>
-          {m.observation_clear_debug_warning({ retained: formatBytes(debugQuery.data.retained_bytes) })}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-        <AlertDialog.Action
-          variant="destructive"
-          disabled={clearingDebug || debugQuery.isFetching}
-          onclick={() => void clearDebugData()}>
-          {clearingDebug ? m.observation_clearing() : m.observation_clear_debug()}
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    </AlertDialog.Content>{/if}
-</AlertDialog.Root>
+<style>
+.settings-layout {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.settings-column {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: var(--content-column-max-width);
+  flex-direction: column;
+  gap: 2rem;
+}
+
+/* 导航形态随 route 容器宽度切换：不小于 64rem 时纵向导航在左，设置列不少于 50rem。 */
+@container route-page (min-width: 64rem) {
+  .settings-layout {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 2rem;
+  }
+
+  .settings-column {
+    flex: 1;
+  }
+}
+</style>

@@ -6,6 +6,7 @@ import { page } from '$app/state'
 import { createQuery } from '@tanstack/svelte-query'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { capabilityStatus } from '#lib/capability-status.js'
 import ApiKeyEditor from '#lib/components/api-key-editor.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
@@ -26,15 +27,9 @@ const mediaGenerationQuery = createQuery(() => ({
   queryFn: admin.mediaGeneration.config.get,
 }))
 
-const mediaGenerationStatus = $derived(
-  mediaGenerationQuery.isPending
-    ? ('loading' as const)
-    : mediaGenerationQuery.isError
-      ? ('unavailable' as const)
-      : mediaGenerationQuery.data?.config?.enabled
-        ? ('enabled' as const)
-        : ('disabled' as const),
-)
+const webSearchStatus = $derived(capabilityStatus(webSearchQuery, (config) => config.enabled))
+const mediaUnderstandingStatus = $derived(capabilityStatus(mediaUnderstandingQuery, (config) => config.enabled))
+const mediaGenerationStatus = $derived(capabilityStatus(mediaGenerationQuery, (config) => config.config.enabled))
 
 const apiKey = $derived(apiKeysQuery.data?.find((item) => item.id === apiKeyId))
 
@@ -43,13 +38,13 @@ async function returnToApiKeys(): Promise<void> {
 }
 </script>
 
-<svelte:head><title>{apiKey?.name ?? m.common_api_key()} · Stravia</title></svelte:head>
+<svelte:head><title>{apiKey ? apiKey.name.trim() || apiKey.id : m.common_api_key()} · Stravia</title></svelte:head>
 
 {#if apiKeysQuery.isPending || modelsQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if apiKeysQuery.isError || modelsQuery.isError}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.common_api_key()} />
+    <PageHeader title={m.common_api_key()} />
     <RequestFailure
       title={m.api_keys_api_keys_not_loaded()}
       message={localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
@@ -59,7 +54,7 @@ async function returnToApiKeys(): Promise<void> {
   </div>
 {:else if !apiKey}
   <div class="route-page">
-    <PageHeader eyebrow={m.common_setup()} title={m.api_keys_api_key_not_found()} />
+    <PageHeader title={m.api_keys_api_key_not_found()} />
     <Button href="/api-keys" variant="outline">{m.api_keys_back_api_keys()}</Button>
   </div>
 {:else}
@@ -67,8 +62,8 @@ async function returnToApiKeys(): Promise<void> {
     presentation="page"
     {apiKey}
     models={modelsQuery.data ?? []}
-    webSearchEnabled={webSearchQuery.data?.enabled ?? false}
-    mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false}
+    {webSearchStatus}
+    {mediaUnderstandingStatus}
     {mediaGenerationStatus}
     onSaved={returnToApiKeys} />
 {/if}

@@ -415,9 +415,8 @@ onDestroy(() => {
 
       {#if supportsManualCallback && oauthInProgress}
         <Field.Field size="fill" class="mt-4">
-          <Field.Label for={callbackInputId} hint={m.provider_oauth_authorization_manual_callback_help()}>
-            {m.provider_oauth_authorization_callback_url()}
-          </Field.Label>
+          <Field.Label for={callbackInputId}>{m.provider_oauth_authorization_callback_url()}</Field.Label>
+          <Field.Description>{m.provider_oauth_authorization_manual_callback_help()}</Field.Description>
           <div class="flex gap-2">
             <Input
               id={callbackInputId}

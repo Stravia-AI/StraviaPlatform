@@ -285,10 +285,7 @@ function jumpToRun(runId: string | null) {
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
   <div class="min-w-0">
-    <p class="font-structural text-xs font-semibold tracking-wider text-primary uppercase">
-      {interaction ? m.observation_interaction_details() : m.observation_failed_request_details()}
-    </p>
-    <h2 class="font-structural mt-1 truncate text-xl font-semibold">{timeline.title}</h2>
+    <h2 class="font-structural truncate text-xl font-semibold">{timeline.title}</h2>
   </div>
   <Button variant="ghost" size="icon" aria-label={m.common_close()} onclick={onclose}><XIcon /></Button>
 </header>
@@ -319,7 +316,7 @@ function jumpToRun(runId: string | null) {
   <RequestFailure message={error} retry={onretry} />
 {:else if failure}
   <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
-    <Alert.Root variant="destructive">
+    <Alert.Root variant="destructive" class="max-w-(--reading-max-width)">
       <Alert.Title>{failure.request.error.code ?? m.observation_request_failed()}</Alert.Title>
       <Alert.Description>
         <p class="whitespace-pre-wrap break-words">
@@ -354,7 +351,7 @@ function jumpToRun(runId: string | null) {
       <p role="status">{m.observation_failure_diagnostic_missing()}</p>
     {/if}
     {#each failure.trace?.reasons ?? [] as reason (reason)}
-      <p class="whitespace-pre-wrap break-words">{reason}</p>
+      <p class="max-w-(--reading-max-width) whitespace-pre-wrap break-words">{reason}</p>
     {/each}
     <div class="flex flex-wrap gap-3">
       {#if oninteraction}<Button variant="outline" onclick={oninteraction}>{m.observation_open_interaction()}</Button

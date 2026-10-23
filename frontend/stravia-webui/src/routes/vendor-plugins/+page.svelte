@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import { renderSnippet } from '@tanstack/svelte-table'
 import CircleAlertIcon from '@lucide/svelte/icons/circle-alert'
 import PackageOpenIcon from '@lucide/svelte/icons/package-open'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
@@ -9,6 +10,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { getDataTableLabels } from '#lib/data-table-labels.js'
 import type {
   PluginBindingImpact,
   PluginNetworkPermission,
@@ -20,13 +22,21 @@ import PageHeader from '#lib/components/page-header.svelte'
 import ProviderMark from '#lib/components/provider-mark.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
+import TechnicalValue from '#lib/components/technical-value.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import { Checkbox } from '#lib/components/ui/checkbox/index.js'
+import {
+  DataTable,
+  createDataTableColumnHelper,
+  type DataTableCellContext,
+  type DataTableRowPointerEvent,
+} from '#lib/components/ui/data-table/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
+import * as Field from '#lib/components/ui/field/index.js'
 import { Label } from '#lib/components/ui/label/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
@@ -58,6 +68,7 @@ let detailVendorId = $state<string>()
 let detailOpen = $state(false)
 
 const plugins = $derived(pluginsQuery.data ?? [])
+const listEmpty = $derived(!pluginsQuery.isPending && !pluginsQuery.error && plugins.length === 0)
 const fileDragActive = $derived(fileDragDepth > 0)
 const importBusy = $derived(importing || previewOpen || importQueue.length > 0)
 const detailPlugin = $derived(plugins.find((plugin) => plugin.vendor_id === detailVendorId))
@@ -69,6 +80,10 @@ const attentionNotes = $derived(
     failedCount > 0 ? m.vendor_plugins_attention_errors({ count: failedCount }) : undefined,
   ].filter((note) => note !== undefined),
 )
+const attentionVendorId = $derived(
+  plugins.find((plugin) => plugin.pending_update || plugin.error || /error|fail/i.test(plugin.status))?.vendor_id,
+)
+const tableLabels = $derived(getDataTableLabels())
 const dataDiscardRequired = $derived((preview?.discarded_data.length ?? 0) > 0)
 const addedPermissions = $derived(preview?.network_permissions.filter((item) => item.added) ?? [])
 const retainedPermissions = $derived(preview?.network_permissions.filter((item) => !item.added) ?? [])
@@ -109,9 +124,6 @@ const safeNotes = $derived.by(() => {
   }
   if (!sessionsCancelled) {
     notes.push(m.vendor_plugins_preview_auth_sessions_none())
-  }
-  if (retainedPermissions.length > 0) {
-    notes.push(m.vendor_plugins_preview_safe_network({ count: retainedPermissions.length }))
   }
   if (preview.affected_bindings.length === 0) {
     notes.push(m.vendor_plugins_preview_binding_none())
@@ -234,6 +246,85 @@ function canRestoreBuiltin(plugin: PluginSummary): boolean {
 
 function canUninstall(plugin: PluginSummary): boolean {
   return plugin.vendor_id !== 'base'
+}
+
+const pluginColumnHelper = createDataTableColumnHelper<PluginSummary>()
+const pluginColumns = pluginColumnHelper.columns([
+  pluginColumnHelper.accessor((plugin) => plugin.name, {
+    id: 'name',
+    header: () => m.common_name(),
+    cell: (context) => renderSnippet(pluginIdentityCell, context),
+    enableSorting: false,
+    meta: { label: () => m.common_name(), width: 'fill' },
+    size: 260,
+  }),
+  pluginColumnHelper.accessor((plugin) => plugin.version, {
+    id: 'version',
+    header: () => m.vendor_plugins_actual_version(),
+    cell: (context) => renderSnippet(pluginVersionCell, context),
+    enableSorting: false,
+    meta: { label: () => m.vendor_plugins_actual_version(), width: 'compact' },
+    size: 112,
+  }),
+  pluginColumnHelper.accessor((plugin) => sourceLabel(plugin.source), {
+    id: 'source',
+    header: () => m.vendor_plugins_source_label(),
+    cell: (context) => renderSnippet(pluginSourceCell, context),
+    enableSorting: false,
+    meta: { label: () => m.vendor_plugins_source_label(), width: 'compact' },
+    size: 96,
+  }),
+  pluginColumnHelper.accessor((plugin) => listedCapabilities(plugin.capabilities).map(capabilityLabel).join(' · '), {
+    id: 'capabilities',
+    header: () => m.vendor_plugins_features(),
+    cell: (context) => renderSnippet(pluginCapabilitiesCell, context),
+    enableSorting: false,
+    meta: { label: () => m.vendor_plugins_features(), width: 'fill', cellClass: 'whitespace-normal' },
+    size: 160,
+  }),
+  pluginColumnHelper.accessor((plugin) => statusLabel(plugin.status), {
+    id: 'status',
+    header: () => m.common_status(),
+    cell: (context) => renderSnippet(pluginStatusCell, context),
+    enableSorting: false,
+    meta: { label: () => m.common_status(), width: 'compact' },
+    size: 104,
+  }),
+  pluginColumnHelper.display({
+    id: 'actions',
+    header: () => m.common_actions(),
+    cell: (context) => renderSnippet(pluginActionsCell, context),
+    enableSorting: false,
+    enableHiding: false,
+    meta: { label: () => m.common_actions(), width: 'compact', align: 'end' },
+    size: 160,
+  }),
+])
+
+function hasBundledDifference(plugin: PluginSummary): boolean {
+  return Boolean(plugin.builtin_version && plugin.builtin_version !== plugin.version)
+}
+
+function pluginVersionChange(update: PluginPreview): string {
+  return update.previous_version
+    ? m.vendor_plugins_preview_version_change({ previous: update.previous_version, next: update.new_version })
+    : m.vendor_plugins_preview_new_install({ version: update.new_version })
+}
+
+// 紧凑注意计数只负责定位；原因与恢复动作始终在所属行。
+function locateAttentionPlugin(): void {
+  const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-plugin-row]')).filter(
+    (row) => row.dataset.pluginRow === attentionVendorId,
+  )
+  const target = rows.find((row) => row.getClientRects().length > 0) ?? rows[0]
+  if (!target) return
+  target.scrollIntoView({ block: 'center' })
+  target.focus({ preventScroll: true })
+}
+
+function handlePluginRowClick({ event, original }: DataTableRowPointerEvent<PluginSummary>): void {
+  if (event.target instanceof Element && event.target.closest('a, button, [role="button"]')) return
+  openDetails(original)
 }
 
 function pickPluginFile(): void {
@@ -441,34 +532,134 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 }
 </script>
 
+{#snippet pageActions()}
+  <Button variant="outline" disabled={pluginsQuery.isFetching} onclick={() => pluginsQuery.refetch()}>
+    {#if pluginsQuery.isFetching}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
+        data-icon="inline-start" />{/if}
+    {m.vendor_plugins_refresh()}
+  </Button>
+  <Button onclick={pickPluginFile} disabled={importing} aria-busy={importing}>
+    {#if importing}<Spinner data-icon="inline-start" />{:else}<UploadIcon data-icon="inline-start" />{/if}
+    {importing ? m.vendor_plugins_importing() : m.vendor_plugins_import_title()}
+  </Button>
+{/snippet}
+
+{#snippet pluginIssueNotes(plugin: PluginSummary)}
+  {#if plugin.pending_update}
+    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-warning">
+      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
+      <span class="min-w-0 break-words">
+        {m.vendor_plugins_pending_builtin_update()} · {pluginVersionChange(plugin.pending_update)}
+      </span>
+    </p>
+  {/if}
+  {#if plugin.error}
+    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-destructive">
+      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
+      <span class="min-w-0 break-words">{plugin.error}</span>
+    </p>
+  {/if}
+  {#if restoreError?.vendorId === plugin.vendor_id}
+    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-destructive" role="alert">
+      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
+      <span class="min-w-0 break-words">{m.vendor_plugins_restore_failed()} {restoreError.message}</span>
+    </p>
+  {/if}
+  {#if plugin.affected_bindings.length > 0}
+    <p class="mt-1 text-xs text-muted-foreground">
+      {m.vendor_plugins_card_binding_count({ count: plugin.affected_bindings.length })}
+    </p>
+  {/if}
+{/snippet}
+
+{#snippet pluginActions(plugin: PluginSummary)}
+  {@const restoring = restoringVendorId === plugin.vendor_id}
+  {#if plugin.pending_update}
+    {@const pendingUpdate = plugin.pending_update}
+    <Button size="sm" onclick={() => showPreview(pendingUpdate)}>
+      {m.vendor_plugins_review_update()}
+    </Button>
+  {/if}
+  {#if canRestoreBuiltin(plugin)}
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={restoring}
+      aria-busy={restoring}
+      onclick={() => restoreBuiltin(plugin.vendor_id)}>
+      {#if restoring}<Spinner data-icon="inline-start" />{/if}
+      {restoring ? m.vendor_plugins_restoring() : m.vendor_plugins_restore_builtin()}
+    </Button>
+  {/if}
+  {#if canUninstall(plugin)}
+    <Button variant="outline" size="sm" onclick={() => openUninstall(plugin)}>
+      {m.vendor_plugins_uninstall_action()}
+    </Button>
+  {/if}
+  <Button variant="ghost" size="sm" onclick={() => openDetails(plugin)}>
+    {m.vendor_plugins_details()}
+  </Button>
+{/snippet}
+
+{#snippet pluginIdentityCell(context: DataTableCellContext<PluginSummary>)}
+  {@const plugin = context.row.original}
+  <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
+    <ProviderMark
+      class="size-10 shrink-0 rounded-lg p-1.5 text-base"
+      name={plugin.name}
+      svg={plugin.icon_svg}
+      logo={plugin.vendor_id} />
+    <div class="min-w-0 flex-1">
+      <p class="truncate font-medium">{plugin.name}</p>
+      {@render pluginIssueNotes(plugin)}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet pluginVersionCell(context: DataTableCellContext<PluginSummary>)}
+  {@const plugin = context.row.original}
+  <p class="font-technical tabular-nums">{plugin.version}</p>
+  {#if hasBundledDifference(plugin)}
+    <p class="mt-0.5 text-xs text-muted-foreground">
+      {m.vendor_plugins_bundled_version()}
+      <span class="font-technical tabular-nums">{plugin.builtin_version}</span>
+    </p>
+  {/if}
+{/snippet}
+
+{#snippet pluginSourceCell(context: DataTableCellContext<PluginSummary>)}
+  <Badge variant="outline">{sourceLabel(context.row.original.source)}</Badge>
+{/snippet}
+
+{#snippet pluginCapabilitiesCell(context: DataTableCellContext<PluginSummary>)}
+  {@const features = listedCapabilities(context.row.original.capabilities)}
+  <p class="text-xs leading-5 text-muted-foreground">
+    {features.length > 0 ? features.map(capabilityLabel).join(' · ') : m.vendor_plugins_no_capabilities()}
+  </p>
+{/snippet}
+
+{#snippet pluginStatusCell(context: DataTableCellContext<PluginSummary>)}
+  {@const plugin = context.row.original}
+  <StatusIndicator compact label={statusLabel(plugin.status)} tone={statusTone(plugin.status, plugin.error)} />
+{/snippet}
+
+{#snippet pluginActionsCell(context: DataTableCellContext<PluginSummary>)}
+  <div class="flex flex-wrap items-center justify-end gap-2">{@render pluginActions(context.row.original)}</div>
+{/snippet}
+
 <svelte:head><title>{m.vendor_plugins_title()} · Stravia</title></svelte:head>
 
 <svelte:window ondragover={guardFileDragDefault} ondrop={guardFileDragDefault} />
 
 <div
-  class="route-page relative min-h-[calc(100svh-5rem)]"
+  class="route-page vendor-plugins-page relative"
   role="group"
   aria-label={m.vendor_plugins_title()}
   ondragenter={handleFileDragEnter}
   ondragover={handleFileDragOver}
   ondragleave={handleFileDragLeave}
   ondrop={handleFileDrop}>
-  <PageHeader
-    eyebrow={m.vendor_plugins_eyebrow()}
-    title={m.vendor_plugins_title()}
-    description={m.vendor_plugins_summary()}>
-    {#snippet actions()}
-      <Button variant="outline" disabled={pluginsQuery.isFetching} onclick={() => pluginsQuery.refetch()}>
-        {#if pluginsQuery.isFetching}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
-            data-icon="inline-start" />{/if}
-        {m.vendor_plugins_refresh()}
-      </Button>
-      <Button onclick={pickPluginFile} disabled={importing} aria-busy={importing}>
-        {#if importing}<Spinner data-icon="inline-start" />{:else}<UploadIcon data-icon="inline-start" />{/if}
-        {importing ? m.vendor_plugins_importing() : m.vendor_plugins_import_title()}
-      </Button>
-    {/snippet}
-  </PageHeader>
+  <PageHeader title={m.vendor_plugins_title()} actions={listEmpty ? undefined : pageActions} />
 
   <input
     bind:this={fileInput}
@@ -488,14 +679,6 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       retrying={pluginsQuery.isFetching} />
   {/if}
 
-  {#if attentionNotes.length > 0}
-    <Alert.Root variant="warning">
-      <CircleAlertIcon />
-      <Alert.Title>{m.vendor_plugins_attention_title()}</Alert.Title>
-      <Alert.Description>{attentionNotes.join(' · ')}</Alert.Description>
-    </Alert.Root>
-  {/if}
-
   {#if importError}
     <Alert.Root variant="destructive">
       <CircleAlertIcon />
@@ -503,147 +686,109 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     </Alert.Root>
   {/if}
 
-  {#if pluginsQuery.isPending}
-    <ul class="route-plugin-list" aria-busy="true">
-      {#each Array(4) as _, index (index)}
-        <li class="flex items-start gap-4 p-4">
-          <Skeleton class="size-10 rounded-lg" />
-          <div class="flex flex-1 flex-col gap-2">
-            <Skeleton class="h-5 w-48" />
-            <Skeleton class="h-4 w-32" />
-            <Skeleton class="h-5 w-64 max-w-full" />
-          </div>
-        </li>
-      {/each}
-    </ul>
-  {:else if plugins.length === 0 && !pluginsQuery.error}
-    <Empty.Root class="border border-dashed">
-      <Empty.Header>
-        <Empty.Media variant="icon"><PackageOpenIcon /></Empty.Media>
-        <Empty.Title>{m.vendor_plugins_empty_title()}</Empty.Title>
-        <Empty.Description>{m.vendor_plugins_empty_description()}</Empty.Description>
-      </Empty.Header>
-      <Empty.Content>
-        <Button onclick={pickPluginFile} disabled={importing}>
-          <UploadIcon data-icon="inline-start" />
-          {m.vendor_plugins_import_title()}
+  <section class="route-section vendor-plugins-workspace">
+    {#if attentionNotes.length > 0}
+      <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-warning" data-slot="plugin-attention">
+        <span class="flex items-center gap-1.5">
+          <CircleAlertIcon class="size-3.5 shrink-0" />
+          <span class="font-medium">{m.vendor_plugins_attention_title()}</span>
+          <span>{attentionNotes.join(' · ')}</span>
+        </span>
+        <Button variant="link" size="xs" class="h-auto p-0" onclick={locateAttentionPlugin}>
+          {m.vendor_plugins_attention_locate()}
         </Button>
-      </Empty.Content>
-    </Empty.Root>
-  {:else if plugins.length > 0}
-    <ul class="route-plugin-list">
-      {#each plugins as plugin (plugin.vendor_id)}
-        {@const features = listedCapabilities(plugin.capabilities)}
-        <li class="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:gap-4">
-          <div class="flex min-w-0 flex-1 items-start gap-3.5">
-            <ProviderMark
-              class="size-10 rounded-lg p-1.5 text-base"
-              name={plugin.name}
-              svg={plugin.icon_svg}
-              logo={plugin.vendor_id} />
-            <div class="flex min-w-0 flex-1 flex-col gap-2">
-              <div class="flex min-w-0 flex-col gap-0.5">
-                <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                  <h2 class="truncate text-base font-semibold">{plugin.name}</h2>
-                  <span
-                    class="font-technical text-xs text-muted-foreground tabular-nums"
-                    title={m.vendor_plugins_actual_version()}>{plugin.version}</span>
-                  <Badge variant="outline">{sourceLabel(plugin.source)}</Badge>
-                </div>
-                <p class="font-technical truncate text-xs text-muted-foreground">{plugin.vendor_id}</p>
-              </div>
+      </p>
+    {/if}
 
-              {#if features.length > 0}
-                <div class="flex flex-wrap gap-1.5">
-                  {#each features as capability (capability)}
-                    <Badge variant="secondary">{capabilityLabel(capability)}</Badge>
-                  {/each}
-                </div>
-              {/if}
-
-              {#if (plugin.builtin_version && plugin.builtin_version !== plugin.version) || plugin.affected_bindings.length > 0}
-                <p class="text-xs text-muted-foreground">
-                  {#if plugin.builtin_version && plugin.builtin_version !== plugin.version}
-                    {m.vendor_plugins_bundled_version()}
-                    <span class="font-technical tabular-nums">{plugin.builtin_version}</span>
-                  {/if}
-                  {#if plugin.builtin_version && plugin.builtin_version !== plugin.version && plugin.affected_bindings.length > 0}
-                    ·
-                  {/if}
-                  {#if plugin.affected_bindings.length > 0}
-                    {m.vendor_plugins_card_binding_count({ count: plugin.affected_bindings.length })}
+    {#if listEmpty}
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
+        <Empty.Header>
+          <Empty.Media variant="icon"><PackageOpenIcon /></Empty.Media>
+          <Empty.Title class="flex items-center justify-center gap-1.5">
+            {m.vendor_plugins_empty_title()}
+            <Field.FieldHelp hint={m.vendor_plugins_empty_description()} />
+          </Empty.Title>
+        </Empty.Header>
+        <Empty.Content>
+          <Button onclick={pickPluginFile} disabled={importing}>
+            <UploadIcon data-icon="inline-start" />
+            {m.vendor_plugins_import_title()}
+          </Button>
+        </Empty.Content>
+      </Empty.Root>
+    {:else if pluginsQuery.isPending}
+      <div class="route-desktop-table" aria-busy="true">
+        <DataTable
+          data={plugins}
+          columns={pluginColumns}
+          labels={tableLabels}
+          ariaLabel={m.vendor_plugins_title()}
+          loading
+          loadingRows={3} />
+      </div>
+      <div class="route-mobile-list border-y" aria-busy="true">
+        {#each Array(3) as _, index (index)}
+          <div class="flex items-start gap-3 border-b py-4 last:border-b-0">
+            <Skeleton class="size-10 shrink-0 rounded-lg" />
+            <div class="flex flex-1 flex-col gap-2">
+              <Skeleton class="h-5 w-40 max-w-full" />
+              <Skeleton class="h-4 w-56 max-w-full" />
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else if plugins.length > 0}
+      <div class="route-desktop-table min-h-0 flex-1">
+        <DataTable
+          workbench
+          data={plugins}
+          columns={pluginColumns}
+          labels={tableLabels}
+          getRowId={(plugin: PluginSummary) => plugin.vendor_id}
+          ariaLabel={m.vendor_plugins_title()}
+          onRowClick={handlePluginRowClick} />
+      </div>
+      <ul class="route-mobile-list border-t">
+        {#each plugins as plugin (plugin.vendor_id)}
+          {@const features = listedCapabilities(plugin.capabilities)}
+          <li class="flex flex-col gap-3 border-b py-4">
+            <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
+              <ProviderMark
+                class="size-10 shrink-0 rounded-lg p-1.5 text-base"
+                name={plugin.name}
+                svg={plugin.icon_svg}
+                logo={plugin.vendor_id} />
+              <div class="min-w-0 flex-1">
+                <p class="font-medium break-words">{plugin.name}</p>
+                <p class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                  <span class="font-technical tabular-nums" title={m.vendor_plugins_actual_version()}
+                    >{plugin.version}</span>
+                  <span>{sourceLabel(plugin.source)}</span>
+                  {#if hasBundledDifference(plugin)}
+                    <span>
+                      {m.vendor_plugins_bundled_version()}
+                      <span class="font-technical tabular-nums">{plugin.builtin_version}</span>
+                    </span>
                   {/if}
                 </p>
-              {/if}
-
-              {#if plugin.pending_update}
-                <Alert.Root variant="warning">
-                  <CircleAlertIcon />
-                  <Alert.Title>{m.vendor_plugins_pending_builtin_update()}</Alert.Title>
-                  <Alert.Description>
-                    {plugin.pending_update.previous_version
-                      ? m.vendor_plugins_preview_version_change({
-                          previous: plugin.pending_update.previous_version,
-                          next: plugin.pending_update.new_version,
-                        })
-                      : m.vendor_plugins_preview_new_install({ version: plugin.pending_update.new_version })}
-                  </Alert.Description>
-                </Alert.Root>
-              {/if}
-
-              {#if plugin.error}
-                <Alert.Root variant="destructive">
-                  <CircleAlertIcon />
-                  <Alert.Title>{m.vendor_plugins_reported_error()}</Alert.Title>
-                  <Alert.Description><p class="line-clamp-3 break-words">{plugin.error}</p></Alert.Description>
-                </Alert.Root>
-              {/if}
-
-              {#if restoreError?.vendorId === plugin.vendor_id}
-                <RequestFailure message={restoreError.message} />
-              {/if}
+                {#if features.length > 0}
+                  <p class="mt-1 text-xs text-muted-foreground">{features.map(capabilityLabel).join(' · ')}</p>
+                {/if}
+                {@render pluginIssueNotes(plugin)}
+              </div>
             </div>
-          </div>
-
-          <div
-            class="flex shrink-0 items-start justify-between gap-3 border-t pt-3 sm:flex-col sm:items-end sm:justify-start sm:border-t-0 sm:pt-0">
-            <div class="flex items-center">
-              <StatusIndicator label={statusLabel(plugin.status)} tone={statusTone(plugin.status, plugin.error)} />
+            <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <StatusIndicator
+                compact
+                label={statusLabel(plugin.status)}
+                tone={statusTone(plugin.status, plugin.error)} />
+              <div class="flex flex-wrap justify-end gap-2">{@render pluginActions(plugin)}</div>
             </div>
-            <div class="flex flex-wrap justify-end gap-2">
-              {#if plugin.pending_update}
-                {@const pendingUpdate = plugin.pending_update}
-                <Button size="sm" onclick={() => showPreview(pendingUpdate)}>
-                  {m.vendor_plugins_review_update()}
-                </Button>
-              {/if}
-              {#if canRestoreBuiltin(plugin)}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={restoringVendorId === plugin.vendor_id}
-                  aria-busy={restoringVendorId === plugin.vendor_id}
-                  onclick={() => restoreBuiltin(plugin.vendor_id)}>
-                  {#if restoringVendorId === plugin.vendor_id}<Spinner data-icon="inline-start" />{/if}
-                  {restoringVendorId === plugin.vendor_id
-                    ? m.vendor_plugins_restoring()
-                    : m.vendor_plugins_restore_builtin()}
-                </Button>
-              {/if}
-              {#if canUninstall(plugin)}
-                <Button variant="outline" size="sm" onclick={() => openUninstall(plugin)}>
-                  {m.vendor_plugins_uninstall_action()}
-                </Button>
-              {/if}
-              <Button variant="ghost" size="sm" onclick={() => openDetails(plugin)}>
-                {m.vendor_plugins_details()}
-              </Button>
-            </div>
-          </div>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
 
   {#if fileDragActive}
     <div class="pointer-events-none absolute inset-0 z-40 bg-background/80">
@@ -676,11 +821,14 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
             logo={plugin.vendor_id} />
           <span class="truncate">{plugin.name}</span>
         </Sheet.Title>
-        <Sheet.Description class="font-technical">{plugin.vendor_id}</Sheet.Description>
       </Sheet.Header>
       <div class="route-overlay-body">
         <div class="flex flex-col gap-5">
           <dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <div class="min-w-0">
+              <dt class="text-xs text-muted-foreground">{m.vendor_plugins_id_label()}</dt>
+              <dd class="mt-1"><TechnicalValue value={plugin.vendor_id} copyable /></dd>
+            </div>
             <div class="min-w-0">
               <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
               <dd class="mt-1">
@@ -848,7 +996,6 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     <Dialog.Layout class="sm:max-w-xl" showCloseButton={!confirming}>
       {#snippet header()}
         <Dialog.Title>{m.vendor_plugins_preview_title()}</Dialog.Title>
-        <Dialog.Description>{m.vendor_plugins_preview_description()}</Dialog.Description>
       {/snippet}
 
       <div class="flex flex-col gap-4">
@@ -1019,6 +1166,23 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
           </p>
         {/if}
 
+        {#if retainedPermissions.length > 0}
+          <div class="min-w-0 text-xs" data-slot="plugin-retained-network">
+            <p class="font-medium">{m.vendor_plugins_preview_network_retained_list()}</p>
+            <ul class="mt-1 flex flex-col gap-1">
+              {#each retainedPermissions as permission (`${permission.origin}:${permission.provider_id ?? ''}:${permission.configuration_field ?? ''}`)}
+                {@const context = networkPermissionContext(permission)}
+                <li class="min-w-0">
+                  <span class="font-technical break-all">{permission.origin}</span>
+                  {#if context.length > 0}
+                    <span class="text-muted-foreground"> · {context.join(' · ')}</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
         {#if dataDiscardRequired}
           <div class="flex items-start gap-3 rounded-lg border border-warning/40 p-3">
             <Checkbox id="allow-plugin-data-discard" bind:checked={allowDataDiscard} disabled={confirming} />
@@ -1047,3 +1211,29 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     </Dialog.Layout>
   {/if}
 </Dialog.Root>
+
+<style>
+.vendor-plugins-page {
+  /* 与壳层一致，页头与提示按内容占位，其余高度留给资源列表。 */
+  height: calc(100svh - 5rem);
+}
+.vendor-plugins-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 24rem;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+@container route-page (max-width: 52rem) {
+  .vendor-plugins-workspace {
+    flex: none;
+    min-height: 0;
+  }
+}
+@media (max-width: 767px) {
+  .vendor-plugins-page {
+    height: auto;
+    min-height: calc(100svh - 4.5rem);
+  }
+}
+</style>

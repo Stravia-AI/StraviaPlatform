@@ -116,15 +116,46 @@ export type DataTableColumnFilter =
       content: Snippet<[value: unknown, onChange: (value: unknown) => void]>
     }
 
+/**
+ * Column width semantics. `fill` columns (names, errors, expressions) absorb the width the table has
+ * left over; `compact` columns (time, count, status, actions) shrink to their content. Both keep
+ * `column.size` as their minimum width. Columns without a semantic keep the legacy behaviour.
+ */
+export type DataTableColumnWidth = 'fill' | 'compact'
+
 export interface DataTableColumnMeta {
   /** Human-readable label used by column controls and CSV export. */
   label?: string | (() => string)
   align?: DataTableAlign
+  width?: DataTableColumnWidth
   headerClass?: string
   cellClass?: string
   filter?: DataTableColumnFilter
   exportable?: boolean
   exportHeader?: string | (() => string)
+}
+
+export interface DataTableColumnWidthInput {
+  width?: DataTableColumnWidth
+  /** `column.getSize()`, in px. */
+  size: number
+  /** The width is pinned or was set by the user (resize handle / persisted sizing) and must be honoured. */
+  explicit: boolean
+  /** The table enables column resizing, which fixes every column to its size unless a semantic says otherwise. */
+  resizable: boolean
+}
+
+/** CSS declarations that give a column its width; empty when the browser should size it from content. */
+export function dataTableColumnWidthDeclarations({
+  width,
+  size,
+  explicit,
+  resizable,
+}: DataTableColumnWidthInput): string[] {
+  if (explicit) return [`width:${size}px`]
+  if (width === 'compact') return ['width:1%', `min-width:${size}px`]
+  if (width === 'fill') return [`min-width:${size}px`]
+  return resizable ? [`width:${size}px`] : []
 }
 
 export function dataTableCellText(value: unknown): string {

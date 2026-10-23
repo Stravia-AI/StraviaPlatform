@@ -33,6 +33,7 @@ import {
   type ConnectClientApplyRequest,
   type GatewayProtocol,
 } from '#lib/connect.js'
+import ConnectControlRow from '#lib/components/connect-control-row.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
@@ -149,6 +150,13 @@ const codeProtocols = [
   { id: 'google-gemini', name: 'Google Gemini', path: '/v1beta/models/{model}:generateContent' },
 ] as const
 
+const claudeMappingRows = [
+  { id: 'cli-default-model', key: 'defaultModel', label: () => m.connect_default_model() },
+  { id: 'cli-haiku-model', key: 'haikuModel', label: () => m.connect_haiku_model_mapping() },
+  { id: 'cli-sonnet-model', key: 'sonnetModel', label: () => m.connect_sonnet_model_mapping() },
+  { id: 'cli-opus-model', key: 'opusModel', label: () => m.connect_opus_model_mapping() },
+] as const
+
 async function copyText(value: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(value)
@@ -215,382 +223,336 @@ function cliModelName(modelId: string): string | undefined {
   {/each}
 {/snippet}
 
-{#snippet keyRecovery(noCandidates: boolean)}
-  {#if noCandidates}
-    <Alert.Root variant="warning" role="status"
-      ><Alert.Title>{m.connect_no_eligible_key()}</Alert.Title><Alert.Description
-        >{apiKeys.length
-          ? m.connect_no_eligible_key_description()
-          : m.connect_create_key_description()}</Alert.Description
-      ></Alert.Root>
-  {/if}
-  <div class="flex flex-wrap gap-2">
-    <Button variant="outline" onclick={() => manageResource('/api-keys', true)}>{m.connect_create_an_api_key()}</Button>
-    {#if apiKeys.length > 0}
-      <Button variant="ghost" onclick={() => manageResource('/api-keys')}>{m.connect_manage_api_keys()}</Button>
+{#snippet keyActions(selected: boolean)}
+  <div class="flex flex-wrap gap-2 @min-[36rem]/control-row:justify-end">
+    {#if selected}
+      {#if apiKeys.length > 0}
+        <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys')}
+          >{m.connect_manage_api_keys()}</Button>
+      {/if}
+      <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys', true)}
+        >{m.connect_create_an_api_key()}</Button>
+    {:else}
+      <Button variant="outline" onclick={() => manageResource('/api-keys', true)}
+        >{m.connect_create_an_api_key()}</Button>
+      {#if apiKeys.length > 0}
+        <Button variant="ghost" onclick={() => manageResource('/api-keys')}>{m.connect_manage_api_keys()}</Button>
+      {/if}
     {/if}
   </div>
 {/snippet}
 
-<div class="route-page connect-page">
-  <PageHeader
-    eyebrow={m.common_setup()}
-    title={m.connect_connect_apps()}
-    description={m.connect_choose_client_or_code_copy_result()} />
+<div class="@container/connect">
+  <div class="route-page connect-page">
+    <PageHeader title={m.connect_connect_apps()} />
 
-  {#if resourcesPending}
-    <div class="grid w-full max-w-72 grid-cols-2 gap-1" aria-label={m.connect_loading_output_modes()}>
-      <Skeleton class="h-10" /><Skeleton class="h-10" />
-    </div>
-    <div class="mt-5 grid gap-6 min-[1100px]:grid-cols-12">
-      <Skeleton class="h-96 min-[1100px]:col-span-5" />
-      <Skeleton class="h-96 min-[1100px]:col-span-7" />
-    </div>
-  {:else if blockingResourceError}
-    <RequestFailure
-      title={m.connect_connection_setup_unavailable()}
-      message={localizeBackendErrorMessage(blockingResourceError)}
-      retry={retryResources}
-      retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
-  {:else}
-    {#if resourceError}
+    {#if resourcesPending}
+      <div class="grid w-full max-w-72 grid-cols-2 gap-1" aria-label={m.connect_loading_output_modes()}>
+        <Skeleton class="h-10" /><Skeleton class="h-10" />
+      </div>
+      <div class="grid gap-6 @min-[68rem]/connect:grid-cols-12">
+        <Skeleton class="h-96 @min-[68rem]/connect:col-span-5" />
+        <Skeleton class="h-96 @min-[68rem]/connect:col-span-7" />
+      </div>
+    {:else if blockingResourceError}
       <RequestFailure
-        message={m.connect_stale_data_warning()}
+        title={m.connect_connection_setup_unavailable()}
+        message={localizeBackendErrorMessage(blockingResourceError)}
         retry={retryResources}
         retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
-    {/if}
+    {:else}
+      {#if resourceError}
+        <RequestFailure
+          message={m.connect_stale_data_warning()}
+          retry={retryResources}
+          retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
+      {/if}
 
-    <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
-      <Tabs.List class="shrink-0" aria-label={m.connect_setup_format()}>
-        <Tabs.Trigger value="cli"
-          ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
-        <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
-      </Tabs.List>
+      <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
+        <Tabs.List class="shrink-0" aria-label={m.connect_setup_format()}>
+          <Tabs.Trigger value="cli"
+            ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
+          <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
+        </Tabs.List>
 
-      <Tabs.Content value="cli" class="mt-5 min-h-0 data-active:flex data-active:flex-col">
-        <div
-          class="grid gap-6 min-[1100px]:min-h-0 min-[1100px]:flex-1 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
-          <section
-            class="route-section min-[1100px]:min-h-0 min-[1100px]:overflow-y-auto min-[1100px]:col-span-5"
-            aria-labelledby="cli-controls-title">
-            <div class="route-section-header">
-              <div>
-                <h2 id="cli-controls-title" class="route-section-title">
-                  {m.connect_client_setup()}
-                </h2>
-                <p class="route-section-description">
-                  {selectedTool.description()}
-                </p>
-              </div>
-            </div>
-            <Field.FieldGroup>
-              <Field.Field size="select">
-                <Field.FieldLabel for="cli-tool">{m.connect_client()}</Field.FieldLabel>
-                <Select.Root type="single" bind:value={cliToolId}>
-                  <Select.Trigger id="cli-tool" class="w-full">{selectedTool.name}</Select.Trigger>
-                  <Select.Content
-                    ><Select.Group
-                      >{#each CLI_TOOLS as tool (tool.id)}<Select.Item value={tool.id} label={tool.name}
-                          >{tool.name}</Select.Item
-                        >{/each}</Select.Group
-                    ></Select.Content>
-                </Select.Root>
-              </Field.Field>
-              <Field.Field size="select">
-                <Field.FieldLabel for="cli-key">{m.common_api_key()}</Field.FieldLabel>
-                <Select.Root
-                  type="single"
-                  bind:value={
-                    () => selectedCliKey?.id ?? '',
-                    (value: string) => {
-                      cliKeyId = value
+        <Tabs.Content value="cli" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
+          <div
+            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-12 @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
+            <section
+              class="min-w-0 @min-[68rem]/connect:col-span-5 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
+              aria-labelledby="cli-controls-title">
+              <h2 id="cli-controls-title" class="sr-only">{m.connect_client_setup()}</h2>
+              <Field.FieldGroup>
+                <ConnectControlRow label={m.connect_client()} labelFor="cli-tool" hint={selectedTool.description()}>
+                  <Select.Root type="single" bind:value={cliToolId}>
+                    <Select.Trigger id="cli-tool" class="w-full">{selectedTool.name}</Select.Trigger>
+                    <Select.Content
+                      ><Select.Group
+                        >{#each CLI_TOOLS as tool (tool.id)}<Select.Item value={tool.id} label={tool.name}
+                            >{tool.name}</Select.Item
+                          >{/each}</Select.Group
+                      ></Select.Content>
+                  </Select.Root>
+                </ConnectControlRow>
+                <ConnectControlRow
+                  label={m.common_api_key()}
+                  labelFor="cli-key"
+                  hint={cliToolId === 'claude-code'
+                    ? m.connect_model_mapping_scope()
+                    : m.connect_all_api_key_models_included()}>
+                  <Select.Root
+                    type="single"
+                    bind:value={
+                      () => selectedCliKey?.id ?? '',
+                      (value: string) => {
+                        cliKeyId = value
+                      }
                     }
-                  }
-                  disabled={cliKeys.length === 0}>
-                  <Select.Trigger id="cli-key" class="w-full"
-                    >{selectedCliKey
-                      ? `${selectedCliKey.name} · ${maskApiKey(selectedCliKey.key)}`
-                      : m.connect_select_api_key()}</Select.Trigger>
-                  <Select.Content
-                    ><Select.Group
-                      >{#each cliKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
-                          >{key.name} · {maskApiKey(key.key)}</Select.Item
-                        >{/each}</Select.Group
-                    ></Select.Content>
-                </Select.Root>
-                {#if !selectedCliKey && cliKeys.length > 0}
-                  <p class="text-sm text-muted-foreground">{m.connect_select_api_key_client_description()}</p>
-                {:else if cliModels.length === 0}
-                  <Field.FieldDescription class="text-warning"
-                    >{m.connect_api_key_has_no_models_description()}</Field.FieldDescription>
-                {:else if cliToolId === 'claude-code'}
-                  <Field.FieldDescription>{m.connect_model_mapping_scope()}</Field.FieldDescription>
-                {:else}
-                  <Field.FieldDescription>{m.connect_all_api_key_models_included()}</Field.FieldDescription>
+                    disabled={cliKeys.length === 0}>
+                    <Select.Trigger id="cli-key" class="w-full"
+                      >{selectedCliKey
+                        ? `${selectedCliKey.name} · ${maskApiKey(selectedCliKey.key)}`
+                        : m.connect_select_api_key()}</Select.Trigger>
+                    <Select.Content
+                      ><Select.Group
+                        >{#each cliKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
+                            >{key.name} · {maskApiKey(key.key)}</Select.Item
+                          >{/each}</Select.Group
+                      ></Select.Content>
+                  </Select.Root>
+                  {#snippet below()}
+                    {@render keyActions(selectedCliKey !== undefined)}
+                  {/snippet}
+                </ConnectControlRow>
+                {#if selectedCliKey && cliModels.length > 0 && cliToolId === 'claude-code'}
+                  {#each claudeMappingRows as row (row.id)}
+                    <ConnectControlRow label={row.label()} labelFor={row.id}>
+                      <Select.Root type="single" bind:value={claudeModelIds[row.key]}>
+                        <Select.Trigger id={row.id} class="w-full"
+                          >{cliModelName(claudeModelIds[row.key]) ?? m.common_select_model()}</Select.Trigger>
+                        <Select.Content
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
+                      </Select.Root>
+                    </ConnectControlRow>
+                  {/each}
                 {/if}
-                {@render keyRecovery(cliKeys.length === 0)}
-              </Field.Field>
-              {#if selectedCliKey && cliModels.length > 0}
-                {#if cliToolId === 'claude-code'}
-                  <Field.Field size="select">
-                    <Field.FieldLabel for="cli-default-model">{m.connect_default_model()}</Field.FieldLabel>
-                    <Select.Root type="single" bind:value={claudeModelIds.defaultModel}>
-                      <Select.Trigger id="cli-default-model" class="w-full"
-                        >{cliModelName(claudeModelIds.defaultModel) ?? m.common_select_model()}</Select.Trigger>
-                      <Select.Content
-                        ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                    </Select.Root>
-                  </Field.Field>
-                  <Field.Field size="select">
-                    <Field.FieldLabel for="cli-haiku-model">{m.connect_haiku_model_mapping()}</Field.FieldLabel>
-                    <Select.Root type="single" bind:value={claudeModelIds.haikuModel}>
-                      <Select.Trigger id="cli-haiku-model" class="w-full"
-                        >{cliModelName(claudeModelIds.haikuModel) ?? m.common_select_model()}</Select.Trigger>
-                      <Select.Content
-                        ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                    </Select.Root>
-                  </Field.Field>
-                  <Field.Field size="select">
-                    <Field.FieldLabel for="cli-sonnet-model">{m.connect_sonnet_model_mapping()}</Field.FieldLabel>
-                    <Select.Root type="single" bind:value={claudeModelIds.sonnetModel}>
-                      <Select.Trigger id="cli-sonnet-model" class="w-full"
-                        >{cliModelName(claudeModelIds.sonnetModel) ?? m.common_select_model()}</Select.Trigger>
-                      <Select.Content
-                        ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                    </Select.Root>
-                  </Field.Field>
-                  <Field.Field size="select">
-                    <Field.FieldLabel for="cli-opus-model">{m.connect_opus_model_mapping()}</Field.FieldLabel>
-                    <Select.Root type="single" bind:value={claudeModelIds.opusModel}>
-                      <Select.Trigger id="cli-opus-model" class="w-full"
-                        >{cliModelName(claudeModelIds.opusModel) ?? m.common_select_model()}</Select.Trigger>
-                      <Select.Content
-                        ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                    </Select.Root>
-                  </Field.Field>
-                {/if}
-              {/if}
-            </Field.FieldGroup>
-          </section>
+              </Field.FieldGroup>
+            </section>
 
-          <section
-            class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
-            aria-labelledby="cli-output-title">
-            <div class="route-section-header shrink-0">
-              <div>
-                <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
-                <p class="route-section-description">
-                  {protocolLabel(selectedTool.protocol)} · <span class="font-technical">{host}</span>
-                </p>
-                {#if isTauri && connectPlanQuery.data}
-                  <div class="mt-2 flex flex-col gap-1">
-                    <p class="text-xs font-medium text-foreground">{m.connect_global_config_paths()}</p>
-                    {#each connectPlanQuery.data.paths as path (path)}
-                      <p class="font-technical break-all text-xs text-muted-foreground">{path}</p>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-              <div class="flex flex-wrap gap-2">
-                {#if isTauri}
+            <section
+              class="flex min-h-0 min-w-0 flex-col @min-[68rem]/connect:col-span-7"
+              aria-labelledby="cli-output-title">
+              <div class="mb-3.5 flex shrink-0 flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
+                  <p class="route-section-description">
+                    {protocolLabel(selectedTool.protocol)} · <span class="font-technical">{host}</span>
+                  </p>
+                  {#if isTauri && connectPlanQuery.data}
+                    <div class="mt-2 flex flex-col gap-1">
+                      <p class="text-xs font-medium text-foreground">{m.connect_global_config_paths()}</p>
+                      {#each connectPlanQuery.data.paths as path (path)}
+                        <p class="font-technical break-all text-xs text-muted-foreground">{path}</p>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  {#if isTauri}
+                    <Button
+                      onclick={() => void applySelectedClient()}
+                      disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
+                      >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
+                          data-icon="inline-start" />{/if}{applyingClient
+                        ? m.connect_applying()
+                        : m.connect_apply()}</Button>
+                  {/if}
                   <Button
-                    onclick={() => void applySelectedClient()}
-                    disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
-                    >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
-                        data-icon="inline-start" />{/if}{applyingClient
-                      ? m.connect_applying()
-                      : m.connect_apply()}</Button>
-                {/if}
-                <Button
-                  variant={isTauri ? 'outline' : 'default'}
-                  onclick={() => void copyText(generatedCliConfig)}
-                  disabled={!generatedCliConfig}
-                  ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
+                    variant={isTauri ? 'outline' : 'default'}
+                    onclick={() => void copyText(generatedCliConfig)}
+                    disabled={!generatedCliConfig}
+                    ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
+                </div>
               </div>
-            </div>
-            {#if connectPlanQuery.isError}
-              {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
-              <RequestFailure
-                class="mb-3 shrink-0"
-                title={m.connect_apply_plan_failed()}
-                message={planError.message}
-                retry={() => connectPlanQuery.refetch()}
-                retrying={connectPlanQuery.isFetching}>
-                {#if planError.path}<p class="font-technical break-all">{planError.path}</p>{/if}
-              </RequestFailure>
-            {/if}
-            {#if generatedCliConfig}
-              <pre class="route-code-plane min-h-96 flex-1">{generatedCliConfig}</pre>
-            {:else}
-              <Empty.Root class="min-h-72 border-y"
-                ><Empty.Header
-                  >{#if models.length === 0}
-                    <Empty.Title>{m.connect_add_model_first()}</Empty.Title>
-                    <Empty.Description>{m.connect_connect_model_service_add_model_generating_code()}</Empty.Description>
-                  {:else if cliKeys.length === 0}
-                    <Empty.Title>{m.connect_create_an_api_key()}</Empty.Title>
-                    <Empty.Description>{m.connect_no_eligible_key_description()}</Empty.Description>
-                  {:else if !selectedCliKey}
-                    <Empty.Title>{m.connect_select_api_key()}</Empty.Title>
-                    <Empty.Description>{m.connect_select_api_key_client_description()}</Empty.Description>
-                  {:else if cliModels.length === 0}
-                    <Empty.Title>{m.connect_api_key_has_no_models()}</Empty.Title>
-                    <Empty.Description>{m.connect_api_key_has_no_models_description()}</Empty.Description>
-                  {:else if cliToolId === 'claude-code'}
-                    <Empty.Title>{m.connect_complete_model_mappings()}</Empty.Title>
-                    <Empty.Description>{m.connect_complete_model_mappings_description()}</Empty.Description>
-                  {:else if connectPlanQuery.isPending}
-                    <Empty.Title>{m.connect_loading_global_config()}</Empty.Title>
-                    <Empty.Description>{m.connect_loading_global_config_description()}</Empty.Description>
-                  {:else}
-                    <Empty.Title>{m.connect_apply_plan_failed()}</Empty.Title>
-                    <Empty.Description>{m.connect_fix_global_config_retry()}</Empty.Description>
-                  {/if}</Empty.Header
-                >{#if models.length === 0}<Empty.Content
-                    ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button></Empty.Content
-                  >{/if}</Empty.Root>
-            {/if}
-          </section>
-        </div>
-      </Tabs.Content>
+              {#if connectPlanQuery.isError}
+                {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
+                <RequestFailure
+                  class="mb-3 shrink-0"
+                  title={m.connect_apply_plan_failed()}
+                  message={planError.message}
+                  retry={() => connectPlanQuery.refetch()}
+                  retrying={connectPlanQuery.isFetching}>
+                  {#if planError.path}<p class="font-technical break-all">{planError.path}</p>{/if}
+                </RequestFailure>
+              {/if}
+              {#if generatedCliConfig}
+                <pre class="route-code-plane min-h-96 flex-1">{generatedCliConfig}</pre>
+              {:else if !connectPlanQuery.isError}
+                <Empty.Root class="min-h-72 border-y"
+                  ><Empty.Header
+                    >{#if models.length === 0}
+                      <Empty.Title>{m.connect_add_model_first()}</Empty.Title>
+                      <Empty.Description
+                        >{m.connect_connect_model_service_add_model_generating_code()}</Empty.Description>
+                    {:else if cliKeys.length === 0}
+                      <Empty.Title>{m.connect_no_eligible_key()}</Empty.Title>
+                      <Empty.Description
+                        >{apiKeys.length
+                          ? m.connect_no_eligible_key_description()
+                          : m.connect_create_key_description()}</Empty.Description>
+                    {:else if !selectedCliKey}
+                      <Empty.Title>{m.connect_select_api_key()}</Empty.Title>
+                      <Empty.Description>{m.connect_select_api_key_client_description()}</Empty.Description>
+                    {:else if cliModels.length === 0}
+                      <Empty.Title>{m.connect_api_key_has_no_models()}</Empty.Title>
+                      <Empty.Description>{m.connect_api_key_has_no_models_description()}</Empty.Description>
+                    {:else if cliToolId === 'claude-code' && !claudeMappings}
+                      <Empty.Title>{m.connect_complete_model_mappings()}</Empty.Title>
+                      <Empty.Description>{m.connect_complete_model_mappings_description()}</Empty.Description>
+                    {:else}
+                      <Empty.Title>{m.connect_loading_global_config()}</Empty.Title>
+                    {/if}</Empty.Header
+                  >{#if models.length === 0}<Empty.Content
+                      ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button></Empty.Content
+                    >{/if}</Empty.Root>
+              {/if}
+            </section>
+          </div>
+        </Tabs.Content>
 
-      <Tabs.Content value="code" class="mt-5 min-h-0 data-active:flex data-active:flex-col">
-        <div
-          class="grid gap-6 min-[1100px]:min-h-0 min-[1100px]:flex-1 min-[1100px]:grid-cols-12 min-[1100px]:grid-rows-[minmax(0,1fr)]">
-          <section
-            class="route-section min-[1100px]:min-h-0 min-[1100px]:overflow-y-auto min-[1100px]:col-span-5"
-            aria-labelledby="code-controls-title">
-            <div class="route-section-header">
-              <div>
-                <h2 id="code-controls-title" class="route-section-title">
-                  {m.connect_api_example_setup()}
-                </h2>
-                <p class="route-section-description">
-                  {m.connect_choose_api_format_model_key_example()}
-                </p>
-              </div>
-            </div>
-            <Field.FieldGroup>
-              <Field.Field size="select">
-                <Field.FieldLabel for="code-protocol">{m.connect_api_format()}</Field.FieldLabel>
-                <Select.Root type="single" bind:value={codeProtocol}>
-                  <Select.Trigger id="code-protocol" class="w-full"
-                    >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</Select.Trigger>
-                  <Select.Content
-                    ><Select.Group
-                      >{#each codeProtocols as protocol (protocol.id)}<Select.Item
-                          value={protocol.id}
-                          label={protocol.name}>{protocol.name}</Select.Item
-                        >{/each}</Select.Group
-                    ></Select.Content>
-                </Select.Root>
-                <Field.FieldDescription class="font-technical break-all"
-                  >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}</Field.FieldDescription>
-              </Field.Field>
-              <Field.Field size="select">
-                <Field.FieldLabel for="code-model">{m.common_model()}</Field.FieldLabel>
-                <Select.Root type="single" bind:value={codeModelId} disabled={models.length === 0}>
-                  <Select.Trigger id="code-model" class="w-full"
-                    >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
-                      (models.length ? m.common_select_model() : m.connect_add_model_first())}</Select.Trigger>
-                  <Select.Content><Select.Group>{@render logicalModelItems(models)}</Select.Group></Select.Content>
-                </Select.Root>
-                {#if models.length === 0}
-                  <p class="text-sm text-muted-foreground">{m.connect_add_model_first()}</p>
-                  <Button variant="outline" onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button>
-                {/if}
-              </Field.Field>
-              <Field.Field size="select">
-                <Field.FieldLabel for="code-key">{m.common_api_key()}</Field.FieldLabel>
-                <Select.Root
-                  type="single"
-                  bind:value={
-                    () => selectedCodeKey?.id ?? '',
-                    (value: string) => {
-                      codeKeyId = value
+        <Tabs.Content value="code" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
+          <div
+            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-12 @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
+            <section
+              class="min-w-0 @min-[68rem]/connect:col-span-5 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
+              aria-labelledby="code-controls-title">
+              <h2 id="code-controls-title" class="sr-only">{m.connect_api_example_setup()}</h2>
+              <Field.FieldGroup>
+                <ConnectControlRow
+                  label={m.connect_api_format()}
+                  labelFor="code-protocol"
+                  hint={codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}>
+                  <Select.Root type="single" bind:value={codeProtocol}>
+                    <Select.Trigger id="code-protocol" class="w-full"
+                      >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</Select.Trigger>
+                    <Select.Content
+                      ><Select.Group
+                        >{#each codeProtocols as protocol (protocol.id)}<Select.Item
+                            value={protocol.id}
+                            label={protocol.name}>{protocol.name}</Select.Item
+                          >{/each}</Select.Group
+                      ></Select.Content>
+                  </Select.Root>
+                </ConnectControlRow>
+                <ConnectControlRow label={m.common_model()} labelFor="code-model">
+                  <Select.Root type="single" bind:value={codeModelId} disabled={models.length === 0}>
+                    <Select.Trigger id="code-model" class="w-full"
+                      >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
+                        (models.length ? m.common_select_model() : m.connect_add_model_first())}</Select.Trigger>
+                    <Select.Content><Select.Group>{@render logicalModelItems(models)}</Select.Group></Select.Content>
+                  </Select.Root>
+                </ConnectControlRow>
+                <ConnectControlRow label={m.common_api_key()} labelFor="code-key">
+                  <Select.Root
+                    type="single"
+                    bind:value={
+                      () => selectedCodeKey?.id ?? '',
+                      (value: string) => {
+                        codeKeyId = value
+                      }
                     }
-                  }
-                  disabled={codeKeys.length === 0}>
-                  <Select.Trigger id="code-key" class="w-full"
-                    >{selectedCodeKey
-                      ? `${selectedCodeKey.name} · ${maskApiKey(selectedCodeKey.key)}`
-                      : m.connect_select_api_key()}</Select.Trigger>
-                  <Select.Content
-                    ><Select.Group
-                      >{#each codeKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
-                          >{key.name} · {maskApiKey(key.key)}</Select.Item
-                        >{/each}</Select.Group
-                    ></Select.Content>
-                </Select.Root>
-                {#if !codeModel}
-                  <p class="text-sm text-muted-foreground">{m.connect_choose_model_for_key()}</p>
-                {/if}
-                {@render keyRecovery(Boolean(codeModel) && codeKeys.length === 0)}
-              </Field.Field>
-            </Field.FieldGroup>
-          </section>
+                    disabled={codeKeys.length === 0}>
+                    <Select.Trigger id="code-key" class="w-full"
+                      >{selectedCodeKey
+                        ? `${selectedCodeKey.name} · ${maskApiKey(selectedCodeKey.key)}`
+                        : m.connect_select_api_key()}</Select.Trigger>
+                    <Select.Content
+                      ><Select.Group
+                        >{#each codeKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
+                            >{key.name} · {maskApiKey(key.key)}</Select.Item
+                          >{/each}</Select.Group
+                      ></Select.Content>
+                  </Select.Root>
+                  {#snippet below()}
+                    {#if !codeModel && models.length > 0}
+                      <p class="text-sm text-muted-foreground @min-[36rem]/control-row:text-end">
+                        {m.connect_choose_model_for_key()}
+                      </p>
+                    {/if}
+                    {@render keyActions(selectedCodeKey !== undefined)}
+                  {/snippet}
+                </ConnectControlRow>
+              </Field.FieldGroup>
+            </section>
 
-          <section
-            class="route-section flex min-h-0 flex-col min-[1100px]:col-span-7"
-            aria-labelledby="code-output-title">
-            <div class="route-section-header shrink-0">
-              <div>
+            <section
+              class="flex min-h-0 min-w-0 flex-col @min-[68rem]/connect:col-span-7"
+              aria-labelledby="code-output-title">
+              <div class="mb-3.5 flex shrink-0 flex-wrap items-start justify-between gap-4">
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}
                 </h2>
-                <p class="route-section-description">
-                  {codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}
-                </p>
+                <Button onclick={() => void copyText(generatedCode)} disabled={!codeModel || !selectedCodeKey}
+                  ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
               </div>
-              <Button onclick={() => void copyText(generatedCode)} disabled={!codeModel || !selectedCodeKey}
-                ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
-            </div>
-            <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">
-              <Tabs.List class="shrink-0" aria-label={m.connect_code_language()}>
-                {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
-                    >{language === 'typescript'
-                      ? 'TypeScript'
-                      : language === 'python'
-                        ? 'Python'
-                        : 'cURL'}</Tabs.Trigger
-                  >{/each}
-              </Tabs.List>
-              <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
-                {#if codeModel}
-                  <pre class="route-code-plane min-h-96 flex-1">{generatedCode}</pre>
-                  {#if !selectedCodeKey}<Alert.Root class="mt-3 shrink-0" variant="warning" role="status"
-                      ><Alert.Description
-                        >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description
-                      ></Alert.Root
-                    >{/if}
-                {:else}
-                  <Empty.Root class="min-h-72 border-y"
-                    ><Empty.Header
-                      ><Empty.Title>{m.common_select_model()}</Empty.Title><Empty.Description
-                        >{models.length
-                          ? m.connect_generated_request_appear_here()
-                          : m.connect_connect_model_service_add_model_generating_code()}</Empty.Description
-                      ></Empty.Header
-                    >{#if models.length === 0}<Empty.Content
-                        ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button
-                        ></Empty.Content
-                      >{/if}</Empty.Root>
-                {/if}
-              </Tabs.Content>
-            </Tabs.Root>
-          </section>
-        </div>
-      </Tabs.Content>
-    </Tabs.Root>
-  {/if}
+              <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">
+                <Tabs.List class="shrink-0" aria-label={m.connect_code_language()}>
+                  {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
+                      >{language === 'typescript'
+                        ? 'TypeScript'
+                        : language === 'python'
+                          ? 'Python'
+                          : 'cURL'}</Tabs.Trigger
+                    >{/each}
+                </Tabs.List>
+                <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
+                  {#if codeModel}
+                    <pre class="route-code-plane min-h-96 flex-1">{generatedCode}</pre>
+                    {#if !selectedCodeKey}
+                      <Alert.Root class="mt-3 shrink-0" variant="warning" role="status">
+                        {#if codeKeys.length === 0}
+                          <Alert.Title>{m.connect_no_eligible_key()}</Alert.Title>
+                          <Alert.Description
+                            >{apiKeys.length
+                              ? m.connect_no_eligible_key_description()
+                              : m.connect_create_key_description()}</Alert.Description>
+                        {:else}
+                          <Alert.Description
+                            >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description>
+                        {/if}
+                      </Alert.Root>
+                    {/if}
+                  {:else}
+                    <Empty.Root class="min-h-72 border-y"
+                      ><Empty.Header
+                        >{#if models.length}
+                          <Empty.Title>{m.common_select_model()}</Empty.Title>
+                        {:else}
+                          <Empty.Title>{m.connect_add_model_first()}</Empty.Title>
+                          <Empty.Description
+                            >{m.connect_connect_model_service_add_model_generating_code()}</Empty.Description>
+                        {/if}</Empty.Header
+                      >{#if models.length === 0}<Empty.Content
+                          ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button
+                          ></Empty.Content
+                        >{/if}</Empty.Root>
+                  {/if}
+                </Tabs.Content>
+              </Tabs.Root>
+            </section>
+          </div>
+        </Tabs.Content>
+      </Tabs.Root>
+    {/if}
+  </div>
 </div>
 
 <style>
-/* 单栏由主页面滚动；分栏限定高度，让预览填满余量、代码与过高的控件列分别滚动。 */
+/* 工作区（内容容器）宽度达到 68rem 才分栏：页面限定高度，预览填满余量，代码与过高的控件列分别滚动；单栏由主页面滚动。 */
 .connect-page {
   min-height: calc(100svh - 5rem);
 }
-@media (min-width: 1100px) {
+@container connect (min-width: 68rem) {
   .connect-page {
     height: calc(100svh - 5rem);
   }

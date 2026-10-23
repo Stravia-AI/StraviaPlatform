@@ -670,7 +670,9 @@ for (const scenario of [
 
 test('empty Model services, Models, API Keys, and logs speak the missing dependency', async ({ page }) => {
   await page.goto('/providers')
-  await expect(page.getByText('A model has nowhere to go until you connect a provider.')).toBeVisible()
+  // 空状态只保留一句标题与唯一主操作，不再复述「模型无处可去」。
+  await expect(page.locator('[data-slot="empty"]')).toContainText('No providers connected')
+  await expect(page.getByText('A model has nowhere to go until you connect a provider.')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Add your first provider' })).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Add provider' })).toHaveCount(0)
 
@@ -684,7 +686,7 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await expect(page.getByRole('button', { name: 'Create API Key' })).toHaveCount(0)
 
   await page.goto('/logs')
-  await expect(page.getByRole('button', { name: 'Clear history' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'More actions' })).toBeEnabled()
   await expect(page.getByRole('tab', { name: 'Interaction Chains' })).toBeVisible()
 })
 
@@ -706,22 +708,38 @@ test('API Key editor keeps compact controls and help inside the editor', async (
 
   const overlay = page.locator('[data-slot="sheet-content"]')
   await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
+  // Sheet 滑入动画结束后再测量：动画期间逐次 boundingBox 会落在不同帧，横向对齐不可比。
+  await expect
+    .poll(async () => {
+      const first = (await overlay.boundingBox())!.x
+      await page.waitForTimeout(60)
+      return Math.abs((await overlay.boundingBox())!.x - first) < 0.5
+    })
+    .toBe(true)
 
   const nameBox = await page.locator('#api-key-name').boundingBox()
   const overlayBox = await overlay.boundingBox()
+  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
   expect(nameBox?.width ?? 0).toBeGreaterThan(8)
-  expect(nameBox?.width ?? 0).toBeGreaterThan((overlayBox?.width ?? 0) * 0.8)
+  // 名称使用 24rem 的语义宽度，不再按 Sheet 宽度的比例拉伸。
+  expect(Math.abs((nameBox?.width ?? 0) - 24 * rem)).toBeLessThanOrEqual(1)
 
   const rpm = page.locator('#api-key-rpm-limit')
   const expiresAt = page.getByLabel('Expires at')
   await expect(rpm).toBeVisible()
   await expect(expiresAt).toBeVisible()
-  const rpmBox = await rpm.boundingBox()
+  // RPM 是 7rem 的输入组（含单位后缀），过期时间是 18rem；两者都不随 Sheet 宽度拉伸。
+  const rpmBox = await page.locator('[data-slot="input-group"]:has(#api-key-rpm-limit)').boundingBox()
   const expiresAtBox = await expiresAt.boundingBox()
+  expect(Math.abs((rpmBox?.width ?? 0) - 7 * rem)).toBeLessThanOrEqual(1)
+  expect(Math.abs((expiresAtBox?.width ?? 0) - 18 * rem)).toBeLessThanOrEqual(1)
   expect(rpmBox?.width ?? 0).toBeLessThan(nameBox?.width ?? 0)
-  expect(Math.abs((rpmBox?.width ?? 0) - (expiresAtBox?.width ?? 0))).toBeLessThan(1)
-  expect(Math.abs((rpmBox?.y ?? 0) - (expiresAtBox?.y ?? 0))).toBeLessThan(1)
-  const help = overlay.getByRole('group').filter({ has: rpm }).getByRole('button', { name: 'More about this field' })
+  expect(Math.abs((rpmBox?.x ?? 0) - (nameBox?.x ?? 0))).toBeLessThan(1)
+  expect(Math.abs((expiresAtBox?.x ?? 0) - (nameBox?.x ?? 0))).toBeLessThan(1)
+  const help = page
+    .locator('[data-slot="field"]')
+    .filter({ has: rpm })
+    .getByRole('button', { name: 'More about this field' })
   await help.hover()
   await expect(page.locator('[data-slot="tooltip-content"]')).toBeVisible()
 
@@ -1011,3 +1029,49 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
     })
   })
 }
+
+test('Usage analytics keeps optional explanations in help tooltips instead of permanent text', async ({ page }) => {
+  await stubTraffic(page, { requests: 12, errors: 0 })
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await page.goto('/stats')
+  await expect(page.getByRole('group', { name: 'Token activity' })).toBeVisible()
+  await expect(page.getByLabel('Latency and speed chart', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Models', exact: true }).getByRole('listitem')).toHaveCount(1)
+
+  const main = page.getByRole('main')
+  for (const removed of [
+    'First response and output rate over the same period.',
+    'Failed requests by time bucket.',
+    'Requests, errors, and output speed for each provider.',
+    'Client volume, Token usage, cache reads and writes, and last activity.',
+    'Share of total input and output tokens.',
+    'Share of all requests.',
+  ]) {
+    await expect(main.getByText(removed, { exact: true })).toHaveCount(0)
+  }
+  await expect(page.locator('.route-section-description')).toHaveCount(0)
+
+  const tooltip = page.locator('[data-slot="tooltip-content"][data-state$="open"]')
+  for (const [region, text] of [
+    ['Token activity', 'Each cell'],
+    ['Token breakdown', 'Share of total input and output tokens.'],
+    ['Models', 'Share of all requests.'],
+  ] as const) {
+    const trigger = page
+      .getByRole('region', { name: region, exact: true })
+      .getByRole('button', { name: 'More about this field' })
+    await trigger.focus()
+    await expect(tooltip).toContainText(text)
+    const box = (await tooltip.boundingBox())!
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(1600)
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toHaveCount(0)
+  }
+  // Loading mechanics are not product copy.
+  await page
+    .getByRole('region', { name: 'Token activity', exact: true })
+    .getByRole('button', { name: 'More about this field' })
+    .focus()
+  await expect(tooltip).not.toContainText(/coarser|bucket|loads?/i)
+})

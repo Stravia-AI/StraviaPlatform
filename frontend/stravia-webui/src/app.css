@@ -67,6 +67,10 @@
   --shadow-2xl: 0 36px 96px rgb(17 20 23 / 0.24), 0 8px 24px rgb(17 20 23 / 0.14);
   --tracking-normal: 0em;
   --spacing: 0.25rem;
+  /* 内容宽度契约（DESIGN.md spacing）：容器、设置列、阅读列。组件通过这些变量取值，不写死 rem。 */
+  --content-max-width: 120rem;
+  --content-column-max-width: 60rem;
+  --reading-max-width: 56rem;
 }
 
 .dark {
@@ -277,18 +281,14 @@ html[lang='zh-CN'] .font-structural {
   letter-spacing: 0;
 }
 
+/* Field 依据自身容器宽度重排：达到 50rem 时左侧 label、右侧控件，控件按语义宽度贴右缘；可选解释始终只在问号提示中。 */
 @container field (min-width: 50rem) {
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] {
     display: grid;
-    grid-template-columns: minmax(12rem, 1fr) minmax(0, var(--field-control-width));
+    grid-template-columns: minmax(0, 1fr) minmax(0, var(--field-control-width));
     align-items: center;
     column-gap: 2rem;
     row-gap: 0.35rem;
-  }
-
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']:has(> [data-slot='field-label'][data-has-hint='true']) {
-    align-items: start;
   }
 
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-label'] {
@@ -303,39 +303,31 @@ html[lang='zh-CN'] .font-structural {
     min-width: 0;
   }
 
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-description'],
   [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-error'] {
     grid-column: 2;
   }
 
-  [data-slot='field'][data-orientation='responsive'] [data-slot='field-hint'] {
-    display: none;
+  /* 常驻 Description 与 label 组成文本栈，与控件顶部对齐；控件跨越两行，错误留在控件列。 */
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description']) {
+    align-items: start;
   }
 
-  [data-slot='field'][data-orientation='responsive'] [data-slot='field-hint-text'] {
-    display: block;
+  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-description'] {
+    grid-column: 1;
+    grid-row: 2;
   }
-}
 
-/* 超宽单栏表单中固定宽度的控件列会让标签与控件之间出现大片空白；此时按 2:3 分配标签列与控件列。数字与时间保留语义宽度。 */
-@container field (min-width: 72rem) {
-  [data-slot='field'][data-orientation='responsive']:not([data-size='number']):not([data-size='datetime'])
-    > [data-slot='field-layout'] {
-    grid-template-columns: minmax(12rem, 2fr) minmax(var(--field-control-width), 3fr);
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description'])
+    > :not([data-slot='field-label']):not([data-slot='field-description']):not([data-slot='field-error']) {
+    grid-row: 1 / span 2;
   }
-}
 
-.field-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.5rem;
-}
-
-@container field-group (min-width: 50rem) {
-  .field-actions {
-    width: 36rem;
-    align-self: flex-end;
+  [data-slot='field'][data-orientation='responsive']
+    > [data-slot='field-layout']:has(> [data-slot='field-description'])
+    > [data-slot='field-error'] {
+    grid-row: 3;
   }
 }
 
@@ -344,7 +336,19 @@ html[lang='zh-CN'] .font-structural {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 2rem;
+}
+
+/* 区段之间 32px；页头到首个内容 24px，由页头收回 8px。 */
+.route-page > .route-page-header {
+  margin-block-end: -0.5rem;
+}
+
+/* 设置列：配置页、详情页表单与设置行的宽度上限，左对齐，剩余宽度留在右侧。 */
+.content-column {
+  width: 100%;
+  min-width: 0;
+  max-width: var(--content-column-max-width);
 }
 
 .route-page-header {
@@ -356,8 +360,6 @@ html[lang='zh-CN'] .font-structural {
 
 .route-section {
   min-width: 0;
-  border-top: 1px solid var(--border);
-  padding-top: 1rem;
 }
 
 .route-page-empty {
@@ -368,8 +370,6 @@ html[lang='zh-CN'] .font-structural {
   display: flex;
   flex: 1;
   flex-direction: column;
-  border-top: 0;
-  padding-top: 0;
 }
 
 .route-section-header {
@@ -378,7 +378,7 @@ html[lang='zh-CN'] .font-structural {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 0.875rem;
+  margin-bottom: 0.75rem;
 }
 
 .route-section-title {
@@ -387,6 +387,11 @@ html[lang='zh-CN'] .font-structural {
   line-height: 1.35;
   font-weight: 600;
   text-wrap: balance;
+}
+
+/* 没有 route-section-header 包裹的标题同样与内容相隔 12px。 */
+.route-section > .route-section-title {
+  margin-bottom: 0.75rem;
 }
 
 .route-section-description {
@@ -618,17 +623,6 @@ html[lang='zh-CN'] .font-structural {
   }
 }
 
-.route-plugin-list {
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
-}
-
-.route-plugin-list > li + li {
-  border-top: 1px solid var(--border);
-}
-
 .route-mobile-row {
   display: grid;
   min-width: 0;
@@ -782,6 +776,16 @@ html[lang='zh-CN'] .font-structural {
     width: min(56rem, 82vw) !important;
     max-width: 56rem !important;
   }
+}
+
+/* 信息型 Tooltip（内容标记 pointer-events-none）连同浮层容器一起不参与命中测试：
+   小目标密集排列时（如活动方格），提示会盖住相邻目标，导致无法连续悬停。 */
+[data-bits-floating-content-wrapper]:has(> [data-slot='tooltip-content'].pointer-events-none) {
+  pointer-events: none;
+}
+
+[data-slot='tooltip-content'].pointer-events-none {
+  pointer-events: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -13,6 +13,7 @@ import { Input } from '#lib/components/ui/input/index.js'
 import * as m from '#lib/paraglide/messages.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
+import type { SortingState } from '@tanstack/svelte-table'
 import { BarChart, PieChart } from 'layerchart'
 
 import { admin } from '#lib/admin-client.js'
@@ -28,6 +29,7 @@ import {
   formatTps,
 } from '#lib/format.js'
 import { buildActivityGrid, buildLatencyChart, planActivityGrid } from '#lib/stats-chart.js'
+import { STATS_TOP_N, sortStatsRows, visibleStatsRows } from '#lib/stats-table.js'
 import type { ApiKeyStats, ProviderStats } from '#lib/types.js'
 import MetricStrip from '#lib/components/metric-strip.svelte'
 import LatencySpeedChart from '#lib/components/latency-speed-chart.svelte'
@@ -36,10 +38,9 @@ import TokenActivityGrid from '#lib/components/token-activity-grid.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
-import { DataTable, createDataTableColumnHelper } from '#lib/components/ui/data-table/index.js'
+import { DataTable, createDataTableColumnHelper, type DataTableCell } from '#lib/components/ui/data-table/index.js'
 import TimeWindowControls from '#lib/components/time-window-controls.svelte'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
-import * as Empty from '#lib/components/ui/empty/index.js'
 
 let hours = $state('24')
 const HOUR_MS = 3_600_000
@@ -51,12 +52,15 @@ let draftStart = $state('')
 let draftEnd = $state('')
 const draftStartMs = $derived(parseLocalStatsDateTime(draftStart))
 const draftEndMs = $derived(parseLocalStatsDateTime(draftEnd))
-const validDraftRange = $derived(
-  draftStartMs != null &&
-    draftEndMs != null &&
-    draftEndMs > draftStartMs &&
-    draftEndMs <= liveStatsWindow(spanMs).end_at,
-)
+// 每个问题就地显示在出问题的字段下；整刻钟规则本身只在对话框说明里出现一次。
+const startIssue = $derived(draftStartMs == null ? m.stats_range_time_invalid() : null)
+const endIssue = $derived.by(() => {
+  if (draftEndMs == null) return m.stats_range_time_invalid()
+  if (draftStartMs != null && draftEndMs <= draftStartMs) return m.stats_range_order_invalid()
+  if (draftEndMs > liveStatsWindow(spanMs).end_at) return m.stats_range_future_invalid()
+  return null
+})
+const validDraftRange = $derived(startIssue == null && endIssue == null)
 const hoursNumber = $derived(spanMs / HOUR_MS)
 const seriesBucketSeconds = $derived(statsPresentationBucket(spanMs, 3_600))
 const activityBucketSeconds = $derived(
@@ -154,17 +158,53 @@ const hasTraffic = $derived((overview?.total_requests ?? 0) > 0)
 const providerStats = $derived(providersQuery.data ?? [])
 const apiKeyStats = $derived(apiKeysQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
+
+function providerLabel(provider: ProviderStats): string {
+  return `${provider.provider || provider.provider_id || '—'}${provider.deleted ? ` · ${m.stats_deleted_resource()}` : ''}`
+}
+function apiKeyLabel(apiKey: ApiKeyStats): string {
+  return `${apiKey.api_key_name || apiKey.api_key_id}${apiKey.deleted ? ` · ${m.stats_deleted_resource()}` : ''}`
+}
+
+// 排序作用于完整集合，再取前 N 项；表格只展示结果，不自行排序。
+let providerSorting = $state.raw<SortingState>([])
+let apiKeySorting = $state.raw<SortingState>([])
+let showAllProviders = $state(false)
+let showAllApiKeys = $state(false)
+const providerRows = $derived(
+  sortStatsRows(providerStats, providerSorting, {
+    provider: providerLabel,
+    request_count: (provider) => provider.request_count,
+    error_count: (provider) => provider.error_count,
+    errorRate: (provider) => (provider.request_count > 0 ? provider.error_count / provider.request_count : 0),
+    avg_output_tps: (provider) => provider.avg_output_tps,
+  }),
+)
+const apiKeyRows = $derived(
+  sortStatsRows(apiKeyStats, apiKeySorting, {
+    apiKey: apiKeyLabel,
+    request_count: (apiKey) => apiKey.request_count,
+    total_input_tokens: (apiKey) => apiKey.total_input_tokens,
+    total_output_tokens: (apiKey) => apiKey.total_output_tokens,
+    cache_read_tokens: (apiKey) => apiKey.cache_read_tokens,
+    cache_write_tokens: (apiKey) => apiKey.cache_write_tokens,
+    last_used_at: (apiKey) => apiKey.last_used_at,
+  }),
+)
+const visibleProviders = $derived(visibleStatsRows(providerRows, showAllProviders))
+const visibleApiKeys = $derived(visibleStatsRows(apiKeyRows, showAllApiKeys))
+
+// 零个错误保持中性色；只有真实错误才使用 destructive。
+function providerCellClass(cell: DataTableCell<ProviderStats>): string | undefined {
+  return cell.column.id === 'error_count' && cell.row.original.error_count > 0 ? 'text-destructive' : undefined
+}
 const providerStatsColumnHelper = createDataTableColumnHelper<ProviderStats>()
 const providerStatsColumns = providerStatsColumnHelper.columns([
-  providerStatsColumnHelper.accessor(
-    (provider) =>
-      `${provider.provider || provider.provider_id || '—'}${provider.deleted ? ` · ${m.stats_deleted_resource()}` : ''}`,
-    {
-      id: 'provider',
-      header: () => m.common_model_service(),
-      meta: { label: () => m.common_model_service(), cellClass: 'font-medium' },
-    },
-  ),
+  providerStatsColumnHelper.accessor(providerLabel, {
+    id: 'provider',
+    header: () => m.common_model_service(),
+    meta: { label: () => m.common_model_service(), headerClass: 'w-full', cellClass: 'font-medium' },
+  }),
   providerStatsColumnHelper.accessor('request_count', {
     header: () => m.common_request_count_label(),
     cell: (context) => formatCompactCount(context.getValue()),
@@ -172,11 +212,7 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
   }),
   providerStatsColumnHelper.accessor('error_count', {
     header: () => m.common_error_count_label(),
-    meta: {
-      label: () => m.common_error_count_label(),
-      align: 'end',
-      cellClass: 'font-technical text-destructive tabular-nums',
-    },
+    meta: { label: () => m.common_error_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
   providerStatsColumnHelper.accessor(
     (provider) => (provider.request_count > 0 ? provider.error_count / provider.request_count : 0),
@@ -195,15 +231,11 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
 ])
 const apiKeyStatsColumnHelper = createDataTableColumnHelper<ApiKeyStats>()
 const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
-  apiKeyStatsColumnHelper.accessor(
-    (apiKey) =>
-      `${apiKey.api_key_name || apiKey.api_key_id}${apiKey.deleted ? ` · ${m.stats_deleted_resource()}` : ''}`,
-    {
-      id: 'apiKey',
-      header: () => m.common_api_key(),
-      meta: { label: () => m.common_api_key(), cellClass: 'font-medium' },
-    },
-  ),
+  apiKeyStatsColumnHelper.accessor(apiKeyLabel, {
+    id: 'apiKey',
+    header: () => m.common_api_key(),
+    meta: { label: () => m.common_api_key(), headerClass: 'w-full', cellClass: 'font-medium' },
+  }),
   apiKeyStatsColumnHelper.accessor('request_count', {
     header: () => m.common_request_count_label(),
     cell: (context) => formatCompactCount(context.getValue()),
@@ -396,17 +428,6 @@ function retryAll(): void {
   {#if !live}<Button variant="ghost" size="sm" onclick={returnLive}>{m.stats_return_live()}</Button>{/if}
 {/snippet}
 
-{#snippet providerStatsEmpty()}
-  <Empty.Root class="border-y py-6"
-    ><Empty.Header><Empty.Description>{m.stats_no_model_service_traffic()}</Empty.Description></Empty.Header
-    ></Empty.Root>
-{/snippet}
-
-{#snippet apiKeyStatsEmpty()}
-  <Empty.Root class="border-y py-6"
-    ><Empty.Header><Empty.Description>{m.stats_no_api_key_traffic()}</Empty.Description></Empty.Header></Empty.Root>
-{/snippet}
-
 {#snippet liveMeta()}
   <StatusIndicator
     compact
@@ -418,17 +439,37 @@ function retryAll(): void {
   <RequestFailure message={localizeBackendErrorMessage(error)} {retry} {retrying} />
 {/snippet}
 
+{#snippet stateLine(text: string)}
+  <p class="py-2 text-sm text-muted-foreground">{text}</p>
+{/snippet}
+
+{#snippet sectionTitle(id: string, title: string, hint?: string)}
+  <div class="flex min-w-0 items-center gap-1.5">
+    <h2 {id} class="route-section-title">{title}</h2>
+    {#if hint}<Field.Help {hint} />{/if}
+  </div>
+{/snippet}
+
+{#snippet topRange(total: number, showAll: boolean, toggle: () => void)}
+  {#if total > STATS_TOP_N}
+    <div class="flex items-center gap-3">
+      {#if !showAll}
+        <span class="font-technical text-xs text-muted-foreground tabular-nums"
+          >{m.stats_top_range({ count: STATS_TOP_N, total })}</span>
+      {/if}
+      <Button type="button" variant="ghost" size="sm" onclick={toggle}
+        >{showAll ? m.stats_show_top({ count: STATS_TOP_N }) : m.stats_view_all({ total })}</Button>
+    </div>
+  {/if}
+{/snippet}
+
 <div class="route-page">
-  <PageHeader
-    eyebrow={m.common_monitor()}
-    title={m.stats_usage_statistics()}
-    description={m.stats_page_summary()}
-    meta={liveMeta}
-    actions={rangeAction} />
+  <PageHeader title={m.stats_usage_statistics()} meta={liveMeta} actions={rangeAction} />
   {#if analyticsPending}
     <MetricStrip loading loadingLabel={m.stats_loading_analytics_metrics()} placeholderCount={6} />
-    <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <Skeleton class="h-96 min-[1280px]:col-span-7" /><Skeleton class="h-96 min-[1280px]:col-span-5" />
+    <div class="grid gap-6 @min-[80rem]/route-page:grid-cols-12">
+      <Skeleton class="h-52 @min-[80rem]/route-page:col-span-7" />
+      <Skeleton class="h-52 @min-[80rem]/route-page:col-span-5" />
     </div>
   {:else}
     {#if anyError}
@@ -449,21 +490,19 @@ function retryAll(): void {
       </section>
     {:else}
       <MetricStrip {metrics} label={m.common_usage_summary()} />
+      {#if overview && !hasTraffic}
+        <p class="text-sm text-muted-foreground">{m.stats_send_first_request()}</p>
+      {/if}
     {/if}
 
-    <div class="grid gap-6 min-[1280px]:grid-cols-12 min-[1280px]:gap-y-0">
+    <!-- 12 列组合按工作区（route-page 容器）宽度切换，不看 viewport；活动与延迟共享标题行与 10rem 图面。 -->
+    <div
+      class="grid gap-8 @min-[80rem]/route-page:grid-cols-12 @min-[80rem]/route-page:gap-x-6 @min-[80rem]/route-page:gap-y-0">
       <section
-        class="route-section flex flex-col min-[1280px]:col-span-7 min-[1280px]:row-span-2 min-[1280px]:grid min-[1280px]:grid-rows-subgrid"
+        class="route-section flex flex-col @min-[80rem]/route-page:col-span-7 @min-[80rem]/route-page:row-span-2 @min-[80rem]/route-page:grid @min-[80rem]/route-page:grid-rows-subgrid"
         aria-labelledby="token-activity-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="token-activity-title" class="route-section-title">
-              {m.stats_token_activity()}
-            </h2>
-            <p class="route-section-description">
-              {m.stats_input_output_totals_each_time_period()}
-            </p>
-          </div>
+          {@render sectionTitle('token-activity-title', m.stats_token_activity(), m.stats_token_activity_help())}
         </div>
         <div
           class="h-40 min-w-0 flex flex-col justify-center py-2"
@@ -483,13 +522,10 @@ function retryAll(): void {
       </section>
 
       <section
-        class="route-section min-[1280px]:col-span-5 min-[1280px]:row-span-2 min-[1280px]:grid min-[1280px]:grid-rows-subgrid"
+        class="route-section @min-[80rem]/route-page:col-span-5 @min-[80rem]/route-page:row-span-2 @min-[80rem]/route-page:grid @min-[80rem]/route-page:grid-rows-subgrid"
         aria-labelledby="latency-trend-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="latency-trend-title" class="route-section-title">{m.stats_latency_speed()}</h2>
-            <p class="route-section-description">{m.stats_latency_speed_description()}</p>
-          </div>
+          <h2 id="latency-trend-title" class="route-section-title">{m.stats_latency_speed()}</h2>
           <LatencySpeedSummary {overview} />
         </div>
         {#if seriesQuery.error && seriesQuery.data === undefined}
@@ -497,26 +533,20 @@ function retryAll(): void {
         {:else if seriesQuery.isPending}<Skeleton class="h-40" />
         {:else if hasLatencyMetrics}<div class="h-40 min-w-0">
             <LatencySpeedChart data={latencyChart} {formatBucket} />
-          </div>{:else}<Empty.Root class="h-40 border-y"
-            ><Empty.Header
-              ><Empty.Description
-                >{hasTraffic ? m.stats_no_latency_speed_data() : m.stats_send_first_request()}</Empty.Description
-              ></Empty.Header
-            ></Empty.Root
-          >{/if}
+          </div>{:else}{@render stateLine(m.stats_no_latency_speed_data())}{/if}
       </section>
     </div>
 
-    <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="error-trend-title">
+    <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给错误趋势。 -->
+    <div
+      class="grid gap-8 @min-[36rem]/route-page:grid-cols-2 @min-[80rem]/route-page:grid-cols-[minmax(0,1fr)_minmax(15rem,22rem)_minmax(15rem,22rem)] @min-[80rem]/route-page:gap-x-6">
+      <section
+        class="route-section @min-[36rem]/route-page:col-span-2 @min-[80rem]/route-page:col-span-1"
+        aria-labelledby="error-trend-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="error-trend-title" class="route-section-title">{m.common_errors_label()}</h2>
-            <p class="route-section-description">
-              {m.stats_failed_requests_time_bucket()}
-            </p>
-          </div>
-          <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? '–'}</span>
+          <h2 id="error-trend-title" class="route-section-title">{m.common_errors_label()}</h2>
+          <span class={['font-technical text-xs tabular-nums', (overview?.error_count ?? 0) > 0 && 'text-destructive']}
+            >{overview?.error_count ?? '–'}</span>
         </div>
         {#if seriesQuery.error && seriesQuery.data === undefined}
           {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
@@ -526,26 +556,17 @@ function retryAll(): void {
               x={(item: (typeof errorChart)[number]) => item.bucket}
               series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
               props={{ xAxis: { ticks: 4 } }} />
-          </div>{:else}<Empty.Root class="h-40 border-y"
-            ><Empty.Header
-              ><Empty.Description
-                >{hasTraffic ? m.stats_no_error_data() : m.stats_send_first_request()}</Empty.Description
-              ></Empty.Header
-            ></Empty.Root
-          >{/if}
+          </div>{:else}{@render stateLine(m.stats_no_error_data())}{/if}
       </section>
 
-      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="token-breakdown-title">
+      <section class="route-section" aria-labelledby="token-breakdown-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="token-breakdown-title" class="route-section-title">{m.stats_token_breakdown()}</h2>
-            <p class="route-section-description">{m.stats_token_breakdown_share()}</p>
-          </div>
+          {@render sectionTitle('token-breakdown-title', m.stats_token_breakdown(), m.stats_token_breakdown_share())}
         </div>
         {#if overviewQuery.error && overview === undefined}
           {@render queryFailure(overviewQuery.error, overviewQuery.refetch, overviewQuery.isFetching)}
-        {:else if tokenPie && tokenPie.total > 0}<div class="flex flex-col items-center gap-4">
-            <div class="relative size-40 min-w-0" aria-label={m.stats_token_breakdown()}>
+        {:else if tokenPie && tokenPie.total > 0}<div class="flex flex-wrap items-center gap-x-4 gap-y-3">
+            <div class="relative size-40 shrink-0" aria-label={m.stats_token_breakdown()}>
               <PieChart
                 data={tokenPie.slices}
                 key="key"
@@ -562,7 +583,7 @@ function retryAll(): void {
                   >{formatCompactCount(tokenPie.total)}</span>
               </div>
             </div>
-            <ul class="w-full space-y-2 text-sm">
+            <ul class="min-w-36 flex-1 space-y-2 text-sm">
               {#each tokenPie.slices as slice (slice.key)}
                 <li class="flex items-center gap-2">
                   <span class="size-2.5 shrink-0 rounded-[2px]" style:background={slice.color}></span>
@@ -572,30 +593,23 @@ function retryAll(): void {
                 </li>
               {/each}
             </ul>
-          </div>{:else}<Empty.Root class="border-y py-6"
-            ><Empty.Header
-              ><Empty.Description
-                >{hasTraffic
-                  ? tokenPie?.slices.length
-                    ? m.stats_zero_tokens()
-                    : m.stats_token_usage_unavailable()
-                  : m.stats_send_first_request()}</Empty.Description
-              ></Empty.Header
-            ></Empty.Root
-          >{/if}
+          </div>{:else}{@render stateLine(
+            !hasTraffic
+              ? m.stats_no_token_data()
+              : tokenPie && tokenPie.slices.length > 0
+                ? m.stats_zero_tokens()
+                : m.stats_token_usage_unavailable(),
+          )}{/if}
       </section>
 
-      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="analytics-model-title">
+      <section class="route-section" aria-labelledby="analytics-model-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="analytics-model-title" class="route-section-title">{m.common_models()}</h2>
-            <p class="route-section-description">{m.stats_share_all_requests()}</p>
-          </div>
+          {@render sectionTitle('analytics-model-title', m.common_models(), m.stats_share_all_requests())}
         </div>
         {#if modelsQuery.error && modelsQuery.data === undefined}
           {@render queryFailure(modelsQuery.error, modelsQuery.refetch, modelsQuery.isFetching)}
-        {:else if modelPie.length > 0}<div class="flex flex-col items-center gap-4">
-            <div class="size-40 min-w-0" aria-label={m.stats_share_all_requests()}>
+        {:else if modelPie.length > 0}<div class="flex flex-wrap items-center gap-x-4 gap-y-3">
+            <div class="size-40 shrink-0" aria-label={m.stats_share_all_requests()}>
               <PieChart
                 data={modelPie}
                 key="key"
@@ -608,7 +622,7 @@ function retryAll(): void {
                 cornerRadius={2}
                 padAngle={0.01} />
             </div>
-            <ul class="w-full space-y-2 text-sm">
+            <ul class="min-w-36 flex-1 space-y-2 text-sm">
               {#each modelPie as slice (slice.key)}
                 <li class="flex items-center gap-2">
                   <span class="size-2.5 shrink-0 rounded-[2px]" style:background={slice.color}></span>
@@ -618,93 +632,77 @@ function retryAll(): void {
                 </li>
               {/each}
             </ul>
-          </div>{:else}<Empty.Root class="border-y py-6"
-            ><Empty.Header><Empty.Description>{m.stats_no_model_traffic()}</Empty.Description></Empty.Header
-            ></Empty.Root
-          >{/if}
+          </div>{:else}{@render stateLine(m.stats_no_model_traffic())}{/if}
       </section>
     </div>
 
-    <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <section class="route-section min-[1280px]:col-span-12" aria-labelledby="analytics-provider-title">
+    <!-- 七列密钥表只有在并排后仍可读（工作区 ≥ 96rem 时约 56rem）才与供应商并排，否则纵排。 -->
+    <div
+      class="grid gap-8 @min-[96rem]/route-page:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] @min-[96rem]/route-page:gap-x-6">
+      <section class="route-section" aria-labelledby="analytics-provider-title">
         <div class="route-section-header">
-          <div>
-            <h2 id="analytics-provider-title" class="route-section-title">
-              {m.common_model_services()}
-            </h2>
-            <p class="route-section-description">
-              {m.stats_requests_errors_output_speed_each_service()}
-            </p>
-          </div>
+          <h2 id="analytics-provider-title" class="route-section-title">{m.common_model_services()}</h2>
+          {@render topRange(providerStats.length, showAllProviders, () => (showAllProviders = !showAllProviders))}
         </div>
         {#if providersQuery.error && providersQuery.data === undefined}
           {@render queryFailure(providersQuery.error, providersQuery.refetch, providersQuery.isFetching)}
+        {:else if providerStats.length === 0}
+          {@render stateLine(m.stats_no_model_service_traffic())}
         {:else}
           <div class="route-desktop-table">
             <DataTable
-              data={providerStats.slice(0, 8)}
+              data={visibleProviders}
               columns={providerStatsColumns}
               labels={tableLabels}
               getRowId={getProviderStatsRowId}
               ariaLabel={m.common_model_services()}
-              empty={providerStatsEmpty}
+              cellClass={providerCellClass}
+              manualSorting
+              bind:sorting={providerSorting}
               stripedRows />
           </div>
           <div class="route-mobile-list">
-            {#if providerStats.length === 0}<Empty.Root class="border-y py-6"
-                ><Empty.Header><Empty.Description>{m.stats_no_model_service_traffic()}</Empty.Description></Empty.Header
-                ></Empty.Root
-              >{:else}{#each providerStats.slice(0, 8) as provider (provider.provider_id ?? provider.provider)}<div
-                  class="route-mobile-row">
-                  <div class="min-w-0">
-                    <p class="truncate font-medium">
-                      {provider.provider || provider.provider_id || '—'}{#if provider.deleted}
-                        · {m.stats_deleted_resource()}{/if}
-                    </p>
-                    <p class="font-technical mt-1 text-xs text-muted-foreground">
-                      {formatTps(provider.avg_output_tps)} ·
-                      <span class="text-destructive">{provider.error_count} {m.common_errors()}</span>
-                    </p>
-                  </div>
-                  <p class="font-technical tabular-nums">{formatCompactCount(provider.request_count)}</p>
-                </div>{/each}{/if}
+            {#each visibleProviders as provider (provider.provider_id ?? provider.provider)}<div
+                class="route-mobile-row">
+                <div class="min-w-0">
+                  <p class="truncate font-medium">{providerLabel(provider)}</p>
+                  <p class="font-technical mt-1 text-xs text-muted-foreground">
+                    {formatTps(provider.avg_output_tps)} ·
+                    <span class={provider.error_count > 0 ? 'text-destructive' : undefined}
+                      >{provider.error_count} {m.common_errors()}</span>
+                  </p>
+                </div>
+                <p class="font-technical tabular-nums">{formatCompactCount(provider.request_count)}</p>
+              </div>{/each}
           </div>
         {/if}
       </section>
-    </div>
 
-    <section class="route-section" aria-labelledby="analytics-key-title">
-      <div class="route-section-header">
-        <div>
+      <section class="route-section" aria-labelledby="analytics-key-title">
+        <div class="route-section-header">
           <h2 id="analytics-key-title" class="route-section-title">{m.stats_api_key_usage()}</h2>
-          <p class="route-section-description">
-            {m.stats_client_volume_token_usage_cache_reads_last_activity()}
-          </p>
+          {@render topRange(apiKeyStats.length, showAllApiKeys, () => (showAllApiKeys = !showAllApiKeys))}
         </div>
-      </div>
-      {#if apiKeysQuery.error && apiKeysQuery.data === undefined}
-        {@render queryFailure(apiKeysQuery.error, apiKeysQuery.refetch, apiKeysQuery.isFetching)}
-      {:else}
-        <div class="route-desktop-table">
-          <DataTable
-            data={apiKeyStats.slice(0, 8)}
-            columns={apiKeyStatsColumns}
-            labels={tableLabels}
-            getRowId={getApiKeyStatsRowId}
-            ariaLabel={m.stats_api_key_usage()}
-            empty={apiKeyStatsEmpty}
-            stripedRows />
-        </div>
-        <div class="route-mobile-list">
-          {#if apiKeyStats.length === 0}<Empty.Root class="border-y py-6"
-              ><Empty.Header><Empty.Description>{m.stats_no_api_key_traffic()}</Empty.Description></Empty.Header
-              ></Empty.Root
-            >{:else}{#each apiKeyStats.slice(0, 8) as apiKey (apiKey.api_key_id)}<div class="route-mobile-row">
+        {#if apiKeysQuery.error && apiKeysQuery.data === undefined}
+          {@render queryFailure(apiKeysQuery.error, apiKeysQuery.refetch, apiKeysQuery.isFetching)}
+        {:else if apiKeyStats.length === 0}
+          {@render stateLine(m.stats_no_api_key_traffic())}
+        {:else}
+          <div class="route-desktop-table">
+            <DataTable
+              data={visibleApiKeys}
+              columns={apiKeyStatsColumns}
+              labels={tableLabels}
+              getRowId={getApiKeyStatsRowId}
+              ariaLabel={m.stats_api_key_usage()}
+              manualSorting
+              bind:sorting={apiKeySorting}
+              stripedRows />
+          </div>
+          <div class="route-mobile-list">
+            {#each visibleApiKeys as apiKey (apiKey.api_key_id)}<div class="route-mobile-row">
                 <div class="min-w-0">
-                  <p class="truncate font-medium">
-                    {apiKey.api_key_name || apiKey.api_key_id}{#if apiKey.deleted}
-                      · {m.stats_deleted_resource()}{/if}
-                  </p>
+                  <p class="truncate font-medium">{apiKeyLabel(apiKey)}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {m.observation_usage_input()}
                     {formatCompactCount(apiKey.total_input_tokens)} · {m.observation_usage_output()}
@@ -713,13 +711,16 @@ function retryAll(): void {
                     {formatCompactCount(apiKey.cache_read_tokens)} · {m.observation_usage_cache_write()}
                     {formatCompactCount(apiKey.cache_write_tokens)}
                   </p>
-                  <p class="font-technical mt-1 text-xs text-muted-foreground">{formatLogTime(apiKey.last_used_at)}</p>
+                  <p class="font-technical mt-1 text-xs text-muted-foreground">
+                    {formatLogTime(apiKey.last_used_at)}
+                  </p>
                 </div>
                 <p class="font-technical tabular-nums">{formatCompactCount(apiKey.request_count)}</p>
-              </div>{/each}{/if}
-        </div>
-      {/if}
-    </section>
+              </div>{/each}
+          </div>
+        {/if}
+      </section>
+    </div>
   {/if}
 </div>
 
@@ -736,7 +737,7 @@ function retryAll(): void {
         applyRange()
       }}>
       <Field.FieldGroup>
-        <Field.Field data-invalid={!validDraftRange || undefined}>
+        <Field.Field data-invalid={startIssue != null || undefined}>
           <Field.FieldLabel for="stats-start">{m.stats_range_start()}</Field.FieldLabel>
           <Input
             id="stats-start"
@@ -744,10 +745,11 @@ function retryAll(): void {
             step="900"
             required
             bind:value={draftStart}
-            aria-invalid={!validDraftRange}
-            aria-describedby="stats-range-validation" />
+            aria-invalid={startIssue != null}
+            aria-describedby={startIssue ? 'stats-start-error' : undefined} />
+          {#if startIssue}<Field.FieldError id="stats-start-error">{startIssue}</Field.FieldError>{/if}
         </Field.Field>
-        <Field.Field data-invalid={!validDraftRange || undefined}>
+        <Field.Field data-invalid={endIssue != null || undefined}>
           <Field.FieldLabel for="stats-end">{m.stats_range_end()}</Field.FieldLabel>
           <Input
             id="stats-end"
@@ -755,17 +757,11 @@ function retryAll(): void {
             step="900"
             required
             bind:value={draftEnd}
-            aria-invalid={!validDraftRange}
-            aria-describedby="stats-range-validation" />
+            aria-invalid={endIssue != null}
+            aria-describedby={endIssue ? 'stats-end-error' : undefined} />
+          {#if endIssue}<Field.FieldError id="stats-end-error">{endIssue}</Field.FieldError>{/if}
         </Field.Field>
       </Field.FieldGroup>
-      <p
-        id="stats-range-validation"
-        class="text-sm"
-        class:text-destructive={!validDraftRange}
-        role={validDraftRange ? 'status' : 'alert'}>
-        {validDraftRange ? m.stats_range_help() : m.stats_range_invalid()}
-      </p>
       <Dialog.Footer>
         <Button type="button" variant="outline" onclick={() => (rangeOpen = false)}>{m.common_cancel()}</Button>
         <Button type="submit" disabled={!validDraftRange}>{m.stats_apply_range()}</Button>

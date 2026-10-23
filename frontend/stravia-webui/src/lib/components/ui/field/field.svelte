@@ -1,34 +1,28 @@
 <script lang="ts" module>
 import { tv, type VariantProps } from 'tailwind-variants'
 
+import type { FieldControlSize } from './field-sizes.js'
+
 export const fieldVariants = tv({
-  base: 'data-[invalid=true]:text-destructive group/field @container/field w-full min-w-0 [--field-control-width:36rem]',
+  base: 'data-[invalid=true]:text-destructive group/field @container/field w-full min-w-0',
   variants: {
-    orientation: { vertical: '', horizontal: '', responsive: '' },
-    size: {
-      number: '[--field-control-width:7rem]',
-      datetime: '[--field-control-width:18rem]',
-      name: '[--field-control-width:24rem]',
-      select: '[--field-control-width:28rem]',
-      fill: '[--field-control-width:36rem]',
+    // 左右排布的 Field 以设置列为上限，label 与控件的距离不随内容容器放大。
+    orientation: {
+      vertical: '',
+      horizontal: 'max-w-(--content-column-max-width)',
+      responsive: 'max-w-(--content-column-max-width)',
     },
   },
-  compoundVariants: [
-    { orientation: 'vertical', size: 'number', class: 'max-w-[7rem]' },
-    { orientation: 'vertical', size: 'datetime', class: 'max-w-[18rem]' },
-    { orientation: 'vertical', size: 'name', class: 'max-w-[24rem]' },
-    { orientation: 'vertical', size: 'select', class: 'max-w-[28rem]' },
-    { orientation: 'vertical', size: 'fill', class: 'max-w-[36rem]' },
-  ],
   defaultVariants: { orientation: 'responsive' },
 })
 
 export type FieldOrientation = VariantProps<typeof fieldVariants>['orientation']
-export type FieldSize = VariantProps<typeof fieldVariants>['size']
+export type FieldSize = FieldControlSize
 </script>
 
 <script lang="ts">
 import { cn, type WithElementRef } from '#lib/utils.js'
+import { fieldControlWidths } from './field-sizes.js'
 import type { HTMLAttributes } from 'svelte/elements'
 
 let {
@@ -47,7 +41,12 @@ let {
   data-slot="field"
   data-orientation={orientation}
   data-size={size}
-  class={cn(fieldVariants({ orientation, size }), className)}
+  style:--field-control-width={fieldControlWidths[size ?? 'fill']}
+  class={cn(
+    fieldVariants({ orientation }),
+    orientation === 'vertical' && size && 'max-w-(--field-control-width)',
+    className,
+  )}
   {...restProps}>
   <div
     data-slot="field-layout"
