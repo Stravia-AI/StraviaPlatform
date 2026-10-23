@@ -4,6 +4,7 @@ import type {
   CredentialDiscoveryPage,
   CredentialRuleCatalog,
   MediaUnderstandingConfigView,
+  UpdateMediaUnderstandingConfig,
   WebAccessSettings,
   WebProvider,
 } from '../src/lib/types'
@@ -137,7 +138,7 @@ test('external signed downloads and S3 storage take effect only after their shee
   await external.click()
   await expect(sheet.getByLabel('File public access address')).toHaveValue('https://objects.example/storage')
   await sheet.getByLabel('File public access address').fill('https://downloads.example/objects')
-  await sheet.getByRole('button', { name: 'Enable external downloads', exact: true }).click()
+  await sheet.getByRole('button', { name: 'Enable external signed downloads', exact: true }).click()
   await expect(sheet).toHaveCount(0)
   await expect(external).toBeChecked()
   expect(saved).toMatchObject({
@@ -815,6 +816,105 @@ test('media activation saves only confirmed configuration without discarding the
   expect(submitted.at(-1)).toEqual({ enabled: false, model_id: 'media-fixture', thinking_level: 'medium' })
   await page.reload()
   await expect(toggle).not.toBeChecked()
+  await expect(page.getByText('Fixture vision · medium', { exact: true })).toBeVisible()
+})
+
+test('an ineligible saved understanding binding stays visible and clearable at 390 and 320', async ({ page }) => {
+  const eligible = [
+    {
+      id: 'media-fixture',
+      model_id: 'vision-fixture',
+      display_name: 'Fixture vision',
+      supported_thinking_levels: ['medium'] as const,
+    },
+  ]
+  let config: MediaUnderstandingConfigView = {
+    enabled: false,
+    model_id: 'removed-model',
+    thinking_level: 'high',
+    state: 'unavailable',
+    eligible_models: [...eligible],
+  }
+  const submitted: unknown[] = []
+  await page.route('**/api/v1/media-understanding', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON() as UpdateMediaUnderstandingConfig
+      submitted.push(input)
+      config = { ...config, ...input, state: input.model_id ? 'available' : 'unavailable' }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  for (const width of [390, 320]) {
+    config = {
+      enabled: false,
+      model_id: 'removed-model',
+      thinking_level: 'high',
+      state: 'unavailable',
+      eligible_models: [...eligible],
+    }
+    await page.setViewportSize({ width, height: 844 })
+    await page.goto('/media-understanding')
+    // 已保存但不再合格的绑定仍显示原始技术 ID，而不是「未配置」。
+    await expect(page.getByText('removed-model · high', { exact: true })).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'Saved media settings are unavailable' })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+
+    await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+    const sheet = page.locator('[data-slot="sheet-content"]')
+    await expect(sheet.locator('#media-model')).toHaveText('Select a model')
+    const save = sheet.getByRole('button', { name: 'Save understanding model', exact: true })
+    // 功能关闭时允许保存空选择，清除失效绑定。
+    await expect(save).toBeEnabled()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await save.click()
+    await expect(sheet).toHaveCount(0)
+    expect(submitted.at(-1)).toEqual({ enabled: false, model_id: null, thinking_level: null })
+    await expect(page.getByText('Not configured', { exact: true })).toBeVisible()
+  }
+  expect(submitted).toHaveLength(2)
+})
+
+test('media understanding Sheet locks submit, cancel and close while saving', async ({ page }) => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let config: MediaUnderstandingConfigView = {
+    enabled: true,
+    model_id: 'media-fixture',
+    thinking_level: 'high',
+    state: 'available',
+    eligible_models: [
+      {
+        id: 'media-fixture',
+        model_id: 'vision-fixture',
+        display_name: 'Fixture vision',
+        supported_thinking_levels: ['medium', 'high'],
+      },
+    ],
+  }
+  await page.route('**/api/v1/media-understanding', async (route) => {
+    if (route.request().method() === 'PUT') {
+      await gate
+      config = { ...config, ...(route.request().postDataJSON() as UpdateMediaUnderstandingConfig) }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.goto('/media-understanding')
+  await page.getByRole('button', { name: 'Edit Understanding model' }).click()
+  const sheet = page.locator('[data-slot="sheet-content"]')
+  await sheet.locator('#media-thinking-level').click()
+  await page.getByRole('option', { name: 'medium', exact: true }).click()
+  const save = sheet.getByRole('button', { name: /Save understanding model/ })
+  await save.click()
+  await expect(save).toBeDisabled()
+  await expect(save).toHaveAttribute('aria-busy', 'true')
+  await expect(sheet.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+  await expect(sheet.getByRole('button', { name: 'Close', exact: true })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(sheet).toBeVisible()
+  release()
+  await expect(sheet).toHaveCount(0)
   await expect(page.getByText('Fixture vision · medium', { exact: true })).toBeVisible()
 })
 
@@ -1693,7 +1793,7 @@ test('web search keeps one settings column with aligned actions and operable sou
   expect(Math.abs(column.x - header.x)).toBeLessThanOrEqual(1)
   const edit = (await page.getByRole('button', { name: 'Edit search method', exact: true }).boundingBox())!
   const steps = (await page.locator('#search-max-turns').boundingBox())!
-  const suffix = (await page.locator('[data-slot=setting-row]').getByText('seconds', { exact: true }).boundingBox())!
+  const suffix = (await page.locator('[data-slot=setting-row]').getByText('s', { exact: true }).boundingBox())!
   const editRight = edit.x + edit.width
   expect(Math.abs(steps.x + steps.width - editRight)).toBeLessThanOrEqual(1)
   expect(Math.abs(suffix.x + suffix.width - editRight)).toBeLessThanOrEqual(1)
@@ -1923,15 +2023,18 @@ test('credential protection table keeps its header above the draggable body scro
   const viewport = scrollArea.locator('[data-scroll-area-viewport]')
   const main = page.getByRole('main')
   const paginator = page.locator('[data-slot="data-table-paginator"]')
-  const bottomGap = async () => {
-    const mainBox = (await main.boundingBox())!
-    const paginatorBox = (await paginator.boundingBox())!
-    return mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
+  // 规则区占满窗口剩余高度：任何窗口高度下分页器都贴在底部，表体内部滚动。
+  for (const height of [800, 1039]) {
+    await page.setViewportSize({ width: 1280, height })
+    await expect
+      .poll(async () => {
+        const mainBox = (await main.boundingBox())!
+        const paginatorBox = (await paginator.boundingBox())!
+        const bottomGap = mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
+        return bottomGap >= 0 && bottomGap <= 24
+      })
+      .toBe(true)
   }
-  // 工作台列表：数据超出剩余高度时分页钉在底部、表体内部滚动；数据放得下时按自然高度，分页紧跟表格。
-  await expect.poll(async () => (await bottomGap()) >= 0 && (await bottomGap()) <= 24).toBe(true)
-  await page.setViewportSize({ width: 1280, height: 1039 })
-  await expect.poll(async () => (await bottomGap()) > 24).toBe(true)
   await page.setViewportSize({ width: 1280, height: 800 })
   const bar = scrollArea.locator('[data-scroll-area-scrollbar][data-orientation="vertical"]')
   const thumb = bar.locator('[data-scroll-area-thumb]')

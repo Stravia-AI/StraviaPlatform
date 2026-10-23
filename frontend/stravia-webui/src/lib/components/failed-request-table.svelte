@@ -208,11 +208,6 @@ const columns = helper.columns([
   overflow-wrap: anywhere;
 }
 .failure-error {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
   font-size: 0.875rem;
   overflow-wrap: anywhere;
 }

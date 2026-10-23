@@ -1,7 +1,6 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
-import { MediaQuery } from 'svelte/reactivity'
 import type { InteractionDetail, LiveContentBlock, FailedRequestDetail } from '#lib/types.js'
 import ObservationInspectorContent from '#lib/components/observation-inspector-content.svelte'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
@@ -58,7 +57,6 @@ const MIN_REM = 28
 const MAX_REM = 56
 const CANVAS_MIN_REM = 18
 const KEY_STEP_REM = 1
-const narrowViewport = new MediaQuery('(max-width: 767px)', false)
 const previousFocus = typeof document === 'undefined' ? null : document.activeElement
 let activeTab = $state('timeline')
 let resizing = $state(false)
@@ -71,7 +69,7 @@ function remPx(): number {
 
 const maxRem = $derived(containerWidth > 0 ? Math.min(MAX_REM, containerWidth / remPx() - CANVAS_MIN_REM) : MAX_REM)
 // Side by side only when both the panel and a usable canvas fit in the workspace, not by viewport.
-const stacked = $derived(narrowViewport.current || maxRem < MIN_REM)
+const stacked = $derived(maxRem < MIN_REM)
 const appliedRem = $derived(Math.max(MIN_REM, Math.min(width, maxRem)))
 
 $effect(() => {

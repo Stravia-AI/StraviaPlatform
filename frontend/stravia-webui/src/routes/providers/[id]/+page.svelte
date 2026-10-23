@@ -59,17 +59,17 @@ const usesProviderModels = $derived(
   ),
 )
 
-const detailTabs = $derived([
-  { id: 'connection', label: m.provider_detail_tab_connection },
-  ...(usesProviderModels ? [{ id: 'models', label: m.provider_detail_tab_models }] : []),
-  { id: 'routes', label: m.provider_detail_tab_routes },
-])
-
 const routeReferences = $derived(
   (routesQuery.data ?? []).flatMap((route) =>
     route.targets.filter((target) => target.provider_id === providerId).map((target) => ({ route, target })),
   ),
 )
+
+const detailTabs: Array<{ id: ProviderDetailView; label: () => string; count?: number }> = $derived([
+  { id: 'connection', label: m.provider_detail_tab_connection },
+  ...(usesProviderModels ? [{ id: 'models' as const, label: m.provider_detail_tab_models }] : []),
+  { id: 'routes', label: m.provider_detail_tab_routes, count: routeReferences.length || undefined },
+])
 
 $effect(() => {
   if (page.url.searchParams.get('sync') === 'created' && provider && canDiscoverModels && !autoSyncStarted) {
@@ -146,6 +146,7 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
             icon={descriptor?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'}
             name={provider.name}
             logo={provider.id} />
+          {#if provider.vendor}<TechnicalValue value={provider.vendor} copyable class="text-muted-foreground" />{/if}
           {#if credentialInvalid || !provider.is_enabled || !provider.allowance_suspension}
             <StatusIndicator
               compact
@@ -176,7 +177,8 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
           data-state={view === item.id ? 'active' : 'inactive'}
           aria-current={view === item.id ? 'page' : undefined}
           href={resolve(`providers/${encodeURIComponent(providerId)}?view=${encodeURIComponent(item.id)}`)}
-          >{item.label()}</a>
+          >{item.label()}
+          {#if item.count}<Badge variant="secondary">{item.count}</Badge>{/if}</a>
       {/each}
     </nav>
 

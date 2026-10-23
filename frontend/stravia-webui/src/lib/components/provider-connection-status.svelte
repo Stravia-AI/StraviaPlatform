@@ -5,7 +5,8 @@ import { admin } from '#lib/admin-client.js'
 import { formatLogTime } from '#lib/format.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { modelChangeReason, sourceLabel, summaryDescription } from '#lib/model-changes.js'
-import type { Provider, ProviderOAuthStatus } from '#lib/types.js'
+import { providerOAuthStatusLabel } from '#lib/provider-oauth.js'
+import type { Provider } from '#lib/types.js'
 
 interface Props {
   provider: Provider
@@ -30,16 +31,6 @@ const syncStateQuery = createQuery(() => ({
   enabled: discovery,
 }))
 
-const oauthLabels: Record<ProviderOAuthStatus, () => string> = {
-  not_connected: m.provider_connection_oauth_not_connected,
-  pending: m.provider_connection_oauth_pending,
-  connected: m.provider_connection_oauth_connected,
-  unavailable: m.provider_connection_oauth_unavailable,
-  quota_exhausted: m.provider_connection_oauth_quota_exhausted,
-  error: m.provider_connection_oauth_error,
-  disconnected: m.provider_connection_oauth_disconnected,
-}
-
 // 只收集已有的真实状态；没有任何内容时整栏不渲染。
 const items = $derived.by<StatusItem[]>(() => {
   const locale = localeState.current
@@ -57,7 +48,7 @@ const items = $derived.by<StatusItem[]>(() => {
     })
   }
   if (oauth && provider.oauth_status) {
-    const status = oauthLabels[provider.oauth_status]?.() ?? provider.oauth_status
+    const status = providerOAuthStatusLabel(provider.oauth_status)
     result.push({
       key: 'account',
       label: m.provider_connection_status_account(),

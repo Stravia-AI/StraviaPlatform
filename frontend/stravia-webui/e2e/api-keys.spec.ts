@@ -131,12 +131,17 @@ test('API Key editor keeps optional help in tooltips and required scope visible 
     await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
 
     // Optional explanations live only in the question-mark tooltip and never add a visible line under the label.
-    await expect(overlay.locator('[data-slot="field-hint-text"]')).toHaveCount(0)
+    await expect(overlay.getByText('Leave empty for unlimited', { exact: false })).toHaveCount(0)
     const rpm = overlay.locator('[data-slot="field"]').filter({ has: page.locator('#api-key-rpm-limit') })
     const help = rpm.getByRole('button', { name: 'More about this field' })
     await help.focus()
     await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
     await expect(page.locator('[data-slot="tooltip-content"]')).not.toContainText('internal')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(0)
+    // 点击同样可以打开问号提示。
+    await help.click()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
     await page.keyboard.press('Escape')
     await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(0)
 
@@ -150,6 +155,32 @@ test('API Key editor keeps optional help in tooltips and required scope visible 
     ).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
+})
+
+test.describe('touch help', () => {
+  test.use({ hasTouch: true })
+
+  test('question-mark help opens on tap and closes with Escape', async ({ page }) => {
+    await page.route('**/api/v1/models', async (route) => {
+      await route.fulfill({ json: { data: [] } })
+    })
+    await page.route('**/api/v1/api-keys', async (route) => {
+      await route.fulfill({ json: { data: [] } })
+    })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/api-keys')
+    await page.getByRole('button', { name: 'Create first API Key' }).click()
+    const overlay = page.locator('[data-slot="sheet-content"]')
+    const rpm = overlay.locator('[data-slot="field"]').filter({ has: page.locator('#api-key-rpm-limit') })
+    const help = rpm.getByRole('button', { name: 'More about this field' })
+    await help.tap()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
+    // 轻触触发器不会立刻关闭提示；Escape 关闭。
+    await help.tap()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Leave empty for unlimited')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(0)
+  })
 })
 
 test('API Key editor groups and filters allowed model selections', async ({ page }) => {

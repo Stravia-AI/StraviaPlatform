@@ -45,7 +45,7 @@ const modalityTargets = ['input', 'output'] as const
 
 // 宽布局下的“添加可选字段”按钮贴设置列右缘，与控件右边缘对齐。
 const alignedActions =
-  'flex flex-wrap gap-2 empty:hidden @min-[50rem]/model-editor:w-full @min-[50rem]/model-editor:max-w-[60rem] @min-[50rem]/model-editor:justify-end'
+  'flex flex-wrap gap-2 empty:hidden @min-[50rem]/model-editor:w-full @min-[50rem]/model-editor:max-w-(--content-column-max-width) @min-[50rem]/model-editor:justify-end'
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },

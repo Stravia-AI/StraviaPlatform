@@ -9,14 +9,12 @@ import * as Popover from '#lib/components/ui/popover/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import RpmForm from './rpm-form.svelte'
 
-// 移动端行没有表头，showLabel 让摘要自带「RPM」前缀。
 let {
   providerId,
   modelId,
   modelName,
-  showLabel = false,
   compact = false,
-}: { providerId: string; modelId: string; modelName: string; showLabel?: boolean; compact?: boolean } = $props()
+}: { providerId: string; modelId: string; modelName: string; compact?: boolean } = $props()
 
 const query = createQuery(() => ({ queryKey: rpmQueryKey, queryFn: loadRpm }))
 const destination = $derived(
@@ -47,7 +45,7 @@ let open = $state(false)
         aria-label={m.rpm_edit_label({ model: modelId, value: summary })}
         disabled={query.isPending}>
         {#if query.isPending}<Spinner />{:else if query.error}{m.common_unavailable()}{:else}<span class="truncate"
-            >{#if showLabel}<span class="text-muted-foreground">RPM · </span>{/if}{summary}</span
+            >{summary}</span
           >{/if}
         {#if compact && !query.isPending && !query.error}<PencilIcon
             class="size-3 shrink-0 text-muted-foreground"

@@ -22,7 +22,7 @@ import PageHeader from '#lib/components/page-header.svelte'
 import ProductUpdateSettings from '#lib/components/product-update-settings.svelte'
 import RpmManagement from '#lib/components/rpm-management.svelte'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
-import { availableSettingsGroups, resolveSettingsGroup } from '#lib/settings-groups.js'
+import { availableSettingsGroups, resolveSettingsGroup, settingsGroupLabels } from '#lib/settings-groups.js'
 
 // 行内输入的未保存草稿：切换分组或离开设置页前确认，没有草稿时不打扰。
 const inlineDrafts = provideInlineDraftRegistry()
@@ -31,20 +31,12 @@ const guard = new DraftGuard({ dirty: () => inlineDrafts.dirty, busy: () => fals
 const authStateQuery = createQuery(() => ({ queryKey: ['auth-state'], queryFn: getAuthState }))
 
 const isServer = $derived(authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable')
-const groups = $derived(availableSettingsGroups({ desktop: isTauri, server: isServer }))
+const groups = $derived(availableSettingsGroups({ server: isServer }))
 const requested = $derived(page.url.searchParams.get('view'))
 // 账号分组取决于异步的认证状态：加载期间保持请求的分组，避免先闪回「通用」。
 const waitingForHost = $derived(requested === 'account' && authStateQuery.isPending)
 const group = $derived(waitingForHost ? 'account' : resolveSettingsGroup(requested, groups))
-const groupTitle = $derived(
-  {
-    general: m.settings_group_general,
-    network: m.settings_group_network,
-    data: m.settings_group_data,
-    account: m.settings_group_account,
-    advanced: m.settings_group_advanced,
-  }[group](),
-)
+const groupTitle = $derived(settingsGroupLabels[group]())
 
 // 跨页入口附带分区锚点（如 `?view=network#client`）：分组渲染后滚动到该分区。
 $effect(() => {

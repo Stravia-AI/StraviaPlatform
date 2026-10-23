@@ -254,7 +254,7 @@ async function downloadBundle(): Promise<void> {
     <DropdownMenu.Root>
       <DropdownMenu.Trigger>
         {#snippet child({ props })}
-          <Button {...props} variant="outline" size="icon" aria-label={m.observation_more_actions()}
+          <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}
             ><MoreHorizontalIcon /></Button>
         {/snippet}
       </DropdownMenu.Trigger>

@@ -348,8 +348,10 @@ test('real management persists root and destination RPM limits and queue setting
   await saveQueueSettings(queueSheet)
   expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 9000, queue_capacity: 16 })
   await page.reload()
-  await expect(queue).toContainText(/1,?500 ms/)
-  await expect(queue).toContainText(/9,?000 ms/)
+  await expect(queue).toContainText(/1,?500/)
+  await expect(queue).toContainText(/9,?000/)
+  // 行标题已标注 (ms)，只读值不再重复单位。
+  await expect(queue).not.toContainText(/1,?500 ms/)
   await expect(queue).toContainText('16')
   await page.screenshot({ path: test.info().outputPath('rpm-queue-en.png'), fullPage: true })
 

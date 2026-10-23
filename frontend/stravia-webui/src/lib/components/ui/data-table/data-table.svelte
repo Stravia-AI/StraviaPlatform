@@ -1151,7 +1151,6 @@ $effect(() => {
 <div
   bind:this={rootElement}
   data-slot="data-table"
-  data-workbench={workbench ? '' : undefined}
   class={cn('@container/data-table flex min-w-0 flex-col gap-3', workbench && 'h-full min-h-0', className)}
   style="--data-table-header-background:color-mix(in oklab,var(--muted) 45%,var(--background))">
   {#if showToolbar}

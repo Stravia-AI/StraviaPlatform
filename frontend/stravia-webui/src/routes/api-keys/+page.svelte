@@ -29,6 +29,7 @@ import {
 import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
+import { capabilityStatus } from '#lib/capability-status.js'
 
 const queryClient = useQueryClient()
 const connectSetup = getConnectSetup()
@@ -49,15 +50,9 @@ const mediaGenerationQuery = createQuery(() => ({
   queryKey: ['media-generation-config'],
   queryFn: admin.mediaGeneration.config.get,
 }))
-const mediaGenerationStatus = $derived(
-  mediaGenerationQuery.isPending
-    ? ('loading' as const)
-    : mediaGenerationQuery.isError
-      ? ('unavailable' as const)
-      : mediaGenerationQuery.data?.config?.enabled
-        ? ('enabled' as const)
-        : ('disabled' as const),
-)
+const webSearchStatus = $derived(capabilityStatus(webSearchQuery, (config) => config.enabled))
+const mediaUnderstandingStatus = $derived(capabilityStatus(mediaUnderstandingQuery, (config) => config.enabled))
+const mediaGenerationStatus = $derived(capabilityStatus(mediaGenerationQuery, (config) => config.config.enabled))
 let editorOpen = $state(false)
 let editorApiKey = $state<ApiKey>()
 let editorSession = $state(0)
@@ -350,8 +345,8 @@ async function deleteKey(): Promise<void> {
     bind:open={editorOpen}
     apiKey={editorApiKey}
     {models}
-    webSearchEnabled={webSearchQuery.data?.enabled ?? false}
-    mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false}
+    {webSearchStatus}
+    {mediaUnderstandingStatus}
     {mediaGenerationStatus} />
 {/key}
 

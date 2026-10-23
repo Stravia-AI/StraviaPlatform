@@ -162,7 +162,6 @@ async function setEnabled(enabled: boolean): Promise<void> {
   try {
     await admin.settings.set(settingKey, value)
     queryClient.setQueryData(queryKey, value)
-    toast.success(m.reversible_redaction_saved())
   } catch (error) {
     saveError = localizeBackendErrorMessage(error)
     toast.error(saveError)
@@ -406,6 +405,7 @@ function selectMatch(match: CredentialMatch): void {
           {/if}
           <DataTable
             workbench
+            class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
             data={visibleRows}
             columns={ruleColumns}
             labels={tableLabels}

@@ -59,7 +59,7 @@ async function remove() {
     {#if chat.snapshot.conversations.length}
       <DropdownMenu.Root>
         <DropdownMenu.Trigger
-          aria-label={m.console_chat_more_actions()}
+          aria-label={m.common_more_actions()}
           class={buttonVariants({ variant: 'outline', size: 'icon' })}><EllipsisIcon /></DropdownMenu.Trigger>
         <DropdownMenu.Content align="end"
           ><DropdownMenu.Group>

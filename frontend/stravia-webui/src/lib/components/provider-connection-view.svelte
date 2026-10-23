@@ -227,7 +227,7 @@ async function testConnection(): Promise<void> {
 
   <!-- 表单占 60rem 设置列；宽屏时右侧辅助栏只放真实状态，没有内容就不占位，窄时排在表单之后。 -->
   <div
-    class="grid gap-6 @min-[80rem]/route-page:grid-cols-[minmax(0,60rem)_minmax(0,20rem)] @min-[80rem]/route-page:items-start @min-[80rem]/route-page:gap-x-12">
+    class="grid gap-6 @min-[80rem]/route-page:grid-cols-[minmax(0,var(--content-column-max-width))_minmax(0,20rem)] @min-[80rem]/route-page:items-start @min-[80rem]/route-page:gap-x-12">
     <form
       class="flex min-w-0 flex-col gap-6"
       onsubmit={(event) => {
@@ -299,7 +299,7 @@ async function testConnection(): Promise<void> {
         <SettingRow
           title={m.common_use_proxy()}
           labelFor="provider-use-proxy"
-          hint={m.common_send_requests_service_proxy_configured_settings()}
+          description={m.common_send_requests_service_proxy_configured_settings()}
           layout="inline">
           <Switch
             id="provider-use-proxy"

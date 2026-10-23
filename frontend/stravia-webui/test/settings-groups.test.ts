@@ -4,27 +4,16 @@ import { availableSettingsGroups, resolveSettingsGroup, settingsGroupHref } from
 
 describe('settings groups', () => {
   test('server hosts list general, network, data, account and advanced in task order', () => {
-    expect(availableSettingsGroups({ desktop: false, server: true })).toEqual([
-      'general',
-      'network',
-      'data',
-      'account',
-      'advanced',
-    ])
+    expect(availableSettingsGroups({ server: true })).toEqual(['general', 'network', 'data', 'account', 'advanced'])
   })
 
   test('desktop hosts hide the account group instead of disabling it', () => {
-    expect(availableSettingsGroups({ desktop: true, server: false })).toEqual([
-      'general',
-      'network',
-      'data',
-      'advanced',
-    ])
+    expect(availableSettingsGroups({ server: false })).toEqual(['general', 'network', 'data', 'advanced'])
   })
 
   test('missing, unknown and unavailable values fall back to general', () => {
-    const server = availableSettingsGroups({ desktop: false, server: true })
-    const desktop = availableSettingsGroups({ desktop: true, server: false })
+    const server = availableSettingsGroups({ server: true })
+    const desktop = availableSettingsGroups({ server: false })
     expect(resolveSettingsGroup(null, server)).toBe('general')
     expect(resolveSettingsGroup('', server)).toBe('general')
     expect(resolveSettingsGroup('billing', server)).toBe('general')
@@ -33,7 +22,7 @@ describe('settings groups', () => {
   })
 
   test('available values resolve to themselves', () => {
-    const server = availableSettingsGroups({ desktop: false, server: true })
+    const server = availableSettingsGroups({ server: true })
     for (const group of server) expect(resolveSettingsGroup(group, server)).toBe(group)
   })
 

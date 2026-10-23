@@ -10,6 +10,7 @@ import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 
 import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
+import type { CapabilityStatus } from '#lib/capability-status.js'
 
 import type { ApiKey, Route } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
@@ -45,9 +46,9 @@ interface Props {
   open?: boolean
   apiKey?: ApiKey
   models: Route[]
-  webSearchEnabled: boolean
-  mediaUnderstandingEnabled: boolean
-  mediaGenerationStatus: 'enabled' | 'disabled' | 'loading' | 'unavailable'
+  webSearchStatus: CapabilityStatus
+  mediaUnderstandingStatus: CapabilityStatus
+  mediaGenerationStatus: CapabilityStatus
   presentation?: 'sheet' | 'page'
   onSaved?: () => void | Promise<void>
 }
@@ -56,8 +57,8 @@ let {
   open = $bindable(false),
   apiKey,
   models,
-  webSearchEnabled,
-  mediaUnderstandingEnabled,
+  webSearchStatus,
+  mediaUnderstandingStatus,
   mediaGenerationStatus,
   presentation = 'sheet',
   onSaved,
@@ -188,6 +189,16 @@ async function saveKey(): Promise<void> {
 {#snippet unavailableLink(href: string)}
   <a href={resolve(href)} class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
     >{m.api_key_editor_platform_capability_disabled()}</a>
+{/snippet}
+
+{#snippet capabilityNote(status: CapabilityStatus, href: string)}
+  {#if status === 'disabled'}
+    {@render unavailableLink(href)}
+  {:else if status === 'loading'}
+    <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
+  {:else if status === 'unavailable'}
+    <span class="text-sm text-destructive" role="status">{m.api_key_editor_platform_capability_unavailable()}</span>
+  {/if}
 {/snippet}
 
 {#snippet keyFields()}
@@ -360,6 +371,7 @@ async function saveKey(): Promise<void> {
     <SettingRow
       title={m.api_key_editor_transparent_injection()}
       description={m.api_key_editor_transparent_injection_help()}
+      hint={m.api_key_editor_choose_automatic_capabilities()}
       layout="inline">
       {#snippet children({ titleId, descriptionId })}
         <Switch
@@ -371,29 +383,18 @@ async function saveKey(): Promise<void> {
     </SettingRow>
     {#if form.transparentInjectionEnabled}
       <SettingRow title={m.api_key_editor_media_understanding()} layout="inline" nested>
-        {#snippet note()}
-          {#if !mediaUnderstandingEnabled}{@render unavailableLink('media-understanding')}{/if}
-        {/snippet}
+        {#snippet note()}{@render capabilityNote(mediaUnderstandingStatus, 'media-understanding')}{/snippet}
         {#snippet children({ titleId })}
           <Switch
             id="api-key-inject-media-understanding"
             aria-labelledby={titleId}
             bind:checked={form.injectMediaUnderstanding}
-            disabled={!mediaUnderstandingEnabled} />
+            disabled={mediaUnderstandingStatus !== 'enabled'}
+            aria-busy={mediaUnderstandingStatus === 'loading'} />
         {/snippet}
       </SettingRow>
       <SettingRow title={m.api_key_editor_media_generation()} layout="inline" nested>
-        {#snippet note()}
-          {#if mediaGenerationStatus === 'disabled'}
-            {@render unavailableLink('media-generation')}
-          {:else if mediaGenerationStatus === 'loading'}
-            <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
-          {:else if mediaGenerationStatus === 'unavailable'}
-            <span class="text-sm text-destructive" role="status">
-              {m.api_key_editor_platform_capability_unavailable()}
-            </span>
-          {/if}
-        {/snippet}
+        {#snippet note()}{@render capabilityNote(mediaGenerationStatus, 'media-generation')}{/snippet}
         {#snippet children({ titleId })}
           <Switch
             id="api-key-inject-media-generation"
@@ -404,15 +405,14 @@ async function saveKey(): Promise<void> {
         {/snippet}
       </SettingRow>
       <SettingRow title={m.api_key_editor_web_search()} layout="inline" nested>
-        {#snippet note()}
-          {#if !webSearchEnabled}{@render unavailableLink('web-search')}{/if}
-        {/snippet}
+        {#snippet note()}{@render capabilityNote(webSearchStatus, 'web-search')}{/snippet}
         {#snippet children({ titleId })}
           <Switch
             id="api-key-inject-web-search"
             aria-labelledby={titleId}
             bind:checked={form.injectWebSearch}
-            disabled={!webSearchEnabled} />
+            disabled={webSearchStatus !== 'enabled'}
+            aria-busy={webSearchStatus === 'loading'} />
         {/snippet}
       </SettingRow>
     {/if}

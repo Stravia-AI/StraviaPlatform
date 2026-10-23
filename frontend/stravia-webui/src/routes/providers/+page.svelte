@@ -12,6 +12,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { getModelChanges } from '#lib/model-changes.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { providerOAuthStatusLabel } from '#lib/provider-oauth.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { formatDuration } from '#lib/format.js'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '#lib/logical-model.js'
@@ -190,22 +191,7 @@ function providerSearchText(provider: Provider): string {
 }
 
 function oauthStatusLabel(status: ProviderOAuthStatus | undefined): string | undefined {
-  switch (status) {
-    case 'not_connected':
-      return m.providers_oauth_not_connected()
-    case 'pending':
-      return m.providers_oauth_pending()
-    case 'unavailable':
-      return m.providers_oauth_unavailable()
-    case 'quota_exhausted':
-      return m.providers_oauth_quota_exhausted()
-    case 'error':
-      return m.providers_oauth_error()
-    case 'disconnected':
-      return m.providers_oauth_disconnected()
-    default:
-      return undefined
-  }
+  return status ? providerOAuthStatusLabel(status) : undefined
 }
 
 function openCreate(): void {

@@ -619,7 +619,7 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   // 汇总只统计并定位例外；耗尽项明细按需展开
   const emptyWindows = page.getByTestId('allowance-empty-windows')
   await expect(emptyWindows).toHaveCount(0)
-  await conditionSummary.getByRole('button', { name: 'Exhausted windows (1)' }).click()
+  await conditionSummary.getByRole('button', { name: 'Exhausted items (1)' }).click()
   await expect(emptyWindows).toContainText('Beta account')
   await expect(emptyWindows).toContainText('Weekly window')
   await expect(emptyWindows).not.toContainText('Alpha account')
