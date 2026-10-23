@@ -418,6 +418,7 @@ function saveProvider(): void {
               satisfiedSecretFields={oauthSessionSecretFields}
               issues={previewIssues}
               idPrefix={`new-provider-${selectedOption.key}`}
+              vendorName={selectedOption.descriptor.display_name}
               disabled={draft.submitting}
               onChanged={() => draft.configurationChanged()} />
           </Field.Group>
@@ -442,7 +443,7 @@ function saveProvider(): void {
             class="mt-4"
             title={m.common_use_proxy()}
             labelFor="provider-use-proxy"
-            hint={m.common_send_requests_service_proxy_configured_settings()}
+            description={m.common_send_requests_service_proxy_configured_settings()}
             layout="inline">
             <Switch
               id="provider-use-proxy"

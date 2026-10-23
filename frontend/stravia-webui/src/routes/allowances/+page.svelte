@@ -808,6 +808,13 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   ]}>
   <PageHeader title={m.allowances_title()}>
     {#snippet actions()}
+      {#if !readState.loading && hasEntries}
+        <span class="font-technical text-xs text-muted-foreground tabular-nums">
+          {latestFetchedAt
+            ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })
+            : m.allowances_never_updated()}
+        </span>
+      {/if}
       {#if hasEntries}
         <Button onclick={refreshAll} disabled={readState.refreshAllDisabled}>
           {#if readState.refreshingAll}<Spinner
@@ -908,12 +915,10 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
           </div>
         {:else}
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-            {#if overallCondition}
-              <StatusIndicator
-                compact
-                label={conditionLabel(overallCondition)}
-                tone={conditionStatusTone(overallCondition)} />
-            {/if}
+            <StatusIndicator
+              compact
+              label={conditionLabel(overallCondition)}
+              tone={conditionStatusTone(overallCondition)} />
             <p class="font-technical tabular-nums">
               {lowestRemaining == null
                 ? m.allowances_lowest_remaining({ value: '–' })
@@ -930,8 +935,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               <Collapsible.Root open={exhaustedOpen} onOpenChange={(open: boolean) => (exhaustedOpen = open)}>
                 <Collapsible.Trigger
                   class="inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-destructive transition-colors duration-[140ms] hover:underline"
-                  aria-expanded={exhaustedOpen}
-                  aria-controls="allowance-empty-windows">
+                  aria-expanded={exhaustedOpen}>
                   <ChevronDownIcon
                     class={cn('size-3.5 transition-transform duration-[140ms]', exhaustedOpen && 'rotate-180')}
                     aria-hidden="true" />
@@ -957,12 +961,6 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                   </Collapsible.Content>
                 {/if}
               </Collapsible.Root>
-            {/if}
-            {#if latestFetchedAt}
-              <!-- 更新时间压缩为汇总行状态；没有支持对象时整页不渲染（见空态分支） -->
-              <p class="font-technical text-xs whitespace-nowrap text-muted-foreground tabular-nums sm:ms-auto">
-                {m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })}
-              </p>
             {/if}
           </div>
         {/if}

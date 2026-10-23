@@ -6,6 +6,7 @@ import { page } from '$app/state'
 import { createQuery } from '@tanstack/svelte-query'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { capabilityStatus } from '#lib/capability-status.js'
 import ApiKeyEditor from '#lib/components/api-key-editor.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
@@ -26,15 +27,9 @@ const mediaGenerationQuery = createQuery(() => ({
   queryFn: admin.mediaGeneration.config.get,
 }))
 
-const mediaGenerationStatus = $derived(
-  mediaGenerationQuery.isPending
-    ? ('loading' as const)
-    : mediaGenerationQuery.isError
-      ? ('unavailable' as const)
-      : mediaGenerationQuery.data?.config?.enabled
-        ? ('enabled' as const)
-        : ('disabled' as const),
-)
+const webSearchStatus = $derived(capabilityStatus(webSearchQuery, (config) => config.enabled))
+const mediaUnderstandingStatus = $derived(capabilityStatus(mediaUnderstandingQuery, (config) => config.enabled))
+const mediaGenerationStatus = $derived(capabilityStatus(mediaGenerationQuery, (config) => config.config.enabled))
 
 const apiKey = $derived(apiKeysQuery.data?.find((item) => item.id === apiKeyId))
 
@@ -67,8 +62,8 @@ async function returnToApiKeys(): Promise<void> {
     presentation="page"
     {apiKey}
     models={modelsQuery.data ?? []}
-    webSearchEnabled={webSearchQuery.data?.enabled ?? false}
-    mediaUnderstandingEnabled={mediaUnderstandingQuery.data?.enabled ?? false}
+    {webSearchStatus}
+    {mediaUnderstandingStatus}
     {mediaGenerationStatus}
     onSaved={returnToApiKeys} />
 {/if}

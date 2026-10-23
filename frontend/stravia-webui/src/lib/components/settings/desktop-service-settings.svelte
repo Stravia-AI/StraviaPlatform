@@ -200,7 +200,7 @@ async function copyLanUrl(): Promise<void> {
 </script>
 
 <SettingsSection id="client" title={m.desktop_client_title()}>
-  {#if portQuery.isPending}
+  {#if portQuery.isPending || clientQuery.isPending}
     <p role="status" class="flex items-center gap-2 py-3 text-sm text-muted-foreground">
       <Spinner />{m.desktop_client_loading()}
     </p>
@@ -209,6 +209,14 @@ async function copyLanUrl(): Promise<void> {
       <p class="text-sm font-medium text-destructive">{m.desktop_client_unavailable()}</p>
       <p class="mt-1 text-sm text-muted-foreground">{String(portQuery.error)}</p>
       <Button class="mt-3" variant="outline" onclick={() => void portQuery.refetch()}>
+        {m.common_retry()}
+      </Button>
+    </div>
+  {:else if clientQuery.isError}
+    <div class="py-3" role="alert">
+      <p class="text-sm font-medium text-destructive">{m.desktop_client_settings_unavailable()}</p>
+      <p class="mt-1 text-sm text-muted-foreground">{String(clientQuery.error)}</p>
+      <Button class="mt-3" variant="outline" onclick={() => void clientQuery.refetch()}>
         {m.common_retry()}
       </Button>
     </div>

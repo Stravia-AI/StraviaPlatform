@@ -4,9 +4,6 @@ import { untrack } from 'svelte'
 import type { Path } from '$app/types'
 import { DraftGuardController, type DraftGuardDecision, type DraftGuardState } from '#lib/draft-guard.js'
 
-export { DraftGuardController } from '#lib/draft-guard.js'
-export type { DraftGuardDecision, DraftGuardState } from '#lib/draft-guard.js'
-
 /**
  * 资源草稿的离开保护（Svelte 壳）。必须在组件初始化时创建，因为它注册 `beforeNavigate`。
  *
@@ -55,10 +52,6 @@ export class DraftGuard {
 
   get busy(): boolean {
     return this.#state.busy()
-  }
-
-  get dirty(): boolean {
-    return this.#state.dirty()
   }
 
   /** 把会丢失草稿的动作交给守卫；返回守卫的决定。 */

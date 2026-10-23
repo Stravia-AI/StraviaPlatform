@@ -6,8 +6,6 @@ import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import type { MediaGenerationConfig, MediaGenerationConfigView } from '#lib/types.js'
-import { DraftGuard } from '#lib/draft-guard.svelte.js'
-import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
@@ -32,7 +30,7 @@ const eligibleRoutesQuery = createQuery(() => ({
   queryFn: admin.mediaGeneration.eligibleRoutes,
 }))
 
-// undefined：没有未保存的选择，跟随服务器确认值；被拒绝的选择留在这里直到重试成功或改选。
+// 保存中的选择先显示；请求结束后回到服务器确认值（成功即新值，失败即旧值）。
 let pendingRoute = $state<string | null | undefined>(undefined)
 let routeSaving = $state(false)
 let routeError = $state('')
@@ -42,12 +40,6 @@ let validationTooltipOpen = $state(false)
 let clearOpen = $state(false)
 let clearSaving = $state(false)
 let clearError = $state('')
-
-// 未保存的路由选择（被拒绝的选择仍留在原处）离开页面前需确认；保存中锁定。
-const guard = new DraftGuard({
-  dirty: () => pendingRoute !== undefined && pendingRoute !== (configQuery.data?.config.image.route_id ?? null),
-  busy: () => routeSaving || clearSaving,
-})
 
 const eligibleRoutes = $derived(eligibleRoutesQuery.data ?? [])
 const savedRouteId = $derived(configQuery.data?.config.image.route_id ?? null)
@@ -119,9 +111,9 @@ async function persistRoute(routeId: string | null): Promise<void> {
     updateCachedConfig(view)
     pendingRoute = undefined
     await queryClient.invalidateQueries({ queryKey: ['models'] })
-    toast.success(m.media_generation_settings_saved())
   } catch (error) {
-    // 失败保留选择：草稿不变，服务器确认值不被覆盖，错误留在本次事务内。
+    // 即时保存失败：选择回到服务器确认值，错误留在本次事务内可重试。
+    pendingRoute = undefined
     routeError = localizeBackendErrorMessage(error)
   } finally {
     routeSaving = false
@@ -279,14 +271,6 @@ async function unlinkRoute(): Promise<void> {
           {#if routeSaving}
             <Spinner aria-label={m.media_generation_saving_route()} />
           {/if}
-          {#if routeError}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={routeSaving}
-              onclick={() => void persistRoute(routeDraft)}>{m.common_save_settings()}</Button>
-          {/if}
           {#if savedRouteId}
             <Button type="button" variant="outline" size="sm" disabled={routeSaving} onclick={openClear}
               >{m.media_generation_clear_route()}</Button>
@@ -321,5 +305,3 @@ async function unlinkRoute(): Promise<void> {
   onsubmit={unlinkRoute}>
   <SettingRow title={m.media_generation_image_route_title()} value={clearSummary} layout="inline" />
 </SettingsSheet>
-
-<DraftDiscardDialog {guard} />

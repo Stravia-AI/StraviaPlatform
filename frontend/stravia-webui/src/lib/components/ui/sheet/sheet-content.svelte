@@ -17,7 +17,6 @@ let {
   class: className,
   side = 'right',
   showCloseButton = true,
-  closeDisabled = false,
   locked = false,
   closeLabel = 'Close',
   portalProps,
@@ -27,8 +26,6 @@ let {
   portalProps?: WithoutChildrenOrChild<ComponentProps<typeof SheetPortal>>
   side?: Side
   showCloseButton?: boolean
-  closeDisabled?: boolean
-  /** 保存中：禁用关闭按钮，并忽略 Escape 与遮罩点击。 */
   locked?: boolean
   closeLabel?: string
   children: Snippet
@@ -50,7 +47,7 @@ let {
     interactOutsideBehavior={locked ? 'ignore' : (restProps.interactOutsideBehavior ?? 'close')}>
     {@render children?.()}
     {#if showCloseButton}
-      <SheetPrimitive.Close data-slot="sheet-close" disabled={closeDisabled || locked}>
+      <SheetPrimitive.Close data-slot="sheet-close" disabled={locked}>
         {#snippet child({ props })}
           <Button variant="ghost" class="absolute top-2 right-2" size="icon" {...props}>
             <XIcon />

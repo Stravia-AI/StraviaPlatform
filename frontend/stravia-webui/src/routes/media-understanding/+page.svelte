@@ -47,10 +47,16 @@ const draftValid = $derived(
 const bindingSummary = $derived.by(() => {
   const config = configQuery.data
 
-  if (!savedModel) return m.media_understanding_binding_empty()
+  if (!config?.model_id) return m.common_not_configured()
 
-  return config?.thinking_level ? `${savedModel.display_name} · ${config.thinking_level}` : savedModel.display_name
+  // 已保存但不再合格的绑定仍显示原始技术 ID，不伪装成「未配置」。
+  const name = savedModel?.display_name ?? config.model_id
+
+  return config.thinking_level ? `${name} · ${config.thinking_level}` : name
 })
+
+// 与改动前一致：功能关闭时允许保存空选择以清除失效绑定；开启时必须选到有效模型。
+const canSaveDraft = $derived(configQuery.data !== undefined && hasChanges && (!configQuery.data.enabled || draftValid))
 
 const savedBindingReady = $derived.by(() => {
   const config = configQuery.data
@@ -105,13 +111,13 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
 async function save(): Promise<void> {
   const current = configQuery.data
 
-  if (!current || saving || !hasChanges || !draftValid) return
+  if (!current || saving || !canSaveDraft) return
   saving = true
   saveError = ''
   try {
     const config = await admin.mediaUnderstanding.update({
       enabled: current.enabled,
-      model_id: modelId,
+      model_id: modelId || null,
       thinking_level: thinkingLevel || null,
     })
     queryClient.setQueryData(['media-understanding-config'], config)
@@ -205,7 +211,7 @@ function selectThinkingLevel(value?: string): void {
   bind:open={editorOpen}
   title={m.media_understanding_edit_binding()}
   submitLabel={m.media_understanding_save_binding()}
-  submitDisabled={!hasChanges || !draftValid}
+  submitDisabled={!canSaveDraft}
   {saving}
   error={saveError}
   draft={() => ({ modelId, thinkingLevel })}

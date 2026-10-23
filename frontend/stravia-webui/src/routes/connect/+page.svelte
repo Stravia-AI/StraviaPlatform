@@ -406,7 +406,7 @@ function cliModelName(modelId: string): string | undefined {
                     {:else if cliModels.length === 0}
                       <Empty.Title>{m.connect_api_key_has_no_models()}</Empty.Title>
                       <Empty.Description>{m.connect_api_key_has_no_models_description()}</Empty.Description>
-                    {:else if cliToolId === 'claude-code'}
+                    {:else if cliToolId === 'claude-code' && !claudeMappings}
                       <Empty.Title>{m.connect_complete_model_mappings()}</Empty.Title>
                       <Empty.Description>{m.connect_complete_model_mappings_description()}</Empty.Description>
                     {:else}
@@ -474,7 +474,7 @@ function cliModelName(modelId: string): string | undefined {
                       ></Select.Content>
                   </Select.Root>
                   {#snippet below()}
-                    {#if !codeModel}
+                    {#if !codeModel && models.length > 0}
                       <p class="text-sm text-muted-foreground @min-[36rem]/control-row:text-end">
                         {m.connect_choose_model_for_key()}
                       </p>

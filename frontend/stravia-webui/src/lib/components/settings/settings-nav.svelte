@@ -8,7 +8,7 @@ import UserRoundIcon from '@lucide/svelte/icons/user-round'
 import WrenchIcon from '@lucide/svelte/icons/wrench'
 
 import { tabsListVariants, tabsTriggerVariants } from '#lib/components/ui/tabs/index.js'
-import { settingsGroupHref, type SettingsGroup } from '#lib/settings-groups.js'
+import { settingsGroupHref, settingsGroupLabels, type SettingsGroup } from '#lib/settings-groups.js'
 
 interface Props {
   groups: readonly SettingsGroup[]
@@ -17,12 +17,12 @@ interface Props {
 
 let { groups, current }: Props = $props()
 
-const items = {
-  general: { label: m.settings_group_general, icon: SlidersHorizontalIcon },
-  network: { label: m.settings_group_network, icon: GlobeIcon },
-  data: { label: m.settings_group_data, icon: DatabaseIcon },
-  account: { label: m.settings_group_account, icon: UserRoundIcon },
-  advanced: { label: m.settings_group_advanced, icon: WrenchIcon },
+const icons = {
+  general: SlidersHorizontalIcon,
+  network: GlobeIcon,
+  data: DatabaseIcon,
+  account: UserRoundIcon,
+  advanced: WrenchIcon,
 } as const
 </script>
 
@@ -33,14 +33,14 @@ const items = {
 -->
 <nav class="settings-nav {tabsListVariants()}" data-variant="default" aria-label={m.settings_sections()}>
   {#each groups as group (group)}
-    {@const item = items[group]}
+    {@const Icon = icons[group]}
     <a
       class="settings-nav-link {tabsTriggerVariants()}"
       data-state={current === group ? 'active' : 'inactive'}
       aria-current={current === group ? 'page' : undefined}
       href={resolve(settingsGroupHref(group))}>
-      <item.icon class="settings-nav-icon" aria-hidden="true" />
-      <span class="min-w-0">{item.label()}</span>
+      <Icon class="settings-nav-icon" aria-hidden="true" />
+      <span class="min-w-0">{settingsGroupLabels[group]()}</span>
     </a>
   {/each}
 </nav>

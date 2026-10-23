@@ -41,9 +41,7 @@ let editor = $state<{ submit: () => void }>()
   <Sheet.Content
     side="right"
     class="provider-model-drawer w-full! max-w-none! gap-0 overflow-hidden p-0 sm:max-w-[960px]!"
-    closeDisabled={saving}
-    onEscapeKeydown={(event: KeyboardEvent) => saving && event.preventDefault()}
-    onInteractOutside={(event: { preventDefault(): void }) => saving && event.preventDefault()}
+    locked={saving}
     closeLabel={m.provider_model_catalog_close_model_editor()}>
     {#if detail}
       <Sheet.Header class="border-b pr-14">

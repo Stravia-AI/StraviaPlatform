@@ -331,16 +331,6 @@ html[lang='zh-CN'] .font-structural {
   }
 }
 
-/* 组合表单的操作条跟随设置列右缘，与控件右边缘对齐；不再固定宽度。 */
-.field-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  width: 100%;
-  max-width: 60rem;
-}
-
 .route-page {
   container: route-page / inline-size;
   display: flex;
@@ -370,12 +360,6 @@ html[lang='zh-CN'] .font-structural {
 
 .route-section {
   min-width: 0;
-}
-
-/* 仅当相邻区段都没有自身的表头或行线、留白难以区分时使用；不与表头或行线叠成双线。 */
-.route-section-rule {
-  border-top: 1px solid var(--border);
-  padding-top: 2rem;
 }
 
 .route-page-empty {

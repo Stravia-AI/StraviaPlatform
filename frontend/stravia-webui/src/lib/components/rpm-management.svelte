@@ -4,6 +4,7 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { formatNumber } from '#lib/format.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import SettingsSection from '#lib/components/settings/settings-section.svelte'
@@ -73,14 +74,8 @@ async function save(): Promise<void> {
       retry={() => void query.refetch()}
       retrying={query.isFetching} />
   {:else if config}
-    <SettingRow
-      layout="inline"
-      title={m.rpm_preferred_wait()}
-      value={m.rpm_milliseconds({ value: config.preferred_wait_ms })} />
-    <SettingRow
-      layout="inline"
-      title={m.rpm_total_wait()}
-      value={m.rpm_milliseconds({ value: config.total_wait_ms })} />
+    <SettingRow layout="inline" title={m.rpm_preferred_wait()} value={formatNumber(config.preferred_wait_ms)} />
+    <SettingRow layout="inline" title={m.rpm_total_wait()} value={formatNumber(config.total_wait_ms)} />
     <SettingRow layout="inline" title={m.rpm_queue_capacity()} value={String(config.queue_capacity)} />
   {:else}
     <Skeleton class="my-3 h-9" aria-busy="true" />

@@ -138,7 +138,10 @@ async function remove(): Promise<void> {
           </Field.Field>
 
           <Field.Field orientation="vertical">
-            <Field.Label id="custom-rule-mode-label">{m.credential_custom_mode()}</Field.Label>
+            <div class="flex items-center gap-2">
+              <Field.Label id="custom-rule-mode-label">{m.credential_custom_mode()}</Field.Label>
+              {#if draft.mode === 'simple'}<Field.Help hint={m.credential_custom_mode_simple_help()} />{/if}
+            </div>
             <Tabs.Root bind:value={draft.mode} class="gap-4">
               <Tabs.List aria-labelledby="custom-rule-mode-label">
                 <Tabs.Trigger value="simple" disabled={busy}
