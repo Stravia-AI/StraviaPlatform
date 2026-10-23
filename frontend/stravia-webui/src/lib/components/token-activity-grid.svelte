@@ -73,7 +73,8 @@ function cellText(cell: ActivityCell): string {
           data-level={cell.level}
           data-start={cell.start}
           aria-label={cellText(cell)} />
-        <Tooltip.Content side="top" sideOffset={4}>{cellText(cell)}</Tooltip.Content>
+        <!-- 方格只有 ~23px：上方提示会盖住上一行方格，信息提示不参与命中测试才能连续悬停。 -->
+        <Tooltip.Content side="top" sideOffset={4} class="pointer-events-none">{cellText(cell)}</Tooltip.Content>
       </Tooltip.Root>
     {/each}
   </div>
