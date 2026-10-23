@@ -513,7 +513,7 @@ _避免使用_：balance、weighted、priority（当指 Route 旧四档）、coo
 
 ## Traffic Equalization
 
-Traffic Equalization 是把下一个请求分给同组内近期加权 token 流量最低的 Target 的调度策略。它均衡的是流量，不是美元成本。
+Traffic Equalization 是在亲和偏好之后，先选择同组内在途请求数最少、再选择最近一小时加权 token 流量与在途输入占位最低的 Target 的调度策略。它均衡的是负载与流量，不是美元成本。
 _避免使用_：平均调度、Cost Equalization、weighted、round-robin、计费
 
 

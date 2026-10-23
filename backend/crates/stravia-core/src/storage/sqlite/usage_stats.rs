@@ -14,27 +14,31 @@ pub(super) struct SqliteUsageStatsStore {
 
 const BASE_BUCKET_MS: i64 = 900_000;
 
-// FILTER 让一小时窗口之外的记录不再参与对应聚合器，但仍只扫描一次日窗口。
+// 调度只消费最近一小时：用量 SUM 逐维度忽略未知，全未知才为 NULL；
+// 派生 uncached 仅以 input 是否已知为门槛，cache_read 未知时按 0 抵扣，不回写原始 SUM；
+// 状态完整性仍用 FILTER 限定在成功样本上。只设下界，不排除本机时钟偏差导致的未来记录。
 const ROUTE_SCHEDULING_SQL: &str =
     "SELECT provider_id || ':' || upstream_model AS target_key,
-        CASE WHEN COUNT(input_tokens) = COUNT(*) THEN SUM(input_tokens) END AS input_tokens_24h,
-        CASE WHEN COUNT(output_tokens) = COUNT(*) THEN SUM(output_tokens) END AS output_tokens_24h,
-        CASE WHEN COUNT(cache_read_tokens) = COUNT(*) THEN SUM(cache_read_tokens) END AS cache_read_tokens_24h,
-        CASE WHEN COUNT(cache_write_tokens) = COUNT(*) THEN SUM(cache_write_tokens) END AS cache_write_tokens_24h,
-        COUNT(*) FILTER (WHERE started_at >= ?1) AS attempts_1h,
-        COUNT(*) FILTER (WHERE started_at >= ?1 AND status = 'completed') AS successes_1h,
-        CASE WHEN COUNT(*) FILTER (WHERE started_at >= ?1 AND status = 'completed') > 0
-                   AND COUNT(output_tokens) FILTER (WHERE started_at >= ?1 AND status = 'completed')
-                     = COUNT(*) FILTER (WHERE started_at >= ?1 AND status = 'completed')
-             THEN SUM(output_tokens) FILTER (WHERE started_at >= ?1 AND status = 'completed') END AS successful_output_tokens_1h,
-        CASE WHEN COUNT(*) FILTER (WHERE started_at >= ?1 AND status = 'completed') > 0
-                   AND COUNT(duration_ms) FILTER (WHERE started_at >= ?1 AND status = 'completed')
-                     = COUNT(*) FILTER (WHERE started_at >= ?1 AND status = 'completed')
-             THEN SUM(duration_ms) FILTER (WHERE started_at >= ?1 AND status = 'completed') END AS successful_upstream_ms_1h,
+        SUM(input_tokens) AS input_tokens_1h,
+        SUM(output_tokens) AS output_tokens_1h,
+        SUM(cache_read_tokens) AS cache_read_tokens_1h,
+        SUM(cache_write_tokens) AS cache_write_tokens_1h,
+        SUM(CASE WHEN input_tokens IS NOT NULL
+                 THEN MAX(input_tokens - COALESCE(cache_read_tokens, 0), 0) END) AS uncached_input_tokens_1h,
+        COUNT(*) AS attempts_1h,
+        COUNT(*) FILTER (WHERE status = 'completed') AS successes_1h,
+        CASE WHEN COUNT(*) FILTER (WHERE status = 'completed') > 0
+                   AND COUNT(output_tokens) FILTER (WHERE status = 'completed')
+                     = COUNT(*) FILTER (WHERE status = 'completed')
+             THEN SUM(output_tokens) FILTER (WHERE status = 'completed') END AS successful_output_tokens_1h,
+        CASE WHEN COUNT(*) FILTER (WHERE status = 'completed') > 0
+                   AND COUNT(duration_ms) FILTER (WHERE status = 'completed')
+                     = COUNT(*) FILTER (WHERE status = 'completed')
+             THEN SUM(duration_ms) FILTER (WHERE status = 'completed') END AS successful_upstream_ms_1h,
         NULL AS cost_input, NULL AS cost_output,
         NULL AS cost_cache_read, NULL AS cost_cache_write
              FROM target_attempt_observations
-             WHERE started_at >= ?2
+             WHERE started_at >= ?1
                AND provider_id <> '' AND upstream_model <> ''
              GROUP BY provider_id, upstream_model";
 
@@ -51,11 +55,9 @@ impl UsageStatsStore for SqliteUsageStatsStore {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage {
         let now = chrono::Utc::now().timestamp_millis();
         let hour_ago = now.saturating_sub(60 * 60 * 1_000);
-        let day_ago = now.saturating_sub(24 * 60 * 60 * 1_000);
         let result =
             sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(ROUTE_SCHEDULING_SQL)
                 .bind(hour_ago)
-                .bind(day_ago)
                 .fetch_all(&self.pool)
                 .await;
         match result {
@@ -505,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_scheduling_preserves_windows_status_and_unknown_usage() -> anyhow::Result<()> {
+    async fn route_scheduling_hour_window_status_and_unknown_usage() -> anyhow::Result<()> {
         use sqlx::Row;
         use std::collections::BTreeMap;
 
@@ -516,27 +518,8 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None).await?;
         let now = 1_800_000_000_000_i64;
         let hour_ago = now - 3_600_000;
-        let day_ago = now - 86_400_000;
         insert_turn(&pool, "run", now, "model", "key").await?;
         for (id, provider, model, started_at, status, output, duration) in [
-            (
-                "day-boundary",
-                "known",
-                "model",
-                day_ago,
-                "completed",
-                Some(3_i64),
-                Some(10_i64),
-            ),
-            (
-                "before-day",
-                "known",
-                "model",
-                day_ago - 1,
-                "completed",
-                Some(3),
-                Some(10),
-            ),
             (
                 "before-hour",
                 "known",
@@ -564,7 +547,7 @@ mod tests {
                 Some(3),
                 Some(10),
             ),
-            // 现有契约只有窗口下界，不因本机与记录时钟偏差丢弃未来时间。
+            // 调度窗口只有 1h 下界，不因本机与记录时钟偏差丢弃未来时间。
             (
                 "future",
                 "known",
@@ -638,19 +621,19 @@ mod tests {
                 None,
             ),
             (
-                "day-only",
-                "day-only",
+                "all-unknown",
+                "all-unknown",
                 "model",
-                hour_ago - 1,
-                "completed",
-                Some(3),
-                Some(10),
+                now,
+                "failed",
+                None,
+                None,
             ),
             (
-                "expired",
-                "expired",
+                "missing-cache",
+                "unknown-cache",
                 "model",
-                day_ago - 1,
+                now,
                 "completed",
                 Some(3),
                 Some(10),
@@ -689,18 +672,31 @@ mod tests {
             .execute(&pool)
             .await?;
         }
-        sqlx::query("UPDATE target_attempt_observations SET cache_read_tokens=NULL WHERE id='missing-output'")
+        sqlx::query("UPDATE target_attempt_observations SET cache_read_tokens=NULL WHERE id IN ('missing-output','missing-cache')")
             .execute(&pool).await?;
+        sqlx::query("UPDATE target_attempt_observations SET input_tokens=NULL,cache_read_tokens=NULL,cache_write_tokens=NULL WHERE id='all-unknown'")
+            .execute(&pool).await?;
+        // 同一 Provider + 上游模型的另一条 Route 仍聚合同一 target。
+        insert_turn(&pool, "run-2", now, "other-route", "key").await?;
+        insert_attempt(&pool, "cross-route", "run-2", now, 10, Some(2)).await?;
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET provider_id='known',upstream_model='model',status='completed',
+                 output_tokens=3,duration_ms=10,cache_write_tokens=1
+             WHERE id='cross-route'",
+        )
+        .execute(&pool)
+        .await?;
         let rows = sqlx::query(ROUTE_SCHEDULING_SQL)
             .bind(hour_ago)
-            .bind(day_ago)
             .fetch_all(&pool)
             .await?;
         let columns = [
-            "input_tokens_24h",
-            "output_tokens_24h",
-            "cache_read_tokens_24h",
-            "cache_write_tokens_24h",
+            "input_tokens_1h",
+            "output_tokens_1h",
+            "cache_read_tokens_1h",
+            "cache_write_tokens_1h",
+            "uncached_input_tokens_1h",
             "attempts_1h",
             "successes_1h",
             "successful_output_tokens_1h",
@@ -720,23 +716,25 @@ mod tests {
             (
                 "known:model",
                 vec![
-                    Some(60),
-                    Some(18),
-                    Some(12),
-                    Some(6),
+                    Some(50),
+                    Some(15),
+                    Some(10),
+                    Some(5),
+                    Some(40),
+                    Some(5),
                     Some(4),
-                    Some(3),
-                    Some(9),
-                    Some(30),
+                    Some(12),
+                    Some(40),
                 ],
             ),
             (
                 "unknown-output:model",
                 vec![
                     Some(20),
-                    None,
-                    None,
+                    Some(3),
                     Some(2),
+                    Some(2),
+                    Some(18),
                     Some(2),
                     Some(2),
                     None,
@@ -747,9 +745,10 @@ mod tests {
                 "unknown-duration:model",
                 vec![
                     Some(30),
-                    None,
+                    Some(6),
                     Some(6),
                     Some(3),
+                    Some(24),
                     Some(3),
                     Some(2),
                     Some(6),
@@ -763,6 +762,7 @@ mod tests {
                     None,
                     Some(2),
                     Some(1),
+                    Some(8),
                     Some(1),
                     Some(0),
                     None,
@@ -770,23 +770,116 @@ mod tests {
                 ],
             ),
             (
-                "day-only:model",
+                "unknown-cache:model",
                 vec![
                     Some(10),
                     Some(3),
-                    Some(2),
+                    None,
                     Some(1),
-                    Some(0),
-                    Some(0),
-                    None,
-                    None,
+                    Some(10),
+                    Some(1),
+                    Some(1),
+                    Some(3),
+                    Some(10),
                 ],
+            ),
+            (
+                "all-unknown:model",
+                vec![None, None, None, None, None, Some(1), Some(0), None, None],
             ),
         ]
         .into_iter()
         .map(|(key, values)| (key.to_owned(), values))
         .collect();
         assert_eq!(actual, expected);
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn route_scheduling_keeps_confirmed_usage_after_unknown_attempts() -> anyhow::Result<()> {
+        use sqlx::Row;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let now = 1_800_000_000_000_i64;
+        let hour_ago = now - 3_600_000;
+        insert_turn(&pool, "run", now, "model", "key").await?;
+        insert_attempt(&pool, "confirmed", "run", now - 1, 10, Some(2)).await?;
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET status='completed',output_tokens=3,cache_write_tokens=1,duration_ms=10
+             WHERE id='confirmed'",
+        )
+        .execute(&pool)
+        .await?;
+
+        let confirmed = sqlx::query(ROUTE_SCHEDULING_SQL)
+            .bind(hour_ago)
+            .fetch_one(&pool)
+            .await?;
+        for (column, expected) in [
+            ("input_tokens_1h", Some(10_i64)),
+            ("output_tokens_1h", Some(3_i64)),
+            ("cache_read_tokens_1h", Some(2_i64)),
+            ("cache_write_tokens_1h", Some(1_i64)),
+            ("uncached_input_tokens_1h", Some(8_i64)),
+        ] {
+            assert_eq!(
+                confirmed.try_get::<Option<i64>, _>(column)?,
+                expected,
+                "confirmed {column}"
+            );
+        }
+
+        // 失败和进行中的 attempt 即使完全未报告用量，也只让自身维度未知，
+        // 不能让同一 Target 已确认的用量整体丢失。
+        insert_failed_attempt(&pool, "failed-unknown", "run", now).await?;
+        insert_attempt(&pool, "running-unknown", "run", now, 1, Some(1)).await?;
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET status='running',input_tokens=NULL,output_tokens=NULL,
+                 cache_read_tokens=NULL,cache_write_tokens=NULL,
+                 reasoning_tokens=NULL,duration_ms=NULL,first_token_ms=NULL
+             WHERE id='running-unknown'",
+        )
+        .execute(&pool)
+        .await?;
+
+        let after = sqlx::query(ROUTE_SCHEDULING_SQL)
+            .bind(hour_ago)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            after.try_get::<String, _>("target_key")?,
+            "provider:upstream"
+        );
+        for (column, expected) in [
+            ("input_tokens_1h", Some(10_i64)),
+            ("output_tokens_1h", Some(3_i64)),
+            ("cache_read_tokens_1h", Some(2_i64)),
+            ("cache_write_tokens_1h", Some(1_i64)),
+            ("uncached_input_tokens_1h", Some(8_i64)),
+        ] {
+            assert_eq!(
+                after.try_get::<Option<i64>, _>(column)?,
+                expected,
+                "confirmed {column} survives unknown attempts"
+            );
+        }
+        assert_eq!(after.try_get::<i64, _>("attempts_1h")?, 3);
+        assert_eq!(after.try_get::<i64, _>("successes_1h")?, 1);
+        assert_eq!(
+            after.try_get::<Option<i64>, _>("successful_output_tokens_1h")?,
+            Some(3)
+        );
+        assert_eq!(
+            after.try_get::<Option<i64>, _>("successful_upstream_ms_1h")?,
+            Some(10)
+        );
         pool.close().await;
         Ok(())
     }
@@ -813,8 +906,9 @@ mod tests {
         let recent = now / 3_600_000 * 3_600_000 - 5_400_000;
         let old = now - 4 * 60 * 60 * 1_000;
         insert_turn(&pool, "recent", recent, "model", "key").await?;
-        insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
-        insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+        // 调度只消费最近一小时；管理统计仍由 Turn 开始时间分桶，与 attempt 自身时间无关。
+        insert_attempt(&pool, "recent-a", "recent", now - 1_000, 12, Some(5)).await?;
+        insert_attempt(&pool, "recent-b", "recent", now - 1_000, 3, Some(9)).await?;
         sqlx::query("UPDATE target_attempt_observations SET output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE model_turn_id='recent'")
             .execute(&pool).await?;
         let scheduling = store.route_scheduling_snapshot().await;
@@ -826,7 +920,7 @@ mod tests {
             .await?;
         sqlx::query("UPDATE inference_run_observations SET status='failed',terminal_reason='delivery_error' WHERE id='recent'")
             .execute(&pool).await?;
-        // 失败和未完成 attempt 即使有用量也不计入。
+        // 管理统计中，失败和未完成 attempt 即使有用量也不计入；调度用量仍按观测汇总。
         insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
         insert_attempt(&pool, "recent-incomplete", "recent", recent, 999, None).await?;
         sqlx::query("UPDATE target_attempt_observations SET status='running',output_tokens=999,duration_ms=1,first_token_ms=1 WHERE id='recent-incomplete'")

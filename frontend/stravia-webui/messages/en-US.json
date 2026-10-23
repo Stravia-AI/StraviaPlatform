@@ -974,7 +974,7 @@
   "model_editor_set_model_name_request_type_client_apps_use": "Set the exact Model ID clients request and an optional human-readable display name.",
   "model_editor_traffic_share_help": "Set a relative share to control how much traffic each destination receives.",
   "model_editor_traffic_equalization": "Traffic equalization",
-  "model_editor_traffic_equalization_help": "Within the highest-priority group, send requests to the destination carrying the least weighted traffic.",
+  "model_editor_traffic_equalization_help": "When no conversation or cache affinity applies, choose among the highest-priority destinations by the fewest in-flight requests, then the lowest weighted traffic over the past hour. Eligible cached prefixes retain their destination.",
   "model_editor_split_traffic": "Split traffic",
   "model_editor_failover_help": "Stravia tries each destination from top to bottom until one is available.",
   "model_editor_text_chat": "Text and chat",

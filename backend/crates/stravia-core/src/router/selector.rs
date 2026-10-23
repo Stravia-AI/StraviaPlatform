@@ -66,10 +66,11 @@ pub enum ConversationIdentity {
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
 pub struct TargetSchedulingSnapshot {
     pub(super) target_key: String,
-    pub(super) input_tokens_24h: Option<i64>,
-    pub(super) output_tokens_24h: Option<i64>,
-    pub(super) cache_read_tokens_24h: Option<i64>,
-    pub(super) cache_write_tokens_24h: Option<i64>,
+    pub(super) input_tokens_1h: Option<i64>,
+    pub(super) uncached_input_tokens_1h: Option<i64>,
+    pub(super) output_tokens_1h: Option<i64>,
+    pub(super) cache_read_tokens_1h: Option<i64>,
+    pub(super) cache_write_tokens_1h: Option<i64>,
     pub(super) attempts_1h: i64,
     pub(super) successes_1h: i64,
     pub(super) successful_output_tokens_1h: Option<i64>,
@@ -117,10 +118,6 @@ struct CooldownAttemptsInner {
 }
 
 impl CooldownAttempts {
-    fn eligible(&self, key: &str, preferred: Option<&str>) -> bool {
-        preferred == Some(key) || self.inner.lock().selected.contains(key)
-    }
-
     fn claim(&self, key: &str) -> bool {
         self.inner.lock().consumed.insert(key.to_owned())
     }
@@ -171,7 +168,7 @@ pub struct RoutePolicyState {
 /// globally monotonically increasing `epoch` survives recovery: a success or
 /// failure recorded against an older epoch can never clear or rewrite a newer
 /// cooldown generation (no ABA on delete/recreate).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct TargetRuntime {
     consecutive_failures: u32,
     /// Cooldown expiry in `RoutePolicyState::now_ms` terms; `0` = not cooling.
@@ -182,6 +179,14 @@ struct TargetRuntime {
     /// Epoch claimed by the in-flight half-open probe, if any. Only ever
     /// equals the entry's own `epoch`, so it doubles as probe identity.
     probe_epoch: Option<u64>,
+    load: TargetLoad,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TargetLoad {
+    attempts: u64,
+    input_tokens: u64,
+    last_selected: u64,
 }
 
 pub struct RouteAttemptReservation {
@@ -197,7 +202,7 @@ pub struct RouteAttemptReservation {
 struct RoutePolicyStateInner {
     targets: HashMap<String, TargetRuntime>,
     next_epoch: u64,
-    in_flight_input: HashMap<String, u64>,
+    selection_sequence: u64,
     conversation_targets: HashMap<ConversationAffinityKey, String>,
     /// `pricing_generation` bumps on every clear so a load that raced an
     /// invalidation can never reinsert stale data.
@@ -261,6 +266,7 @@ impl RoutePolicyStateInner {
             && (matches!(retry_after, Some(RetryAfterPolicy::Cooldown(_)))
                 || consecutive_failures > retry_budget.max(0) as u32
                 || current.is_some_and(|runtime| runtime.probe_epoch == Some(epoch)));
+        let load = current.map_or_else(TargetLoad::default, |runtime| runtime.load);
         let next = TargetRuntime {
             consecutive_failures,
             retry_after_until: match retry_after {
@@ -281,6 +287,7 @@ impl RoutePolicyStateInner {
                 epoch
             },
             probe_epoch: None,
+            load,
         };
         if let Some(runtime) = self.targets.get_mut(target_key) {
             *runtime = next;
@@ -383,7 +390,7 @@ impl RoutePolicyState {
             runtime.probe_epoch = None;
         }
         release_reservation(
-            &mut inner.in_flight_input,
+            &mut inner.targets,
             target_key,
             context.estimated_uncached_input_tokens,
         );
@@ -481,7 +488,7 @@ impl RoutePolicyState {
     fn release(&self, context: &RouteAttemptContext, target_key: &str, epoch: u64, probe: bool) {
         let mut inner = self.inner.lock();
         release_reservation(
-            &mut inner.in_flight_input,
+            &mut inner.targets,
             target_key,
             context.estimated_uncached_input_tokens,
         );
@@ -569,10 +576,18 @@ impl Drop for RouteAttemptReservation {
     }
 }
 
+struct RouteCandidate {
+    target: SelectedTarget,
+    key: String,
+    traffic: f64,
+    latency: Option<f64>,
+}
+
 pub struct RouteAttemptPolicy {
     context: RouteAttemptContext,
     state: RoutePolicyState,
-    ordered: std::vec::IntoIter<SelectedTarget>,
+    ordered: Vec<RouteCandidate>,
+    strategy: RouteSelectionStrategy,
     current_target_key: Option<String>,
     /// Runtime generation of the selected target; `0` when no record existed
     /// at selection time.
@@ -597,9 +612,9 @@ impl RouteAttemptPolicy {
         // virtual clock through it — while `state.now_ms()` floors it so a
         // stale signal can never rewind the cooldown window in production.
         let now_ms = context.now_ms.max(state.now_ms());
-        let (in_flight, preferred) = {
+        let preferred = {
             let inner = state.inner.lock();
-            let preferred = context
+            context
                 .conversation
                 .as_ref()
                 .and_then(|identity| {
@@ -620,8 +635,7 @@ impl RouteAttemptPolicy {
                         .then(|| context.cache_affinity_target.clone())
                         .flatten()
                 })
-                .or_else(|| context.cooldown.inner.lock().last_selected.clone());
-            (inner.in_flight_input.clone(), preferred)
+                .or_else(|| context.cooldown.inner.lock().last_selected.clone())
         };
         let snapshots = snapshot
             .targets
@@ -668,21 +682,23 @@ impl RouteAttemptPolicy {
             .unwrap_or_default();
         let mut ordered = Vec::with_capacity(targets.len());
         for group in priority_groups.into_values() {
-            let group = order_group(strategy, group, &snapshots, &in_flight);
-            ordered.extend(group.into_iter().map(to_selected));
-        }
-        if let Some(preferred) = preferred.as_ref()
-            && let Some(index) = ordered
-                .iter()
-                .position(|target| selected_target_key(target) == *preferred)
-        {
-            let preferred = ordered.remove(index);
-            ordered.insert(0, preferred);
+            let weights = traffic_weights(&group, &snapshots);
+            ordered.extend(group.into_iter().map(|target| {
+                let key = persisted_target_key(target);
+                let snapshot = snapshots.get(key.as_str()).copied();
+                RouteCandidate {
+                    target: to_selected(target),
+                    traffic: traffic_score(snapshot, weights),
+                    latency: snapshot.and_then(latency_score),
+                    key,
+                }
+            }));
         }
         Self {
             context,
             state,
-            ordered: ordered.into_iter(),
+            ordered,
+            strategy,
             current_target_key: None,
             current_epoch: 0,
             current_probe: false,
@@ -695,8 +711,8 @@ impl RouteAttemptPolicy {
         self.preferred.as_deref()
     }
 
-    pub fn candidates(&self) -> &[SelectedTarget] {
-        self.ordered.as_slice()
+    pub fn candidates(&self) -> impl Iterator<Item = &SelectedTarget> {
+        self.ordered.iter().map(|candidate| &candidate.target)
     }
 
     /// 仅观察当前健康资格；RPM 等待不能提前占用半开槽或冷却例外。
@@ -705,30 +721,25 @@ impl RouteAttemptPolicy {
         let now_ms = self.context.now_ms.max(self.state.now_ms());
         let cooldown = &self.context.cooldown;
         let preferred = self.preferred.as_deref();
-        self.ordered = self
-            .ordered
-            .by_ref()
-            .filter(|target| {
-                let key = selected_target_key(target);
-                if excluded.contains(&key) {
-                    return false;
-                }
-                let Some(runtime) = inner.targets.get(&key) else {
-                    return true;
-                };
-                if runtime.retry_after_until > now_ms {
-                    return false;
-                }
-                if runtime.cooldown_until == 0 {
-                    return true;
-                }
-                if runtime.cooldown_until > now_ms {
-                    return cooldown.available(&key, preferred);
-                }
-                runtime.probe_epoch.is_none()
-            })
-            .collect::<Vec<_>>()
-            .into_iter();
+        self.ordered.retain(|candidate| {
+            let key = &candidate.key;
+            if excluded.contains(key) {
+                return false;
+            }
+            let Some(runtime) = inner.targets.get(key) else {
+                return true;
+            };
+            if runtime.retry_after_until > now_ms {
+                return false;
+            }
+            if runtime.cooldown_until == 0 {
+                return true;
+            }
+            if runtime.cooldown_until > now_ms {
+                return cooldown.available(key, preferred);
+            }
+            runtime.probe_epoch.is_none()
+        });
     }
 
     /// 尚未发送时归还本策略领取的机会；调用者必须以发送状态作证。
@@ -751,84 +762,113 @@ impl RouteAttemptPolicy {
         &self.state
     }
 
-    pub fn retain(&mut self, predicate: impl FnMut(&SelectedTarget) -> bool) {
-        self.ordered = self
-            .ordered
-            .by_ref()
-            .filter(predicate)
-            .collect::<Vec<_>>()
-            .into_iter();
+    pub fn retain(&mut self, mut predicate: impl FnMut(&SelectedTarget) -> bool) {
+        self.ordered
+            .retain(|candidate| predicate(&candidate.target));
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ordered.as_slice().is_empty()
+        self.ordered.is_empty()
     }
 
     pub fn next_healthy(&mut self) -> Option<SelectedTarget> {
         self.skip_current();
-        for target in self.ordered.by_ref() {
-            let key = selected_target_key(&target);
-            // Same floored clock as construction: the request's evidence clock
-            // may be a virtual test clock; `state.now_ms()` floors it.
-            let now_ms = self.context.now_ms.max(self.state.now_ms());
-            let mut inner = self.state.inner.lock();
-            let mut probe_epoch = None;
-            let mut exception = false;
-            if inner
-                .targets
-                .get(&key)
-                .is_some_and(|runtime| runtime.retry_after_until > now_ms)
-            {
-                continue;
-            }
-            match inner.targets.get(&key) {
-                Some(runtime) if runtime.cooldown_until > 0 => {
-                    if runtime.retry_after_until > now_ms {
-                        continue;
-                    }
-                    if runtime.cooldown_until > now_ms {
-                        if !self
-                            .context
-                            .cooldown
-                            .eligible(&key, self.preferred.as_deref())
-                            || !self.context.cooldown.claim(&key)
-                        {
-                            continue;
-                        }
-                        exception = true;
-                    } else if runtime.probe_epoch.is_some() {
-                        // Another request already holds the single probe.
-                        continue;
+        let now_ms = self.context.now_ms.max(self.state.now_ms());
+        let mut inner = self.state.inner.lock();
+        let cooldown = &self.context.cooldown;
+        let preferred = self.preferred.as_deref();
+        self.ordered.retain(|candidate| {
+            let Some(runtime) = inner.targets.get(&candidate.key) else {
+                return true;
+            };
+            runtime.retry_after_until <= now_ms
+                && (runtime.cooldown_until == 0
+                    || if runtime.cooldown_until > now_ms {
+                        cooldown.available(&candidate.key, preferred)
                     } else {
-                        let epoch = inner.next_epoch();
-                        let runtime = inner.targets.get_mut(&key).expect("target entry");
-                        runtime.epoch = epoch;
-                        runtime.probe_epoch = Some(epoch);
-                        probe_epoch = Some(epoch);
-                    }
-                }
-                _ => {}
-            }
-            *inner.in_flight_input.entry(key.clone()).or_default() = inner
-                .in_flight_input
-                .get(&key)
-                .copied()
-                .unwrap_or_default()
-                .saturating_add(self.context.estimated_uncached_input_tokens);
-            self.current_epoch = probe_epoch.unwrap_or_else(|| {
-                inner
+                        runtime.probe_epoch.is_none()
+                    })
+        });
+        let priority = self.ordered.iter().map(|item| item.target.priority).max()?;
+        let latency = self.strategy == RouteSelectionStrategy::LatencyPreference
+            && self
+                .ordered
+                .iter()
+                .filter(|item| item.target.priority == priority && item.latency.is_some())
+                .take(2)
+                .count()
+                == 2;
+        // 排序和占位共用同一临界区；提前准备的 policy 不能沿用旧的在途快照。
+        let index = self
+            .ordered
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                let left_load = inner
                     .targets
-                    .get(&key)
-                    .map(|runtime| runtime.epoch)
-                    .unwrap_or(0)
-            });
-            self.current_probe = probe_epoch.is_some();
-            self.current_exception = exception;
-            self.context.cooldown.selected(&key);
-            self.current_target_key = Some(key);
-            return Some(target);
+                    .get(&left.key)
+                    .map_or_else(TargetLoad::default, |item| item.load);
+                let right_load = inner
+                    .targets
+                    .get(&right.key)
+                    .map_or_else(TargetLoad::default, |item| item.load);
+                let affinity = (preferred == Some(right.key.as_str()))
+                    .cmp(&(preferred == Some(left.key.as_str())));
+                affinity
+                    .then_with(|| right.target.priority.cmp(&left.target.priority))
+                    .then_with(|| {
+                        if latency {
+                            right
+                                .latency
+                                .partial_cmp(&left.latency)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            left_load.attempts.cmp(&right_load.attempts).then_with(|| {
+                                (left.traffic + left_load.input_tokens as f64)
+                                    .partial_cmp(&(right.traffic + right_load.input_tokens as f64))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        }
+                    })
+                    .then_with(|| left_load.last_selected.cmp(&right_load.last_selected))
+            })
+            .map(|(index, _)| index)?;
+        let RouteCandidate { target, key, .. } = self.ordered.remove(index);
+        let mut probe = false;
+        let mut exception = false;
+        if let Some(runtime) = inner.targets.get(&key)
+            && runtime.cooldown_until > 0
+        {
+            if runtime.cooldown_until > now_ms {
+                // 各 policy 可能共享同一 RootRequest，领取前仍须原子确认一次性名额。
+                if !cooldown.claim(&key) {
+                    drop(inner);
+                    return self.next_healthy();
+                }
+                exception = true;
+            } else {
+                let epoch = inner.next_epoch();
+                let runtime = inner.targets.get_mut(&key).expect("target entry");
+                runtime.epoch = epoch;
+                runtime.probe_epoch = Some(epoch);
+                probe = true;
+            }
         }
-        None
+        inner.selection_sequence = inner.selection_sequence.saturating_add(1);
+        let sequence = inner.selection_sequence;
+        let runtime = inner.targets.entry(key.clone()).or_default();
+        runtime.load.attempts = runtime.load.attempts.saturating_add(1);
+        runtime.load.input_tokens = runtime
+            .load
+            .input_tokens
+            .saturating_add(self.context.estimated_uncached_input_tokens);
+        runtime.load.last_selected = sequence;
+        self.current_epoch = runtime.epoch;
+        self.current_probe = probe;
+        self.current_exception = exception;
+        cooldown.selected(&key);
+        self.current_target_key = Some(key);
+        Some(target)
     }
 
     /// Rechecks the selected attempt after asynchronous preparation/backoff.
@@ -966,7 +1006,7 @@ impl RouteAttemptPolicy {
     fn release_current(&self, key: &str) {
         let mut inner = self.state.inner.lock();
         release_reservation(
-            &mut inner.in_flight_input,
+            &mut inner.targets,
             key,
             self.context.estimated_uncached_input_tokens,
         );
@@ -982,45 +1022,6 @@ impl Drop for RouteAttemptPolicy {
             self.release_current(&key);
         }
     }
-}
-
-fn order_group<'a>(
-    strategy: RouteSelectionStrategy,
-    mut group: Vec<&'a TargetConfig>,
-    snapshots: &HashMap<&str, &TargetSchedulingSnapshot>,
-    in_flight: &HashMap<String, u64>,
-) -> Vec<&'a TargetConfig> {
-    if strategy == RouteSelectionStrategy::LatencyPreference {
-        let valid = group
-            .iter()
-            .filter(|target| {
-                snapshots
-                    .get(persisted_target_key(target).as_str())
-                    .is_some_and(|snapshot| latency_score(snapshot).is_some())
-            })
-            .count();
-        if valid >= 2 {
-            group.sort_by(|left, right| {
-                let left_score = snapshots
-                    .get(persisted_target_key(left).as_str())
-                    .and_then(|snapshot| latency_score(snapshot));
-                let right_score = snapshots
-                    .get(persisted_target_key(right).as_str())
-                    .and_then(|snapshot| latency_score(snapshot));
-                right_score
-                    .partial_cmp(&left_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            return group;
-        }
-    }
-    let weights = traffic_weights(&group, snapshots);
-    group.sort_by(|left, right| {
-        traffic_score(left, snapshots, in_flight, weights)
-            .partial_cmp(&traffic_score(right, snapshots, in_flight, weights))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    group
 }
 
 #[derive(Clone, Copy)]
@@ -1076,30 +1077,25 @@ fn average_price_ratio(
     (count > 0).then_some(sum / count as f64)
 }
 
-fn traffic_score(
-    target: &TargetConfig,
-    snapshots: &HashMap<&str, &TargetSchedulingSnapshot>,
-    in_flight: &HashMap<String, u64>,
-    weights: TrafficWeights,
-) -> f64 {
-    let key = persisted_target_key(target);
-    let (input, output, cache_read, cache_write) = snapshots
-        .get(key.as_str())
+fn traffic_score(snapshot: Option<&TargetSchedulingSnapshot>, weights: TrafficWeights) -> f64 {
+    let (uncached_input, output, cache_read, cache_write) = snapshot
         .map(|snapshot| {
             (
-                snapshot.input_tokens_24h.unwrap_or_default(),
-                snapshot.output_tokens_24h.unwrap_or_default(),
-                snapshot.cache_read_tokens_24h.unwrap_or_default(),
-                snapshot.cache_write_tokens_24h.unwrap_or_default(),
+                // 缓存读取完全未知时不给缓存折扣，但不改写确认用量的未知语义。
+                snapshot
+                    .uncached_input_tokens_1h
+                    .or(snapshot.input_tokens_1h)
+                    .unwrap_or_default(),
+                snapshot.output_tokens_1h.unwrap_or_default(),
+                snapshot.cache_read_tokens_1h.unwrap_or_default(),
+                snapshot.cache_write_tokens_1h.unwrap_or_default(),
             )
         })
         .unwrap_or_default();
-    let uncached_input = input.saturating_sub(cache_read).max(0);
     weights.cache_read * cache_read.max(0) as f64
-        + uncached_input as f64
+        + uncached_input.max(0) as f64
         + weights.output * output.max(0) as f64
         + weights.cache_write * cache_write.max(0) as f64
-        + in_flight.get(&key).copied().unwrap_or_default() as f64
 }
 
 fn latency_score(snapshot: &TargetSchedulingSnapshot) -> Option<f64> {
@@ -1152,14 +1148,12 @@ fn retry_after_policy(
     })
 }
 
-fn release_reservation(reservations: &mut HashMap<String, u64>, key: &str, amount: u64) {
-    let Some(current) = reservations.get_mut(key) else {
+fn release_reservation(targets: &mut HashMap<String, TargetRuntime>, key: &str, amount: u64) {
+    let Some(runtime) = targets.get_mut(key) else {
         return;
     };
-    *current = current.saturating_sub(amount);
-    if *current == 0 {
-        reservations.remove(key);
-    }
+    runtime.load.attempts = runtime.load.attempts.saturating_sub(1);
+    runtime.load.input_tokens = runtime.load.input_tokens.saturating_sub(amount);
 }
 
 pub fn conversation_identity(request: &AiRequest) -> Option<ConversationIdentity> {
@@ -1256,6 +1250,142 @@ mod tests {
         policy
             .next_healthy()
             .map(|target| target.destination.into_parts().0.into())
+    }
+
+    #[test]
+    fn route_scheduling_prepared_uncached_requests_spread_despite_history() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("a", 0), target("b", 0), target("c", 0)];
+        let snapshot = RouteSchedulingSnapshot {
+            targets: vec![
+                TargetSchedulingSnapshot {
+                    target_key: "b:model".into(),
+                    input_tokens_1h: Some(1_000_000),
+                    ..Default::default()
+                },
+                TargetSchedulingSnapshot {
+                    target_key: "c:model".into(),
+                    input_tokens_1h: Some(1_000_000),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut policies = (0..12)
+            .map(|_| {
+                RouteAttemptPolicy::new(
+                    "traffic_equalization",
+                    &targets,
+                    context(0),
+                    &snapshot,
+                    state.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut allocations = BTreeMap::new();
+        for policy in &mut policies {
+            *allocations
+                .entry(next_provider(policy).unwrap())
+                .or_insert(0) += 1;
+        }
+        assert_eq!(
+            allocations,
+            BTreeMap::from([("a".into(), 4), ("b".into(), 4), ("c".into(), 4)])
+        );
+    }
+
+    #[test]
+    fn cache_affinity_precedes_priority_and_concurrent_hourly_load() {
+        for cached_priority in [0, 1] {
+            let targets = vec![target("fresh", 1), target("cached", cached_priority)];
+            let snapshot = RouteSchedulingSnapshot {
+                targets: vec![TargetSchedulingSnapshot {
+                    target_key: "cached:model".into(),
+                    input_tokens_1h: Some(100),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut request = context(0);
+            request.cache_affinity_target = Some("cached:model".into());
+            let state = RoutePolicyState::default();
+            let mut policies = (0..12)
+                .map(|_| {
+                    RouteAttemptPolicy::new(
+                        "traffic_equalization",
+                        &targets,
+                        request.clone(),
+                        &snapshot,
+                        state.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for policy in &mut policies {
+                assert_eq!(next_provider(policy).as_deref(), Some("cached"));
+            }
+        }
+    }
+
+    #[test]
+    fn idle_ties_rotate_after_success_and_cancellation_without_leaking_reservations() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("a", 0), target("b", 0)];
+        let mut selected = Vec::new();
+        for completed in [true, false, true, false] {
+            let request = context(0);
+            let mut policy = RouteAttemptPolicy::new(
+                "traffic_equalization",
+                &targets,
+                request.clone(),
+                &RouteSchedulingSnapshot::default(),
+                state.clone(),
+            );
+            let target = policy.next_healthy().unwrap();
+            selected.push(target.provider_id().to_string());
+            if completed {
+                let epoch = policy.current_epoch();
+                policy.accept_current();
+                state.record_success(&request, &selected_target_key(&target), epoch);
+            }
+        }
+        assert_eq!(selected, ["a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn simultaneous_policies_reserve_targets_atomically() {
+        let state = RoutePolicyState::default();
+        let targets = vec![target("a", 0), target("b", 0), target("c", 0)];
+        let barrier = std::sync::Barrier::new(12);
+        let policies = std::thread::scope(|scope| {
+            let workers = (0..12)
+                .map(|_| {
+                    let state = state.clone();
+                    let targets = &targets;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut policy = RouteAttemptPolicy::new(
+                            "traffic_equalization",
+                            targets,
+                            context(0),
+                            &RouteSchedulingSnapshot::default(),
+                            state,
+                        );
+                        barrier.wait();
+                        let selected = next_provider(&mut policy).unwrap();
+                        (policy, selected)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut allocations = BTreeMap::new();
+        for (_, selected) in &policies {
+            *allocations.entry(selected.as_str()).or_insert(0) += 1;
+        }
+        assert_eq!(allocations, BTreeMap::from([("a", 4), ("b", 4), ("c", 4)]));
     }
 
     #[test]
@@ -1393,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn affinity_isolated_by_identity_principal_and_route_and_cache_only_fills_identity_gap() {
+    fn conversation_affinity_isolated_by_identity_principal_and_route() {
         let state = RoutePolicyState::default();
         let targets = vec![target("primary", 10), target("affinity", 0)];
         let mut recorded_context = context(0);
@@ -1431,17 +1561,6 @@ mod tests {
             );
             assert_eq!(next_provider(&mut policy).as_deref(), Some("primary"));
         }
-
-        let mut cache_context = context(1);
-        cache_context.cache_affinity_target = Some("affinity:model".into());
-        let mut cache = RouteAttemptPolicy::new(
-            "traffic_equalization",
-            &targets,
-            cache_context,
-            &RouteSchedulingSnapshot::default(),
-            state,
-        );
-        assert_eq!(next_provider(&mut cache).as_deref(), Some("affinity"));
     }
 
     #[test]
@@ -1451,8 +1570,9 @@ mod tests {
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
                 target_key: "busy:model".into(),
-                input_tokens_24h: Some(1_000),
-                cache_read_tokens_24h: Some(900),
+                input_tokens_1h: Some(1_000),
+                uncached_input_tokens_1h: Some(100),
+                cache_read_tokens_1h: Some(900),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1485,7 +1605,7 @@ mod tests {
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
                 target_key: "busy:model".into(),
-                input_tokens_24h: Some(100),
+                input_tokens_1h: Some(100),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1523,7 +1643,7 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "cached:model".into(),
-                    cache_read_tokens_24h: Some(100),
+                    cache_read_tokens_1h: Some(100),
                     cost_input: Some(2.0),
                     cost_output: Some(10.0),
                     cost_cache_read: None,
@@ -1532,7 +1652,7 @@ mod tests {
                 },
                 TargetSchedulingSnapshot {
                     target_key: "output:model".into(),
-                    output_tokens_24h: Some(3),
+                    output_tokens_1h: Some(3),
                     cost_input: Some(4.0),
                     cost_output: Some(20.0),
                     cost_cache_read: Some(0.8),
@@ -1555,14 +1675,14 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "cached:model".into(),
-                    cache_write_tokens_24h: Some(1),
+                    cache_write_tokens_1h: Some(1),
                     cost_input: Some(2.0),
                     cost_output: Some(10.0),
                     ..Default::default()
                 },
                 TargetSchedulingSnapshot {
                     target_key: "output:model".into(),
-                    output_tokens_24h: Some(1),
+                    output_tokens_1h: Some(1),
                     cost_input: Some(4.0),
                     cost_output: Some(20.0),
                     ..Default::default()
@@ -1618,7 +1738,7 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "sampled:model".into(),
-                    input_tokens_24h: Some(100),
+                    input_tokens_1h: Some(100),
                     attempts_1h: 20,
                     successes_1h: 20,
                     successful_output_tokens_1h: Some(2_000),
@@ -2457,7 +2577,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_cooldown_allows_a_single_probe_while_concurrent_policies_fall_back() {
+    fn expired_cooldown_remains_exclusive_when_load_balancing_changes_probe_order() {
         let state = RoutePolicyState::default();
         let mut cooling = target("recovering", 0);
         cooling.target_retry_budget = 0;
@@ -2488,25 +2608,27 @@ mod tests {
         );
         drop(opener);
 
-        // Cooldown elapsed: exactly one policy may probe the recovering target;
-        // a concurrent policy over the same shared state must fall back.
-        let mut probe = RouteAttemptPolicy::new(
-            "traffic_equalization",
-            &targets,
-            context(121_000),
-            &RouteSchedulingSnapshot::default(),
-            state.clone(),
+        let mut policies = (0..3)
+            .map(|_| {
+                RouteAttemptPolicy::new(
+                    "traffic_equalization",
+                    &targets,
+                    context(121_000),
+                    &RouteSchedulingSnapshot::default(),
+                    state.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut allocations = BTreeMap::new();
+        for policy in &mut policies {
+            *allocations
+                .entry(next_provider(policy).unwrap())
+                .or_insert(0) += 1;
+        }
+        assert_eq!(
+            allocations,
+            BTreeMap::from([("recovering".into(), 1), ("fallback".into(), 2)])
         );
-        let mut rival = RouteAttemptPolicy::new(
-            "traffic_equalization",
-            &targets,
-            context(121_000),
-            &RouteSchedulingSnapshot::default(),
-            state.clone(),
-        );
-        assert_eq!(next_provider(&mut probe).as_deref(), Some("recovering"));
-        assert_eq!(next_provider(&mut rival).as_deref(), Some("fallback"));
-        assert_eq!(next_provider(&mut rival), None);
     }
 
     #[tokio::test]

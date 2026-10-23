@@ -389,7 +389,7 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 #### `model_turn_observations`
 
-保存 Run 内每个 Model Turn 的身份、Route、开始/结束、状态和 usage。Route Scheduling Strategy 原来依赖 `request_logs` 的 24h/1h provider/model/latency/usage 聚合迁到 Observation 原始事实；不得继续双写旧表。管理用量分析已改读独立 Stats Usage，Model Turn 与 Target attempt 只作为其事务内计量来源与升级回填来源，不再要求详情长期存在。
+保存 Run 内每个 Model Turn 的身份、Route、开始/结束、状态和 usage。Route Scheduling Strategy 的 provider/model/latency/usage 聚合已从 `request_logs` 迁到 Observation 原始事实，使用滚动 1h 窗口；不得继续双写旧表。管理用量分析已改读独立 Stats Usage，Model Turn 与 Target attempt 只作为其事务内计量来源与升级回填来源，不再要求详情长期存在。
 
 #### `target_attempt_observations`
 
@@ -416,7 +416,7 @@ Core 的 `UsageStatsStore` 在现有 SQLite/PostgreSQL 数据库内拥有长期�
 - **升级与恢复：** 建表、触发器安装及对实际保留事实的回填在同一 SQLx 迁移事务内完成；失败或中断回滚，重入不会重复入账。现有启动迁移完成后才构造存储并开放管理读取，不以空统计掩盖未完成升级；没有独立异步回填游标。只能恢复仍存在且可判定的事实，已删除或从未持久化的历史不可恢复，不调用上游补账、不解析 Debug 猜用量、不把缺口补零，也不自动重放模型调用。
 - **历史身份：** 以模型内部 Route ID、Provider ID、API Key ID 归属，不按可复用的客户端模型名或展示名称合并。桶不依赖配置外键级联；删除配置后保留非秘密名称与可信身份，不保留凭据或授权能力。同名重建是新身份，更名不拆分身份；旧事实无法证明归属时保留未知边界，不凭同名关联当前对象。分类返回 `deleted`，历史 `model_id` / `provider_id` 可为 `null`；已删除对象仍可识别，但不提供失效配置操作。
 
-长期 Stats Usage 与 Observation/Debug 的保留周期独立；清理后只剩汇总，不能再追溯到已删除的具体对话，也不能从 15 分钟桶恢复秒级历史分布。它保留管理分析现有成功 attempt 与请求级口径，不承诺完整财务账本或上游实际收费。Route Scheduling 继续从原始 Observation 读取精确 24h/1h 短窗口并叠加进行中占位，不读取长期桶替代选路事实。请求记录页面仍以精确到秒的绝对范围筛选并限制跨度 24 小时，不继承统计页的长期范围契约。
+长期 Stats Usage 与 Observation/Debug 的保留周期独立；清理后只剩汇总，不能再追溯到已删除的具体对话，也不能从 15 分钟桶恢复秒级历史分布。它保留管理分析现有成功 attempt 与请求级口径，不承诺完整财务账本或上游实际收费。Route Scheduling 继续从原始 Observation 读取精确 1h 短窗口并叠加实时在途负载，不读取长期桶替代选路事实。请求记录页面仍以精确到秒的绝对范围筛选并限制跨度 24 小时，不继承统计页的长期范围契约。
 
 ### 6.2 Debug 分段文件
 

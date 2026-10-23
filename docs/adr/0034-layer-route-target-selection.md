@@ -8,7 +8,7 @@ Stravia 不再把 `Route.balance` 当成互斥的四档选路。Target 选择改
 
 Conversation Affinity 使用已有身份，不新建 Session：Generation Chain 父节点，否则 Prompt Cache Directive 路由键。同一身份软粘上次成功 Target，可压过 Target Priority；不同身份不共享；两种都没有才走 ADR-0023 的前缀 Cache Affinity（仍可压过 Priority）。这收窄了 ADR-0023「适用于所有经 Route 的调用」：共享系统提示不得把无关对话粘到同一 Target。
 
-Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；取消 1|2 上限（合法范围由 ADR-0036 扩展）。旧数据全部迁成 0，不反转旧序号。同组由 Route Scheduling Strategy 二选一，缺省 Traffic Equalization：把下一个请求给 24h 加权 token 流量最低的 Target。权重组内共用——全组无价时为缓存输入 0.1、未命中输入 1、输出 5、缓存输出 6；有计价（`cost_input > 0` 且有 `cost_output`）时用价格比平均，缺维回退缺省；忽略 reasoning、audio 与 200k 分层。流量按 `provider_id` + upstream model 跨 Route 累计；每个真实 Target attempt 明确上报的 usage（包括失败、重试与 failover）只计一次，未知维度保持未知，进行中另加占位，上游失败另按下述统一规则计数。Latency Preference 用 1h 成功率 × 输出 tok/s；成功样本 < 20 视为无数据，组内有效 Target < 2 则回退 Traffic Equalization。
+Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；取消 1|2 上限（合法范围由 ADR-0036 扩展）。旧数据全部迁成 0，不反转旧序号。同组由 Route Scheduling Strategy 二选一，缺省 Traffic Equalization：无亲和命中时先选择在途请求数最少的 Target，再比较滚动 1h 加权 token 流量与在途输入占位，平分时选最久未被选中的 Target。选择、增加在途请求数和输入占位在同一个进程内锁中完成；预先装配好的并发请求也必须在实际选择时重新比较实时负载。正常结束、失败切换与取消均释放预留。合格 Cache Affinity 仍先选择最长精确前缀的 Target，同长度时沿用最近成功记录；不能为了并发或流量均衡改发无缓存 Target。权重组内共用——全组无价时为缓存输入 0.1、未命中输入 1、输出 5、缓存输出 6；有计价（`cost_input > 0` 且有 `cost_output`）时用价格比平均，缺维回退缺省；忽略 reasoning、audio 与 200k 分层。流量按 `provider_id` + upstream model 跨 Route 累计，以 attempt 的 `started_at` 为窗口依据；每个真实 Target attempt 明确上报的 usage（包括失败、重试与 failover）只计一次。各原始维度独立求已知值之和，仅全未知时返回未知，不能让一条未知记录抹掉其余已知流量。未命中输入先逐 attempt 计算，再求和；已知输入但缓存读取未知时保守按全部输入计，不能用覆盖范围不同的两个总和相减。Latency Preference 仍用 1h 成功率 × 输出 tok/s；成功样本 < 20 视为无数据，组内有效 Target < 2 则回退 Traffic Equalization。
 
 普通状态下，同一 `provider_id:model` 的内部重试与跨请求终态上游失败共用连续失败计数；完整成功清零。Target Retry Budget 为 N 时，第 N+1 次连续失败才进入 Target Cooldown，缺省 5 即第 6 次失败后冷却 120s。瞬时失败（含 First Token Timeout）仍可按错误分类在同一 Target 重试，间隔 0.5s 起、×2、封顶 8s、full jitter。
 
@@ -45,7 +45,7 @@ Latency Preference 的输出 tok/s 为一小时内成功 attempt 的 `Σoutput_t
 ## Consequences
 
 - 管理面必须能显式设置 Target Priority 与失败旋钮，不能再用列表 `index+1` 当优先级。
-- 选路通过 `UsageStatsStore` 读取 `target_attempt_observations` 的 24h/1h Confirmed Upstream Usage 聚合，并叠加进行中占位；共享连续失败计数与冷却状态保持进程内。存储普通查询错误时沿用进程内最后一次成功快照并标记 stale；尚无快照或 Observation gap 导致数据缺失时，以无历史用量的既有调度 fallback 继续选路，不能让普通观测失败阻断推理。存储失败按用户修订的 ADR-0060 只影响所属请求或任务，不再触发实例终止；这里已有有效缓存与 stale/fallback 的正常调度语义保持不变，不新增存储健康模式或改变选路、重试预算。长期管理 Stats Usage 的 15 分钟汇总不替代选路所需的原始 24h/1h 短窗口。
+- 选路通过 `UsageStatsStore` 读取 `target_attempt_observations` 的滚动 1h Confirmed Upstream Usage 聚合，并叠加进行中占位；在途请求数、最近选择顺序、共享连续失败计数与冷却状态保持进程内，不协调独立实例。存储普通查询错误时沿用进程内最后一次成功快照并标记 stale；尚无快照或 Observation gap 导致数据缺失时，以无历史用量继续按实时在途数分流，不能让普通观测失败阻断推理。存储失败按用户修订的 ADR-0060 只影响所属请求或任务，不再触发实例终止；这里已有有效缓存与 stale/fallback 的正常调度语义保持不变，不新增存储健康模式或改变选路、重试预算。长期管理 Stats Usage 的 15 分钟汇总不替代选路所需的原始 1h 短窗口；观测保留期、缓存 TTL 和数据库结构均不因此改变。
 - 529 / QuotaExceeded 与 HTTP `is_retryable(status)` 必须对齐到三档处置，不能再两套判定。
 - Target Priority 的合法范围由 ADR-0036 改为有符号 32 位全区间；本 ADR 的分层选择顺序不变。
 - 管理面用优先级泳道表达这些组，见 ADR-0037；已禁用 Target 见 ADR-0035。

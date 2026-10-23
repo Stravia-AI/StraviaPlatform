@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Traffic Equalization now uses a rolling one-hour usage window and atomically selects and reserves eligible destinations using in-flight request counts, then weighted traffic. Existing cache affinity, conversation affinity, and continuation constraints retain precedence; load balancing does not redirect eligible cached prefixes to uncached destinations.
 - The destination provider selector in the model editor is now a searchable combobox.
 - The Allowances remaining/used switch now uses the shared Tabs segmented style like other view switches, and the unused Toggle and ToggleGroup components are removed.
 - The Allowances page no longer repeats the pause-on-exhaustion sentence under every provider; the column help tooltip and each switch's label still explain it.
@@ -14,6 +15,7 @@
 
 ### Fixed
 
+- SQLite and PostgreSQL scheduling aggregates preserve confirmed usage when other attempts have unknown usage. Uncached input is calculated per attempt so incomplete cache reporting cannot erase known traffic.
 - The provider-type filter on the Allowances page labels providers without a catalog entry (such as Antigravity) by their vendor instead of an empty prefix like ` / oauth`.
 - Devin manual sign-in now follows the Devin CLI: it opens the `app.devin.ai` authorization page (previously a `/windsurf/signin` URL that returned 404), and the pasted authorization code is exchanged with PKCE for the session token instead of being stored as the token itself.
 - Selected values in the Connect clients selectors (client, API format, model, API key, Claude mappings) now truncate inside the control instead of pushing the chevron out of view.

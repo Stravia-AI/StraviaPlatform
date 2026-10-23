@@ -140,7 +140,6 @@ impl TargetAdmission {
             && let Some(preferred) = policy.preferred_target_key()
             && let Some(target) = policy
                 .candidates()
-                .iter()
                 .find(|target| crate::router::selected_target_key(target) == preferred)
             && let Some(next) = Self::next_at(&mut state, &DestinationKey::for_target(target), now)
         {

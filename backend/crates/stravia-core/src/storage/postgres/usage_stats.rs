@@ -14,6 +14,32 @@ pub(super) struct PostgresUsageStatsStore {
 
 const BASE_BUCKET_MS: i64 = 900_000;
 
+// 与 SQLite 一致：部分未知不丢弃已知用量，未报告缓存读取时不给派生输入折扣。
+const ROUTE_SCHEDULING_SQL: &str =
+    "SELECT provider_id || ':' || upstream_model AS target_key,
+        SUM(input_tokens)::BIGINT AS input_tokens_1h,
+        SUM(output_tokens)::BIGINT AS output_tokens_1h,
+        SUM(cache_read_tokens)::BIGINT AS cache_read_tokens_1h,
+        SUM(cache_write_tokens)::BIGINT AS cache_write_tokens_1h,
+        SUM(CASE WHEN input_tokens IS NOT NULL
+                 THEN GREATEST(input_tokens - COALESCE(cache_read_tokens, 0), 0) END)::BIGINT AS uncached_input_tokens_1h,
+        COUNT(*)::BIGINT AS attempts_1h,
+        (COUNT(*) FILTER (WHERE status = 'completed'))::BIGINT AS successes_1h,
+        CASE WHEN COUNT(*) FILTER (WHERE status = 'completed') > 0
+                   AND COUNT(*) FILTER (WHERE status = 'completed' AND output_tokens IS NULL) = 0
+             THEN (SUM(output_tokens) FILTER (WHERE status = 'completed'))::BIGINT END AS successful_output_tokens_1h,
+        CASE WHEN COUNT(*) FILTER (WHERE status = 'completed') > 0
+                   AND COUNT(*) FILTER (WHERE status = 'completed' AND duration_ms IS NULL) = 0
+             THEN (SUM(duration_ms) FILTER (WHERE status = 'completed'))::BIGINT END AS successful_upstream_ms_1h,
+        NULL::DOUBLE PRECISION AS cost_input,
+        NULL::DOUBLE PRECISION AS cost_output,
+        NULL::DOUBLE PRECISION AS cost_cache_read,
+        NULL::DOUBLE PRECISION AS cost_cache_write
+             FROM target_attempt_observations
+             WHERE started_at >= $1
+               AND provider_id <> '' AND upstream_model <> ''
+             GROUP BY provider_id, upstream_model";
+
 // Display buckets start at the selected boundary and retain the final partial bucket.
 fn display_bucket_ms(start: i64, end: i64, requested: i64) -> i64 {
     let span = i128::from(end) - i128::from(start);
@@ -27,34 +53,11 @@ impl UsageStatsStore for PostgresUsageStatsStore {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage {
         let now = chrono::Utc::now().timestamp_millis();
         let hour_ago = now.saturating_sub(60 * 60 * 1_000);
-        let day_ago = now.saturating_sub(24 * 60 * 60 * 1_000);
-        let result = sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(
-            "SELECT provider_id || ':' || upstream_model AS target_key,
-        CASE WHEN COUNT(*) > 0 AND COUNT(input_tokens) = COUNT(*) THEN SUM(input_tokens)::BIGINT END AS input_tokens_24h,
-        CASE WHEN COUNT(*) > 0 AND COUNT(output_tokens) = COUNT(*) THEN SUM(output_tokens)::BIGINT END AS output_tokens_24h,
-        CASE WHEN COUNT(*) > 0 AND COUNT(cache_read_tokens) = COUNT(*) THEN SUM(cache_read_tokens)::BIGINT END AS cache_read_tokens_24h,
-        CASE WHEN COUNT(*) > 0 AND COUNT(cache_write_tokens) = COUNT(*) THEN SUM(cache_write_tokens)::BIGINT END AS cache_write_tokens_24h,
-        SUM(CASE WHEN started_at >= $1 THEN 1 ELSE 0 END)::BIGINT AS attempts_1h,
-        SUM(CASE WHEN started_at >= $1 AND status = 'completed' THEN 1 ELSE 0 END)::BIGINT AS successes_1h,
-        CASE WHEN COUNT(*) FILTER (WHERE started_at >= $1 AND status = 'completed') > 0
-                   AND COUNT(*) FILTER (WHERE started_at >= $1 AND status = 'completed' AND output_tokens IS NULL) = 0
-             THEN (SUM(output_tokens) FILTER (WHERE started_at >= $1 AND status = 'completed'))::BIGINT END AS successful_output_tokens_1h,
-        CASE WHEN COUNT(*) FILTER (WHERE started_at >= $1 AND status = 'completed') > 0
-                   AND COUNT(*) FILTER (WHERE started_at >= $1 AND status = 'completed' AND duration_ms IS NULL) = 0
-             THEN (SUM(duration_ms) FILTER (WHERE started_at >= $1 AND status = 'completed'))::BIGINT END AS successful_upstream_ms_1h,
-        NULL::DOUBLE PRECISION AS cost_input,
-        NULL::DOUBLE PRECISION AS cost_output,
-        NULL::DOUBLE PRECISION AS cost_cache_read,
-        NULL::DOUBLE PRECISION AS cost_cache_write
-             FROM target_attempt_observations
-             WHERE started_at >= $2
-               AND provider_id <> '' AND upstream_model <> ''
-             GROUP BY provider_id, upstream_model",
-        )
-        .bind(hour_ago)
-        .bind(day_ago)
-        .fetch_all(&self.pool)
-        .await;
+        let result =
+            sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(ROUTE_SCHEDULING_SQL)
+                .bind(hour_ago)
+                .fetch_all(&self.pool)
+                .await;
         match result {
             Ok(targets) => {
                 *self.last_route_snapshot.write() = targets.clone();
@@ -530,6 +533,64 @@ mod tests {
         Ok(())
     }
 
+    async fn verify_hourly_scheduling_retains_partial_usage(
+        pool: &Pool<Postgres>,
+    ) -> anyhow::Result<()> {
+        use sqlx::Row;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let hour_ago = now - 3_600_000;
+        insert_turn(pool, "scheduling-partial", now, "model", "key").await?;
+        for (id, started_at, input, cache_read) in [
+            ("scheduling-boundary", hour_ago, 10, Some(2)),
+            ("scheduling-expired", hour_ago - 1, 1_000, Some(0)),
+            ("scheduling-no-cache-usage", now, 50, None),
+            ("scheduling-cache-only", now, 0, Some(500)),
+        ] {
+            insert_attempt(
+                pool,
+                id,
+                "scheduling-partial",
+                started_at,
+                input,
+                cache_read,
+            )
+            .await?;
+        }
+        insert_failed_attempt(pool, "scheduling-unknown", "scheduling-partial", now).await?;
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET provider_id='scheduling-provider',
+                 status=CASE WHEN id='scheduling-boundary' THEN 'completed' ELSE 'failed' END,
+                 input_tokens=CASE WHEN id='scheduling-cache-only' THEN NULL ELSE input_tokens END,
+                 output_tokens=CASE WHEN id='scheduling-boundary' THEN 3 END,
+                 cache_write_tokens=CASE WHEN id='scheduling-boundary' THEN 1 END
+             WHERE model_turn_id='scheduling-partial'",
+        )
+        .execute(pool)
+        .await?;
+        let rows = sqlx::query(ROUTE_SCHEDULING_SQL)
+            .bind(hour_ago)
+            .fetch_all(pool)
+            .await?;
+        let target = rows
+            .iter()
+            .find(|row| row.get::<String, _>("target_key") == "scheduling-provider:upstream")
+            .expect("hour-boundary attempt remains eligible");
+        for (column, expected) in [
+            ("input_tokens_1h", 60),
+            ("uncached_input_tokens_1h", 58),
+            ("output_tokens_1h", 3),
+            ("cache_read_tokens_1h", 502),
+            ("cache_write_tokens_1h", 1),
+            ("attempts_1h", 4),
+            ("successes_1h", 1),
+        ] {
+            assert_eq!(target.try_get::<i64, _>(column)?, expected, "{column}");
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn postgres_management_stats_project_net_input_and_preserve_full_attempt_tps()
     -> anyhow::Result<()> {
@@ -564,8 +625,9 @@ mod tests {
                 let recent = now / 3_600_000 * 3_600_000 - 5_400_000;
                 let old = now - 4 * 60 * 60 * 1_000;
                 insert_turn(&pool, "recent", recent, "model", "key").await?;
-                insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
-                insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+                // 调度只消费最近一小时；管理统计仍由 Turn 开始时间分桶，与 attempt 自身时间无关。
+                insert_attempt(&pool, "recent-a", "recent", now - 1_000, 12, Some(5)).await?;
+                insert_attempt(&pool, "recent-b", "recent", now - 1_000, 3, Some(9)).await?;
                 sqlx::query("UPDATE target_attempt_observations SET output_tokens=CASE id WHEN 'recent-a' THEN 20 ELSE 30 END,duration_ms=CASE id WHEN 'recent-a' THEN 1000 ELSE 9000 END,first_token_ms=CASE id WHEN 'recent-a' THEN 900 ELSE 8900 END WHERE model_turn_id='recent'")
                     .execute(&pool).await?;
                 let scheduling = store.route_scheduling_snapshot().await;
@@ -576,7 +638,7 @@ mod tests {
                     .execute(&pool).await?;
                 sqlx::query("UPDATE inference_run_observations SET status='failed',terminal_reason='delivery_error' WHERE id='recent'")
                     .execute(&pool).await?;
-                // 失败和未完成 attempt 即使有用量也不计入。
+                // 管理统计中，失败和未完成 attempt 即使有用量也不计入；调度用量仍按观测汇总。
                 insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
                 insert_attempt(&pool, "recent-incomplete", "recent", recent, 999, None).await?;
                 sqlx::query("UPDATE target_attempt_observations SET status='running',output_tokens=999,duration_ms=1,first_token_ms=1 WHERE id='recent-incomplete'")
@@ -753,6 +815,7 @@ mod tests {
                     .await?;
                 verify_final_failure_counts(&pool).await?;
                 verify_fixed_range_survives_detail_cleanup(&pool).await?;
+                verify_hourly_scheduling_retains_partial_usage(&pool).await?;
                 Ok::<_, anyhow::Error>(())
             }
             .await;

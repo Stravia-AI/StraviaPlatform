@@ -968,7 +968,7 @@
   "model_editor_set_model_name_request_type_client_apps_use": "设置客户端请求时使用的精确模型 ID，以及可选的易读显示名称。",
   "model_editor_traffic_share_help": "设置相对份额，控制每个目标接收的流量比例。",
   "model_editor_traffic_equalization": "流量均衡",
-  "model_editor_traffic_equalization_help": "在最高优先级组内，把请求发送到近期加权流量最低的目标。",
+  "model_editor_traffic_equalization_help": "无对话或缓存亲和命中时，在最高优先级组内先比较进行中请求数，再比较最近 1 小时的加权流量；满足条件的缓存前缀仍发送到命中的目标。",
   "model_editor_split_traffic": "分配流量",
   "model_editor_failover_help": "Stravia 会从上到下尝试，直到找到可用目标。",
   "model_editor_text_chat": "文本与对话",

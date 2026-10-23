@@ -66,9 +66,9 @@ impl RouteSelector {
     /// Assemble a ready-to-drive `RouteAttemptPolicy` for one request.
     ///
     /// ADR-0034 precedence is enforced by the produced policy: Target
-    /// Continuation and Conversation/Cache Affinity enter as hints, cooldown and
-    /// health stay eligibility filters, and Target Priority + the route's
-    /// scheduling strategy order the remainder.
+    /// Continuation and Conversation/Cache Affinity enter as preferred targets,
+    /// cooldown and health stay eligibility filters, and Target Priority + the
+    /// route's scheduling strategy order the remainder.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         target = "stravia::perf",
@@ -1032,6 +1032,7 @@ mod tests {
         }
         .expect("select");
         assert_eq!(next_provider(&mut policy).as_deref(), Some("affinity"));
+        drop(policy);
 
         // A conversation identity suppresses the cache hint entirely.
         let mut identified = request();
@@ -1660,7 +1661,7 @@ mod tests {
             stale: true,
             targets: vec![TargetSchedulingSnapshot {
                 target_key: "busy:model".into(),
-                input_tokens_24h: Some(1_000_000),
+                input_tokens_1h: Some(1_000_000),
                 ..Default::default()
             }],
         }));
@@ -1694,13 +1695,14 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "cache_read_heavy:model".into(),
-                    input_tokens_24h: Some(1_000_000),
-                    cache_read_tokens_24h: Some(1_000_000),
+                    input_tokens_1h: Some(1_000_000),
+                    uncached_input_tokens_1h: Some(0),
+                    cache_read_tokens_1h: Some(1_000_000),
                     ..Default::default()
                 },
                 TargetSchedulingSnapshot {
                     target_key: "output_heavy:model".into(),
-                    output_tokens_24h: Some(100_000),
+                    output_tokens_1h: Some(100_000),
                     ..Default::default()
                 },
             ],

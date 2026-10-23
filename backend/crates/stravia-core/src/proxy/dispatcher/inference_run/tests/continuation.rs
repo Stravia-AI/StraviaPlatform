@@ -1399,10 +1399,14 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         first_turn.route.provider_id,
         backends[1].provider_id().as_str()
     );
-    let _ = first_turn.output.collect::<Vec<_>>().await;
+    let first_events = first_turn.output.collect::<Vec<_>>().await;
+    assert!(matches!(
+        first_events.last(),
+        Some(Ok(stravia_runtime_contract::model_turn::CanonicalEvent::Completed(response)))
+            if response.output_text() == "first output" && response.usage.prompt_tokens == 20_000
+    ));
 
-    // Both targets are eligible again: only the recorded cache prefix should
-    // keep this request on the lower-priority target.
+    // 合格缓存前缀优先于更高的 Priority 和更低的一小时流量。
     gateway
         .admin()
         .update_model(model, configure_primary(true))
