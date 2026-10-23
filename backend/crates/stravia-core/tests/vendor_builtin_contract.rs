@@ -1162,8 +1162,16 @@ async fn base_cline_pass_allowance_reads_usage_limits_and_reports_window_quotas(
 -> anyhow::Result<()> {
     let (_directory, gateway) = gateway().await?;
     let served = AtomicUsize::new(0);
-    let (base_url, server) = local_upstream(2, {
-        move |_: &ObservedRequest| {
+    // 每次刷新先读 usage-limits，成功后再读 /users/me/plan；第二次刷新在
+    // usage-limits 就失败，不会发出套餐请求，共 3 个请求。
+    let (base_url, server) = local_upstream(3, {
+        move |request: &ObservedRequest| {
+            if request.path == "/api/v1/users/me/plan" {
+                return MockResponse::json(json!({
+                    "success": true,
+                    "data": {"plan": {"id": "plan-1", "displayName": "ClinePass Monthly"}}
+                }));
+            }
             if served.fetch_add(1, Ordering::SeqCst) == 0 {
                 MockResponse::json(json!({
                     "success": true,
@@ -1218,6 +1226,7 @@ async fn base_cline_pass_allowance_reads_usage_limits_and_reports_window_quotas(
         .expect("base cline-pass profile must answer allowance refreshes");
     assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
     assert_eq!(snapshot.error, None);
+    assert_eq!(snapshot.plan_label.as_deref(), Some("ClinePass Monthly"));
     let five_hour = snapshot
         .allowances
         .iter()
@@ -1261,9 +1270,18 @@ async fn base_cline_pass_allowance_reads_usage_limits_and_reports_window_quotas(
     );
 
     let observed = server.await??;
-    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/api/v1/users/me/plan/usage-limits",
+            "/api/v1/users/me/plan",
+            "/api/v1/users/me/plan/usage-limits",
+        ]
+    );
     for request in &observed {
-        assert_eq!(request.path, "/api/v1/users/me/plan/usage-limits");
         assert_eq!(
             request.headers.get("authorization").map(String::as_str),
             Some("Bearer cline-pass-contract-key")

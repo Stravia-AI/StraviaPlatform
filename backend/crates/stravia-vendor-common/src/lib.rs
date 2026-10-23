@@ -3,6 +3,7 @@
 pub mod account;
 pub mod common;
 pub mod icons;
+pub mod plan;
 pub mod thinking;
 
 pub use common::{

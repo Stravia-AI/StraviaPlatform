@@ -1,4 +1,5 @@
 use serde_json::Value;
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost,
     PluginError, ProviderSnapshot, read_http_body,
@@ -76,7 +77,14 @@ fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {
 
     let top = parse_fields(body).map_err(|_| ())?;
     let mut plan_label = message(&top, 2).and_then(|inner| string(&inner, 2));
-    let user = message(&top, 1).unwrap_or_else(|| top.clone());
+    let user_status = message(&top, 1);
+    // UserStatus #7 是登录邮箱（live GetUserStatus 验证）；#5 是令牌类字符串，
+    // #33.#8 是组织名，二者都不能当账号标识。
+    let account_label = first_account_label([user_status
+        .as_ref()
+        .and_then(|user| string(user, 7))
+        .as_deref()]);
+    let user = user_status.unwrap_or_else(|| top.clone());
     let used_prompt = varint(&user, 28);
     let used_flow = varint(&user, 29);
     let mut allowances = Vec::new();
@@ -157,7 +165,7 @@ fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {
         allowances,
         models: Vec::new(),
         plan_label,
-        account_label: None,
+        account_label,
     })
 }
 
@@ -334,7 +342,9 @@ fn error(kind: ErrorKind, message: impl Into<String>) -> PluginError {
 #[cfg(test)]
 mod tests {
     use super::parse_response;
-    use crate::codec::devin_connect::proto::{write_message_field, write_varint_field};
+    use crate::codec::devin_connect::proto::{
+        write_message_field, write_string_field, write_varint_field,
+    };
 
     #[test]
     fn reports_exhausted_windows_when_zero_remaining_percent_is_omitted() {
@@ -407,6 +417,29 @@ mod tests {
                 "an unreported quota window must not be treated as exhausted"
             );
         }
+    }
+
+    #[test]
+    fn reports_login_email_as_account_label_only() {
+        // live GetUserStatus：#5 是令牌类字符串，#7 是邮箱，组织名在 #13.#1.#33.#8。
+        let mut user_status = Vec::new();
+        write_string_field(&mut user_status, 5, "devin-session$not-an-identity");
+        write_string_field(&mut user_status, 7, " user@example.test ");
+        let mut plan_status = Vec::new();
+        write_varint_field(&mut plan_status, 16, 1_000_000);
+        write_message_field(&mut user_status, 13, &plan_status);
+        let mut body = Vec::new();
+        write_message_field(&mut body, 1, &user_status);
+
+        let parsed = parse_response(&body).expect("Devin user status should parse");
+        assert_eq!(parsed.account_label.as_deref(), Some("user@example.test"));
+
+        let mut anonymous = Vec::new();
+        write_message_field(&mut anonymous, 13, &plan_status);
+        let mut body = Vec::new();
+        write_message_field(&mut body, 1, &anonymous);
+        let parsed = parse_response(&body).expect("status without email should parse");
+        assert_eq!(parsed.account_label, None);
     }
 
     #[test]

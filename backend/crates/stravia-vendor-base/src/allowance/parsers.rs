@@ -1,5 +1,6 @@
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{AllowanceAmount, AllowanceItem, AllowanceResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,12 @@ fn parse_github_copilot(payload: &Value) -> Result<AllowanceResponse, ()> {
     let mut parsed = response(vec![allowance]);
     // GitHub 在该响应里只给用户名 `login`，没有邮箱。
     parsed.account_label = first_account_label([payload.get("login").and_then(Value::as_str)]);
+    // `copilot_plan`（free/individual/business/enterprise/pro）是响应里唯一的订阅等级；
+    // `access_type_sku` 只是计费 SKU，不能当展示名。
+    parsed.plan_label = payload
+        .get("copilot_plan")
+        .and_then(non_empty)
+        .and_then(display_name);
     Ok(parsed)
 }
 
@@ -290,7 +297,22 @@ fn parse_kimi(payload: &Value) -> Result<AllowanceResponse, ()> {
             }
         }
     }
-    Ok(response(allowances))
+    let mut parsed = response(allowances);
+    // 上游只在 `user.membership.level` 给 LEVEL_* 枚举；公开客户端对营销套餐名的映射
+    // 互相冲突，因此这里只去掉枚举前缀整理成可读等级，不杜撰套餐名。
+    parsed.plan_label = payload
+        .pointer("/user/membership/level")
+        .and_then(non_empty)
+        .filter(|level| !level.eq_ignore_ascii_case("LEVEL_UNSPECIFIED"))
+        .and_then(kimi_level_name);
+    Ok(parsed)
+}
+
+fn kimi_level_name(level: &str) -> Option<String> {
+    match level.strip_prefix("LEVEL_") {
+        Some(token) => display_name(&token.to_ascii_lowercase()),
+        None => display_name(level),
+    }
 }
 
 fn duration_seconds(duration: Option<f64>, unit: Option<&str>) -> Option<u64> {
@@ -400,7 +422,7 @@ fn parse_zai(payload: &Value) -> Result<AllowanceResponse, ()> {
     Ok(AllowanceResponse {
         allowances,
         models: Vec::new(),
-        plan_label: data.get("level").and_then(non_empty).map(str::to_owned),
+        plan_label: data.get("level").and_then(non_empty).and_then(display_name),
         account_label: None,
     })
 }
@@ -447,7 +469,13 @@ fn parse_zhipu(payload: &Value) -> Result<AllowanceResponse, ()> {
             _ => {}
         }
     }
-    Ok(response(allowances))
+    let mut parsed = response(allowances);
+    // 实测 open.bigmodel.cn 的 quota/limit 响应带 `data.level`（如 pro），与 Z.ai 同源。
+    parsed.plan_label = payload
+        .pointer("/data/level")
+        .and_then(non_empty)
+        .and_then(display_name);
+    Ok(parsed)
 }
 
 fn parse_minimax(payload: &Value, token_plan: bool) -> Result<AllowanceResponse, ()> {
@@ -518,7 +546,29 @@ fn parse_minimax(payload: &Value, token_plan: bool) -> Result<AllowanceResponse,
             allowances.push(weekly);
         }
     }
-    Ok(response(allowances))
+    let mut parsed = response(allowances);
+    parsed.plan_label = minimax_plan(object);
+    Ok(parsed)
+}
+
+// coding_plan/remains 的响应顶层带订阅名称；按上游字段存在性取第一个非空值。
+fn minimax_plan(object: &Map<String, Value>) -> Option<String> {
+    [
+        "current_subscribe_title",
+        "plan_name",
+        "combo_title",
+        "current_plan_title",
+    ]
+    .into_iter()
+    .find_map(|key| object.get(key).and_then(non_empty))
+    .or_else(|| {
+        object
+            .get("current_combo_card")
+            .and_then(Value::as_object)
+            .and_then(|card| card.get("title"))
+            .and_then(non_empty)
+    })
+    .and_then(display_name)
 }
 
 fn pick_minimax_model(models: &[Value]) -> Option<&Map<String, Value>> {
@@ -773,7 +823,13 @@ fn parse_neuralwatt(payload: &Value) -> Result<AllowanceResponse, ()> {
         allowance.remaining = Some(amount(balance, "currency", Some("USD")));
         allowances.push(allowance);
     }
-    Ok(response(allowances))
+    let mut parsed = response(allowances);
+    // quota 响应里的 `subscription.plan` 就是订阅计划名；余额型账户没有 subscription。
+    parsed.plan_label = payload
+        .pointer("/subscription/plan")
+        .and_then(non_empty)
+        .and_then(display_name);
+    Ok(parsed)
 }
 
 fn slug_key(value: &str) -> String {
@@ -824,5 +880,108 @@ mod tests {
                 .account_label,
             None
         );
+    }
+
+    #[test]
+    fn copilot_reports_the_copilot_plan() {
+        let body = br#"{
+            "login": "octocat",
+            "copilot_plan": "individual",
+            "access_type_sku": "copilot_individual",
+            "quota_snapshots": {"premium_interactions": {"entitlement": 300, "remaining": 120}},
+            "quota_reset_date": "2026-11-01"
+        }"#;
+        let response = parse(Monitor::GitHubCopilot, body).unwrap();
+        assert_eq!(response.plan_label.as_deref(), Some("Individual"));
+    }
+
+    #[test]
+    fn kimi_reports_the_membership_level() {
+        let body = br#"{
+            "user": {"membership": {"level": "LEVEL_INTERMEDIATE"}},
+            "usage": {
+                "limit": "2048",
+                "used": "214",
+                "remaining": "1834",
+                "resetTime": "2026-01-09T15:23:13.716839300Z"
+            },
+            "limits": [{
+                "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                "detail": {
+                    "limit": "200",
+                    "used": "139",
+                    "remaining": "61",
+                    "resetTime": "2026-01-06T13:33:02.717479433Z"
+                }
+            }]
+        }"#;
+        let response = parse(Monitor::KimiCoding, body).unwrap();
+        assert_eq!(response.plan_label.as_deref(), Some("Intermediate"));
+    }
+
+    #[test]
+    fn kimi_unspecified_membership_has_no_plan() {
+        let body = br#"{
+            "user": {"membership": {"level": "LEVEL_UNSPECIFIED"}},
+            "usage": {"limit": "2048", "used": "214"}
+        }"#;
+        let response = parse(Monitor::KimiCoding, body).unwrap();
+        assert_eq!(response.plan_label, None);
+    }
+
+    #[test]
+    fn zhipu_reports_the_subscription_level() {
+        let body = br#"{
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "level": "pro",
+                "limits": [{
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 42,
+                    "nextResetTime": 1760000000000
+                }]
+            },
+            "success": true
+        }"#;
+        let response = parse(Monitor::ZhipuAiCodingPlan, body).unwrap();
+        assert_eq!(response.plan_label.as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn minimax_reports_the_subscription_title() {
+        let body = br#"{
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+            "current_subscribe_title": "Token Plan Plus",
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100,
+                "current_interval_usage_count": 96,
+                "current_interval_remaining_percent": 96,
+                "start_time": 1780279200000,
+                "end_time": 1780297200000,
+                "current_weekly_remaining_percent": 99
+            }]
+        }"#;
+        let response = parse(Monitor::MiniMaxCodingPlan, body).unwrap();
+        assert_eq!(response.plan_label.as_deref(), Some("Token Plan Plus"));
+    }
+
+    #[test]
+    fn neuralwatt_reports_the_subscription_plan() {
+        let body = br#"{
+            "balance": {"credits_remaining_usd": 12.5},
+            "subscription": {
+                "plan": "pro",
+                "kwh_included": 100,
+                "kwh_used": 25,
+                "current_period_end": "2026-11-01T00:00:00Z"
+            },
+            "key": null
+        }"#;
+        let response = parse(Monitor::NeuralWatt, body).unwrap();
+        assert_eq!(response.plan_label.as_deref(), Some("Pro"));
     }
 }

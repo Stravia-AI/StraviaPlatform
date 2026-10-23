@@ -721,7 +721,6 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                 <span class="relative z-10 inline-flex"><AllowanceSuspension {suspension} /></span>
               {/if}
               {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
-              {#if snapshot?.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
             </div>
           </div>
         </div>
@@ -746,11 +745,19 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       <!-- Collapsible.Content 收起时仍保留隐藏 DOM；只在展开时渲染详情，避免每行常驻一份明细与开关 -->
       {#if expanded}
         <Collapsible.Content class="border-t bg-muted/10 px-2 pb-2 @md:ps-8">
-          {#if snapshot?.account_label}
-            <dl class="flex flex-wrap items-baseline gap-x-2 py-2 text-xs text-muted-foreground">
-              <dt>{m.allowances_detail_account()}</dt>
-              <dd class="break-all" data-testid={`allowance-account-${providerId}`}>{snapshot.account_label}</dd>
-            </dl>
+          {#if snapshot?.account_label || snapshot?.plan_label}
+            <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1 py-2 text-xs text-muted-foreground">
+              {#if snapshot.account_label}
+                <dl class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                  <dt>{m.allowances_detail_account()}</dt>
+                  <dd class="break-all" data-testid={`allowance-account-${providerId}`}>{snapshot.account_label}</dd>
+                </dl>
+              {/if}
+              {#if snapshot.plan_label}
+                <span data-testid={`allowance-plan-${providerId}`}
+                  >{m.allowances_plan({ plan: snapshot.plan_label })}</span>
+              {/if}
+            </div>
           {/if}
           {#if provider.allowances.length > 0}
             {@render allowanceDetailTable(provider)}

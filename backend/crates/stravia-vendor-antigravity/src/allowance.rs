@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common::plugin_error;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot,
@@ -28,7 +29,24 @@ pub(crate) fn execute(
     // 登录时由 Google id_token 的 `email`、`name` 声明保存。
     let stored = |key: &str| provider.credentials.get(key).and_then(Value::as_str);
     response.account_label = first_account_label([stored("email"), stored("name")]);
+    // 等级只是附加展示信息，与 Command Code 的订阅查询一致：该请求失败时不让额度读取失败。
+    response.plan_label = crate::client::post_json(
+        host,
+        provider,
+        "loadCodeAssist",
+        &json!({"metadata":{"ideType":"ANTIGRAVITY"}}),
+    )
+    .ok()
+    .as_ref()
+    .and_then(plan_label);
     Ok(response)
+}
+
+/// `paidTier` 才是订阅（live 返回 `Google AI Pro`）；`currentTier` 只是产品名
+/// `Antigravity`，免费档与付费档都叫它，登录时保存的 `tier` 也取自它，所以
+/// 每次读取额度时重新发现；没有 `paidTier` 说明没有订阅，不展示等级。
+fn plan_label(discovery: &Value) -> Option<String> {
+    display_name(discovery.get("paidTier")?.get("name")?.as_str()?)
 }
 
 fn text<'a>(object: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
@@ -253,6 +271,18 @@ fn decimal(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_label_comes_from_paid_tier_not_the_product_named_current_tier() {
+        let subscribed = json!({
+            "currentTier": {"id": "free-tier", "name": "Antigravity"},
+            "paidTier": {"id": "g1-pro-tier", "name": "Google AI Pro"}
+        });
+        assert_eq!(plan_label(&subscribed).as_deref(), Some("Google AI Pro"));
+        let free = json!({"currentTier": {"id": "free-tier", "name": "Antigravity"}});
+        assert_eq!(plan_label(&free), None);
+        assert_eq!(plan_label(&json!({"paidTier": {"name": " "}})), None);
+    }
 
     #[test]
     fn distinguishes_missing_zero_disabled_and_unknown_windows() {

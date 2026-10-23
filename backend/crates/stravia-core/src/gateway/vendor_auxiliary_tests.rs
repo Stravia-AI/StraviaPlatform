@@ -380,6 +380,7 @@ fn devin_allowance_fixture() -> Vec<u8> {
     status.extend(proto_u64(18, 2_000_100_000));
 
     let mut user = Vec::new();
+    user.extend(proto_string(7, "devin-user@example.test"));
     user.extend(proto_len(13, &status));
     user.extend(proto_u64(28, 25));
     user.extend(proto_u64(29, 4));
@@ -2415,6 +2416,10 @@ async fn devin_allowance_uses_real_tls_protobuf_request_and_decodes_credit_windo
         .expect("Devin supports allowance");
     assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
     assert_eq!(snapshot.plan_label.as_deref(), Some("Devin Max Contract"));
+    assert_eq!(
+        snapshot.account_label.as_deref(),
+        Some("devin-user@example.test")
+    );
     let daily = snapshot
         .allowances
         .iter()

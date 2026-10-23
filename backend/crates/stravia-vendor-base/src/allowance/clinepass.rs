@@ -7,6 +7,9 @@
 //! reference. Window types the gateway adds later pass through with their raw
 //! `type` as the item key instead of being dropped.
 //!
+//! 套餐名不在额度响应里：同一主机上的 `GET /users/me/plan` 提供它，失败时
+//! `plan_label` 保持为空，不影响额度窗口本身。
+//!
 //! This stays a dedicated monitor instead of joining the generic monitor
 //! loop: the usage-limits URL follows the connection's configured base URL
 //! rather than a fixed origin, and `success: false` bodies carry upstream
@@ -14,6 +17,7 @@
 
 use serde_json::Value;
 use stravia_vendor_common::common;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
@@ -24,6 +28,7 @@ use super::parsers;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const USAGE_LIMITS_PATH: &str = "/users/me/plan/usage-limits";
+const CURRENT_PLAN_PATH: &str = "/users/me/plan";
 const DEFAULT_BASE_URL: &str = "https://api.cline.bot/api/v1";
 
 pub(super) fn supports(vendor_id: &str, channel: &str) -> bool {
@@ -36,9 +41,10 @@ pub(super) fn execute(
     _request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     let credential = api_key(provider)?;
+    let base = base_url(provider);
     let response = host.http_start(HttpRequest {
         method: "GET".into(),
-        url: format!("{}{USAGE_LIMITS_PATH}", base_url(provider)),
+        url: format!("{base}{USAGE_LIMITS_PATH}"),
         headers: vec![
             ("accept".into(), "application/json".into()),
             ("authorization".into(), format!("Bearer {credential}")),
@@ -52,7 +58,56 @@ pub(super) fn execute(
         return Err(common::upstream_error(status, &headers, &body));
     }
     let value: Value = serde_json::from_slice(&body).map_err(|_| invalid_response(None))?;
-    parse_limits(&value)
+    let mut parsed = parse_limits(&value)?;
+    // 额度接口只返回窗口占用，不含订阅等级；Cline 官方 SDK 另用同一主机上的
+    // GET /users/me/plan 读取当前套餐。该请求失败时保持 None，不影响额度快照。
+    parsed.plan_label = current_plan_label(host, base, credential);
+    Ok(parsed)
+}
+
+/// 读取当前订阅套餐名称。
+///
+/// Cline 官方 SDK 把 `GET /users/me/plan` 的 `data.plan` 映射为
+/// `{ displayName?, name?, id? }`，CLI 也用 `displayName || name` 展示套餐，
+/// 因此只取这两个人类可读字段，`id` 是不透明标识，不能当作等级。
+/// 主机与额度接口相同，插件的网络来源声明已经覆盖。
+fn current_plan_label(host: &GuestHost, base: &str, credential: &str) -> Option<String> {
+    let response = host
+        .http_start(HttpRequest {
+            method: "GET".into(),
+            url: format!("{base}{CURRENT_PLAN_PATH}"),
+            headers: vec![
+                ("accept".into(), "application/json".into()),
+                ("authorization".into(), format!("Bearer {credential}")),
+            ],
+            body: Vec::new(),
+        })
+        .ok()?;
+    let status = response.status().ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let body = read_http_body(&response, MAX_RESPONSE_BYTES).ok()?;
+    let value: Value = serde_json::from_slice(&body).ok()?;
+    plan_label_from(&value)
+}
+
+fn plan_label_from(value: &Value) -> Option<String> {
+    // 与额度接口一样，`data` 信封并非契约；裸 `plan` 对象也要接受。
+    let payload = value
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(value);
+    if value.get("success").and_then(Value::as_bool) == Some(false)
+        || payload.get("success").and_then(Value::as_bool) == Some(false)
+    {
+        return None;
+    }
+    let plan = payload.get("plan")?.as_object()?;
+    ["displayName", "name"]
+        .into_iter()
+        .find_map(|key| plan.get(key).and_then(parsers::non_empty))
+        .and_then(display_name)
 }
 
 fn parse_limits(value: &Value) -> Result<AllowanceResponse, PluginError> {
@@ -221,6 +276,62 @@ mod tests {
             );
             let weekly = &response.allowances[1];
             assert_eq!(weekly.window_seconds, Some(604_800));
+        }
+    }
+
+    #[test]
+    fn reads_plan_label_from_the_current_plan_endpoint() {
+        // 形状取自 Cline 官方 SDK 的 fetchCurrentUserPlan 测试夹具。
+        let response = json!({
+            "success": true,
+            "data": {
+                "planHistoryId": "history-1",
+                "subscriptionId": "sub-1",
+                "userId": "user-1",
+                "plan": {
+                    "id": "plan-1",
+                    "displayName": "ClinePass Monthly",
+                    "interval": "Monthly"
+                }
+            }
+        });
+        assert_eq!(
+            plan_label_from(&response).as_deref(),
+            Some("ClinePass Monthly")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_plan_name_and_ignores_opaque_ids() {
+        // displayName 缺失时用 name；裸 payload 的信封可省略。
+        assert_eq!(
+            plan_label_from(&json!({"success": true, "data": {"plan": {"name": "pro"}}}))
+                .as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            plan_label_from(
+                &json!({"plan": {"displayName": "ClinePass Max 5x", "name": "max-5x"}})
+            )
+            .as_deref(),
+            Some("ClinePass Max 5x")
+        );
+        // 只有不透明 id 时不能臆造等级。
+        assert_eq!(
+            plan_label_from(&json!({"success": true, "data": {"plan": {"id": "plan-1"}}})),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_or_refused_plans_have_no_label() {
+        for body in [
+            json!({"success": true, "data": null}),
+            json!({"success": true, "data": {"plan": null}}),
+            json!({"success": false, "error": "no plan found for user"}),
+            json!({"success": true, "data": {"plan": {"displayName": "  "}}}),
+        ] {
+            assert_eq!(plan_label_from(&body), None, "{body}");
         }
     }
 

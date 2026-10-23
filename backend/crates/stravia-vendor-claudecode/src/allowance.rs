@@ -1,12 +1,14 @@
 //! Claude 订阅额度：`GET /api/oauth/usage`。响应形态与请求头跟随 oh-my-pi
 //! v18.4.2 `packages/ai/src/usage/claude.ts`；新版以 `limits[]` 描述各窗口，
 //! 旧版以 `five_hour` / `seven_day` 对象给出 `utilization` 百分比。
+//! usage 响应不含订阅等级，等级另从 `GET /api/oauth/profile` 读取。
 
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, GuestHost, HttpRequest, ModelAllowance,
     PluginError, ProviderSnapshot, read_http_body,
@@ -16,8 +18,10 @@ use crate::request::{DEFAULT_CLIENT_VERSION, cli_user_agent};
 use crate::{access_token, retryable};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const USAGE_BETAS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
 const MAX_USAGE_BODY: usize = 1024 * 1024;
+const MAX_PROFILE_BODY: usize = 512 * 1024;
 const FIVE_HOURS: u64 = 18_000;
 const SEVEN_DAYS: u64 = 604_800;
 
@@ -25,6 +29,7 @@ pub(crate) fn execute(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<AllowanceResponse, PluginError> {
+    let access_token = access_token(provider)?;
     let response = host.http_start(HttpRequest {
         method: "GET".into(),
         url: USAGE_URL.into(),
@@ -33,10 +38,7 @@ pub(crate) fn execute(
             ("anthropic-beta".into(), USAGE_BETAS.into()),
             ("content-type".into(), "application/json".into()),
             ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
-            (
-                "authorization".into(),
-                format!("Bearer {}", access_token(provider)?),
-            ),
+            ("authorization".into(), format!("Bearer {access_token}")),
         ],
         body: Vec::new(),
     })?;
@@ -50,10 +52,131 @@ pub(crate) fn execute(
         .map_err(|_| retryable("Claude usage returned invalid JSON"))?;
     let mut response = parse(&payload)
         .ok_or_else(|| retryable("Claude usage response has no allowance windows"))?;
+    // 订阅等级不在 usage 响应里；Claude Code 自己登录/刷新时也向
+    // `/api/oauth/profile` 取 `organization_type` 与 `rate_limit_tier`。
+    // 该接口失败不影响额度展示，因此失败时保持 None。
+    response.plan_label = fetch_plan_label(host, access_token);
     // 只取登录时保存的邮箱；`organization_name` 是组织名，不是账号标识。
     response.account_label =
         first_account_label([provider.credentials.get("email").and_then(Value::as_str)]);
     Ok(response)
+}
+
+/// 取订阅等级。profile 接口只用于展示，失败或无 `user:profile` 权限时降级为
+/// `None`，不让一次附加请求拖垮额度刷新。
+fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
+    let response = host
+        .http_start(HttpRequest {
+            method: "GET".into(),
+            url: PROFILE_URL.into(),
+            headers: vec![
+                ("accept".into(), "application/json, text/plain, */*".into()),
+                ("anthropic-beta".into(), "oauth-2025-04-20".into()),
+                ("content-type".into(), "application/json".into()),
+                ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
+                ("authorization".into(), format!("Bearer {access_token}")),
+            ],
+            body: Vec::new(),
+        })
+        .ok()?;
+    if !(200..300).contains(&response.status().ok()?) {
+        return None;
+    }
+    let body = read_http_body(&response, MAX_PROFILE_BODY).ok()?;
+    profile_plan_label(&serde_json::from_slice(&body).ok()?)
+}
+
+/// 依据 `/api/oauth/profile` 判定订阅等级。
+///
+/// Claude Code 客户端 `fetchProfileInfo` 把 `organization.organization_type` 映射为
+/// `claude_max` → max、`claude_pro` → pro、`claude_team` → team、
+/// `claude_enterprise` → enterprise；Max 的 5x/20x 倍率只出现在
+/// `organization.rate_limit_tier`（`default_claude_max_5x` / `_20x`）。
+/// 组织字段缺失时按 `rate_limit_tier`、再按账号的 `has_claude_max` /
+/// `has_claude_pro` 兜底；两个布尔值都明确为 false 时才是 Free。
+fn profile_plan_label(profile: &Value) -> Option<String> {
+    let organization = profile.get("organization");
+    let organization_type = organization
+        .and_then(|value| value.get("organization_type"))
+        .and_then(non_empty);
+    let rate_limit_tier = organization
+        .and_then(|value| value.get("rate_limit_tier"))
+        .and_then(non_empty);
+    if let Some(plan) = organization_type.and_then(plan_from_organization) {
+        return max_plan_label(plan, rate_limit_tier);
+    }
+    if let Some(tier) = rate_limit_tier
+        && let Some(label) = plan_from_rate_limit_tier(tier)
+    {
+        return Some(label);
+    }
+    let account = profile.get("account");
+    let flag = |field: &str| {
+        account
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_bool)
+    };
+    match (flag("has_claude_max"), flag("has_claude_pro")) {
+        (Some(true), _) => max_plan_label("max", rate_limit_tier),
+        (_, Some(true)) => display_name("pro"),
+        (Some(false), Some(false)) => display_name("free"),
+        _ => None,
+    }
+}
+
+fn plan_from_organization(organization_type: &str) -> Option<&'static str> {
+    match organization_type.trim().to_ascii_lowercase().as_str() {
+        "claude_max" => Some("max"),
+        "claude_pro" => Some("pro"),
+        "claude_team" => Some("team"),
+        "claude_enterprise" => Some("enterprise"),
+        _ => None,
+    }
+}
+
+/// 只有组织类型缺失时才直接读 tier；Team Premium 也会带
+/// `default_claude_max_5x`，所以有组织类型时必须优先信组织类型。
+fn plan_from_rate_limit_tier(rate_limit_tier: &str) -> Option<String> {
+    let tier = rate_limit_tier.trim().to_ascii_lowercase();
+    if tier.contains("max") {
+        return max_plan_label("max", Some(rate_limit_tier));
+    }
+    if tier.contains("pro") {
+        return display_name("pro");
+    }
+    if tier.contains("team") {
+        return display_name("team");
+    }
+    if tier.contains("enterprise") {
+        return display_name("enterprise");
+    }
+    None
+}
+
+fn max_plan_label(plan: &str, rate_limit_tier: Option<&str>) -> Option<String> {
+    if plan != "max" {
+        return display_name(plan);
+    }
+    let machine = match rate_limit_tier.and_then(max_multiplier) {
+        Some(multiplier) => format!("max_{multiplier}"),
+        None => "max".into(),
+    };
+    display_name(&machine)
+}
+
+/// `default_claude_max_5x` / `default_claude_max_20x` 中 `max` 后面的倍率。
+/// 只接受 `<数字>x`，避免把其它 tier 词误当成倍率。
+fn max_multiplier(rate_limit_tier: &str) -> Option<String> {
+    let mut words = rate_limit_tier
+        .split(['_', '-'])
+        .filter(|word| !word.is_empty());
+    words.find(|word| word.eq_ignore_ascii_case("max"))?;
+    let multiplier = words.next()?.to_ascii_lowercase();
+    let digits = multiplier.strip_suffix('x')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(multiplier)
 }
 
 fn parse(payload: &Value) -> Option<AllowanceResponse> {
@@ -306,5 +429,79 @@ mod tests {
         assert_eq!(keys, ["5h", "7d"]);
         assert_eq!(response.allowances[0].used_percent.as_deref(), Some("12.5"));
         assert!(parse(&json!({"spend": {"enabled": false}})).is_none());
+    }
+
+    #[test]
+    fn profile_plan_label_uses_organization_and_max_multiplier() {
+        let profile = |organization_type: &str, rate_limit_tier: &str| {
+            json!({
+                "account": {"uuid": "acc", "has_claude_max": false, "has_claude_pro": false},
+                "organization": {
+                    "uuid": "org",
+                    "organization_type": organization_type,
+                    "rate_limit_tier": rate_limit_tier
+                }
+            })
+        };
+        assert_eq!(
+            profile_plan_label(&profile("claude_max", "default_claude_max_20x")).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            profile_plan_label(&profile("claude_max", "default_claude_max_5x")).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            profile_plan_label(&profile("claude_max", "")).as_deref(),
+            Some("Max")
+        );
+        assert_eq!(
+            profile_plan_label(&profile("claude_pro", "default_claude_pro")).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            profile_plan_label(&profile("claude_team", "default_claude_team")).as_deref(),
+            Some("Team")
+        );
+        // Team Premium 也带 max_5x tier，组织类型必须优先，不能误报成 Max。
+        assert_eq!(
+            profile_plan_label(&profile("claude_team", "default_claude_max_5x")).as_deref(),
+            Some("Team")
+        );
+        assert_eq!(
+            profile_plan_label(&profile("claude_enterprise", "default_claude_enterprise"))
+                .as_deref(),
+            Some("Enterprise")
+        );
+    }
+
+    #[test]
+    fn profile_plan_label_falls_back_to_flags_and_rejects_unknown() {
+        let profile = |account: Value, organization: Value| json!({"account": account, "organization": organization});
+        assert_eq!(
+            profile_plan_label(&profile(
+                json!({"has_claude_max": true, "has_claude_pro": true}),
+                json!({"rate_limit_tier": "default_claude_max_5x"})
+            ))
+            .as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            profile_plan_label(&profile(json!({"has_claude_pro": true}), json!({}))).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            profile_plan_label(&profile(
+                json!({"has_claude_max": false, "has_claude_pro": false}),
+                json!({"organization_type": "claude_free"})
+            ))
+            .as_deref(),
+            Some("Free")
+        );
+        assert_eq!(
+            profile_plan_label(&profile(json!({"has_claude_pro": false}), json!({}))),
+            None
+        );
+        assert_eq!(profile_plan_label(&json!({})), None);
     }
 }

@@ -668,9 +668,17 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
     'false',
   )
 
+  // 套餐不在标题行展示；展开详情后与账号同一行，位于账号右侧
+  await expect(page.getByTestId('allowance-provider-provider-alpha')).not.toContainText('Pro')
   await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
   // 详情只展示上游账号标识；供应商目录 ID / 渠道不再展示，没有标识的供应商不出现该行
   await expect(page.getByTestId('allowance-account-provider-alpha')).toHaveText('alpha@example.test')
+  const planDetail = page.getByTestId('allowance-plan-provider-alpha')
+  await expect(planDetail).toHaveText('Plan: Pro')
+  const accountBox = await page.getByTestId('allowance-account-provider-alpha').boundingBox()
+  const planBox = await planDetail.boundingBox()
+  expect(planBox!.x).toBeGreaterThan(accountBox!.x + accountBox!.width)
+  expect(Math.abs(planBox!.y - accountBox!.y)).toBeLessThan(accountBox!.height)
   await expect(matrix.getByText('Account', { exact: true })).toHaveCount(1)
   await expect(matrix.getByText('openai-codex / codex')).toHaveCount(0)
   await matrix.getByLabel('Show model allowances for Alpha account').click()

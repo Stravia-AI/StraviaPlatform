@@ -1,12 +1,16 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceItem, AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost, HttpRequest,
     PluginError, ProviderSnapshot, read_http_body,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_USER_BYTES: usize = 64 * 1024;
 const ALLOWANCE_URL: &str = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+const USER_URL: &str = "https://cli-chat-proxy.grok.com/v1/user?include=subscription";
 
 pub(crate) fn execute(
     host: &GuestHost,
@@ -37,12 +41,49 @@ pub(crate) fn execute(
     check_grpc_status(&headers)?;
     let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
     let mut parsed = parse_xai(&body, current_unix_ms()?).map_err(|()| invalid_response())?;
+    // 额度接口只返回用量百分比与账期，不含订阅等级；官方 grok-build 在额度页
+    // 另外请求 cli-chat-proxy 的 `/user?include=subscription` 读取
+    // `subscriptionTier`（如 SuperGrokPro、X Premium），这里沿用同一来源。
+    // 附加请求失败（例如凭据是 API key）只影响等级展示，不拖垮额度刷新。
+    parsed.plan_label = fetch_plan_label(host, credential);
     // 额度接口不返回身份；`email` 在登录或刷新令牌时从 id_token 保存，旧凭据下次刷新后才有。
     parsed.account_label = stravia_vendor_common::account::first_account_label([provider
         .credentials
         .get("email")
         .and_then(serde_json::Value::as_str)]);
     Ok(parsed)
+}
+
+/// 订阅等级不在 GetGrokCreditsConfig 的响应里：官方客户端把
+/// `/user?include=subscription` 的 `subscriptionTier` 作为实时等级。没有有效订阅时
+/// 服务端不返回该字段，因此缺省、空值或请求失败都降级为 None。
+fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
+    let response = host
+        .http_start(HttpRequest {
+            method: "GET".into(),
+            url: USER_URL.into(),
+            headers: vec![
+                ("accept".into(), "application/json".into()),
+                ("authorization".into(), format!("Bearer {access_token}")),
+                ("x-xai-token-auth".into(), "xai-grok-cli".into()),
+                (
+                    "x-grok-client-version".into(),
+                    crate::XAI_CLIENT_VERSION.into(),
+                ),
+            ],
+            body: Vec::new(),
+        })
+        .ok()?;
+    if !(200..300).contains(&response.status().ok()?) {
+        return None;
+    }
+    let body = read_http_body(&response, MAX_USER_BYTES).ok()?;
+    plan_label(&serde_json::from_slice(&body).ok()?)
+}
+
+/// `/user` 的 `subscriptionTier` 是上游自己的等级串；仅做去空白与机器标识整理。
+fn plan_label(user: &Value) -> Option<String> {
+    display_name(user.get("subscriptionTier").and_then(Value::as_str)?)
 }
 
 fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
@@ -359,5 +400,42 @@ fn error(kind: ErrorKind, message: &str, upstream_status: Option<u16>) -> Plugin
         kind,
         message: message.into(),
         upstream_status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_label;
+    use serde_json::json;
+
+    /// 形状取自官方 grok-build 的 `UserInfo`：`/v1/user?include=subscription`
+    /// 在有有效订阅时返回 `subscriptionTier`，无订阅时整个字段缺省。
+    #[test]
+    fn plan_label_comes_from_the_user_subscription_tier() {
+        let subscribed = json!({
+            "userId": "u-1",
+            "email": "a@example.test",
+            "subscriptionTier": "SuperGrokPro"
+        });
+        assert_eq!(plan_label(&subscribed).as_deref(), Some("SuperGrokPro"));
+        assert_eq!(
+            plan_label(&json!({"userId": "u-2", "subscriptionTier": "X Premium+"})).as_deref(),
+            Some("X Premium+")
+        );
+    }
+
+    #[test]
+    fn machine_subscription_tier_becomes_readable() {
+        assert_eq!(
+            plan_label(&json!({"subscriptionTier": " grok_pro "})).as_deref(),
+            Some("Grok Pro")
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_subscription_tier_has_no_plan() {
+        assert_eq!(plan_label(&json!({"userId": "u-3"})), None);
+        assert_eq!(plan_label(&json!({"subscriptionTier": null})), None);
+        assert_eq!(plan_label(&json!({"subscriptionTier": "  "})), None);
     }
 }

@@ -29,6 +29,9 @@ pub(super) fn parse(value: Value) -> Result<AllowanceResponse, PluginError> {
             condition: None,
         }],
         models: Vec::new(),
+        // 余额接口与登录时的 /api/profile 都不返回套餐、档位或订阅字段；
+        // Kilo Pass 只暴露 tier_19 这类价格档位 ID（需网页端自己的映射），
+        // 属于不透明 ID，按规则不写入 plan_label。
         plan_label: None,
         account_label: None,
     })

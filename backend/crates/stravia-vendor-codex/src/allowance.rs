@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
+use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot,
@@ -160,7 +161,11 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
     Some(AllowanceResponse {
         allowances,
         models: Vec::new(),
-        plan_label: None,
+        // live wham/usage 响应顶层带 `plan_type`（如 `pro`）；`plus`、`team` 等同为机器小写值。
+        plan_label: object
+            .get("plan_type")
+            .and_then(Value::as_str)
+            .and_then(display_name),
         account_label: None,
     })
 }
@@ -330,6 +335,20 @@ mod tests {
         assert_eq!(account_label(&opaque), None);
         let broken = BTreeMap::from([("raw".to_owned(), json!({"id_token": "not-a-jwt"}))]);
         assert_eq!(account_label(&broken), None);
+    }
+
+    #[test]
+    fn plan_label_comes_from_the_usage_plan_type() {
+        let with_plan = parse(
+            br#"{"plan_type":"pro","rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":3}}}"#,
+        )
+        .unwrap();
+        assert_eq!(with_plan.plan_label.as_deref(), Some("Pro"));
+        let without_plan = parse(
+            br#"{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":3}}}"#,
+        )
+        .unwrap();
+        assert_eq!(without_plan.plan_label, None);
     }
 
     fn assert_credits(amount: &AllowanceAmount, value: &str) {

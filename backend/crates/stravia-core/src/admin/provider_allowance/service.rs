@@ -436,7 +436,7 @@ async fn allowance_target(
         suspension,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
-        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        catalog_provider_id: provider_type_id(provider),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         snapshot,
         refreshing,
@@ -1046,7 +1046,7 @@ fn map_allowance_response(
         suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
-        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        catalog_provider_id: provider_type_id(provider),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: trimmed_label(response.plan_label),
         account_label: trimmed_label(response.account_label),
@@ -1062,6 +1062,18 @@ fn trimmed_label(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// 额度页以它归类“供应商类型”：优先目录 preset；没有目录条目的 Vendor（如
+/// Antigravity）退回 vendor id，避免列表出现空前缀的 ` / oauth`。
+fn provider_type_id(provider: &Provider) -> String {
+    [provider.preset_key.as_deref(), provider.vendor.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn map_allowance(item: stravia_vendor_sdk::AllowanceItem) -> anyhow::Result<Allowance> {
@@ -1422,7 +1434,7 @@ fn error_snapshot(provider: &Provider, error: ProviderAllowanceError) -> Provide
         suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
-        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        catalog_provider_id: provider_type_id(provider),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: None,
         account_label: None,
@@ -1448,7 +1460,7 @@ fn stale_or_error_snapshot(
         suspension: None,
         provider_id: provider.id.clone(),
         provider_name: provider.name.clone(),
-        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        catalog_provider_id: provider_type_id(provider),
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: previous.plan_label.clone(),
         account_label: previous.account_label.clone(),
@@ -1463,6 +1475,42 @@ fn stale_or_error_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider_with(preset_key: Option<&str>, vendor: Option<&str>) -> Provider {
+        Provider {
+            id: "provider".into(),
+            name: "Provider".into(),
+            vendor: vendor.map(str::to_owned),
+            protocol: "openai-compatible".into(),
+            base_url: "http://localhost".into(),
+            preset_key: preset_key.map(str::to_owned),
+            channel: None,
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+            last_test_success: None,
+            last_test_at: None,
+            is_enabled: true,
+            credential_status: "ok".into(),
+            credential_invalid_at: None,
+            revision: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn provider_type_prefers_preset_then_vendor_and_never_blank() {
+        let type_id = |preset, vendor| provider_type_id(&provider_with(preset, vendor));
+        assert_eq!(type_id(Some("openai"), Some("openai-codex")), "openai");
+        assert_eq!(type_id(None, Some("antigravity")), "antigravity");
+        assert_eq!(type_id(Some("  "), Some(" antigravity ")), "antigravity");
+        assert_eq!(type_id(None, None), "");
+    }
 
     fn cached_snapshot(status: ProviderAllowanceStatus) -> ProviderAllowanceSnapshot {
         ProviderAllowanceSnapshot {

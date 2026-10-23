@@ -124,7 +124,11 @@ async fn upstream(
             }
         }
         "/v1internal:loadCodeAssist" => {
-            json!({"allowedTiers":[{"id":"account-default","isDefault":true}]})
+            // currentTier 只是产品名；订阅在 paidTier（与 live 响应一致）。
+            json!({
+                "allowedTiers":[{"id":"account-default","isDefault":true}],
+                "paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}
+            })
         }
         "/v1internal:onboardUser" => json!({"name":"operations/account-onboarding","done":false}),
         "/v1internal/operations/account-onboarding" => {
@@ -777,6 +781,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     };
     assert_eq!(quota.allowances.len(), 1);
     assert_eq!(quota.allowances[0].used_percent.as_deref(), Some("30"));
+    assert_eq!(quota.plan_label.as_deref(), Some("Google AI Pro"));
     let AuthResponse::Credentials { values, .. } =
         auth(&runtime, &plugin, &services, &provider, AuthStep::Refresh).await
     else {
