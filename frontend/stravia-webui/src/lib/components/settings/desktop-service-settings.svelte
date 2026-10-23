@@ -40,6 +40,8 @@ let portDraft = $state<string>()
 let validationError = $state<string>()
 let operationError = $state<DesktopPortOperationError>()
 let saving = $state(false)
+let portSaved = $state(false)
+let portSavedTimer: ReturnType<typeof setTimeout> | undefined
 let rechecking = $state(false)
 let confirmationOpen = $state(false)
 let pendingPort = $state<number>()
@@ -75,6 +77,7 @@ function parsePort(value: string): number | undefined {
 
 function setPortDraft(value: string): void {
   portDraft = value
+  portSaved = false
   validationError = undefined
   operationError = undefined
 }
@@ -132,6 +135,9 @@ async function savePort(port: number): Promise<void> {
     const nextState = await setDesktopFixedPort(port)
     queryClient.setQueryData(['desktop-port-state'], nextState)
     portDraft = undefined
+    portSaved = true
+    clearTimeout(portSavedTimer)
+    portSavedTimer = setTimeout(() => (portSaved = false), 2400)
   } catch (error) {
     operationError = asDesktopPortOperationError(error)
     if (operationError?.ownerLookup === 'identifying') void portQuery.refetch()
@@ -243,8 +249,11 @@ async function copyLanUrl(): Promise<void> {
             oninput={(event: Event) => setPortDraft(inputValue(event))}
             onkeydown={onPortKeydown} />
         </InputGroup.Root>
-        {#if portDirty || saving || (portState.mode === 'fallback' && portState.fixedPort != null)}
+        {#if portDirty || saving || portSaved || (portState.mode === 'fallback' && portState.fixedPort != null)}
           <div class="flex flex-wrap items-center justify-end gap-2">
+            {#if portSaved && !portDirty && !saving}
+              <span class="text-xs text-muted-foreground" role="status">{m.common_saved()}</span>
+            {/if}
             {#if portDirty || saving}
               <Button
                 size="sm"

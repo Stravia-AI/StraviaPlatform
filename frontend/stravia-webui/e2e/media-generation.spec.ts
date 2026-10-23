@@ -278,7 +278,7 @@ test('media generation unlink Sheet locks submit, cancel and close while saving'
   await page.goto('/media-generation')
   await page.getByRole('button', { name: 'Unlink image route', exact: true }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
-  const submit = sheet.getByRole('button', { name: 'Unlink route', exact: true })
+  const submit = sheet.getByRole('button', { name: /Unlink route/ })
   await submit.click()
   await expect(submit).toBeDisabled()
   await expect(submit).toHaveAttribute('aria-busy', 'true')

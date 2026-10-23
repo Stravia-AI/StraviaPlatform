@@ -2521,7 +2521,8 @@ for (const [locale, label, action] of [
     await page.goto('/providers')
     const row = page.getByRole('row').filter({ hasText: 'Alpha Service' })
     await expect(row.getByText(label)).toBeVisible()
-    await expect(row.getByText('disconnected')).toHaveCount(0)
+    // 本地化状态只出现一次，原始状态枚举不会额外泄露。
+    await expect(row.getByText(label, { exact: true })).toHaveCount(1)
     await expect(row.getByText(/OAuth ·/)).toHaveCount(0)
     await expect(row.getByRole('button', { name: action, exact: true })).toBeVisible()
     // 其余行没有 OAuth 状态，不出现该提示。

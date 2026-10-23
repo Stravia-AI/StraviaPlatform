@@ -138,7 +138,7 @@ test('external signed downloads and S3 storage take effect only after their shee
   await external.click()
   await expect(sheet.getByLabel('File public access address')).toHaveValue('https://objects.example/storage')
   await sheet.getByLabel('File public access address').fill('https://downloads.example/objects')
-  await sheet.getByRole('button', { name: 'Enable external downloads', exact: true }).click()
+  await sheet.getByRole('button', { name: 'Enable external signed downloads', exact: true }).click()
   await expect(sheet).toHaveCount(0)
   await expect(external).toBeChecked()
   expect(saved).toMatchObject({
@@ -905,7 +905,7 @@ test('media understanding Sheet locks submit, cancel and close while saving', as
   const sheet = page.locator('[data-slot="sheet-content"]')
   await sheet.locator('#media-thinking-level').click()
   await page.getByRole('option', { name: 'medium', exact: true }).click()
-  const save = sheet.getByRole('button', { name: 'Save understanding model', exact: true })
+  const save = sheet.getByRole('button', { name: /Save understanding model/ })
   await save.click()
   await expect(save).toBeDisabled()
   await expect(save).toHaveAttribute('aria-busy', 'true')
