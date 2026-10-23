@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type Page } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 import { prepareApp } from './prepare-app'
 
@@ -356,31 +356,38 @@ test.describe('Not found', () => {
 })
 
 test.describe('Global error', () => {
-  async function pageNodes(browser: Browser, path: string): Promise<Set<string>> {
-    const context = await browser.newContext()
-    const probe = await context.newPage()
-    await prepareApp(probe)
-    const urls = new Set<string>()
-    probe.on('request', (request) => {
-      if (/\/nodes\/[^/]+\.js$/.test(new URL(request.url()).pathname)) urls.add(request.url())
-    })
-    await probe.goto(path)
-    await probe.waitForLoadState('networkidle')
-    await context.close()
-    return urls
-  }
-
-  async function statsNode(browser: Browser): Promise<string> {
-    const [home, stats] = [await pageNodes(browser, '/'), await pageNodes(browser, '/stats')]
-    const own = [...stats].filter((url) => !home.has(url))
-    expect(own).toHaveLength(1)
-    return own[0]
-  }
-
-  test('shows a localized safe reason beside the status, and reload and home recover', async ({ browser, page }) => {
-    const node = await statsNode(browser)
+  // 路由代码块由浏览器在客户端导航时按需加载；读取它自己的 resource timing，
+  // 不猜文件名，也不依赖 networkidle。
+  async function statsNodes(page: Page): Promise<string[]> {
+    const scriptUrls = () =>
+      page.evaluate(() =>
+        performance
+          .getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .filter((name) => /\/nodes\/[^/]+\.js$/.test(new URL(name).pathname)),
+      )
     await prepareApp(page)
-    await page.route(node, (route) => route.abort())
+    await page.goto('/')
+    await expect(page.getByRole('heading', { level: 1, name: 'New conversation', exact: true })).toBeVisible()
+    const before = new Set(await scriptUrls())
+    await page
+      .getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('link', { name: 'Usage', exact: true })
+      .click()
+    await expect(page.getByRole('heading', { level: 1, name: 'Usage statistics', exact: true })).toBeVisible()
+    const nodes = (await scriptUrls()).filter((url) => !before.has(url))
+    expect(nodes.length).toBeGreaterThan(0)
+    return nodes
+  }
+
+  async function blockStatsNodes(page: Page, handler: (route: Route) => unknown): Promise<string[]> {
+    const nodes = await statsNodes(page)
+    for (const node of nodes) await page.route(node, handler)
+    return nodes
+  }
+
+  test('shows a localized safe reason beside the status, and reload and home recover', async ({ page }) => {
+    const nodes = await blockStatsNodes(page, (route) => route.abort())
     await page.setViewportSize({ width: 390, height: 844 })
     await page.goto('/stats')
 
@@ -398,7 +405,7 @@ test.describe('Global error', () => {
       page.getByText('Reload the page. If the problem continues, check that Stravia is running and try again.'),
     ).toBeVisible()
     await expect(page.locator('body')).not.toContainText('dynamically imported module')
-    await expect(page.locator('body')).not.toContainText(node)
+    for (const node of nodes) await expect(page.locator('body')).not.toContainText(node)
     await expectContainedHorizontally(page)
 
     await page.setViewportSize({ width: 1440, height: 900 })
@@ -411,19 +418,14 @@ test.describe('Global error', () => {
     expect(reloaded.url()).toContain('/stats')
     await expect(heading).toBeVisible()
 
-    await page.unroute(node)
+    for (const node of nodes) await page.unroute(node)
     await page.getByRole('link', { name: 'Go to overview' }).click()
     await expect(page).toHaveURL(/\/$/)
     await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible()
   })
 
-  test('falls back to the generic recovery text without echoing sensitive exception details', async ({
-    browser,
-    page,
-  }) => {
-    const node = await statsNode(browser)
-    await prepareApp(page)
-    await page.route(node, (route) =>
+  test('falls back to the generic recovery text without echoing sensitive exception details', async ({ page }) => {
+    await blockStatsNodes(page, (route) =>
       route.fulfill({
         contentType: 'text/javascript',
         body: "throw new Error('connect ECONNREFUSED postgres://admin:hunter2@10.0.0.5:5432/stravia')",

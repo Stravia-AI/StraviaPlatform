@@ -2512,8 +2512,8 @@ test('Provider list at 2560px is 1920px wide, keeps filling the remaining height
 })
 
 for (const [locale, label, action] of [
-  ['en-US', 'Signed out', 'Reauthorize'],
-  ['zh-CN', '已退出登录', '重新授权'],
+  ['en-US', 'Disconnected', 'Reauthorize'],
+  ['zh-CN', '已断开', '重新授权'],
 ] as const) {
   test(`OAuth Provider state is a localized recoverable credential state (${locale})`, async ({ page }) => {
     await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
@@ -2571,9 +2571,7 @@ test('Add provider Sheet keeps one width across both steps and uses a flat proxy
   await expect(page.getByRole('switch', { name: 'Use proxy' })).toBeVisible()
 })
 
-test('Add provider draft asks before every close path and keeps OAuth cancellation out of the way', async ({
-  page,
-}) => {
+test('Add provider draft asks before every close path', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/providers')
   const dialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
@@ -2853,8 +2851,9 @@ test('Provider connection form keeps one right edge at 60rem and shows the side 
   const proxyRow = page
     .locator('[data-slot="setting-row"]')
     .filter({ has: page.getByRole('switch', { name: 'Use proxy' }) })
-  await expect(proxyRow.locator('[data-slot="field-hint"]')).toHaveCount(1)
-  await expect(page.getByText('Send requests to this service through the proxy configured in Settings.')).toBeHidden()
+  // 代理数据流向是常驻 Description，不再进问号。
+  await expect(proxyRow).toContainText('Send requests to this service through the proxy configured in Settings.')
+  await expect(proxyRow.locator('[data-slot="field-hint"]')).toHaveCount(0)
 
   // 辅助栏：只含真实状态，位于表单右侧、与表单顶部对齐。
   const aside = page.getByRole('complementary', { name: 'Connection status' })

@@ -320,7 +320,11 @@ test.describe('custom rule Sheet', () => {
     // 没有常驻说明文字：标题之外既无 Sheet 描述也无字段说明。
     await expect(sheet.locator('[data-slot="sheet-description"]')).toHaveCount(0)
     await expect(sheet.locator('[data-slot="field-description"]')).toHaveCount(0)
-    await sheet.getByRole('button', { name: 'More about this field' }).first().focus()
+    const helps = sheet.getByRole('button', { name: 'More about this field' })
+    await helps.first().focus()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Type the text to protect')
+    await page.keyboard.press('Escape')
+    await helps.nth(1).focus()
     await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('Case-sensitive and matched as typed')
     await page.keyboard.press('Escape')
     await sheet.getByRole('tab', { name: 'Rule' }).click()
@@ -380,6 +384,35 @@ test.describe('custom rule Sheet', () => {
     await expect(sheet).toBeHidden()
     await page.getByRole('button', { name: /Staging token/ }).click()
     await expect(sheet.getByLabel('Text to protect')).toHaveAttribute('data-revealed', 'false')
+  })
+
+  test('keeps the editor and typed secret when an edit fails', async ({ page }) => {
+    const state = await mockRedaction(page, { custom: [savedRule] })
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/reversible-redaction')
+    await page.getByRole('button', { name: 'Internal token' }).click()
+    const sheet = sheetOf(page)
+    await expect(sheet.getByRole('heading', { name: 'Edit custom rule' })).toBeVisible()
+    await sheet.getByLabel('Rule name').fill('Renamed token')
+    await sheet.getByRole('button', { name: 'Show secret' }).click()
+    const secret = sheet.getByLabel('Text to protect')
+    await secret.fill('renamed-secret-value')
+
+    state.failNextWrite = { status: 503, json: { error: 'Fixture edit unavailable' } }
+    await sheet.getByRole('button', { name: 'Save rule' }).click()
+    await expect(sheet.getByRole('alert').filter({ hasText: 'Fixture edit unavailable' })).toBeVisible()
+    await expect(sheet).toBeVisible()
+    await expect(sheet.getByLabel('Rule name')).toHaveValue('Renamed token')
+    await expect(secret).toHaveValue('renamed-secret-value')
+    expect(state.writes.at(-1)).toMatchObject({
+      method: 'PUT',
+      path: '/api/v1/reversible-redaction/custom-rules/custom-1',
+      body: { name: 'Renamed token', spec: { mode: 'simple', text: 'renamed-secret-value' } },
+    })
+
+    await sheet.getByRole('button', { name: 'Save rule' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(page.getByRole('button', { name: /Renamed token/ })).toBeVisible()
   })
 
   test('keeps the editor when a delete fails and removes the named rule when it succeeds', async ({ page }) => {
