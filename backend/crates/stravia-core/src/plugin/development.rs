@@ -6,7 +6,6 @@ use sha2::{Digest, Sha256};
 
 use crate::Gateway;
 
-use super::builtin::BundledPlugins;
 use super::{ConfirmPluginUpdate, PluginSource};
 
 #[derive(Deserialize)]
@@ -27,7 +26,7 @@ pub(crate) async fn reconcile(gw: &Gateway, manifest: &Path) -> anyhow::Result<(
     // 先建立专属归属，避免 base 更新把专属连接误判成自己的旧数据。
     records.sort_by_key(|record| record.vendor_id == "base");
     let installed = gw.vendor_plugins.store.list().await?;
-    let bundled = BundledPlugins::load().await?;
+    let bundled = gw.vendor_plugins.bundled();
     for record in records {
         if installed
             .iter()

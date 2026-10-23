@@ -21,11 +21,15 @@ tokio = { workspace = true, features = ["sync", "time", "macros"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 async-trait = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 stravia-runtime-contract = { workspace = true }
 stravia-vendor-sdk = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 wasmprinter = { workspace = true }
 wat = { workspace = true }

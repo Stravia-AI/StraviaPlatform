@@ -74,7 +74,8 @@ pub async fn check_sqlite_source_history(
     connection: &mut sqlx::SqliteConnection<'_>,
 ) -> anyhow::Result<()> {
     let mut runner = unlocked_runner(&SQLITE_MIGRATOR);
-    reject_incompatible_sqlite(connection, &mut runner).await
+    reject_incompatible_sqlite(connection, &mut runner).await?;
+    Ok(())
 }
 
 struct SqliteMigrationConnection {
@@ -90,12 +91,27 @@ impl Drop for SqliteMigrationConnection {
     }
 }
 
+/// 轻量启动路径不会关闭外键约束；仍确保连接以开启状态回到池中。
+async fn ensure_sqlite_foreign_keys(
+    connection: &mut sqlx::SqliteConnection<'_>,
+) -> anyhow::Result<()> {
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *connection)
+        .await?;
+    let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(&mut *connection)
+        .await?;
+    ensure!(enabled == 1, "SQLite foreign keys could not be enabled");
+    Ok(())
+}
+
 /// 应用受支持的增量迁移并转换历史数据。旧 Debug manifest 非空时必须提供诊断目录。
 pub async fn migrate_sqlite(pool: &SqlitePool, diagnostics: Option<&Path>) -> anyhow::Result<()> {
     run_sqlite_migrator(pool, &SQLITE_MIGRATOR, diagnostics).await
 }
 
 /// Used by the isolated schema exporter with its runtime-resolved migration directory.
+/// 已完整升级时只校验历史并保持外键开启，不执行全库外键扫描或历史转换。
 pub async fn run_sqlite_migrator(
     pool: &SqlitePool,
     migrator: &Migrator,
@@ -105,17 +121,38 @@ pub async fn run_sqlite_migrator(
     tracing::info!(backend = "sqlite", "Starting database migration");
     report(
         "migration_validate",
-        "Checking database migration history",
+        "Waiting for database migration lock",
         0,
         None,
     );
     let mut pinned = SqliteMigrationConnection {
         connection: pool.acquire().await?,
-        // Arm before the first await which can disable FK enforcement.
+        // 保守标记：迁移会话可能执行过 PRAGMA foreign_keys=OFF，失败或取消时必须关闭连接。
         foreign_keys_may_be_off: true,
     };
     let mut runner = unlocked_runner(migrator);
-    reject_incompatible_sqlite(&mut pinned.connection, &mut runner).await?;
+    Migrate::lock(&mut *pinned.connection).await?;
+    report(
+        "migration_validate",
+        "Checking database migration history",
+        0,
+        None,
+    );
+    let applied = reject_incompatible_sqlite(&mut pinned.connection, &mut runner).await?;
+    // 仅在历史校验成功且已覆盖当前列表时跳过升级工作。
+    if applied == runner.iter().count() {
+        // 已完整升级：不关闭外键约束、不扫描全部业务表，也不运行没有待处理工作的历史转换。
+        ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
+        Migrate::unlock(&mut *pinned.connection).await?;
+        pinned.foreign_keys_may_be_off = false;
+        tracing::info!(
+            backend = "sqlite",
+            applied_migrations = applied,
+            elapsed_ms = started.elapsed().as_millis(),
+            "Database migration history is current; skipped full database verification"
+        );
+        return Ok(());
+    }
     let existing_violations: Vec<(String, i64, String, i64)> =
         sqlx::query_as("PRAGMA foreign_key_check")
             .fetch_all(&mut *pinned.connection)
@@ -127,13 +164,6 @@ pub async fn run_sqlite_migrator(
     sqlx::query("PRAGMA foreign_keys=OFF")
         .execute(&mut *pinned.connection)
         .await?;
-    report(
-        "migration_validate",
-        "Waiting for database migration lock",
-        0,
-        None,
-    );
-    Migrate::lock(&mut *pinned.connection).await?;
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner
@@ -189,13 +219,7 @@ pub async fn run_sqlite_migrator(
         violations.is_empty(),
         "migration created foreign key violations: {violations:?}"
     );
-    sqlx::query("PRAGMA foreign_keys=ON")
-        .execute(&mut *pinned.connection)
-        .await?;
-    let restored: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
-        .fetch_one(&mut *pinned.connection)
-        .await?;
-    ensure!(restored == 1, "SQLite foreign keys could not be restored");
+    ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
     Migrate::unlock(&mut *pinned.connection).await?;
     pinned.foreign_keys_may_be_off = false;
     tracing::info!(
@@ -212,6 +236,7 @@ pub async fn migrate_postgres(pool: &PgPool, diagnostics: Option<&Path>) -> anyh
 }
 
 /// Isolate SQLx's session-level advisory lock, including in schema exports.
+/// 已完整升级时只校验历史，不执行历史转换。
 pub async fn run_postgres_migrator(
     pool: &PgPool,
     migrator: &Migrator,
@@ -237,7 +262,25 @@ pub async fn run_postgres_migrator(
         None,
     );
     let mut runner = unlocked_runner(migrator);
-    reject_incompatible_postgres(&mut connection, &mut runner).await?;
+    let applied = reject_incompatible_postgres(&mut connection, &mut runner).await?;
+    // 在 advisory lock 内判定，避免与其他启动实例交错。
+    if applied == runner.iter().count() {
+        // 已完整升级：不再执行没有待处理工作的历史转换或重复校验。
+        report(
+            "migration_verify",
+            "Releasing database migration lock",
+            0,
+            None,
+        );
+        Migrate::unlock(&mut *connection).await?;
+        tracing::info!(
+            backend = "postgres",
+            applied_migrations = applied,
+            elapsed_ms = started.elapsed().as_millis(),
+            "Database migration history is current; skipped history conversions"
+        );
+        return Ok(());
+    }
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner.run_direct(Some(6), &mut *connection, false).await?;
@@ -290,10 +333,11 @@ pub async fn run_postgres_migrator(
     Ok(())
 }
 
+/// 校验历史兼容性，并返回连续成功应用的迁移数量；该数量用于判定是否已完整升级。
 async fn reject_incompatible_sqlite(
     connection: &mut sqlx::SqliteConnection<'_>,
     migrator: &mut Migrator,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let has_history: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations')")
         .fetch_one(&mut *connection)
     .await?;
@@ -312,6 +356,7 @@ async fn reject_incompatible_sqlite(
             ensure!(tables == 0, "{UNRECOGNIZED_TABLES}");
         }
         supported_history(&rows, migrator)?;
+        Ok(rows.len())
     } else {
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
@@ -319,14 +364,15 @@ async fn reject_incompatible_sqlite(
         .fetch_one(&mut *connection)
         .await?;
         ensure!(tables == 0, "{UNRECOGNIZED_TABLES}");
+        Ok(0)
     }
-    Ok(())
 }
 
+/// 校验历史兼容性，并返回连续成功应用的迁移数量；该数量用于判定是否已完整升级。
 async fn reject_incompatible_postgres(
     connection: &mut sqlx::PgConnection<'_>,
     migrator: &mut Migrator,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let has_history: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
      WHERE table_schema = current_schema() AND table_name = '_sqlx_migrations')",
@@ -348,6 +394,7 @@ async fn reject_incompatible_postgres(
             ensure!(tables == 0, "{UNRECOGNIZED_TABLES}");
         }
         supported_history(&rows, migrator)?;
+        Ok(rows.len())
     } else {
         let tables: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM information_schema.tables \
@@ -356,8 +403,8 @@ async fn reject_incompatible_postgres(
         .fetch_one(&mut *connection)
         .await?;
         ensure!(tables == 0, "{UNRECOGNIZED_TABLES}");
+        Ok(0)
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -392,12 +439,46 @@ mod tests {
         Migrator::with_migrations(migrations)
     }
 
+    fn parent_child_migrator(upgrade: bool) -> Migrator {
+        let mut migrations = vec![Migration::new(
+            1,
+            "foreign key fixture".into(),
+            MigrationType::Simple,
+            "CREATE TABLE parent (id TEXT PRIMARY KEY);\nCREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES parent(id));\nINSERT INTO parent VALUES ('kept');\n".into_sql_str(),
+            false,
+        )];
+        if upgrade {
+            migrations.push(Migration::new(
+                2,
+                "upgrade version".into(),
+                MigrationType::Simple,
+                "ALTER TABLE parent ADD COLUMN upgrade_version INTEGER NOT NULL DEFAULT 2;\n"
+                    .into_sql_str(),
+                false,
+            ));
+        }
+        Migrator::with_migrations(migrations)
+    }
+
     async fn sqlite_pool() -> sqlx::SqlitePool {
         SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .expect("SQLite pool")
+    }
+
+    async fn sqlite_file_pool(directory: &std::path::Path) -> sqlx::SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(directory.join("gateway.db"))
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .expect("file-backed SQLite pool")
     }
 
     #[tokio::test]
@@ -783,6 +864,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_complete_history_skips_full_foreign_key_scan_and_keeps_enforcement() {
+        let pool = sqlite_pool().await;
+        migrate_sqlite(&pool, None).await.unwrap();
+        // 全库扫描会拒绝这条既有外键违规；轻量启动必须保留数据且不执行该扫描。
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_models (provider_id, model_id, source_kind, presence, metadata_json) \
+             VALUES ('missing-provider', 'orphan-model', 'manual', 'present', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let history: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("a current database must start without scanning every table");
+
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id='missing-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+        let violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(violations.len(), 1);
+        let after: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after, history);
+        let error = sqlx::query(
+            "INSERT INTO provider_models (provider_id, model_id, source_kind, presence, metadata_json) \
+             VALUES ('another-missing-provider', 'orphan-model-2', 'manual', 'present', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("foreign key enforcement must remain active after the lightweight startup");
+        assert!(
+            error
+                .as_database_error()
+                .unwrap()
+                .is_foreign_key_violation(),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn sqlite_v1_upgrade_preserves_history_and_enforces_contracts() {
         let pool = sqlite_pool().await;
         SQLITE_MIGRATOR
@@ -996,8 +1147,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_interrupted_history_conversion_completes_before_lightweight_restart() {
+        let pool = sqlite_pool().await;
+        SQLITE_MIGRATOR
+            .run_to(7, pool.migration_pool())
+            .await
+            .unwrap();
+        // 模拟迁移 7 已提交、历史数据转换尚未开始的中断状态。
+        sqlx::query(
+            "INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, legacy_payload, created_at, expires_at, storage_format) \
+             VALUES ('legacy-node', 'response', NULL, 'api-key:alice', 1, X'', '{\"slot\":true}', 1, 9999999999999, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate_sqlite(&pool, None).await.unwrap();
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("completed history must take the lightweight path");
+
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, SQLITE_MIGRATOR.iter().last().unwrap().version);
+        let legacy_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('turn_chain_nodes') WHERE name='legacy_payload'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_columns, 0);
+        use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
+            .materialize(
+                &stravia_runtime_contract::Principal::new("alice"),
+                TurnNodeKind::Response,
+                &TurnNodeId::new("legacy-node"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].payload, serde_json::json!({"slot": true}));
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_interrupted_observation_conversion_completes_before_lightweight_restart() {
+        let pool = sqlite_pool().await;
+        SQLITE_MIGRATOR
+            .run_to(8, pool.migration_pool())
+            .await
+            .unwrap();
+        // 迁移 8 已提交但两个转换都未运行：legacy 列和 legacy 事件表仍在。
+        let legacy_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='observation_events_legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_tables, 1);
+
+        migrate_sqlite(&pool, None).await.unwrap();
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("completed history must take the lightweight path");
+
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, SQLITE_MIGRATOR.iter().last().unwrap().version);
+        let legacy_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='observation_events_legacy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_tables, 0);
+        let legacy_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('turn_chain_nodes') WHERE name='legacy_payload'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_columns, 0);
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
     async fn sqlite_rejects_unversioned_tables() {
         let pool = sqlite_pool().await;
+        sqlx::query("CREATE TABLE stray (id INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = migrate_sqlite(&pool, None).await.unwrap_err().to_string();
+        assert!(error.contains("unrecognized"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_rejects_business_tables_with_empty_migration_history() {
+        let pool = sqlite_pool().await;
+        sqlx::query(
+            "CREATE TABLE _sqlx_migrations (\
+             version BIGINT PRIMARY KEY, description TEXT NOT NULL, \
+             installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+             success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("CREATE TABLE stray (id INTEGER)")
             .execute(&pool)
             .await
@@ -1028,6 +1297,84 @@ mod tests {
         .unwrap();
         let error = migrate_sqlite(&pool, None).await.unwrap_err().to_string();
         assert!(error.contains("unknown, missing, or failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_complete_history_still_rejects_incompatible_migration_history() {
+        for mutation in [
+            "UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 1",
+            "UPDATE _sqlx_migrations SET success = 0 WHERE version = 1",
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (999, 'unknown', 1, X'00', 0)",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let pool = sqlite_file_pool(directory.path()).await;
+            migrate_sqlite(&pool, None).await.unwrap();
+            sqlx::query("INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('p', 'Provider', 'openai', 'https://example.invalid', '')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(mutation).execute(&pool).await.unwrap();
+
+            assert!(
+                migrate_sqlite(&pool, None).await.is_err(),
+                "a complete history must still be validated: {mutation}"
+            );
+            let name: String = sqlx::query_scalar("SELECT name FROM providers WHERE id='p'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(name, "Provider");
+            let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(foreign_keys, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_pending_upgrade_still_rejects_existing_foreign_key_violations() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        parent_child_migrator(false)
+            .run(pool.migration_pool())
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO child (id, parent_id) VALUES ('orphan', 'missing')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = super::run_sqlite_migrator(&pool, &parent_child_migrator(true), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("foreign key violations"), "{error}");
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, [1]);
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('parent') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(columns, ["id"]);
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
     }
 
     #[tokio::test]

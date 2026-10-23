@@ -92,9 +92,29 @@ impl VendorPlugins {
     pub(crate) async fn open(
         store: PluginStore,
         plugin_directory: PathBuf,
+        wasmtime_cache: Option<PathBuf>,
     ) -> anyhow::Result<Arc<Self>> {
-        let bundled = BundledPlugins::load().await?;
-        let runtime = bundled.runtime.clone();
+        // 内置组件跨实例共享；内存存储共享无缓存运行时，持久存储的本地插件
+        // 则各自使用 data_dir 下的官方编译缓存，不写入其他实例的目录。
+        let wasmtime_cache = wasmtime_cache.filter(|_| store.is_persistent());
+        let (bundled, runtime) = match BundledPlugins::load(wasmtime_cache.as_deref()).await {
+            Ok(loaded) => loaded,
+            Err(error)
+                if wasmtime_cache.is_some()
+                    && matches!(
+                        error.downcast_ref::<stravia_vendor_runtime::LoadError>(),
+                        Some(stravia_vendor_runtime::LoadError::CompilationCache(_))
+                    ) =>
+            {
+                tracing::warn!(
+                    cache_directory = ?wasmtime_cache,
+                    %error,
+                    "persistent plugin compilation cache is unavailable; continuing without it"
+                );
+                BundledPlugins::load(None).await?
+            }
+            Err(error) => return Err(error),
+        };
         let artifacts = store
             .is_persistent()
             .then(|| PluginArtifacts::new(plugin_directory));
@@ -170,6 +190,10 @@ impl VendorPlugins {
             pending: Mutex::new(HashMap::new()),
             updates: Mutex::new(()),
         }))
+    }
+
+    pub(super) fn bundled(&self) -> &BundledPlugins {
+        &self.bundled
     }
 
     /// Vendor 配置与状态写回的复合许可；持有期间该 Vendor 的插件更新无法完成排空。

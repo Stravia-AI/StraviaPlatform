@@ -149,17 +149,15 @@ pub async fn prepare_server_app(
     }
     if let Some(database) = file.and_then(|config| config.database) {
         let gateway_config = gateway_config(&startup.gateway, &database)?;
-        let storage = Gateway::open_storage(&gateway_config)
-            .await
-            .map_err(|error| {
-                error.context(format!(
-                    "configured database is unavailable or incompatible ({})",
-                    startup.config_path.display()
-                ))
-            })?;
-        let auth = AdminAuth::new(storage);
+        let prepared = Gateway::prepare(gateway_config).await.map_err(|error| {
+            error.context(format!(
+                "configured database is unavailable or incompatible ({})",
+                startup.config_path.display()
+            ))
+        })?;
+        let auth = AdminAuth::new(Arc::clone(prepared.storage()));
         if auth.has_admin().await.map_err(auth_to_anyhow)? {
-            let gateway = Gateway::new(gateway_config).await.map_err(|error| {
+            let gateway = prepared.start().await.map_err(|error| {
                 error.context(format!(
                     "configured Gateway could not start ({})",
                     startup.config_path.display()
@@ -256,10 +254,10 @@ pub fn gateway_config(
 pub async fn recover_admin(config_path: &Path, base: GatewayConfig) -> anyhow::Result<()> {
     let database = read_database_config(config_path)?
         .context("server configuration does not exist; initial setup is required")?;
-    let storage = Gateway::open_storage(&gateway_config(&base, &database)?)
+    let prepared = Gateway::prepare(gateway_config(&base, &database)?)
         .await
         .context("open configured database")?;
-    let auth = AdminAuth::new(storage);
+    let auth = AdminAuth::new(Arc::clone(prepared.storage()));
     if !auth.has_admin().await.map_err(auth_to_anyhow)? {
         bail!("configured database has no administrator; complete initial setup instead");
     }
@@ -464,13 +462,14 @@ async fn complete_setup(
         return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed");
     }
 
-    let storage = match Gateway::open_storage(&gateway_config).await {
-        Ok(storage) => storage,
+    let prepared = match Gateway::prepare(gateway_config).await {
+        Ok(prepared) => prepared,
         Err(error) => {
             tracing::warn!(error = %redacted_database_error(&error), "database migration failed");
             return auth_error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable");
         }
     };
+    let storage = prepared.storage();
     let artifact_json = match serde_json::to_string(&artifact_settings) {
         Ok(value) => value,
         Err(_) => return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed"),
@@ -509,7 +508,7 @@ async fn complete_setup(
     *runtime.setup_token.lock().await = None;
     *runtime.current.write().await = unavailable_router(&runtime);
 
-    let gateway = match Gateway::new(gateway_config).await {
+    let gateway = match prepared.start().await {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(error = %redacted_database_error(&error), "gateway initialization failed");

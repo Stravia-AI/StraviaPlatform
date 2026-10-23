@@ -200,6 +200,21 @@ async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageR
     Ok((storage_kind, storage, sqlite_pool, postgres_pool))
 }
 
+impl PreparedGateway {
+    /// 借用已初始化的存储，供宿主在启动后台任务前检查或创建管理员。
+    pub fn storage(&self) -> &DynStorage {
+        &self.runtime.1
+    }
+
+    /// 使用保留的配置与连接池启动 Gateway；初始化错误原样返回。
+    /// 不重新连接、迁移数据库，也不把持久存储当作内存存储装配。
+    pub async fn start(self) -> anyhow::Result<Gateway> {
+        let (kind, storage, sqlite_pool, postgres_pool) = self.runtime;
+        Gateway::from_storage_with_kind(self.config, storage, kind, sqlite_pool, postgres_pool)
+            .await
+    }
+}
+
 impl Gateway {
     /// 检查配置所需的运行时缓存，不执行 SQL 迁移或启动后台任务。
     /// SQLite 使用进程内缓存；PostgreSQL 的 Redis 地址或连接无效时返回脱敏错误。
@@ -210,11 +225,13 @@ impl Gateway {
         Ok(())
     }
 
-    /// 打开配置指定的存储，执行迁移并检查连接，不启动 Gateway 后台任务。
+    /// 准备配置指定的存储，执行迁移并检查连接，不启动 Gateway 后台任务。
     /// SQLite 会按需创建数据目录和数据库；连接、迁移或健康检查失败时返回错误。
-    pub async fn open_storage(config: &GatewayConfig) -> anyhow::Result<DynStorage> {
-        let (_, storage, _, _) = open_storage_runtime(config).await?;
-        Ok(storage)
+    /// 返回值保留配置与连接池，可通过 `PreparedGateway::start` 继续启动。
+    pub async fn prepare(mut config: GatewayConfig) -> anyhow::Result<PreparedGateway> {
+        config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
+        let runtime = open_storage_runtime(&config).await?;
+        Ok(PreparedGateway { config, runtime })
     }
 
     pub fn builder(config: GatewayConfig) -> GatewayBuilder {
@@ -233,12 +250,8 @@ impl Gateway {
         self.runtime_cache.shutdown().await;
     }
 
-    pub async fn new(mut config: GatewayConfig) -> anyhow::Result<Self> {
-        config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
-        let (storage_kind, storage, sqlite_pool, postgres_pool) =
-            open_storage_runtime(&config).await?;
-        Self::from_storage_with_kind(config, storage, storage_kind, sqlite_pool, postgres_pool)
-            .await
+    pub async fn new(config: GatewayConfig) -> anyhow::Result<Self> {
+        Self::prepare(config).await?.start().await
     }
 
     pub async fn from_storage(config: GatewayConfig, storage: DynStorage) -> anyhow::Result<Self> {
@@ -490,7 +503,8 @@ impl Gateway {
         )?);
         let vendor_plugins = crate::plugin::manager::VendorPlugins::open(
             storage.vendor_plugins().clone(),
-            crate::data_paths::DataPaths::new(&config.data_dir).plugins(),
+            paths.plugins(),
+            Some(paths.wasmtime_cache()),
         )
         .await?;
         let catalog_base_url = config.catalog_base_url.clone();

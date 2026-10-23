@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -10,7 +12,7 @@ use stravia_vendor_sdk::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Cache, CacheConfig, Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
@@ -85,6 +87,8 @@ impl OperationScope {
 pub struct VendorRuntime {
     engine: Engine,
     compiled: Arc<Mutex<VecDeque<CompiledEntry>>>,
+    #[cfg(test)]
+    cache: Option<Cache>,
 }
 
 struct CompiledEntry {
@@ -95,7 +99,19 @@ struct CompiledEntry {
 const MAX_COMPILED_ENTRIES: usize = 16;
 
 impl VendorRuntime {
+    /// 不使用持久编译缓存。Engine、编译结果仍由调用方共享。
     pub fn new() -> Result<Self, LoadError> {
+        Self::build(None)
+    }
+
+    /// 使用 Wasmtime 官方持久编译缓存（版本、目标 CPU、编译特性与组件内容
+    /// 的失效由 Wasmtime 负责）。目录必须为绝对路径；目录及其上层按需创建，
+    /// Unix 上权限收紧为 0700，真实路径的祖先不得受不可信用户控制，且必须可写。
+    pub fn with_cache(directory: impl Into<PathBuf>) -> Result<Self, LoadError> {
+        Self::build(Some(directory.into()))
+    }
+
+    fn build(cache_directory: Option<PathBuf>) -> Result<Self, LoadError> {
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true);
         // Owned host calls release lowered payloads before awaiting the guest.
@@ -106,11 +122,30 @@ impl VendorRuntime {
         engine_config.wasm_component_model_async_stackful(false);
         engine_config.wasm_component_model_threading(false);
         engine_config.consume_fuel(true);
+        let cache = match cache_directory {
+            Some(directory) => {
+                let directory = prepare_cache_directory(&directory)?;
+                let mut cache_config = CacheConfig::new();
+                cache_config.with_directory(directory);
+                let cache = Cache::new(cache_config).map_err(|error| {
+                    LoadError::CompilationCache(format!(
+                        "initialize persistent compilation cache: {error}"
+                    ))
+                })?;
+                Some(cache)
+            }
+            None => None,
+        };
+        #[cfg(test)]
+        let measured_cache = cache.clone();
+        engine_config.cache(cache);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
         Ok(Self {
             engine,
             compiled: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMPILED_ENTRIES))),
+            #[cfg(test)]
+            cache: measured_cache,
         })
     }
 
@@ -245,8 +280,9 @@ impl VendorRuntime {
             deadline,
             generation: 0,
         };
-        let mut store = self.new_store(scope, None, false);
-        let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
+        let engine = plugin.inner.component.engine();
+        let mut store = Self::new_store(engine, scope, None, false);
+        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
         let instantiate =
@@ -326,8 +362,9 @@ impl VendorRuntime {
 
         let wit_operation = convert_operation(operation.into());
         let wit_input = convert_input(sdk_input);
-        let mut store = self.new_store(scope, Some(operation), false);
-        let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
+        let engine = plugin.inner.component.engine();
+        let mut store = Self::new_store(engine, scope, Some(operation), false);
+        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
         let instantiate =
@@ -405,8 +442,9 @@ impl VendorRuntime {
             format: CANONICAL_FORMAT_VERSION,
             body: input,
         };
-        let mut store = self.new_store(scope, None, true);
-        let linker = self.new_linker().map_err(|_| RuntimeError::Trapped)?;
+        let engine = plugin.inner.component.engine();
+        let mut store = Self::new_store(engine, scope, None, true);
+        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
         let instantiate =
@@ -509,9 +547,9 @@ impl VendorRuntime {
             deadline: Deadline::from_now(Duration::from_secs(2)),
             generation: 0,
         };
-        let mut store = self.new_store(scope, None, false);
-        let linker = self
-            .new_linker()
+        let engine = component.engine();
+        let mut store = Self::new_store(engine, scope, None, false);
+        let linker = Self::new_linker(engine)
             .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
         let deadline = store.data().deadline.clone();
         let instantiate = bindings::Vendor::instantiate_async(&mut store, component, &linker);
@@ -533,23 +571,24 @@ impl VendorRuntime {
         serde_json::from_str(&descriptor).map_err(LoadError::DescriptorJson)
     }
 
-    fn new_linker(&self) -> wasmtime::Result<Linker<StoreState>> {
-        let mut linker = Linker::new(&self.engine);
+    fn new_linker(engine: &Engine) -> wasmtime::Result<Linker<StoreState>> {
+        let mut linker = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wit_host::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
         Ok(linker)
     }
 
     fn new_store(
-        &self,
+        engine: &Engine,
         scope: OperationScope,
         operation: Option<Operation>,
         catalog_sync: bool,
     ) -> Store<StoreState> {
         let mut wasi = WasiCtx::builder();
         wasi.max_random_size(64 * 1024);
+        // 编译结果可以跨实例共享；Store 与 Linker 必须绑定组件所属的 Engine。
         let mut store = Store::new(
-            &self.engine,
+            engine,
             StoreState {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
@@ -1208,6 +1247,108 @@ fn ensure_format(format: u32) -> Result<(), HostFailure> {
     }
 }
 
+/// 创建并验证官方编译缓存目录。只接受绝对路径，拒绝末级符号链接/非目录，
+/// Unix 上收紧到仅属主可访问，并用写入探针尽早暴露只读或空间错误。
+fn prepare_cache_directory(directory: &Path) -> Result<PathBuf, LoadError> {
+    if directory.as_os_str().is_empty() || !directory.is_absolute() {
+        return Err(LoadError::CompilationCache(format!(
+            "cache directory must be an absolute path: {}",
+            directory.display()
+        )));
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(directory)
+        .map_err(|error| cache_directory_error(directory, "create", error))?;
+    let metadata = std::fs::symlink_metadata(directory)
+        .map_err(|error| cache_directory_error(directory, "inspect", error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(LoadError::CompilationCache(format!(
+            "cache path is not a directory: {}",
+            directory.display()
+        )));
+    }
+    // 引擎只使用真实路径，父目录中的可信符号链接不会成为后续缓存访问的跳板。
+    let resolved = std::fs::canonicalize(directory)
+        .map_err(|error| cache_directory_error(directory, "resolve", error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = std::fs::metadata(&resolved)
+            .map_err(|error| cache_directory_error(directory, "inspect resolved", error))?;
+        // SAFETY: geteuid has no preconditions and touches no memory.
+        let current_user = unsafe { libc::geteuid() };
+        if metadata.uid() != current_user {
+            return Err(LoadError::CompilationCache(format!(
+                "cache directory {} is not owned by the current user",
+                directory.display()
+            )));
+        }
+        // 已允许其他用户写入的缓存可能包含伪造机器码，收紧权限也不能恢复其可信性。
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(LoadError::CompilationCache(format!(
+                "cache directory {} is writable by another user",
+                directory.display()
+            )));
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(&resolved, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| cache_directory_error(directory, "restrict", error))?;
+        }
+        // 仅保护末级目录不足以保护原生编译产物：可写父目录仍允许替换整个路径。
+        // /tmp 等 sticky 目录允许共享写入，但只有可信属主才能控制其中的既有子目录。
+        for ancestor in resolved.ancestors().skip(1) {
+            let metadata = std::fs::metadata(ancestor)
+                .map_err(|error| cache_directory_error(ancestor, "inspect ancestor of", error))?;
+            let mode = metadata.permissions().mode();
+            if (metadata.uid() != current_user && metadata.uid() != 0)
+                || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+            {
+                return Err(LoadError::CompilationCache(format!(
+                    "cache ancestor is controlled by another user: {}",
+                    ancestor.display()
+                )));
+            }
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let probe = resolved.join(format!(
+        ".stravia-cache-write-probe-{}-{nonce}",
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&probe)
+        .map_err(|error| cache_directory_error(directory, "write", error))?;
+    let written = file.write_all(b"stravia compilation cache probe");
+    drop(file);
+    let removed = std::fs::remove_file(&probe);
+    written.map_err(|error| cache_directory_error(directory, "write", error))?;
+    removed.map_err(|error| cache_directory_error(directory, "remove write probe from", error))?;
+    Ok(resolved)
+}
+
+fn cache_directory_error(directory: &Path, action: &str, error: std::io::Error) -> LoadError {
+    LoadError::CompilationCache(format!(
+        "{action} cache directory {}: {error}",
+        directory.display()
+    ))
+}
+
 fn classify_trap(error: &wasmtime::Error) -> RuntimeError {
     if error
         .downcast_ref::<wasmtime::Trap>()
@@ -1290,6 +1431,10 @@ impl HostServices for DenyServices {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "compilation_cache_tests.rs"]
+mod compilation_cache_tests;
 
 #[cfg(test)]
 mod deadline_tests {
