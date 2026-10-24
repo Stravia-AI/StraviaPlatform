@@ -36,8 +36,7 @@ pub(super) use self::ledger::RunLedger;
 use self::leg::*;
 use self::projection::*;
 use self::settlement::{
-    PendingGenerationChainWrite, Settlement, prepare_client_completion, report_projected_delivery,
-    settle,
+    CompletionSettlement, MarkerExecutions, PendingGenerationChainWrite, report_projected_delivery,
 };
 use self::util::forwarded_client_headers;
 use super::{Phase, PhaseTracker, RunInput};
@@ -987,7 +986,7 @@ async fn dispatch_round(
                 let HookResponsePlan {
                     response,
                     staged_delivery,
-                    mut pending_generation_chain,
+                    pending_generation_chain,
                 } = plan;
                 let response = match projection
                     .as_mut()
@@ -1005,39 +1004,22 @@ async fn dispatch_round(
                     ingress,
                     request.stream.enabled,
                 );
-                let mut projection = projection
+                let projection = projection
                     .take()
                     .expect("delivered Hook Client Projection session");
-                let gateway = gw.clone();
-                let ledger = ledger.clone();
-                let observer = observer.clone();
-                let prepared_vendor_guards = prepare_client_completion(
-                    &ledger,
-                    &observer,
-                    pending_generation_chain.as_deref_mut(),
+                return CompletionSettlement::buffered(
+                    staged_delivery,
+                    pending_generation_chain.map(|chain| *chain),
+                    MarkerExecutions::default(),
+                )
+                .bind_buffered(
+                    response,
+                    gw.clone(),
+                    projection,
+                    ledger.clone(),
+                    observer.clone(),
                 )
                 .await;
-                return after_body_delivery(response, async move {
-                    let delivered_at = chrono::Utc::now().timestamp_millis();
-                    ledger
-                        .terminal
-                        .publish_prepared_client_completion(delivered_at);
-                    settle(
-                        &gateway,
-                        &mut projection,
-                        &ledger,
-                        &observer,
-                        ingress,
-                        Settlement {
-                            staged_delivery: Some(staged_delivery),
-                            pending_generation_chain: pending_generation_chain.map(|chain| *chain),
-                            delivery_completed_at: Some(delivered_at),
-                            prepared_vendor_guards,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                });
             }
             Ok(control) => {
                 return render_hook_control(control, ingress, request.stream.enabled);
@@ -1309,7 +1291,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 let HookResponsePlan {
                     response,
                     staged_delivery,
-                    mut pending_generation_chain,
+                    pending_generation_chain,
                 } = *plan;
                 let response = match projection_session.prepare_upload_delivery(&response).await {
                     Ok(std::borrow::Cow::Borrowed(_)) => response,
@@ -1322,39 +1304,24 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     ingress,
                     false,
                 );
-                let mut projection_session = projection
+                let projection_session = projection
                     .take()
                     .expect("delivered Hook Client Projection session");
-                let gateway = gateway.clone();
-                let ledger = ledger.clone();
-                let observer = observer.clone();
-                let prepared_vendor_guards = prepare_client_completion(
-                    &ledger,
-                    &observer,
-                    pending_generation_chain.as_deref_mut(),
-                )
-                .await;
-                return buffered_response(after_body_delivery(response, async move {
-                    let delivered_at = chrono::Utc::now().timestamp_millis();
-                    ledger
-                        .terminal
-                        .publish_prepared_client_completion(delivered_at);
-                    settle(
-                        &gateway,
-                        &mut projection_session,
-                        &ledger,
-                        &observer,
-                        ingress,
-                        Settlement {
-                            staged_delivery: Some(staged_delivery),
-                            pending_generation_chain: pending_generation_chain.map(|chain| *chain),
-                            delivery_completed_at: Some(delivered_at),
-                            prepared_vendor_guards,
-                            ..Default::default()
-                        },
+                return buffered_response(
+                    CompletionSettlement::buffered(
+                        staged_delivery,
+                        pending_generation_chain.map(|chain| *chain),
+                        MarkerExecutions::default(),
                     )
-                    .await;
-                }));
+                    .bind_buffered(
+                        response,
+                        gateway.clone(),
+                        projection_session,
+                        ledger.clone(),
+                        observer.clone(),
+                    )
+                    .await,
+                );
             }
             LegAdvance::StreamError(error) => {
                 return buffered_response(buffered_stream_error_response(&error));
@@ -1379,7 +1346,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     let PreparedDelivery {
         response: prepared_response,
         staged_delivery,
-        mut pending_generation_chain,
+        pending_generation_chain,
         background_executions,
         started_executions,
     } = prepared;
@@ -1410,46 +1377,26 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         return buffered_response(delivered.response);
     }
     {
-        let gateway = gateway.clone();
-        let ledger = ledger.clone();
         let observer = request_context
             .extensions
             .get::<crate::interaction_observation::RunObserver>()
             .expect("admitted Inference Run observer");
-        let prepared_vendor_guards =
-            prepare_client_completion(&ledger, &observer, pending_generation_chain.as_mut()).await;
-        let mut projection_session = projection
+        let projection_session = projection
             .take()
             .expect("delivered buffered Client Projection session");
-        let run = if !background_executions.is_empty() || !started_executions.is_empty() {
-            inference_run.take()
-        } else {
-            None
-        };
-        delivered.response = after_body_delivery(delivered.response, async move {
-            let delivered_at = chrono::Utc::now().timestamp_millis();
-            ledger
-                .terminal
-                .publish_prepared_client_completion(delivered_at);
-            settle(
-                &gateway,
-                &mut projection_session,
-                &ledger,
-                &observer,
-                ingress,
-                Settlement {
-                    staged_delivery: Some(staged_delivery),
-                    background_executions,
-                    started_executions,
-                    run,
-                    pending_generation_chain,
-                    delivery_completed_at: Some(delivered_at),
-                    prepared_vendor_guards,
-                    ..Default::default()
-                },
-            )
-            .await;
-        });
+        delivered.response = CompletionSettlement::buffered(
+            staged_delivery,
+            pending_generation_chain,
+            MarkerExecutions::take(background_executions, started_executions, inference_run),
+        )
+        .bind_buffered(
+            delivered.response,
+            gateway.clone(),
+            projection_session,
+            ledger.clone(),
+            observer,
+        )
+        .await;
     }
     buffered_completion(delivered.response)
 }

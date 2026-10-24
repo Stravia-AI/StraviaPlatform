@@ -21,13 +21,13 @@ use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 use super::delivery::LiveStreamRequest;
 use super::{
-    ClientOutputCommit, ClientProjectionSession, CompletionFailure, DeliveryAdapter,
-    DeliveryProgress, FollowupEnv, HookLegGuard, HookResponsePlan, LegAdvance, LegEnv, LegFailure,
-    LegFlow, LegOps, LegParts, LegPolicy, LegReaction, LiveLegOps, ModelLegConsume, PhaseTracker,
-    PreparedDelivery, ProjectedDeliveryFailure, ProjectionDelivery, RoundOutcome, RunLedger,
-    SealOutcome, Settlement, ai_response_to_deltas, buffered_response, deliver_projected,
-    error_response, live_response, record_marker_failure, render_completion_failure,
-    render_leg_failure, report_projected_delivery, settle,
+    ClientOutputCommit, ClientProjectionSession, CompletionFailure, CompletionSettlement,
+    DeliveryAdapter, DeliveryProgress, FollowupEnv, HookLegGuard, HookResponsePlan, LegAdvance,
+    LegEnv, LegFailure, LegFlow, LegOps, LegParts, LegPolicy, LegReaction, LiveLegOps,
+    MarkerExecutions, ModelLegConsume, PhaseTracker, PreparedDelivery, ProjectedDeliveryFailure,
+    ProjectionDelivery, RoundOutcome, RunLedger, SealOutcome, ai_response_to_deltas,
+    buffered_response, deliver_projected, error_response, live_response, record_marker_failure,
+    render_completion_failure, render_leg_failure, report_projected_delivery,
 };
 
 #[cfg(test)]
@@ -424,15 +424,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut owned_run = Some(inference_run);
             let mut owned_phase = Some(phase);
             let mut marker_output_delivered = false;
-            let prepared_vendor_guards = if preflight_failure.is_none()
+            let mut completion = CompletionSettlement::streaming(pending_generation_chain.take());
+            if preflight_failure.is_none()
                 && !aborted && !transport.disrupted()
             {
-                super::prepare_client_completion(
-                    &ledger, &observer, pending_generation_chain.as_mut(),
-                ).await
-            } else {
-                None
-            };
+                completion.prepare(&ledger, &observer).await;
+            }
 
             if !buffer_terminal_hooks
                 && preflight_failure.is_none()
@@ -573,19 +570,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 && !aborted
                 && (!background_executions.is_empty() || !started_executions.is_empty())
             {
-                settle(
-                    &gateway,
-                    &mut projection,
-                    &ledger,
-                    &observer,
-                    ingress,
-                    Settlement {
-                        background_executions: std::mem::take(&mut background_executions),
-                        started_executions: std::mem::take(&mut started_executions),
-                        run: owned_run.take(),
-                        ..Default::default()
-                    },
+                MarkerExecutions::take(
+                    std::mem::take(&mut background_executions),
+                    std::mem::take(&mut started_executions),
+                    &mut owned_run,
                 )
+                .finish(&gateway, &mut projection, &ledger, &observer)
                 .await;
             }
 
@@ -694,21 +684,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 // actual receipt; transport closure cannot undo delivered output.
                 delivery_completed_at = delivery.take_confirmed_terminal_delivery();
             }
-            if delivery_completed_at.is_some() {
-                settle(
-                    &gateway,
-                    &mut projection,
-                    &ledger,
-                    &observer,
-                    ingress,
-                    Settlement {
-                        pending_generation_chain: pending_generation_chain.take(),
-                        delivery_completed_at,
-                        prepared_vendor_guards,
-                        ..Default::default()
-                    },
-                )
-                .await;
+            if let Some(delivered_at) = delivery_completed_at {
+                completion
+                    .finish_sent(&gateway, &mut projection, &ledger, &observer, delivered_at)
+                    .await;
             }
             let terminal = delivery_completed_at
                 .is_some()
