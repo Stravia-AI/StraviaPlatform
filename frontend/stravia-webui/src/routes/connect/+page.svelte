@@ -224,7 +224,7 @@ function cliModelName(modelId: string): string | undefined {
 {/snippet}
 
 {#snippet keyActions(selected: boolean)}
-  <div class="flex flex-wrap gap-2 @min-[36rem]/control-row:justify-end">
+  <div class="flex flex-wrap gap-2">
     {#if selected}
       {#if apiKeys.length > 0}
         <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys')}
@@ -250,9 +250,9 @@ function cliModelName(modelId: string): string | undefined {
       <div class="grid w-full max-w-72 grid-cols-2 gap-1" aria-label={m.connect_loading_output_modes()}>
         <Skeleton class="h-10" /><Skeleton class="h-10" />
       </div>
-      <div class="grid gap-6 @min-[68rem]/connect:grid-cols-12">
-        <Skeleton class="h-96 @min-[68rem]/connect:col-span-5" />
-        <Skeleton class="h-96 @min-[68rem]/connect:col-span-7" />
+      <div class="grid gap-6 @min-[68rem]/connect:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+        <Skeleton class="h-96" />
+        <Skeleton class="h-96" />
       </div>
     {:else if blockingResourceError}
       <RequestFailure
@@ -277,9 +277,9 @@ function cliModelName(modelId: string): string | undefined {
 
         <Tabs.Content value="cli" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
           <div
-            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-12 @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
+            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)] @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
             <section
-              class="min-w-0 @min-[68rem]/connect:col-span-5 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
+              class="min-w-0 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
               aria-labelledby="cli-controls-title">
               <h2 id="cli-controls-title" class="sr-only">{m.connect_client_setup()}</h2>
               <Field.FieldGroup>
@@ -344,9 +344,7 @@ function cliModelName(modelId: string): string | undefined {
               </Field.FieldGroup>
             </section>
 
-            <section
-              class="flex min-h-0 min-w-0 flex-col @min-[68rem]/connect:col-span-7"
-              aria-labelledby="cli-output-title">
+            <section class="flex min-h-0 min-w-0 flex-col" aria-labelledby="cli-output-title">
               <div class="mb-3.5 flex shrink-0 flex-wrap items-start justify-between gap-4">
                 <div>
                   <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
@@ -427,9 +425,9 @@ function cliModelName(modelId: string): string | undefined {
 
         <Tabs.Content value="code" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
           <div
-            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-12 @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
+            class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)] @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
             <section
-              class="min-w-0 @min-[68rem]/connect:col-span-5 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
+              class="min-w-0 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
               aria-labelledby="code-controls-title">
               <h2 id="code-controls-title" class="sr-only">{m.connect_api_example_setup()}</h2>
               <Field.FieldGroup>
@@ -439,7 +437,8 @@ function cliModelName(modelId: string): string | undefined {
                   hint={codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}>
                   <Select.Root type="single" bind:value={codeProtocol}>
                     <Select.Trigger id="code-protocol" class="w-full min-w-0"
-                      ><span class="truncate">{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
+                      ><span class="truncate"
+                        >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
                       ></Select.Trigger>
                     <Select.Content
                       ><Select.Group
@@ -485,7 +484,7 @@ function cliModelName(modelId: string): string | undefined {
                   </Select.Root>
                   {#snippet below()}
                     {#if !codeModel && models.length > 0}
-                      <p class="text-sm text-muted-foreground @min-[36rem]/control-row:text-end">
+                      <p class="text-sm text-muted-foreground">
                         {m.connect_choose_model_for_key()}
                       </p>
                     {/if}
@@ -495,9 +494,7 @@ function cliModelName(modelId: string): string | undefined {
               </Field.FieldGroup>
             </section>
 
-            <section
-              class="flex min-h-0 min-w-0 flex-col @min-[68rem]/connect:col-span-7"
-              aria-labelledby="code-output-title">
+            <section class="flex min-h-0 min-w-0 flex-col" aria-labelledby="code-output-title">
               <div class="mb-3.5 flex shrink-0 flex-wrap items-start justify-between gap-4">
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}

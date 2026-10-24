@@ -850,7 +850,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
   await expect
     .poll(async () => Math.round(((await page.locator('#route-display-name').boundingBox())?.width ?? 0) / rem))
-    .toBe(24)
+    .toBe(48)
   const [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox] = await Promise.all([
     page.locator('#route-model-id').boundingBox(),
     page.locator('#route-display-name').boundingBox(),
@@ -861,17 +861,22 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   for (const box of [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox]) {
     expect(box).not.toBeNull()
   }
-  // 设置列（60rem）左对齐；各控件使用语义宽度并共用同一条右边缘。
-  expect(columnBox!.width).toBeLessThanOrEqual(60 * rem + 1)
-  // Model ID 的输入框不含右侧清除按钮，因此用左边缘 + 语义宽度校验其落点。
-  const controlRight = displayInputBox!.x + displayInputBox!.width
+  // 设置列（48rem）在内容容器内居中；名称类控件占满设置列，短选项保持 16rem 并靠设置列右缘。
+  expect(columnBox!.width).toBeLessThanOrEqual(48 * rem + 1)
+  const route = (await page.locator('.route-page').boundingBox())!
+  expect(
+    Math.abs(columnBox!.x - route.x - (route.x + route.width - columnBox!.x - columnBox!.width)),
+  ).toBeLessThanOrEqual(1)
+  const columnRight = columnBox!.x + columnBox!.width
+  // Model ID 的输入框不含右侧清除按钮，因此只校验左缘与不越过设置列。
+  expect(Math.abs(nameInputBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
+  expect(nameInputBox!.x + nameInputBox!.width).toBeLessThanOrEqual(columnRight + 1)
+  expect(Math.abs(displayInputBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(displayInputBox!.width - columnBox!.width)).toBeLessThanOrEqual(1)
   for (const box of [outputTriggerBox!, balanceTriggerBox!]) {
-    expect(Math.abs(box.x + box.width - controlRight)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.x + box.width - columnRight)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.width - 16 * rem)).toBeLessThanOrEqual(2)
   }
-  expect(Math.abs(controlRight - 36 * rem - nameInputBox!.x)).toBeLessThanOrEqual(2)
-  expect(Math.abs(displayInputBox!.width - 24 * rem)).toBeLessThanOrEqual(2)
-  expect(Math.abs(outputTriggerBox!.width - 16 * rem)).toBeLessThanOrEqual(2)
-  expect(Math.abs(balanceTriggerBox!.width - 16 * rem)).toBeLessThanOrEqual(2)
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
   for (const index of [1, 2]) {
@@ -1456,9 +1461,7 @@ test('New model keeps the first destination layer on screen and offers a compact
   expect(await lane.evaluate((element) => getComputedStyle(element).boxShadow)).toBe('none')
 })
 
-test('Model editor caps target cards at 36rem and keeps the disabled area compact on wide screens', async ({
-  page,
-}) => {
+test('Model editor keeps lanes, disabled area and footer on the form column at every width', async ({ page }) => {
   const target = (id: string, priority: number, enabled: boolean) => ({
     id,
     model_id: 'wide-route',
@@ -1499,26 +1502,47 @@ test('Model editor caps target cards at 36rem and keeps the disabled area compac
   await page.route('**/api/v1/models/wide-route', (route) => route.fulfill({ json: { data: saved } }))
   await page.route('**/api/v1/models/wide-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
 
-  await page.setViewportSize({ width: 2560, height: 1440 })
-  await page.goto('/models/wide-route')
-  const cards = page.locator('[data-slot="target-lane"] [data-slot="target-card"]')
-  await expect(cards).toHaveCount(5)
-  const remRem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
-  for (const box of await cards.evaluateAll((elements) =>
-    elements.map((element) => element.getBoundingClientRect().width),
-  )) {
-    expect(box).toBeLessThanOrEqual(36 * remRem + 0.5)
+  const stackBoxes = async () => {
+    const form = (await page.locator('form').first().boundingBox())!
+    const stack = (await page.locator('[data-slot="target-lane-stack"]').boundingBox())!
+    const dock = (await page.locator('[data-slot="target-dock"]').boundingBox())!
+    const footer = (await page.locator('[data-slot="model-editor-footer"]').boundingBox())!
+    const save = (await page.getByRole('button', { name: 'Save model', exact: true }).boundingBox())!
+    const title = (await page.getByRole('heading', { level: 1 }).boundingBox())!
+    return { form, stack, dock, footer, save, title }
   }
-  // 停用区贴着内容顶部，不被拉伸到与层栈等高。
-  const dock = (await page.locator('[data-slot="target-dock"]').boundingBox())!
-  const stack = (await page.locator('[data-slot="target-lane-stack"]').boundingBox())!
-  const disabledCard = (await page.locator('[data-slot="target-dock"] [data-slot="target-card"]').boundingBox())!
-  expect(Math.abs(dock.y - stack.y)).toBeLessThanOrEqual(2)
-  expect(dock.height).toBeLessThan(disabledCard.height + 120)
-  expect(dock.height).toBeLessThan(stack.height - 100)
-  // 多出的宽度留在右侧：停用区紧跟层栈，而不是被推到容器最右端。
-  const containerRight = await page
-    .locator('[data-slot="target-lane-stack"]')
-    .evaluate((element) => element.parentElement!.getBoundingClientRect().right)
-  expect(containerRight - (dock.x + dock.width)).toBeGreaterThan(100)
+  const rem = 16
+  for (const width of [2560, 1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 1440 })
+    await page.goto('/models/wide-route')
+    const cards = page.locator('[data-slot="target-lane"] [data-slot="target-card"]')
+    await expect(cards).toHaveCount(5)
+    const { form, stack, dock, footer, save, title } = await stackBoxes()
+    expect(form.width, `form width at ${width}`).toBeLessThanOrEqual(48 * rem + 1)
+    // 页头、层栈、停用区与固定操作区共用表单列的左缘；右缘上，层栈、停用区、固定操作区与主操作按钮对齐。
+    expect(Math.abs(title.x - form.x)).toBeLessThanOrEqual(1)
+    for (const box of [stack, dock, footer]) {
+      expect(Math.abs(box.x - form.x), `left edge at ${width}`).toBeLessThanOrEqual(1)
+      expect(Math.abs(box.x + box.width - (form.x + form.width)), `right edge at ${width}`).toBeLessThanOrEqual(1)
+    }
+    expect(Math.abs(save.x + save.width - (form.x + form.width))).toBeLessThanOrEqual(1)
+    // 停用区在层栈之下，高度只随卡片，不被拉伸。
+    expect(dock.y).toBeGreaterThanOrEqual(stack.y + stack.height - 1)
+    const disabledCard = (await page.locator('[data-slot="target-dock"] [data-slot="target-card"]').boundingBox())!
+    expect(dock.height).toBeLessThan(disabledCard.height + 120)
+    // 每张卡都落在层栈内，不越过表单列。
+    for (const card of await cards.evaluateAll((elements) =>
+      elements.map((element) => {
+        const { x, width } = element.getBoundingClientRect()
+        return { x, right: x + width }
+      }),
+    )) {
+      expect(card.x).toBeGreaterThanOrEqual(form.x - 0.5)
+      expect(card.right).toBeLessThanOrEqual(form.x + form.width + 0.5)
+    }
+    // 表单列在内容容器内居中（窄屏时与容器等宽）。
+    const route = (await page.locator('.route-page').boundingBox())!
+    expect(Math.abs(form.x - route.x - (route.x + route.width - form.x - form.width))).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
 })

@@ -364,7 +364,7 @@ function saveProvider(): void {
         <div class="route-overlay-body">
           <div class="mb-6">{@render providerOptionSource(selectedOption)}</div>
           <Field.Group class="grid gap-6 sm:grid-cols-2">
-            <Field.Field size="name" class="sm:col-span-2">
+            <Field.Field class="sm:col-span-2">
               <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
               <Input
                 id="provider-name"
@@ -373,7 +373,7 @@ function saveProvider(): void {
                 disabled={draft.submitting}
                 oninput={() => draft.nameChanged()} />
             </Field.Field>
-            <Field.Field size="fill" class="sm:col-span-2">
+            <Field.Field class="sm:col-span-2">
               <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
               <Input
                 id="provider-base-url"
@@ -388,7 +388,7 @@ function saveProvider(): void {
               {@const selectedProtocol = selectedOption.channel.protocols.find(
                 (option) => option.value === draft.fields.protocol,
               )}
-              <Field.Field size="fill" class="sm:col-span-2">
+              <Field.Field class="sm:col-span-2">
                 <Field.Label for="provider-protocol">{m.common_protocol()}</Field.Label>
                 <Select.Root
                   type="single"

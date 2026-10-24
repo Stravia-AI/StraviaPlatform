@@ -393,7 +393,9 @@ test.describe('media generation switch guidance', () => {
 })
 
 for (const width of [2560, 390]) {
-  test(`media settings column stays within 60rem and aligned with the title at ${width}px`, async ({ page }) => {
+  test(`media settings column stays within 48rem, centered and aligned with the title at ${width}px`, async ({
+    page,
+  }) => {
     await page.setViewportSize({ width, height: 900 })
     await page.route('**/api/v1/media-generation/config', (route) =>
       route.fulfill({
@@ -413,8 +415,10 @@ for (const width of [2560, 390]) {
     await expect(title).toBeVisible()
     const gate = page.getByRole('switch', { name: 'Enable media generation' })
     await expect(gate).toBeVisible()
-    const column = (await page.locator('.content-column').first().boundingBox())!
-    expect(column.width).toBeLessThanOrEqual(960)
+    const column = (await page.locator('[data-slot=setting-row]').first().boundingBox())!
+    expect(column.width).toBeLessThanOrEqual(48 * 16 + 1)
+    const route = (await page.locator('.route-page').boundingBox())!
+    expect(Math.abs(column.x - route.x - (route.x + route.width - column.x - column.width))).toBeLessThan(2)
     expect(Math.abs(column.x - (await title.boundingBox())!.x)).toBeLessThan(2)
     expect(await page.locator('header').filter({ has: title }).getByRole('switch').count()).toBe(0)
     await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)

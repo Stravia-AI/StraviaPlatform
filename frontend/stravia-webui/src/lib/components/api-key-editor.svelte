@@ -203,9 +203,9 @@ async function saveKey(): Promise<void> {
 
 {#snippet keyFields()}
   <Field.Group>
-    <Field.Field size="name">
+    <Field.Field>
       <Field.Label for="api-key-name">{m.common_name()}</Field.Label>
-      <Input id="api-key-name" class="max-w-(--field-control-width)" bind:value={form.name} required />
+      <Input id="api-key-name" bind:value={form.name} required />
     </Field.Field>
     {#if !apiKey}
       <SettingRow
@@ -219,10 +219,10 @@ async function saveKey(): Promise<void> {
       </SettingRow>
     {/if}
     {#if apiKey || form.customKey}
-      <Field.Field size="fill">
+      <Field.Field>
         <Field.Label for="api-key-secret" hint={m.api_key_editor_api_key_help()}
           >{m.api_key_editor_api_key()}</Field.Label>
-        <div class="w-full max-w-(--field-control-width) min-w-0">
+        <div class="w-full min-w-0">
           <SecretInput
             id="api-key-secret"
             class="font-technical"
@@ -245,7 +245,7 @@ async function saveKey(): Promise<void> {
       <Field.Label for="api-key-rpm-limit" hint={m.api_key_editor_rpm_limit_help()}>
         {m.api_key_editor_requests_per_minute()}
       </Field.Label>
-      <InputGroup.Root class="max-w-(--field-control-width)">
+      <InputGroup.Root>
         <InputGroup.Input
           id="api-key-rpm-limit"
           bind:value={form.rpmLimit}
@@ -262,11 +262,7 @@ async function saveKey(): Promise<void> {
       <Field.Label for="api-key-expires" hint={m.api_key_editor_never_expires_placeholder()}>
         {m.api_key_editor_expires()}
       </Field.Label>
-      <Input
-        id="api-key-expires"
-        class="max-w-(--field-control-width)"
-        bind:value={form.expiresAt}
-        type="datetime-local" />
+      <Input id="api-key-expires" bind:value={form.expiresAt} type="datetime-local" />
     </Field.Field>
   </Field.Group>
   <div class="mt-2 flex flex-col">
@@ -292,7 +288,7 @@ async function saveKey(): Promise<void> {
       {/snippet}
     </SettingRow>
     {#if !allowAllModels}
-      <SettingRow title={m.api_key_editor_allowed_models()} controlSize="select" nested>
+      <SettingRow title={m.api_key_editor_allowed_models()} layout="stacked" nested>
         <Popover.Root bind:open={modelPickerOpen}>
           <Popover.Trigger>
             {#snippet child({ props })}
@@ -421,7 +417,7 @@ async function saveKey(): Promise<void> {
 
 {#snippet editorForm(pageMode: boolean)}
   <form
-    class={pageMode ? 'content-column flex flex-1 flex-col gap-6' : 'route-overlay-form'}
+    class={pageMode ? 'flex flex-1 flex-col gap-6' : 'route-overlay-form'}
     onsubmit={(event) => {
       event.preventDefault()
       void saveKey()
@@ -456,7 +452,7 @@ async function saveKey(): Promise<void> {
 {/snippet}
 
 {#if presentation === 'page'}
-  <div class="route-page min-h-[calc(100svh-5rem)]">
+  <div class="route-page route-page-column min-h-[calc(100svh-5rem)]">
     <PageHeader title={apiKey?.name.trim() || apiKey?.id || m.api_key_editor_edit_api_key()} />
     {@render editorForm(true)}
   </div>
@@ -474,7 +470,7 @@ async function saveKey(): Promise<void> {
       {#if createdSecret}
         <div class="route-overlay-body">
           <Field.Group>
-            <Field.Field size="fill">
+            <Field.Field>
               <Field.Label for="created-api-key">{m.api_key_editor_copy_api_key_now()}</Field.Label>
               <SecretInput
                 id="created-api-key"

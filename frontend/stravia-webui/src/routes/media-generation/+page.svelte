@@ -156,7 +156,7 @@ async function unlinkRoute(): Promise<void> {
 
 <svelte:head><title>{m.media_generation_title()} · Stravia</title></svelte:head>
 
-<div class="route-page">
+<div class="route-page route-page-column">
   <PageHeader title={m.media_generation_title()} />
 
   {#if configQuery.isError}
@@ -166,13 +166,13 @@ async function unlinkRoute(): Promise<void> {
       retry={() => configQuery.refetch()}
       retrying={configQuery.isFetching} />
   {:else if configQuery.isPending}
-    <div class="content-column flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
+    <div class="flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
       <Skeleton class="h-12" />
       <Skeleton class="h-12" />
     </div>
   {:else if configQuery.data}
     {@const config = configQuery.data.config}
-    <div class="content-column">
+    <div>
       <SettingRow title={m.media_generation_enable()} hint={m.media_generation_enable_help()} layout="inline">
         {#snippet children({ titleId })}
           {#if toggleSaving}<Spinner aria-label={m.media_generation_saving_enabled_state()} />{/if}
@@ -232,7 +232,7 @@ async function unlinkRoute(): Promise<void> {
         title={m.media_generation_image_route_title()}
         hint={m.media_generation_image_route_hint()}
         labelFor="media-generation-image-route"
-        controlSize="fill"
+        layout="stacked"
         description={eligibleRoutesQuery.isSuccess && eligibleRoutes.length === 0 && !savedRouteId
           ? m.media_generation_no_eligible_routes()
           : undefined}>

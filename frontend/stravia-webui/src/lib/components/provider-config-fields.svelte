@@ -131,7 +131,7 @@ function setText(field: VendorConfigField, value: string): void {
             {/each}
           </Field.Field>
         {:else}
-          <Field.Field size="fill" class="sm:col-span-2" data-invalid={invalid || undefined}>
+          <Field.Field class="sm:col-span-2" data-invalid={invalid || undefined}>
             <Field.Label for={controlId} hint={fieldHint(field)}
               >{resolvePluginText(field.label, localeState.current)}</Field.Label>
             {#if field.kind.type === 'bool'}

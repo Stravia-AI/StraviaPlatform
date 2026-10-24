@@ -204,7 +204,6 @@ const standardPages = [
   '/media-understanding',
   '/models',
   '/providers',
-  '/reversible-redaction',
   '/settings',
   '/stats',
   '/vendor-plugins',
@@ -241,6 +240,32 @@ for (const path of standardPages) {
   })
 }
 
+test('Credential Protection keeps the enable switch and one-sentence data flow in its header', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.route('**/api/v1/reversible-redaction/rules', (route) =>
+    route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),
+  )
+  await page.route('**/api/v1/reversible-redaction/discoveries**', (route) =>
+    route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+  )
+  await page.goto('/reversible-redaction')
+  const title = page.getByRole('heading', { level: 1, name: 'Credential Protection' })
+  await expect(title).toBeVisible()
+  const header = page.locator('header').filter({ has: title })
+  const note = header.locator('p')
+  await expect(note).toHaveCount(1)
+  await expect(note).toHaveText('When enabled, replace detected credentials in requests from every API key.')
+  // 总开关与标题同行，不再另占一个设置行。
+  const toggle = header.getByRole('switch', { name: 'Enable credential protection' })
+  await expect(toggle).toBeVisible()
+  const [titleBox, toggleBox] = await Promise.all([title.boundingBox(), toggle.boundingBox()])
+  expect(Math.abs(toggleBox!.y + toggleBox!.height / 2 - (titleBox!.y + titleBox!.height / 2))).toBeLessThan(
+    titleBox!.height / 2,
+  )
+  expect(toggleBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
 test('All conversations keeps only the one-sentence local history risk under its title', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/conversations')
@@ -274,9 +299,7 @@ test('page header status sits on the title row and stays after the title on narr
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
-test('content container caps at 120rem, centers, and keeps one left edge across list and detail pages', async ({
-  page,
-}) => {
+test('content container caps at 120rem, centers, and keeps one left edge across workbench pages', async ({ page }) => {
   const container = page.getByRole('main').locator('> div')
   const containerBox = async () => {
     const box = await container.boundingBox()
@@ -297,15 +320,23 @@ test('content container caps at 120rem, centers, and keeps one left edge across 
 
   await page.getByRole('button', { name: 'Expand navigation' }).click()
   const titleLeft: Record<string, number> = {}
-  for (const path of ['/providers', '/providers/missing-provider', '/models', '/models/new']) {
+  const titleOf = async (path: string) => {
     await page.goto(path)
     // 刷新后先出现启动页（自带 main 与 h1），页头必须限定在应用壳层容器内，否则会量到随后被卸载的启动标题。
     const title = container.getByRole('heading', { level: 1 })
     await expect(title).toBeVisible()
     // 标题在数据载入后可能被替换，轮询到稳定的盒子再取位置。
     await expect.poll(async () => (await title.boundingBox()) !== null).toBe(true)
-    titleLeft[path] = Math.round((await title.boundingBox())!.x)
+    return Math.round((await title.boundingBox())!.x)
+  }
+  for (const path of ['/providers', '/providers/missing-provider', '/models']) {
+    titleLeft[path] = await titleOf(path)
   }
   expect(new Set(Object.values(titleLeft)).size, JSON.stringify(titleLeft)).toBe(1)
+
+  // 表单页的页头随设置列在容器内居中：左缘 = 容器左缘 + (容器宽 - 设置列宽) / 2。
+  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
+  const formTitleLeft = await titleOf('/models/new')
+  expect(Math.abs(formTitleLeft - (titleLeft['/providers'] + (1920 - 48 * rem) / 2))).toBeLessThanOrEqual(1)
   await expect.poll(containerBox).toMatchObject({ x: titleLeft['/providers'], width: 1920 })
 })

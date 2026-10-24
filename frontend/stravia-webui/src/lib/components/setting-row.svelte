@@ -22,12 +22,14 @@ export interface SettingRowProps {
   hint?: string
   /** 控件前的等宽 muted 只读值，如版本号、地址、数据量。 */
   value?: string
-  /** 控件语义宽度。宽行中控件列取该宽度并贴右缘；窄行中控件占满整行。 */
+  /** 控件语义宽度（number、setting、datetime）。并排时控件列取该宽度并贴右缘；上下排布时控件占满整行。自由文本控件不设宽度，改用 `layout="stacked"`。 */
   controlSize?: FieldControlSize
   /**
-   * `auto`（默认）：行宽低于 50rem 时标题在上、控件占满宽度；`inline`：任何宽度都左右排布，用于开关与只读值。
+   * `auto`（默认）：行宽低于 32rem 时标题在上、控件占满宽度，否则左右并排；
+   * `inline`：任何宽度都左右排布，用于开关与只读值；
+   * `stacked`：任何宽度都标题在上、控件占满整行，用于名称、地址、密钥等自由文本。
    */
-  layout?: 'auto' | 'inline'
+  layout?: 'auto' | 'inline' | 'stacked'
   /** 依赖父开关的子设置：紧跟父行，以左侧竖线缩进一级。父开关关闭时由调用方不渲染。 */
   nested?: boolean
   /** 提供后在行尾显示「编辑」，点击打开 Sheet 等显式保存表面；与只读 `value` 摘要配合使用。 */
@@ -70,8 +72,8 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
 </script>
 
 <!--
-  设置行：左侧标题（可选一行必要说明与问号提示），右侧控件或只读值；行宽低于 50rem 时标题在上、控件占满宽度（layout="inline" 例外）。
-  行之间 1px 分隔线，首行之上不画线；以 60rem 设置列为上限，左对齐。
+  设置行：左侧标题（可选一行必要说明与问号提示），右侧控件或只读值；行宽低于 32rem 时标题在上、控件占满宽度（layout="inline" 例外），
+  自由文本控件用 layout="stacked" 始终上下排布。行之间 1px 分隔线，首行之上不画线；宽度由所在设置列决定。
 -->
 <div
   data-slot="setting-row"
@@ -79,9 +81,9 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
   data-nested={nested ? 'true' : undefined}
   class={cn(
     // 单行设置保持 44px 的可点行高：标题行高 19.25px 加 24px 内边距只有 43.25px，低于触控与可读下限。
-    '@container/setting-row w-full min-w-0 max-w-(--content-column-max-width) py-3 min-h-11',
+    '@container/setting-row w-full min-w-0 py-3 min-h-11',
     '[[data-slot=setting-row]+&]:border-t',
-    nested && 'ms-2 w-auto max-w-[calc(var(--content-column-max-width)-0.5rem)] border-s ps-4',
+    nested && 'ms-2 w-auto border-s ps-4',
     className,
   )}>
   <div
@@ -89,10 +91,12 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
       'flex min-w-0 gap-2',
       layout === 'inline'
         ? ['justify-between gap-4', description || note ? 'items-start' : 'items-center']
-        : [
-            'flex-col @min-[50rem]/setting-row:flex-row @min-[50rem]/setting-row:justify-between @min-[50rem]/setting-row:gap-8',
-            description || note ? '@min-[50rem]/setting-row:items-start' : '@min-[50rem]/setting-row:items-center',
-          ],
+        : layout === 'stacked'
+          ? 'flex-col'
+          : [
+              'flex-col @min-[32rem]/setting-row:flex-row @min-[32rem]/setting-row:justify-between @min-[32rem]/setting-row:gap-8',
+              description || note ? '@min-[32rem]/setting-row:items-start' : '@min-[32rem]/setting-row:items-center',
+            ],
     )}>
     <div class="flex min-w-0 flex-1 flex-col gap-0.5">
       <div class="flex min-w-0 items-center gap-2">
@@ -116,8 +120,10 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
           'flex min-w-0 items-center gap-3',
           layout === 'inline'
             ? 'shrink-0 justify-end'
-            : 'w-full @min-[50rem]/setting-row:w-auto @min-[50rem]/setting-row:shrink-0 @min-[50rem]/setting-row:justify-end',
-          controlSize && layout !== 'inline' && '@min-[50rem]/setting-row:w-(--setting-control-width)',
+            : layout === 'stacked'
+              ? 'w-full'
+              : 'w-full @min-[32rem]/setting-row:w-auto @min-[32rem]/setting-row:shrink-0 @min-[32rem]/setting-row:justify-end',
+          controlSize && layout === 'auto' && '@min-[32rem]/setting-row:w-(--setting-control-width)',
         )}>
         {#if value !== undefined}
           <TechnicalValue {value} class="text-muted-foreground" />

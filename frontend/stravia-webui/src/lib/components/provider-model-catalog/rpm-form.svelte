@@ -94,10 +94,7 @@ export async function save(): Promise<void> {
   }}>
   <fieldset disabled={saving || !ready} class={cn('flex min-w-0 flex-col gap-4', !embedded && 'p-4')}>
     <Field.Group>
-      <Field.Field
-        orientation={embedded ? 'responsive' : 'vertical'}
-        size={embedded ? 'select' : undefined}
-        data-invalid={!!error}>
+      <Field.Field size="number" data-invalid={!!error}>
         <Field.Label for={`${id}-limit`}>{m.rpm_requests_per_minute()}</Field.Label>
         <Input
           id={`${id}-limit`}

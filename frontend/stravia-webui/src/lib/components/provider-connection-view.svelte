@@ -225,18 +225,18 @@ async function testConnection(): Promise<void> {
     </Alert.Root>
   {/if}
 
-  <!-- 表单占 60rem 设置列；宽屏时右侧辅助栏只放真实状态，没有内容就不占位，窄时排在表单之后。 -->
+  <!-- 表单始终占居中的设置列；容器足够宽时辅助栏落在表单右侧的空白里，没有内容就不占位，较窄时排在表单之后。 -->
   <div
-    class="grid gap-6 @min-[80rem]/route-page:grid-cols-[minmax(0,var(--content-column-max-width))_minmax(0,20rem)] @min-[80rem]/route-page:items-start @min-[80rem]/route-page:gap-x-12">
+    class="mx-auto grid w-full max-w-(--content-column-max-width) gap-6 @min-[96rem]/route-page:max-w-none @min-[96rem]/route-page:grid-cols-[minmax(0,1fr)_minmax(0,var(--content-column-max-width))_minmax(0,1fr)] @min-[96rem]/route-page:items-start @min-[96rem]/route-page:gap-x-12">
     <form
-      class="flex min-w-0 flex-col gap-6"
+      class="flex min-w-0 flex-col gap-6 @min-[96rem]/route-page:col-start-2 @min-[96rem]/route-page:row-start-1"
       onsubmit={(event) => {
         event.preventDefault()
         save()
       }}>
       <FormSection title={m.provider_connection_view_section_connection()}>
         <Field.Group>
-          <Field.Field size="fill">
+          <Field.Field>
             <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
             <Input
               id="provider-name"
@@ -245,7 +245,7 @@ async function testConnection(): Promise<void> {
               disabled={draft.submitting}
               oninput={nameChanged} />
           </Field.Field>
-          <Field.Field size="fill">
+          <Field.Field>
             <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
             <Input
               id="provider-base-url"

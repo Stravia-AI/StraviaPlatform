@@ -69,7 +69,7 @@
   --spacing: 0.25rem;
   /* 内容宽度契约（DESIGN.md spacing）：容器、设置列、阅读列。组件通过这些变量取值，不写死 rem。 */
   --content-max-width: 120rem;
-  --content-column-max-width: 60rem;
+  --content-column-max-width: 48rem;
   --reading-max-width: 56rem;
 }
 
@@ -281,54 +281,11 @@ html[lang='zh-CN'] .font-structural {
   letter-spacing: 0;
 }
 
-/* Field 依据自身容器宽度重排：达到 50rem 时左侧 label、右侧控件，控件按语义宽度贴右缘；可选解释始终只在问号提示中。 */
-@container field (min-width: 50rem) {
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, var(--field-control-width));
-    align-items: center;
-    column-gap: 2rem;
-    row-gap: 0.35rem;
-  }
-
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-label'] {
-    grid-column: 1;
-    min-width: 0;
-  }
-
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']
-    > :not([data-slot='field-label']):not([data-slot='field-description']):not([data-slot='field-error']) {
-    grid-column: 2;
-    min-width: 0;
-  }
-
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-error'] {
-    grid-column: 2;
-  }
-
-  /* 常驻 Description 与 label 组成文本栈，与控件顶部对齐；控件跨越两行，错误留在控件列。 */
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']:has(> [data-slot='field-description']) {
-    align-items: start;
-  }
-
-  [data-slot='field'][data-orientation='responsive'] > [data-slot='field-layout'] > [data-slot='field-description'] {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']:has(> [data-slot='field-description'])
-    > :not([data-slot='field-label']):not([data-slot='field-description']):not([data-slot='field-error']) {
-    grid-row: 1 / span 2;
-  }
-
-  [data-slot='field'][data-orientation='responsive']
-    > [data-slot='field-layout']:has(> [data-slot='field-description'])
-    > [data-slot='field-error'] {
-    grid-row: 3;
-  }
+/* Field 的语义宽度（number、setting、datetime）只限制控件；label、说明与错误仍占满设置列。其余控件占满设置列。 */
+[data-slot='field'][data-size]
+  > [data-slot='field-layout']
+  > :not([data-slot='field-label']):not([data-slot='field-description']):not([data-slot='field-error']) {
+  max-width: var(--field-control-width);
 }
 
 .route-page {
@@ -344,11 +301,13 @@ html[lang='zh-CN'] .font-structural {
   margin-block-end: -0.5rem;
 }
 
-/* 设置列：配置页、详情页表单与设置行的宽度上限，左对齐，剩余宽度留在右侧。 */
-.content-column {
+/* 设置列：配置页与详情编辑页的表单、设置行和固定操作栏共用的居中列；多出的宽度平均留在两侧。 */
+.content-column,
+.route-page-column > * {
   width: 100%;
   min-width: 0;
   max-width: var(--content-column-max-width);
+  margin-inline: auto;
 }
 
 .route-page-header {

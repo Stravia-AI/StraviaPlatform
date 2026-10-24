@@ -721,8 +721,9 @@ test('API Key editor keeps compact controls and help inside the editor', async (
   const overlayBox = await overlay.boundingBox()
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
   expect(nameBox?.width ?? 0).toBeGreaterThan(8)
-  // 名称使用 24rem 的语义宽度，不再按 Sheet 宽度的比例拉伸。
-  expect(Math.abs((nameBox?.width ?? 0) - 24 * rem)).toBeLessThanOrEqual(1)
+  // 名称是自由文本，占满 Sheet 的内容宽度；短控件仍保持各自的语义宽度。
+  expect(nameBox?.width ?? 0).toBeGreaterThan((overlayBox?.width ?? 0) * 0.8)
+  expect(nameBox?.width ?? 0).toBeLessThan(overlayBox?.width ?? 0)
 
   const rpm = page.locator('#api-key-rpm-limit')
   const expiresAt = page.getByLabel('Expires at')

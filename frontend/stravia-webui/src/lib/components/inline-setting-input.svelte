@@ -144,7 +144,7 @@ function onkeydown(event: KeyboardEvent) {
 <div data-slot="inline-setting-input" class={cn('flex w-full min-w-0 flex-col gap-1', className)}>
   <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
     <div
-      class={suffix ? 'flex w-full min-w-0 items-center gap-2 @min-[50rem]/setting-row:w-auto' : 'contents'}
+      class={suffix ? 'flex w-full min-w-0 items-center gap-2 @min-[32rem]/setting-row:w-auto' : 'contents'}
       style:--setting-control-width={suffix ? fieldControlWidths.number : undefined}>
       <Input
         {id}
@@ -162,7 +162,7 @@ function onkeydown(event: KeyboardEvent) {
         aria-busy={saving || undefined}
         disabled={disabled || saving}
         class={cn(
-          'w-full @min-[50rem]/setting-row:w-(--setting-control-width,100%) @min-[50rem]/setting-row:min-w-0',
+          'w-full @min-[32rem]/setting-row:w-(--setting-control-width,100%) @min-[32rem]/setting-row:min-w-0',
           technical && 'font-technical',
         )}
         value={draft}

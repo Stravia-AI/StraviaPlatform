@@ -12,7 +12,6 @@ import { observationStatusLabel } from '#lib/observation-labels.js'
 import type { CredentialDiscoverySummary, CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib/types.js'
 
 import PageHeader from '#lib/components/page-header.svelte'
-import SettingRow from '#lib/components/setting-row.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -340,16 +339,14 @@ function selectMatch(match: CredentialMatch): void {
 {/snippet}
 
 <div class={['route-page', { 'rules-workspace': tab === 'rules' }]}>
-  <PageHeader title={m.reversible_redaction_title()} actions={pageActions} />
-
-  <section class="route-section" aria-label={m.reversible_redaction_enable()}>
-    <SettingRow
-      layout="inline"
-      title={m.reversible_redaction_enable()}
-      description={m.credential_protection_scope_brief()}>
-      {#snippet children({ titleId, descriptionId })}
+  <PageHeader
+    title={m.reversible_redaction_title()}
+    description={m.credential_protection_scope_brief()}
+    actions={pageActions}>
+    {#snippet meta()}
+      <div class="flex items-center gap-2">
         {#if settingQuery.isPending}
-          <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
+          <span class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</span>
         {:else if saving}
           <Spinner aria-label={m.settings_saving()} />
         {/if}
@@ -358,23 +355,25 @@ function selectMatch(match: CredentialMatch): void {
           bind:checked={() => storedEnabled, (checked: boolean) => void setEnabled(checked)}
           disabled={!settingQuery.isSuccess || saving}
           aria-busy={saving}
-          aria-labelledby={titleId}
-          aria-describedby={descriptionId} />
-      {/snippet}
-    </SettingRow>
-    {#if settingQuery.isError || saveError}
-      <div class="flex flex-col gap-3">
-        {#if settingQuery.isError}
-          <Alert.Root variant="destructive"
-            ><Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description></Alert.Root>
-          <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}
-            >{m.common_retry()}</Button>
-        {/if}
-        {#if saveError}<Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root
-          >{/if}
+          aria-label={m.reversible_redaction_enable()} />
+        <span class="text-sm font-medium text-muted-foreground" aria-hidden="true"
+          >{storedEnabled ? m.common_enabled_status() : m.common_disabled_status()}</span>
       </div>
-    {/if}
-  </section>
+    {/snippet}
+  </PageHeader>
+
+  {#if settingQuery.isError || saveError}
+    <section class="route-section flex flex-col gap-3" aria-label={m.reversible_redaction_enable()}>
+      {#if settingQuery.isError}
+        <Alert.Root variant="destructive"
+          ><Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description></Alert.Root>
+        <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}
+          >{m.common_retry()}</Button>
+      {/if}
+      {#if saveError}<Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root
+        >{/if}
+    </section>
+  {/if}
 
   <Tabs.Root bind:value={tab} class="min-h-0 min-w-0 gap-0">
     <Tabs.List aria-label={m.reversible_redaction_title()}>
@@ -419,7 +418,7 @@ function selectMatch(match: CredentialMatch): void {
             globalFilterId="credential-rule-search"
             globalFilterPlaceholder={m.credential_protection_catalog_search()}
             paginator
-            pagination={{ pageIndex: 0, pageSize: 10 }}
+            pagination={{ pageIndex: 0, pageSize: 25 }}
             pageSizeOptions={[10, 25, 50]}
             onRowClick={({ row }: DataTableRowPointerEvent<RuleRow>) => openRule(row.original)}>
             {#snippet toolbar()}
@@ -827,22 +826,29 @@ function selectMatch(match: CredentialMatch): void {
 
 <style>
 .rules-workspace {
-  display: grid;
-  /* 低窗口至少保留 24rem 的列表工作区（外加页签与面板上内边距）。 */
-  grid-template-rows: auto auto minmax(calc(24rem + 4.5rem), 1fr);
+  /* 页头与可选的错误区段取自然高度，页签区吸收其余高度；不依赖兄弟节点数量定位行。 */
+  display: flex;
+  flex-direction: column;
   /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给规则工作区；超出时页面滚动并保留底部内边距。 */
   min-height: calc(100svh - 5rem);
 }
 @media (max-width: 767px) {
   .rules-workspace {
     min-height: calc(100svh - 4.5rem);
-    /* 窄屏的工具栏与分页器各占多行，表体需要更多高度才能看到足够的行。 */
-    grid-template-rows: auto auto minmax(calc(34rem + 4.5rem), 1fr);
   }
 }
-/* 工作区行不以表格内容撑高，而是吸收剩余高度，表体在其中滚动。 */
+/* 工作区不以表格内容撑高，而是吸收剩余高度，表体在其中滚动。
+ * 低窗口至少保留 24rem 的列表工作区（外加页签与面板上内边距）；窄屏的工具栏与分页器各占多行，需要更多高度。 */
 .rules-workspace > :global([data-slot='tabs']) {
+  flex: 1 1 calc(24rem + 4.5rem);
+  min-height: calc(24rem + 4.5rem);
   contain: size;
+}
+@media (max-width: 767px) {
+  .rules-workspace > :global([data-slot='tabs']) {
+    flex-basis: calc(34rem + 4.5rem);
+    min-height: calc(34rem + 4.5rem);
+  }
 }
 .workspace-panel {
   min-width: 0;

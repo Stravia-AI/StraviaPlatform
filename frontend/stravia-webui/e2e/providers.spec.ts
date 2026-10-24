@@ -2789,7 +2789,7 @@ test('Provider connection actions stay in view and lock while saving, and a save
   await expect(page.getByRole('alertdialog')).toHaveCount(0)
 })
 
-test('Provider connection form keeps one right edge at 60rem and shows the side column only with real status', async ({
+test('Provider connection form fills a centered 48rem column and shows the side status only with real status', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
@@ -2833,15 +2833,16 @@ test('Provider connection form keeps one right edge at 60rem and shows the side 
   const labelBox = (await page.locator('label[for="provider-name"]').boundingBox())!
   const boxes = await Promise.all(controls.map(async (control) => (await control.boundingBox())!))
   const formBox = (await form.boundingBox())!
-  expect(formBox.width).toBeLessThanOrEqual(960)
-  // 名称、地址、密钥同宽、同一左右边缘；label 到控件右缘的距离受 60rem 约束。
+  expect(formBox.width).toBeLessThanOrEqual(48 * 16 + 1)
+  // 名称、地址、密钥占满表单列，左右边缘都是列边缘；label 在控件上方。
   for (const box of boxes) {
-    expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(1)
-    expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.x - formBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.width - formBox.width)).toBeLessThanOrEqual(1)
   }
-  expect(boxes[0].width).toBeLessThanOrEqual(576 + 1)
-  expect(boxes[0].x + boxes[0].width - labelBox.x).toBeLessThanOrEqual(960)
-  expect(boxes[0].x + boxes[0].width).toBeLessThanOrEqual(formBox.x + formBox.width + 1)
+  expect(labelBox.y + labelBox.height).toBeLessThanOrEqual(boxes[0].y)
+  // 表单列在路由容器内居中，辅助栏不参与居中。
+  const route = (await page.locator('.route-page').boundingBox())!
+  expect(Math.abs(formBox.x - route.x - (route.x + route.width - formBox.x - formBox.width))).toBeLessThanOrEqual(1)
 
   // 说明只进问号：复述 label 的说明省略，真正的数据流向说明保留在问号里。
   const apiKeyField = page.locator('[data-slot="field"]').filter({ has: page.getByLabel('API key', { exact: true }) })

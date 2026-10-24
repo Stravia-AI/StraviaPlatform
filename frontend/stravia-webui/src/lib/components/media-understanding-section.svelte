@@ -207,7 +207,7 @@ function selectThinkingLevel(value?: string): void {
   draft={() => ({ modelId, thinkingLevel })}
   onsubmit={save}>
   <Field.Group>
-    <Field.Field size="select">
+    <Field.Field>
       <Field.Label for="media-model-{kind}">{m.media_understanding_model_label()}</Field.Label>
       <Select.Root type="single" value={modelId} disabled={saving} onValueChange={selectModel}>
         <Select.Trigger id="media-model-{kind}" class="w-full">
@@ -227,7 +227,7 @@ function selectThinkingLevel(value?: string): void {
           </Select.Group></Select.Content>
       </Select.Root>
     </Field.Field>
-    <Field.Field size="select">
+    <Field.Field>
       <Field.Label for="media-thinking-level-{kind}">
         {m.media_understanding_thinking_level_label()}
       </Field.Label>
