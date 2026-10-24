@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -17,7 +18,6 @@ import pytest
 from tests.common.helpers import (
     CompleteRequestHTTPConnection,
     WebSession,
-    find_free_port,
     initialize_server,
     start_stravia_server,
     stop_stravia_server,
@@ -60,15 +60,23 @@ def isolated_external_services() -> Iterator[None]:
 def _server(
     binary: Path, directory: Path, *security_args: str, host: str = "0.0.0.0",
 ) -> Iterator[tuple[str, str]]:
-    port = find_free_port()
-    base = f"http://[::1]:{port}" if host == "::1" else f"http://127.0.0.1:{port}"
     proc, logs = start_stravia_server(
         stravia_binary=binary,
-        args=["--host", host, "--port", str(port), "--data-dir", str(directory), *security_args],
+        args=[
+            "--host", host, "--port", "0", "--data-dir", str(directory),
+            "--log-level", "info", *security_args,
+        ],
         cwd=directory,
     )
     try:
         token = wait_for_setup_token(logs, proc)
+        listener = next((line for line in logs if "Stravia startup listener opened" in line), "")
+        listener = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", listener)
+        address = re.search(r"\baddress=(?:\[[^\]]+\]|[^:\s]+):(\d+)", listener)
+        if address is None:
+            raise RuntimeError("server did not report its bound listener address")
+        port = int(address[1])
+        base = f"http://[::1]:{port}" if host == "::1" else f"http://127.0.0.1:{port}"
         wait_until_ready(f"{base}/healthz")
         yield base, token
     finally:
@@ -110,21 +118,12 @@ def _request(
 def test_nonloopback_http_without_entry_configuration_supports_management(
     stravia_binary: Path, tmp_path: Path,
 ) -> None:
-    port = find_free_port()
-    base = f"http://127.0.0.1:{port}"
-    proc, logs = start_stravia_server(
-        stravia_binary=stravia_binary,
-        args=["--host", "0.0.0.0", "--port", str(port), "--data-dir", str(tmp_path)],
-        cwd=tmp_path,
-    )
-    try:
-        token = wait_for_setup_token(logs, proc)
-        wait_until_ready(f"{base}/healthz")
+    with _server(stravia_binary, tmp_path) as (base, token):
         first = initialize_server(base, token, {"backend": "sqlite"})
         assert first.request("GET", "/api/v1/status")[0] == 200
         assert first.request("PUT", "/api/v1/settings/log_retention_days", {"value": "9"})[0] == 200
         assert first.request("GET", "/api/v1/settings/log_retention_days")[1]["data"] == "9"
-        second = WebSession(f"http://localhost:{port}")
+        second = WebSession(f"http://localhost:{urlsplit(base).port}")
         assert second.request("POST", "/api/v1/auth/login", {
             "username": "admin", "password": "correct horse battery staple",
         })[0] == 200
@@ -134,15 +133,14 @@ def test_nonloopback_http_without_entry_configuration_supports_management(
         assert first.request("POST", "/api/v1/auth/logout")[0] == 204
         assert first.request("GET", "/api/v1/status")[0] == 401
         assert second.request("GET", "/api/v1/status")[0] == 200
-    finally:
-        stop_stravia_server(proc, logs)
 
 
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_explicit_entries_guard_pages_setup_and_all_management(
-    stravia_binary: Path, tmp_path: Path,
+    stravia_binary: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("STRAVIA_LOG_LEVEL", "warn")
     allowed = "http://entry.test:23471"
     headers = [("Host", "entry.test:23471")]
     with _server(stravia_binary, tmp_path, "--admin-origin", allowed,
@@ -295,8 +293,7 @@ def test_restarting_with_entry_list_gates_existing_admin_without_gating_model_ap
         })
         assert status == 200
         protocol_headers = [("Authorization", f"Bearer {key['data']['key']}")]
-    port = find_free_port()
-    base = f"http://127.0.0.1:{port}"
+    port = urlsplit(base).port
     proc, logs = start_stravia_server(
         stravia_binary=stravia_binary,
         args=["--port", str(port), "--data-dir", str(tmp_path)],

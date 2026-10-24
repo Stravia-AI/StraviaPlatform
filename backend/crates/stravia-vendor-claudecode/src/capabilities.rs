@@ -301,7 +301,7 @@ mod tests {
                 expected,
                 "wire max_tokens {wire}"
             );
-            assert!(model.metadata.get("limit").is_none());
+            assert!(!model.metadata.contains_key("limit"));
         }
     }
 

@@ -665,20 +665,95 @@ pub(super) fn unsupported(message: impl Into<String>) -> PluginError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn official_preparation_preserves_codec_derived_includes() {
-        let provider = ProviderSnapshot {
+    fn provider(protocol: &str) -> ProviderSnapshot {
+        ProviderSnapshot {
             provider_id: "openai".into(),
             channel: "default".into(),
             base_url: "https://api.openai.com/v1".into(),
-            protocol: "openai-responses".into(),
+            protocol: protocol.into(),
             options: Default::default(),
             credentials: Default::default(),
             model: Some("model".into()),
             model_metadata: None,
             client_headers: Vec::new(),
             operation_metadata: Default::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn selection_requires_request_content_or_continuation() {
+        use stravia_runtime_contract::protocol::ir::{AiItem, Continuation, MessageContent, Role};
+
+        let provider = provider("openai-compatible");
+        let request = AiRequest::new(
+            "model",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("same prompt".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        let responses = OPEN_RESPONSES_2026_04_24.to_string();
+        for operation in [Operation::Infer, Operation::Compact] {
+            assert_eq!(
+                select_protocol(operation, DEFAULT_CHANNEL, &provider, &request).unwrap(),
+                responses
+            );
+            let mut empty = request.clone();
+            empty.items.clear();
+            assert_eq!(
+                select_protocol(operation, DEFAULT_CHANNEL, &provider, &empty).unwrap(),
+                provider.protocol
+            );
+            empty.parameters.continuation = Some(Continuation::PreviousResponse("response".into()));
+            assert_eq!(
+                select_protocol(operation, DEFAULT_CHANNEL, &provider, &empty).unwrap(),
+                responses
+            );
+        }
+    }
+
+    #[test]
+    fn selection_preserves_embedding_and_operation_boundaries() {
+        use stravia_runtime_contract::protocol::ir::{EmbeddingInput, EmbeddingRequest};
+
+        let mut request = AiRequest::new("model", Vec::new());
+        request.embedding = Some(EmbeddingRequest {
+            input: EmbeddingInput::Text("input".into()),
+            dimensions: None,
+            encoding_format: None,
+            user: None,
+        });
+        for (configured, expected) in [
+            (
+                "openai-compatible",
+                OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string(),
+            ),
+            ("openai-responses", "openai-responses".into()),
+        ] {
+            let provider = provider(configured);
+            for operation in [Operation::Infer, Operation::Compact] {
+                assert_eq!(
+                    select_protocol(operation, DEFAULT_CHANNEL, &provider, &request).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                select_protocol(Operation::Discover, DEFAULT_CHANNEL, &provider, &request).unwrap(),
+                configured
+            );
+            assert_eq!(
+                select_protocol(Operation::Infer, "other", &provider, &request).unwrap(),
+                configured
+            );
+        }
+    }
+
+    #[test]
+    fn official_preparation_preserves_codec_derived_includes() {
+        let provider = provider("openai-responses");
         for include in [
             None,
             Some(serde_json::json!(["message.output_text.logprobs"])),

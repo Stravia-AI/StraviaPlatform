@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::path::PathBuf;
 
 use super::{LoadError, VendorRuntime};
 
@@ -11,6 +12,26 @@ fn component_bytes() -> Vec<u8> {
              (import "wasi:untrusted/cache-probe@0.2.13" (instance)))"#,
     )
     .expect("valid component")
+}
+
+fn base_component() -> Vec<u8> {
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("target/vendor-plugins");
+    let manifest_path = directory.join("manifest.json");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&manifest_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display())),
+    )
+    .expect("valid vendor manifest");
+    let entry = manifest
+        .as_array()
+        .expect("manifest entries")
+        .iter()
+        .find(|entry| entry["vendor_id"] == "base")
+        .expect("manifest must contain the real base component");
+    let path = directory.join(entry["file"].as_str().expect("base component filename"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
 async fn load_error(runtime: &VendorRuntime) -> LoadError {
@@ -67,6 +88,36 @@ async fn persistent_cache_reuses_compilation_and_rebuilds_after_deletion()
     let (hits, misses) = metrics(&rebuilt);
     assert_eq!(hits, 0);
     assert!(misses > 0, "deleted cache must be repopulated");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires built base component"]
+async fn in_memory_compilation_reuses_live_components_and_recompiles_after_release()
+-> Result<(), Box<dyn Error>> {
+    let workspace = tempfile::tempdir()?;
+    let cache_directory = workspace.path().join("cache/wasmtime");
+    let runtime = VendorRuntime::with_cache(&cache_directory)?;
+    let bytes = base_component();
+
+    let plugin = runtime.load(&bytes).await?;
+    let pinned = plugin.with_descriptor(plugin.descriptor().clone());
+    drop(plugin);
+    let (hits, misses) = metrics(&runtime);
+
+    // The pinned handle keeps the Engine-local Weak entry upgradeable, so a
+    // fresh load of the same bytes must not compile at all.
+    let reloaded = runtime.load(&bytes).await?;
+    assert_eq!(metrics(&runtime), (hits, misses));
+
+    // Releasing every LoadedPlugin expires the Weak entry; the next load must
+    // recompile and reuse the persistent artifact instead of memory.
+    drop(pinned);
+    drop(reloaded);
+    let _recompiled = runtime.load(&bytes).await?;
+    let (hits_after, misses_after) = metrics(&runtime);
+    assert!(hits_after > hits, "expired in-memory entry must recompile");
+    assert_eq!(misses_after, misses);
     Ok(())
 }
 
