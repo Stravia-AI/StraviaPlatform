@@ -1,19 +1,20 @@
-//! Settlement: the fixed tail sequence an Inference Run owes after bytes are
-//! confirmed Sent.
+//! Settlement owns delivery preparation and the fixed tail an Inference Run
+//! owes after bytes are confirmed Sent.
 //!
-//! Settlement owns "what happens after delivery is confirmed" and nothing else
-//! — it never sends bytes. The steps run in a fixed order and each step's
-//! failure is recorded as an observation gap on the run's terminal context
-//! rather than silently skipping the rest of the tail.
+//! Delivery adapters still own the synchronous Sent receipt. Buffered delivery
+//! binds its tail to body EOF; streaming keeps Marker executions separate from
+//! final-response completion. No settlement operation sends bytes or detaches
+//! work from its existing body/producer task.
 
 #[cfg(test)]
 use super::super::RunTerminalContext;
+use axum::response::Response;
+
+use super::delivery::after_body_delivery;
 use super::ledger::RunLedger;
 use super::projection::{ClientProjectionSession, ProjectedDeltaBatch, ProjectionDelivery};
 use crate::interaction_observation::RunEvent;
 use crate::interaction_observation::RunObserver;
-use stravia_runtime_contract::protocol::ids::ProtocolId;
-use stravia_runtime_contract::protocol::ir::AiResponse;
 
 /// Runtime-only envelope for a Generation Chain write and the Vendor result
 /// whose bytes it will publish. The fence deliberately never enters a
@@ -25,63 +26,171 @@ pub(super) struct PendingGenerationChainWrite {
 
 use super::super::{GuardedVendorPublications, VendorWriteGuards};
 
-/// Acquire the existing revocation fence before exposing a complete response.
-/// The transport synchronously consumes the prepared observation at Sent;
-/// settlement retains the same guards rather than opening a second await gap.
-pub(super) async fn prepare_client_completion(
-    ledger: &RunLedger,
-    observer: &RunObserver,
-    mut pending: Option<&mut PendingGenerationChainWrite>,
-) -> Option<VendorWriteGuards> {
-    let publications = pending
-        .as_ref()
-        .map(|pending| pending.vendor_publications.as_slice())
-        .unwrap_or_default();
-    match crate::model_turn::vendor_write_fences(publications).await {
-        Ok(guards) => {
-            let guards = std::sync::Arc::new(GuardedVendorPublications {
-                _guards: guards,
-                confirmed_sent: std::sync::atomic::AtomicBool::new(false),
-                publications: pending
-                    .as_mut()
-                    .map(|pending| std::mem::take(&mut pending.vendor_publications))
-                    .unwrap_or_default(),
-            });
-            ledger
-                .terminal
-                .prepare_client_completion(observer.clone(), guards.clone());
-            Some(guards)
+/// Execution work stays paired with the Hook run that owns its delivered result.
+#[derive(Default)]
+pub(super) struct MarkerExecutions {
+    background: Vec<crate::PreparedMarkerExecution>,
+    started: Vec<crate::StartedMarkerDelivery>,
+    run: Option<crate::hook::InferenceRun>,
+}
+
+impl MarkerExecutions {
+    pub(super) fn take(
+        background: Vec<crate::PreparedMarkerExecution>,
+        started: Vec<crate::StartedMarkerDelivery>,
+        run: &mut Option<crate::hook::InferenceRun>,
+    ) -> Self {
+        // Empty work must leave the run available to its caller's Hook cleanup.
+        let run = if background.is_empty() && started.is_empty() {
+            None
+        } else {
+            run.take()
+        };
+        Self {
+            background,
+            started,
+            run,
         }
-        // Settlement records the existing stale-publication failure and
-        // suppresses every result-derived side effect, as before.
-        Err(_) => None,
+    }
+
+    /// Consume only work whose Markers were delivered. This does not confirm a
+    /// complete response, commit Generation history, or perform Tool Execution
+    /// Handoff; those facts retain their existing owners.
+    pub(super) async fn finish(
+        self,
+        gateway: &crate::Gateway,
+        session: &mut ClientProjectionSession,
+        ledger: &RunLedger,
+        observer: &RunObserver,
+    ) -> SettlementOutcome {
+        settle(
+            gateway,
+            session,
+            ledger,
+            observer,
+            Settlement {
+                executions: self,
+                ..Default::default()
+            },
+        )
+        .await
     }
 }
 
-/// The outstanding work a run still owes after delivery is confirmed Sent.
+/// An owned, single-use response tail. Its pending write and prepared Vendor
+/// guards cannot be separated by a delivery caller.
+pub(super) struct CompletionSettlement {
+    settlement: Settlement,
+}
+
+impl CompletionSettlement {
+    pub(super) fn buffered(
+        staged_delivery: ProjectedDeltaBatch,
+        pending_generation_chain: Option<PendingGenerationChainWrite>,
+        executions: MarkerExecutions,
+    ) -> Self {
+        Self {
+            settlement: Settlement {
+                staged_delivery: Some(staged_delivery),
+                pending_generation_chain,
+                executions,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Streaming Marker work is deliberately absent: a final receipt must not
+    /// release executions skipped by the earlier Marker-delivery gate.
+    pub(super) fn streaming(pending_generation_chain: Option<PendingGenerationChainWrite>) -> Self {
+        Self {
+            settlement: Settlement {
+                pending_generation_chain,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Acquire the existing revocation fence before exposing terminal output.
+    /// Failure preserves the pending publications for the existing settlement
+    /// check; it neither approves publication nor rejects the response early.
+    pub(super) async fn prepare(&mut self, ledger: &RunLedger, observer: &RunObserver) {
+        let pending = self.settlement.pending_generation_chain.as_mut();
+        let publications = pending
+            .as_ref()
+            .map(|pending| pending.vendor_publications.as_slice())
+            .unwrap_or_default();
+        self.settlement.prepared_vendor_guards =
+            match crate::model_turn::vendor_write_fences(publications).await {
+                Ok(guards) => {
+                    let guards = std::sync::Arc::new(GuardedVendorPublications {
+                        _guards: guards,
+                        confirmed_sent: std::sync::atomic::AtomicBool::new(false),
+                        publications: pending
+                            .map(|pending| std::mem::take(&mut pending.vendor_publications))
+                            .unwrap_or_default(),
+                    });
+                    ledger
+                        .terminal
+                        .prepare_client_completion(observer.clone(), guards.clone());
+                    Some(guards)
+                }
+                Err(_) => None,
+            };
+    }
+
+    /// Prepare and bind the tail before returning the buffered response.
+    /// The existing body wrapper polls it inline only after successful EOF;
+    /// dropping the body never spawns a replacement task.
+    pub(super) async fn bind_buffered(
+        mut self,
+        response: Response,
+        gateway: crate::Gateway,
+        mut session: ClientProjectionSession,
+        ledger: RunLedger,
+        observer: RunObserver,
+    ) -> Response {
+        self.prepare(&ledger, &observer).await;
+        after_body_delivery(response, async move {
+            let delivered_at = chrono::Utc::now().timestamp_millis();
+            ledger
+                .terminal
+                .publish_prepared_client_completion(delivered_at);
+            self.finish_sent(&gateway, &mut session, &ledger, &observer, delivered_at)
+                .await;
+        })
+    }
+
+    /// Consume the tail using the adapter's actual receipt timestamp. Live
+    /// adapters have already published Sent synchronously before this await.
+    pub(super) async fn finish_sent(
+        mut self,
+        gateway: &crate::Gateway,
+        session: &mut ClientProjectionSession,
+        ledger: &RunLedger,
+        observer: &RunObserver,
+        delivered_at: i64,
+    ) -> SettlementOutcome {
+        self.settlement.delivery_completed_at = Some(delivered_at);
+        settle(gateway, session, ledger, observer, self.settlement).await
+    }
+}
+
+/// Private work representation shared by the two response shapes and the
+/// stream's earlier Marker phase. Callers cannot mix their optional fields.
 ///
-/// Every field is optional because settlement is shared by paths that owe
-/// different steps: a Hook-produced buffered response has no Platform
-/// executions, the live tail has no staged batch left, and so on.
+/// Marker publication, execution results and Generation persistence remain
+/// independent steps, not a transaction.
 #[derive(Default)]
-pub(super) struct Settlement {
+struct Settlement {
     /// Marker batch staged for the Sent response, published after observation.
-    pub staged_delivery: Option<ProjectedDeltaBatch>,
-    /// Platform executions whose jobs start once their Markers are published.
-    pub background_executions: Vec<crate::PreparedMarkerExecution>,
-    /// Platform executions already started, spawned once delivery is confirmed.
-    pub started_executions: Vec<crate::StartedMarkerDelivery>,
-    /// The live Hook session executions finish under. Required whenever
-    /// `started_executions` is non-empty; its absence is itself a failure.
-    pub run: Option<crate::hook::InferenceRun>,
+    staged_delivery: Option<ProjectedDeltaBatch>,
+    executions: MarkerExecutions,
     /// The staged Generation Chain node awaiting its fenced commit persist.
-    pub pending_generation_chain: Option<PendingGenerationChainWrite>,
+    pending_generation_chain: Option<PendingGenerationChainWrite>,
     /// The terminal-delivery timestamp reported by the adapter.
-    pub delivery_completed_at: Option<i64>,
-    /// The response the client received, staged as observed client output.
-    pub delivered_response: Option<AiResponse>,
+    delivery_completed_at: Option<i64>,
     /// Revocation guards acquired before the transport exposed terminal output.
-    pub prepared_vendor_guards: Option<VendorWriteGuards>,
+    prepared_vendor_guards: Option<VendorWriteGuards>,
 }
 
 /// A settlement step that failed. Later steps still ran; the outcome
@@ -148,22 +257,23 @@ pub(super) async fn report_projected_delivery(
 /// A step's failure is recorded as an observation gap and enumerated in the
 /// outcome; later independent steps still run. A stale Vendor fence is the one
 /// exception: no result-derived publication step may start after revocation.
-pub(super) async fn settle(
+async fn settle(
     gateway: &crate::Gateway,
     session: &mut ClientProjectionSession,
     ledger: &RunLedger,
     observer: &RunObserver,
-    ingress: ProtocolId,
     settlement: Settlement,
 ) -> SettlementOutcome {
     let Settlement {
         mut staged_delivery,
-        mut background_executions,
-        mut started_executions,
-        run,
+        executions:
+            MarkerExecutions {
+                background: mut background_executions,
+                started: mut started_executions,
+                run,
+            },
         mut pending_generation_chain,
         delivery_completed_at,
-        mut delivered_response,
         prepared_vendor_guards,
     } = settlement;
     let mut outcome = SettlementOutcome {
@@ -207,7 +317,6 @@ pub(super) async fn settle(
             background_executions.clear();
             started_executions.clear();
             pending_generation_chain = None;
-            delivered_response = None;
             None
         }
     };
@@ -218,9 +327,6 @@ pub(super) async fn settle(
     if let Some(delivered_at) = delivery_completed_at {
         ledger.terminal.set_delivery_completed_at(delivered_at);
         if _vendor_guards.is_some() {
-            if let Some(response) = delivered_response.take() {
-                ledger.terminal.stage_client_output(ingress, &response);
-            }
             ledger
                 .terminal
                 .publish_client_completion(observer, delivered_at);
@@ -305,7 +411,7 @@ mod tests {
     use crate::history_marker::{HistoryMarker, HistoryMarkerKind};
     use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
     use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, AiResponse};
 
     async fn fixture() -> (
         tempfile::TempDir,
@@ -414,14 +520,19 @@ mod tests {
     const SENT_AT: i64 = 1_700_000_000_000;
     const VENDOR: &str = "settlement-vendor";
 
-    async fn prepared_vendor_settlement(
+    async fn vendor_settlement(
         gateway: &crate::Gateway,
         session: &mut ClientProjectionSession,
         ledger: &RunLedger,
-        observer: &RunObserver,
         tracker: &crate::plugin::VendorOperationTracker,
         caller: stravia_runtime_contract::CancellationToken,
-    ) -> (Settlement, String, crate::plugin::VendorPublicationFence) {
+    ) -> (
+        CompletionSettlement,
+        AiResponse,
+        String,
+        crate::plugin::VendorPublicationFence,
+        String,
+    ) {
         let operation = tracker.begin(VENDOR).expect("Vendor operation");
         let publication =
             operation.publication_fence(caller, stravia_runtime_contract::Deadline::never());
@@ -472,24 +583,16 @@ mod tests {
         ledger
             .terminal
             .stage_client_output(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, &response);
-        let mut pending = PendingGenerationChainWrite {
+        let pending = PendingGenerationChainWrite {
             write,
             vendor_publications: vec![publication.clone()],
         };
-        let guards = prepare_client_completion(ledger, observer, Some(&mut pending))
-            .await
-            .expect("real Vendor read guards prepared");
         (
-            Settlement {
-                staged_delivery: Some(batch),
-                pending_generation_chain: Some(pending),
-                delivery_completed_at: Some(SENT_AT),
-                delivered_response: Some(response),
-                prepared_vendor_guards: Some(guards),
-                ..Default::default()
-            },
+            CompletionSettlement::buffered(batch, Some(pending), MarkerExecutions::default()),
+            response,
             generation_id,
             publication,
+            marker.reference,
         )
     }
 
@@ -585,39 +688,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_settlement_waits_for_body_eof_before_publishing_history() {
+        use futures::StreamExt;
+
+        let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
+        let tracker = crate::plugin::VendorOperationTracker::default();
+        let (settlement, response, generation_id, _, marker) = vendor_settlement(
+            &gateway,
+            &mut session,
+            &ledger,
+            &tracker,
+            stravia_runtime_contract::CancellationToken::new(),
+        )
+        .await;
+        let bound = settlement
+            .bind_buffered(
+                Response::new(axum::body::Body::from("delivered payload")),
+                gateway.clone(),
+                session,
+                ledger.clone(),
+                observer.clone(),
+            )
+            .await;
+        let mut body = bound.into_body().into_data_stream();
+        assert_eq!(
+            body.next().await.expect("payload").expect("body bytes"),
+            "delivered payload"
+        );
+        // Reading the last data chunk is not the buffered EOF receipt.
+        assert_eq!(ledger.terminal.delivery_completed_at(), None);
+        assert!(ledger.published_executions().is_empty());
+        assert!(body.next().await.is_none());
+        assert!(ledger.terminal.delivery_completed_at().is_some());
+        assert_eq!(ledger.published_executions(), vec![marker]);
+        // The enclosing Run normally finishes observation after body EOF,
+        // releasing the commit fence before a continuation can read history.
+        observer.finish(crate::interaction_observation::RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: ledger.terminal.delivery_completed_at(),
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: Some(generation_id.clone()),
+            generation_root_id: Some(generation_id.clone()),
+        });
+        assert_generation_stored(&gateway, &ledger, &generation_id, true).await;
+        assert_delivered_history(&observation, response, true).await;
+        observation.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_buffered_body_before_eof_discards_all_publications() {
+        use futures::StreamExt;
+
+        for read_payload in [false, true] {
+            let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
+            let tracker = crate::plugin::VendorOperationTracker::default();
+            let (settlement, response, generation_id, _, _) = vendor_settlement(
+                &gateway,
+                &mut session,
+                &ledger,
+                &tracker,
+                stravia_runtime_contract::CancellationToken::new(),
+            )
+            .await;
+            let bound = settlement
+                .bind_buffered(
+                    Response::new(axum::body::Body::from("unconfirmed payload")),
+                    gateway.clone(),
+                    session,
+                    ledger.clone(),
+                    observer.clone(),
+                )
+                .await;
+            let mut body = bound.into_body().into_data_stream();
+            if read_payload {
+                assert_eq!(
+                    body.next().await.expect("payload").expect("body bytes"),
+                    "unconfirmed payload"
+                );
+            }
+            drop(body);
+            assert_eq!(ledger.terminal.delivery_completed_at(), None);
+            assert!(ledger.published_executions().is_empty());
+            assert_generation_stored(&gateway, &ledger, &generation_id, false).await;
+            assert_delivered_history(&observation, response, false).await;
+            observation.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_preparation_keeps_vendor_publications_fenced_at_body_eof() {
+        let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
+        let tracker = crate::plugin::VendorOperationTracker::default();
+        let caller = stravia_runtime_contract::CancellationToken::new();
+        let (settlement, response, generation_id, _, _) =
+            vendor_settlement(&gateway, &mut session, &ledger, &tracker, caller.clone()).await;
+        caller.cancel();
+        let bound = settlement
+            .bind_buffered(
+                Response::new(axum::body::Body::from("already rendered")),
+                gateway.clone(),
+                session,
+                ledger.clone(),
+                observer.clone(),
+            )
+            .await;
+        let bytes = axum::body::to_bytes(bound.into_body(), usize::MAX)
+            .await
+            .expect("existing response delivery remains unchanged");
+        assert_eq!(bytes, "already rendered");
+        assert!(ledger.published_executions().is_empty());
+        assert_generation_stored(&gateway, &ledger, &generation_id, false).await;
+        assert_delivered_history(&observation, response, false).await;
+        observation.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn confirmed_sent_settlement_survives_caller_cancellation() {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
         let caller = stravia_runtime_contract::CancellationToken::new();
-        let (settlement, generation_id, publication) = prepared_vendor_settlement(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            &tracker,
-            caller.clone(),
-        )
-        .await;
-        let response = settlement
-            .delivered_response
-            .clone()
-            .expect("delivered response");
+        let (mut settlement, response, generation_id, publication, marker) =
+            vendor_settlement(&gateway, &mut session, &ledger, &tracker, caller.clone()).await;
+        settlement.prepare(&ledger, &observer).await;
         ledger.terminal.publish_prepared_client_completion(SENT_AT);
         assert_eq!(ledger.terminal.delivery_completed_at(), Some(SENT_AT));
         caller.cancel();
         assert!(publication.ensure_current().is_err());
         assert!(publication.ensure_generation_current().is_ok());
-        let outcome = settle(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            settlement,
-        )
-        .await;
+        let outcome = settlement
+            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .await;
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
-        assert_eq!(outcome.published_platform_executions.len(), 1);
+        assert_eq!(outcome.published_platform_executions, vec![marker]);
         assert!(session.client_output_committed());
         assert!(
             ledger
@@ -643,19 +847,15 @@ mod tests {
     async fn confirmed_sent_settlement_rejects_vendor_revocation_while_guards_are_held() {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
-        let (settlement, generation_id, publication) = prepared_vendor_settlement(
+        let (mut settlement, response, generation_id, publication, _) = vendor_settlement(
             &gateway,
             &mut session,
             &ledger,
-            &observer,
             &tracker,
             stravia_runtime_contract::CancellationToken::new(),
         )
         .await;
-        let response = settlement
-            .delivered_response
-            .clone()
-            .expect("delivered response");
+        settlement.prepare(&ledger, &observer).await;
         ledger.terminal.publish_prepared_client_completion(SENT_AT);
         assert_eq!(ledger.terminal.delivery_completed_at(), Some(SENT_AT));
         // Poll the actual drain once. It advances the epoch and cancels the
@@ -667,15 +867,9 @@ mod tests {
             std::task::Poll::Pending
         ));
         assert!(publication.ensure_generation_current().is_err());
-        let outcome = settle(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            settlement,
-        )
-        .await;
+        let outcome = settlement
+            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .await;
         assert!(matches!(
             outcome.failures.as_slice(),
             [SettlementFailure::VendorPublication(_)]
@@ -702,33 +896,17 @@ mod tests {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
         let caller = stravia_runtime_contract::CancellationToken::new();
-        let (settlement, generation_id, _) = prepared_vendor_settlement(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            &tracker,
-            caller.clone(),
-        )
-        .await;
-        let response = settlement
-            .delivered_response
-            .clone()
-            .expect("staged response");
+        let (mut settlement, response, generation_id, _, _) =
+            vendor_settlement(&gateway, &mut session, &ledger, &tracker, caller.clone()).await;
+        settlement.prepare(&ledger, &observer).await;
         caller.cancel();
         // The real synchronous callback must not issue a Sent certificate when
         // strict validation fails, even though read guards were acquired earlier.
         ledger.terminal.publish_prepared_client_completion(SENT_AT);
         assert_eq!(ledger.terminal.delivery_completed_at(), None);
-        let outcome = settle(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            settlement,
-        )
-        .await;
+        let outcome = settlement
+            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .await;
         assert!(matches!(
             outcome.failures.as_slice(),
             [SettlementFailure::VendorPublication(_)]
@@ -748,7 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settle_publishes_staged_markers_then_commits_and_stages() {
+    async fn confirmed_response_publishes_markers_with_delivery_timestamp() {
         let (_directory, mut session, ledger, observer, gateway, _observation) = fixture().await;
         let principal = ledger.terminal.principal.clone();
         let marker = gateway
@@ -773,20 +951,16 @@ mod tests {
 
         let mut response = AiResponse::new("response-1", "model");
         response.items = vec![AiItem::output_text("answer")];
-        let outcome = settle(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            Settlement {
-                staged_delivery: Some(batch),
-                delivery_completed_at: Some(1_700_000_000_000),
-                delivered_response: Some(response),
-                ..Default::default()
-            },
-        )
-        .await;
+        ledger
+            .terminal
+            .stage_client_output(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, &response);
+        let mut settlement =
+            CompletionSettlement::buffered(batch, None, MarkerExecutions::default());
+        settlement.prepare(&ledger, &observer).await;
+        ledger.terminal.publish_prepared_client_completion(SENT_AT);
+        let outcome = settlement
+            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .await;
 
         assert!(
             outcome.failures.is_empty(),
@@ -823,24 +997,23 @@ mod tests {
             .await
             .expect("begin Generation Chain write");
 
-        let outcome = settle(
-            &gateway,
-            &mut session,
-            &ledger,
-            &observer,
+        ledger.terminal.stage_client_output(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            Settlement {
-                staged_delivery: Some(batch),
-                pending_generation_chain: Some(PendingGenerationChainWrite {
-                    write: pending,
-                    vendor_publications: Vec::new(),
-                }),
-                delivery_completed_at: Some(1_700_000_000_000),
-                delivered_response: Some(AiResponse::new("response-1", "model")),
-                ..Default::default()
-            },
-        )
-        .await;
+            &AiResponse::new("response-1", "model"),
+        );
+        let mut settlement = CompletionSettlement::buffered(
+            batch,
+            Some(PendingGenerationChainWrite {
+                write: pending,
+                vendor_publications: Vec::new(),
+            }),
+            MarkerExecutions::default(),
+        );
+        settlement.prepare(&ledger, &observer).await;
+        ledger.terminal.publish_prepared_client_completion(SENT_AT);
+        let outcome = settlement
+            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .await;
 
         assert_eq!(outcome.failures.len(), 2);
         assert!(matches!(

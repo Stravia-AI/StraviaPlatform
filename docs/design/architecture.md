@@ -544,6 +544,12 @@ Gateway::builder(config)
 
 每个客户端推理 turn 只把 `RunInput` 交给 `inference_run::execute`；该一次性 `interface` 独占完整生命周期，并调用 `HookRuntime::begin(SessionContext, &AiRequest, ContextCompleteness)` 创建 crate-private run state 与每个 Hook 的 `HookSession`。一次 Inference Run 覆盖初始 provider round、纯 PlatformTool 隐藏续跑，以及混合工具等待客户端结果后的恢复；普通 provider Target 重试复用本 round 已校验的 canonical 请求。`SessionContext` 只含 request/run ID、RequestKind、ingress、HTTP/WebSocket transport 和脱敏主体；路由确定后事件才收到 model/provider/target/egress。
 
+交付准备与收口集中在 `engine/settlement.rs`。`CompletionSettlement` 的私有状态一起持有待提交的 Generation Chain Write 与 Vendor 围栏，完整响应收口按值消费该对象；调用方不再自行配对围栏、交付时间和可选收口字段。buffered 形态还持有 staged Marker 与其执行工作；stream 形态只持有最终响应工作，先前未通过 Marker 交付门的执行不会在最终收口中补启动。`MarkerExecutions` 仅在确有工作时接管所属 Hook run，空执行保留调用方的清理所有权；Marker 发布仍不等于工具执行交接。
+
+buffered 的 `bind_buffered` 在返回响应前准备围栏，并统一安装正文回调：完整 body EOF 后先同步登记 Sent，再在原 body future 中运行收口，提前丢弃正文不另起任务。HTTP stream 的终帧 poll 与 WebSocket 实际发送回执继续通过原 `RunTerminalContext` 同步登记 Sent，不等待 producer 恢复或 Generation 提交。stream 在原交付门内单独准备完整响应，在 Marker 确认后处理执行工作，在取得真实终态回执后完成最终收口；`ClientProjectionSession` 仍由 producer 独占。
+
+共同 implementation 保留观测交付、Marker 发布、执行结果处理、Generation 持久化的既有顺序与独立失败策略，不将它们包装成事务。准备围栏失败时仍保留待检查的 Vendor 发布信息，不提前批准发布或改变响应；已确认 Sent 后的调用方取消与 Vendor 撤销继续分别裁决。测试穿过与调用方相同的 interface，使用真实 SQLite 与 Vendor 围栏验证 EOF、断线、撤销和续接。该内部 seam 不新增通用 port、后台任务或每个 delta 的动态分派；depth 来自减少调用方顺序知识，locality 来自规则集中，leverage 来自 buffered 与 stream 两个真实 delivery adapter 共用。
+
 ### 4.2 小接口、深实现
 
 ```rust

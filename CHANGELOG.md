@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Inference Run delivery settlement now owns preparation guards and completion work across buffered and streaming responses. Synchronous delivery receipts, Marker publication, cancellation and revocation rules, and Generation Chain persistence semantics are unchanged.
 - Fully migrated databases now take a lightweight startup path: migration history and checksums remain validated, and SQLite foreign-key enforcement remains enabled, but ordinary restarts no longer scan every foreign key or revisit completed data conversions. Pending upgrades retain their migration integrity checks; normal startup is not a full database audit.
 - Persistent instances now reuse Wasmtime's compiled-plugin cache in `<data-dir>/cache/wasmtime` across restarts while retaining process-wide reuse of bundled components. Plugins are still loaded and validated before readiness. Cache directories are owner-controlled; an unavailable or unsafe cache produces a warning and falls back to compilation without persistent caching.
 - Traffic Equalization now uses a rolling one-hour usage window and atomically selects and reserves eligible destinations using in-flight request counts, then weighted traffic. Existing cache affinity, conversation affinity, and continuation constraints retain precedence; load balancing does not redirect eligible cached prefixes to uncached destinations.
