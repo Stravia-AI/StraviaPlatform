@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Vendor plugin calls now reuse typed Wasmtime pre-instantiation data while retaining a fresh Store, HostServices and resource table for every call. Import checks, descriptor revalidation, cancellation and request isolation remain unchanged.
+- Pending input previews now retain only bounded text instead of keeping the entire canonical request alive. Credential-mapping-ready publication, client tool results and full model/history data remain unchanged.
 - Fully migrated databases now take a lightweight startup path: migration history and checksums remain validated, and SQLite foreign-key enforcement remains enabled, but ordinary restarts no longer scan every foreign key or revisit completed data conversions. Pending upgrades retain their migration integrity checks; normal startup is not a full database audit.
 - Persistent instances now reuse Wasmtime's compiled-plugin cache in `<data-dir>/cache/wasmtime` across restarts while retaining process-wide reuse of bundled components. Plugins are still loaded and validated before readiness. Cache directories are owner-controlled; an unavailable or unsafe cache produces a warning and falls back to compilation without persistent caching.
 - Traffic Equalization now uses a rolling one-hour usage window and atomically selects and reserves eligible destinations using in-flight request counts, then weighted traffic. Existing cache affinity, conversation affinity, and continuation constraints retain precedence; load balancing does not redirect eligible cached prefixes to uncached destinations.
@@ -21,6 +23,8 @@
 
 ### Fixed
 
+- Offline Wasm evaluation fixtures now remove URL userinfo and query credentials from Provider settings while preserving replay paths and unrelated options. Recorded requests, responses and traces remain sensitive local data.
+- Admin entry regression tests now set their own log level and use OS-assigned initial listener ports, avoiding failures caused by inherited log settings or released-port probes.
 - Server startup and setup completion now reuse the prepared storage and connection pools for administrator checks and Gateway construction instead of initializing and migrating the same database twice.
 - SQLite and PostgreSQL scheduling aggregates preserve confirmed usage when other attempts have unknown usage. Uncached input is calculated per attempt so incomplete cache reporting cannot erase known traffic.
 - The provider-type filter on the Allowances page labels providers without a catalog entry (such as Antigravity) by their vendor instead of an empty prefix like ` / oauth`.

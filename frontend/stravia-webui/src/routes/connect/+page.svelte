@@ -439,7 +439,8 @@ function cliModelName(modelId: string): string | undefined {
                   hint={codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}>
                   <Select.Root type="single" bind:value={codeProtocol}>
                     <Select.Trigger id="code-protocol" class="w-full min-w-0"
-                      ><span class="truncate">{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
+                      ><span class="truncate"
+                        >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
                       ></Select.Trigger>
                     <Select.Content
                       ><Select.Group

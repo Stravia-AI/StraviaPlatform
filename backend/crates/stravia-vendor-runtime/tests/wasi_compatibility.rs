@@ -246,6 +246,30 @@ async fn real_base_executes_with_stable_wasi_patches_and_mixed_imports() {
         assert_eq!(protocol, "openai-compatible/embeddings/v1", "{mode:?}");
     }
 
+    // The prepared blueprint belongs to the component's Engine, not to the
+    // runtime driving the call: loading on one runtime and selecting on
+    // another must keep working, including after `with_descriptor` pins the
+    // effective profile set.
+    let bytes = redirect_imports(&text, WasiImports::Uniform("0.2.12"));
+    let loaded = runtime.load(&bytes).await.expect("foreign-engine fixture");
+    let pinned = loaded.with_descriptor(loaded.descriptor().clone());
+    assert_eq!(pinned.identity(), loaded.identity());
+    let foreign_runtime = VendorRuntime::new().expect("foreign runtime");
+    for plugin in [&loaded, &pinned] {
+        let protocol = foreign_runtime
+            .select_protocol(
+                plugin,
+                Operation::Infer,
+                &provider,
+                &request,
+                CancellationToken::new(),
+                Deadline::from_now(Duration::from_secs(60)),
+            )
+            .await
+            .expect("foreign runtime reuses the prepared blueprint");
+        assert_eq!(protocol, "openai-compatible/embeddings/v1");
+    }
+
     // Keep all real guest exports intact. A newer patch name alone is allowed,
     // but a function absent from this host must still prevent instantiation.
     let end = text.rfind(')').expect("outer component terminator");

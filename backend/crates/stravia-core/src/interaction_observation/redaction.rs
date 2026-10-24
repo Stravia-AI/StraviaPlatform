@@ -6,54 +6,74 @@ use stravia_credential_protection::marker;
 
 pub(crate) const REDACTED: &str = "***";
 
-pub(crate) fn user_input_text(
+/// Maximum number of Unicode scalar values retained for an input preview.
+pub(crate) const INPUT_PREVIEW_CHARS: usize = 4096;
+
+/// Bounded preview of the latest user text in the received canonical window.
+///
+/// Runs when the preview is captured so the waiting state does not pin the
+/// request tree. Multiple text blocks are joined with `\n` while copying at
+/// most [`INPUT_PREVIEW_CHARS`] scalar values; the full joined body is never
+/// materialized.
+pub(crate) fn user_input_preview(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
-) -> Option<Cow<'_, str>> {
+) -> Option<String> {
     use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
-    let text = match &item.content {
-        MessageContent::Text(text) => Cow::Borrowed(text.as_str()),
+    match &item.content {
+        MessageContent::Text(text) => {
+            (!text.is_empty()).then(|| preview_prefix(text, INPUT_PREVIEW_CHARS).0.to_owned())
+        }
         MessageContent::Blocks(blocks) => {
-            let mut texts = blocks.iter().filter_map(|block| match block {
+            let texts = blocks.iter().filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
-            let first = texts.next()?;
-            if let Some(second) = texts.next() {
-                let capacity = first.len()
-                    + second.len()
-                    + 1
-                    + texts.clone().map(|text| text.len() + 1).sum::<usize>();
-                let mut joined = String::with_capacity(capacity);
-                joined.push_str(first);
-                joined.push('\n');
-                joined.push_str(second);
-                for text in texts {
-                    joined.push('\n');
-                    joined.push_str(text);
+            let mut remaining = INPUT_PREVIEW_CHARS;
+            let mut text_count = 0;
+            let mut bytes = 0;
+            let mut last_end = 0;
+            for text in texts.clone() {
+                if text_count > 0 {
+                    bytes += 1;
+                    remaining -= 1;
                 }
-                Cow::Owned(joined)
-            } else {
-                Cow::Borrowed(first)
+                let (prefix, chars) = preview_prefix(text, remaining);
+                last_end = prefix.len();
+                bytes += last_end;
+                remaining -= chars;
+                text_count += 1;
+                if remaining == 0 {
+                    break;
+                }
             }
-        }
-    };
-    (!text.is_empty()).then_some(text)
-}
-
-pub(crate) fn input_preview(text: Cow<'_, str>) -> String {
-    let end = text
-        .char_indices()
-        .nth(4096)
-        .map_or(text.len(), |(end, _)| end);
-    match text {
-        Cow::Borrowed(text) => text[..end].to_owned(),
-        Cow::Owned(mut text) => {
-            text.truncate(end);
-            text.shrink_to_fit();
-            text
+            if bytes == 0 {
+                return None;
+            }
+            let mut preview = String::with_capacity(bytes);
+            for (index, text) in texts.take(text_count).enumerate() {
+                if index > 0 {
+                    preview.push('\n');
+                }
+                if index + 1 == text_count {
+                    preview.push_str(&text[..last_end]);
+                } else {
+                    preview.push_str(text);
+                }
+            }
+            Some(preview)
         }
     }
+}
+
+fn preview_prefix(text: &str, limit: usize) -> (&str, usize) {
+    let mut end = 0;
+    let mut chars = 0;
+    for (offset, character) in text.char_indices().take(limit) {
+        end = offset + character.len_utf8();
+        chars += 1;
+    }
+    (&text[..end], chars)
 }
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
@@ -1017,23 +1037,86 @@ fn text_wrapper(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn user_text_items(text: &str) -> Vec<stravia_runtime_contract::protocol::ir::AiItem> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
+        vec![AiItem {
+            role: Role::User,
+            content: MessageContent::Text(std::sync::Arc::new(text.to_owned())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }]
+    }
+
     #[test]
     fn input_preview_selects_latest_user_text_without_history_or_tool_payloads() {
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
-            {"role":"system","content":"system-secret"},
-            {"role":"user","content":"old-user"},
-            {"role":"assistant","content":"assistant-secret"},
-            {"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},
-            {"role":"tool","content":"tool-secret","tool_call_id":"call"}
-        ])).unwrap();
-        assert_eq!(super::user_input_text(&items), Some("first\nsecond".into()));
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"system","content":"system-secret"},
+                {"role":"user","content":"old-user"},
+                {"role":"assistant","content":"assistant-secret"},
+                {"role":"user","content":[
+                    {"type":"text","text":"first"},
+                    {"type":"thinking","thinking":"ignored"},
+                    {"type":"text","text":"second"}
+                ]},
+                {"role":"tool","content":"tool-secret","tool_call_id":"call"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_preview(&items),
+            Some("first\nsecond".into())
+        );
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":"old-user"},
                 {"role":"user","content":[]}
             ]))
             .unwrap();
-        assert_eq!(super::user_input_text(&items), None);
+        assert_eq!(super::user_input_preview(&items), None);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":""}]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_preview(&items), None);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[
+                    {"type":"text","text":""},
+                    {"type":"text","text":""}
+                ]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_preview(&items), Some("\n".into()));
+    }
+
+    #[test]
+    fn input_preview_stops_at_the_limit_without_an_extra_separator() {
+        let full = "a".repeat(4096);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[
+                    {"type":"text","text":full},
+                    {"type":"text","text":"b"}
+                ]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_preview(&items).unwrap(), full);
+
+        let almost = "a".repeat(4095);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[
+                    {"type":"text","text":almost},
+                    {"type":"text","text":"b"}
+                ]}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_preview(&items).unwrap(),
+            format!("{almost}\n")
+        );
     }
 
     #[test]
@@ -1043,7 +1126,8 @@ mod tests {
             "start {secret}\napi_key=credential-sentinel\n{}",
             "文".repeat(4200)
         );
-        let preview = super::input_preview(text.into());
+        let items = user_text_items(&text);
+        let preview = super::user_input_preview(&items).unwrap();
         assert!(preview.starts_with("start 密"));
         assert!(preview.contains("密"));
         assert!(!preview.contains("credential-sentinel"));
@@ -1062,20 +1146,17 @@ mod tests {
             "地址：https://example.test/path?token=never-persist"
         );
 
-        let preview = input_preview(text.into());
+        let preview = user_input_preview(&user_text_items(text)).unwrap();
 
         assert_eq!(preview, text);
     }
 
     #[test]
     fn input_preview_preserves_header_schemes_in_semantic_text() {
-        let preview =
-            input_preview("safe prose bEaReR bearer-sentinel BaSiC basic-sentinel".into());
+        let text = "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel";
+        let preview = user_input_preview(&user_text_items(text)).unwrap();
 
-        assert_eq!(
-            preview,
-            "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel"
-        );
+        assert_eq!(preview, text);
     }
 
     #[test]
@@ -1083,7 +1164,7 @@ mod tests {
         let opening = "𠮷".repeat(4096);
         let text = format!("{opening}last");
 
-        let preview = input_preview(text.as_str().into());
+        let preview = user_input_preview(&user_text_items(&text)).unwrap();
 
         assert_eq!(preview, opening);
     }

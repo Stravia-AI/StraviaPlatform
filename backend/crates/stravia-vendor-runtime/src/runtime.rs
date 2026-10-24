@@ -29,7 +29,15 @@ pub struct LoadedPlugin {
 }
 
 struct LoadedVersion {
+    /// Strong reference that keeps the runtime's Engine-local `Weak<Component>`
+    /// compilation entry upgradeable for as long as this plugin is pinned.
+    /// Instantiation uses `prepared`, which is bound to this component's
+    /// Engine, so a plugin driven by another runtime never switches to the
+    /// caller's Engine.
     component: Arc<Component>,
+    /// Import-resolved, export-indexed blueprint bound to `component`'s Engine.
+    /// Shared by `with_descriptor`, never by different loads.
+    prepared: bindings::VendorPre<StoreState>,
     descriptor: VendorDescriptor,
     identity: String,
 }
@@ -53,6 +61,7 @@ impl LoadedPlugin {
         LoadedPlugin {
             inner: Arc::new(LoadedVersion {
                 component: self.inner.component.clone(),
+                prepared: self.inner.prepared.clone(),
                 descriptor,
                 identity: self.inner.identity.clone(),
             }),
@@ -207,15 +216,18 @@ impl VendorRuntime {
     }
 
     /// Compile (or reuse a live Engine-local compilation), import-check,
-    /// freshly instantiate, and validate a component without mutating any
-    /// installed version. Only immutable compilation is shared; validation is
-    /// repeated on every load. Active operations pin this exact component.
+    /// resolve imports once, freshly instantiate, and validate a component
+    /// without mutating any installed version. Only immutable compilation is
+    /// shared across loads; the prepared blueprint and every descriptor
+    /// validation are rebuilt on each load. Active operations pin this exact
+    /// blueprint.
     pub async fn load(&self, bytes: &[u8]) -> Result<LoadedPlugin, LoadError> {
         let digest = stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes);
         let identity = stravia_runtime_contract::identifier::encode_digest(&digest);
         let component = self.compiled_component(&digest, bytes).await?;
         self.validate_imports(&component)?;
-        let descriptor = self.read_descriptor(&component).await?;
+        let prepared = Self::prepare(&component)?;
+        let descriptor = self.read_descriptor(&prepared).await?;
         descriptor
             .validate()
             .map_err(|error| LoadError::DescriptorInvalid(error.to_string()))?;
@@ -228,6 +240,7 @@ impl VendorRuntime {
         Ok(LoadedPlugin {
             inner: Arc::new(LoadedVersion {
                 component,
+                prepared,
                 descriptor,
                 identity,
             }),
@@ -280,13 +293,11 @@ impl VendorRuntime {
             deadline,
             generation: 0,
         };
-        let engine = plugin.inner.component.engine();
+        let engine = plugin.inner.prepared.engine();
         let mut store = Self::new_store(engine, scope, None, false);
-        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate =
-            bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
+        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -362,13 +373,11 @@ impl VendorRuntime {
 
         let wit_operation = convert_operation(operation.into());
         let wit_input = convert_input(sdk_input);
-        let engine = plugin.inner.component.engine();
+        let engine = plugin.inner.prepared.engine();
         let mut store = Self::new_store(engine, scope, Some(operation), false);
-        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate =
-            bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
+        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -442,13 +451,11 @@ impl VendorRuntime {
             format: CANONICAL_FORMAT_VERSION,
             body: input,
         };
-        let engine = plugin.inner.component.engine();
+        let engine = plugin.inner.prepared.engine();
         let mut store = Self::new_store(engine, scope, None, true);
-        let linker = Self::new_linker(engine).map_err(|_| RuntimeError::Trapped)?;
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate =
-            bindings::Vendor::instantiate_async(&mut store, &plugin.inner.component, &linker);
+        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -540,19 +547,33 @@ impl VendorRuntime {
         Ok(())
     }
 
-    async fn read_descriptor(&self, component: &Component) -> Result<VendorDescriptor, LoadError> {
+    /// Resolve imports and required exports once against the component's own
+    /// Engine. Every later instantiation in this load (descriptor and each
+    /// operation) reuses this blueprint; stores and host state stay fresh.
+    fn prepare(component: &Component) -> Result<bindings::VendorPre<StoreState>, LoadError> {
+        let linker = Self::new_linker(component.engine())
+            .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
+        let instance_pre = linker
+            .instantiate_pre(component)
+            .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
+        bindings::VendorPre::new(instance_pre)
+            .map_err(|error| LoadError::DescriptorExecution(error.to_string()))
+    }
+
+    async fn read_descriptor(
+        &self,
+        prepared: &bindings::VendorPre<StoreState>,
+    ) -> Result<VendorDescriptor, LoadError> {
         let scope = OperationScope {
             services: Arc::new(DenyServices),
             cancellation: CancellationToken::new(),
             deadline: Deadline::from_now(Duration::from_secs(2)),
             generation: 0,
         };
-        let engine = component.engine();
+        let engine = prepared.engine();
         let mut store = Self::new_store(engine, scope, None, false);
-        let linker = Self::new_linker(engine)
-            .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
         let deadline = store.data().deadline.clone();
-        let instantiate = bindings::Vendor::instantiate_async(&mut store, component, &linker);
+        let instantiate = prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             result = instantiate => result,
             () = deadline.wait() => {
@@ -586,7 +607,8 @@ impl VendorRuntime {
     ) -> Store<StoreState> {
         let mut wasi = WasiCtx::builder();
         wasi.max_random_size(64 * 1024);
-        // 编译结果可以跨实例共享；Store 与 Linker 必须绑定组件所属的 Engine。
+        // 编译结果与 prepared blueprint 可以跨实例共享；Store 必须绑定该
+        // 组件所属的 Engine，而不是调用方 runtime 的 Engine。
         let mut store = Store::new(
             engine,
             StoreState {

@@ -167,7 +167,9 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 普通准入在入队前从收到的 canonical 请求生成 `PreparedAdmission`：只保留有界 received-input 证据、溢出或指纹缺口标志、Generation 已确认事实及完整请求的 canonical fingerprint，不让 writer 等待 SQL 时持有完整原文请求。fingerprint 覆盖完整请求语义，仅排除每次尝试的 `parameters.session.request_id` 关联 ID；会话、线程、轮次、父节点、Provider context 和业务 JSON 中同名字段仍参与身份判定。对象键顺序不影响身份；正文借用并流式计算摘要，不复制完整历史或依赖有界尾窗。证据超限、缺失或无法无损重建时按既有规则记录 gap，不凭截断内容确认归属。
 
-输入预览不作为上述准入证据，也不提前写入普通队列。活动请求先完成凭据保护并登记全部有效映射，成功后才生成和发布最多 4,096 Unicode 字符的受保护预览；保护失败或取消不能发布未经保护的正文。该内存优化不关闭普通 Observation、进程日志、Generation Chain 历史或 Debug 契约，不缩减 SQL 历史；Debug 原文捕获仍只在明确启用时遵循 §7 的独立边界。
+输入预览不作为上述准入证据，也不提前写入普通队列。捕获阶段只借用不可变的 received canonical 请求，提取最后一个 User item 中最多 4,096 Unicode scalar values 的文本前缀；多个 Text block 按原有换行规则连接，不先拼出完整正文。等待凭据映射期间只保留有界字符串，不额外持有整棵请求树。
+
+发布边界不变：活动请求完成模型侧凭据保护并登记全部有效映射后，才发布输入预览及待发布的客户端工具结果；保护失败或取消时不发布。该顺序不表示普通 Observation 预览会替换保护映射：预览来自 received canonical 原文，writer 按 §7.2 的 Authorization-only 规则写入，不额外替换正文中的已知秘密；前缀截取不会改变这一点。该内存优化不关闭普通 Observation、进程日志、Generation Chain 历史或 Debug 契约，不缩减模型上下文或 SQL 历史；Debug 原文捕获仍只在明确启用时遵循 §7 的独立边界。
 
 同一 Principal、完整 canonical request fingerprint 相同、前次失败且没有 Client Output Commit、失败后两分钟内开始、没有同指纹活动请求的重试，归入同一 Interaction 时不再次发布用户输入预览。当前工具续接等归属证据仍优先决定父节点与分组原因，但不能遮蔽上述重试事实；重试 Run 与失败诊断照常保留。判定复用进程内完整请求指纹，不依赖有界输入窗口或预览文字相等。新增 User item、修改请求语义、已提交输出、并发请求或证据过期不据此去重；既有持久化记录不重算，进程重启后不推断已丢失的重试证据。
 

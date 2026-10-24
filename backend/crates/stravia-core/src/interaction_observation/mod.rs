@@ -907,7 +907,7 @@ impl IngressObserver {
             queued_text: Mutex::new(None),
             failure: Mutex::new(None),
             generation_commit_fences: Mutex::new(Vec::new()),
-            pending_input: Mutex::new(None),
+            pending_preview: Mutex::new(None),
             pending_tool_results: Mutex::new(Vec::new()),
             active_thinking: Mutex::new(std::collections::BTreeMap::new()),
             protected,
@@ -1039,8 +1039,9 @@ struct RunObserverInner {
     queued_text: Mutex<Option<Arc<Mutex<writer::QueuedText>>>>,
     failure: Mutex<Option<FailureDiagnostic>>,
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
-    // Canonical user text remains memory-only until Model Turn protection succeeds.
-    pending_input: Mutex<Option<Arc<stravia_runtime_contract::protocol::ir::AiRequest>>>,
+    // Bounded canonical user preview retained until Model Turn protection
+    // succeeds; the observer no longer owns the request tree.
+    pending_preview: Mutex<Option<String>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
     active_thinking: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     protected: redaction::ProtectedSecrets,
@@ -1067,11 +1068,20 @@ impl RunObserver {
     }
 
     /// Admission only: use the received canonical window, never effective model history.
+    /// The observer does not retain the request after this call; waiting for
+    /// protection keeps only its bounded preview.
     pub(crate) fn capture_input_preview(
         &self,
-        input: Arc<stravia_runtime_contract::protocol::ir::AiRequest>,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
-        *self.inner.pending_input.lock() = Some(input);
+        if !self.inner.admission_queued {
+            return;
+        }
+        // The received canonical window is immutable; Model Turn protection
+        // rewrites the effective request, so extracting here is equivalent to
+        // extracting at publish time while avoiding an extra request owner.
+        let preview = redaction::user_input_preview(input);
+        *self.inner.pending_preview.lock() = preview;
     }
 
     /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
@@ -1120,13 +1130,9 @@ impl RunObserver {
         }
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
         self.send_tool_results(tool_results);
-        let Some(input) = self.inner.pending_input.lock().take() else {
+        let Some(preview) = self.inner.pending_preview.lock().take() else {
             return;
         };
-        let Some(text) = redaction::user_input_text(&input.items) else {
-            return;
-        };
-        let preview = redaction::input_preview(text);
         self.inner.queued_text.lock().take();
         if self
             .inner
@@ -3603,9 +3609,7 @@ mod snapshot_tests {
         };
         let publish = |id: &str, input: &[AiItem]| {
             let run = test_run(&observation, id, facts(input.to_vec()));
-            run.capture_input_preview(Arc::new(
-                stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.to_vec()),
-            ));
+            run.capture_input_preview(input);
             run.capture_client_tool_results(input);
             run.protect_secrets(["preview-secret"]);
             run.publish_input_preview();
@@ -3696,9 +3700,7 @@ mod snapshot_tests {
         observation.shutdown().await;
         let observation = test_observation(&pool, directory.path(), false).await;
         let unknown = test_run(&observation, "preview-unavailable", facts(input.clone()));
-        unknown.capture_input_preview(Arc::new(
-            stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.clone()),
-        ));
+        unknown.capture_input_preview(&input);
         unknown.protect_secrets(["preview-secret"]);
         unknown.publish_input_preview();
         observation.flush().await?;
@@ -3765,6 +3767,67 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn input_preview_joins_large_text_blocks_only_up_to_the_limit() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let first = "密".repeat(3000);
+        let second = "文".repeat(3000);
+        let user = AiItem {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: std::sync::Arc::new(first.clone()),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: std::sync::Arc::new(second.clone()),
+                    cache_control: None,
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let run = test_run(
+            &observation,
+            "preview-bounded-blocks",
+            facts(vec![user.clone()]),
+        );
+        run.capture_input_preview(std::slice::from_ref(&user));
+        run.publish_input_preview();
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        let payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='preview-bounded-blocks' AND kind='input_preview_recorded'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let expected: String = first
+            .chars()
+            .chain(std::iter::once('\n'))
+            .chain(second.chars())
+            .take(redaction::INPUT_PREVIEW_CHARS)
+            .collect();
+        assert_eq!(stored_payload(&payload)?["text"], expected);
+        assert_eq!(expected.chars().count(), redaction::INPUT_PREVIEW_CHARS);
+        drop(run);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn verified_parent_historical_user_preview_is_not_republished() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
 
@@ -3783,9 +3846,7 @@ mod snapshot_tests {
             "preview-verified-parent",
             facts(vec![question.clone()]),
         );
-        parent.capture_input_preview(Arc::new(
-            stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![question.clone()]),
-        ));
+        parent.capture_input_preview(std::slice::from_ref(&question));
         parent.publish_input_preview();
         parent.finish(RunOutcome {
             client_output_committed: true,
@@ -3816,9 +3877,7 @@ mod snapshot_tests {
             let mut admission = facts(input.clone());
             admission.generation_parent_id = Some("preview-verified-node".into());
             let child = test_run(&observation, id, admission);
-            child.capture_input_preview(Arc::new(
-                stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.clone()),
-            ));
+            child.capture_input_preview(&input);
             child.publish_input_preview();
         }
         observation.flush().await?;
@@ -4465,9 +4524,7 @@ mod snapshot_tests {
         }];
         let run = test_run(&observation, "raw-observation", facts(input.clone()));
         run.protect_secrets(["known-mapping"]);
-        run.capture_input_preview(Arc::new(
-            stravia_runtime_contract::protocol::ir::AiRequest::new("model", input),
-        ));
+        run.capture_input_preview(&input);
         run.publish_input_preview();
         for chunk in [
             "https://user:pass",
