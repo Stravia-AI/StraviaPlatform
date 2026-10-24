@@ -3842,6 +3842,120 @@ mod snapshot_tests {
         Ok(())
     }
 
+    /// 客户端超过图片预算后会把较早工具结果里的截图删掉再回放整段历史；Generation 父项
+    /// 因此退回更早祖先，增量里重新带上已展示过的提醒。该提醒不是新的用户输入。
+    #[tokio::test]
+    async fn client_image_budget_rewrite_does_not_republish_historical_user_preview()
+    -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let user = |text: &str| AiItem {
+            role: Role::User,
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let call = |id: &str| {
+            AiItem::function_call(ToolCall {
+                id: id.into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            })
+        };
+        let screenshot = |id: &str| {
+            AiItem::function_call_output(
+                id,
+                serde_json::json!([
+                    {"type": "input_text", "text": "screenshot"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                ]),
+            )
+        };
+        let publish = |id: &str, input: &[AiItem], parent: &str| {
+            let mut admission = facts(input.to_vec());
+            admission.generation_parent_id = Some(parent.into());
+            let run = test_run(&observation, id, admission);
+            run.capture_input_preview(Arc::new(
+                stravia_runtime_contract::protocol::ir::AiRequest::new("model", input.to_vec()),
+            ));
+            run.capture_client_tool_results(input);
+            run.publish_input_preview();
+            run
+        };
+        let deliver = |run: &RunObserver, input: &[AiItem], call: &AiItem, node: Option<&str>| {
+            run.record(RunEvent::ClientToolHandoff {
+                tool_id: call.tool_calls.as_ref().unwrap()[0].id.to_string(),
+                name: "probe".into(),
+                input: None,
+            });
+            run.observe_client_completion(input, std::slice::from_ref(call), writer::now(), true);
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: Some(writer::now()),
+                status: "waiting_client".into(),
+                terminal_reason: None,
+                generation_node_id: node.map(str::to_owned),
+                generation_root_id: node.map(str::to_owned),
+            });
+        };
+
+        let root_input = vec![user("task")];
+        let root = test_run(&observation, "image-root", facts(root_input.clone()));
+        root.capture_input_preview(Arc::new(
+            stravia_runtime_contract::protocol::ir::AiRequest::new("model", root_input.clone()),
+        ));
+        root.publish_input_preview();
+        deliver(&root, &root_input, &call("call-1"), Some("image-root-node"));
+        observation.flush().await?;
+
+        // 提醒位于第一轮工具结果之后，是真实的新用户输入。
+        let mut input = vec![
+            user("task"),
+            call("call-1"),
+            screenshot("call-1"),
+            user("reminder"),
+        ];
+        let reminded = publish("image-reminded", &input, "image-root-node");
+        deliver(&reminded, &input, &call("call-2"), None);
+        observation.flush().await?;
+
+        // 客户端删掉 call-1 的截图，Generation 父项仍落在更早的 root。
+        input[2] = AiItem::function_call_output("call-1", serde_json::json!("screenshot"));
+        input.extend([call("call-2"), screenshot("call-2")]);
+        let rewritten = publish("image-rewritten", &input, "image-root-node");
+        rewritten.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let previews: Vec<String> = sqlx::query_scalar(
+            "SELECT run_id FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(previews, ["image-root", "image-reminded"]);
+        let admitted: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE kind='run_admitted' AND run_id='image-rewritten'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stored_payload(&admitted)?["has_new_user"], false);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn input_preview_is_root_owned_and_recorded_once_per_run() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;

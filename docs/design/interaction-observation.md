@@ -270,7 +270,7 @@ clear_history() -> ClearHistoryResult
 - `observation_gap`
 - `input_preview_recorded`：每个带有新增用户输入的 Run 至多记录一次，`payload.text` 保存完成凭据保护后的最多 4,096 字符输入预览。同一 Interaction 的追加输入也记录事件，但只有初始 Run 更新卡片的 `input_preview`；重复发布不覆盖已有正文。旧事件缺少 `text` 时不推断或补录输入。
 
-没有已核验 Generation parent 时，完整请求中的历史 User 不自动视为新增：只有已选定的唯一续接来源或已观察父节点提供完整 received-input canonical 前缀证明，且当前请求仅追加 assistant/tool items、末尾为当前工具结果，才令新 Run 的 `has_new_user=false` 并抑制输入预览。证明包含 system/developer 前缀与私有控制，不凭预览文字相同去重；追加同文 User、前缀变化、证据缺失或超过既有窗口预算时均保留输入。重启可通过保留的 Generation 证据恢复前缀，无法恢复时保守记录。该判定只影响后续观察事件，不改变分组、模型输入或 Generation 父关系，不删除、改写或隐藏旧重复事件。
+没有已核验 Generation parent 时，完整请求中的历史 User 不自动视为新增：只有已选定的唯一续接来源或已观察父节点提供 received-input 证明，且当前请求末尾为当前工具结果，才令新 Run 的 `has_new_user=false` 并抑制输入预览。证明比较来源 received-input 与当前请求中有序的用户输入（User 角色且非工具结果载体的 canonical item，忽略图片），二者必须逐项一致；客户端在回放时改写其余历史（删除较早图片、裁剪或移除旧工具结果、变更 system/developer 指令、私有控制）不是新的用户输入，不影响证明。不凭预览文字相同去重；追加同文 User、用户输入被改写、删除或重排、证据缺失或超过既有窗口预算时均保留输入。重启可通过保留的 Generation 证据恢复前缀，无法恢复时保守记录。该判定只影响后续观察事件，不改变分组、模型输入或 Generation 父关系，不删除、改写或隐藏旧重复事件。
 
 `platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
