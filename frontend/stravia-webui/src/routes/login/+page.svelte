@@ -68,7 +68,7 @@ async function submit(): Promise<void> {
           void submit()
         }}>
         <Field.FieldGroup>
-          <Field.Field orientation="vertical" size="fill" data-invalid={error ? true : undefined}>
+          <Field.Field orientation="vertical" data-invalid={error ? true : undefined}>
             <Field.FieldLabel for="admin-username">{m.login_username()}</Field.FieldLabel>
             <Input
               id="admin-username"
@@ -78,7 +78,7 @@ async function submit(): Promise<void> {
               aria-invalid={error ? true : undefined}
               autofocus />
           </Field.Field>
-          <Field.Field orientation="vertical" size="fill" data-invalid={error ? true : undefined}>
+          <Field.Field orientation="vertical" data-invalid={error ? true : undefined}>
             <Field.FieldLabel for="admin-password">{m.login_password()}</Field.FieldLabel>
             <SecretInput
               id="admin-password"

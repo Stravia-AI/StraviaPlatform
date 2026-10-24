@@ -189,7 +189,7 @@ test('Claude requires all four mappings while other clients do not ask for a def
   await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
 })
 
-test('Wide workspace uses side labels and 16rem selects sharing one right edge, including Claude mappings', async ({
+test('Wide workspace stacks labels over bounded controls sharing one column, including Claude mappings', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
@@ -205,25 +205,26 @@ test('Wide workspace uses side labels and 16rem selects sharing one right edge, 
   for (const id of ids) boxes.push((await page.locator(`#${id}`).boundingBox())!)
   const right = boxes[0].x + boxes[0].width
   for (const box of boxes) {
-    expect(box.width).toBeLessThanOrEqual(256 + 0.5)
+    expect(box.width).toBeGreaterThanOrEqual(18 * 16 - 0.5)
+    expect(box.width).toBeLessThanOrEqual(24 * 16 + 0.5)
+    expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(0.5)
     expect(Math.abs(box.x + box.width - right)).toBeLessThanOrEqual(0.5)
   }
-  // 标签在控件左侧、同一行。
+  // 标签在控件上方。
   const label = (await page.locator('label[for="cli-key"]').boundingBox())!
-  expect(label.x + label.width).toBeLessThan(boxes[1].x)
-  expect(label.y).toBeLessThan(boxes[1].y + boxes[1].height)
-  expect(label.y + label.height).toBeGreaterThan(boxes[1].y)
+  expect(label.y + label.height).toBeLessThanOrEqual(boxes[1].y)
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('Long selected values truncate inside the 16rem select and keep the chevron visible', async ({ page }) => {
-  await setup(page, [key('Production-automation-credential')])
+test('Long selected values truncate inside the bounded select and keep the chevron visible', async ({ page }) => {
+  const longName = 'Production-automation-credential-for-the-nightly-release-and-rollback-pipeline'
+  await setup(page, [key(longName)])
   await page.setViewportSize({ width: 2560, height: 1440 })
   await page.goto('/connect')
   await page.getByRole('tab', { name: 'Code', exact: true }).click()
   await page.locator('#code-model').click()
   await page.getByRole('option', { name: /My model/ }).click()
-  await expect(page.locator('#code-key')).toContainText('Production-automation-credential')
+  await expect(page.locator('#code-key')).toContainText(longName)
   for (const id of ['code-protocol', 'code-model', 'code-key']) {
     const trigger = page.locator(`#${id}`)
     await expect(trigger).toBeVisible()

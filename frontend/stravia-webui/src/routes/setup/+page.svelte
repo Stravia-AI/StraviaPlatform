@@ -164,7 +164,7 @@ async function complete(): Promise<void> {
             void claim()
           }}>
           <Field.FieldGroup>
-            <Field.Field orientation="vertical" size="fill" data-invalid={error ? true : undefined}>
+            <Field.Field orientation="vertical" data-invalid={error ? true : undefined}>
               <Field.FieldLabel for="setup-token">{m.setup_token()}</Field.FieldLabel>
               <Input
                 id="setup-token"
@@ -197,7 +197,7 @@ async function complete(): Promise<void> {
             <Field.FieldHelp hint={m.setup_database_description()} />
           </div>
           <Field.FieldGroup>
-            <Field.Field orientation="vertical" size="select">
+            <Field.Field orientation="vertical">
               <Field.FieldLabel for="database-backend">{m.setup_database_type()}</Field.FieldLabel>
               <Select.Root
                 type="single"
@@ -220,7 +220,7 @@ async function complete(): Promise<void> {
               </Select.Root>
             </Field.Field>
             {#if backend === 'postgres'}
-              <Field.Field orientation="vertical" size="fill" data-invalid={!databaseReady ? true : undefined}>
+              <Field.Field orientation="vertical" data-invalid={!databaseReady ? true : undefined}>
                 <Field.FieldLabel for="postgres-url">{m.setup_postgres_url()}</Field.FieldLabel>
                 <Input
                   id="postgres-url"
@@ -295,22 +295,21 @@ async function complete(): Promise<void> {
         <section class="flex flex-col gap-3" aria-labelledby="setup-admin-title">
           <h2 id="setup-admin-title" class="font-structural text-lg font-semibold">{m.setup_admin_title()}</h2>
           <Field.FieldGroup>
-            <Field.Field orientation="vertical" size="fill">
+            <Field.Field orientation="vertical">
               <Field.FieldLabel for="setup-client-base-url">{m.artifact_client_base_url()}</Field.FieldLabel>
               <Field.FieldDescription>{m.artifact_client_base_help()}</Field.FieldDescription>
               <Input id="setup-client-base-url" type="url" required bind:value={clientBaseUrl} />
             </Field.Field>
-            <Field.Field orientation="vertical" size="name">
+            <Field.Field orientation="vertical">
               <Field.FieldLabel for="setup-username">{m.login_username()}</Field.FieldLabel>
               <Input id="setup-username" bind:value={username} autocomplete="username" />
             </Field.Field>
-            <Field.Field orientation="vertical" size="name">
+            <Field.Field orientation="vertical">
               <Field.FieldLabel for="setup-password">{m.login_password()}</Field.FieldLabel>
               <Input id="setup-password" type="password" bind:value={password} autocomplete="new-password" />
             </Field.Field>
             <Field.Field
               orientation="vertical"
-              size="name"
               data-invalid={confirmingPassword.length > 0 && !passwordsMatch ? true : undefined}>
               <Field.FieldLabel for="setup-confirm-password">{m.setup_confirm_password()}</Field.FieldLabel>
               <Input

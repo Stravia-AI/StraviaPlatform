@@ -122,7 +122,7 @@ async function submit(): Promise<void> {
       }}>
       <div class="route-overlay-body flex flex-col gap-4">
         <Field.Group>
-          <Field.Field size="select">
+          <Field.Field>
             <Field.Label for="search-backend">{m.web_search_method()}</Field.Label>
             <Select.Root type="single" bind:value={backendKind} disabled={saving}>
               <Select.Trigger id="search-backend" class="w-full">
@@ -141,7 +141,7 @@ async function submit(): Promise<void> {
           </Field.Field>
 
           {#if backendKind === 'local'}
-            <Field.Field size="select">
+            <Field.Field>
               <Field.Label for="search-local-model" hint={m.web_search_eligible_model_help()}
                 >{m.web_search_model_used()}</Field.Label>
               <Select.Root
@@ -180,7 +180,7 @@ async function submit(): Promise<void> {
               </div>
             {/if}
           {:else}
-            <Field.Field size="select" data-invalid={Boolean(externalRouteId) && !selectedExternalRoute?.available}>
+            <Field.Field data-invalid={Boolean(externalRouteId) && !selectedExternalRoute?.available}>
               <Field.Label for="search-external-route">{m.web_search_external_route()}</Field.Label>
               <Select.Root
                 type="single"

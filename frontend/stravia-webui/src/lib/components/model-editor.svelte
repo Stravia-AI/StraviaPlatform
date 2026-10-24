@@ -808,7 +808,7 @@ async function saveModel(): Promise<void> {
   </span>
 {/snippet}
 
-<div class="route-page min-h-[calc(100svh-5rem)]">
+<div class="route-page route-page-column min-h-[calc(100svh-5rem)]">
   <PageHeader title={initialModel ? initialModel.display_name?.trim() || initialModel.model_id : m.common_add_model()}>
     {#snippet meta()}
       {#if initialModel}
@@ -826,7 +826,7 @@ async function saveModel(): Promise<void> {
       event.preventDefault()
       void saveModel()
     }}>
-    <section class="route-section content-column" aria-labelledby="route-contract-title">
+    <section class="route-section" aria-labelledby="route-contract-title">
       <div class="route-section-header">
         <div class="flex min-w-0 items-center gap-2">
           <h2 id="route-contract-title" class="route-section-title">{m.model_editor_client_model()}</h2>
@@ -845,7 +845,7 @@ async function saveModel(): Promise<void> {
             </div>
           {/snippet}
         </SettingRow>
-        <SettingRow title={m.model_editor_model_id()} labelFor="route-model-id" controlSize="fill">
+        <SettingRow title={m.model_editor_model_id()} labelFor="route-model-id" layout="stacked">
           <ModelIdCombobox
             id="route-model-id"
             value={form.modelId}
@@ -866,7 +866,7 @@ async function saveModel(): Promise<void> {
               form.displayName = ''
             }} />
         </SettingRow>
-        <SettingRow title={m.model_editor_model_name()} labelFor="route-display-name" controlSize="name">
+        <SettingRow title={m.model_editor_model_name()} labelFor="route-display-name" layout="stacked">
           <Input
             id="route-display-name"
             bind:value={form.displayName}
@@ -967,8 +967,7 @@ async function saveModel(): Promise<void> {
       {/if}
 
       {#if targets.length > 0}
-        <div
-          class="grid gap-4 @min-[60rem]/route-page:grid-cols-[minmax(0,78rem)_minmax(16rem,20rem)] @min-[60rem]/route-page:items-start">
+        <div class="flex flex-col gap-4">
           <div
             data-slot="target-lane-stack"
             class="relative min-w-0"
@@ -1022,9 +1021,7 @@ async function saveModel(): Promise<void> {
                       <div
                         class={[
                           'grid gap-2',
-                          lane.targets.length > 1
-                            ? 'grid-cols-[minmax(0,36rem)] @2xl/lane:grid-cols-[repeat(2,minmax(0,36rem))]'
-                            : 'grid-cols-[minmax(0,36rem)]',
+                          lane.targets.length > 1 ? 'grid-cols-1 @2xl/lane:grid-cols-2' : 'grid-cols-1',
                         ]}>
                         {#each lane.targets as target (target.key)}
                           {@const summary = selectedSummary(target)}
@@ -1117,7 +1114,7 @@ async function saveModel(): Promise<void> {
           <aside
             data-slot="target-dock"
             class={[
-              'min-w-0 self-start rounded-lg border border-dashed p-3 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
+              'min-w-0 rounded-lg border border-dashed p-3 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
               isDraggingTarget && 'border-primary/60 bg-primary/5',
             ]}
             aria-label={m.model_editor_disabled_targets()}
@@ -1238,7 +1235,7 @@ async function saveModel(): Promise<void> {
               </div>
 
               <Field.Group class="grid gap-4 lg:grid-cols-2">
-                <Field.Field size="select">
+                <Field.Field>
                   <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
                   <ProviderCombobox
                     id={`target-provider-${target.key}`}
@@ -1251,7 +1248,7 @@ async function saveModel(): Promise<void> {
                     onSelect={(value: string) => void changeProvider(target, value)} />
                 </Field.Field>
 
-                <Field.Field size="fill">
+                <Field.Field>
                   <Field.Label for={`target-model-${target.key}`}>{m.common_model()}</Field.Label>
                   {#if target.custom}
                     <Input
@@ -1478,16 +1475,16 @@ async function saveModel(): Promise<void> {
       </Dialog.Root>
     </section>
 
-    <section class="route-section content-column" aria-labelledby="route-thinking-title">
+    <section class="route-section" aria-labelledby="route-thinking-title">
       <div class="route-section-header">
         <h2 id="route-thinking-title" class="route-section-title">{m.model_editor_thinking_section()}</h2>
       </div>
       <div>
-        <SettingRow title={m.model_editor_thinking_levels()} hint={m.model_editor_thinking_levels_help()}>
-          <div
-            role="group"
-            aria-label={m.model_editor_thinking_levels()}
-            class="flex flex-wrap gap-1.5 @min-[50rem]/setting-row:max-w-[32rem] @min-[50rem]/setting-row:justify-end">
+        <SettingRow
+          title={m.model_editor_thinking_levels()}
+          hint={m.model_editor_thinking_levels_help()}
+          layout="stacked">
+          <div role="group" aria-label={m.model_editor_thinking_levels()} class="flex flex-wrap gap-1.5">
             {#each thinkingLevels as level (level)}
               {@const blockers = thinkingLevelBlockers(level)}
               {#if !supportedThinkingLevels.includes(level)}
@@ -1559,7 +1556,7 @@ async function saveModel(): Promise<void> {
     <div
       data-slot="model-editor-footer"
       class="sticky bottom-0 z-20 mt-auto translate-y-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-      <div class="content-column flex flex-wrap items-center justify-end gap-2">
+      <div class="flex flex-wrap items-center justify-end gap-2">
         <Button href="/models" variant="outline">{m.common_cancel()}</Button>
         <Button type="submit" disabled={saving}
           >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}</Button>

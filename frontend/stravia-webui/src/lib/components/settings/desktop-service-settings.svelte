@@ -231,7 +231,7 @@ async function copyLanUrl(): Promise<void> {
       title={m.desktop_client_port()}
       labelFor="desktop-fixed-port"
       description={m.desktop_client_port_help()}
-      controlSize="name">
+      controlSize="setting">
       <div
         class="flex w-full min-w-0 flex-col gap-2"
         data-invalid={validationError != null || displayedOperationError != null}>

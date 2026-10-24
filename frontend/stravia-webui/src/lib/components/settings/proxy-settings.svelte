@@ -66,7 +66,7 @@ async function saveBypass(next: string): Promise<string> {
       retrying={proxyQuery.isFetching} />
   {:else if proxy}
     <SettingRow title={m.settings_proxy_url()} value={proxy.url || m.common_not_configured()} onedit={openEditor} />
-    <SettingRow title={m.settings_bypass_hosts()} labelFor="proxy-bypass" controlSize="fill">
+    <SettingRow title={m.settings_bypass_hosts()} labelFor="proxy-bypass" layout="stacked">
       {#snippet children({ titleId })}
         <InlineSettingInput
           id="proxy-bypass"
@@ -90,7 +90,7 @@ async function saveBypass(next: string): Promise<string> {
   {saving}
   {error}
   onsubmit={saveUrl}>
-  <Field.Field size="fill">
+  <Field.Field>
     <Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel>
     <Input
       id="proxy-url"

@@ -675,7 +675,7 @@ function clearManualTemplate(): void {
 {/if}
 
 {#if (modelEditing.modelId || requestedModelId) && !modelEditing.draft}
-  <section class="route-section" aria-labelledby="provider-model-editor-title">
+  <section class="route-section content-column" aria-labelledby="provider-model-editor-title">
     {#if modelEditing.loading || modelEditing.preparing || modelsQuery.isPending}
       <div class="grid min-h-72 place-items-center"><Spinner /></div>
     {:else if modelEditing.readError || !modelEditing.detail}

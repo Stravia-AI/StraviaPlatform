@@ -160,7 +160,7 @@ function toggleExternalDownloads(enabled: boolean): void {
       title={m.artifact_client_base_url()}
       labelFor="artifact-client-base-url"
       description={m.artifact_client_base_help()}
-      controlSize="fill">
+      layout="stacked">
       {#snippet children({ titleId, descriptionId })}
         <InlineSettingInput
           id="artifact-client-base-url"
@@ -242,23 +242,23 @@ function toggleExternalDownloads(enabled: boolean): void {
   error={s3Error}
   onsubmit={saveS3}>
   <Field.FieldGroup>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-endpoint">{m.artifact_s3_endpoint()}</Field.FieldLabel>
       <Input id="artifact-s3-endpoint" bind:value={s3Draft.endpoint} disabled={s3Saving} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-region">{m.artifact_s3_region()}</Field.FieldLabel>
       <Input id="artifact-s3-region" bind:value={s3Draft.region} disabled={s3Saving} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-bucket">{m.artifact_s3_bucket()}</Field.FieldLabel>
       <Input id="artifact-s3-bucket" bind:value={s3Draft.bucket} disabled={s3Saving} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-access_key_id">{m.artifact_s3_access_key()}</Field.FieldLabel>
       <Input id="artifact-s3-access_key_id" bind:value={s3Draft.access_key_id} disabled={s3Saving} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-secret_access_key">{m.artifact_s3_secret_key()}</Field.FieldLabel>
       <SecretInput
         id="artifact-s3-secret_access_key"
@@ -266,7 +266,7 @@ function toggleExternalDownloads(enabled: boolean): void {
         disabled={s3Saving}
         resetKey={s3Open} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-s3-session_token">{m.artifact_s3_session_token()}</Field.FieldLabel>
       <SecretInput
         id="artifact-s3-session_token"
@@ -293,7 +293,7 @@ function toggleExternalDownloads(enabled: boolean): void {
   error={downloadsError}
   onsubmit={saveDownloads}>
   <Field.FieldGroup>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="artifact-public-base-url">{m.artifact_public_base_url()}</Field.FieldLabel>
       <Input
         id="artifact-public-base-url"

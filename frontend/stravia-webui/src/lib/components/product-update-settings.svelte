@@ -7,6 +7,7 @@ import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up'
 import CircleCheckIcon from '@lucide/svelte/icons/circle-check'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
+import InfoIcon from '@lucide/svelte/icons/info'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert'
 import { toast } from 'svelte-sonner'
@@ -91,27 +92,17 @@ async function checkNow(): Promise<void> {
   else if (result === 'available' && updates.status?.available_update) {
     toast.success(m.settings_update_available({ version: updates.status.available_update.version }))
   } else if (result === 'error') {
-    if (checkUnavailable) {
-      toast.info(m.settings_update_check_unavailable())
-    } else {
-      toast.error(
-        m.settings_update_check_failed({
-          message: updates.state.error ?? updates.status?.last_failure?.message ?? 'Unknown error',
-        }),
-      )
-    }
+    toast.error(
+      m.settings_update_check_failed({
+        message: updates.state.error ?? updates.status?.last_failure?.message ?? 'Unknown error',
+      }),
+    )
   }
 }
 </script>
 
 {#snippet checkButton()}
-  <Button
-    type="button"
-    variant="outline"
-    size="sm"
-    disabled={checking || busy || checkUnavailable}
-    aria-describedby={checkUnavailable ? 'update-check-unavailable' : undefined}
-    onclick={() => void checkNow()}>
+  <Button type="button" variant="outline" size="sm" disabled={checking || busy} onclick={() => void checkNow()}>
     {#if checking}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon data-icon="inline-start" />{/if}
     {checking ? m.settings_update_checking() : m.settings_update_check_now()}
   </Button>
@@ -119,8 +110,7 @@ async function checkNow(): Promise<void> {
 
 <SettingsSection id="updates" title={m.settings_update()}>
   <SettingRow title={m.settings_version()}>
-    <div
-      class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @min-[50rem]/setting-row:max-w-[36rem] @min-[50rem]/setting-row:justify-end">
+    <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @min-[32rem]/setting-row:justify-end">
       <span class="flex items-center gap-2 font-technical text-sm tabular-nums">
         <span class="break-all">{updates.status?.current_version ?? '–'}</span>
         {#if available}
@@ -141,7 +131,14 @@ async function checkNow(): Promise<void> {
           <CircleCheckIcon class="size-4" aria-hidden="true" />{m.settings_update_status_current()}
         </span>
       {/if}
-      {@render checkButton()}
+      {#if checkUnavailable}
+        <!-- 开发版没有在线检查：只说明一次，不提供禁用的按钮。 -->
+        <span role="status" class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+          <InfoIcon class="size-4" aria-hidden="true" />{m.settings_update_check_unavailable()}
+        </span>
+      {:else}
+        {@render checkButton()}
+      {/if}
       {#if !busy}
         {#if available}
           {#if updates.status?.skipped}
@@ -173,21 +170,17 @@ async function checkNow(): Promise<void> {
     </div>
   </SettingRow>
 
-  <div class="flex flex-col gap-3 pb-3">
+  <div class="flex flex-col gap-3 pb-3 empty:hidden">
     {#if updates.status?.skipped && available}
       <p role="status" class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
     {/if}
-    {#if !updates.status?.last_success_at || (updates.status?.last_failure && !checkUnavailable)}
+    {#if !checkUnavailable && (!updates.status?.last_success_at || updates.status?.last_failure)}
       <p class="text-xs text-muted-foreground">
         {m.settings_update_last_checked()} <span class="tabular-nums">{lastChecked}</span>
       </p>
     {/if}
 
-    {#if checkUnavailable}
-      <Alert.Root id="update-check-unavailable" role="status">
-        <Alert.Description>{m.settings_update_check_unavailable()}</Alert.Description>
-      </Alert.Root>
-    {:else if updates.status?.last_failure}
+    {#if updates.status?.last_failure && !checkUnavailable}
       <Alert.Root variant="destructive">
         <Alert.Description
           >{m.settings_update_check_failed({ message: updates.status.last_failure.message })}</Alert.Description>
@@ -233,38 +226,41 @@ async function checkNow(): Promise<void> {
     {/if}
   </div>
 
-  {#if proxyPreferenceQuery.error}
-    <RequestFailure
-      title={m.settings_update_proxy_load_failed()}
-      message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
-      retry={() => void proxyPreferenceQuery.refetch()}
-      retrying={proxyPreferenceQuery.isFetching} />
-  {:else if proxyPreferenceQuery.isPending}
-    <p role="status" class="flex items-center gap-2 border-t py-3 text-sm text-muted-foreground">
-      <Spinner />{m.common_loading()}
-    </p>
-  {:else}
-    <SettingRow layout="inline" title={m.settings_update_use_proxy()} labelFor="update-use-proxy">
-      {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
-      <Switch
-        id="update-use-proxy"
-        bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
-        disabled={savingProxy} />
-    </SettingRow>
-  {/if}
-  {#if proxyNeedsConfiguration}
-    <p role="alert" class="pb-3 text-sm">
-      <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4"
-        >{m.settings_update_proxy_configure_first()}</a>
-    </p>
-  {/if}
-  {#if proxyError}
-    <RequestFailure
-      title={m.settings_update_proxy_save_failed()}
-      message={proxyError}
-      retry={() => {
-        if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
-      }}
-      retrying={savingProxy} />
+  <!-- 开发版不检查也不下载更新，更新代理偏好与之无关；已保存的偏好值保留。 -->
+  {#if !checkUnavailable}
+    {#if proxyPreferenceQuery.error}
+      <RequestFailure
+        title={m.settings_update_proxy_load_failed()}
+        message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
+        retry={() => void proxyPreferenceQuery.refetch()}
+        retrying={proxyPreferenceQuery.isFetching} />
+    {:else if proxyPreferenceQuery.isPending}
+      <p role="status" class="flex items-center gap-2 border-t py-3 text-sm text-muted-foreground">
+        <Spinner />{m.common_loading()}
+      </p>
+    {:else}
+      <SettingRow layout="inline" title={m.settings_update_use_proxy()} labelFor="update-use-proxy">
+        {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
+        <Switch
+          id="update-use-proxy"
+          bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
+          disabled={savingProxy} />
+      </SettingRow>
+    {/if}
+    {#if proxyNeedsConfiguration}
+      <p role="alert" class="pb-3 text-sm">
+        <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4"
+          >{m.settings_update_proxy_configure_first()}</a>
+      </p>
+    {/if}
+    {#if proxyError}
+      <RequestFailure
+        title={m.settings_update_proxy_save_failed()}
+        message={proxyError}
+        retry={() => {
+          if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
+        }}
+        retrying={savingProxy} />
+    {/if}
   {/if}
 </SettingsSection>

@@ -69,7 +69,7 @@ async function save(): Promise<void> {
   onclose={reset}
   onsubmit={save}>
   <Field.FieldGroup>
-    <Field.Field size="fill" data-invalid={error ? true : undefined}>
+    <Field.Field data-invalid={error ? true : undefined}>
       <Field.FieldLabel for="current-password">{m.settings_current_password()}</Field.FieldLabel>
       <Input
         id="current-password"
@@ -79,7 +79,7 @@ async function save(): Promise<void> {
         autocomplete="current-password"
         aria-invalid={error ? true : undefined} />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="admin-username" hint={m.settings_username_unchanged_help()}>
         {m.login_username()}
       </Field.FieldLabel>
@@ -90,11 +90,11 @@ async function save(): Promise<void> {
         placeholder={username}
         autocomplete="username" />
     </Field.Field>
-    <Field.Field size="fill">
+    <Field.Field>
       <Field.FieldLabel for="new-password">{m.settings_new_password()}</Field.FieldLabel>
       <Input id="new-password" type="password" bind:value={newPassword} disabled={saving} autocomplete="new-password" />
     </Field.Field>
-    <Field.Field size="fill" data-invalid={mismatch ? true : undefined}>
+    <Field.Field data-invalid={mismatch ? true : undefined}>
       <Field.FieldLabel for="confirm-password">{m.setup_confirm_password()}</Field.FieldLabel>
       <Input
         id="confirm-password"

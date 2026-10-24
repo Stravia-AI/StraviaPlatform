@@ -405,9 +405,16 @@ test('API Key direct page and Sheet share field order and semantic widths', asyn
   // The RPM control is the 7rem input group including its unit suffix.
   const rpmGroup = await box('[data-slot="input-group"]:has(#api-key-rpm-limit)')
   expect(Math.abs(rpmGroup.width - 7 * rem)).toBeLessThanOrEqual(1)
-  expect((await box('#api-key-name')).width).toBeLessThanOrEqual(24 * rem + 1)
+  // Free-text controls fill the centered 48rem form column; short controls keep their semantic widths.
+  const formBox = (await form.boundingBox())!
+  expect(formBox.width).toBeLessThanOrEqual(48 * rem + 1)
+  const route = (await page.locator('.route-page').boundingBox())!
+  expect(Math.abs(formBox.x - route.x - (route.x + route.width - formBox.x - formBox.width))).toBeLessThanOrEqual(1)
+  const nameBox = await box('#api-key-name')
+  expect(Math.abs(nameBox.x - formBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(nameBox.width - formBox.width)).toBeLessThanOrEqual(1)
   expect((await box('#api-key-expires')).width).toBeLessThanOrEqual(18 * rem + 1)
-  expect((await box('#api-key-secret')).width).toBeLessThanOrEqual(36 * rem + 1)
+  expect((await box('#api-key-secret')).width).toBeLessThanOrEqual(formBox.width + 1)
 
   // Switches are rows, never side by side; auto-exposed features sit indented under their parent row.
   const parent = await box('#api-key-transparent-injection')

@@ -95,7 +95,7 @@ const items = $derived.by<StatusItem[]>(() => {
 {#if items.length > 0}
   <aside
     aria-label={m.provider_connection_status_title()}
-    class="min-w-0 border-t pt-4 @min-[80rem]/route-page:border-t-0 @min-[80rem]/route-page:pt-0">
+    class="min-w-0 border-t pt-4 @min-[96rem]/route-page:col-start-3 @min-[96rem]/route-page:row-start-1 @min-[96rem]/route-page:max-w-80 @min-[96rem]/route-page:border-t-0 @min-[96rem]/route-page:pt-0">
     <dl class="flex flex-col gap-4 text-sm">
       {#each items as item (item.key)}
         <div class="min-w-0">

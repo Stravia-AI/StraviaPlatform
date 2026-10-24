@@ -44,8 +44,7 @@ type PriceField = keyof ProviderModelPriceForm
 const modalityTargets = ['input', 'output'] as const
 
 // 宽布局下的“添加可选字段”按钮贴设置列右缘，与控件右边缘对齐。
-const alignedActions =
-  'flex flex-wrap gap-2 empty:hidden @min-[50rem]/model-editor:w-full @min-[50rem]/model-editor:max-w-(--content-column-max-width) @min-[50rem]/model-editor:justify-end'
+const alignedActions = 'flex flex-wrap gap-2 empty:hidden'
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },
@@ -193,9 +192,9 @@ export function submit(): void {
 <fieldset bind:this={editorRoot} {disabled} class="@container/model-editor flex min-w-0 flex-col gap-6">
   {#if !draft}
     <Field.Group>
-      <Field.Field size="select">
+      <Field.Field>
         <Field.Label for="provider-model-selection" hint={m.provider_model_editor_visibility_help()}
-          >{m.provider_model_editor_available_adding_models()}</Field.Label>
+          >{m.common_availability_adding_models()}</Field.Label>
         <Select.Root
           type="single"
           {disabled}
@@ -223,7 +222,7 @@ export function submit(): void {
     <Field.Group class="gap-4 empty:hidden">
       {#each stringFields as field (field.key)}
         {#if hasField(field.key)}
-          <Field.Field size="select">
+          <Field.Field>
             <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
             {#if field.multiline}
               <Textarea
@@ -252,7 +251,7 @@ export function submit(): void {
 
   <FormSection title={m.provider_model_editor_context_modalities()}>
     <Field.Group class="gap-4">
-      <Field.Field size="select">
+      <Field.Field size="setting">
         <Field.Label for="provider-model-limit-context">{m.provider_model_editor_context()}</Field.Label>
         <Input
           id="provider-model-limit-context"
@@ -266,7 +265,7 @@ export function submit(): void {
       </Field.Field>
       {#if hasField('modalities') && metadata.modalities}
         {#each modalityTargets as target (target)}
-          <Field.Field size="select">
+          <Field.Field>
             <Field.Label for={`provider-model-${target}-modalities`}>
               {target === 'input'
                 ? m.provider_model_editor_accepted_input_types()
@@ -294,7 +293,7 @@ export function submit(): void {
 
   <FormSection title={m.provider_model_editor_reasoning_efforts()}>
     <Field.Group class="gap-4">
-      <Field.Field size="select">
+      <Field.Field>
         <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
           >{m.provider_model_editor_supported_efforts()}</Field.Label>
         <Select.Root type="multiple" {disabled} bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
@@ -313,7 +312,7 @@ export function submit(): void {
             </Select.Group></Select.Content>
         </Select.Root>
       </Field.Field>
-      <Field.Field size="select">
+      <Field.Field>
         <Field.Label for="provider-model-custom-effort">{m.provider_model_editor_custom_effort()}</Field.Label>
         <div class="flex min-w-0 gap-2">
           <Input

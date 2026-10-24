@@ -29,7 +29,7 @@ const icons = {
 <!--
   同一组链接两种形态，随 route 容器宽度切换（不同时渲染两套）：
   窄于 64rem 为页头下方的横向页签（Tabs 分段样式，只显示文字，允许换行）；
-  不小于 64rem 为设置列左侧 12rem 的纵向导航（图标 + 文字，sticky）。
+  不小于 64rem 为设置列左侧 `--settings-nav-width` 宽的纵向导航（图标 + 文字，sticky）。
 -->
 <nav class="settings-nav {tabsListVariants()}" data-variant="default" aria-label={m.settings_sections()}>
   {#each groups as group (group)}
@@ -54,7 +54,7 @@ const icons = {
   .settings-nav {
     position: sticky;
     top: 0;
-    width: 12rem;
+    width: var(--settings-nav-width);
     flex: none;
     flex-direction: column;
     flex-wrap: nowrap;

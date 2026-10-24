@@ -326,7 +326,7 @@ test('settings fields align in wide containers and stack in narrow containers', 
   const wideTheme = await boxOf(page, '#theme-preference')
   const wideLanguage = await boxOf(page, '#interface-language')
   expect(wideLabel.right).toBeLessThan(wideTheme.x)
-  // Semantic widths: setting 16rem, one shared right edge at the settings column.
+  // Short selects keep their 16rem semantic width and sit on the settings column's right edge.
   expect(Math.abs(wideTheme.width - 256)).toBeLessThan(1)
   expect(Math.abs(wideLanguage.width - 256)).toBeLessThan(1)
   expect(Math.abs(wideTheme.right - wideColumn.right)).toBeLessThan(1)
@@ -341,15 +341,18 @@ test('settings fields align in wide containers and stack in narrow containers', 
   const retention = await boxOf(page, '#log-retention')
   const clientAddress = await boxOf(page, '#artifact-client-base-url')
   expect(Math.abs(retention.width - 112)).toBeLessThan(1)
-  expect(Math.abs(clientAddress.width - 576)).toBeLessThan(1)
   expect(Math.abs(retention.right - dataColumn.right)).toBeLessThan(1)
+  // Free-text rows stack: the title sits above a control that fills the settings column.
+  const clientAddressLabel = await boxOf(page, 'label[for="artifact-client-base-url"]')
+  expect(clientAddressLabel.bottom).toBeLessThanOrEqual(clientAddress.y)
+  expect(Math.abs(clientAddress.x - dataColumn.x)).toBeLessThan(1)
   expect(Math.abs(clientAddress.right - dataColumn.right)).toBeLessThan(1)
 
   await page.goto('/settings?view=network')
   await expect(page.locator('#proxy-bypass')).toBeVisible()
   const bypass = await boxOf(page, '#proxy-bypass')
   const networkColumn = await boxOf(page, column)
-  expect(Math.abs(bypass.width - 576)).toBeLessThan(1)
+  expect(Math.abs(bypass.x - networkColumn.x)).toBeLessThan(1)
   expect(Math.abs(bypass.right - networkColumn.right)).toBeLessThan(1)
 
   await page.setViewportSize({ width: 500, height: 900 })
@@ -367,30 +370,37 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(Math.abs(narrowRetention.width - narrowTheme.width)).toBeLessThan(1)
 })
 
-test('settings fields keep label and control within the settings column on ultra-wide screens', async ({ page }) => {
+test('settings column stays 48rem and centered with its navigation on ultra-wide screens', async ({ page }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
-  const pairs = [
-    ['/settings', 'label[for="theme-preference"]', '#theme-preference'],
-    ['/settings?view=data', 'label[for="log-retention"]', '#log-retention'],
-    ['/settings?view=network', 'label[for="proxy-bypass"]', '#proxy-bypass'],
+  const rem = 16
+  const rows = [
+    ['/settings', 'label[for="theme-preference"]', '#theme-preference', 'inline'],
+    ['/settings?view=data', 'label[for="log-retention"]', '#log-retention', 'inline'],
+    ['/settings?view=network', 'label[for="proxy-bypass"]', '#proxy-bypass', 'stacked'],
   ] as const
   const edges: number[] = []
-  for (const [url, labelSelector, controlSelector] of pairs) {
+  for (const [url, labelSelector, controlSelector, layout] of rows) {
     await page.goto(url)
     await expect(page.locator(controlSelector)).toBeVisible()
     await page.evaluate(() => document.fonts.ready.then(() => undefined))
     const label = await boxOf(page, labelSelector)
     const control = await boxOf(page, controlSelector)
     const column = await boxOf(page, '.settings-column')
-    expect(control.x - label.right).toBeGreaterThan(0)
-    expect(control.right - label.x).toBeLessThanOrEqual(60 * 16 + 1)
-    expect(column.width).toBeLessThanOrEqual(60 * 16 + 1)
+    if (layout === 'inline') expect(control.x - label.right).toBeGreaterThan(0)
+    else expect(control.y).toBeGreaterThanOrEqual(label.bottom)
+    expect(control.right - label.x).toBeLessThanOrEqual(48 * rem + 1)
+    expect(column.width).toBeLessThanOrEqual(48 * rem + 1)
     edges.push(control.right - column.x)
+    // The navigation and the column form one group centered in the route container.
+    const route = await boxOf(page, '.route-page')
+    const nav = await boxOf(page, 'nav[aria-label="Settings sections"]')
+    expect(Math.abs(nav.x - route.x - (route.right - column.right))).toBeLessThan(1)
+    expect(Math.abs(nav.x - (await boxOf(page, '.route-page-header')).x)).toBeLessThan(1)
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
     ).toBe(true)
   }
-  // Every control shares the settings column's right edge, whatever its semantic width.
+  // Every control ends on the settings column's right edge, whatever its layout.
   expect(Math.max(...edges) - Math.min(...edges)).toBeLessThan(1)
 })
 
@@ -405,11 +415,13 @@ test('settings navigation switches between vertical and horizontal at a 64rem ro
         return { x, y, width, height, iconVisible: icon ? getComputedStyle(icon).display !== 'none' : false }
       })
       const navBox = nav.getBoundingClientRect()
+      const routeBox = document.querySelector('.route-page')!.getBoundingClientRect()
       const column = document.querySelector('.settings-column')!.getBoundingClientRect()
       const header = document.querySelector('.route-page-header')!.getBoundingClientRect()
       const firstTitle = document.querySelector('.settings-column h2')!.getBoundingClientRect()
       return {
         route,
+        routeX: routeBox.x,
         nav: { x: navBox.x, y: navBox.y, width: navBox.width, height: navBox.height, scrollW: nav.scrollWidth },
         links,
         column: { x: column.x, width: column.width },
@@ -431,11 +443,12 @@ test('settings navigation switches between vertical and horizontal at a 64rem ro
     expect(m.overflow).toBe(true)
     expect(m.links).toHaveLength(5)
     if (vertical) {
-      // Same links, stacked at the left: 12rem wide, 32px gap to a column of at least 50rem.
+      // Same links, stacked at the left: 12rem wide, 32px gap to a 48rem column; the pair is centered.
       expect(Math.abs(m.nav.width - 192)).toBeLessThan(1)
       expect(Math.abs(m.nav.x - m.headerX)).toBeLessThan(1)
       expect(Math.abs(m.column.x - (m.nav.x + m.nav.width + 32))).toBeLessThan(1)
-      expect(m.column.width).toBeGreaterThanOrEqual(50 * 16 - 1)
+      expect(Math.abs(m.column.width - 48 * 16)).toBeLessThan(1)
+      expect(Math.abs(m.nav.x - m.routeX - (m.routeX + m.route - (m.column.x + m.column.width)))).toBeLessThan(1)
       expect(m.links.every((link) => link.iconVisible)).toBe(true)
       for (let index = 1; index < m.links.length; index += 1) {
         expect(m.links[index].y).toBeGreaterThan(m.links[index - 1].y)
@@ -642,9 +655,13 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(title).toBeVisible()
   const enable = page.getByRole('switch', { name: 'Enable image understanding' })
   await expect(enable).toBeChecked()
-  const column = page.locator('.content-column').first()
-  const columnBox = (await column.boundingBox())!
-  expect(columnBox.width).toBeLessThanOrEqual(960)
+  const columnBox = (await enable.locator('xpath=ancestor::section[1]').boundingBox())!
+  expect(columnBox.width).toBeLessThanOrEqual(48 * 16 + 1)
+  // 页头与设置列同宽，一起在内容容器中居中。
+  const routeBox = (await page.locator('.route-page').boundingBox())!
+  expect(
+    Math.abs(columnBox.x - routeBox.x - (routeBox.x + routeBox.width - columnBox.x - columnBox.width)),
+  ).toBeLessThan(2)
   expect(Math.abs(columnBox.x - (await title.boundingBox())!.x)).toBeLessThan(2)
   expect(await page.locator('header').filter({ has: title }).getByRole('switch').count()).toBe(0)
   await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)
@@ -1883,14 +1900,21 @@ test('web search keeps one settings column with aligned actions and operable sou
   await page.goto('/web-search')
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   const remSize = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
-  const column = (await page.locator('.content-column').boundingBox())!
-  expect(column.width).toBeLessThanOrEqual(60 * remSize + 1)
+  // 设置行铺满设置列：列宽不超过 48rem，页头左缘与列对齐，设置列在内容容器中居中。
+  const column = (await page.locator('[data-slot=setting-row]').first().boundingBox())!
+  expect(column.width).toBeLessThanOrEqual(48 * remSize + 1)
   const header = (await page.getByRole('heading', { level: 1, name: 'Web search' }).boundingBox())!
   expect(Math.abs(column.x - header.x)).toBeLessThanOrEqual(1)
+  const route = (await page.locator('.route-page').boundingBox())!
+  expect(Math.abs(column.x - route.x - (route.x + route.width - column.x - column.width))).toBeLessThanOrEqual(1)
   const edit = (await page.getByRole('button', { name: 'Edit search method', exact: true }).boundingBox())!
   const steps = (await page.locator('#search-max-turns').boundingBox())!
   const suffix = (await page.locator('[data-slot=setting-row]').getByText('s', { exact: true }).boundingBox())!
   const editRight = edit.x + edit.width
+  // 行内控件与区段动作共用设置列的右缘。
+  expect(Math.abs(editRight - (column.x + column.width))).toBeLessThanOrEqual(1)
+  const connect = (await page.getByRole('button', { name: 'Connect service', exact: true }).boundingBox())!
+  expect(Math.abs(connect.x + connect.width - (column.x + column.width))).toBeLessThanOrEqual(1)
   expect(Math.abs(steps.x + steps.width - editRight)).toBeLessThanOrEqual(1)
   expect(Math.abs(suffix.x + suffix.width - editRight)).toBeLessThanOrEqual(1)
   expect(Math.abs(steps.width - 7 * remSize)).toBeLessThanOrEqual(1)
@@ -2043,7 +2067,7 @@ test('cached update remains actionable when the latest automatic check fails', a
 })
 
 for (const locale of ['en-US', 'zh-CN']) {
-  test(`disabled update checks are informational and cannot be retried (${locale})`, async ({ page }) => {
+  test(`disabled update checks show one status and no controls to retry (${locale})`, async ({ page }) => {
     const technicalMessage = 'Production update checks are disabled in debug and test builds'
     await page.addInitScript((locale) => localStorage.setItem('stravia-locale', locale), locale)
     await page.route('**/api/v1/updates**', async (route) => {
@@ -2068,8 +2092,11 @@ for (const locale of ['en-US', 'zh-CN']) {
 
     await page.goto('/settings')
     const updates = page.locator('#updates')
-    await expect(updates.getByRole('button')).toBeDisabled()
+    // 开发版只说明一次“不支持在线检查更新”：没有失效的检查按钮、失败记录或代理开关。
+    await expect(updates.getByRole('status')).toHaveCount(1)
     await expect(updates.getByRole('status')).toBeVisible()
+    await expect(updates.getByRole('button')).toHaveCount(0)
+    await expect(updates.getByRole('switch')).toHaveCount(0)
     await expect(updates.getByRole('alert')).toHaveCount(0)
     await expect(updates).not.toContainText(technicalMessage)
   })

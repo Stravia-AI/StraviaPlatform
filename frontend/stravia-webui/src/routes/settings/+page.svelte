@@ -54,7 +54,7 @@ $effect(() => {
 
 <svelte:head><title>{groupTitle} · {m.settings_settings()} · Stravia</title></svelte:head>
 
-<div class="route-page">
+<div class="route-page route-page-column settings-page">
   <PageHeader title={m.settings_settings()} />
 
   <div class="settings-layout">
@@ -87,6 +87,12 @@ $effect(() => {
 <DraftDiscardDialog {guard} />
 
 <style>
+/* 窄时页签在页头下方，设置列居中；宽时导航与设置列作为一组居中，页头与导航左缘对齐。 */
+.settings-page {
+  --settings-nav-width: 12rem;
+  --settings-layout-gap: 2rem;
+}
+
 .settings-layout {
   display: flex;
   min-width: 0;
@@ -103,12 +109,16 @@ $effect(() => {
   gap: 2rem;
 }
 
-/* 导航形态随 route 容器宽度切换：不小于 64rem 时纵向导航在左，设置列不少于 50rem。 */
+/* 导航形态随 route 容器宽度切换：不小于 64rem 时纵向导航在左，设置列保持设置列宽度。 */
 @container route-page (min-width: 64rem) {
+  .settings-page > :global(*) {
+    max-width: calc(var(--settings-nav-width) + var(--settings-layout-gap) + var(--content-column-max-width));
+  }
+
   .settings-layout {
     flex-direction: row;
     align-items: flex-start;
-    gap: 2rem;
+    gap: var(--settings-layout-gap);
   }
 
   .settings-column {

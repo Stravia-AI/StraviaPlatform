@@ -16,7 +16,7 @@ const configQuery = createQuery(() => ({
 
 <svelte:head><title>{m.media_understanding_title()} · Stravia</title></svelte:head>
 
-<div class="route-page">
+<div class="route-page route-page-column">
   <PageHeader title={m.media_understanding_title()} />
 
   {#if configQuery.isError}
@@ -26,12 +26,12 @@ const configQuery = createQuery(() => ({
       retry={() => configQuery.refetch()}
       retrying={configQuery.isFetching} />
   {:else if configQuery.isPending}
-    <div class="content-column flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
+    <div class="flex flex-col gap-4" aria-label={m.common_settings_loading()} aria-busy="true">
       <Skeleton class="h-12" />
       <Skeleton class="h-12" />
     </div>
   {:else if configQuery.data}
-    <div class="content-column flex flex-col gap-8">
+    <div class="flex flex-col gap-8">
       <MediaUnderstandingSection kind="image" config={configQuery.data.image} />
       <MediaUnderstandingSection kind="audio" config={configQuery.data.audio} />
     </div>

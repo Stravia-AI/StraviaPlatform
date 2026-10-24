@@ -60,13 +60,13 @@ let deleteOpen = $state(false)
 
 const webProviders = $derived(providersQuery.data ?? [])
 const localProvider = $derived(webProviders.find((provider) => provider.kind === 'local'))
-// 来源矩阵的列：服务 | 搜索 | 网页读取；窄容器改为逐项上下排列。
-const matrixRow = 'gap-4 @min-[36rem]/sources:grid-cols-[minmax(0,1fr)_10rem_10rem] @min-[36rem]/sources:items-center'
 const settings = $derived<WebAccessSettings>(settingsQuery.data ?? { search_provider_ids: [], fetch_provider_ids: [] })
 const settingsUnavailable = $derived(settingsQuery.isPending || settingsQuery.isError)
 const localBrowserAvailable = $derived(
   browserQuery.isSuccess && !browserQuery.isFetching && browserQuery.data.available,
 )
+// 浏览器加载失败或仍在首次加载时由区段顶部的状态说明；只有确认不可用时才在 Local 行内提示。
+const localBrowserMissing = $derived(!browserQuery.isError && !browserQuery.isPending && !localBrowserAvailable)
 const browserPath = $derived(
   browserPathDraft ?? browserQuery.data?.configuredPath ?? browserQuery.data?.resolvedPath ?? '',
 )
@@ -317,10 +317,15 @@ async function deleteProvider(): Promise<void> {
 }
 </script>
 
-<!-- 单一设置列内的来源配置：已连接服务逐行排列，其后是搜索／网页读取的紧凑来源矩阵。能力总开关只在页面第一行。 -->
+<!-- 单一设置列内的来源配置：每个已连接服务一行，行内是搜索／网页读取的启用与顺序；Local 浏览器缺失就地提示。能力总开关只在页面第一行。 -->
 <section id="web-search-sources" class="route-section @container/sources" aria-labelledby="web-providers-title">
   <div class="route-section-header">
-    <h2 id="web-providers-title" class="route-section-title">{m.web_access_configuration_sources_title()}</h2>
+    <div class="flex min-w-0 items-center gap-2">
+      <h2 id="web-providers-title" class="route-section-title">{m.web_access_configuration_sources_title()}</h2>
+      {#if webProviders.length > 0}
+        <FieldHelp hint={m.web_access_configuration_enabled_services_tried_top_bottom()} />
+      {/if}
+    </div>
     <Button size="sm" onclick={openCreate}>
       <PlusIcon data-icon="inline-start" />{m.common_connect_service()}
     </Button>
@@ -353,14 +358,6 @@ async function deleteProvider(): Promise<void> {
           retrying={browserQuery.isFetching} />
       {:else if browserQuery.isPending}
         <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
-      {:else if !localBrowserAvailable}
-        <Alert.Root variant="warning" role="status">
-          <Alert.Description>
-            {m.web_access_browser_required()}
-            <Button variant="link" size="sm" onclick={() => openEdit(localProvider)}
-              >{m.web_access_configure_browser()}</Button>
-          </Alert.Description>
-        </Alert.Root>
       {/if}
     {/if}
     {#if providersQuery.isError && providersQuery.data !== undefined}
@@ -391,76 +388,69 @@ async function deleteProvider(): Promise<void> {
     {:else}
       <div class="divide-y border-y">
         {#each webProviders as provider (provider.id)}
-          <div class="flex flex-col gap-3 py-3 @min-[36rem]/sources:flex-row @min-[36rem]/sources:items-center">
-            <div class="min-w-0 flex-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <p class="font-medium">{provider.name}</p>
-                <Badge variant="secondary">{kindLabel(provider.kind)}</Badge>
-                {#if supportsFetch(provider)}<Badge variant="outline">{m.web_access_read_pages_label()}</Badge>{/if}
-              </div>
-              {#if provider.last_test_success === true}
-                <p class="mt-1 text-sm text-muted-foreground">
-                  {m.web_access_configuration_last_connection_test_succeeded()}
-                </p>
-              {:else if provider.last_test_success === false}
-                <p class="mt-1 text-sm text-muted-foreground">
-                  {m.web_access_configuration_last_connection_test_failed()}
-                </p>
-              {/if}
-            </div>
-            <div class="flex flex-wrap gap-2 @min-[36rem]/sources:justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                class="min-w-20"
-                aria-busy={actingProviderId === provider.id}
-                disabled={actingProviderId === provider.id}
-                onclick={() => void testProvider(provider)}>
-                {#if actingProviderId === provider.id}
-                  <Spinner data-icon="inline-start" aria-label={m.web_access_configuration_testing_connection()} />
-                  {m.web_access_configuration_testing()}
-                {:else}
-                  {m.web_access_configuration_test()}
+          <div class="flex flex-col gap-2 py-3">
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <p class="font-medium">{provider.name}</p>
+                  {#if kindLabel(provider.kind) !== provider.name}
+                    <Badge variant="secondary">{kindLabel(provider.kind)}</Badge>
+                  {/if}
+                </div>
+                {#if provider.last_test_success === true}
+                  <p class="mt-1 text-sm text-muted-foreground">
+                    {m.web_access_configuration_last_connection_test_succeeded()}
+                  </p>
+                {:else if provider.last_test_success === false}
+                  <p class="mt-1 text-sm text-muted-foreground">
+                    {m.web_access_configuration_last_connection_test_failed()}
+                  </p>
                 {/if}
-              </Button>
-              <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>{m.common_edit()}</Button>
-              {#if provider.kind !== 'local'}
+                {#if provider.kind === 'local' && localBrowserMissing}
+                  <p class="mt-1 text-sm text-warning" role="status">
+                    {m.web_access_browser_required()}
+                    <Button variant="link" size="sm" onclick={() => openEdit(provider)}
+                      >{m.web_access_configure_browser()}</Button>
+                  </p>
+                {/if}
+              </div>
+              <div class="flex flex-wrap gap-2">
                 <Button
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  class="text-destructive"
-                  onclick={() => {
-                    deleteTarget = provider
-                    deleteOpen = true
-                  }}>{m.web_access_configuration_delete()}</Button>
-              {/if}
+                  class="min-w-20"
+                  aria-busy={actingProviderId === provider.id}
+                  disabled={actingProviderId === provider.id}
+                  onclick={() => void testProvider(provider)}>
+                  {#if actingProviderId === provider.id}
+                    <Spinner data-icon="inline-start" aria-label={m.web_access_configuration_testing_connection()} />
+                    {m.web_access_configuration_testing()}
+                  {:else}
+                    {m.web_access_configuration_test()}
+                  {/if}
+                </Button>
+                <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>{m.common_edit()}</Button>
+                {#if provider.kind !== 'local'}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="text-destructive"
+                    onclick={() => {
+                      deleteTarget = provider
+                      deleteOpen = true
+                    }}>{m.web_access_configuration_delete()}</Button>
+                {/if}
+              </div>
             </div>
-          </div>
-        {/each}
-      </div>
-
-      {#if settingsQuery.data}
-        <div class="mt-3 flex flex-col gap-2">
-          <div class="flex items-center gap-2">
-            <h3 class="text-sm font-semibold">{m.web_access_configuration_priority_title()}</h3>
-            <FieldHelp hint={m.web_access_configuration_enabled_services_tried_top_bottom()} />
-          </div>
-          <div class="divide-y border-y">
-            <div class={`${matrixRow} hidden py-2 text-xs font-medium text-muted-foreground @min-[36rem]/sources:grid`}>
-              <span>{m.web_access_configuration_service()}</span>
-              <span>{m.web_access_configuration_web_search()}</span>
-              <span>{m.web_access_page_access_label()}</span>
-            </div>
-            {#each webProviders as provider (provider.id)}
-              <div class={`${matrixRow} flex flex-col gap-2 py-3 @min-[36rem]/sources:grid @min-[36rem]/sources:py-2`}>
-                <span class="min-w-0 truncate text-sm font-medium">{provider.name}</span>
+            {#if settingsQuery.data}
+              <div class="grid gap-x-8 gap-y-1 @min-[32rem]/sources:grid-cols-2">
                 {@render capabilityCell(provider, 'search')}
                 {@render capabilityCell(provider, 'fetch')}
               </div>
-            {/each}
+            {/if}
           </div>
-        </div>
-      {/if}
+        {/each}
+      </div>
     {/if}
   </div>
 </section>
@@ -481,8 +471,7 @@ async function deleteProvider(): Promise<void> {
           savingSettings ||
           (provider.kind === 'local' && !enabled && !localBrowserAvailable)}
         aria-label={m.web_access_use_provider_for_capability({ provider: provider.name, capability: label })} />
-      <span class="min-w-0 flex-1 text-sm text-muted-foreground @min-[36rem]/sources:sr-only" aria-hidden="true"
-        >{label}</span>
+      <span class="min-w-0 flex-1 text-sm text-muted-foreground" aria-hidden="true">{label}</span>
       {#if enabled}
         <span class="w-4 text-center font-technical text-xs text-muted-foreground tabular-nums">{orderIndex + 1}</span>
         <Button
@@ -499,8 +488,7 @@ async function deleteProvider(): Promise<void> {
           onclick={() => moveProvider(provider.id, capability, 1)}><ArrowDownIcon /></Button>
       {/if}
     {:else}
-      <span class="min-w-0 flex-1 text-sm text-muted-foreground @min-[36rem]/sources:sr-only" aria-hidden="true"
-        >{label}</span>
+      <span class="min-w-0 flex-1 text-sm text-muted-foreground" aria-hidden="true">{label}</span>
       <span class="text-sm text-muted-foreground" aria-hidden="true">—</span>
       <span class="sr-only">{label}: {m.web_access_capability_unsupported()}</span>
     {/if}
@@ -523,11 +511,11 @@ async function deleteProvider(): Promise<void> {
       }}>
       <div class="route-overlay-body">
         <Field.Group>
-          <Field.Field size="name">
+          <Field.Field>
             <Field.Label for="web-provider-name">{m.common_name()}</Field.Label>
             <Input id="web-provider-name" bind:value={editorName} disabled={savingEditor} required />
           </Field.Field>
-          <Field.Field size="select">
+          <Field.Field>
             <Field.Label for="web-provider-kind" hint={m.web_access_configuration_account_help()}
               >{m.web_access_configuration_service()}</Field.Label>
             <Select.Root type="single" bind:value={editorKind} disabled={savingEditor || Boolean(editingProvider)}>
@@ -551,7 +539,7 @@ async function deleteProvider(): Promise<void> {
               onCheckedChange={(checked: boolean) => (editorUseProxy = checked)} />
           </Field.Field>
           {#if editorKind === 'local'}
-            <Field.Field size="fill" data-invalid={Boolean(browserInputError)} data-disabled={browserInputBusy}>
+            <Field.Field data-invalid={Boolean(browserInputError)} data-disabled={browserInputBusy}>
               <Field.Label for="web-provider-browser-path" hint={m.web_access_browser_path_help()}
                 >{m.web_access_browser_path()}</Field.Label>
               <div class="flex min-w-0 flex-wrap items-center gap-2">
@@ -612,7 +600,7 @@ async function deleteProvider(): Promise<void> {
               </div>
             </Field.Set>
           {:else}
-            <Field.Field size="fill">
+            <Field.Field>
               <Field.Label for="web-provider-secret">{m.common_api_key()}</Field.Label>
               <SecretInput
                 id="web-provider-secret"

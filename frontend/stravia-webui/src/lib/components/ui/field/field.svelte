@@ -5,14 +5,7 @@ import type { FieldControlSize } from './field-sizes.js'
 
 export const fieldVariants = tv({
   base: 'data-[invalid=true]:text-destructive group/field @container/field w-full min-w-0',
-  variants: {
-    // 左右排布的 Field 以设置列为上限，label 与控件的距离不随内容容器放大。
-    orientation: {
-      vertical: '',
-      horizontal: 'max-w-(--content-column-max-width)',
-      responsive: 'max-w-(--content-column-max-width)',
-    },
-  },
+  variants: { orientation: { vertical: '', horizontal: '', responsive: '' } },
   defaultVariants: { orientation: 'responsive' },
 })
 
@@ -41,12 +34,8 @@ let {
   data-slot="field"
   data-orientation={orientation}
   data-size={size}
-  style:--field-control-width={fieldControlWidths[size ?? 'fill']}
-  class={cn(
-    fieldVariants({ orientation }),
-    orientation === 'vertical' && size && 'max-w-(--field-control-width)',
-    className,
-  )}
+  style:--field-control-width={size ? fieldControlWidths[size] : undefined}
+  class={cn(fieldVariants({ orientation }), className)}
   {...restProps}>
   <div
     data-slot="field-layout"

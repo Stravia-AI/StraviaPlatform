@@ -211,7 +211,7 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
 
 <svelte:head><title>{m.web_search_title()} · Stravia</title></svelte:head>
 
-<div class="route-page">
+<div class="route-page route-page-column">
   <PageHeader title={m.web_search_title()} />
 
   {#if configQuery.isError}
@@ -225,7 +225,7 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
     <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
   {/if}
   {#if config}
-    <div class="content-column flex flex-col gap-8">
+    <div class="flex flex-col gap-8">
       <div class="flex flex-col gap-3">
         <SettingRow title={m.web_search_enable()} layout="inline">
           {#snippet children({ titleId })}
@@ -290,64 +290,65 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
         <SettingRow
           title={backend?.kind === 'external' ? m.web_search_external_route() : m.web_search_model_used()}
           value={bindingTarget} />
+        {#if usesLocal}
+          <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4 border-t py-2">
+            <Collapsible.Trigger class={buttonVariants({ variant: 'ghost', size: 'sm', class: 'self-start' })}
+              >{m.common_advanced()}</Collapsible.Trigger>
+            <Collapsible.Content>
+              <SettingsSection id="web-search-advanced-fields" title={m.web_search_limits_title()}>
+                {#if limits}
+                  <SettingRow
+                    title={m.web_search_maximum_steps()}
+                    labelFor="search-max-turns"
+                    controlSize="number"
+                    hint="{m.web_search_limits_help()} {m.web_search_range_hint({
+                      min: limits.min_turns,
+                      max: limits.max_turns,
+                    })}">
+                    {#snippet children({ titleId })}
+                      <InlineSettingInput
+                        id="search-max-turns"
+                        labelledby={titleId}
+                        type="number"
+                        inputmode="numeric"
+                        min={limits.min_turns}
+                        max={limits.max_turns}
+                        disabled={writing}
+                        value={String(config.max_turns)}
+                        validate={rangeValidator(limits.min_turns, limits.max_turns)}
+                        onSave={saveMaxTurns} />
+                    {/snippet}
+                  </SettingRow>
+                  <SettingRow
+                    title={m.web_search_time_limit_seconds()}
+                    labelFor="search-total-seconds"
+                    hint="{m.web_search_limits_help()} {m.web_search_range_hint({
+                      min: limits.min_total_time_seconds,
+                      max: limits.max_total_time_seconds,
+                    })}">
+                    {#snippet children({ titleId })}
+                      <InlineSettingInput
+                        id="search-total-seconds"
+                        labelledby={titleId}
+                        type="number"
+                        inputmode="numeric"
+                        min={limits.min_total_time_seconds}
+                        max={limits.max_total_time_seconds}
+                        suffix={m.web_search_seconds_unit()}
+                        disabled={writing}
+                        value={String(config.total_time_seconds)}
+                        validate={rangeValidator(limits.min_total_time_seconds, limits.max_total_time_seconds)}
+                        onSave={saveTotalSeconds} />
+                    {/snippet}
+                  </SettingRow>
+                {/if}
+              </SettingsSection>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        {/if}
       </SettingsSection>
 
       {#if usesLocal}
-        <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4">
-          <Collapsible.Trigger class={buttonVariants({ variant: 'outline', class: 'self-start' })}
-            >{m.common_advanced()}</Collapsible.Trigger>
-          <Collapsible.Content>
-            <SettingsSection id="web-search-advanced-fields" title={m.web_search_limits_title()}>
-              {#if limits}
-                <SettingRow
-                  title={m.web_search_maximum_steps()}
-                  labelFor="search-max-turns"
-                  controlSize="number"
-                  hint="{m.web_search_limits_help()} {m.web_search_range_hint({
-                    min: limits.min_turns,
-                    max: limits.max_turns,
-                  })}">
-                  {#snippet children({ titleId })}
-                    <InlineSettingInput
-                      id="search-max-turns"
-                      labelledby={titleId}
-                      type="number"
-                      inputmode="numeric"
-                      min={limits.min_turns}
-                      max={limits.max_turns}
-                      disabled={writing}
-                      value={String(config.max_turns)}
-                      validate={rangeValidator(limits.min_turns, limits.max_turns)}
-                      onSave={saveMaxTurns} />
-                  {/snippet}
-                </SettingRow>
-                <SettingRow
-                  title={m.web_search_time_limit_seconds()}
-                  labelFor="search-total-seconds"
-                  hint="{m.web_search_limits_help()} {m.web_search_range_hint({
-                    min: limits.min_total_time_seconds,
-                    max: limits.max_total_time_seconds,
-                  })}">
-                  {#snippet children({ titleId })}
-                    <InlineSettingInput
-                      id="search-total-seconds"
-                      labelledby={titleId}
-                      type="number"
-                      inputmode="numeric"
-                      min={limits.min_total_time_seconds}
-                      max={limits.max_total_time_seconds}
-                      suffix={m.web_search_seconds_unit()}
-                      disabled={writing}
-                      value={String(config.total_time_seconds)}
-                      validate={rangeValidator(limits.min_total_time_seconds, limits.max_total_time_seconds)}
-                      onSave={saveTotalSeconds} />
-                  {/snippet}
-                </SettingRow>
-              {/if}
-            </SettingsSection>
-          </Collapsible.Content>
-        </Collapsible.Root>
-
         <WebAccessConfiguration />
       {/if}
     </div>
