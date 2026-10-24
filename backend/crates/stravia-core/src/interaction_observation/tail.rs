@@ -24,7 +24,20 @@ pub(super) struct Window {
     /// Delivery/graph metadata is not client-input content: reconstructed
     /// ancestors retain server-output provenance, not client-replay provenance.
     /// Absent whenever a complete input cannot fit the capture limits.
-    received_items: Option<Vec<([u8; 32], bool, bool)>>,
+    received_items: Option<Vec<ReceivedItem>>,
+}
+
+/// 一条客户端输入项的身份证据。`hash` 覆盖整项规范内容；`input` 只在该项是用户输入
+/// （User 角色且不是工具结果载体，含 native compaction 触发）时存在，且忽略图片。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReceivedItem {
+    hash: [u8; 32],
+    user_only: bool,
+    input: Option<[u8; 32]>,
+}
+
+fn user_inputs(items: &[ReceivedItem]) -> impl Iterator<Item = [u8; 32]> + '_ {
+    items.iter().filter_map(|item| item.input)
 }
 #[derive(Clone)]
 struct Unit {
@@ -73,6 +86,51 @@ pub(super) fn hash_json(
     }
     result?;
     Ok(Some((writer.digest.finalize().into(), writer.bytes)))
+}
+
+/// 用户输入身份忽略图片：客户端超出自身图片数量预算时，会在回放历史前删掉较早的图片、
+/// 只留下文字；这不是新的用户输入。含图片时返回删图后的副本，否则返回 `None` 表示原值即可。
+/// 删图后的形状与客户端实际发送的一致：只剩文本块时规范投影会把它们合并成一个文本块。
+fn without_images(units: &Value) -> Option<Value> {
+    let Value::Array(items) = units else {
+        return None;
+    };
+    let has_image = |unit: &Value| matches!(unit.get("content"), Some(Value::Array(blocks)) if blocks.iter().any(is_image_block));
+    if !items.iter().any(has_image) {
+        return None;
+    }
+    let mut stripped = units.clone();
+    for unit in stripped.as_array_mut()? {
+        if let Some(Value::Array(blocks)) = unit.get_mut("content") {
+            strip_content_images(blocks);
+        }
+    }
+    stripped.sort_all_objects();
+    Some(stripped)
+}
+
+fn is_image_block(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("image" | "input_image" | "output_image" | "image_url")
+    )
+}
+
+fn strip_content_images(blocks: &mut Vec<Value>) {
+    blocks.retain(|block| !is_image_block(block));
+    let texts: Option<Vec<&str>> = blocks
+        .iter()
+        .map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("text") => block.get("text").and_then(Value::as_str),
+            _ => None,
+        })
+        .collect();
+    if let Some(texts) = texts
+        && !texts.is_empty()
+    {
+        let text = texts.concat();
+        *blocks = vec![serde_json::json!({ "type": "text", "text": text })];
+    }
 }
 
 fn unadorned_text_exceeds_budget(item: &AiItem, budget: usize) -> bool {
@@ -176,7 +234,7 @@ impl Window {
         }
         Some(window)
     }
-    fn capture_received_items(items: &[AiItem]) -> Option<Vec<([u8; 32], bool, bool)>> {
+    fn capture_received_items(items: &[AiItem]) -> Option<Vec<ReceivedItem>> {
         if items.len() > MAX_UNITS {
             return None;
         }
@@ -197,8 +255,7 @@ impl Window {
                             && unit.get("native_compaction").is_none()
                     })
                 });
-            // A User-role tool-result block is canonical Tool content. Only
-            // assistant/tool units may extend a proven historical input.
+            // A User-role tool-result block is canonical Tool content, not input.
             let continuation_only = value.as_array().is_some_and(|units| {
                 !units.is_empty()
                     && units.iter().all(|unit| {
@@ -208,7 +265,21 @@ impl Window {
                         )
                     })
             });
-            received.push((hash, user_only, continuation_only));
+            let input = if item.role == stravia_runtime_contract::protocol::ir::Role::User
+                && !continuation_only
+            {
+                Some(match without_images(&value) {
+                    Some(stripped) => hash_json(&stripped, MAX_WINDOW_BYTES).ok()??.0,
+                    None => hash,
+                })
+            } else {
+                None
+            };
+            received.push(ReceivedItem {
+                hash,
+                user_only,
+                input,
+            });
         }
         Some(received)
     }
@@ -220,28 +291,27 @@ impl Window {
         !old.is_empty()
             && old.len() < new.len()
             && new.starts_with(old)
-            && new[old.len()..].iter().all(|(_, user, _)| *user)
+            && new[old.len()..].iter().all(|item| item.user_only)
     }
 
-    /// Strict received-input identity includes every item, not merely the
-    /// projected diagnostic tail. A changed prefix or any appended User fails.
+    /// 判断当前请求没有相对来源 Run 新增任何用户输入，只是沿着当前工具结果继续。
+    ///
+    /// 只比较用户输入的有序身份：客户端可以在回放时改写其余历史（删除旧图片、裁剪或
+    /// 移除旧工具结果、变更 system 指令），这些都不是新的用户输入。输入被改、新增、
+    /// 删除或重排，或请求末尾不是当前工具结果，都不构成证明。
     pub(super) fn is_received_prefix_with_tool_continuation(&self, input: &Self) -> bool {
         let (Some(old), Some(new)) = (&self.received_items, &input.received_items) else {
             return false;
         };
         !old.is_empty()
-            && old.len() < new.len()
-            && new.starts_with(old)
-            && new[old.len()..]
-                .iter()
-                .all(|(_, _, continuation)| *continuation)
+            && user_inputs(old).eq(user_inputs(new))
             && input.current_tail_tool_ids().is_some()
     }
 
     fn retained_bytes(&self) -> usize {
         self.bytes
             + self.received_items.as_ref().map_or(0, |items| {
-                items.capacity() * std::mem::size_of::<([u8; 32], bool, bool)>()
+                items.capacity() * std::mem::size_of::<ReceivedItem>()
             })
     }
 
@@ -853,6 +923,89 @@ mod tests {
         assert!(!old.is_received_prefix_with_only_new_users(
             &Window::capture_received_input(&replay).unwrap()
         ));
+    }
+
+    #[test]
+    fn tool_continuation_proof_compares_user_inputs_not_the_rewritten_history() {
+        use stravia_runtime_contract::protocol::ir::{ContentBlock, MediaSource, Role, ToolCall};
+        let image = || ContentBlock::Image {
+            source: MediaSource::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            },
+            detail: None,
+            cache_control: None,
+        };
+        let text = |text: &str| ContentBlock::Text {
+            text: std::sync::Arc::new(text.into()),
+            cache_control: None,
+        };
+        let mut pasted = user("");
+        pasted.content = MessageContent::Blocks(vec![text("look"), image(), text(" here")]);
+        let call = |id: &str| {
+            AiItem::function_call(ToolCall {
+                id: id.into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            })
+        };
+        let mut system = user("rules");
+        system.role = Role::System;
+        let received = vec![
+            system.clone(),
+            pasted,
+            call("call-1"),
+            AiItem::function_call_output(
+                "call-1",
+                serde_json::json!([
+                    {"type": "input_text", "text": "first"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                ]),
+            ),
+            user("reminder"),
+            call("call-2"),
+            AiItem::function_call_output("call-2", serde_json::json!("old output")),
+        ];
+        let old = Window::capture_received_input(&received).unwrap();
+        let proves = |items: &[AiItem]| {
+            old.is_received_prefix_with_tool_continuation(
+                &Window::capture_received_input(items).unwrap(),
+            )
+        };
+        let continued = |mut items: Vec<AiItem>| {
+            items.extend([
+                call("call-3"),
+                AiItem::function_call_output("call-3", serde_json::json!("done")),
+            ]);
+            items
+        };
+
+        // 客户端删图、裁剪并移除旧工具结果、改写 system 指令：用户输入没有变化。
+        let mut rewritten = received.clone();
+        rewritten[0] = user("new rules");
+        rewritten[0].role = Role::System;
+        rewritten[1].content = MessageContent::Text(std::sync::Arc::new("look here".into()));
+        rewritten[3] = AiItem::function_call_output("call-1", serde_json::json!("[truncated]"));
+        rewritten.remove(6);
+        assert!(proves(&continued(rewritten.clone())));
+
+        // 任何用户输入的新增、改动、删除或重排都不是同一段输入。
+        let mut edited = rewritten.clone();
+        edited[4] = user("another reminder");
+        let mut appended = rewritten.clone();
+        appended.push(user("reminder"));
+        let mut removed = rewritten.clone();
+        removed.remove(4);
+        let mut reordered = rewritten.clone();
+        reordered.swap(1, 4);
+        for items in [edited, appended, removed, reordered] {
+            assert!(!proves(&continued(items)));
+        }
+
+        // 请求末尾不是当前工具结果时，不能证明是工具续接。
+        let mut answered = rewritten.clone();
+        answered.push(AiItem::output_text("answer"));
+        assert!(!proves(&answered));
     }
 
     #[test]

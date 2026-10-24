@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use toml::{Table as TomlTable, Value as TomlValue};
 
+/// OMP 默认每次请求只保留最近 5 张图片，超出时会改写已发送过的历史（删掉最早的图片）。
+/// 改写让 Stravia 无法按严格 canonical 历史续接 Generation 父项，上游提示缓存随之失效。
+/// 20 张是各上游共同可承受的上限：Anthropic 超过 20 张后会收紧单图像素限制，
+/// 其余主流上游的数量上限都远高于它。
+const OMP_IMAGE_COUNT_BUDGET: u64 = 20;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectClientId {
@@ -794,18 +800,16 @@ fn responses_provider(input: &ConnectClientApplyInput, base_url_key: &str) -> Js
                 .supported_thinking_levels
                 .iter()
                 .any(|level| level != "off");
+            let modalities = input_modalities(model, input.transparent_image_input_enabled);
             let mut value = JsonMap::from_iter([
                 ("id".to_owned(), json!(model.model_id)),
                 ("name".to_owned(), json!(model.display_name)),
                 ("reasoning".to_owned(), json!(reasoning)),
-                (
-                    "input".to_owned(),
-                    json!(input_modalities(
-                        model,
-                        input.transparent_image_input_enabled
-                    )),
-                ),
+                ("input".to_owned(), json!(modalities)),
             ]);
+            if matches!(input.tool, ConnectClientId::Omp) && modalities.contains(&"image") {
+                value.insert("imageCountBudget".to_owned(), json!(OMP_IMAGE_COUNT_BUDGET));
+            }
             if reasoning && matches!(input.tool, ConnectClientId::Omp) {
                 let levels = model
                     .supported_thinking_levels
@@ -1792,6 +1796,67 @@ name = "Other"
         let document = serde_json::from_str::<serde_json::Value>(&planned_text(&pi, "models.json"))
             .expect("Pi JSON");
         assert!(document["providers"]["stravia"].get("compat").is_none());
+    }
+
+    /// OMP 默认只保留最近 5 张图片，超出时改写已发送历史并使上游缓存失效；预算只写给
+    /// 接受图片输入的模型，且只写在 OMP 自己的 provider 上。
+    #[test]
+    fn omp_raises_image_count_budget_only_for_image_models_and_not_for_pi() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut environment = environment(temporary.path());
+        environment.insert(
+            "PI_CODING_AGENT_DIR".to_owned(),
+            temporary.path().join("pi").display().to_string(),
+        );
+        let configure = |tool| {
+            let mut input = standard_input(tool);
+            let mut text_only = model("text-only", "Text only");
+            text_only.supports_image_input = false;
+            input.models = vec![model("vision", "Vision"), text_only];
+            input
+        };
+
+        let omp = plan_connect_client_apply(
+            &configure(ConnectClientId::Omp),
+            &environment,
+            &BTreeMap::new(),
+        )
+        .expect("OMP plan");
+        let document =
+            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
+                .expect("OMP YAML");
+        let models = &document["providers"]["stravia"]["models"];
+        assert_eq!(models[0]["imageCountBudget"], serde_json::json!(20));
+        assert!(models[1].get("imageCountBudget").is_none());
+
+        // 透明图片理解让文本模型也接受图片输入，预算随之写入。
+        let mut transparent = configure(ConnectClientId::Omp);
+        transparent.transparent_image_input_enabled = true;
+        let omp = plan_connect_client_apply(&transparent, &environment, &BTreeMap::new())
+            .expect("OMP plan");
+        let document =
+            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
+                .expect("OMP YAML");
+        assert_eq!(
+            document["providers"]["stravia"]["models"][1]["imageCountBudget"],
+            serde_json::json!(20)
+        );
+
+        let pi = plan_connect_client_apply(
+            &configure(ConnectClientId::Pi),
+            &environment,
+            &BTreeMap::new(),
+        )
+        .expect("Pi plan");
+        let document = serde_json::from_str::<serde_json::Value>(&planned_text(&pi, "models.json"))
+            .expect("Pi JSON");
+        assert!(
+            document["providers"]["stravia"]["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .all(|model| model.get("imageCountBudget").is_none())
+        );
     }
 
     #[test]
