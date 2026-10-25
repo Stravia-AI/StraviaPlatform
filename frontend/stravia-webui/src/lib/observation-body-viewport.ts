@@ -4,7 +4,6 @@ import { createContext } from 'svelte'
 export interface ObservationBodyViewport {
   observe: (element: HTMLElement, update: (near: boolean) => void) => () => void
   root: () => HTMLElement | undefined
-  fullText: () => boolean
   resizeAbove: (delta: number) => void
 }
 

@@ -14,7 +14,6 @@ let {
   onolder,
   children,
   activityKey,
-  fullText = false,
 }: {
   label: string
   olderCursor: number | null
@@ -24,7 +23,6 @@ let {
   children: Snippet<[older: Snippet]>
   /** Explicit activity signal when body mounts/unmounts are not themselves new content. */
   activityKey?: unknown
-  fullText?: boolean
 } = $props()
 
 // 加载行常驻固定高度：出现、转圈、失败与消失都不改变其上下内容的位置。
@@ -45,7 +43,6 @@ let bodyObserver: IntersectionObserver | undefined
 let activityCursor = untrack(() => olderCursor)
 setObservationBodyViewport({
   root: () => viewport,
-  fullText: () => fullText,
   resizeAbove(delta) {
     if (!viewport) return
     syncScrollPosition()
@@ -160,7 +157,6 @@ const prependCursor = $derived(olderCursor)
 
 $effect.pre(() => {
   void prependCursor
-  void fullText
   untrack(() => {
     syncScrollPosition()
     prependPosition = readingPosition()
@@ -168,7 +164,6 @@ $effect.pre(() => {
 })
 $effect(() => {
   void prependCursor
-  void fullText
   untrack(() => {
     // 补入的历史不是新活动，不能触发跟随或「有新活动」提示。
     mutation?.takeRecords()

@@ -1909,8 +1909,6 @@
   "observation_activity_error": "Failed",
   "observation_activity_storage_error": "Could not remember the expanded state in this browser.",
   "observation_chat_latest": "New activity · Back to latest",
-  "observation_render_full_text": "Full text for find, copy and assistive reading",
-  "observation_render_full_text_help": "Only nearby text is normally rendered. Enable full text for browser find, complete copying or continuous assistive reading of all loaded text; this uses more memory.",
   "observation_older_loading": "Loading earlier events",
   "observation_older_retry": "Couldn't load earlier events · Retry",
   "observation_live_capacity": "Live preview is incomplete. Content appears here as it is saved.",

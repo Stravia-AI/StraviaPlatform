@@ -10,7 +10,7 @@ let height = $state<number | null>(null)
 let width = $state(0)
 let body: HTMLElement | undefined
 let resizeFromAbove: boolean | null = null
-const mounted = $derived(viewport.fullText() || near || retained)
+const mounted = $derived(near || retained)
 // This is only the initial scrollbar estimate; visited blocks retain their measured border-box height.
 const estimatedHeight = $derived.by(() => {
   const columns = Math.max(20, Math.floor((width || viewport.root()?.clientWidth || 640) / 7))
@@ -28,7 +28,6 @@ const estimatedHeight = $derived.by(() => {
 
 $effect.pre(() => {
   void source
-  void viewport.fullText()
   untrack(() => {
     const root = viewport.root()
     if (mounted && body && root && root.clientHeight > 0) {

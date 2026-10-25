@@ -13,8 +13,6 @@ import ConversationMessage from '#lib/components/conversation-message.svelte'
 import type { InteractionDetail, LiveContentBlock } from '#lib/types.js'
 import StreamingMarkdown from '#lib/components/streaming-markdown.svelte'
 import ObservationLogViewport from '#lib/components/observation-log-viewport.svelte'
-import { Checkbox } from '#lib/components/ui/checkbox/index.js'
-import * as Field from '#lib/components/ui/field/index.js'
 
 let {
   detail,
@@ -61,24 +59,12 @@ const responseBlocks = $derived(observationConversationBlocks(detail, liveBlocks
 const activityKey = $derived(
   JSON.stringify([detail.interaction.last_event_sequence, liveBlocks.map((block) => [block.block_id, block.revision])]),
 )
-let fullText = $state(false)
-const fullTextHelp = $props.id()
 </script>
 
 <div class="conversation-shell">
-  <div class="body-mode">
-    <Field.Field orientation="horizontal">
-      <Field.FieldContent>
-        <Field.FieldLabel for={`${fullTextHelp}-control`}>{m.observation_render_full_text()}</Field.FieldLabel>
-        <Field.FieldDescription id={fullTextHelp}>{m.observation_render_full_text_help()}</Field.FieldDescription>
-      </Field.FieldContent>
-      <Checkbox id={`${fullTextHelp}-control`} bind:checked={fullText} aria-describedby={fullTextHelp} />
-    </Field.Field>
-  </div>
   <div class="conversation-viewport">
     <ObservationLogViewport
       label={m.observation_conversation()}
-      {fullText}
       {activityKey}
       olderCursor={detail.older_events_cursor}
       {olderLoading}
@@ -135,12 +121,6 @@ const fullTextHelp = $props.id()
 .conversation-viewport {
   flex: 1;
   min-height: 0;
-}
-.body-mode {
-  flex: none;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.75rem;
 }
 .conversation-messages {
   display: flex;

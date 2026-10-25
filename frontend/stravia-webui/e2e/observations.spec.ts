@@ -190,6 +190,33 @@ function distanceFromBottom(viewport: Locator): Promise<number> {
   return viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)
 }
 
+/** Windowed bodies only mount nearby text: walk the viewport top to bottom and tally every `Increment N` paragraph. */
+function collectIncrements(viewport: Locator): Promise<{ seen: number[]; duplicated: number[] }> {
+  return viewport.evaluate(async (element) => {
+    const seen = new Set<number>()
+    const duplicated = new Set<number>()
+    element.scrollTop = 0
+    for (;;) {
+      // 两帧：先让 IntersectionObserver 回调触发挂载，再让 Svelte 完成渲染。
+      const { promise, resolve } = Promise.withResolvers<void>()
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      await promise
+      const mounted = new Set<number>()
+      for (const node of element.querySelectorAll('p')) {
+        const match = /^Increment (\d+)$/.exec(node.textContent ?? '')
+        if (!match) continue
+        const value = Number(match[1])
+        if (mounted.has(value)) duplicated.add(value)
+        mounted.add(value)
+        seen.add(value)
+      }
+      if (element.scrollTop + element.clientHeight >= element.scrollHeight - 1) break
+      element.scrollTop += element.clientHeight / 2
+    }
+    return { seen: [...seen].sort((a, b) => a - b), duplicated: [...duplicated] }
+  })
+}
+
 // 向上滚到加载行出现，并每帧记录锚点相对视口的位置；加载前、加载中与加载后都不允许位移。
 async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, text?: string): Promise<void> {
   await viewport.evaluate((element) => {
@@ -945,16 +972,16 @@ test.describe('Interaction Observation canvas', () => {
         },
       })
     await expect(conversation.getByText('Increment 450', { exact: true })).toHaveCount(1)
-    await page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true }).check()
-    await expect(conversation.getByText('Increment 1', { exact: true })).toHaveCount(1)
-    await expect(conversation.getByText('Increment 201', { exact: true })).toHaveCount(1)
+    const increments = await collectIncrements(conversation)
+    expect(increments.duplicated).toEqual([])
+    expect(increments.seen).toEqual(Array.from({ length: 450 }, (_, index) => index + 1))
     const pages = fixture.eventRequests
     expect(pages.map((url) => url.searchParams.get('after_sequence'))).toEqual(['10', '210', '410'])
     expect(pages.map((url) => url.searchParams.get('through_sequence'))).toEqual([null, '460', '460'])
     expect(fixture.detailRequests).toHaveLength(1)
   })
 
-  test('long conversation bodies remain reachable and offer explicit full text for find and copy', async ({ page }) => {
+  test('long conversation bodies stay windowed and reachable from both ends', async ({ page }) => {
     const paragraphs = Array.from({ length: 1000 }, (_, index) =>
       `Readable paragraph ${index + 1}: 中文 e\u0301 👩🏽‍💻 ${'body content '.repeat(8)}`.trimEnd(),
     )
@@ -967,8 +994,7 @@ test.describe('Interaction Observation canvas', () => {
     })
     await page.goto('/logs?interaction=interaction-cinder')
     const conversation = page.getByRole('log', { name: 'Conversation' })
-    const fullText = page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true })
-    await expect(fullText).not.toBeChecked()
+    await expect(page.getByRole('checkbox')).toHaveCount(0)
     await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
     await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(0)
     await expect.poll(() => distanceFromBottom(conversation)).toBeLessThanOrEqual(2)
@@ -979,29 +1005,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(page.getByRole('button', { name: 'New activity · Back to latest', exact: true })).toHaveCount(0)
     await conversation.press('Control+End')
     await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
-    await fullText.focus()
-    await fullText.press('Space')
-    await expect(fullText).toBeChecked()
-    await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(1)
-    await expect(conversation.getByText(paragraphs[499], { exact: true })).toHaveCount(1)
-    await expect(conversation.getByText(paragraphs[999], { exact: true })).toHaveCount(1)
-    const selectedText = await conversation.evaluate((element) => {
-      const selection = document.getSelection()!
-      const range = document.createRange()
-      range.selectNodeContents(element)
-      selection.removeAllRanges()
-      selection.addRange(range)
-      const text = selection.toString()
-      selection.removeAllRanges()
-      return text
-    })
-    expect(selectedText).toContain(paragraphs[0])
-    expect(selectedText).toContain(paragraphs[499])
-    expect(selectedText).toContain(paragraphs[999])
-    await fullText.press('Space')
-    await expect(fullText).not.toBeChecked()
     await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(0)
-    await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
   })
 
   test('conversation opens at the latest content and prepends earlier history without moving the reading position', async ({
@@ -3066,8 +3070,6 @@ test.describe('Interaction Observation canvas', () => {
       conversation
         .locator('[data-activity-kind="tool"]')
         .filter({ has: page.getByRole('button', { name: `Tool call ${name}`, exact: true }) })
-    // This case inspects all historical tools at once; use the explicit continuous-reading surface.
-    await page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true }).check()
     const search = activity('Search')
     await expect(search).toHaveAttribute('aria-busy', 'true')
     await expect(search.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
@@ -3084,12 +3086,16 @@ test.describe('Interaction Observation canvas', () => {
         element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
       })
       await expect(conversation.getByRole('status', { name: 'Loading earlier events', exact: true })).toBeInViewport()
+      // Bodies are windowed: the previous page's oldest paragraph is mounted only while the loader is next to it.
+      if (pageIndex === 1)
+        await expect(conversation.getByText('History paragraph 51', { exact: true })).toHaveCount(1)
       release()
       await response
-      await expect(
-        conversation.getByText(`History paragraph ${pageIndex === 0 ? 51 : 0}`, { exact: true }),
-      ).toHaveCount(1)
     }
+    await conversation.evaluate((element) => {
+      element.scrollTop = 0
+    })
+    await expect(conversation.getByText('History paragraph 0', { exact: true })).toHaveCount(1)
     const a = activity('Read A')
     const b = activity('Read B')
     await expect(a).toHaveAttribute('aria-busy', 'true')
