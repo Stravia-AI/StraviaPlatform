@@ -1901,6 +1901,8 @@
   "observation_chat_latest": "有新活动 · 回到最新",
   "observation_older_loading": "正在加载更早的事件",
   "observation_older_retry": "更早的事件加载失败 · 重试",
+  "observation_render_full_text": "完整正文（查找、复制与辅助阅读）",
+  "observation_render_full_text_help": "默认仅呈现附近正文。查找、完整复制或辅助技术连续阅读全部已加载正文时，需启用完整正文；这会使用更多内存。",
   "observation_live_capacity": "实时预览不完整，读取到已保存内容后会补齐。",
   "observation_live_unsaved": "尚未保存",
   "observation_live_save_failed": "部分实时内容保存失败，重新连接后可能缺失。",

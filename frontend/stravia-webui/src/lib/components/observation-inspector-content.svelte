@@ -100,23 +100,29 @@ function jumpToRun(runId: string | null) {
       </Collapsible.Trigger>
       {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
       <Collapsible.Content>
-        <div class="row-detail">
-          <dl class="detail-grid">
-            <div>
-              <dt>{m.observation_event_type()}</dt>
-              <dd class="event-kind"><code>{event.kind}</code></dd>
-            </div>
-            <div>
-              <dt>{m.observation_event_sequence()}</dt>
-              <dd class="font-technical">{event.sequence}</dd>
-            </div>
-            <div>
-              <dt>{m.failed_request_time()}</dt>
-              <dd>{formatLogTime(event.occurred_at)}</dd>
-            </div>
-          </dl>
-          <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-        </div>
+        {#snippet child({ props, open })}
+          <div {...props}>
+            {#if open}
+              <div class="row-detail">
+                <dl class="detail-grid">
+                  <div>
+                    <dt>{m.observation_event_type()}</dt>
+                    <dd class="event-kind"><code>{event.kind}</code></dd>
+                  </div>
+                  <div>
+                    <dt>{m.observation_event_sequence()}</dt>
+                    <dd class="font-technical">{event.sequence}</dd>
+                  </div>
+                  <div>
+                    <dt>{m.failed_request_time()}</dt>
+                    <dd>{formatLogTime(event.occurred_at)}</dd>
+                  </div>
+                </dl>
+                <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+              </div>
+            {/if}
+          </div>
+        {/snippet}
       </Collapsible.Content>
     </Collapsible.Root>
   </li>
@@ -147,11 +153,17 @@ function jumpToRun(runId: string | null) {
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         <Collapsible.Content>
-          <ol class="branch sub">
-            {#each events as event (event.sequence)}
-              {@render eventRow(event)}
-            {/each}
-          </ol>
+          {#snippet child({ props, open })}
+            <div {...props}>
+              {#if open}
+                <ol class="branch sub">
+                  {#each events as event (event.sequence)}
+                    {@render eventRow(event)}
+                  {/each}
+                </ol>
+              {/if}
+            </div>
+          {/snippet}
         </Collapsible.Content>
       </Collapsible.Root>
     </li>
@@ -232,41 +244,47 @@ function jumpToRun(runId: string | null) {
           </Alert.Description></Alert.Root>
       {/if}
       <Collapsible.Content>
-        <dl class="row-detail detail-grid">
-          <div>
-            <dt>{m.observation_run_id()}</dt>
-            <dd><TechnicalValue value={run.id} copyable /></dd>
+        {#snippet child({ props, open })}
+          <div {...props}>
+            {#if open}
+              <dl class="row-detail detail-grid">
+                <div>
+                  <dt>{m.observation_run_id()}</dt>
+                  <dd><TechnicalValue value={run.id} copyable /></dd>
+                </div>
+                <div>
+                  <dt>{m.observation_route()}</dt>
+                  <dd><TechnicalValue value={run.route_id} copyable /></dd>
+                </div>
+                <div>
+                  <dt>{m.failed_request_time()}</dt>
+                  <dd>{formatLogTime(run.started_at)}</dd>
+                </div>
+                <div>
+                  <dt>{m.observation_protocol()}</dt>
+                  <dd class="font-technical">{run.ingress_protocol}</dd>
+                </div>
+                <div>
+                  <dt>{m.observation_delivery()}</dt>
+                  <dd>{run.client_output_committed ? m.observation_committed() : m.observation_not_committed()}</dd>
+                </div>
+                {#if run.parent_run_id}
+                  <div>
+                    <dt>{m.observation_parent_run()}</dt>
+                    <dd><TechnicalValue value={run.parent_run_id} copyable /></dd>
+                  </div>
+                {/if}
+              </dl>
+              {#if items.length}
+                <ol class="branch">
+                  {#each items as item (itemKey(item))}
+                    {@render streamItem(item)}
+                  {/each}
+                </ol>
+              {/if}
+            {/if}
           </div>
-          <div>
-            <dt>{m.observation_route()}</dt>
-            <dd><TechnicalValue value={run.route_id} copyable /></dd>
-          </div>
-          <div>
-            <dt>{m.failed_request_time()}</dt>
-            <dd>{formatLogTime(run.started_at)}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_protocol()}</dt>
-            <dd class="font-technical">{run.ingress_protocol}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_delivery()}</dt>
-            <dd>{run.client_output_committed ? m.observation_committed() : m.observation_not_committed()}</dd>
-          </div>
-          {#if run.parent_run_id}
-            <div>
-              <dt>{m.observation_parent_run()}</dt>
-              <dd><TechnicalValue value={run.parent_run_id} copyable /></dd>
-            </div>
-          {/if}
-        </dl>
-        {#if items.length}
-          <ol class="branch">
-            {#each items as item (itemKey(item))}
-              {@render streamItem(item)}
-            {/each}
-          </ol>
-        {/if}
+        {/snippet}
       </Collapsible.Content>
     </Collapsible.Root>
   </li>

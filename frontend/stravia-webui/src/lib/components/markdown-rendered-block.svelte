@@ -37,7 +37,8 @@ function renderBlock(element: HTMLDivElement) {
 }
 </script>
 
-<div class="markdown-rendered-block" {@attach renderBlock}></div>
+<div class="markdown-rendered-block" data-markdown-dialog-open={openedImage ? '' : undefined} {@attach renderBlock}>
+</div>
 {#if openedImage}
   {@const image = openedImage}
   <Dialog.Root

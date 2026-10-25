@@ -876,6 +876,50 @@ async fn structural_history_postgres_contract_when_configured() {
         .await
         .unwrap();
     contract(SqlTurnChainStore::postgres(pool.clone())).await;
+    let store = SqlTurnChainStore::postgres(pool.clone());
+    let owner = Principal::new("postgres-gc-batch-owner");
+    let node = TurnNodeId::response();
+    let expected = json!({
+        "items": (0..900).map(|index| format!("PG live {index} {}", "x".repeat(300))).collect::<Vec<_>>()
+    });
+    store
+        .commit(TurnCommit {
+            id: node.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: expected.clone(),
+            idle_ttl: Duration::from_secs(600),
+            reusable_prefix: None,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO turn_chain_contents(principal,content_key,content) \
+         SELECT $1,'pg-tail-orphan-' || i,decode('00','hex') FROM generate_series(1,450) i",
+    )
+    .bind(owner.continuation_key())
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.remove_unreferenced_contents().await.unwrap();
+    assert_eq!(
+        scalar(
+            &store,
+            "SELECT COUNT(*) FROM turn_chain_contents WHERE content_key LIKE 'pg-tail-orphan-%'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        store
+            .materialize(&owner, TurnNodeKind::Response, &node)
+            .await
+            .unwrap()[0]
+            .payload,
+        expected
+    );
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)

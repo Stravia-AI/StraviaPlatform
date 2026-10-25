@@ -20,6 +20,7 @@ let {
   followed = false,
   minimumHeadingLevel = 1,
   resultOnly = false,
+  virtualized = false,
 }: {
   activity: ObservationActivity
   liveActive?: boolean
@@ -29,6 +30,8 @@ let {
   followed?: boolean
   minimumHeadingLevel?: 1 | 2
   resultOnly?: boolean
+  /** Observation conversation bodies can release offscreen Markdown while keeping disclosure controls mounted. */
+  virtualized?: boolean
 } = $props()
 const contentId = $props.id()
 const storageKey = $derived(`stravia:observation-activity:${activity.id}`)
@@ -172,6 +175,7 @@ function formatContent(content: unknown): string {
                 text={activity.text}
                 active={activity.live && liveActive && open}
                 {minimumHeadingLevel}
+                {virtualized}
                 snapshotKey={liveContentEpoch} />
             {:else}
               {#if activity.input !== undefined}

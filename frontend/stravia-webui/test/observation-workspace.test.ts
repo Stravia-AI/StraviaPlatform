@@ -406,13 +406,6 @@ describe('stream updates', () => {
     await h.emit({ type: 'reset_required', snapshot_sequence: 10 })
     expect(h.snap().liveGaps).toEqual([])
     expect(h.snap().interactionDetail?.interaction.id).toBe('i1')
-    expect(h.calls.map((c) => c.method)).toEqual([
-      'forest',
-      'interaction',
-      'interactionEvents',
-      'forest',
-      'interaction',
-    ])
     expect(h.subscription.setCursorCalls).toEqual([10])
   })
 
@@ -511,6 +504,104 @@ describe('selection races', () => {
     await p
     expect(h.snap().selectedInteraction).toBeUndefined()
     expect(h.snap().interactionDetail).toBeUndefined()
+  })
+})
+
+describe('selected detail catch-up', () => {
+  test('a notification beyond the detail snapshot still catches up from that snapshot', async () => {
+    const h = harness({
+      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+    })
+    await h.controller.start()
+    await h.controller.selectInteraction(summary('i1'))
+    await h.emit(streamEvent(12, 'i1', 999_500))
+    expect(h.snap().interactionDetail?.runs[0].events.map((event) => event.sequence)).toEqual([11, 12])
+    expect(h.snap().interactionDetail?.snapshot_sequence).toBe(12)
+    h.controller.dispose()
+  })
+
+  test('a notification arriving while the detail is loading is caught up after it lands', async () => {
+    const detail = deferred<InteractionDetail>()
+    const h = harness({
+      interaction: () => detail.promise,
+      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+    })
+    await h.controller.start()
+    const selection = h.controller.selectInteraction(summary('i1'))
+    await h.emit(streamEvent(12, 'i1', 999_500))
+    detail.resolve(detailFor('i1', 10))
+    await selection
+    expect(h.snap().interactionDetail?.runs[0].events.map((event) => event.sequence)).toEqual([11, 12])
+    h.controller.dispose()
+  })
+
+  test('a deep link catches notifications received before its snapshot response', async () => {
+    const detail = deferred<InteractionDetail>()
+    const h = harness({
+      interaction: () => detail.promise,
+      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+    })
+    await h.controller.start()
+    const selection = h.controller.deepLinkInteraction('i1')
+    await h.emit(streamEvent(12, 'i1', 999_500))
+    detail.resolve(detailFor('i1', 10))
+    await selection
+    expect(h.snap().selectedInteraction?.id).toBe('i1')
+    expect(h.snap().interactionDetail?.runs[0].events.map((event) => event.sequence)).toEqual([11, 12])
+    h.controller.dispose()
+  })
+
+  test('reset during a pending deep link keeps its target and rejects the old snapshot', async () => {
+    const pending = deferred<InteractionDetail>()
+    let details = 0
+    let forests = 0
+    const h = harness({
+      forest: () =>
+        Promise.resolve(forestPage([root('root1', [summary('i1')])], { snapshot_sequence: ++forests === 1 ? 20 : 0 })),
+      interaction: () => (++details === 1 ? pending.promise : Promise.resolve(detailFor('i1', 0))),
+    })
+    await h.controller.start()
+    const selection = h.controller.deepLinkInteraction('i1')
+    await h.emit({ type: 'reset_required', snapshot_sequence: 0 })
+    pending.resolve({ ...detailFor('i1', 20), runs: [eventRun([20])] })
+    await selection
+    expect(h.snap().selectedInteraction?.id).toBe('i1')
+    expect(h.snap().interactionDetail?.snapshot_sequence).toBe(0)
+    expect(h.snap().interactionDetail?.runs).toEqual([])
+    h.controller.dispose()
+  })
+})
+
+describe('canvas derivations', () => {
+  test('latest interaction prefers a running chain over a newer finished one', async () => {
+    const h = harness({
+      forest: () =>
+        Promise.resolve(
+          forestPage([
+            root('root1', [
+              summary('running', { status: 'running', last_active_at: 500 }),
+              summary('finished', { last_active_at: 900 }),
+            ]),
+          ]),
+        ),
+    })
+    await h.controller.start()
+    expect(h.snap().latestInteraction?.id).toBe('running')
+    h.controller.dispose()
+  })
+
+  test('latest interaction keeps the first member when activity timestamps tie', async () => {
+    const h = harness({
+      forest: () =>
+        Promise.resolve(
+          forestPage([
+            root('root1', [summary('first', { last_active_at: 900 }), summary('second', { last_active_at: 900 })]),
+          ]),
+        ),
+    })
+    await h.controller.start()
+    expect(h.snap().latestInteraction?.id).toBe('first')
+    h.controller.dispose()
   })
 })
 
@@ -835,8 +926,7 @@ describe('bounded refresh orchestration', () => {
       interaction: () => Promise.resolve({ ...detailFor('i1'), runs: [eventRun([10])] }),
       interactionEvents: (_id, query) => {
         calls += 1
-        if (calls === 1) return Promise.resolve({ runs: [], snapshot_sequence: 10, next_cursor: null })
-        if (calls === 2) return page.promise
+        if (calls === 1) return page.promise
         if (query.through_sequence === 12)
           return Promise.resolve({ runs: [eventRun([12])], snapshot_sequence: 12, next_cursor: null })
         return Promise.resolve({ runs: [eventRun([13])], snapshot_sequence: 13, next_cursor: null })
@@ -846,7 +936,6 @@ describe('bounded refresh orchestration', () => {
     await h.controller.selectInteraction(summary('i1'))
     await h.emit(streamEvent(11, 'i1', 999_500))
     await h.emit(streamEvent(13, 'i1', 999_500))
-    expect(calls).toBe(2)
     page.resolve({ runs: [eventRun([11])], snapshot_sequence: 12, next_cursor: 11 })
     await h.advance(0)
     expect(h.snap().interactionDetail?.runs[0].events.map((event) => event.sequence)).toEqual([10, 11, 12])

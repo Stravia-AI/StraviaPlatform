@@ -14,6 +14,8 @@ use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::canonical;
 
+use crate::generation_chain::GenerationDiscoveryWorkspace;
+
 use super::{
     grouping::{AssignInput, DiagnosticKind, DiagnosticSource, GroupingIndex, ObservedParent},
     store::ObservationStore,
@@ -163,7 +165,7 @@ pub(super) trait AttributionEvidence {
     /// `received_input_only` captures the client-input boundary before that
     /// source's output, so restart recovery cannot mistake output for a receipt.
     /// Missing node ids are resolved from their source runs. Generation Chain
-    /// visits shared ancestors once per materialized chain, while this seam
+    /// reuses validated ancestor deltas within this admission, while this seam
     /// retains only windows belonging to the requested candidates.
     async fn source_windows(
         &self,
@@ -171,6 +173,7 @@ pub(super) trait AttributionEvidence {
         sources: &[(&str, Option<&str>)],
         preferred_head: Option<&str>,
         received_input_only: bool,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> anyhow::Result<Vec<SourceWindow>>;
 
     async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>>;
@@ -241,6 +244,7 @@ impl AttributionEvidence for ObservationEvidence {
         sources: &[(&str, Option<&str>)],
         preferred_head: Option<&str>,
         received_input_only: bool,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> anyhow::Result<Vec<SourceWindow>> {
         let mut resolved_nodes = Vec::with_capacity(sources.len());
         for (source_run_id, node) in sources {
@@ -298,33 +302,38 @@ impl AttributionEvidence for ObservationEvidence {
             }
             let available = self
                 .generations
-                .visit_ancestor_client_items(&principal, node, |visited_node, items, input_end| {
-                    let Some(positions) = candidate_positions.get(visited_node) else {
-                        return;
-                    };
-                    let Some((&last, duplicates)) = positions.split_last() else {
-                        return;
-                    };
-                    if windows[last].is_some() {
-                        return;
-                    }
-                    let items = if received_input_only {
-                        &items[..input_end]
-                    } else {
-                        items
-                    };
-                    let captured = if received_input_only {
-                        Window::capture_received_input(items)
-                    } else {
-                        Window::capture(items)
-                    }
-                    .map(SourceWindow::Captured)
-                    .unwrap_or(SourceWindow::ResourceLimit);
-                    for index in duplicates {
-                        windows[*index] = Some(captured.clone());
-                    }
-                    windows[last] = Some(captured);
-                })
+                .visit_ancestor_client_items(
+                    &principal,
+                    node,
+                    workspace,
+                    |visited_node, items, input_end| {
+                        let Some(positions) = candidate_positions.get(visited_node) else {
+                            return;
+                        };
+                        let Some((&last, duplicates)) = positions.split_last() else {
+                            return;
+                        };
+                        if windows[last].is_some() {
+                            return;
+                        }
+                        let items = if received_input_only {
+                            &items[..input_end]
+                        } else {
+                            items
+                        };
+                        let captured = if received_input_only {
+                            Window::capture_received_input(items)
+                        } else {
+                            Window::capture(items)
+                        }
+                        .map(SourceWindow::Captured)
+                        .unwrap_or(SourceWindow::ResourceLimit);
+                        for index in duplicates {
+                            windows[*index] = Some(captured.clone());
+                        }
+                        windows[last] = Some(captured);
+                    },
+                )
                 .await?;
             if !available || positions.iter().any(|index| windows[*index].is_none()) {
                 for index in positions {
@@ -391,10 +400,12 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         let input_overflow = facts.input_overflow;
         let canonical_fingerprint = &facts.canonical_fingerprint;
         let fingerprint_gap = facts.fingerprint_gap;
+        // 只在本次准入中复用有界祖先证据，不把诊断缓存变成历史事实源。
+        let mut history = None;
         let mut parent_evidence_error = None;
         let replayed_client_tool_results = match input.as_ref() {
             Some(input) => {
-                self.replayed_client_tool_results(&start.principal, input, now)
+                self.replayed_client_tool_results(&start.principal, input, now, &mut history)
                     .await
             }
             None => false,
@@ -417,16 +428,19 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         // persisted event separates a model-switched continuation (input carries
         // the intermediate turn) from a real fork of the original chain.
         let (diagnostic, diagnostic_event) = self
-            .discover(DiscoverInput {
-                run_id: &start.id,
-                principal: &start.principal,
-                generation_parent_id: facts.generation_parent_id.as_deref(),
-                input: input.as_ref(),
-                input_overflow,
-                ingress_received_at,
-                now,
-                replayed_client_tool_results,
-            })
+            .discover(
+                DiscoverInput {
+                    run_id: &start.id,
+                    principal: &start.principal,
+                    generation_parent_id: facts.generation_parent_id.as_deref(),
+                    input: input.as_ref(),
+                    input_overflow,
+                    ingress_received_at,
+                    now,
+                    replayed_client_tool_results,
+                },
+                &mut history,
+            )
             .await;
         let historical_user = if facts.has_new_user
             && let Some(input) = input.as_ref()
@@ -437,7 +451,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 .or_else(|| parent.as_ref().map(|parent| parent.run_id.as_str()));
             match source {
                 Some(source) => {
-                    self.historical_user(&start.principal, source, input, now)
+                    self.historical_user(&start.principal, source, input, now, &mut history)
                         .await
                 }
                 None => false,
@@ -505,6 +519,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         principal: &str,
         input: &Window,
         now: i64,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> bool {
         let Some(ids) = input.current_tail_tool_ids() else {
             return false;
@@ -541,7 +556,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         }
         let windows = match self
             .evidence
-            .source_windows(principal, &unloaded, None, true)
+            .source_windows(principal, &unloaded, None, true, workspace)
             .await
         {
             Ok(windows) => windows,
@@ -593,6 +608,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         source: &str,
         input: &Window,
         now: i64,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> bool {
         if let Some(old) = self.tail.received_input(source, now) {
             return old.is_received_prefix_with_tool_continuation(input);
@@ -600,7 +616,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         let sources = [(source, None)];
         match self
             .evidence
-            .source_windows(principal, &sources, None, true)
+            .source_windows(principal, &sources, None, true, workspace)
             .await
         {
             Ok(windows) if windows.len() == 1 => {
@@ -634,6 +650,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         input: &Window,
         ingress_received_at: i64,
         now: i64,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> Option<DiagnosticSource> {
         let ids = input.current_tail_tool_ids()?;
         let rows = self
@@ -665,7 +682,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             let sources = [(run_id.as_str(), None)];
             let windows = self
                 .evidence
-                .source_windows(principal, &sources, None, false)
+                .source_windows(principal, &sources, None, false, workspace)
                 .await
                 .ok()?;
             match windows.into_iter().next()? {
@@ -695,6 +712,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
     async fn discover(
         &self,
         discovery: DiscoverInput<'_>,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> (Option<DiagnosticSource>, Option<RunEvent>) {
         let DiscoverInput {
             run_id,
@@ -715,7 +733,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         // 历史编辑可能只保留较早的生成前缀；当前工具结果仍能确认实际续接来源。
         if !replayed_client_tool_results
             && let Some(source) = self
-                .current_tool_source(principal, input, ingress_received_at, now)
+                .current_tool_source(principal, input, ingress_received_at, now, workspace)
                 .await
         {
             return (Some(source), None);
@@ -769,7 +787,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                 .collect();
             let windows = match self
                 .evidence
-                .source_windows(principal, &sources, generation_parent_id, false)
+                .source_windows(principal, &sources, generation_parent_id, false, workspace)
                 .await
             {
                 Ok(windows) if windows.len() == unloaded.len() => windows,
@@ -947,6 +965,7 @@ mod tests {
             sources: &[(&str, Option<&str>)],
             _preferred_head: Option<&str>,
             received_input_only: bool,
+            _workspace: &mut Option<GenerationDiscoveryWorkspace>,
         ) -> anyhow::Result<Vec<SourceWindow>> {
             Ok(sources
                 .iter()
@@ -1375,35 +1394,40 @@ mod tests {
         let mut visited_receipt = false;
         assert!(
             restarted
-                .visit_ancestor_client_items(&principal, &receipt_id, |node, items, input_end| {
-                    if node != receipt_id {
-                        return;
+                .visit_ancestor_client_items(
+                    &principal,
+                    &receipt_id,
+                    &mut None,
+                    |node, items, input_end| {
+                        if node != receipt_id {
+                            return;
+                        }
+                        visited_receipt = true;
+                        assert_eq!(input_end, incoming.len());
+                        assert!(items.len() > input_end);
+                        assert_ne!(
+                            serde_json::to_value(&items[..input_end]).unwrap(),
+                            serde_json::to_value(&incoming).unwrap(),
+                            "stored ancestor call carries server graph IDs/provenance"
+                        );
+                        let reconstructed =
+                            Window::capture_received_input(&items[..input_end]).unwrap();
+                        assert!(reconstructed.is_received_prefix_with_only_new_users(&current));
+                        let mut different_result = replay.clone();
+                        different_result[2] =
+                            AiItem::function_call_output("call-1", serde_json::json!("changed"));
+                        assert!(!reconstructed.is_received_prefix_with_only_new_users(
+                            &Window::capture_received_input(&different_result).unwrap()
+                        ));
+                        let mut different_instruction = replay.clone();
+                        let mut instruction = user("new instructions");
+                        instruction.role = Role::System;
+                        different_instruction.insert(0, instruction);
+                        assert!(!reconstructed.is_received_prefix_with_only_new_users(
+                            &Window::capture_received_input(&different_instruction).unwrap()
+                        ));
                     }
-                    visited_receipt = true;
-                    assert_eq!(input_end, incoming.len());
-                    assert!(items.len() > input_end);
-                    assert_ne!(
-                        serde_json::to_value(&items[..input_end]).unwrap(),
-                        serde_json::to_value(&incoming).unwrap(),
-                        "stored ancestor call carries server graph IDs/provenance"
-                    );
-                    let reconstructed =
-                        Window::capture_received_input(&items[..input_end]).unwrap();
-                    assert!(reconstructed.is_received_prefix_with_only_new_users(&current));
-                    let mut different_result = replay.clone();
-                    different_result[2] =
-                        AiItem::function_call_output("call-1", serde_json::json!("changed"));
-                    assert!(!reconstructed.is_received_prefix_with_only_new_users(
-                        &Window::capture_received_input(&different_result).unwrap()
-                    ));
-                    let mut different_instruction = replay.clone();
-                    let mut instruction = user("new instructions");
-                    instruction.role = Role::System;
-                    different_instruction.insert(0, instruction);
-                    assert!(!reconstructed.is_received_prefix_with_only_new_users(
-                        &Window::capture_received_input(&different_instruction).unwrap()
-                    ));
-                })
+                )
                 .await
                 .unwrap()
         );

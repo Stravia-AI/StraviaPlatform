@@ -1,6 +1,7 @@
 <script lang="ts">
-import { markdownBlocks } from '#lib/markdown.js'
+import { deferredMarkdownBlocks, markdownBlocks, type DeferredMarkdownBlock } from '#lib/markdown.js'
 import MarkdownRenderedBlock from '#lib/components/markdown-rendered-block.svelte'
+import ObservationBodyBlock from '#lib/components/observation-body-block.svelte'
 import { createQuery } from '@tanstack/svelte-query'
 import { admin } from '#lib/admin-client.js'
 
@@ -10,6 +11,7 @@ let {
   streaming = false,
   variant = 'compact',
   allowImages = false,
+  virtualized = false,
 }: {
   text: string
   minimumHeadingLevel?: 1 | 2
@@ -17,24 +19,43 @@ let {
   /** `compact` 用于观测与思考等窄区域，标题与正文同号；`document` 用于对话回答，标题按原文级别分级。 */
   variant?: 'compact' | 'document'
   allowImages?: boolean
+  /** Observation logs only: defer rendering outside the log's shared body viewport. */
+  virtualized?: boolean
 } = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
-const blocks = $derived(markdownBlocks(text, minimumHeadingLevel))
+const blocks = $derived(virtualized ? [] : markdownBlocks(text, minimumHeadingLevel))
+const deferredBlocks = $derived(virtualized ? deferredMarkdownBlocks(text, minimumHeadingLevel) : [])
 const artifactSettings = createQuery(() => ({
   queryKey: ['artifact-settings'],
   queryFn: admin.settings.artifacts,
-  enabled: allowImages && blocks.some((block) => block.images.length > 0),
+  enabled: allowImages && (virtualized ? text.includes('![') : blocks.some((block) => block.images.length > 0)),
 }))
 </script>
 
-<div class="markdown-content" data-variant={variant}>
-  {#each blocks as block (block.id)}
-    <MarkdownRenderedBlock
-      {block}
-      {streaming}
-      clientBase={allowImages ? (artifactSettings.data?.client_base_url ?? '') : ''} />
-  {/each}
+{#snippet deferredBlock(block: DeferredMarkdownBlock)}
+  {@const rendered = block.render()}
+  <MarkdownRenderedBlock
+    block={rendered}
+    {streaming}
+    clientBase={allowImages ? (artifactSettings.data?.client_base_url ?? '') : ''} />
+{/snippet}
+
+<div class="markdown-content" data-variant={variant} data-observation-markdown={virtualized ? '' : undefined}>
+  {#if virtualized}
+    {#each deferredBlocks as block (block.id)}
+      <ObservationBodyBlock source={block.source}>
+        {@render deferredBlock(block)}
+      </ObservationBodyBlock>
+    {/each}
+  {:else}
+    {#each blocks as block (block.id)}
+      <MarkdownRenderedBlock
+        {block}
+        {streaming}
+        clientBase={allowImages ? (artifactSettings.data?.client_base_url ?? '') : ''} />
+    {/each}
+  {/if}
 </div>
 
 <style>
@@ -42,6 +63,9 @@ const artifactSettings = createQuery(() => ({
   flex: none;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.markdown-content :global([data-observation-body] + [data-observation-body] > .markdown-rendered-block > :first-child) {
+  margin-top: 0.35rem;
 }
 .markdown-content :global(p),
 .markdown-content :global(pre),

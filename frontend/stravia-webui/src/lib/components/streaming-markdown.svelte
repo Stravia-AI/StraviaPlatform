@@ -11,6 +11,7 @@ let {
   minimumHeadingLevel = 1,
   variant,
   allowImages = false,
+  virtualized = false,
 }: {
   text: string
   active?: boolean
@@ -20,6 +21,7 @@ let {
   minimumHeadingLevel?: 1 | 2
   variant?: 'compact' | 'document'
   allowImages?: boolean
+  virtualized?: boolean
 } = $props()
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
@@ -177,4 +179,5 @@ $effect(() => {
   {minimumHeadingLevel}
   {variant}
   {allowImages}
+  {virtualized}
   streaming={(streaming ?? active) || displayed !== text} />

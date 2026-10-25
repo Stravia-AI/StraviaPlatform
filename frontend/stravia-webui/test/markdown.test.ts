@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { rejects } from 'node:assert/strict'
-import { markdownBlocks, renderMarkdownFragment } from '../src/lib/markdown'
+import { deferredMarkdownBlocks, markdownBlocks, renderMarkdownFragment } from '../src/lib/markdown'
 
 function html(text: string): string {
   return markdownBlocks(text)
@@ -9,6 +9,25 @@ function html(text: string): string {
 }
 
 describe('markdown HTML', () => {
+  test('deferred sections resolve document references and retain their own fragments across remounts', () => {
+    const text = `$alpha$ and ![first][picture]\n\n${'Padding paragraph.\n\n'.repeat(500)}$omega$ and ![last][picture]\n\n[picture]: https://example.com/image.png`
+    const sections = deferredMarkdownBlocks(text)
+    const first = sections[0].render()
+    const last = sections[sections.length - 1].render()
+    expect(first.fragments.map((fragment) => fragment.source)).toEqual(['alpha'])
+    expect(last.fragments.map((fragment) => fragment.source)).toEqual(['omega'])
+    expect(first.images.map((image) => ({ url: image.url, alt: image.alt }))).toEqual([
+      { url: 'https://example.com/image.png', alt: 'first' },
+    ])
+    expect(last.images.map((image) => ({ url: image.url, alt: image.alt }))).toEqual([
+      { url: 'https://example.com/image.png', alt: 'last' },
+    ])
+    const restored = sections[0].render()
+    expect(restored.html).toBe(first.html)
+    expect(restored.fragments).toEqual(first.fragments)
+    expect(restored.images).toEqual(first.images)
+  })
+
   test('closes strong emphasis between full-width punctuation and CJK text', () => {
     expect(html('这是一张**二次元虚拟主播（VTuber / VUP）**或原创角色')).toContain(
       '<strong>二次元虚拟主播（VTuber / VUP）</strong>或原创角色',

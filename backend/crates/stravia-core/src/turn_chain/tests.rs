@@ -5,6 +5,22 @@ fn principal(id: &str) -> Principal {
     Principal::new(id)
 }
 
+async fn content_counts(pool: &sqlx::SqlitePool, principal: &str) -> (i64, i64) {
+    let contents: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM turn_chain_contents WHERE principal = ?")
+            .bind(principal)
+            .fetch_one(pool)
+            .await
+            .expect("content count");
+    let references: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM turn_chain_node_contents WHERE principal = ?")
+            .bind(principal)
+            .fetch_one(pool)
+            .await
+            .expect("reference count");
+    (contents, references)
+}
+
 #[tokio::test]
 async fn large_retention_sweep_preserves_live_history_and_native_login() {
     let pool = crate::test_support::migrated_sqlite_pool()
@@ -97,6 +113,262 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
             .expect("native session remains authenticated")
             .role,
         "admin"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_content_gc_batches_live_contents_and_collects_tail_orphans() {
+    let pool = crate::test_support::migrated_sqlite_pool()
+        .await
+        .expect("SQLite database");
+    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let owner = principal("gc-batch-owner");
+    let principal_key = owner.continuation_key();
+    let live = TurnNodeId::response();
+    let payload = serde_json::json!({
+        "items": (0..900)
+            .map(|index| format!("live item {index} {}", "x".repeat(300)))
+            .collect::<Vec<_>>(),
+    });
+    store
+        .commit(TurnCommit {
+            id: live.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: payload.clone(),
+            idle_ttl: Duration::from_secs(600),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("live history");
+    assert_eq!(
+        content_counts(&pool, &principal_key).await,
+        (900, 900),
+        "every externalized item has its own content row"
+    );
+
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<450) \
+         INSERT INTO turn_chain_contents(principal, content_key, content) \
+         SELECT ?, 'gc-tail-orphan-' || i, zeroblob(64) FROM n",
+    )
+    .bind(&principal_key)
+    .execute(&pool)
+    .await
+    .expect("tail orphans");
+
+    // 前两批 400 个候选全是活内容；零删除不能让扫描提前结束。
+    assert_eq!(store.sweep_expired().await.expect("sweep"), 0);
+    assert_eq!(content_counts(&pool, &principal_key).await, (900, 900));
+    let restored = store
+        .materialize(&owner, TurnNodeKind::Response, &live)
+        .await
+        .expect("live history survives");
+    assert_eq!(restored[0].payload, payload);
+}
+
+#[tokio::test]
+async fn sqlite_content_gc_restarts_from_a_reconstructed_store() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .expect("SQLite migrations");
+    let owner = principal("gc-restart-owner");
+    let principal_key = owner.continuation_key();
+    let live = TurnNodeId::response();
+    let payload = serde_json::json!({
+        "items": (0..450)
+            .map(|index| format!("restart item {index} {}", "y".repeat(300)))
+            .collect::<Vec<_>>(),
+    });
+    SqlTurnChainStore::sqlite(pool.clone())
+        .commit(TurnCommit {
+            id: live.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: payload.clone(),
+            idle_ttl: Duration::from_secs(600),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("live history");
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200) \
+         INSERT INTO turn_chain_contents(principal, content_key, content) \
+         SELECT ?, 'gc-first-orphan-' || i, zeroblob(64) FROM n",
+    )
+    .bind(&principal_key)
+    .execute(&pool)
+    .await
+    .expect("first orphans");
+    let first = SqlTurnChainStore::sqlite(pool.clone());
+    assert_eq!(first.sweep_expired().await.expect("first sweep"), 0);
+    assert_eq!(content_counts(&pool, &principal_key).await, (450, 450));
+
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<450) \
+         INSERT INTO turn_chain_contents(principal, content_key, content) \
+         SELECT ?, 'gc-second-orphan-' || i, zeroblob(64) FROM n",
+    )
+    .bind(&principal_key)
+    .execute(&pool)
+    .await
+    .expect("second orphans");
+
+    // 重建后的 store 没有内存游标，必须从表头重新有界扫描并清完剩余孤儿。
+    let rebuilt = SqlTurnChainStore::sqlite(pool.clone());
+    assert_eq!(rebuilt.sweep_expired().await.expect("rebuilt sweep"), 0);
+    assert_eq!(content_counts(&pool, &principal_key).await, (450, 450));
+    let restored = rebuilt
+        .materialize(&owner, TurnNodeKind::Response, &live)
+        .await
+        .expect("live history survives reconstruction");
+    assert_eq!(restored[0].payload, payload);
+}
+
+#[tokio::test]
+async fn sqlite_content_gc_rechecks_references_added_after_candidate_read() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(data_dir.path().join("turn-chain.sqlite"))
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .expect("SQLite migrations");
+    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let owner = principal("gc-recheck-owner");
+    let principal_key = owner.continuation_key();
+    let node = TurnNodeId::response();
+    store
+        .commit(TurnCommit {
+            id: node.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: serde_json::json!({"message": "reference owner"}),
+            idle_ttl: Duration::from_secs(600),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("reference owner");
+    // 目标内容排在最前，候选扫描会先把它判定为孤儿；随后插入的填充内容
+    // 保证同一条 SELECT 仍有多行可读，进度回调在判定之后暂停。
+    let content_id: i64 = sqlx::query_scalar(
+        "INSERT INTO turn_chain_contents(principal, content_key, content) \
+         VALUES (?, 'rechecked-content', X'00') RETURNING id",
+    )
+    .bind(&principal_key)
+    .fetch_one(&pool)
+    .await
+    .expect("unreferenced content");
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<400) \
+         INSERT INTO turn_chain_contents(principal, content_key, content) \
+         SELECT ?, 'gc-recheck-padding-' || i, zeroblob(64) FROM n",
+    )
+    .bind(&principal_key)
+    .execute(&pool)
+    .await
+    .expect("candidate padding");
+
+    // 占住一条连接作为并发引用写入者；另一条是 GC 唯一可用的空闲连接。
+    let mut reference_writer = pool.acquire().await.expect("reference connection");
+    let mut gc_connection = pool.acquire().await.expect("GC connection");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let mut handle = gc_connection.lock_handle().await.expect("SQLite handle");
+        let started_tx = std::sync::Mutex::new(Some(started_tx));
+        let resume_rx = std::sync::Mutex::new(resume_rx);
+        // 候选 SELECT 判定若干行后暂停，让测试在 DELETE 前提交新引用。
+        handle.set_progress_handler(1000, move || {
+            if let Some(started) = started_tx.lock().expect("progress sender").take() {
+                if started.send(()).is_ok() {
+                    let _ = resume_rx.lock().expect("progress resume").recv();
+                }
+            }
+            true
+        });
+    }
+    drop(gc_connection);
+    let sweep = tokio::spawn({
+        let store = store.clone();
+        async move { store.remove_unreferenced_contents().await }
+    });
+    started_rx.await.expect("candidate scan starts");
+    let reference = sqlx::query(
+        "INSERT INTO turn_chain_node_contents(node_id, principal, content_id) VALUES (?, ?, ?)",
+    )
+    .bind(node.as_str())
+    .bind(&principal_key)
+    .bind(content_id)
+    .execute(&mut *reference_writer)
+    .await;
+    resume_tx.send(()).expect("resume candidate scan");
+    reference.expect("late reference");
+    sweep
+        .await
+        .expect("GC task")
+        .expect("GC must not trust the stale candidate");
+    drop(reference_writer);
+    let mut cleanup = Vec::new();
+    for _ in 0..2 {
+        cleanup.push(pool.acquire().await.expect("cleanup connection"));
+    }
+    for connection in &mut cleanup {
+        connection
+            .lock_handle()
+            .await
+            .expect("SQLite handle")
+            .remove_progress_handler();
+    }
+    drop(cleanup);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM turn_chain_contents \
+             WHERE principal = ? AND content_key LIKE 'gc-recheck-padding-%'",
+        )
+        .bind(&principal_key)
+        .fetch_one(&pool)
+        .await
+        .expect("padding count"),
+        0,
+        "all padding candidates are collected"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_chain_contents WHERE id = ?")
+            .bind(content_id)
+            .fetch_one(&pool)
+            .await
+            .expect("content count"),
+        1,
+        "the late reference must protect its content"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM turn_chain_node_contents WHERE node_id = ? AND content_id = ?",
+        )
+        .bind(node.as_str())
+        .bind(content_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reference count"),
+        1
     );
 }
 

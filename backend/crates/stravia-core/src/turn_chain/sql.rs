@@ -1,5 +1,6 @@
 use super::*;
 
+use futures::TryStreamExt;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -121,61 +122,136 @@ impl SqlTurnChainStore {
         Ok(prefix)
     }
 
-    async fn remove_unreferenced_contents(&self) -> anyhow::Result<()> {
-        const DELETE: &str = "DELETE FROM turn_chain_contents WHERE NOT EXISTS \
-        (SELECT 1 FROM turn_chain_node_contents r WHERE r.principal = turn_chain_contents.principal \
-         AND r.content_id = turn_chain_contents.id)";
+    pub(super) async fn remove_unreferenced_contents(&self) -> anyhow::Result<()> {
+        const ORPHAN: &str = "NOT EXISTS (SELECT 1 FROM turn_chain_node_contents r \
+        WHERE r.principal = turn_chain_contents.principal \
+        AND r.content_id = turn_chain_contents.id)";
+        // 每批最多检查这么多内容行；活内容也计入预算，不能按找到的孤儿数截断。
+        const BATCH: usize = 400;
         match self {
             Self::Sqlite(pool) => {
                 let mut cursor: Option<(String, i64)> = None;
                 loop {
-                    // 候选扫描不持写锁；沿 (principal, id) 覆盖索引推进，避免反复扫描活内容。
-                    let mut candidates = {
-                        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                            "SELECT principal, id FROM turn_chain_contents WHERE NOT EXISTS \
-                             (SELECT 1 FROM turn_chain_node_contents r \
-                              WHERE r.principal = turn_chain_contents.principal \
-                              AND r.content_id = turn_chain_contents.id)",
-                        );
-                        if let Some((principal, id)) = &cursor {
-                            query
-                                .push(" AND (principal, id) > (")
-                                .push_bind(principal)
-                                .push(",")
-                                .push_bind(*id)
-                                .push(")");
-                        }
-                        query.push(" ORDER BY principal, id LIMIT 400");
+                    // 候选扫描不持写锁。先沿当前 Principal 的 (principal, id)
+                    // 覆盖索引继续推进，再跨到更大的 Principal；直接使用
+                    // (principal, id) > (?, ?) 的排序游标会让同一 Principal
+                    // 每批从头扫描，批数一多就退化为平方级。
+                    // NOT EXISTS 只判定本批候选，LIMIT 始终约束检查过的内容行。
+                    let mut candidates: Vec<(String, i64, i64)> = Vec::with_capacity(BATCH);
+                    if let Some((principal, id)) = &cursor {
+                        let mut query =
+                            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT principal, id, ");
                         query
-                            .build_query_as::<(String, i64)>()
-                            .fetch_all(pool)
-                            .await?
-                    };
-                    let Some(last) = candidates.pop() else {
-                        break;
-                    };
-                    // 读取候选后可能已有新引用，必须在同一条 DELETE 中重新检查。
-                    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(DELETE);
-                    query.push(" AND id IN (");
-                    let mut ids = query.separated(",");
-                    for (_, id) in candidates {
-                        ids.push_bind(id);
+                            .push(ORPHAN)
+                            .push(" AS orphan FROM turn_chain_contents WHERE principal = ")
+                            .push_bind(principal)
+                            .push(" AND id > ")
+                            .push_bind(id)
+                            .push(" ORDER BY id LIMIT ")
+                            .push_bind(BATCH as i64);
+                        let read = query.build_query_as::<(String, i64, i64)>();
+                        let mut rows = read.fetch(pool);
+                        while let Some(row) = rows.try_next().await? {
+                            candidates.push(row);
+                        }
                     }
-                    ids.push_bind(last.1).push_unseparated(")");
-                    let mut connection = pool.acquire_write().await?;
-                    query.build().execute(&mut *connection).await?;
-                    connection.finish().await?;
-                    cursor = Some(last);
+                    if candidates.len() < BATCH {
+                        let mut query =
+                            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT principal, id, ");
+                        query
+                            .push(ORPHAN)
+                            .push(" AS orphan FROM turn_chain_contents");
+                        if let Some((principal, _)) = &cursor {
+                            query.push(" WHERE principal > ").push_bind(principal);
+                        }
+                        query
+                            .push(" ORDER BY principal, id LIMIT ")
+                            .push_bind((BATCH - candidates.len()) as i64);
+                        let read = query.build_query_as::<(String, i64, i64)>();
+                        let mut rows = read.fetch(pool);
+                        while let Some(row) = rows.try_next().await? {
+                            candidates.push(row);
+                        }
+                    }
+                    if candidates.is_empty() {
+                        break;
+                    }
+                    // 只有真正读到表尾才结束；中间批即使零孤儿也继续推进游标。
+                    let exhausted = candidates.len() < BATCH;
+                    if let Some(first_orphan) = candidates.iter().position(|row| row.2 != 0) {
+                        // 判定后可能已有新引用，必须在同一条 DELETE 中重新检查。
+                        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                            "DELETE FROM turn_chain_contents WHERE ",
+                        );
+                        query.push(ORPHAN).push(" AND id IN (");
+                        let mut ids = query.separated(",");
+                        for (_, id, orphan) in &candidates[first_orphan..] {
+                            if *orphan != 0 {
+                                ids.push_bind(*id);
+                            }
+                        }
+                        ids.push_unseparated(")");
+                        let mut connection = pool.acquire_write().await?;
+                        query.build().execute(&mut *connection).await?;
+                        connection.finish().await?;
+                    }
+                    if exhausted {
+                        break;
+                    }
+                    let (principal, id, _) = candidates.pop().expect("non-empty content GC batch");
+                    cursor = Some((principal, id));
                 }
             }
             Self::Postgres(pool) => {
-                let mut transaction = pool.begin().await?;
-                // 清理与插入共享内容互斥，避免 MVCC 快照漏看刚建立的引用。
-                sqlx::query("LOCK TABLE turn_chain_contents IN SHARE ROW EXCLUSIVE MODE")
-                    .execute(&mut *transaction)
-                    .await?;
-                sqlx::query(DELETE).execute(&mut *transaction).await?;
-                transaction.commit().await?;
+                let mut cursor: Option<(String, i64)> = None;
+                loop {
+                    let mut query =
+                        sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT principal,id,");
+                    query.push(ORPHAN).push(" FROM turn_chain_contents");
+                    if let Some((principal, id)) = &cursor {
+                        query
+                            .push(" WHERE (principal,id)>(")
+                            .push_bind(principal)
+                            .push(",")
+                            .push_bind(id)
+                            .push(")");
+                    }
+                    query
+                        .push(" ORDER BY principal,id LIMIT ")
+                        .push_bind(BATCH as i64);
+                    let mut candidates: Vec<(String, i64, bool)> =
+                        query.build_query_as().fetch_all(pool).await?;
+                    if candidates.is_empty() {
+                        break;
+                    }
+                    let exhausted = candidates.len() < BATCH;
+                    if let Some(first_orphan) = candidates.iter().position(|row| row.2) {
+                        // 每批保留原有的插入互斥；获得锁后的 READ COMMITTED
+                        // DELETE 使用新快照重检，不能信任锁外读取的孤儿判定。
+                        let mut transaction = pool.begin().await?;
+                        sqlx::query("LOCK TABLE turn_chain_contents IN SHARE ROW EXCLUSIVE MODE")
+                            .execute(&mut *transaction)
+                            .await?;
+                        let mut delete = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                            "DELETE FROM turn_chain_contents WHERE ",
+                        );
+                        delete.push(ORPHAN).push(" AND id IN (");
+                        let mut ids = delete.separated(",");
+                        for (_, id, orphan) in &candidates[first_orphan..] {
+                            if *orphan {
+                                ids.push_bind(*id);
+                            }
+                        }
+                        ids.push_unseparated(")");
+                        delete.build().execute(&mut *transaction).await?;
+                        transaction.commit().await?;
+                    }
+                    if exhausted {
+                        break;
+                    }
+                    let (principal, id, _) = candidates.pop().expect("non-empty content GC batch");
+                    cursor = Some((principal, id));
+                }
             }
         }
         Ok(())

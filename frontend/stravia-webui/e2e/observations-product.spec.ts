@@ -43,6 +43,12 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
     request.on('end', () => {
       const payload = JSON.parse(body) as { stream?: boolean; messages?: Array<{ content: string }> }
       const text = payload.messages?.at(-1)?.content ?? 'synthetic answer'
+      const usage = {
+        prompt_tokens: 600,
+        completion_tokens: 600,
+        total_tokens: 1200,
+        prompt_tokens_details: { cached_tokens: 0 },
+      }
       if (payload.stream) {
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         const chunk = (delta: object, finish_reason: string | null, usage?: object) => ({
@@ -54,7 +60,7 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
           ...(usage ? { usage } : {}),
         })
         response.end(
-          `data: ${JSON.stringify(chunk({ role: 'assistant', content: text }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop', { prompt_tokens: 600, completion_tokens: 600, total_tokens: 1200 }))}\n\ndata: [DONE]\n\n`,
+          `data: ${JSON.stringify(chunk({ role: 'assistant', content: text }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop', usage))}\n\ndata: [DONE]\n\n`,
         )
         return
       }
@@ -66,7 +72,7 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
           created: 1,
           model: 'synthetic',
           choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 600, completion_tokens: 600, total_tokens: 1200 },
+          usage,
         }),
       )
     })
@@ -177,6 +183,24 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
         .toBeDefined()
       interactions.push({ id: id!, text })
     }
+    const tokenScope = new URLSearchParams({
+      start_at: String(Date.now() - 60_000),
+      end_at: String(Date.now() + 60_000),
+      model: model.id,
+      limit: '30',
+      min_tokens: '1200',
+    })
+    const atTokenBoundary = await api(`/observations/interactions?${tokenScope}`)
+    expect(atTokenBoundary.root_total).toBe(2)
+    expect(
+      atTokenBoundary.roots
+        .flatMap((root: { interactions: Array<{ id: string }> }) => root.interactions.map((item) => item.id))
+        .sort(),
+    ).toEqual(interactions.map((item) => item.id).sort())
+    tokenScope.set('min_tokens', '1201')
+    const aboveTokenBoundary = await api(`/observations/interactions?${tokenScope}`)
+    expect(aboveTokenBoundary.root_total).toBe(0)
+    expect(aboveTokenBoundary.roots).toEqual([])
     const scopeRequests: string[] = []
     page.on('request', (request) => {
       if (/\/interactions\/[^/]+\/live(?:\?|$)/.test(request.url())) scopeRequests.push(request.url())

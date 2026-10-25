@@ -8,6 +8,10 @@
 
 ### Changed
 
+- Request-chain queries read retained event watermarks through separate indexed bounds and aggregate Tokens only for candidate roots. Token-filtered root counts and pagination share one query; matching retains whole-root usage, running estimates and the existing snapshot semantics.
+- Structural-history content cleanup scans bounded candidate batches on SQLite and PostgreSQL, including batches containing only referenced content, and rechecks references before deletion. Observation tail persistence batches pending tools, and admission reuses decoded Generation Chain ancestors within one request without changing ownership, expiry or writer ordering.
+- Request-chain details fetch incremental events only when notifications exceed their snapshot watermark, including notifications received during deep-link loading or reset. The canvas reuses unchanged graph derivations, topology and node objects across clock, connection, selection and body updates instead of rebuilding the full graph.
+- Request-chain conversations render nearby Markdown sections on demand and release offscreen rendered content while retaining focused controls, selections and open image dialogs. An explicit full-text mode restores all loaded text for browser find, copying and continuous assistive reading. Closed diagnostic Run, event-group and raw-event sections no longer construct their heavy contents; history prepends and rendering changes preserve the reading anchor without blocking native scrolling.
 - Inference Run delivery settlement now owns preparation guards and completion work across buffered and streaming responses. Synchronous delivery receipts, Marker publication, cancellation and revocation rules, and Generation Chain persistence semantics are unchanged.
 - Vendor plugin calls now reuse typed Wasmtime pre-instantiation data while retaining a fresh Store, HostServices and resource table for every call. Import checks, descriptor revalidation, cancellation and request isolation remain unchanged.
 - Pending input previews now retain only bounded text instead of keeping the entire canonical request alive. Credential-mapping-ready publication, client tool results and full model/history data remain unchanged.
@@ -26,6 +30,7 @@
 
 ### Fixed
 
+- Patched Dagre 3.1.1's repeated type-2 conflict tail scan across all shipped JavaScript entry points, reducing transient layout allocations for wide request-chain graphs.
 - Anthropic Messages, including Claude Code, supplies its required `max_tokens` from the upstream model's discovered native maximum when available, otherwise 64,000 instead of 4,096. Automatic limits are not raised by Claude Code thinking-budget normalization; explicit limits retain existing handling. Optional standard-protocol fields remain omitted when unset. Command Code and Devin retain their reverse-engineered CLI defaults of 64,000 and 128,000 respectively. Upgrade the host and rebuild/re-import affected standalone plugins; synchronize or explicitly re-import model metadata to use newly discovered Anthropic maxima.
 - Offline Wasm evaluation fixtures now remove URL userinfo and query credentials from Provider settings while preserving replay paths and unrelated options. Recorded requests, responses and traces remain sensitive local data.
 - Admin entry regression tests now set their own log level and use OS-assigned initial listener ports, avoiding failures caused by inherited log settings or released-port probes.

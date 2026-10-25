@@ -15,10 +15,14 @@ pub(super) struct DiscoveryWorkspace {
     budget: usize,
 }
 
-/// Owned, preparation-only reuse. Consumers may move it but cannot inspect nodes.
+/// Request-local reuse for preparation and attribution; consumers cannot inspect nodes.
 pub(crate) struct GenerationDiscoveryWorkspace(DiscoveryWorkspace);
 
 impl GenerationDiscoveryWorkspace {
+    pub(crate) fn new(principal: &Principal) -> Self {
+        Self(DiscoveryWorkspace::new(principal, true))
+    }
+
     pub(super) fn workspace(&mut self) -> &mut DiscoveryWorkspace {
         &mut self.0
     }
@@ -184,6 +188,25 @@ impl DiscoveryWorkspace {
             nodes.push(decoded);
         }
         Ok((nodes, chain))
+    }
+
+    pub(super) async fn visit_client_items(
+        &mut self,
+        store: &dyn TurnChainStore,
+        principal: &Principal,
+        id: &TurnNodeId,
+        visit: impl FnMut(&str, &[AiItem], usize),
+    ) -> anyhow::Result<bool> {
+        let (nodes, chain) = match self.read(store, principal, id).await {
+            Ok(read) => read,
+            Err(DiscoveryReadError::Storage(TurnUnavailable::Unavailable)) => return Ok(false),
+            Err(DiscoveryReadError::Storage(error)) => return Err(anyhow::Error::new(error)),
+            Err(DiscoveryReadError::Decode(error)) => return Err(anyhow::Error::msg(error)),
+        };
+        tracing::Span::current().record("node_count", nodes.len() as u64);
+        visit_client_items_from_nodes(&nodes, visit);
+        self.retain(principal, &nodes, &chain);
+        Ok(true)
     }
 
     fn fold(

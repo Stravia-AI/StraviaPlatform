@@ -77,7 +77,8 @@ let {
   onfollow,
 }: Props = $props()
 
-const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
+const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } =
+  useSvelteFlow<FlowInteractionNode, Edge>()
 const nodeTypes = { interaction: InteractionNode }
 const interactionNodeHandles: NodeHandle[] = [
   { type: 'target', position: Position.Top, x: interactionNodeWidth / 2 - 0.5, y: -0.5, width: 1, height: 1 },
@@ -100,17 +101,17 @@ let worker: Worker | undefined
 let pendingLayout = Promise.resolve()
 let resolveLayout: (() => void) | undefined
 
-let nodes = $derived.by<FlowInteractionNode[]>(() => {
-  const hasMatches = roots.some((root) => root.interactions.some((interaction) => interaction.matched))
-  return roots.flatMap((root) =>
-    root.interactions.flatMap((interaction) => {
+let hasMatches = $derived(roots.some((root) => root.interactions.some((interaction) => interaction.matched)))
+
+// 拓扑骨架只随 roots/positions 失效；选中与正文更新不重建它，也不触发画布布局。
+let baseNodes = $derived.by<FlowInteractionNode[]>(() => {
+  const result: FlowInteractionNode[] = []
+  for (const root of roots) {
+    for (const interaction of root.interactions) {
       const position = positions.get(interaction.id)
       // 布局未返回时不把新节点堆在原点；已知几何让裁剪不再依赖全量 DOM 测量。
-      if (!position) return []
+      if (!position) continue
       const current = untrack(() => getNode(interaction.id))
-      const selected = interaction.id === selectedId
-      const onSelectedPath = selectedPath.has(interaction.id)
-      const subdued = (selectedId != null && !onSelectedPath) || (!interaction.matched && hasMatches)
       const title = interaction.first_model_display_name || interaction.first_route_id
       const statusLabel = observationStatusLabel(interactionDisplayStatus(interaction))
       const ariaLabel = hasHistoricalFailure(interaction)
@@ -121,47 +122,128 @@ let nodes = $derived.by<FlowInteractionNode[]>(() => {
         current.data.interaction === interaction &&
         current.position.x === position.x &&
         current.position.y === position.y &&
-        current.selected === selected &&
-        current.data.onSelectedPath === onSelectedPath &&
-        current.data.subdued === subdued &&
-        current.data.outputPreview?.text === (selected ? selectedOutputPreview?.text : undefined) &&
-        current.data.outputPreview?.start === (selected ? selectedOutputPreview?.start : undefined) &&
-        current.data.outputActive === (selected && selectedOutputActive) &&
-        current.data.outputSnapshotKey === (selected ? liveContentEpoch : 0) &&
         current.ariaLabel === ariaLabel
-      )
-        return [current]
-      return [
-        {
-          id: interaction.id,
-          type: 'interaction' as const,
-          position,
-          width: interactionNodeWidth,
-          height: interactionNodeHeight,
-          handles: interactionNodeHandles,
-          measured: current?.measured,
-          data: {
-            interaction,
-            onSelectedPath,
-            subdued,
-            outputPreview: selected ? selectedOutputPreview : undefined,
-            outputActive: selected && selectedOutputActive,
-            outputSnapshotKey: selected ? liveContentEpoch : 0,
-          },
-          selected,
-          draggable: false,
-          connectable: false,
-          deletable: false,
-          focusable: true,
-          ariaRole: 'button' as const,
-          ariaLabel,
+      ) {
+        result.push(current)
+        continue
+      }
+      result.push({
+        id: interaction.id,
+        type: 'interaction' as const,
+        position,
+        width: interactionNodeWidth,
+        height: interactionNodeHeight,
+        handles: interactionNodeHandles,
+        measured: current?.measured,
+        data: {
+          interaction,
+          onSelectedPath: false,
+          subdued: false,
+          outputPreview: undefined,
+          outputActive: false,
+          outputSnapshotKey: 0,
         },
-      ]
-    }),
-  )
+        selected: false,
+        draggable: false,
+        connectable: false,
+        deletable: false,
+        focusable: true,
+        ariaRole: 'button' as const,
+        ariaLabel,
+      })
+    }
+  }
+  return result
 })
+
+interface SelectionView {
+  id: string | undefined
+  path: Set<string>
+  preview: ObservationOutputPreview | undefined
+  active: boolean
+  epoch: number
+}
+
+let styledNodes: FlowInteractionNode[] = []
+let styledBase: FlowInteractionNode[] | undefined
+let styledView: SelectionView | undefined
+
+function styleNode(node: FlowInteractionNode, view: SelectionView): FlowInteractionNode {
+  const selected = node.id === view.id
+  const onSelectedPath = view.path.has(node.id)
+  const subdued = (view.id != null && !onSelectedPath) || (!node.data.interaction.matched && hasMatches)
+  const outputPreview = selected ? view.preview : undefined
+  const outputActive = selected && view.active
+  const outputSnapshotKey = selected ? view.epoch : 0
+  if (
+    node.selected === selected &&
+    node.data.onSelectedPath === onSelectedPath &&
+    node.data.subdued === subdued &&
+    node.data.outputPreview === outputPreview &&
+    node.data.outputActive === outputActive &&
+    node.data.outputSnapshotKey === outputSnapshotKey
+  )
+    return node
+  return {
+    ...node,
+    selected,
+    data: { ...node.data, onSelectedPath, subdued, outputPreview, outputActive, outputSnapshotKey },
+  }
+}
+
+let nodes = $derived.by<FlowInteractionNode[]>(() => {
+  const base = baseNodes
+  const view: SelectionView = {
+    id: selectedId,
+    path: selectedPath,
+    preview: selectedOutputPreview,
+    active: selectedOutputActive,
+    epoch: liveContentEpoch,
+  }
+  const previous = styledView
+  const baseChanged = base !== styledBase
+  if (
+    !baseChanged &&
+    previous &&
+    previous.id === view.id &&
+    previous.path === view.path &&
+    previous.active === view.active &&
+    previous.epoch === view.epoch &&
+    previous.preview?.text === view.preview?.text &&
+    previous.preview?.start === view.preview?.start
+  )
+    return styledNodes
+
+  const bodyOnly =
+    !baseChanged &&
+    previous &&
+    previous.id === view.id &&
+    previous.path === view.path &&
+    previous.active === view.active
+  if (bodyOnly) {
+    // 不能从派生输入读回 getNodes()：它会经 nodesInitialized 再次求值此派生。
+    const source = styledNodes
+    const result = source.slice()
+    const index = source.findIndex((node) => node.id === view.id)
+    if (index >= 0) result[index] = styleNode(source[index], view)
+    styledNodes = result
+    styledBase = base
+    styledView = view
+    return result
+  }
+
+  // 骨架或选中变化：只重建样式有变化的节点；骨架变化时以新骨架为准。
+  const source = baseChanged ? base : styledNodes
+  const result = source.map((node) => styleNode(node, view))
+  styledNodes = result
+  styledBase = base
+  styledView = view
+  return result
+})
+
+let links = $derived.by(() => canvasLinks(roots.flatMap((root) => root.interactions)))
 let edges = $derived.by<Edge[]>(() =>
-  canvasLinks(roots.flatMap((root) => root.interactions)).map((link) => {
+  links.map((link) => {
     const onPath = selectedPath.has(link.source) && selectedPath.has(link.target)
     const stroke = link.kind === 'native' ? 'var(--muted-foreground)' : onPath ? 'var(--primary)' : 'var(--border)'
     const dash = link.kind === 'native' ? '3 3' : link.kind === 'inferred' ? '8 5' : undefined
@@ -209,7 +291,7 @@ function requestLayout(): void {
     startedAt: Math.min(...root.interactions.map((interaction) => interaction.started_at)),
     interactions: root.interactions.map(({ id }) => ({ id })),
   }))
-  const layoutEdges = edges.map(({ source, target }) => ({ source, target }))
+  const layoutEdges = links.map(({ source, target }) => ({ source, target }))
   const topology = JSON.stringify({ roots: layoutRoots, edges: layoutEdges })
   if (topology === requestedTopology) return
   requestedTopology = topology

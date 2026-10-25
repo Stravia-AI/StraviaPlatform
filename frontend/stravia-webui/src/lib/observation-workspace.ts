@@ -161,6 +161,27 @@ export class ObservationWorkspaceController {
   #minTokenStop = OBSERVATION_DEFAULT_MIN_TOKEN_STOP
 
   #roots: ForestRoot[] = []
+  // 画布派生只在 roots / reveal 集合换引用时重建；时钟、连接状态与选中正文不触发全图重算。
+  #canvasViewCache:
+    | {
+        roots: ForestRoot[]
+        revealed: ReadonlySet<string>
+        canvasRoots: ForestRoot[]
+        interactions: InteractionSummary[]
+        linkIndex?: CanvasLinkIndex
+      }
+    | undefined
+  #rootInteractionsCache:
+    | {
+        roots: ForestRoot[]
+        byId: Map<string, InteractionSummary>
+        rootIds: Map<string, string>
+      }
+    | undefined
+  #latestCache: { canvasRoots: ForestRoot[]; value: InteractionSummary | undefined } | undefined
+  #selectedPathCache:
+    | { canvasRoots: ForestRoot[]; selection: InteractionSummary | undefined; value: Set<string> }
+    | undefined
   #rootTotal = 0
   #rootTotalSequence = 0
   #nextCursor: string | null | undefined
@@ -192,6 +213,7 @@ export class ObservationWorkspaceController {
   #rootBatchRequest: Promise<void> | undefined
 
   #selectedInteraction: InteractionSummary | undefined
+  #requestedInteractionId: string | undefined
   #selectedFailure: FailedRequestSummary | undefined
   #interactionDetail: InteractionDetail | undefined
   #interactionDetailEpoch = -1
@@ -319,7 +341,7 @@ export class ObservationWorkspaceController {
     }
     await this.#reloadWindow()
     if (focusId) {
-      const interaction = this.#canvasInteractions().find((item) => item.id === focusId)
+      const interaction = this.#canvasView().interactions.find((item) => item.id === focusId)
       if (interaction) await this.selectInteraction(interaction)
     }
   }
@@ -428,6 +450,7 @@ export class ObservationWorkspaceController {
     this.closeInspector()
     const selection = this.#selectionVersion
     this.#selectedInteraction = interaction
+    this.#requestedInteractionId = interaction.id
     this.#openLive(interaction.id, selection)
     this.#detailLoading = true
     if (interaction.id !== this.#latestInteraction()?.id) this.#followPaused = true
@@ -467,6 +490,8 @@ export class ObservationWorkspaceController {
   async deepLinkInteraction(id: string): Promise<void> {
     this.closeInspector()
     const selection = this.#selectionVersion
+    // 深链尚无 summary；先保留目标，才能记录快照查询在途时收到的通知。
+    this.#requestedInteractionId = id
     this.#followPaused = true
     if (!this.#revealedFailures.has(id)) this.#revealedFailures = new Set([...this.#revealedFailures, id])
     this.#detailLoading = true
@@ -486,6 +511,7 @@ export class ObservationWorkspaceController {
     this.#closeLiveScope()
     this.#liveBlocks = []
     this.#selectedInteraction = undefined
+    this.#requestedInteractionId = undefined
     this.#selectedFailure = undefined
     this.#interactionDetail = undefined
     this.#failureDetail = undefined
@@ -663,12 +689,26 @@ export class ObservationWorkspaceController {
     }
   }
 
-  #interactions(): InteractionSummary[] {
-    return this.#roots.flatMap((root) => root.interactions)
+  #rootIndex(): { byId: Map<string, InteractionSummary>; rootIds: Map<string, string> } {
+    const cached = this.#rootInteractionsCache
+    if (cached && cached.roots === this.#roots) return cached
+    const byId = new Map<string, InteractionSummary>()
+    const rootIds = new Map<string, string>()
+    for (const root of this.#roots) {
+      for (const interaction of root.interactions) {
+        byId.set(interaction.id, interaction)
+        rootIds.set(interaction.id, root.id)
+      }
+    }
+    const index = { roots: this.#roots, byId, rootIds }
+    this.#rootInteractionsCache = index
+    return index
   }
 
-  #canvasRoots(): ForestRoot[] {
-    return this.#roots
+  #canvasView(): { canvasRoots: ForestRoot[]; interactions: InteractionSummary[]; linkIndex?: CanvasLinkIndex } {
+    const cached = this.#canvasViewCache
+    if (cached && cached.roots === this.#roots && cached.revealed === this.#revealedFailures) return cached
+    const canvasRoots = this.#roots
       .map((root) => ({
         ...root,
         interactions: root.interactions.filter(
@@ -676,29 +716,52 @@ export class ObservationWorkspaceController {
         ),
       }))
       .filter((root) => root.interactions.length > 0)
+    const next = {
+      roots: this.#roots,
+      revealed: this.#revealedFailures,
+      canvasRoots,
+      interactions: canvasRoots.flatMap((root) => root.interactions),
+    }
+    this.#canvasViewCache = next
+    return next
   }
 
-  #canvasInteractions(): InteractionSummary[] {
-    return this.#canvasRoots().flatMap((root) => root.interactions)
-  }
-
+  /** 单遍取最新：运行中优先，其次 last_active_at；同值时保留先出现的成员（与原稳定排序一致）。 */
   #latestInteraction(): InteractionSummary | undefined {
-    return [...this.#canvasInteractions()].sort(
-      (a, b) => Number(b.status === 'running') - Number(a.status === 'running') || b.last_active_at - a.last_active_at,
-    )[0]
+    const view = this.#canvasView()
+    const cached = this.#latestCache
+    if (cached && cached.canvasRoots === view.canvasRoots) return cached.value
+    let latest: InteractionSummary | undefined
+    for (const interaction of view.interactions) {
+      if (!latest) {
+        latest = interaction
+        continue
+      }
+      const runningDelta = Number(interaction.status === 'running') - Number(latest.status === 'running')
+      if (runningDelta > 0 || (runningDelta === 0 && interaction.last_active_at > latest.last_active_at))
+        latest = interaction
+    }
+    this.#latestCache = { canvasRoots: view.canvasRoots, value: latest }
+    return latest
   }
 
   #selectedPath(): Set<string> {
+    const view = this.#canvasView()
+    const selection = this.#selectedInteraction
+    const cached = this.#selectedPathCache
+    if (cached && cached.canvasRoots === view.canvasRoots && cached.selection === selection) return cached.value
     const path = new Set<string>()
-    let current = this.#selectedInteraction
-    if (!current) return path
-    // 一次构建视觉父边索引，整条选中路径共用快照内的祖先查询。
-    const index = new CanvasLinkIndex(this.#canvasInteractions())
-    while (current && !path.has(current.id)) {
-      path.add(current.id)
-      const parentId: string | undefined = index.visualParent(current)?.id
-      current = parentId ? index.byId.get(parentId) : undefined
+    let current = selection
+    if (current) {
+      // 一次构建视觉父边索引，整条选中路径共用快照内的祖先查询。
+      const index = (view.linkIndex ??= new CanvasLinkIndex(view.interactions))
+      while (current && !path.has(current.id)) {
+        path.add(current.id)
+        const parentId: string | undefined = index.visualParent(current)?.id
+        current = parentId ? index.byId.get(parentId) : undefined
+      }
     }
+    this.#selectedPathCache = { canvasRoots: view.canvasRoots, selection, value: path }
     return path
   }
 
@@ -814,7 +877,11 @@ export class ObservationWorkspaceController {
   }
 
   #refreshSelectedEvents(id: string, selection: number): Promise<void> {
+    if (selection !== this.#selectionVersion || this.#interactionDetail?.interaction.id !== id)
+      return Promise.resolve()
     if (this.#eventsRequest) return this.#eventsRequest
+    // 详情已带快照内的首批事件与 runs；只有待处理通知水位超过它时才串行补齐。
+    if (this.#eventsPending <= (this.#interactionDetail?.snapshot_sequence ?? 0)) return Promise.resolve()
     const request = this.#pullSelectedEvents(id, selection)
       .catch((error) => {
         if (selection === this.#selectionVersion) {
@@ -1008,7 +1075,7 @@ export class ObservationWorkspaceController {
       this.#resetRecoveryPending = true
       this.#closeLiveScope()
       const selection = this.#selectionVersion
-      const interactionId = this.#selectedInteraction?.id
+      const interactionId = this.#selectedInteraction?.id ?? this.#requestedInteractionId
       const failure = this.#selectedFailure
       this.#detailLoading = Boolean(interactionId || failure)
       this.#failureDetailError = undefined
@@ -1082,12 +1149,12 @@ export class ObservationWorkspaceController {
     }
     this.#publish()
     const interactionId = streamEvent.interaction_id
-    const known = this.#interactions().find((item) => item.id === interactionId)
+    const known = interactionId ? this.#rootIndex().byId.get(interactionId) : undefined
     const rootId = streamEvent.root_id ?? known?.root_id
     if (rootId && this.#activeTab === 'interactions' && (!known || known.last_event_sequence < streamEvent.sequence)) {
       this.#pendingRoots.set(rootId, Math.max(this.#pendingRoots.get(rootId) ?? 0, streamEvent.sequence))
     }
-    if (interactionId && interactionId === this.#selectedInteraction?.id) {
+    if (interactionId && interactionId === this.#requestedInteractionId) {
       this.#eventsPending = Math.max(this.#eventsPending, streamEvent.sequence)
       if (streamEvent.boundary && streamEvent.kind === 'run_finished') {
         if (streamEvent.run_id) this.#finishLiveRun(streamEvent.run_id)
@@ -1246,8 +1313,6 @@ export class ObservationWorkspaceController {
 
   #snapshot(): ObservationWorkspaceSnapshot {
     const minTokensFilter = this.#minTokens()
-    const canvasRoots = this.#canvasRoots()
-    const canvasInteractions = canvasRoots.flatMap((root) => root.interactions)
     return {
       windowStart: this.#windowStart,
       windowEnd: this.#windowEnd,
@@ -1268,14 +1333,11 @@ export class ObservationWorkspaceController {
           this.#apiKeyFilter,
           ...(this.#activeTab === 'interactions' ? [this.#statusFilter] : []),
         ].filter((value) => value !== 'all').length + Number(this.#activeTab === 'interactions' && minTokensFilter > 0),
-      canvasRoots,
-      latestInteraction: [...canvasInteractions].sort(
-        (a, b) =>
-          Number(b.status === 'running') - Number(a.status === 'running') || b.last_active_at - a.last_active_at,
-      )[0],
+      canvasRoots: this.#canvasView().canvasRoots,
+      latestInteraction: this.#latestInteraction(),
       selectedPath: this.#selectedPath(),
       selectedMigrated: this.#selectedInteraction
-        ? this.#roots.find((root) => root.interactions.some((item) => item.id === this.#selectedInteraction?.id))?.id
+        ? this.#rootIndex().rootIds.get(this.#selectedInteraction.id)
         : undefined,
       migratedRoots: this.#migratedRoots,
       selectedInteraction: this.#selectedInteraction,
