@@ -152,7 +152,13 @@ class ObservationRenderer extends Renderer {
   }
 }
 
-export function markdownBlocks(text: string, minimumHeadingLevel: 1 | 2 = 1): MarkdownBlock[] {
+export interface DeferredMarkdownBlock {
+  id: number
+  source: string
+  render: () => MarkdownBlock
+}
+
+function observationMarkdownParser(minimumHeadingLevel: 1 | 2) {
   const fragments: MarkdownFragment[] = []
   const images: MarkdownImage[] = []
   const renderer = new ObservationRenderer(minimumHeadingLevel, fragments, images)
@@ -182,6 +188,45 @@ export function markdownBlocks(text: string, minimumHeadingLevel: 1 | 2 = 1): Ma
   // CommonMark 不把汉字视为标点，`）**或` 这类全角标点后紧跟汉字的 `**` 无法闭合；按 CJK 友好草案放宽界定。
   markdown.use(markedCjkFriendly())
   markdown.setOptions({ renderer })
+  return { markdown, fragments, images }
+}
+
+/** Keep the lexer's protected block boundaries and resolved inline references, but defer HTML and fragments. */
+export function deferredMarkdownBlocks(text: string, minimumHeadingLevel: 1 | 2 = 1): DeferredMarkdownBlock[] {
+  const { markdown, fragments, images } = observationMarkdownParser(minimumHeadingLevel)
+  const tokens = markdown.lexer(text)
+  const groups: (typeof tokens)[number][][] = []
+  let length = 0
+  for (const token of tokens) {
+    // Group small tokens, but never split a protected token (code, table, list or math-bearing paragraph).
+    if (!groups.length || length >= 8192) {
+      groups.push([])
+      length = 0
+    }
+    groups[groups.length - 1].push(token)
+    length += token.raw.length
+  }
+  let offset = 0
+  return groups.map((group) => {
+    const id = offset
+    for (const token of group) offset += token.raw.length
+    return {
+      id,
+      source: text.slice(id, offset),
+      render: () => {
+        // Each mounted block owns its output. Unmounting releases HTML, math/diagram fragments and image state.
+        const html = markdown.parser(group)
+        const block = { id, html, fragments: [...fragments], images: [...images] }
+        fragments.length = 0
+        images.length = 0
+        return block
+      },
+    }
+  })
+}
+
+export function markdownBlocks(text: string, minimumHeadingLevel: 1 | 2 = 1): MarkdownBlock[] {
+  const { markdown, fragments, images } = observationMarkdownParser(minimumHeadingLevel)
   let offset = 0
   return markdown.lexer(text).map((token) => {
     const id = offset

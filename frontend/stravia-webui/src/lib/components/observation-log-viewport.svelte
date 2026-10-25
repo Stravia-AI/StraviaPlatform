@@ -1,9 +1,11 @@
 <script lang="ts">
 import { tick, untrack, type Snippet } from 'svelte'
+import { SvelteMap } from 'svelte/reactivity'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import * as m from '#lib/paraglide/messages.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
+import { setObservationBodyViewport } from '#lib/observation-body-viewport.js'
 
 let {
   label,
@@ -11,6 +13,8 @@ let {
   olderLoading = false,
   onolder,
   children,
+  activityKey,
+  fullText = false,
 }: {
   label: string
   olderCursor: number | null
@@ -18,6 +22,9 @@ let {
   onolder?: () => Promise<void>
   /** `older` 是更早事件的加载行；调用方把它放在已加载记录与未加载空洞的交界处。 */
   children: Snippet<[older: Snippet]>
+  /** Explicit activity signal when body mounts/unmounts are not themselves new content. */
+  activityKey?: unknown
+  fullText?: boolean
 } = $props()
 
 // 加载行常驻固定高度：出现、转圈、失败与消失都不改变其上下内容的位置。
@@ -33,6 +40,48 @@ let loading = $state(false)
 let failedCursor = $state<number | null>(null)
 const failed = $derived(failedCursor !== null && failedCursor === olderCursor)
 let hasNewActivity = $state(false)
+const bodyTargets = new SvelteMap<HTMLElement, (near: boolean) => void>()
+let bodyObserver: IntersectionObserver | undefined
+let activityCursor = untrack(() => olderCursor)
+setObservationBodyViewport({
+  root: () => viewport,
+  fullText: () => fullText,
+  resizeAbove(delta) {
+    if (!viewport) return
+    syncScrollPosition()
+    if (settlePosition !== null) holdReadingPosition(settlePosition)
+    else if (following) scrollToLatest()
+    else if (pausedPosition?.anchor?.element.isConnected) holdReadingPosition(pausedPosition)
+    else {
+      viewport.scrollTop += delta
+      previousTop = viewport.scrollTop
+      pausedPosition = readingPosition()
+    }
+    // 高度补偿可能让已相交的加载行重新可读，而不会产生新的 IO 边沿。
+    void loadOlder()
+  },
+  observe(element, update) {
+    bodyTargets.set(element, update)
+    bodyObserver?.observe(element)
+    return () => {
+      bodyObserver?.unobserve(element)
+      bodyTargets.delete(element)
+    }
+  },
+})
+
+// Source updates, unlike viewport materialization, represent new activity.
+$effect(() => {
+  const key = activityKey
+  const cursor = prependCursor
+  untrack(() => {
+    const prepended = cursor !== activityCursor
+    activityCursor = cursor
+    if (key === undefined || prepended || !viewport || settlePosition !== null) return
+    if (following) scrollToLatest()
+    else hasNewActivity = true
+  })
+})
 
 function atBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.clientHeight - element.scrollTop <= 2
@@ -46,21 +95,62 @@ function scrollToLatest(): void {
 
 function returnToLatest(): void {
   following = true
+  pausedPosition = null
   hasNewActivity = false
   scrollToLatest()
 }
 
-// 更早事件只会插入在读者位置之上：记下到底部的距离，DOM 更新后在绘制前恢复，可见内容保持不动。
-// 子组件（如流式 Markdown）会在随后的微任务里继续渲染同一批历史，因此直到下一帧前都按同一距离恢复。
-let prependDistance: number | null = null
-let settleDistance: number | null = null
+interface ReadingPosition {
+  distance: number
+  anchor?: { element: HTMLElement; offset: number }
+}
+
+// 虚拟正文的高度也会在读者下方变化，不能把所有 scrollHeight 变化都当作补入历史。
+let prependPosition: ReadingPosition | null = null
+let settlePosition: ReadingPosition | null = null
+let pausedPosition: ReadingPosition | null = null
 let settleFrame = 0
 
-function holdReadingPosition(distance: number): void {
-  if (!viewport) return
+function readingPosition(): ReadingPosition | null {
+  if (!viewport || viewport.clientHeight === 0) return null
+  const position: ReadingPosition = { distance: viewport.scrollHeight - viewport.scrollTop }
+  const bounds = viewport.getBoundingClientRect()
+  for (const element of viewport.querySelectorAll<HTMLElement>(
+    '[data-observation-body], [data-activity-id] [data-slot="collapsible-trigger"]',
+  )) {
+    const rect = element.getBoundingClientRect()
+    if (rect.bottom > bounds.top && rect.top < bounds.bottom) {
+      position.anchor = { element, offset: rect.top - bounds.top }
+      break
+    }
+  }
+  return position
+}
+
+function syncScrollPosition(userEvent = false): void {
+  if (!viewport || viewport.clientHeight === 0 || viewport.scrollTop === previousTop) return
+  const top = viewport.scrollTop
+  // 原生滚动可能先于 scroll 事件；重排也会夹紧 scrollTop，但不代表用户暂停跟随。
+  if (userEvent && top < previousTop && !atBottom(viewport)) following = false
+  else if (top > previousTop && atBottom(viewport)) {
+    following = true
+    hasNewActivity = false
+  }
+  previousTop = top
+  pausedPosition = following ? null : readingPosition()
+  if (settlePosition !== null) settlePosition = pausedPosition
+}
+
+function holdReadingPosition(position: ReadingPosition): void {
+  if (!viewport || viewport.clientHeight === 0) return
   if (following) scrollToLatest()
   else {
-    viewport.scrollTop = viewport.scrollHeight - distance
+    if (position.anchor?.element.isConnected) {
+      viewport.scrollTop +=
+        position.anchor.element.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top -
+        position.anchor.offset
+    } else viewport.scrollTop = viewport.scrollHeight - position.distance
     previousTop = viewport.scrollTop
   }
 }
@@ -70,23 +160,27 @@ const prependCursor = $derived(olderCursor)
 
 $effect.pre(() => {
   void prependCursor
+  void fullText
   untrack(() => {
-    prependDistance = viewport && viewport.clientHeight > 0 ? viewport.scrollHeight - viewport.scrollTop : null
+    syncScrollPosition()
+    prependPosition = readingPosition()
   })
 })
 $effect(() => {
   void prependCursor
+  void fullText
   untrack(() => {
     // 补入的历史不是新活动，不能触发跟随或「有新活动」提示。
     mutation?.takeRecords()
-    const distance = prependDistance
-    prependDistance = null
-    if (distance === null) return
-    holdReadingPosition(distance)
-    settleDistance = distance
+    const position = prependPosition
+    prependPosition = null
+    if (position === null) return
+    if (!following) pausedPosition = position
+    settlePosition = position
+    holdReadingPosition(position)
     cancelAnimationFrame(settleFrame)
     settleFrame = requestAnimationFrame(() => {
-      settleDistance = null
+      settlePosition = null
     })
   })
 })
@@ -142,6 +236,8 @@ function observeLoader(element: HTMLElement): () => void {
 function ownActivity(record: MutationRecord): boolean {
   const target = record.target instanceof Element ? record.target : record.target.parentElement
   if (target?.closest('[data-older-loader]')) return true
+  // Body content can mount, release or resize without receiving any new source data.
+  if (target?.closest('[data-observation-markdown]')) return true
   if (record.type !== 'childList') return false
   // 用户展开已有详情并不是收到新内容；仍观察详情内部的实时文本变化。
   if (target?.getAttribute('data-slot') === 'collapsible') return true
@@ -161,29 +257,34 @@ function follow(element: HTMLElement): () => void {
       if (element.clientHeight > 0) distance = element.scrollHeight - element.scrollTop
     }
     const onScroll = () => {
-      const top = element.scrollTop
-      if (top < previousTop || atBottom(element)) {
-        following = atBottom(element)
-        if (following) hasNewActivity = false
-      }
-      previousTop = top
+      syncScrollPosition(true)
       remember()
     }
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY < 0) following = false
+      pausedPosition = null
     }
     const onKey = (event: KeyboardEvent) => {
       if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false
+      else if (event.key === 'End') {
+        following = true
+        hasNewActivity = false
+      }
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) pausedPosition = null
     }
     // 展开或收起详情是阅读动作：停止跟随，避免展开的内容被自动滚走。
     const onInspect = (event: MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest('[data-slot="collapsible-trigger"]'))
+      if (event.target instanceof Element && event.target.closest('[data-slot="collapsible-trigger"]')) {
         following = false
+        pausedPosition = readingPosition()
+      }
     }
     const resize = new ResizeObserver(() => {
       const height = element.clientHeight
-      if (settleDistance !== null) holdReadingPosition(settleDistance)
+      if (visibleHeight > 0) syncScrollPosition()
+      if (settlePosition !== null) holdReadingPosition(settlePosition)
       else if (following) scrollToLatest()
+      else if (pausedPosition?.anchor?.element.isConnected) holdReadingPosition(pausedPosition)
       else if (visibleHeight === 0 && height > 0) {
         element.scrollTop = element.scrollHeight - distance
         previousTop = element.scrollTop
@@ -192,8 +293,15 @@ function follow(element: HTMLElement): () => void {
       remember()
     })
     mutation = new MutationObserver((records) => {
-      if (settleDistance !== null) {
-        holdReadingPosition(settleDistance)
+      if (visibleHeight > 0) syncScrollPosition()
+      if (settlePosition !== null) {
+        holdReadingPosition(settlePosition)
+        return
+      }
+      if (activityKey !== undefined) {
+        // 正文挂载仍需在 scroll 事件前跟随到底部，但不能把挂载本身当成新内容。
+        if (following) scrollToLatest()
+        else if (pausedPosition?.anchor?.element.isConnected) holdReadingPosition(pausedPosition)
         return
       }
       if (records.every(ownActivity)) return
@@ -201,6 +309,15 @@ function follow(element: HTMLElement): () => void {
       else hasNewActivity = true
     })
     scrollToLatest()
+    bodyObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          bodyTargets.get(entry.target as HTMLElement)?.(entry.isIntersecting)
+        }
+      },
+      { root: element, rootMargin: '600px 0px' },
+    )
+    for (const target of bodyTargets.keys()) bodyObserver.observe(target)
     resize.observe(content)
     resize.observe(element)
     mutation.observe(content, { childList: true, subtree: true, characterData: true })
@@ -210,6 +327,8 @@ function follow(element: HTMLElement): () => void {
     element.addEventListener('click', onInspect, { capture: true })
     return () => {
       resize.disconnect()
+      bodyObserver?.disconnect()
+      bodyObserver = undefined
       mutation?.disconnect()
       mutation = undefined
       element.removeEventListener('scroll', onScroll)
@@ -217,7 +336,7 @@ function follow(element: HTMLElement): () => void {
       element.removeEventListener('keydown', onKey)
       element.removeEventListener('click', onInspect, { capture: true })
       cancelAnimationFrame(settleFrame)
-      settleDistance = null
+      settlePosition = null
       if (viewport === element) viewport = undefined
     }
   })

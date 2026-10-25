@@ -361,19 +361,13 @@ pub(super) fn serialized_size_bytes(value: &impl serde::Serialize) -> usize {
 }
 
 pub(super) fn visit_client_items_from_nodes(
-    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+    nodes: &[Arc<DecodedDiscoveryNode>],
     mut visit: impl FnMut(&str, &[AiItem], usize),
-) -> Result<(), String> {
-    let mut decoded = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        decoded.push(decode_response_node(node)?);
-    }
-
+) {
     let mut client_items = Vec::new();
-    for (node_id, persisted) in decoded {
-        let mut persisted = Cow::Owned(persisted);
+    for node in nodes {
+        let mut persisted = Cow::Borrowed(&node.persisted);
         let input_end = fold_client_history_view(&mut client_items, &mut persisted);
-        visit(node_id.as_str(), &client_items, input_end);
+        visit(node.id.as_str(), &client_items, input_end);
     }
-    Ok(())
 }

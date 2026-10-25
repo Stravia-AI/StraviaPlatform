@@ -267,6 +267,9 @@ impl ObservationStore {
         pending_tool_ids: &[String],
         expires_at: i64,
     ) -> anyhow::Result<()> {
+        const INSERT_PENDING: &str = "INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) ";
+        // 五列一组，给 SQLite 旧版本的 999 个绑定参数上限留余量。
+        const PENDING_BATCH_SIZE: usize = 180;
         match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
@@ -282,14 +285,16 @@ impl ObservationStore {
                     .bind(run_id)
                     .execute(&mut *tx)
                     .await?;
-                for tool_id in pending_tool_ids {
-                    sqlx::query("INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES (?,?,?,?,?)")
-                    .bind(principal)
-                    .bind(tool_id)
-                    .bind(run_id)
-                    .bind(interaction_id)
-                    .bind(expires_at)
-                    .execute(&mut *tx).await?;
+                for tools in pending_tool_ids.chunks(PENDING_BATCH_SIZE) {
+                    let mut insert = sqlx::QueryBuilder::<sqlx::Sqlite>::new(INSERT_PENDING);
+                    insert.push_values(tools, |mut row, tool_id| {
+                        row.push_bind(principal)
+                            .push_bind(tool_id)
+                            .push_bind(run_id)
+                            .push_bind(interaction_id)
+                            .push_bind(expires_at);
+                    });
+                    insert.build().execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;
@@ -307,14 +312,16 @@ impl ObservationStore {
                     .bind(run_id)
                     .execute(&mut *tx)
                     .await?;
-                for tool_id in pending_tool_ids {
-                    sqlx::query("INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
-                    .bind(principal)
-                    .bind(tool_id)
-                    .bind(run_id)
-                    .bind(interaction_id)
-                    .bind(expires_at)
-                    .execute(&mut *tx).await?;
+                for tools in pending_tool_ids.chunks(PENDING_BATCH_SIZE) {
+                    let mut insert = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_PENDING);
+                    insert.push_values(tools, |mut row, tool_id| {
+                        row.push_bind(principal)
+                            .push_bind(tool_id)
+                            .push_bind(run_id)
+                            .push_bind(interaction_id)
+                            .push_bind(expires_at);
+                    });
+                    insert.build().execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
             }
@@ -3373,6 +3380,111 @@ mod tests {
         Ok(())
     }
 
+    async fn pending_tools_replacement_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        admit_tool_run(store, "pending-root", None, "alice").await?;
+        admit_tool_run(store, "pending-foreign", None, "bob").await?;
+        let tools: Vec<String> = (0..367).map(|index| format!("call-{index:03}")).collect();
+        store
+            .persist_tail_source("pending-root", "pending-root", "alice", "first", &tools, 10)
+            .await?;
+        store
+            .persist_tail_source(
+                "pending-foreign",
+                "pending-foreign",
+                "bob",
+                "foreign",
+                &tools[..1],
+                10,
+            )
+            .await?;
+        let mut actual = store.pending_tool_sources("alice", &tools, 9).await?;
+        actual.sort();
+        assert_eq!(
+            actual,
+            tools
+                .iter()
+                .map(|id| (id.clone(), "pending-root".into(), "pending-root".into()))
+                .collect::<Vec<_>>()
+        );
+        store
+            .persist_tail_source(
+                "pending-root",
+                "pending-root",
+                "alice",
+                "second",
+                &tools[359..],
+                10,
+            )
+            .await?;
+        let duplicate = vec!["duplicate".to_owned(); 2];
+        assert!(
+            store
+                .persist_tail_source(
+                    "pending-root",
+                    "pending-root",
+                    "alice",
+                    "failed",
+                    &duplicate,
+                    10
+                )
+                .await
+                .is_err()
+        );
+        let mut remaining = store.pending_tool_sources("alice", &tools, 9).await?;
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            tools[359..]
+                .iter()
+                .map(|id| (id.clone(), "pending-root".into(), "pending-root".into()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            store
+                .tail_sources_by_hashes("alice", "other-run", &["second".into()], 9)
+                .await?,
+            [("pending-root".into(), "pending-root".into(), None)]
+        );
+        assert!(
+            store
+                .pending_tool_sources("alice", &tools, 10)
+                .await?
+                .is_empty()
+        );
+        store
+            .persist_tail_source("pending-root", "pending-root", "alice", "empty", &[], 10)
+            .await?;
+        assert!(
+            store
+                .pending_tool_sources("alice", &tools, 9)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            store.pending_tool_sources("bob", &tools, 9).await?,
+            [(
+                tools[0].clone(),
+                "pending-foreign".into(),
+                "pending-foreign".into()
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_tools_replacement_is_atomic_across_batches() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
+        );
+        pending_tools_replacement_scenario(&store).await?;
+        pool.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn queued_observations_preserve_terminal_order_without_inflating_duration()
     -> anyhow::Result<()> {
@@ -4831,11 +4943,12 @@ mod tests {
                 .await?;
             let result = async {
                 crate::migrations::migrate_postgres(&pool, None).await?;
-                interleaved_batch_scenario(&ObservationStore::Postgres(
+                let store = ObservationStore::Postgres(
                     pool.clone(),
                     Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
-                ))
-                .await
+                );
+                interleaved_batch_scenario(&store).await?;
+                pending_tools_replacement_scenario(&store).await
             }
             .await;
             pool.close().await;

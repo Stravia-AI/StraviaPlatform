@@ -414,24 +414,19 @@ impl GenerationChain {
         &self,
         principal: &Principal,
         node: &str,
+        workspace: &mut Option<GenerationDiscoveryWorkspace>,
         visit: impl FnMut(&str, &[AiItem], usize) + Send,
     ) -> anyhow::Result<bool> {
-        match self
-            .store
-            .turn_chain
-            .materialize(principal, TurnNodeKind::Response, &TurnNodeId::new(node))
+        workspace
+            .get_or_insert_with(|| GenerationDiscoveryWorkspace::new(principal))
+            .workspace()
+            .visit_client_items(
+                self.store.turn_chain.as_ref(),
+                principal,
+                &TurnNodeId::new(node),
+                visit,
+            )
             .await
-        {
-            Ok(nodes) => {
-                tracing::Span::current().record("node_count", nodes.len() as u64);
-                visit_client_items_from_nodes(nodes, visit).map_err(anyhow::Error::msg)?;
-                Ok(true)
-            }
-            Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Unavailable) => Ok(false),
-            Err(error @ stravia_runtime_contract::turn_chain::TurnUnavailable::Storage(_)) => {
-                Err(anyhow::Error::new(error))
-            }
-        }
     }
 
     pub(crate) async fn begin(

@@ -4308,16 +4308,20 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
 
     let mut snapshots = Vec::new();
     let available = chain
-        .visit_ancestor_client_items(&owner, "observation-replace", |node, items, input_end| {
-            assert_eq!(
-                input_end,
-                match node {
-                    "observation-root" | "observation-replace" => 1,
-                    "observation-append" => 3,
-                    _ => panic!("unexpected node"),
-                }
-            );
-            snapshots.push((
+        .visit_ancestor_client_items(
+            &owner,
+            "observation-replace",
+            &mut None,
+            |node, items, input_end| {
+                assert_eq!(
+                    input_end,
+                    match node {
+                        "observation-root" | "observation-replace" => 1,
+                        "observation-append" => 3,
+                        _ => panic!("unexpected node"),
+                    }
+                );
+                snapshots.push((
                 node.to_owned(),
                 items
                     .iter()
@@ -4326,7 +4330,8 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
                     })
                     .collect::<Vec<_>>(),
             ))
-        })
+            },
+        )
         .await
         .expect("visit complete chain");
 
@@ -4353,6 +4358,96 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
 }
 
 #[tokio::test]
+async fn ancestor_client_item_workspace_keeps_branches_and_principals_isolated() {
+    let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
+    let chain = GenerationChain::from_turn_chain(
+        Arc::clone(&backend),
+        Duration::from_secs(60),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+    );
+    let owner = principal("workspace-observation-owner");
+    for (id, parent, question, answer) in [
+        ("shared-root", None, "root question", "root answer"),
+        ("left", Some("shared-root"), "left question", "left answer"),
+        (
+            "right",
+            Some("shared-root"),
+            "right question",
+            "right answer",
+        ),
+    ] {
+        commit_observation_node(
+            backend.as_ref(),
+            &owner,
+            id,
+            parent,
+            observation_payload(vec![user_message(question)], None, None, answer),
+            Duration::from_secs(60),
+        )
+        .await;
+    }
+    let mut workspace = None;
+    assert!(
+        chain
+            .visit_ancestor_client_items(&owner, "left", &mut workspace, |_, _, _| {})
+            .await
+            .expect("left branch")
+    );
+    let mut right = Vec::new();
+    assert!(
+        chain
+            .visit_ancestor_client_items(&owner, "right", &mut workspace, |id, items, input_end| {
+                if id == "right" {
+                    right = items.iter().map(|item| item.content.to_text()).collect();
+                    assert_eq!(input_end, 3);
+                }
+            })
+            .await
+            .expect("right branch")
+    );
+    assert_eq!(
+        right,
+        [
+            "root question",
+            "root answer",
+            "right question",
+            "right answer"
+        ]
+    );
+    let mut foreign = Vec::new();
+    assert!(
+        !chain
+            .visit_ancestor_client_items(
+                &principal("foreign-workspace-owner"),
+                "shared-root",
+                &mut workspace,
+                |id, _, _| foreign.push(id.to_owned()),
+            )
+            .await
+            .expect("foreign principal declines")
+    );
+    assert!(foreign.is_empty());
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "expired-child",
+        Some("shared-root"),
+        observation_payload(vec![user_message("expired")], None, None, "expired"),
+        Duration::ZERO,
+    )
+    .await;
+    assert!(
+        !chain
+            .visit_ancestor_client_items(&owner, "expired-child", &mut workspace, |_, _, _| {
+                panic!("expired suffix must not emit cached partial evidence")
+            })
+            .await
+            .expect("expired suffix declines")
+    );
+}
+
+#[tokio::test]
 async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partial_evidence() {
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
@@ -4366,7 +4461,7 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
     let mut visited = Vec::new();
     assert!(
         !chain
-            .visit_ancestor_client_items(&owner, "missing-node", |node, _, _| {
+            .visit_ancestor_client_items(&owner, "missing-node", &mut None, |node, _, _| {
                 visited.push(node.to_owned())
             })
             .await
@@ -4386,7 +4481,7 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
 
     assert!(
         !chain
-            .visit_ancestor_client_items(&owner, "expired-observation", |node, _, _| {
+            .visit_ancestor_client_items(&owner, "expired-observation", &mut None, |node, _, _| {
                 visited.push(node.to_owned())
             })
             .await
@@ -4428,9 +4523,12 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
     let mut visited = Vec::new();
     assert!(
         chain
-            .visit_ancestor_client_items(&owner, "invalid-observation-tail", |node, _, _| {
-                visited.push(node.to_owned())
-            })
+            .visit_ancestor_client_items(
+                &owner,
+                "invalid-observation-tail",
+                &mut None,
+                |node, _, _| { visited.push(node.to_owned()) }
+            )
             .await
             .is_err()
     );

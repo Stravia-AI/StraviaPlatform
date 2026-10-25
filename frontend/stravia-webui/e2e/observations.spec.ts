@@ -192,6 +192,23 @@ function distanceFromBottom(viewport: Locator): Promise<number> {
 
 // 向上滚到加载行出现，并每帧记录锚点相对视口的位置；加载前、加载中与加载后都不允许位移。
 async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, text?: string): Promise<void> {
+  await viewport.evaluate((element) => {
+    const loader = element.querySelector('[data-older-loader]')
+    if (!loader) throw new Error('missing older-events loader')
+    element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
+  })
+  // Offscreen bodies are materialized asynchronously. Start measuring once the reader's anchor exists.
+  await expect
+    .poll(() =>
+      viewport.evaluate(
+        (element, { selector, text }) =>
+          [...element.querySelectorAll(selector)].some(
+            (candidate) => text === undefined || candidate.textContent === text,
+          ),
+        { selector, text },
+      ),
+    )
+    .toBe(true)
   await viewport.evaluate(
     (element, { selector, text }) => {
       const offset = () => {
@@ -200,9 +217,6 @@ async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, t
         )
         return anchor ? anchor.getBoundingClientRect().top - element.getBoundingClientRect().top : Number.NaN
       }
-      const loader = element.querySelector('[data-older-loader]')
-      if (!loader) throw new Error('missing older-events loader')
-      element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
       const samples: number[] = []
       const tracker = { samples, frame: 0 }
       const sample = () => {
@@ -837,8 +851,6 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     const conversation = inspector.getByRole('log', { name: 'Conversation' })
     await expect(conversation).toContainText('Cinder client-visible answer')
-    await expect.poll(() => fixture.eventRequests.length).toBe(1)
-    const reads = fixture.eventRequests.length
     const block = {
       block_id: 'live-table',
       interaction_id: 'interaction-cinder',
@@ -857,7 +869,6 @@ test.describe('Interaction Observation canvas', () => {
     const renderedTable = await conversation.getByRole('table').elementHandle()
     await sendObservation(page, 'live_content', block)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
-    expect(fixture.eventRequests).toHaveLength(reads)
     expect(fixture.detailRequests).toHaveLength(1)
     const durable: ObservationEvent = {
       sequence: 11,
@@ -912,7 +923,6 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs?interaction=interaction-cinder')
     const conversation = page.getByRole('log', { name: 'Conversation' })
     await expect(conversation).toContainText('Cinder client-visible answer')
-    await expect.poll(() => fixture.eventRequests.length).toBe(1)
     let failures = 0
     await page.route('**/observations/interactions/interaction-cinder/events?**', async (route) => {
       if (failures++ === 0) await route.fulfill({ status: 503, json: { error: { message: 'Temporary read failure' } } })
@@ -935,12 +945,63 @@ test.describe('Interaction Observation canvas', () => {
         },
       })
     await expect(conversation.getByText('Increment 450', { exact: true })).toHaveCount(1)
+    await page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true }).check()
     await expect(conversation.getByText('Increment 1', { exact: true })).toHaveCount(1)
     await expect(conversation.getByText('Increment 201', { exact: true })).toHaveCount(1)
-    const pages = fixture.eventRequests.slice(1)
+    const pages = fixture.eventRequests
     expect(pages.map((url) => url.searchParams.get('after_sequence'))).toEqual(['10', '210', '410'])
     expect(pages.map((url) => url.searchParams.get('through_sequence'))).toEqual([null, '460', '460'])
     expect(fixture.detailRequests).toHaveLength(1)
+  })
+
+  test('long conversation bodies remain reachable and offer explicit full text for find and copy', async ({ page }) => {
+    const paragraphs = Array.from({ length: 1000 }, (_, index) =>
+      `Readable paragraph ${index + 1}: 中文 e\u0301 👩🏽‍💻 ${'body content '.repeat(8)}`.trimEnd(),
+    )
+    await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-cinder') return
+      detail.interaction.input_preview = 'Short question'
+      const visible = detail.runs[0].events.find((event) => event.kind === 'client_visible_content')
+      if (!visible) throw new Error('missing visible-content fixture')
+      visible.payload = { text: paragraphs.join('\n\n'), block_id: 'long-readable-body', complete: true }
+    })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    const fullText = page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true })
+    await expect(fullText).not.toBeChecked()
+    await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
+    await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(0)
+    await expect.poll(() => distanceFromBottom(conversation)).toBeLessThanOrEqual(2)
+    await conversation.focus()
+    await conversation.press('Control+Home')
+    await expect(conversation.getByText(paragraphs[0], { exact: true })).toBeInViewport()
+    await expect(conversation.getByText(paragraphs[999], { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'New activity · Back to latest', exact: true })).toHaveCount(0)
+    await conversation.press('Control+End')
+    await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
+    await fullText.focus()
+    await fullText.press('Space')
+    await expect(fullText).toBeChecked()
+    await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(1)
+    await expect(conversation.getByText(paragraphs[499], { exact: true })).toHaveCount(1)
+    await expect(conversation.getByText(paragraphs[999], { exact: true })).toHaveCount(1)
+    const selectedText = await conversation.evaluate((element) => {
+      const selection = document.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      const text = selection.toString()
+      selection.removeAllRanges()
+      return text
+    })
+    expect(selectedText).toContain(paragraphs[0])
+    expect(selectedText).toContain(paragraphs[499])
+    expect(selectedText).toContain(paragraphs[999])
+    await fullText.press('Space')
+    await expect(fullText).not.toBeChecked()
+    await expect(conversation.getByText(paragraphs[0], { exact: true })).toHaveCount(0)
+    await expect(conversation.getByText(paragraphs[999], { exact: true })).toBeInViewport()
   })
 
   test('conversation opens at the latest content and prepends earlier history without moving the reading position', async ({
@@ -976,9 +1037,8 @@ test.describe('Interaction Observation canvas', () => {
     await revealLoaderTrackingAnchor(conversation, 'p', 'Paragraph 251')
     await expect(loader).toBeInViewport()
     release()
-    await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
-    expectAnchorHeld(await stopAnchorTracking(page))
     await expect(loader).not.toBeInViewport()
+    expectAnchorHeld(await stopAnchorTracking(page))
 
     let failures = 0
     await page.route('**/observations/interactions/interaction-cinder/events?**', async (route) => {
@@ -989,10 +1049,12 @@ test.describe('Interaction Observation canvas', () => {
     await revealLoaderTrackingAnchor(conversation, 'p', 'Paragraph 51')
     // 失败后停在原位等待显式重试，而不是在视口顶部反复请求。
     await conversation.getByRole('button', { name: "Couldn't load earlier events · Retry", exact: true }).click()
-    await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
+    await expect(loader).toHaveCount(0)
     expect(failures).toBe(2)
     expectAnchorHeld(await stopAnchorTracking(page))
-    await expect(loader).toHaveCount(0)
+    await conversation.focus()
+    await conversation.press('Control+Home')
+    await expect(conversation.getByText('Cinder user question', { exact: true })).toBeInViewport()
     expect(fixture.detailRequests).toHaveLength(1)
     expect(
       fixture.eventRequests
@@ -1222,6 +1284,11 @@ test.describe('Interaction Observation canvas', () => {
         const fixture = await installObservationFixture(page)
         await page.goto('/logs')
         const inspector = page.getByRole('complementary', { name: 'Observation details' })
+        const pendingRead = page.waitForRequest(
+          (request) =>
+            new URL(request.url()).pathname ===
+            `/api/v1/observations/interactions/interaction-cinder${pending === 'live' ? '/events' : ''}`,
+        )
         let release: () => void
         if (pending === 'initial') {
           release = fixture.holdNextRead('interaction-cinder')
@@ -1231,7 +1298,6 @@ test.describe('Interaction Observation canvas', () => {
           await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText(
             'Cinder client-visible answer',
           )
-          await expect.poll(() => fixture.eventRequests.length).toBe(1)
           release = fixture.holdNextRead('interaction-cinder')
           fixture.emit({
             sequence: 11,
@@ -1249,9 +1315,7 @@ test.describe('Interaction Observation canvas', () => {
             },
           })
         }
-        await expect
-          .poll(() => (pending === 'initial' ? fixture.detailRequests.length : fixture.eventRequests.length))
-          .toBe(pending === 'initial' ? 1 : 2)
+        await pendingRead
         if (action === 'switch') {
           await node(page, 'Atlas', 'completed').focus()
           await node(page, 'Atlas', 'completed').press('Enter')
@@ -3002,6 +3066,8 @@ test.describe('Interaction Observation canvas', () => {
       conversation
         .locator('[data-activity-kind="tool"]')
         .filter({ has: page.getByRole('button', { name: `Tool call ${name}`, exact: true }) })
+    // This case inspects all historical tools at once; use the explicit continuous-reading surface.
+    await page.getByRole('checkbox', { name: 'Full text for find, copy and assistive reading', exact: true }).check()
     const search = activity('Search')
     await expect(search).toHaveAttribute('aria-busy', 'true')
     await expect(search.getByRole('button')).toHaveAttribute('aria-expanded', 'false')

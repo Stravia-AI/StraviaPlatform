@@ -8,6 +8,10 @@
 
 ### Changed
 
+- Request-chain queries read retained event watermarks through separate indexed bounds and aggregate Tokens only for candidate roots. Token-filtered root counts and pagination share one query; matching retains whole-root usage, running estimates and the existing snapshot semantics.
+- Structural-history content cleanup scans bounded candidate batches on SQLite and PostgreSQL, including batches containing only referenced content, and rechecks references before deletion. Observation tail persistence batches pending tools, and admission reuses decoded Generation Chain ancestors within one request without changing ownership, expiry or writer ordering.
+- Request-chain details fetch incremental events only when notifications exceed their snapshot watermark, including notifications received during deep-link loading or reset. The canvas reuses unchanged graph derivations, topology and node objects across clock, connection, selection and body updates instead of rebuilding the full graph.
+- Request-chain conversations render nearby Markdown sections on demand and release offscreen rendered content while retaining focused controls, selections and open image dialogs. An explicit full-text mode restores all loaded text for browser find, copying and continuous assistive reading. Closed diagnostic Run, event-group and raw-event sections no longer construct their heavy contents; history prepends and rendering changes preserve the reading anchor without blocking native scrolling.
 - Inference Run delivery settlement now owns preparation guards and completion work across buffered and streaming responses. Synchronous delivery receipts, Marker publication, cancellation and revocation rules, and Generation Chain persistence semantics are unchanged.
 - Fully migrated databases now take a lightweight startup path: migration history and checksums remain validated, and SQLite foreign-key enforcement remains enabled, but ordinary restarts no longer scan every foreign key or revisit completed data conversions. Pending upgrades retain their migration integrity checks; normal startup is not a full database audit.
 - Persistent instances now reuse Wasmtime's compiled-plugin cache in `<data-dir>/cache/wasmtime` across restarts while retaining process-wide reuse of bundled components. Plugins are still loaded and validated before readiness. Cache directories are owner-controlled; an unavailable or unsafe cache produces a warning and falls back to compilation without persistent caching.
@@ -23,6 +27,7 @@
 
 ### Fixed
 
+- Patched Dagre 3.1.1's repeated type-2 conflict tail scan across all shipped JavaScript entry points, reducing transient layout allocations for wide request-chain graphs.
 - Anthropic Messages, including Claude Code, supplies its required `max_tokens` from the upstream model's discovered native maximum when available, otherwise 64,000 instead of 4,096. Automatic limits are not raised by Claude Code thinking-budget normalization; explicit limits retain existing handling. Optional standard-protocol fields remain omitted when unset. Command Code and Devin retain their reverse-engineered CLI defaults of 64,000 and 128,000 respectively. Upgrade the host and rebuild/re-import affected standalone plugins; synchronize or explicitly re-import model metadata to use newly discovered Anthropic maxima.
 - Server startup and setup completion now reuse the prepared storage and connection pools for administrator checks and Gateway construction instead of initializing and migrating the same database twice.
 - SQLite and PostgreSQL scheduling aggregates preserve confirmed usage when other attempts have unknown usage. Uncached input is calculated per attempt so incomplete cache reporting cannot erase known traffic.
