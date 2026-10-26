@@ -14,7 +14,9 @@ status: accepted
 
 已交付来源在 HTTP 流式协议终帧交出、非流式完整 body 交付确认或 WebSocket 终帧发送成功时可用，不等待 Generation 提交与 Run finish。后续准入先处理该来源及实际交付时间；来源的晚到 finish 不得把同一 Interaction 内已经有 child 的分支重新置为 `waiting_client`。
 
-旧结果回放必须由同 Principal、未过期的已保存工具收据和完整收到输入的 canonical 严格前缀共同证明，新增后缀只能是普通 User 输入。该证明允许客户端省略 thinking-only 输出，但不忽略已有输入中的指令、媒体或控制差异，也不把 User 内的 ToolResult 当作普通追加输入。成立时不采用当前工具／pending-tool 优先级，且不重复保存该 Run 的历史结果；精确父节点、快速续接和尾部规则照常适用。相同输入的独立 sibling 和结果或已有输入变化的分支仍保留各自收据，不全局消费工具 ID。完整证明不可用时不猜测回放，不改变 Generation 父边或模型输入。
+旧结果回放必须由同 Principal、未过期的已保存工具收据和完整收到输入的 canonical 严格前缀共同证明，新增后缀只能是普通 User 输入。该证明允许客户端省略 thinking-only 输出，但不忽略已有输入中的指令、媒体或控制差异，也不把 User 内的 ToolResult 当作普通追加输入。成立时不采用当前工具／pending-tool 优先级，且不重复保存该 Run 的历史结果；精确父节点、快速续接和尾部规则照常适用。相同输入的独立 sibling、结果值变化和其他历史变化仍保留各自收据，不全局消费工具 ID。完整证明不可用时不猜测回放，不改变 Generation 父边或模型输入。
+
+已收到工具结果后的普通 User 尾段被编辑，而非仅在完整旧输入后追加 User 时，另按分支处理。同 Principal、未过期的工具收据和完整收到输入必须证明：工具结果及其之前的全部 canonical 输入不变，结果后的两侧尾段均仅含普通 User 输入，且本次尾段非空并发生变化。唯一工具来源确认后，创建连接到来源 Interaction 的 child Interaction，以工具来源 Run 为 `parent_run_id`，跳过重复工具结果捕获；当前工具、pending-tool、两秒快速续接和五分钟尾部归并均不得把该分支重新并回原 Interaction。该判定支持没有 Generation parent 的跨根请求和重启后重建证据，不改变模型输入、Generation 父边或已有 Observation。
 
 没有 Generation parent 且不满足当前工具续接时，唯一且包含完整连续交互的保留尾部精确匹配也可以作为自动归并依据，但必须满足时间窗口约束。时间窗口限制的是这条尾部归并路径；时间接近本身不是任务续接证据，不能放宽唯一性、完整性或 Principal 隔离。
 

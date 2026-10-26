@@ -44,7 +44,7 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；已确认的当前工具续接与两秒快速续接按以下规则归并。
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
 3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。此外，Observation 独立核验完整输入当前尾段的工具结果：若唯一对应同 Principal 已交付来源的待完成调用，则优先归入该来源 Interaction，并以来源 Run 作为观测父节点，即使严格前缀退回较早 Generation parent。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
-4. 同一父响应的并发续接属于同一 Interaction，并在详情中形成 Run 子树。
+4. 同一父响应的并发工具续接属于同一 Interaction，并在详情中形成 Run 子树；已保存工具收据证明的 User 尾段编辑分支按下文另建 child Interaction。
 5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。该父 Generation node 已被其他 Run 续接（失败且未向客户端输出的尝试除外）时，后到的带 User 请求是并行分支，不适用快速续接，按下一条创建 child Interaction，避免旁路请求（如 harness 的 side-channel 询问）污染主 Interaction 的摘要与用量。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应、且尚无续接 Run 的执行分支标记为 `user_interrupted`；已被续接的等待分支记为 `superseded`，不当作中断。
 6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
 7. 无 parent 的失败根 Run 只在以下条件全部满足时归并：
@@ -181,7 +181,9 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 客户端可能省略 thinking-only 输出，再把上次收到的完整输入加一条 User 提醒重新提交。只有同 Principal、未过期的 `client_tool_result` 收据和完整收到输入的 canonical 严格前缀共同证明这种回放，且新增后缀仅为普通 User 输入时，才排除当前工具／pending-tool 归并优先级并跳过本 Run 的重复结果捕获。User 内容块中的 ToolResult 是新工具结果，不属于 User-only 后缀。该判定只影响 Observation；原有精确父节点、两秒快速续接和尾部规则继续适用，模型输入与 Generation 父边不变。
 
-收到输入的证明包含 leading system/developer、媒体和原生控制的 canonical 语义；忽略范围严格沿用既有 canonical 规则，包括交付/graph 元数据与缓存指令。进程内使用准入时的完整输入摘要；缓存不可用时，由已保存 Generation 重建收到输入边界，不把本次输出混入证明。截断、缺失、过期或无法无损重建时不推断回放。相同输入的独立 sibling、结果值变化和已有输入变化仍保留自己的工具收据，不按工具 ID 全局消费或去重。
+编辑已回传结果后的旧 User 消息不是首次工具续接。已有收据与完整收到输入若证明工具结果及其之前的全部 canonical 历史相同，只有结果后的非空普通 User 尾段被编辑，则确认唯一工具来源后直接创建 child Interaction，连接来源 Interaction，并以工具来源 Run 为 `parent_run_id`。该分支不受两秒快速续接或五分钟尾部归并影响，不再捕获重复工具结果；即使控制参数或模型切换使 Generation parent 缺失，也保留诊断父边。仅在完整旧输入后追加 User 的请求仍遵循上一段规则。
+
+收到输入的证明包含 leading system/developer、媒体和原生控制的 canonical 语义；忽略范围严格沿用既有 canonical 规则，包括交付/graph 元数据与缓存指令。进程内使用准入时的完整输入摘要；缓存不可用时，由已保存 Generation 重建收到输入边界，不把本次输出混入证明。截断、缺失、过期或无法无损重建时不推断回放。除上述已证明的 User 尾段编辑外，相同输入的独立 sibling、结果值变化和其他历史变化仍保留自己的工具收据，不按工具 ID 全局消费或去重。
 
 只有未满足当前工具续接条件且没有 Generation parent 时，才用保留尾部决定交互归属；先确认来源，再按以下规则分组：
 

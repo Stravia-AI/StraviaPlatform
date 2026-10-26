@@ -104,6 +104,7 @@ class _LocalConversation:
     def send(
         self, messages: list[dict[str, Any]], *, answer: dict[str, Any] | None = None,
         key: str | None = None, tools: bool = False,
+        body_extra: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         before = {
             item["id"]: item["last_event_sequence"]
@@ -111,7 +112,9 @@ class _LocalConversation:
         }
         expected = answer or _answer(_text("answer-" + hashlib.sha256(_semantic(messages).encode()).hexdigest()[:12]))
         self.accepted[_semantic(messages)] = expected
-        extra = {"tools": [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}]} if tools else None
+        extra = dict(body_extra or {})
+        if tools:
+            extra["tools"] = [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}]
         status, body = _proxy(self.env, key or self.key, self.name, messages, body_extra=extra)
         assert status == 200, body
         returned = body["choices"][0]["message"]
@@ -207,6 +210,28 @@ def _admitted(detail: dict[str, Any]) -> dict[str, Any]:
     events = [event for event in run["events"] if event["kind"] == "run_admitted"]
     assert events
     return events[-1]["payload"]
+
+
+def _restart_observation_server(admin_env: dict[str, Any], stravia_binary: Path) -> None:
+    stop_stravia_server(admin_env["process"], admin_env["logs"])
+    port = urlparse(admin_env["admin"]).port
+    proc, logs = start_stravia_server(
+        stravia_binary=stravia_binary,
+        args=[
+            "--host", "127.0.0.1", "--port", str(port),
+            "--data-dir", str(admin_env["data_dir"]),
+            "--proxy-cors-origin", admin_env["proxy_cors_origin"],
+        ],
+    )
+    admin_env.update({"process": proc, "logs": logs})
+    wait_until_ready(f"{admin_env['admin']}/api/v1/auth/state")
+    session = WebSession(admin_env["admin"])
+    status, body = session.request(
+        "POST", "/api/v1/auth/login",
+        {"username": admin_env["username"], "password": admin_env["password"]},
+    )
+    assert status == 200, body
+    admin_env["auth"] = session.auth_headers()
 
 
 def _diagnostic(conversation: _LocalConversation, detail: dict[str, Any], status: str) -> dict[str, Any]:
@@ -659,25 +684,7 @@ def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
         if any(event["kind"] == "client_tool_result" for event in run["events"])
     )
     if restart:
-        stop_stravia_server(admin_env["process"], admin_env["logs"])
-        port = urlparse(admin_env["admin"]).port
-        proc, logs = start_stravia_server(
-            stravia_binary=stravia_binary,
-            args=[
-                "--host", "127.0.0.1", "--port", str(port),
-                "--data-dir", str(admin_env["data_dir"]),
-                "--proxy-cors-origin", admin_env["proxy_cors_origin"],
-            ],
-        )
-        admin_env.update({"process": proc, "logs": logs})
-        wait_until_ready(f"{admin_env['admin']}/api/v1/auth/state")
-        session = WebSession(admin_env["admin"])
-        status, body = session.request(
-            "POST", "/api/v1/auth/login",
-            {"username": admin_env["username"], "password": admin_env["password"]},
-        )
-        assert status == 200, body
-        admin_env["auth"] = session.auth_headers()
+        _restart_observation_server(admin_env, stravia_binary)
         conversation.env["auth"] = admin_env["auth"]
 
     # The client omits the thinking-only output and only appends a reminder.
@@ -716,3 +723,46 @@ def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
         "branch result", "first result", "first result",
     ]
     assert all(run["status"] != "waiting_client" for run in runs)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("new_generation_root", [False, True])
+@pytest.mark.parametrize("restart", [False, True])
+def test_editing_user_after_received_tool_result_creates_child_interaction(
+    diagnostic_provider, admin_env: dict[str, Any], stravia_binary: Path,
+    new_generation_root: bool, restart: bool,
+) -> None:
+    conversation = diagnostic_provider("edited-user-branch")
+    question = _user("Run a browser probe and report its result.")
+    call_id = "call-edit-" + uuid4().hex
+    call = {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "probe", "arguments": "{}"},
+        }],
+    }
+    assistant, source = conversation.send([question], answer=call, tools=True)
+    source_run = _newest_run(source)
+    history = [question, assistant, {"role": "tool", "tool_call_id": call_id, "content": "probe result"}]
+    _, original = conversation.send([*history, _user("Use CloakBrowser for OMP.")], tools=True)
+    assert original["interaction"]["id"] == source["interaction"]["id"]
+
+    if restart:
+        _restart_observation_server(admin_env, stravia_binary)
+        conversation.env["auth"] = admin_env["auth"]
+
+    _, branch = conversation.send(
+        [*history, _user("Use CloakBrowser for OMP and preserve UA-CH.")],
+        tools=True, body_extra={"temperature": 0.25} if new_generation_root else None,
+    )
+    assert branch["interaction"]["id"] != original["interaction"]["id"]
+    assert branch["interaction"]["parent_interaction_id"] == original["interaction"]["id"]
+    run = _newest_run(branch)
+    assert run["parent_run_id"] == source_run["id"]
+    assert run["generation_parent_id"] == (None if new_generation_root else source_run["generation_node_id"])
+    assert branch["interaction"]["input_preview"] == "Use CloakBrowser for OMP and preserve UA-CH."
+    assert run["status"] == "completed"
+    assert not any(event["kind"] == "client_tool_result" for event in run["events"])

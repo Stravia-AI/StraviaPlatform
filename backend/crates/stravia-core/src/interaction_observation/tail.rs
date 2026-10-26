@@ -294,6 +294,30 @@ impl Window {
             && new[old.len()..].iter().all(|item| item.user_only)
     }
 
+    /// 工具结果之前的完整输入必须不变，只允许编辑其后的普通 User 尾段。
+    /// 不能仅凭已见过工具 ID 判断分支，否则会吞掉合法 sibling 的独立结果。
+    pub(super) fn is_received_input_with_edited_user_tail(&self, input: &Self) -> bool {
+        let (Some(old), Some(new)) = (&self.received_items, &input.received_items) else {
+            return false;
+        };
+        let Some(boundary) = old.iter().rposition(|item| !item.user_only).map(|i| i + 1) else {
+            return false;
+        };
+        boundary < old.len()
+            && boundary < new.len()
+            && new.starts_with(&old[..boundary])
+            && new[boundary..].iter().all(|item| item.user_only)
+            && old[boundary..] != new[boundary..]
+            && self
+                .units
+                .iter()
+                .rev()
+                .take_while(|unit| {
+                    unit.value.get("role").and_then(Value::as_str) != Some("assistant")
+                })
+                .any(|unit| tool_result_id(&unit.value).is_some())
+    }
+
     /// 判断当前请求没有相对来源 Run 新增任何用户输入，只是沿着当前工具结果继续。
     ///
     /// 只比较用户输入的有序身份：客户端可以在回放时改写其余历史（删除旧图片、裁剪或

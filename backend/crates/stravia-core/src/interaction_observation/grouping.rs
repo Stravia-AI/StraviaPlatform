@@ -30,6 +30,7 @@ pub(super) struct GroupAssignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DiagnosticKind {
     CurrentTool,
+    ToolResultBranch,
     RetainedTail,
 }
 
@@ -136,6 +137,18 @@ impl GroupingIndex {
         let mut diagnostic_source_run_id = None;
         let mut interrupt_parent = false;
         let (interaction_id, parent_run_id, inferred_retry) = if let Some(source) =
+            diagnostic.filter(|source| source.kind == DiagnosticKind::ToolResultBranch)
+        {
+            grouping_reason = "new_user";
+            parent_interaction_id = Some(source.interaction_id.clone());
+            diagnostic_source_run_id = Some(source.run_id.clone());
+            interrupt_parent = true;
+            (
+                stravia_runtime_contract::identifier::new_id(),
+                Some(source.run_id.clone()),
+                false,
+            )
+        } else if let Some(source) =
             diagnostic.filter(|source| source.kind == DiagnosticKind::CurrentTool)
         {
             grouping_reason = "current_tool_continuation";

@@ -33,7 +33,14 @@ struct DiscoverInput<'a> {
     input_overflow: bool,
     ingress_received_at: i64,
     now: i64,
-    replayed_client_tool_results: bool,
+    tool_result_relation: ToolResultRelation,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolResultRelation {
+    Unproven,
+    UserOnlyReplay,
+    EditedUserBranch,
 }
 
 /// Caller-confirmed admission inputs: the received client items plus the facts
@@ -403,13 +410,14 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         // 只在本次准入中复用有界祖先证据，不把诊断缓存变成历史事实源。
         let mut history = None;
         let mut parent_evidence_error = None;
-        let replayed_client_tool_results = match input.as_ref() {
+        let tool_result_relation = match input.as_ref() {
             Some(input) => {
-                self.replayed_client_tool_results(&start.principal, input, now, &mut history)
+                self.received_tool_result_relation(&start.principal, input, now, &mut history)
                     .await
             }
-            None => false,
+            None => ToolResultRelation::Unproven,
         };
+        let replayed_client_tool_results = tool_result_relation != ToolResultRelation::Unproven;
         let parent = match facts.generation_parent_id.as_deref() {
             Some(node) => match self
                 .evidence
@@ -437,7 +445,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                     input_overflow,
                     ingress_received_at,
                     now,
-                    replayed_client_tool_results,
+                    tool_result_relation,
                 },
                 &mut history,
             )
@@ -514,15 +522,15 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         self.tail.cache_received_input(run_id, window, expires_at);
     }
 
-    async fn replayed_client_tool_results(
+    async fn received_tool_result_relation(
         &self,
         principal: &str,
         input: &Window,
         now: i64,
         workspace: &mut Option<GenerationDiscoveryWorkspace>,
-    ) -> bool {
+    ) -> ToolResultRelation {
         let Some(ids) = input.current_tail_tool_ids() else {
-            return false;
+            return ToolResultRelation::Unproven;
         };
         let sources = match self
             .evidence
@@ -535,24 +543,28 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                     cause = %super::writer::redacted_persist_cause(&error),
                     "received tool-result evidence lookup failed"
                 );
-                return false;
+                return ToolResultRelation::Unproven;
             }
         };
         if sources.len() > MAX_CANDIDATES {
-            return false;
+            return ToolResultRelation::Unproven;
         }
+        let mut relation = ToolResultRelation::Unproven;
         let mut unloaded = Vec::new();
         for (run, node) in &sources {
             if let Some(old) = self.tail.received_input(run, now) {
                 if old.is_received_prefix_with_only_new_users(input) {
-                    return true;
+                    return ToolResultRelation::UserOnlyReplay;
+                }
+                if old.is_received_input_with_edited_user_tail(input) {
+                    relation = ToolResultRelation::EditedUserBranch;
                 }
             } else {
                 unloaded.push((run.as_str(), node.as_deref()));
             }
         }
         if unloaded.is_empty() {
-            return false;
+            return relation;
         }
         let windows = match self
             .evidence
@@ -565,14 +577,22 @@ impl<E: AttributionEvidence> RunAttribution<E> {
                     cause = %super::writer::redacted_persist_cause(&error),
                     "received client-input evidence materialization failed"
                 );
-                return false;
+                return relation;
             }
         };
-        windows.len() == unloaded.len()
-            && windows.iter().any(|window| {
-                matches!(window, SourceWindow::Captured(old)
-                if old.is_received_prefix_with_only_new_users(input))
-            })
+        if windows.len() == unloaded.len() {
+            for window in windows {
+                if let SourceWindow::Captured(old) = window {
+                    if old.is_received_prefix_with_only_new_users(input) {
+                        return ToolResultRelation::UserOnlyReplay;
+                    }
+                    if old.is_received_input_with_edited_user_tail(input) {
+                        relation = ToolResultRelation::EditedUserBranch;
+                    }
+                }
+            }
+        }
+        relation
     }
 
     pub(super) fn sweep(&mut self, now: i64) {
@@ -722,7 +742,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             input_overflow,
             ingress_received_at,
             now,
-            replayed_client_tool_results,
+            tool_result_relation,
         } = discovery;
         if input_overflow {
             return (None, Some(tail_status_event("resource_limit")));
@@ -731,11 +751,14 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             return (None, None);
         };
         // 历史编辑可能只保留较早的生成前缀；当前工具结果仍能确认实际续接来源。
-        if !replayed_client_tool_results
-            && let Some(source) = self
+        if tool_result_relation != ToolResultRelation::UserOnlyReplay
+            && let Some(mut source) = self
                 .current_tool_source(principal, input, ingress_received_at, now, workspace)
                 .await
         {
+            if tool_result_relation == ToolResultRelation::EditedUserBranch {
+                source.kind = DiagnosticKind::ToolResultBranch;
+            }
             return (Some(source), None);
         }
         let mut loaded = Vec::new();
@@ -1556,7 +1579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_proof_preserves_siblings_and_changed_result_or_user_branches() {
+    async fn receipt_proof_preserves_siblings_and_changed_result_branches() {
         let received = vec![
             user("task"),
             tool_call("call-1"),
@@ -1567,18 +1590,10 @@ mod tests {
         changed_result[2] =
             AiItem::function_call_output("call-1", serde_json::json!("other result"));
         changed_result.push(user("reminder"));
-        let mut changed_user = received.clone();
-        changed_user[3] = user("different branch");
-        changed_user.push(user("reminder"));
         let mut new_assistant = received.clone();
         new_assistant.push(AiItem::output_text("new answer"));
         new_assistant.push(tool_result("call-1"));
-        for items in [
-            received.clone(),
-            changed_result,
-            changed_user,
-            new_assistant,
-        ] {
+        for items in [received.clone(), changed_result, new_assistant] {
             let mut evidence = MemoryEvidence::default();
             evidence.received_results.insert(
                 "received-run".into(),
