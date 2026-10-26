@@ -108,7 +108,7 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
         {#if hint}<FieldHelp {hint} />{/if}
       </div>
       {#if description}
-        <p id={descriptionId} class="text-sm leading-normal text-muted-foreground">{description}</p>
+        <p id={descriptionId} class="text-xs leading-normal text-muted-foreground">{description}</p>
       {/if}
       {@render note?.()}
     </div>

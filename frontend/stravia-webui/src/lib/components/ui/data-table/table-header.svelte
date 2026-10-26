@@ -107,7 +107,7 @@ let {
 <Table.Header
   bind:ref
   class={cn(
-    'bg-[var(--data-table-header-background)] shadow-[0_1px_0_var(--border)] [&_[data-slot=table-head]]:bg-[var(--data-table-header-background)] [&_[data-slot=table-head]]:text-[0.8rem] [&_[data-slot=table-head]]:text-muted-foreground',
+    'bg-[var(--data-table-header-background)] shadow-[0_1px_0_var(--border)] [&_[data-slot=table-head]]:bg-[var(--data-table-header-background)] [&_[data-slot=table-head]]:text-xs [&_[data-slot=table-head]]:text-muted-foreground',
     stickyHeader && 'sticky top-0 z-20',
   )}>
   {#each headerGroups as headerGroup, headerRowIndex (headerGroup.id)}

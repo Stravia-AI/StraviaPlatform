@@ -58,34 +58,34 @@ colors:
 typography:
   body:
     fontFamily: "IBM Plex Sans, Noto Sans SC Variable, Noto Sans SC, system-ui, sans-serif"
-    fontSize: 14px
+    fontSize: 13px
     fontWeight: 400
     lineHeight: 1.5
   body-chinese:
     fontFamily: "Noto Sans SC Variable, Noto Sans SC, IBM Plex Sans, sans-serif"
-    fontSize: 14px
+    fontSize: 13px
     fontWeight: 400
     lineHeight: 1.58
   page-title:
     fontFamily: "IBM Plex Sans Condensed, IBM Plex Sans, sans-serif"
-    fontSize: 30px
+    fontSize: 28px
     fontWeight: 600
     lineHeight: 1.15
     letterSpacing: -0.025em
   page-title-compact:
     fontFamily: "IBM Plex Sans Condensed, IBM Plex Sans, sans-serif"
-    fontSize: 26px
+    fontSize: 24px
     fontWeight: 600
     lineHeight: 1.15
     letterSpacing: -0.025em
   section-title:
     fontFamily: "IBM Plex Sans Condensed, IBM Plex Sans, sans-serif"
-    fontSize: 18px
+    fontSize: 16px
     fontWeight: 600
     lineHeight: 1.35
   navigation:
     fontFamily: "IBM Plex Sans, Noto Sans SC Variable, Noto Sans SC, sans-serif"
-    fontSize: 13px
+    fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
   technical:
@@ -304,21 +304,22 @@ Stravia 是本地运行、可自托管的 Agent infra（智能体基础设施）
 
 字体系统分为三种职责，数量越少越能维持仪表感。
 
-1. **正文：IBM Plex Sans。** 英文正文、导航、标签和按钮使用 IBM Plex Sans，正文基准为 14px / 1.5。只使用 400、500、600 三个字重：400 阅读，500 操作、设置行标题与局部强调，600 标题。
-2. **结构：IBM Plex Sans Condensed。** 英文页标题、区段标题与导航分组使用 Condensed 600，建立控制面板式的纵向节奏，不用于长段正文。页标题在窄屏为 26px，`sm` 起为 30px；区段标题为 18px；表单小节与 Sheet 内标题为 14px / 600。
+1. **正文：IBM Plex Sans。** 英文正文、导航、标签和按钮使用 IBM Plex Sans，正文基准为 13px / 1.5。只使用 400、500、600 三个字重：400 阅读，500 操作、设置行标题与局部强调，600 标题。
+2. **结构：IBM Plex Sans Condensed。** 英文页标题、区段标题与导航分组使用 Condensed 600，建立控制面板式的纵向节奏，不用于长段正文。页标题在窄屏为 24px，`sm` 起为 28px；区段标题为 16px；表单小节与 Sheet 内标题为 14px / 600。
 3. **技术：IBM Plex Mono。** Model ID、Route ID、URL、协议值、掩码密钥、代码、时间、计数和延迟使用等宽字。数字开启 tabular numerals，便于按列扫描；普通产品名称和解释文案不要等宽化。
 
 中文界面使用 Noto Sans SC Variable；正文行高提高到 1.58。`.font-structural` 在 `zh-CN` 下也切换为 Noto Sans SC 并取消字距，避免拉丁窄体与中文强行混排。
 
 文字层级只有四级，每级承担一种职责：
 
-| 层级       | 规格           | 用途                                                       |
-| ---------- | -------------- | ---------------------------------------------------------- |
-| 页标题     | 26／30px，600  | 每页唯一 `h1`，说明当前任务或资源名称                      |
-| 区段标题   | 18px，600      | `h2`，描述一个可操作或可理解的子任务                       |
-| 正文与标签 | 14px，400／500 | 设置行标题、字段标签、表格内容、按钮、说明                 |
-| 辅助       | 12–13px，muted | 表头、时间、来源、计数、单位等真实数据；不用于解释文字段落 |
+| 层级       | 规格           | 用途                                                           |
+| ---------- | -------------- | -------------------------------------------------------------- |
+| 页标题     | 24／28px，600  | 每页唯一 `h1`，说明当前任务或资源名称                          |
+| 区段标题   | 16px，600      | `h2`，描述一个可操作或可理解的子任务                           |
+| 正文与标签 | 13px，400／500 | 设置行标题、字段标签、表格内容、按钮                           |
+| 辅助       | 12px，muted    | 设置行说明、表头、时间、来源、计数、单位等；不用于解释文字段落 |
 
+- 侧栏条目、侧栏分组标签与设置页内导航为 14px（分组标签 muted），条目高度约 30px；按钮、输入框与下拉框默认高 32px，紧凑变体（`sm`）28px，行内操作与表格工具栏使用紧凑变体。字号与控件高度以 1920px 宽、100% 缩放下的 Codex 设置页为参照，不随视口放大。
 - 不使用眉题。信息域已由侧栏分组和 breadcrumb 表达，页头不再重复「配置」「监控」等归属。
 - 页标题说明当前任务；详情页使用资源的展示名称，未命名时回退到其 ID，不用「编辑模型」等泛称代替资源身份。
 - 标题使用 balanced wrapping，正文使用 pretty wrapping。禁止用字号过大制造空洞“英雄区”，也不用缩小字号塞入更多说明。
@@ -438,14 +439,15 @@ Lucide 图标使用 16px 为常规尺寸，跟随文字颜色；图标只辅助�
 - 开关与复选框行在任何宽度都保持左右排布：文字在左，控件在右；开关组按设置行逐行排列，不并排成多列。依赖父开关的子项缩进紧跟父行。
 - 技术输入使用等宽字体。Secret 默认遮蔽，提供有名称的显示/隐藏按钮；提示必须符合实际查看、复制和编辑契约，不能未经依据声称「仅显示一次」。本规范不改变凭据展示或安全策略。
 - Advanced 默认折叠，触发器提供 `aria-expanded` 与 `aria-controls`。只有在用户明确需要时显示协议级参数，不能让高级项淹没主流程。
-- 多小节表单使用 `FormSection`：小节标题为 14px／600，默认无描述，小节之间 24px；小节级次要操作与标题同行靠右。顶层区段仍用 `h2`，嵌套小节用下一级标题，不叠加双重分隔线。
+- 多小节表单使用 `FormSection`：小节标题为 14px／600，默认无描述，小节之间 24px；小节内字段标签降为 400，让标题成为唯一的加粗层，避免标题与首个标签叠成两行同样重的文字。小节按用户任务归并，每节承载一组相关字段；只有一个字段或一个添加按钮的内容并入相邻小节，不单独设标题，也不让标题与标签重复同一个词。顶层区段仍用 `h2`，嵌套小节用下一级标题，不叠加双重分隔线。
+- 既能勾选已知取值、又允许登记自定义取值的多选（如推理强度），把「输入并添加」放进同一个下拉：搜索框无匹配项时出现「添加“值”」选项，不再另设输入框与按钮。
 - 保存方式遵循「保存方式」。保存失败保留用户输入并显示可行动错误；不要吞掉后端错误，也不要用自动重试掩盖配置问题。
 
 ### 设置行
 
 设置行是配置页的基本单元，也用于其他页面中的独立开关与偏好，以及编辑器中的开关组。
 
-- 一项设置一行：左侧为标题（14px／500），需要时下方加一行说明；右侧为控件或操作，控件右边缘与设置列右边缘对齐。控件前可放一个等宽、muted 的状态值（如已保存数据量，零值隐藏）。控件只用 number、setting、datetime 三档语义宽度。
+- 一项设置一行：左侧为标题（13px／500），需要时下方加一行 12px muted 说明；右侧为控件或操作，控件右边缘与设置列右边缘对齐。控件前可放一个等宽、muted 的状态值（如已保存数据量，零值隐藏）。控件只用 number、setting、datetime 三档语义宽度。
 - 行使用 `settings-row` 上下内边距，行之间用 1px `border` 分隔，首行之上、末行之下不画线；分区标题与首行间距 8px，分区之间 32px。分隔线已经建立节奏，不再叠加区段顶边线，也不包卡片。
 - 行宽低于 32rem 时标题在上、控件占满宽度；开关与只读值行在任何宽度都保持左右排布。需要输入名称、地址、密钥等自由文本的设置项使用上下排布的行：标题在上、控件占满行宽，不把长控件挤到标题右侧。
 - 依赖父开关的子设置紧跟父行，以左侧竖线缩进一级；父开关关闭时隐藏。
@@ -467,7 +469,7 @@ Lucide 图标使用 16px 为常规尺寸，跟随文字颜色；图标只辅助�
 #### 表头视觉与密度
 
 - 采用主流数据表的克制处理，而不是复制 React 等框架的实现。可参考 [shadcn/ui Data Table](https://ui.shadcn.com/docs/components/data-table) 的 ghost 排序按钮；继续使用本项目的 Svelte 组件、字体和语义 token。
-- 表头是辅助扫描层，不是页面标题或厚重工具栏。共享表头字号为 `0.8rem`（默认根字号下约 13px）、字重 500；未排序标题使用 `muted-foreground`，当前排序标题使用 `foreground`。
+- 表头是辅助扫描层，不是页面标题或厚重工具栏。共享表头字号为 12px（`text-xs`）、字重 500；未排序标题使用 `muted-foreground`，当前排序标题使用 `foreground`。
 - 表头密度根据文字、图标与实际控件的占位选择；分组、筛选行和文本缩放必须自然容纳，不以固定高度裁切内容。
 - 数据行密度独立选择。规则浏览可以使用宽松数据行，同时保持紧凑表头；不得在按钮外再叠加大量垂直 padding，把表头撑成厚重色块。
 - 表头背景必须不透明，浅色和深色使用同一语义派生方式：当前共享值为 `color-mix(in oklab, var(--muted) 45%, var(--background))`。固定列的表头使用相同背景，滚动时不能透出下方数据；不为页面新增孤立灰色或主题特例。

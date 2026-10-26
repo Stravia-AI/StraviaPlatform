@@ -30,7 +30,7 @@ let { metrics = [], label, loading = false, loadingLabel, placeholderCount = 6 }
         <p class="text-xs leading-4 font-medium text-muted-foreground">{metric.label}</p>
         <p
           class={[
-            'font-technical mt-1 text-xl leading-6 font-medium tabular-nums sm:text-2xl',
+            'font-technical mt-1 text-lg leading-6 font-medium tabular-nums sm:text-xl',
             metric.tone === 'error' && 'text-destructive',
           ]}>
           {metric.value}

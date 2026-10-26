@@ -3,11 +3,11 @@ import * as m from '#lib/paraglide/messages.js'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
-import { tick, untrack } from 'svelte'
+import { tick, untrack, type Snippet } from 'svelte'
 
-import { specificationReasoningEfforts } from '#lib/model-specification.js'
 import FormSection from '#lib/components/form-section.svelte'
 import ModalitySelect from '#lib/components/modality-select.svelte'
+import ReasoningEffortSelect from '#lib/components/reasoning-effort-select.svelte'
 import { localeState } from '#lib/localization.svelte.js'
 import { providerModelSelectionPolicyLabel } from '#lib/provider-model-labels.js'
 import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelSelectionPolicy } from '#lib/types.js'
@@ -37,6 +37,8 @@ interface Props {
   onSave: (metadataJson: string) => void
   onSelectionChange: (policy: ProviderModelSelectionPolicy) => void
   onDirtyChange?: (dirty: boolean) => void
+  /** 上游模型的 RPM 限额；只有已存在的模型才有，由使用方提供并随页面一起保存。 */
+  rpm?: Snippet
 }
 
 type StringField = 'name' | 'description'
@@ -45,6 +47,10 @@ const modalityTargets = ['input', 'output'] as const
 
 // 宽布局下的“添加可选字段”按钮贴设置列右缘，与控件右边缘对齐。
 const alignedActions = 'flex flex-wrap gap-2 empty:hidden'
+// 设置列够宽时短字段两列并排；窄时退回单列。
+const pairGrid =
+  'grid gap-x-6 gap-y-4 grid-cols-[repeat(auto-fill,minmax(max(min(100%,20rem),calc((100%-1.5rem)/2)),1fr))]'
+const priceGrid = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]'
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },
@@ -55,11 +61,10 @@ const priceFields: Array<{ key: PriceField; label: () => string }> = [
   { key: 'cache_read', label: m.provider_model_field_cache_read },
   { key: 'cache_write', label: m.provider_model_field_cache_write },
 ]
-let { detail, draft = false, disabled = false, onSave, onSelectionChange, onDirtyChange }: Props = $props()
+let { detail, draft = false, disabled = false, onSave, onSelectionChange, onDirtyChange, rpm }: Props = $props()
 let metadata = $state<ProviderModelMetadata>({})
 let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
 let structuralErrors = $state<string[]>([])
-let customEffort = $state('')
 let extensionsOpen = $state(false)
 let errorAlert = $state<HTMLDivElement>()
 let initialFingerprint = $state('')
@@ -94,7 +99,6 @@ $effect(() => {
   metadata = nextMetadata
   cost = providerModelCostFromMetadata(snapshot)
   structuralErrors = []
-  customEffort = ''
   initialFingerprint = untrack(fingerprint)
 })
 $effect(() => {
@@ -150,21 +154,6 @@ function setLimit(value: string): void {
   metadata.limit = { context: value === '' ? null : Number(value) }
 }
 
-function effortOptions(): string[] {
-  return [...new Set([...specificationReasoningEfforts, ...(metadata.reasoning_efforts ?? [])])]
-}
-
-function setEffortValues(values: string[]): void {
-  metadata.reasoning_efforts = effortOptions().filter((value) => values.includes(value))
-}
-
-function addCustomEffort(): void {
-  const value = customEffort.trim()
-  if (!value || ['default', 'null'].includes(value.toLowerCase())) return
-  metadata.reasoning_efforts = [...new Set([...(metadata.reasoning_efforts ?? []), value])]
-  customEffort = ''
-}
-
 function addTier(): void {
   cost.tiers.push({ ...emptyProviderModelPrices(), threshold: '' })
   metadata.cost ??= { tiers: [] }
@@ -184,60 +173,60 @@ export function submit(): void {
 }
 </script>
 
-{#snippet pricingActions()}
-  <Button type="button" variant="ghost" size="sm" onclick={() => removeField('cost')}
-    ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
+{#snippet stringControl(field: (typeof stringFields)[number])}
+  {#if hasField(field.key)}
+    <Field.Field class={field.multiline ? 'col-span-full' : undefined}>
+      <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+      {#if field.multiline}
+        <Textarea
+          id={`provider-model-${field.key}`}
+          class="min-h-24 resize-y"
+          value={String(metadata[field.key] ?? '')}
+          oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
+      {:else}
+        <Input
+          id={`provider-model-${field.key}`}
+          value={String(metadata[field.key] ?? '')}
+          oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
+      {/if}
+    </Field.Field>
+  {/if}
 {/snippet}
 
 <fieldset bind:this={editorRoot} {disabled} class="@container/model-editor flex min-w-0 flex-col gap-6">
-  {#if !draft}
-    <Field.Group>
-      <Field.Field>
-        <Field.Label for="provider-model-selection" hint={m.provider_model_editor_visibility_help()}
-          >{m.common_availability_adding_models()}</Field.Label>
-        <Select.Root
-          type="single"
-          {disabled}
-          value={detail.selection_policy}
-          onValueChange={(value: string) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
-          <Select.Trigger
-            id="provider-model-selection"
-            class="w-full min-w-0"
-            aria-label={m.common_availability_adding_models()}>
-            {providerModelSelectionPolicyLabel(detail.selection_policy, localeState.current)}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value="auto">{m.common_use_synced_status()}</Select.Item>
-              <Select.Item value="force_enabled">{m.common_always_allow()}</Select.Item>
-              <Select.Item value="force_disabled">{m.common_don_t_allow()}</Select.Item>
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-      </Field.Field>
-    </Field.Group>
-  {/if}
-
   <FormSection title={m.provider_model_editor_model_information()}>
-    <Field.Group class="gap-4 empty:hidden">
-      {#each stringFields as field (field.key)}
-        {#if hasField(field.key)}
-          <Field.Field>
-            <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
-            {#if field.multiline}
-              <Textarea
-                id={`provider-model-${field.key}`}
-                class="min-h-24 resize-y"
-                value={String(metadata[field.key] ?? '')}
-                oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
-            {:else}
-              <Input
-                id={`provider-model-${field.key}`}
-                value={String(metadata[field.key] ?? '')}
-                oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
-            {/if}
-          </Field.Field>
-        {/if}
+    <!-- 设置列够宽时短字段两列并排；描述是多行文本，独占一行。 -->
+    <Field.Group class={`${pairGrid} empty:hidden`}>
+      {#each stringFields.filter((field) => !field.multiline) as field (field.key)}
+        {@render stringControl(field)}
+      {/each}
+      {#if !draft}
+        <Field.Field>
+          <Field.Label for="provider-model-selection" hint={m.provider_model_editor_visibility_help()}
+            >{m.common_availability_adding_models()}</Field.Label>
+          <Select.Root
+            type="single"
+            {disabled}
+            value={detail.selection_policy}
+            onValueChange={(value: string) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
+            <Select.Trigger
+              id="provider-model-selection"
+              class="w-full min-w-0"
+              aria-label={m.common_availability_adding_models()}>
+              {providerModelSelectionPolicyLabel(detail.selection_policy, localeState.current)}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value="auto">{m.common_use_synced_status()}</Select.Item>
+                <Select.Item value="force_enabled">{m.common_always_allow()}</Select.Item>
+                <Select.Item value="force_disabled">{m.common_don_t_allow()}</Select.Item>
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </Field.Field>
+      {/if}
+      {#each stringFields.filter((field) => field.multiline) as field (field.key)}
+        {@render stringControl(field)}
       {/each}
     </Field.Group>
     <div class={alignedActions}>
@@ -249,9 +238,9 @@ export function submit(): void {
     </div>
   </FormSection>
 
-  <FormSection title={m.provider_model_editor_context_modalities()}>
-    <Field.Group class="gap-4">
-      <Field.Field size="setting">
+  <FormSection title={m.provider_model_editor_capabilities()}>
+    <Field.Group class={pairGrid}>
+      <Field.Field>
         <Field.Label for="provider-model-limit-context">{m.provider_model_editor_context()}</Field.Label>
         <Input
           id="provider-model-limit-context"
@@ -262,6 +251,17 @@ export function submit(): void {
           value={metadata.limit?.context ?? ''}
           placeholder={m.model_specification_not_registered()}
           oninput={(event: Event) => setLimit(inputValue(event))} />
+      </Field.Field>
+      <Field.Field>
+        <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
+          >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
+        <ReasoningEffortSelect
+          id="provider-model-reasoning-efforts"
+          {disabled}
+          registered={detail.metadata.reasoning_efforts}
+          bind:value={
+            () => metadata.reasoning_efforts ?? [], (values: string[]) => (metadata.reasoning_efforts = values)
+          } />
       </Field.Field>
       {#if hasField('modalities') && metadata.modalities}
         {#each modalityTargets as target (target)}
@@ -291,116 +291,79 @@ export function submit(): void {
     </div>
   </FormSection>
 
-  <FormSection title={m.provider_model_editor_reasoning_efforts()}>
-    <Field.Group class="gap-4">
-      <Field.Field>
-        <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
-          >{m.provider_model_editor_supported_efforts()}</Field.Label>
-        <Select.Root type="multiple" {disabled} bind:value={() => metadata.reasoning_efforts ?? [], setEffortValues}>
-          <Select.Trigger id="provider-model-reasoning-efforts" class="w-full min-w-0" data-effort-values-select>
-            {#if metadata.reasoning_efforts?.length}
-              <span class="truncate font-technical">{metadata.reasoning_efforts.join(', ')}</span>
-            {:else}
-              <span class="truncate text-muted-foreground">{m.provider_model_editor_select_efforts()}</span>
-            {/if}
-          </Select.Trigger>
-          <Select.Content
-            ><Select.Group>
-              {#each effortOptions() as value (value)}<Select.Item {value}
-                  ><span class="font-technical">{value}</span></Select.Item
-                >{/each}
-            </Select.Group></Select.Content>
-        </Select.Root>
-      </Field.Field>
-      <Field.Field>
-        <Field.Label for="provider-model-custom-effort">{m.provider_model_editor_custom_effort()}</Field.Label>
-        <div class="flex min-w-0 gap-2">
-          <Input
-            id="provider-model-custom-effort"
-            class="min-w-0 flex-1 font-technical"
-            bind:value={customEffort}
-            onkeydown={(event: KeyboardEvent) => {
-              if (event.key !== 'Enter' || event.isComposing) return
-              event.preventDefault()
-              addCustomEffort()
-            }} />
-          <Button
-            type="button"
-            variant="outline"
-            class="shrink-0"
-            onclick={addCustomEffort}
-            disabled={!customEffort.trim() || ['default', 'null'].includes(customEffort.trim().toLowerCase())}>
-            <PlusIcon data-icon="inline-start" />{m.provider_model_editor_add_effort()}
-          </Button>
-        </div>
-      </Field.Field>
-    </Field.Group>
-  </FormSection>
-
-  <FormSection title={m.provider_model_editor_pricing()} actions={hasField('cost') ? pricingActions : undefined}>
-    {#if hasField('cost')}
-      <div class="flex flex-col gap-3">
-        <p class="flex items-center gap-2 text-sm font-medium">
-          {m.provider_model_editor_base_pricing()}
-          <Field.Help hint={m.provider_model_editor_pricing_unit_help()} />
-        </p>
-        <div class="grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]">
-          {#each priceFields as field (field.key)}
-            <Field.Field orientation="vertical">
-              <Field.Label for={`provider-model-cost-${field.key}`}>{field.label()}</Field.Label>
-              <Input
-                id={`provider-model-cost-${field.key}`}
-                class="font-technical"
-                inputmode="decimal"
-                bind:value={cost.base[field.key]}
-                placeholder="0.00" />
-            </Field.Field>
-          {/each}
-        </div>
-      </div>
-      {#each cost.tiers as tier, index (tier)}
-        <div class="flex flex-col gap-3 border-t border-dashed pt-4">
-          <div class="flex items-end justify-between gap-3">
-            <Field.Field orientation="vertical" class="max-w-64">
-              <Field.Label for={`provider-model-tier-${index}`}
-                >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
-              <Input
-                id={`provider-model-tier-${index}`}
-                type="number"
-                min="0"
-                step="1"
-                class="font-technical"
-                bind:value={tier.threshold} />
-            </Field.Field>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              class="shrink-0"
-              aria-label={m.provider_model_editor_remove_tier()}
-              onclick={() => removeTier(index)}><Trash2Icon /></Button>
+  <FormSection title={rpm ? m.provider_model_editor_pricing_limits() : m.provider_model_editor_pricing()}>
+    <div class="flex flex-col gap-4">
+      {#if rpm}
+        <div class={pairGrid}>{@render rpm()}</div>
+      {/if}
+      {#if hasField('cost')}
+        <div class="flex flex-col gap-3">
+          <div class="flex items-center justify-between gap-3">
+            <p class="flex items-center gap-2 text-sm font-medium">
+              {m.provider_model_editor_base_pricing()}
+              <Field.Help hint={m.provider_model_editor_pricing_unit_help()} />
+            </p>
+            <Button type="button" variant="ghost" size="sm" onclick={() => removeField('cost')}
+              ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
           </div>
-          <div class="grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]">
+          <div class={priceGrid}>
             {#each priceFields as field (field.key)}
               <Field.Field orientation="vertical">
-                <Field.Label for={`provider-model-tier-${index}-${field.key}`}>{field.label()}</Field.Label>
+                <Field.Label for={`provider-model-cost-${field.key}`}>{field.label()}</Field.Label>
                 <Input
-                  id={`provider-model-tier-${index}-${field.key}`}
+                  id={`provider-model-cost-${field.key}`}
                   class="font-technical"
                   inputmode="decimal"
-                  bind:value={tier[field.key]}
+                  bind:value={cost.base[field.key]}
                   placeholder="0.00" />
               </Field.Field>
             {/each}
           </div>
+          {#each cost.tiers as tier, index (tier)}
+            <div class="flex flex-col gap-3 border-t border-dashed pt-4">
+              <div class="flex items-end justify-between gap-3">
+                <Field.Field orientation="vertical" class="max-w-64">
+                  <Field.Label for={`provider-model-tier-${index}`}
+                    >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
+                  <Input
+                    id={`provider-model-tier-${index}`}
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="font-technical"
+                    bind:value={tier.threshold} />
+                </Field.Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="shrink-0"
+                  aria-label={m.provider_model_editor_remove_tier()}
+                  onclick={() => removeTier(index)}><Trash2Icon /></Button>
+              </div>
+              <div class={priceGrid}>
+                {#each priceFields as field (field.key)}
+                  <Field.Field orientation="vertical">
+                    <Field.Label for={`provider-model-tier-${index}-${field.key}`}>{field.label()}</Field.Label>
+                    <Input
+                      id={`provider-model-tier-${index}-${field.key}`}
+                      class="font-technical"
+                      inputmode="decimal"
+                      bind:value={tier[field.key]}
+                      placeholder="0.00" />
+                  </Field.Field>
+                {/each}
+              </div>
+            </div>
+          {/each}
+          <Button type="button" variant="outline" size="sm" class="self-start" onclick={addTier}
+            ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
         </div>
-      {/each}
-      <Button type="button" variant="outline" size="sm" class="self-start" onclick={addTier}
-        ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
-    {:else}
-      <Button type="button" variant="outline" size="sm" class="self-start" onclick={addCost}
-        ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
-    {/if}
+      {:else}
+        <Button type="button" variant="outline" size="sm" class="self-start" onclick={addCost}
+          ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
+      {/if}
+    </div>
   </FormSection>
 
   {#if extensionEntries.length > 0}

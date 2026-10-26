@@ -43,7 +43,7 @@ let {
   min-width: 0;
   flex-direction: column;
   gap: 0.75rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   line-height: 1.58;
   overflow-wrap: anywhere;
 }

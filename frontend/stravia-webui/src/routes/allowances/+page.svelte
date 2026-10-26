@@ -21,7 +21,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import { formatLogTime } from '#lib/format.js'
+import { formatDate, formatLogTime, formatMonthDay, formatTime } from '#lib/format.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { formatAllowanceAmount, formatAllowancePercent } from '#lib/provider-allowance-format.js'
 import { ProviderAllowanceRead } from '#lib/provider-allowance-read.svelte.js'
@@ -502,8 +502,8 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       {/if}
     </div>
   {:else if provider.allowances.length > 0}
-    <!-- 轨道宽度只取决于容器宽度且有上限：新增宽度容纳更多对齐的额度项，而不是拉长单个进度条 -->
-    <ul class="grid grid-cols-[repeat(auto-fill,minmax(7rem,9rem))] gap-x-4 gap-y-2">
+    <!-- 每个额度一格：标签与数值同行，细进度条在下。轨道宽度固定且有界（auto-fill 按轨道最大值计列，不用 minmax 区间）：新增宽度容纳更多额度项，不拉长单个进度条 -->
+    <ul class="grid grid-cols-1 gap-x-6 gap-y-3 @md:grid-cols-[repeat(auto-fill,11.5rem)]">
       {#each provider.allowances as allowance (allowance.key)}
         {@const id = allowanceElementId(providerId, allowance.key)}
         <li
@@ -513,20 +513,21 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
           onblur={() => (focusedAllowanceId = null)}
           data-highlighted={highlightedAllowanceId === id ? 'true' : undefined}
           class={cn(
-            'grid min-w-0 scroll-m-4 gap-0.5 rounded-sm',
+            'flex min-w-0 scroll-m-4 flex-col justify-between gap-1.5 rounded-sm',
             highlightedAllowanceId === id && 'bg-accent ring-2 ring-primary ring-offset-2 ring-offset-background',
           )}>
-          <span class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-            <span class="truncate">{allowanceLabel(allowance)}</span>
-            {#if provider.snapshot?.guard_supported && allowance.guarded}
-              <ShieldCheckIcon class="size-3 shrink-0 text-primary" aria-hidden="true" />
-              <span class="sr-only">{m.allowances_guard_enabled()}</span>
-            {/if}
+          <span class="flex min-w-0 items-start justify-between gap-3">
+            <span class="flex min-w-0 items-center gap-1 text-xs leading-4 text-muted-foreground">
+              <span class="line-clamp-2 break-words" title={allowanceLabel(allowance)}
+                >{allowanceLabel(allowance)}</span>
+              {#if provider.snapshot?.guard_supported && allowance.guarded}
+                <ShieldCheckIcon class="size-3 shrink-0 text-primary" aria-hidden="true" />
+                <span class="sr-only">{m.allowances_guard_enabled()}</span>
+              {/if}
+            </span>
+            {@render allowanceValue(allowance, 'shrink-0 text-sm leading-4 font-medium')}
           </span>
-          <span class="flex items-center gap-2">
-            {@render allowanceValue(allowance, 'text-sm')}
-            {@render allowanceMeter(allowance, 'w-auto min-w-6 max-w-14 flex-1', true)}
-          </span>
+          {@render allowanceMeter(allowance, 'w-full h-1', true)}
         </li>
       {/each}
     </ul>
@@ -685,51 +686,49 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
     Boolean(snapshot?.missing_guarded_keys?.length) ||
     provider.guardError != null ||
     provider.refreshError != null}
-  <li class="@container border-b" data-testid={`allowance-provider-${providerId}`}>
+  <li class="@container border-b border-border/60" data-testid={`allowance-provider-${providerId}`}>
     <Collapsible.Root open={expanded} onOpenChange={(open: boolean) => setProviderExpanded(providerId, open)}>
       <div
         class={cn(
-          'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-2 py-2.5 transition-colors duration-[140ms] hover:bg-muted/30 @2xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
+          'relative grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 gap-y-2.5 px-3 py-3 transition-colors duration-[140ms] hover:bg-muted/30 @2xl:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)_auto]',
           expanded && 'bg-muted/20',
           highlightedAllowanceId?.startsWith(allowanceElementId(providerId, '')) && 'bg-accent/40',
         )}>
-        <div class="flex min-w-0 items-start gap-2">
+        <div class="flex min-w-0 items-start gap-2.5">
           <ChevronRightIcon
             class={cn(
               'mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
               expanded && 'rotate-90',
             )}
             aria-hidden="true" />
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <h3 class="min-w-0 font-semibold break-words">
-                <!-- 伸展命中区让整行可点击展开；行内其他控件以 z-10 浮于其上 -->
-                <Collapsible.Trigger
-                  class="cursor-pointer rounded-sm text-start after:absolute after:inset-0 after:content-['']"
-                  aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
-                  {provider.target.provider_name}
-                </Collapsible.Trigger>
-              </h3>
-              {#if providerCondition}
-                <StatusIndicator
-                  compact
-                  class="text-xs"
-                  label={conditionLabel(providerCondition)}
-                  tone={conditionStatusTone(providerCondition)} />
-              {/if}
-              {#if suspension}
-                <span class="relative z-10 inline-flex"><AllowanceSuspension {suspension} /></span>
-              {/if}
-              {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
-            </div>
+          <div class="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h3 class="min-w-0 font-semibold break-words">
+              <!-- 伸展命中区让整行可点击展开；行内其他控件以 z-10 浮于其上 -->
+              <Collapsible.Trigger
+                class="cursor-pointer rounded-sm text-start after:absolute after:inset-0 after:content-['']"
+                aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
+                {provider.target.provider_name}
+              </Collapsible.Trigger>
+            </h3>
+            {#if providerCondition}
+              <StatusIndicator
+                compact
+                class="text-xs"
+                label={conditionLabel(providerCondition)}
+                tone={conditionStatusTone(providerCondition)} />
+            {/if}
+            {#if suspension}
+              <span class="relative z-10 inline-flex"><AllowanceSuspension {suspension} /></span>
+            {/if}
+            {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
           </div>
         </div>
-        <div class="col-span-2 ps-6 @2xl:col-span-1 @2xl:col-start-2 @2xl:row-start-1 @2xl:ps-0">
+        <div class="col-span-2 ps-[1.625rem] @2xl:col-span-1 @2xl:col-start-2 @2xl:row-start-1 @2xl:ps-0">
           {@render allowanceChips(provider)}
         </div>
         <Button
           size="icon"
-          class="relative z-10 col-start-2 row-start-1 @2xl:col-start-3"
+          class="relative z-10 col-start-2 row-start-1 text-muted-foreground hover:text-foreground @2xl:col-start-3"
           variant="ghost"
           onclick={() => refreshProvider(provider)}
           disabled={!provider.canRefresh}
@@ -829,16 +828,12 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   </PageHeader>
 
   {#if readState.loading}
-    <div class="grid min-w-0 gap-3" aria-label={m.allowances_loading()}>
-      <div class="allowances-filters route-section grid gap-2">
-        <Skeleton class="h-9 w-full" /><Skeleton class="h-9 w-full" /><Skeleton class="h-9 w-full" />
-        <Skeleton class="h-9 w-full" />
-      </div>
-      <Skeleton class="h-7 w-72" />
-      <div class="allowances-split grid min-w-0 gap-3">
+    <div class="allowances-split grid min-w-0 gap-6" aria-label={m.allowances_loading()}>
+      <div class="grid min-w-0 content-start gap-6">
+        <div class="grid gap-2"><Skeleton class="h-9 w-full" /><Skeleton class="h-9 w-full" /></div>
         <Skeleton class="h-96 w-full" />
-        <div class="grid gap-3"><Skeleton class="h-40 w-full" /><Skeleton class="h-40 w-full" /></div>
       </div>
+      <div class="grid content-start gap-8"><Skeleton class="h-40 w-full" /><Skeleton class="h-24 w-full" /></div>
     </div>
   {:else if readState.loadError && !readState.hasTargets}
     <RequestFailure
@@ -864,310 +859,341 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
         retry={() => reading.retryTargets()}
         retrying={readState.fetching} />{/if}
 
-    <div class="grid min-w-0 gap-3">
-      <section class="allowances-filters route-section grid items-center gap-2">
-        <InputGroup.Root class="allowances-search min-w-0">
-          <InputGroup.Input
-            type="search"
-            aria-label={m.allowances_search_label()}
-            placeholder={m.allowances_search_placeholder()}
-            bind:value={searchQuery} />
-          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-        </InputGroup.Root>
-        <Select.Root type="single" bind:value={catalogFilter}>
-          <Select.Trigger class="w-full justify-between">{catalogFilterLabel}</Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value="all">{m.allowances_filter_catalog_all()}</Select.Item>
-              {#each catalogOptions as option (option.value)}
-                <Select.Item value={option.value}>{option.label}</Select.Item>
-              {/each}
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-        <Select.Root type="single" bind:value={conditionFilter}>
-          <Select.Trigger class="w-full justify-between">{conditionFilterLabel}</Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value="all">{m.allowances_filter_condition_all()}</Select.Item>
-              <Select.Item value="normal">{m.allowances_condition_normal()}</Select.Item>
-              <Select.Item value="tight">{m.allowances_condition_tight()}</Select.Item>
-              <Select.Item value="exhausted">{m.allowances_condition_exhausted()}</Select.Item>
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-        <Select.Root type="single" bind:value={freshnessFilter}>
-          <Select.Trigger class="w-full justify-between">{freshnessFilterLabel}</Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value="all">{m.allowances_filter_freshness_all()}</Select.Item>
-              <Select.Item value="fresh">{m.allowances_status_fresh()}</Select.Item>
-              <Select.Item value="stale">{m.allowances_status_stale()}</Select.Item>
-              <Select.Item value="error">{m.allowances_status_error()}</Select.Item>
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-      </section>
+    <div class="allowances-split grid min-w-0 gap-6">
+      <div class="allowances-main grid min-w-0 content-start gap-6">
+        <div class="grid min-w-0 gap-4">
+          <section class="allowances-filters route-section">
+            <InputGroup.Root class="allowances-search min-w-0">
+              <InputGroup.Input
+                type="search"
+                aria-label={m.allowances_search_label()}
+                placeholder={m.allowances_search_placeholder()}
+                bind:value={searchQuery} />
+              <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+            </InputGroup.Root>
+            <Select.Root type="single" bind:value={catalogFilter}>
+              <Select.Trigger class="allowances-select w-full justify-between">{catalogFilterLabel}</Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  <Select.Item value="all">{m.allowances_filter_catalog_all()}</Select.Item>
+                  {#each catalogOptions as option (option.value)}
+                    <Select.Item value={option.value}>{option.label}</Select.Item>
+                  {/each}
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+            <Select.Root type="single" bind:value={conditionFilter}>
+              <Select.Trigger class="allowances-select w-full justify-between">{conditionFilterLabel}</Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  <Select.Item value="all">{m.allowances_filter_condition_all()}</Select.Item>
+                  <Select.Item value="normal">{m.allowances_condition_normal()}</Select.Item>
+                  <Select.Item value="tight">{m.allowances_condition_tight()}</Select.Item>
+                  <Select.Item value="exhausted">{m.allowances_condition_exhausted()}</Select.Item>
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+            <Select.Root type="single" bind:value={freshnessFilter}>
+              <Select.Trigger class="allowances-select w-full justify-between">{freshnessFilterLabel}</Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  <Select.Item value="all">{m.allowances_filter_freshness_all()}</Select.Item>
+                  <Select.Item value="fresh">{m.allowances_status_fresh()}</Select.Item>
+                  <Select.Item value="stale">{m.allowances_status_stale()}</Select.Item>
+                  <Select.Item value="error">{m.allowances_status_error()}</Select.Item>
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          </section>
 
-      <section class="route-section" aria-labelledby="allowance-summary-title">
-        <h2 id="allowance-summary-title" class="sr-only">{m.allowances_summary_title()}</h2>
-        {#if !allResolved}
-          <div class="flex items-center gap-2 text-sm text-muted-foreground">
-            <Spinner aria-label={m.allowances_loading()} />
-          </div>
-        {:else}
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-            <StatusIndicator
-              compact
-              label={conditionLabel(overallCondition)}
-              tone={conditionStatusTone(overallCondition)} />
-            <p class="font-technical tabular-nums">
-              {lowestRemaining == null
-                ? m.allowances_lowest_remaining({ value: '–' })
-                : m.allowances_lowest_remaining({
-                    value: formatAllowancePercent(lowestRemaining, localeState.current),
-                  })}
-            </p>
-            <p class="font-technical tabular-nums">
-              {nextResetAt == null
-                ? m.allowances_no_upcoming_reset()
-                : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
-            </p>
-            {#if emptyWindows.length > 0}
-              <Collapsible.Root open={exhaustedOpen} onOpenChange={(open: boolean) => (exhaustedOpen = open)}>
-                <Collapsible.Trigger
-                  class="inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-destructive transition-colors duration-[140ms] hover:underline"
-                  aria-expanded={exhaustedOpen}>
-                  <ChevronDownIcon
-                    class={cn('size-3.5 transition-transform duration-[140ms]', exhaustedOpen && 'rotate-180')}
-                    aria-hidden="true" />
-                  {m.allowances_exhausted_windows({ count: emptyWindows.length })}
-                </Collapsible.Trigger>
-                {#if exhaustedOpen}
-                  <Collapsible.Content>
-                    <!-- 汇总只定位例外：明细按需展开，不复制矩阵内容 -->
-                    <ul class="mt-1 grid gap-1 text-sm" data-testid="allowance-empty-windows">
-                      {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                        <li>
-                          {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-                          {#if item.allowance.reset_at != null}
-                            <span class="font-technical text-muted-foreground tabular-nums">
-                              · {m.allowances_reset_at({
-                                time: formatLogTime(item.allowance.reset_at, localeState.current),
-                              })}
-                            </span>
-                          {/if}
-                        </li>
-                      {/each}
-                    </ul>
-                  </Collapsible.Content>
-                {/if}
-              </Collapsible.Root>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
-      <div class="allowances-split grid min-w-0 gap-3">
-        <section class="allowance-matrix-section route-section min-w-0" aria-labelledby="allowance-matrix-title">
-          <div class="route-section-header items-center">
-            <h2 id="allowance-matrix-title" class="route-section-title">{m.allowances_matrix_title()}</h2>
-            <Tabs.Root bind:value={() => valueMode, changeValueMode}>
+          <div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+            <section class="route-section min-w-0" aria-labelledby="allowance-summary-title">
+              <h2 id="allowance-summary-title" class="sr-only">{m.allowances_summary_title()}</h2>
+              {#if !allResolved}
+                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Spinner aria-label={m.allowances_loading()} />
+                </div>
+              {:else}
+                <div class="flex flex-wrap items-center gap-x-8 gap-y-2 text-sm">
+                  <StatusIndicator
+                    compact
+                    label={conditionLabel(overallCondition)}
+                    tone={conditionStatusTone(overallCondition)} />
+                  <p class="font-technical tabular-nums">
+                    {lowestRemaining == null
+                      ? m.allowances_lowest_remaining({ value: '–' })
+                      : m.allowances_lowest_remaining({
+                          value: formatAllowancePercent(lowestRemaining, localeState.current),
+                        })}
+                  </p>
+                  <p class="font-technical tabular-nums">
+                    {nextResetAt == null
+                      ? m.allowances_no_upcoming_reset()
+                      : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
+                  </p>
+                  {#if emptyWindows.length > 0}
+                    <Collapsible.Root open={exhaustedOpen} onOpenChange={(open: boolean) => (exhaustedOpen = open)}>
+                      <Collapsible.Trigger
+                        class="inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-destructive transition-colors duration-[140ms] hover:underline"
+                        aria-expanded={exhaustedOpen}>
+                        <ChevronDownIcon
+                          class={cn('size-3.5 transition-transform duration-[140ms]', exhaustedOpen && 'rotate-180')}
+                          aria-hidden="true" />
+                        {m.allowances_exhausted_windows({ count: emptyWindows.length })}
+                      </Collapsible.Trigger>
+                      {#if exhaustedOpen}
+                        <Collapsible.Content>
+                          <!-- 汇总只定位例外：明细按需展开，不复制矩阵内容 -->
+                          <ul class="mt-1 grid gap-1 text-sm" data-testid="allowance-empty-windows">
+                            {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                              <li>
+                                {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                                {#if item.allowance.reset_at != null}
+                                  <span class="font-technical text-muted-foreground tabular-nums">
+                                    · {m.allowances_reset_at({
+                                      time: formatLogTime(item.allowance.reset_at, localeState.current),
+                                    })}
+                                  </span>
+                                {/if}
+                              </li>
+                            {/each}
+                          </ul>
+                        </Collapsible.Content>
+                      {/if}
+                    </Collapsible.Root>
+                  {/if}
+                </div>
+              {/if}
+            </section>
+            <Tabs.Root class="ms-auto" bind:value={() => valueMode, changeValueMode}>
               <Tabs.List aria-label={m.allowances_value_mode()}>
                 <Tabs.Trigger value="remaining">{m.allowances_remaining()}</Tabs.Trigger>
                 <Tabs.Trigger value="used">{m.allowances_used()}</Tabs.Trigger>
               </Tabs.List>
             </Tabs.Root>
           </div>
+        </div>
+
+        <section class="allowance-matrix-section route-section min-w-0" aria-labelledby="allowance-matrix-title">
+          <h2 id="allowance-matrix-title" class="sr-only">{m.allowances_matrix_title()}</h2>
           {#if visibleProviders.length === 0}
             <Empty.Root class="p-8"
               ><Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header
               ></Empty.Root>
           {:else}
-            <ul class="border-t" aria-label={m.allowances_matrix_title()}>
+            <ul class="border-t border-border/60" aria-label={m.allowances_matrix_title()}>
               {#each visibleProviders as provider (provider.target.provider_id)}
                 {@render providerRow(provider)}
               {/each}
             </ul>
           {/if}
         </section>
+      </div>
 
-        <div class="allowances-rail grid min-w-0 gap-3">
-          <section class="route-section" aria-labelledby="allowance-timeline-title">
-            <h2 id="allowance-timeline-title" class="route-section-title">{m.allowances_timeline_title()}</h2>
-            <div id="allowance-reset-timeline">
-              {#if !allResolved}
-                <div class="flex items-center gap-2">
-                  <Spinner aria-label={m.allowances_loading()} />
-                </div>
-              {:else if futureTimeline.length === 0}
-                <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
-              {:else if displayedTimeline.length === 0}
-                <p class="text-sm text-muted-foreground">{m.allowances_timeline_preview_empty()}</p>
-              {:else}
-                <ol class="relative ml-2 border-l" aria-label={m.allowances_timeline_title()}>
-                  {#each displayedTimeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                    {@const id = allowanceElementId(item.snapshot.provider_id, item.allowance.key)}
-                    <li class="relative pb-1 pl-3 last:pb-0">
-                      <span
-                        class="absolute -left-1.5 top-3 size-3 rounded-full border-2 border-background bg-primary"
-                        aria-hidden="true"></span>
-                      <Button
-                        variant="ghost"
-                        class="w-full justify-start px-2 py-2 text-start whitespace-normal"
-                        aria-controls={id}
-                        aria-label={m.allowances_timeline_locate({
-                          provider: item.snapshot.provider_name,
-                          item: allowanceLabel(item.allowance),
-                          time: formatLogTime(item.allowance.reset_at, localeState.current),
-                        })}
-                        onpointerenter={(event: PointerEvent) => {
-                          if (event.pointerType !== 'touch') hoveredAllowanceId = id
-                        }}
-                        onpointerleave={() => (hoveredAllowanceId = null)}
-                        onfocus={() => (focusedAllowanceId = id)}
-                        onblur={() => (focusedAllowanceId = null)}
-                        onclick={() => locateAllowance(id)}>
-                        <span class="grid min-w-0 gap-1">
-                          <span class="font-technical text-sm font-medium tabular-nums">
-                            {formatLogTime(item.allowance.reset_at, localeState.current)}
-                          </span>
-                          <span class="text-sm text-muted-foreground">
-                            {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-                          </span>
-                        </span>
-                      </Button>
-                    </li>
-                  {/each}
-                </ol>
-              {/if}
-              {#if allResolved && futureTimeline.length > timelinePreview.length}
-                <Button
-                  variant="ghost"
-                  class="mt-2 w-full"
-                  aria-expanded={timelineExpanded}
-                  aria-controls="allowance-reset-timeline"
-                  onclick={() => (timelineExpanded = !timelineExpanded)}>
-                  {#if timelineExpanded}
-                    <ChevronRightIcon data-icon="inline-start" class="-rotate-90" />
-                    {m.allowances_timeline_collapse()}
-                  {:else}
-                    <ChevronDownIcon data-icon="inline-start" />
-                    {m.allowances_timeline_expand()}
-                  {/if}
-                </Button>
-              {/if}
-            </div>
-          </section>
-
-          <section class="route-section" aria-labelledby="allowance-forecast-title">
-            <div class="flex items-center gap-1.5">
-              <h2 id="allowance-forecast-title" class="route-section-title">{m.allowances_forecast_title()}</h2>
-              <Field.Help hint={m.allowances_forecast_basis()} />
-            </div>
+      <div class="allowances-rail grid min-w-0 content-start gap-8">
+        <section class="route-section" aria-labelledby="allowance-timeline-title">
+          <h2 id="allowance-timeline-title" class="route-section-title">{m.allowances_timeline_title()}</h2>
+          <div id="allowance-reset-timeline">
             {#if !allResolved}
               <div class="flex items-center gap-2">
                 <Spinner aria-label={m.allowances_loading()} />
               </div>
+            {:else if futureTimeline.length === 0}
+              <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
+            {:else if displayedTimeline.length === 0}
+              <p class="text-sm text-muted-foreground">{m.allowances_timeline_preview_empty()}</p>
             {:else}
-              <!-- 预报三张小卡改为紧凑计数行；截断只属于时间轴，这里统计全部可见额度 -->
-              <ul class="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
-                <li
-                  class="font-technical tabular-nums"
-                  data-testid="allowance-forecast-exhausted"
-                  aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
-                  <span class={cn(forecastSummary.exhausted > 0 && 'font-semibold text-destructive')}>
-                    {forecastSummary.exhausted}
-                  </span>
-                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_exhausted()}</span>
-                </li>
-                <li
-                  class="font-technical tabular-nums"
-                  data-testid="allowance-forecast-will-exhaust"
-                  aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
-                  <span class={cn(forecastSummary.willExhaust > 0 && 'font-semibold text-warning')}>
-                    {forecastSummary.willExhaust}
-                  </span>
-                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_will_exhaust()}</span>
-                </li>
-                <li
-                  class="font-technical tabular-nums"
-                  data-testid="allowance-forecast-no-risk"
-                  aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
-                  <span>{forecastSummary.noRisk}</span>
-                  <span class="ms-1 text-muted-foreground">{m.allowances_forecast_no_risk()}</span>
-                </li>
-                {#if forecastSummary.unknown > 0}
-                  <li class="text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
-                    {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+              <ol aria-label={m.allowances_timeline_title()}>
+                {#each displayedTimeline as item, index (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                  {@const id = allowanceElementId(item.snapshot.provider_id, item.allowance.key)}
+                  {@const startsDay =
+                    index === 0 ||
+                    formatDate(item.allowance.reset_at, localeState.current) !==
+                      formatDate(displayedTimeline[index - 1].allowance.reset_at, localeState.current)}
+                  <li class={cn(startsDay && index > 0 && 'mt-4')}>
+                    <!-- 同一天只标一次日期，条目只留时刻；完整时间进入定位按钮的可访问名称 -->
+                    {#if startsDay}
+                      <p class="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                        {formatMonthDay(item.allowance.reset_at, localeState.current)}
+                      </p>
+                    {/if}
+                    <Button
+                      variant="ghost"
+                      class="h-auto w-full justify-start px-2 py-1.5 text-start font-normal whitespace-normal"
+                      aria-controls={id}
+                      aria-label={m.allowances_timeline_locate({
+                        provider: item.snapshot.provider_name,
+                        item: allowanceLabel(item.allowance),
+                        time: formatLogTime(item.allowance.reset_at, localeState.current),
+                      })}
+                      onpointerenter={(event: PointerEvent) => {
+                        if (event.pointerType !== 'touch') hoveredAllowanceId = id
+                      }}
+                      onpointerleave={() => (hoveredAllowanceId = null)}
+                      onfocus={() => (focusedAllowanceId = id)}
+                      onblur={() => (focusedAllowanceId = null)}
+                      onclick={() => locateAllowance(id)}>
+                      <span class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3">
+                        <span class="font-technical text-xs text-muted-foreground tabular-nums">
+                          {formatTime(item.allowance.reset_at, localeState.current)}
+                        </span>
+                        <span class="line-clamp-2 text-sm break-words">
+                          {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                        </span>
+                      </span>
+                    </Button>
                   </li>
-                {/if}
-              </ul>
-              <p class="font-technical mt-2 text-sm tabular-nums">
-                {forecastSummary.lowestProjected != null
-                  ? m.allowances_forecast_lowest({
-                      value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
-                    })
-                  : forecastSummary.exhausted > 0
-                    ? m.allowances_forecast_windows_exhausted()
-                    : m.allowances_forecast_no_projection()}
-              </p>
-              {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
-                {#if willExhaustOpen}
-                  <ul class="mt-2 grid gap-1 text-sm" data-testid="allowance-forecast-items">
-                    {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                      <li>{forecastItemCopy(item)}</li>
-                    {/each}
-                  </ul>
-                {/if}
-                <button
-                  type="button"
-                  class="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-muted-foreground transition-colors duration-[140ms] hover:text-foreground hover:underline"
-                  aria-expanded={willExhaustOpen}
-                  onclick={() => (willExhaustOpen = !willExhaustOpen)}>
-                  {#if willExhaustOpen}
-                    {m.allowances_forecast_collapse()}
-                  {:else}
-                    {m.allowances_forecast_show_items({
-                      count: forecastSummary.exhaustedItems.length + forecastSummary.willExhaustItems.length,
-                    })}
-                  {/if}
-                </button>
-              {/if}
+                {/each}
+              </ol>
             {/if}
-          </section>
-        </div>
+            {#if allResolved && futureTimeline.length > timelinePreview.length}
+              <Button
+                variant="ghost"
+                class="mt-2 w-full"
+                aria-expanded={timelineExpanded}
+                aria-controls="allowance-reset-timeline"
+                onclick={() => (timelineExpanded = !timelineExpanded)}>
+                {#if timelineExpanded}
+                  <ChevronRightIcon data-icon="inline-start" class="-rotate-90" />
+                  {m.allowances_timeline_collapse()}
+                {:else}
+                  <ChevronDownIcon data-icon="inline-start" />
+                  {m.allowances_timeline_expand()}
+                {/if}
+              </Button>
+            {/if}
+          </div>
+        </section>
+
+        <section class="route-section" aria-labelledby="allowance-forecast-title">
+          <div class="flex items-center gap-1.5">
+            <h2 id="allowance-forecast-title" class="route-section-title">{m.allowances_forecast_title()}</h2>
+            <Field.Help hint={m.allowances_forecast_basis()} />
+          </div>
+          {#if !allResolved}
+            <div class="flex items-center gap-2">
+              <Spinner aria-label={m.allowances_loading()} />
+            </div>
+          {:else}
+            <!-- 预报三张小卡改为紧凑计数行；截断只属于时间轴，这里统计全部可见额度 -->
+            <ul class="grid grid-cols-3 gap-x-4 gap-y-2">
+              <li
+                class="grid gap-0.5"
+                data-testid="allowance-forecast-exhausted"
+                aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
+                <span
+                  class={cn(
+                    'font-technical text-lg font-semibold tabular-nums',
+                    forecastSummary.exhausted > 0 ? 'text-destructive' : 'text-muted-foreground',
+                  )}>
+                  {forecastSummary.exhausted}
+                </span>
+                <span class="text-xs text-muted-foreground">{m.allowances_forecast_exhausted()}</span>
+              </li>
+              <li
+                class="grid gap-0.5"
+                data-testid="allowance-forecast-will-exhaust"
+                aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
+                <span
+                  class={cn(
+                    'font-technical text-lg font-semibold tabular-nums',
+                    forecastSummary.willExhaust > 0 ? 'text-warning' : 'text-muted-foreground',
+                  )}>
+                  {forecastSummary.willExhaust}
+                </span>
+                <span class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust()}</span>
+              </li>
+              <li
+                class="grid gap-0.5"
+                data-testid="allowance-forecast-no-risk"
+                aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
+                <span class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</span>
+                <span class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk()}</span>
+              </li>
+              {#if forecastSummary.unknown > 0}
+                <li class="col-span-3 text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
+                  {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+                </li>
+              {/if}
+            </ul>
+            <p class="font-technical mt-3 text-sm tabular-nums">
+              {forecastSummary.lowestProjected != null
+                ? m.allowances_forecast_lowest({
+                    value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
+                  })
+                : forecastSummary.exhausted > 0
+                  ? m.allowances_forecast_windows_exhausted()
+                  : m.allowances_forecast_no_projection()}
+            </p>
+            {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
+              {#if willExhaustOpen}
+                <ul class="mt-2 grid gap-1 text-sm" data-testid="allowance-forecast-items">
+                  {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                    <li>{forecastItemCopy(item)}</li>
+                  {/each}
+                </ul>
+              {/if}
+              <button
+                type="button"
+                class="mt-1 inline-flex cursor-pointer items-center gap-1 rounded-md text-sm text-muted-foreground transition-colors duration-[140ms] hover:text-foreground hover:underline"
+                aria-expanded={willExhaustOpen}
+                onclick={() => (willExhaustOpen = !willExhaustOpen)}>
+                {#if willExhaustOpen}
+                  {m.allowances_forecast_collapse()}
+                {:else}
+                  {m.allowances_forecast_show_items({
+                    count: forecastSummary.exhaustedItems.length + forecastSummary.willExhaustItems.length,
+                  })}
+                {/if}
+              </button>
+            {/if}
+          {/if}
+        </section>
       </div>
     </div>
   {/if}
 </div>
 
 <style>
-/* 并排结构按工作区（route-page）宽度切换，不按 viewport。 */
+/* 并排结构按工作区宽度切换，不按 viewport：主列取剩余宽度，侧栏有界 20–24rem。 */
+@container route-page (min-width: 64rem) {
+  .allowances-split {
+    grid-template-columns: minmax(0, 1fr) clamp(20rem, 24%, 24rem);
+    align-items: start;
+    column-gap: 2.5rem;
+  }
+}
+
+/* 工具栏随主列宽度重排：窄时两列网格，搜索占满一行；宽时单行。 */
+.allowances-main {
+  container: allowances-main / inline-size;
+}
+
 .allowances-filters {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .allowances-filters > :global(.allowances-search) {
-  grid-column: span 2;
+  grid-column: 1 / -1;
 }
 
-@container route-page (min-width: 48rem) {
+@container allowances-main (min-width: 40rem) {
   .allowances-filters {
-    grid-template-columns: minmax(12rem, 24rem) repeat(3, minmax(10rem, 15rem));
+    display: flex;
+    flex-wrap: wrap;
   }
 
   .allowances-filters > :global(.allowances-search) {
-    grid-column: auto;
+    flex: 1 1 12rem;
+    max-width: 16rem;
   }
-}
 
-@container route-page (min-width: 64rem) {
-  /* 矩阵取剩余宽度，侧栏有界 24–28rem；不再沿用 2:1 拉伸。 */
-  .allowances-split {
-    grid-template-columns: minmax(0, 1fr) clamp(24rem, 28%, 28rem);
-    align-items: start;
-    column-gap: 2rem;
+  .allowances-filters > :global(.allowances-select) {
+    flex: 0 1 10.5rem;
+    min-width: 9rem;
   }
 }
 </style>

@@ -4469,7 +4469,8 @@ test.describe('Interaction Observation canvas', () => {
         expect(box.x + box.width).toBeLessThanOrEqual(391)
         expect(box.y).toBeGreaterThanOrEqual(0)
         expect(box.y + box.height).toBeLessThanOrEqual(741)
-        await page.locator('h1').tap()
+        // 标题会被向上展开的 Tooltip 盖住一部分，改点视口左上角的空白处关闭。
+        await page.touchscreen.tap(4, 4)
         await expect(tooltip).toBeHidden()
       }
       await card.getByRole('button', { name: 'User input preview', exact: true }).tap()

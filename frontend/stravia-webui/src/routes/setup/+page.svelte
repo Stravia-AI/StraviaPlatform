@@ -155,7 +155,7 @@ async function complete(): Promise<void> {
     {:else if !authorized}
       <section class="flex flex-col gap-4" aria-labelledby="setup-claim-title">
         <div class="flex flex-col gap-1">
-          <h2 id="setup-claim-title" class="font-structural text-lg font-semibold">{m.setup_claim_title()}</h2>
+          <h2 id="setup-claim-title" class="font-structural text-base font-semibold">{m.setup_claim_title()}</h2>
           <p class="text-sm text-muted-foreground">{m.setup_claim_description()}</p>
         </div>
         <form
@@ -193,7 +193,9 @@ async function complete(): Promise<void> {
         }}>
         <section class="flex flex-col gap-3" aria-labelledby="setup-database-title">
           <div class="flex items-center gap-2">
-            <h2 id="setup-database-title" class="font-structural text-lg font-semibold">{m.setup_database_title()}</h2>
+            <h2 id="setup-database-title" class="font-structural text-base font-semibold">
+              {m.setup_database_title()}
+            </h2>
             <Field.FieldHelp hint={m.setup_database_description()} />
           </div>
           <Field.FieldGroup>
@@ -293,7 +295,7 @@ async function complete(): Promise<void> {
         </section>
 
         <section class="flex flex-col gap-3" aria-labelledby="setup-admin-title">
-          <h2 id="setup-admin-title" class="font-structural text-lg font-semibold">{m.setup_admin_title()}</h2>
+          <h2 id="setup-admin-title" class="font-structural text-base font-semibold">{m.setup_admin_title()}</h2>
           <Field.FieldGroup>
             <Field.Field orientation="vertical">
               <Field.FieldLabel for="setup-client-base-url">{m.artifact_client_base_url()}</Field.FieldLabel>

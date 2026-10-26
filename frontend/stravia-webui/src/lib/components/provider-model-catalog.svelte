@@ -31,7 +31,6 @@ import type { ProviderModelEditingOperation } from '#lib/provider-model-editing.
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { formatLogTime } from '#lib/format.js'
 import { formatSpecificationTokens } from '#lib/model-specification.js'
-import FormSection from '#lib/components/form-section.svelte'
 import ModalityIcons from '#lib/components/modality-icons.svelte'
 import { localeState } from '#lib/localization.svelte.js'
 import {
@@ -740,32 +739,31 @@ function clearManualTemplate(): void {
           </DropdownMenu.Content>
         </DropdownMenu.Root>
       </div>
-      <div>
-        <ProviderModelEditor
-          bind:this={editor}
-          detail={modelEditing.detail}
-          draft={modelEditing.draft}
-          disabled={modelEditing.busy}
-          onSave={(metadataJson: string) => void editing.save(metadataJson)}
-          onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
-          onDirtyChange={(value: boolean) => {
-            specificationDirty = value
-            editing.markDirty(value || rpmDirty)
-          }} />
-      </div>
-      {#key modelEditing.detail.id}
-        <FormSection title={m.rpm_column()} class="mt-6">
-          <RpmForm
-            bind:this={rpmForm}
-            {providerId}
-            modelId={modelEditing.detail.id}
-            embedded
-            onDirtyChange={(value: boolean) => {
-              rpmDirty = value
-              editing.markDirty(value || specificationDirty)
-            }} />
-        </FormSection>
-      {/key}
+      <ProviderModelEditor
+        bind:this={editor}
+        detail={modelEditing.detail}
+        draft={modelEditing.draft}
+        disabled={modelEditing.busy}
+        onSave={(metadataJson: string) => void editing.save(metadataJson)}
+        onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
+        onDirtyChange={(value: boolean) => {
+          specificationDirty = value
+          editing.markDirty(value || rpmDirty)
+        }}>
+        {#snippet rpm()}
+          {#key modelEditing.detail!.id}
+            <RpmForm
+              bind:this={rpmForm}
+              {providerId}
+              modelId={modelEditing.detail!.id}
+              embedded
+              onDirtyChange={(value: boolean) => {
+                rpmDirty = value
+                editing.markDirty(value || specificationDirty)
+              }} />
+          {/key}
+        {/snippet}
+      </ProviderModelEditor>
       <div
         class="sticky bottom-0 z-20 mt-6 flex translate-y-2 flex-wrap items-center justify-end gap-x-4 gap-y-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
         {#if modelEditing.dirty}

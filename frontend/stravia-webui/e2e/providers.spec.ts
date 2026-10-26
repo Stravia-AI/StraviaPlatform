@@ -1337,7 +1337,10 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     await expect(page.getByRole('option', { name: value, exact: true })).toBeVisible()
   }
   await page.getByRole('option', { name: 'none', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Search or enter a custom effort', exact: true }).fill('custom-effort')
+  await page.getByRole('option', { name: 'Add "custom-effort"', exact: true }).click()
   await page.keyboard.press('Escape')
+  await expect(effortValuesSelect).toContainText('none, low, medium, high, future, custom-effort')
   await page.locator('#provider-model-cost-input').fill('0.123456789012345678')
   await expect(page.locator('#provider-model-cost-input')).toHaveValue('0.123456789012345678')
   await page.getByRole('button', { name: 'Save model' }).click()
@@ -1359,7 +1362,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     context_over_200k: detail.metadata.cost.context_over_200k,
     tiers: detail.metadata.cost.tiers,
   })
-  expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future'])
+  expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future', 'custom-effort'])
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
@@ -2833,13 +2836,18 @@ test('Provider connection form fills a centered 48rem column and shows the side 
   const labelBox = (await page.locator('label[for="provider-name"]').boundingBox())!
   const boxes = await Promise.all(controls.map(async (control) => (await control.boundingBox())!))
   const formBox = (await form.boundingBox())!
+  const [nameBox, baseUrlBox, apiKeyBox] = boxes
   expect(formBox.width).toBeLessThanOrEqual(48 * 16 + 1)
-  // 名称、地址、密钥占满表单列，左右边缘都是列边缘；label 在控件上方。
-  for (const box of boxes) {
-    expect(Math.abs(box.x - formBox.x)).toBeLessThanOrEqual(1)
-    expect(Math.abs(box.width - formBox.width)).toBeLessThanOrEqual(1)
-  }
-  expect(labelBox.y + labelBox.height).toBeLessThanOrEqual(boxes[0].y)
+  // 名称（16rem）与地址同一行：名称靠列左缘，地址占余下宽度并到列右缘；密钥是长值，独占整行。
+  expect(Math.abs(nameBox.x - formBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(nameBox.width - 16 * 16)).toBeLessThanOrEqual(2)
+  expect(Math.abs(baseUrlBox.y - nameBox.y)).toBeLessThanOrEqual(1)
+  expect(baseUrlBox.x).toBeGreaterThanOrEqual(nameBox.x + nameBox.width)
+  expect(Math.abs(baseUrlBox.x + baseUrlBox.width - (formBox.x + formBox.width))).toBeLessThanOrEqual(1)
+  expect(Math.abs(apiKeyBox.x - formBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(apiKeyBox.width - formBox.width)).toBeLessThanOrEqual(1)
+  expect(apiKeyBox.y).toBeGreaterThanOrEqual(nameBox.y + nameBox.height)
+  expect(labelBox.y + labelBox.height).toBeLessThanOrEqual(nameBox.y)
   // 表单列在路由容器内居中，辅助栏不参与居中。
   const route = (await page.locator('.route-page').boundingBox())!
   expect(Math.abs(formBox.x - route.x - (route.x + route.width - formBox.x - formBox.width))).toBeLessThanOrEqual(1)

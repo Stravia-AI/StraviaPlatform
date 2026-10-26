@@ -878,7 +878,7 @@ function selectMatch(match: CredentialMatch): void {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: baseline;
   gap: 0.75rem 1.5rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 .rule-parameters dt {
   color: var(--muted-foreground);

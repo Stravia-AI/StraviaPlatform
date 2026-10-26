@@ -17,7 +17,7 @@ let { title, description, actions, meta }: Props = $props()
   <div class="min-w-0">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h1
-        class="min-w-0 font-structural text-[1.625rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] sm:text-[1.875rem]">
+        class="min-w-0 font-structural text-[1.5rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] sm:text-[1.75rem]">
         {title}
       </h1>
       {#if meta}{@render meta()}{/if}

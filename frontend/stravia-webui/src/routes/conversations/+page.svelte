@@ -210,7 +210,7 @@ function lastModel(item: ConsoleConversation) {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0.25rem 0.75rem;
   margin-top: 0.25rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 
 .conversations-meta dt {

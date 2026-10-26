@@ -4,13 +4,12 @@ import { untrack } from 'svelte'
 import { useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import PencilIcon from '@lucide/svelte/icons/pencil'
-import PlusIcon from '@lucide/svelte/icons/plus'
 import * as m from '#lib/paraglide/messages.js'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { localeState } from '#lib/localization.svelte.js'
-import { specificationReasoningEfforts } from '#lib/model-specification.js'
 import ModalitySelect from '#lib/components/modality-select.svelte'
+import ReasoningEffortSelect from '#lib/components/reasoning-effort-select.svelte'
 import { providerModelSelectionPolicyLabel } from '#lib/provider-model-labels.js'
 import { inputValue } from '#lib/utils.js'
 import type { ProviderModelDetail, ProviderModelSelectionPolicy, ProviderModelSummary } from '#lib/types.js'
@@ -48,7 +47,6 @@ let context = $state('')
 let input = $state<string[]>([])
 let output = $state<string[]>([])
 let efforts = $state<string[]>([])
-let customEffort = $state('')
 let policy = $state<ProviderModelSelectionPolicy>('auto')
 let generation = 0
 const identity = $derived(JSON.stringify([providerId, model.id, field]))
@@ -64,13 +62,6 @@ let label = $derived(
 let registeredModalities = $derived([
   ...(detail?.metadata.modalities?.input ?? []),
   ...(detail?.metadata.modalities?.output ?? []),
-])
-let effortOptions = $derived([
-  ...new Set([
-    ...specificationReasoningEfforts,
-    ...normalizeProviderModelEfforts(detail?.metadata.reasoning_efforts ?? []),
-    ...efforts,
-  ]),
 ])
 
 $effect(() => {
@@ -103,7 +94,6 @@ async function load(id = providerId, modelId = model.id, currentField = field): 
     input = [...(result.metadata.modalities?.input ?? [])]
     output = [...(result.metadata.modalities?.output ?? [])]
     efforts = normalizeProviderModelEfforts(result.metadata.reasoning_efforts ?? [])
-    customEffort = ''
     policy = result.selection_policy
   } catch (cause) {
     if (isCurrent(request, id, modelId, currentField)) {
@@ -116,13 +106,6 @@ async function load(id = providerId, modelId = model.id, currentField = field): 
 
 function isCurrent(request: number, id: string, modelId: string, currentField: Props['field']): boolean {
   return open && request === generation && providerId === id && model.id === modelId && field === currentField
-}
-
-function addCustomEffort(): void {
-  const value = customEffort.trim()
-  if (!value || ['default', 'null'].includes(value.toLowerCase())) return
-  efforts = normalizeProviderModelEfforts([...efforts, value])
-  customEffort = ''
 }
 
 async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
@@ -263,40 +246,11 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
           {:else if field === 'efforts'}
             <Field.Field>
               <Field.Label for={`${uid}-efforts`} hint={m.provider_model_editor_effort_help()}>{label}</Field.Label>
-              <Select.Root type="multiple" bind:value={efforts} disabled={saving}>
-                <Select.Trigger id={`${uid}-efforts`} class="w-full min-w-0"
-                  ><span class="truncate">{efforts.join(', ') || m.provider_model_editor_select_efforts()}</span
-                  ></Select.Trigger>
-                <Select.Content
-                  ><Select.Group
-                    >{#each effortOptions as value (value)}<Select.Item {value}>{value}</Select.Item
-                      >{/each}</Select.Group
-                  ></Select.Content>
-              </Select.Root>
-            </Field.Field>
-            <Field.Field>
-              <Field.Label for={`${uid}-custom`}>{m.provider_model_editor_custom_effort()}</Field.Label>
-              <div class="flex gap-2">
-                <Input
-                  id={`${uid}-custom`}
-                  class="min-w-0 flex-1"
-                  bind:value={customEffort}
-                  disabled={saving}
-                  onkeydown={(event: KeyboardEvent) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      addCustomEffort()
-                    }
-                  }} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onclick={addCustomEffort}
-                  disabled={saving ||
-                    !customEffort.trim() ||
-                    ['default', 'null'].includes(customEffort.trim().toLowerCase())}
-                  ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_add_effort()}</Button>
-              </div>
+              <ReasoningEffortSelect
+                id={`${uid}-efforts`}
+                disabled={saving}
+                registered={detail?.metadata.reasoning_efforts}
+                bind:value={efforts} />
             </Field.Field>
           {:else}
             <Field.Field>

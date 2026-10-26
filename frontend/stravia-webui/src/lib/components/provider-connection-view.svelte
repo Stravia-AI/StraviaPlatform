@@ -229,13 +229,15 @@ async function testConnection(): Promise<void> {
   <div
     class="mx-auto grid w-full max-w-(--content-column-max-width) gap-6 @min-[96rem]/route-page:max-w-none @min-[96rem]/route-page:grid-cols-[minmax(0,1fr)_minmax(0,var(--content-column-max-width))_minmax(0,1fr)] @min-[96rem]/route-page:items-start @min-[96rem]/route-page:gap-x-12">
     <form
-      class="flex min-w-0 flex-col gap-6 @min-[96rem]/route-page:col-start-2 @min-[96rem]/route-page:row-start-1"
+      class="@container/provider-form flex min-w-0 flex-col gap-6 @min-[96rem]/route-page:col-start-2 @min-[96rem]/route-page:row-start-1"
       onsubmit={(event) => {
         event.preventDefault()
         save()
       }}>
       <FormSection title={m.provider_connection_view_section_connection()}>
-        <Field.Group>
+        <!-- 表单列够宽（≥42rem）时名称与 Base URL 同行：名称取 16rem，地址占余下宽度。 -->
+        <Field.Group
+          class="@2xl/provider-form:grid @2xl/provider-form:grid-cols-[minmax(0,16rem)_minmax(0,1fr)] @2xl/provider-form:gap-x-6">
           <Field.Field>
             <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
             <Input
