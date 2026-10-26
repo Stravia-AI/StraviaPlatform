@@ -254,6 +254,7 @@
   "credential_protection_discoveries_loading": "正在加载发现记录…",
   "credential_protection_discoveries_gap": "观察数据不完整。缺失记录不代表没有发现凭据。",
   "credential_protection_discoveries_count": "新增 {count} 个凭据",
+  "credential_protection_discoveries_new_credentials": "新增凭据",
   "credential_protection_discoveries_api_key": "API 密钥",
   "credential_protection_discoveries_unknown_key": "名称不可用",
   "credential_protection_discoveries_time": "最近发现时间",

@@ -542,8 +542,10 @@ pub struct DiscoverResponse {
 pub struct CatalogSyncRequest {
     /// Host-configured catalog service base URL (e.g. `https://models.stravia.cn`).
     pub catalog_base_url: String,
-    /// `true` = fetch a fresh remote snapshot; `false` = derive profiles from
-    /// `snapshot_body`, falling back to the guest's embedded bootstrap list.
+    /// `true` = fetch a fresh remote snapshot, unless the announced revision
+    /// already equals `snapshot_revision` (then `snapshot_body` is reused);
+    /// `false` = derive profiles from `snapshot_body`, falling back to the
+    /// guest's embedded bootstrap list.
     #[serde(default)]
     pub refresh_remote: bool,
     /// Last-good `providers.json` body persisted by the host, when any.

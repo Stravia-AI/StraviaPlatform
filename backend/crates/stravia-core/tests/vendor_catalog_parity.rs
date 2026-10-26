@@ -37,6 +37,7 @@ struct FakeCatalogState {
     generated_at: String,
     index: Value,
     index_status: u16,
+    index_requests: usize,
     canonical: Value,
     canonical_status: u16,
     scopes: HashMap<String, (u16, Value)>,
@@ -50,6 +51,7 @@ impl FakeCatalog {
             generated_at: "2025-01-01T00:00:00Z".to_owned(),
             index: json!({}),
             index_status: 200,
+            index_requests: 0,
             canonical: json!({
                 "acme/m-1": { "id": "acme/m-1", "name": "Acme Model One" }
             }),
@@ -87,6 +89,10 @@ impl FakeCatalog {
         self.state.write().await.index_status = 500;
     }
 
+    async fn index_requests(&self) -> usize {
+        self.state.read().await.index_requests
+    }
+
     async fn fail_canonical(&self) {
         self.state.write().await.canonical_status = 500;
     }
@@ -109,7 +115,8 @@ async fn version(State(state): State<Arc<RwLock<FakeCatalogState>>>) -> impl Int
 }
 
 async fn index(State(state): State<Arc<RwLock<FakeCatalogState>>>) -> impl IntoResponse {
-    let state = state.read().await;
+    let mut state = state.write().await;
+    state.index_requests += 1;
     if state.index_status != 200 {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "index error").into_response();
     }
@@ -818,6 +825,15 @@ async fn failed_index_refresh_preserves_last_good_snapshot() -> anyhow::Result<(
     let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
     gw.catalog_sync.refresh().await?;
 
+    // 同一 revision 不会再次下载索引；只有 revision 前进后下载失败才应报告失败。
+    catalog
+        .set_index(
+            "rev-2",
+            json!({
+                "other-zen": catalog_entry("other-zen", "Other Zen", "@ai-sdk/openai-compatible", None),
+            }),
+        )
+        .await;
     catalog.fail_index().await;
     assert!(
         gw.catalog_sync.refresh().await.is_err(),
@@ -830,6 +846,13 @@ async fn failed_index_refresh_preserves_last_good_snapshot() -> anyhow::Result<(
             .iter()
             .any(|provider| provider.id == "fake-zen"),
         "last-good snapshot must survive a failed refresh"
+    );
+    assert!(
+        !choices
+            .providers
+            .iter()
+            .any(|provider| provider.id == "other-zen"),
+        "a failed download must not publish the new revision"
     );
     Ok(())
 }
@@ -873,5 +896,54 @@ async fn failed_canonical_refresh_reports_failure_while_the_index_advances() -> 
             .any(|provider| provider.id == "other-zen"),
         "the confirmed provider index still advances on a canonical failure"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Result<()> {
+    let catalog = FakeCatalog::start().await?;
+    let zen_index = |extra: Option<&str>| {
+        let mut index = json!({
+            "zen-a": catalog_entry("zen-a", "Zen A", "@ai-sdk/openai-compatible", None),
+            "zen-b": catalog_entry("zen-b", "Zen B", "@ai-sdk/openai-compatible", None),
+        });
+        if let Some(id) = extra {
+            index[id] = catalog_entry(id, "Zen C", "@ai-sdk/openai-compatible", None);
+        }
+        index
+    };
+    catalog.set_index("rev-1", zen_index(None)).await;
+    for id in ["zen-a", "zen-b", "zen-c"] {
+        catalog.set_scope(id, 200, scope_body()).await;
+    }
+
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    assert_eq!(catalog.index_requests().await, 1);
+
+    // 同一 revision 下，多个 Provider 的 scope 缺失与定时刷新都只复用已落盘的索引。
+    gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    gw.catalog_sync.catalog_models("zen-b", "default").await?;
+    let unchanged = gw.catalog_sync.refresh().await?;
+    assert_eq!(unchanged.revision, "rev-1");
+    assert_eq!(unchanged.provider_count, 2);
+    assert_eq!(catalog.index_requests().await, 1);
+    let choices = gw.admin().catalog_choices().await;
+    assert!(
+        choices
+            .providers
+            .iter()
+            .any(|provider| provider.id == "zen-a")
+    );
+
+    // revision 前进后仍会下载并切换到新索引，其 scope 与新 revision 对应。
+    catalog.set_index("rev-2", zen_index(Some("zen-c"))).await;
+    let advanced = gw.catalog_sync.refresh().await?;
+    assert_eq!(advanced.revision, "rev-2");
+    assert_eq!(advanced.provider_count, 3);
+    assert_eq!(catalog.index_requests().await, 2);
+    gw.catalog_sync.catalog_models("zen-c", "default").await?;
+    assert_eq!(catalog.index_requests().await, 2);
     Ok(())
 }

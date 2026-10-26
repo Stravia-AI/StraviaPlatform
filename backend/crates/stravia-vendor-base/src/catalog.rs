@@ -38,7 +38,9 @@ pub(crate) struct CatalogEntry {
 
 /// `sync-catalog` implementation: optionally fetch the provider scope, then
 /// either derive profiles from the supplied/embedded data or refresh the
-/// index and derive from the confirmed revision.
+/// index and derive from the confirmed revision. A refresh whose announced
+/// revision equals the supplied snapshot revision reuses that snapshot and
+/// returns no `snapshot_body`.
 pub(crate) fn sync_catalog(
     host: &GuestHost,
     request: &CatalogSyncRequest,
@@ -71,6 +73,21 @@ pub(crate) fn sync_catalog(
     }
 
     let announced = fetch_version(host, base_url)?;
+    // revision 对应的索引不可变：宿主快照已是该 revision 时直接复用，避免每次
+    // 定时刷新或 scope 缺失都重新下载整本索引，并让宿主跳过重复的解析与落盘。
+    if let (Some(body), Some(revision)) = (
+        request.snapshot_body.as_deref(),
+        request.snapshot_revision.as_deref(),
+    ) && revision == announced.revision
+    {
+        return Ok(CatalogSyncOutcome {
+            revision: announced.revision,
+            generated_at: Some(announced.generated_at),
+            snapshot_body: None,
+            scope_body,
+            providers: derive_profiles(body)?,
+        });
+    }
     let index_body = fetch_document(host, base_url, "providers.json", MAX_INDEX_BODY)?;
     // A second version read catches a publish racing the index fetch; the
     // profiles then come from the revision the service confirmed.

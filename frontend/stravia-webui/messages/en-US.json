@@ -254,6 +254,7 @@
   "credential_protection_discoveries_loading": "Loading discoveries…",
   "credential_protection_discoveries_gap": "Observation data is incomplete. Missing records do not mean no credentials were discovered.",
   "credential_protection_discoveries_count": "{count} new credentials",
+  "credential_protection_discoveries_new_credentials": "New credentials",
   "credential_protection_discoveries_api_key": "API Key",
   "credential_protection_discoveries_unknown_key": "Name unavailable",
   "credential_protection_discoveries_time": "Latest discovery",

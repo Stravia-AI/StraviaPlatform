@@ -1,7 +1,12 @@
 import { expect, test } from '@playwright/test'
 import type { Locator, Page, Route } from '@playwright/test'
 
-import type { CredentialRule, CustomCredentialRule, CustomCredentialRuleInput } from '../src/lib/types'
+import type {
+  CredentialDiscoverySummary,
+  CredentialRule,
+  CustomCredentialRule,
+  CustomCredentialRuleInput,
+} from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
 function builtin(index: number): CredentialRule {
@@ -40,7 +45,34 @@ interface Mock {
   failTest: boolean
 }
 
-async function mockRedaction(page: Page, options: { rules?: number; custom?: CustomCredentialRule[] } = {}) {
+function discovery(index: number, overrides: Partial<CredentialDiscoverySummary> = {}): CredentialDiscoverySummary {
+  return {
+    interaction_id: `interaction-${index}`,
+    api_key_name: 'omp-key',
+    discovered_at: 1_788_854_400_000 - index * 1000,
+    new_credential_count: 2,
+    rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
+    source_types: ['tool_result'],
+    status: 'running',
+    observation_gap: false,
+    ...overrides,
+  }
+}
+
+async function openRules(page: Page) {
+  await page.getByRole('tab', { name: /Current rules/ }).click()
+}
+
+async function mockRedaction(
+  page: Page,
+  options: {
+    rules?: number
+    custom?: CustomCredentialRule[]
+    discoveries?: CredentialDiscoverySummary[]
+    nextCursor?: string
+    observationGap?: boolean
+  } = {},
+) {
   const state: Mock = {
     customRules: [...(options.custom ?? [])],
     writes: [],
@@ -58,7 +90,16 @@ async function mockRedaction(page: Page, options: { rules?: number; custom?: Cus
     const method = request.method()
     if (pathname.endsWith('/rules')) return route.fulfill({ json: { data: { rules, prefilter: '', filter: '' } } })
     if (pathname.endsWith('/discoveries')) {
-      return route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } })
+      const more = new URL(request.url()).searchParams.has('cursor')
+      return route.fulfill({
+        json: {
+          data: {
+            items: more ? [] : (options.discoveries ?? []),
+            next_cursor: more ? null : (options.nextCursor ?? null),
+            observation_gap: options.observationGap ?? false,
+          },
+        },
+      })
     }
     if (pathname.endsWith('/test')) {
       const { text } = request.postDataJSON() as { text: string }
@@ -123,11 +164,139 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test.describe('hit records', () => {
+  test('is the first and default tab and shows each hit with its rules, source and status in one row', async ({
+    page,
+  }) => {
+    await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const tabs = page.getByRole('tab')
+    await expect(tabs.nth(0)).toHaveText(/Hit records/)
+    await expect(tabs.nth(1)).toHaveText(/Current rules/)
+    await expect(tabs.nth(2)).toHaveText(/Matching test/)
+    await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true')
+
+    const row = page.getByRole('row').filter({ hasText: 'omp-key' })
+    await expect(row.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
+    await expect(row.getByRole('button', { name: 'Fixture credential 1', exact: true })).toBeVisible()
+    await expect(row.getByRole('cell').nth(3).getByRole('listitem')).toHaveText(['Tool result'])
+    await expect(row.getByRole('cell').nth(4)).toHaveText('2')
+    await expect(row.getByRole('status')).toHaveText('Running')
+    await expect(row.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
+      'href',
+      '/logs?interaction=interaction-0',
+    )
+  })
+
+  test('opens the matched rule from its chip and keeps the rule ID reachable there', async ({ page }) => {
+    await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await page.getByRole('button', { name: 'Fixture credential 1', exact: true }).click()
+    const inspector = page.getByRole('dialog')
+    await expect(inspector.getByRole('heading', { name: 'Fixture credential 1' })).toBeVisible()
+    await expect(inspector.getByText('fixture-rule-1', { exact: true })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Close' }).click()
+    await expect(inspector).toHaveCount(0)
+    // 回到命中记录，不被带到现有规则页签。
+    await expect(page.getByRole('tab', { name: 'Hit records' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('falls back to the rule ID for a rule that is gone and flags rows with incomplete observation', async ({
+    page,
+  }) => {
+    await mockRedaction(page, {
+      discoveries: [discovery(0, { rule_ids: ['retired-rule'], observation_gap: true })],
+      observationGap: true,
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const row = page.getByRole('row').filter({ hasText: 'omp-key' })
+    await expect(row.getByText('retired-rule', { exact: true })).toBeVisible()
+    await expect(row.getByRole('button')).toHaveCount(0)
+    await expect(row.getByRole('status').filter({ hasText: 'Observation incomplete' })).toBeVisible()
+    await expect(page.getByRole('alert')).toContainText('Observation data is incomplete.')
+  })
+
+  test('scrolls long histories inside the workspace and keeps load more reachable', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: Array.from({ length: 30 }, (_, index) => discovery(index)),
+      nextCursor: 'more',
+    })
+    await page.setViewportSize({ width: 1280, height: 700 })
+    await page.goto('/reversible-redaction')
+    const viewport = page.getByRole('tabpanel').locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
+    await expect(viewport).toBeVisible()
+    expect(await viewport.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
+    const more = page.getByRole('button', { name: 'Load more discoveries' })
+    await expect(more).toBeInViewport()
+    await more.click()
+    await expect(more).toHaveCount(0)
+  })
+
+  for (const width of [1440, 1280]) {
+    test(`fits every column, including the request link, without horizontal scrolling at ${width}px`, async ({
+      page,
+    }) => {
+      await mockRedaction(page, {
+        discoveries: [
+          discovery(0, { source_types: ['user_message', 'tool_arguments'], observation_gap: true }),
+          discovery(1, {
+            api_key_name: 'Second fixture key',
+            rule_ids: ['fixture-rule-0', 'fixture-rule-1', 'fixture-rule-2', 'fixture-rule-3'],
+            source_types: ['system_or_history'],
+            new_credential_count: 14,
+          }),
+        ],
+      })
+      await page.setViewportSize({ width, height: 800 })
+      await page.goto('/reversible-redaction')
+      const panel = page.getByRole('tabpanel')
+      const viewport = panel.locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
+      await expect(panel.getByRole('table')).toBeVisible()
+      expect(await viewport.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+      const links = panel.getByRole('link', { name: 'Open request observation' })
+      await expect(links).toHaveCount(2)
+      await expect(links.first()).toBeInViewport({ ratio: 1 })
+      await expect(links.last()).toBeInViewport({ ratio: 1 })
+    })
+  }
+
+  test('keeps a short history at its natural height', async ({ page }) => {
+    await mockRedaction(page, { discoveries: [discovery(0), discovery(1)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const table = page.getByRole('tabpanel').locator('[data-slot="data-table-viewport"]')
+    await expect(table).toBeVisible()
+    expect((await box(table)).height).toBeLessThan(300)
+  })
+
+  for (const width of [390, 320]) {
+    test(`reflows into a list without horizontal overflow at ${width}px`, async ({ page }) => {
+      await mockRedaction(page, { discoveries: [discovery(0), discovery(1)] })
+      await page.setViewportSize({ width, height: 800 })
+      await page.goto('/reversible-redaction')
+      await expect(page.getByRole('table')).toHaveCount(0)
+      const item = page.getByRole('listitem').filter({ hasText: 'omp-key' }).first()
+      await expect(item.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
+      await expect(item.getByText('2 new credentials · Tool result')).toBeVisible()
+      await expect(item.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
+        'href',
+        '/logs?interaction=interaction-0',
+      )
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    })
+  }
+})
+
 test.describe('rules workspace', () => {
   test('fills the 120rem container and the remaining height at 2560px with content-sized columns', async ({ page }) => {
     await mockRedaction(page)
     await page.setViewportSize({ width: 2560, height: 720 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     const table = page.getByRole('table')
     await expect(table.getByRole('button', { name: /Fixture credential 0/ })).toBeVisible()
     const title = await box(page.locator('main h1').last())
@@ -154,6 +323,7 @@ test.describe('rules workspace', () => {
       await mockRedaction(page)
       await page.setViewportSize({ width, height: 800 })
       await page.goto('/reversible-redaction')
+      await openRules(page)
       const toolbar = page.locator('[data-slot="data-table-toolbar"]')
       await expect(toolbar).toBeVisible()
       const tabs = await box(page.getByRole('tablist'))
@@ -177,6 +347,7 @@ test.describe('rules workspace', () => {
     await mockRedaction(page, { custom: [savedRule] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Last page', exact: true }).click()
     await expect(page.getByText('Page 2 of 2')).toBeVisible()
     await page.locator('#credential-rule-search').fill('Fixture credential 3')
@@ -196,6 +367,7 @@ test.describe('rules workspace', () => {
     await mockRedaction(page)
     await page.setViewportSize({ width: 1280, height: 420 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await expect(page.getByRole('table').getByRole('button', { name: /Fixture credential 0/ })).toBeVisible()
     const next = page.getByRole('button', { name: 'Next', exact: true })
     await next.scrollIntoViewIfNeeded()
@@ -286,6 +458,7 @@ test.describe('custom rule Sheet', () => {
     const state = await mockRedaction(page, { custom: [savedRule] })
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Internal token' }).click()
     const sheet = sheetOf(page)
     const enabled = sheet.getByRole('switch', { name: 'Enable this rule' })
@@ -340,6 +513,7 @@ test.describe('custom rule Sheet', () => {
     const state = await mockRedaction(page)
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Add custom rule' }).click()
     const sheet = sheetOf(page)
     await sheet.getByLabel('Rule name').fill('Staging token')
@@ -390,6 +564,7 @@ test.describe('custom rule Sheet', () => {
     const state = await mockRedaction(page, { custom: [savedRule] })
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Internal token' }).click()
     const sheet = sheetOf(page)
     await expect(sheet.getByRole('heading', { name: 'Edit custom rule' })).toBeVisible()
@@ -419,6 +594,7 @@ test.describe('custom rule Sheet', () => {
     const state = await mockRedaction(page, { custom: [savedRule] })
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Internal token' }).click()
     const sheet = sheetOf(page)
     await sheet.getByRole('button', { name: 'Delete rule' }).click()
@@ -445,6 +621,7 @@ test.describe('custom rule Sheet', () => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.route('**/api/v1/providers**', (route) => route.fulfill({ json: { data: [] } }))
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Internal token' }).click()
     const sheet = sheetOf(page)
     await sheet.getByLabel('Rule name').fill('Renamed token')

@@ -71,6 +71,7 @@ for (const width of [390, 320]) {
   test(`DataTable toolbar puts search on its own row without overlap at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 })
     await page.goto('/reversible-redaction')
+    await page.getByRole('tab', { name: /Current rules/ }).click()
     const toolbar = page.locator('[data-slot="data-table-toolbar"]')
     await expect(toolbar).toBeVisible()
     const search = toolbar.locator('[data-slot="input-group"]').first()
@@ -92,6 +93,7 @@ for (const width of [390, 320]) {
 test('DataTable toolbar keeps search and actions on one row when the table is wide', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/reversible-redaction')
+  await page.getByRole('tab', { name: /Current rules/ }).click()
   const toolbar = page.locator('[data-slot="data-table-toolbar"]')
   const [searchBox, filterBox] = await boxes([toolbar.locator('input').first(), toolbar.getByLabel('Rule source')])
   expect(Math.abs(searchBox.y - filterBox.y)).toBeLessThan(searchBox.height)
@@ -101,6 +103,7 @@ test('DataTable toolbar keeps search and actions on one row when the table is wi
 test('workbench list scrolls inside the remaining height and keeps the paginator reachable', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 700 })
   await page.goto('/reversible-redaction')
+  await page.getByRole('tab', { name: /Current rules/ }).click()
   const viewport = page.locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
   await expect(viewport).toBeVisible()
   const next = page.getByRole('button', { name: 'Next', exact: true })
@@ -120,6 +123,7 @@ test('workbench list scrolls inside the remaining height and keeps the paginator
 test('custom rule Sheet confirms before discarding a draft and closes directly without one', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/reversible-redaction')
+  await page.getByRole('tab', { name: /Current rules/ }).click()
   const sheet = page.locator('[data-slot="sheet-content"]')
   const dialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
 
