@@ -3,7 +3,7 @@
 //! 与内置规则相同：不解码、不联网，且与已有脱敏标记重叠的命中不再替换。
 use std::collections::HashMap;
 
-use regex::bytes::Regex;
+use super::pattern::Regex;
 
 use super::expression;
 use super::{DetectedCredential, DetectedFinding, reference_ranges};

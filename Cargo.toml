@@ -96,6 +96,8 @@ tokio-rustls = "0.26.4"
 rustls-platform-verifier = "0.7"
 numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
 parking_lot = "0.12.5"
+# 避免碎片化主机上的透明大页缺页触发同步内存整理，不改系统 THP 配置。
+mimalloc = { version = "0.1.52", features = ["no_thp"] }
 tinyufo = { package = "TinyUFO", version = "=0.9.0" }
 redis = { version = "=1.7.1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "script"] }
 tempfile = "3"

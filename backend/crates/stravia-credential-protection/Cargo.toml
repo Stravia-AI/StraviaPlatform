@@ -17,6 +17,7 @@ chrono = { workspace = true, features = ["clock", "std"] }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 regex = { workspace = true }
+regex-automata = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tiktoken-rs = { workspace = true }

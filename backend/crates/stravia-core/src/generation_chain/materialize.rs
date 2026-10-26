@@ -11,12 +11,7 @@ pub(super) fn decode_response_node(
     Ok((node.id, persisted))
 }
 
-fn apply_history_input(
-    items: &mut Vec<AiItem>,
-    mutation: Option<(bool, Cow<'_, [AiItem]>)>,
-    fallback: Cow<'_, [AiItem]>,
-) {
-    let (replace, input) = mutation.unwrap_or((false, fallback));
+fn apply_history_input(items: &mut Vec<AiItem>, replace: bool, input: Cow<'_, [AiItem]>) {
     if replace {
         *items = input.into_owned();
     } else {
@@ -45,11 +40,10 @@ fn owned_mutation<'a>(
     })
 }
 
-// Common fold: owned nodes move content; workspace nodes lend exactly the same input.
-fn fold_client_history_view(
-    client_items: &mut Vec<AiItem>,
-    persisted: &mut Cow<'_, PersistedResponseNode<'static>>,
-) -> usize {
+// Owned and borrowed folds select the same persisted client input and output.
+fn client_history_parts<'a>(
+    persisted: &mut Cow<'a, PersistedResponseNode<'static>>,
+) -> (bool, Cow<'a, [AiItem]>, Cow<'a, [AiItem]>) {
     let (mutation, fallback, output) = match persisted {
         Cow::Owned(node) => {
             let mutation = owned_mutation(node.client_history_mutation.take());
@@ -64,6 +58,7 @@ fn fold_client_history_view(
             (mutation, fallback, output)
         }
         Cow::Borrowed(node) => {
+            let node = *node;
             let output = node
                 .client_output
                 .as_ref()
@@ -78,9 +73,18 @@ fn fold_client_history_view(
             )
         }
     };
-    apply_history_input(client_items, mutation, fallback);
+    let (replace, input) = mutation.unwrap_or((false, fallback));
+    (replace, input, output)
+}
+
+fn fold_client_history_view(
+    client_items: &mut Vec<AiItem>,
+    persisted: &mut Cow<'_, PersistedResponseNode<'static>>,
+) -> usize {
+    let (replace, input, output) = client_history_parts(persisted);
+    apply_history_input(client_items, replace, input);
     let input_end = client_items.len();
-    apply_history_input(client_items, None, output);
+    apply_history_input(client_items, false, output);
     input_end
 }
 
@@ -152,7 +156,8 @@ fn materialize_generation_replay<'a>(
                 Cow::Borrowed(node.client_delta.messages.as_ref()),
             ),
         };
-        apply_history_input(&mut effective_items, mutation, fallback);
+        let (replace, input) = mutation.unwrap_or((false, fallback));
+        apply_history_input(&mut effective_items, replace, input);
         match &mut persisted {
             Cow::Owned(node) => {
                 compaction_record_ids.append(&mut node.compaction_record_ids);
@@ -362,12 +367,25 @@ pub(super) fn serialized_size_bytes(value: &impl serde::Serialize) -> usize {
 
 pub(super) fn visit_client_items_from_nodes(
     nodes: &[Arc<DecodedDiscoveryNode>],
-    mut visit: impl FnMut(&str, &[AiItem], usize),
+    mut visit: impl FnMut(&str, &[Cow<'_, AiItem>], usize),
 ) {
+    fn extend<'a>(view: &mut Vec<Cow<'a, AiItem>>, items: Cow<'a, [AiItem]>) {
+        match items {
+            Cow::Borrowed(items) => view.extend(items.iter().map(Cow::Borrowed)),
+            Cow::Owned(items) => view.extend(items.into_iter().map(Cow::Owned)),
+        }
+    }
+
     let mut client_items = Vec::new();
     for node in nodes {
         let mut persisted = Cow::Borrowed(&node.persisted);
-        let input_end = fold_client_history_view(&mut client_items, &mut persisted);
+        let (replace, input, output) = client_history_parts(&mut persisted);
+        if replace {
+            client_items.clear();
+        }
+        extend(&mut client_items, input);
+        let input_end = client_items.len();
+        extend(&mut client_items, output);
         visit(node.id.as_str(), &client_items, input_end);
     }
 }

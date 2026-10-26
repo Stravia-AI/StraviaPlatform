@@ -10,6 +10,10 @@ use stravia_server::{
     standalone_local_origins, start_http_server,
 };
 
+// 请求与后台写入跨线程交接大型历史树；及时复用释放页，避免逐线程 arena 驻留。
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(name = "stravia-server", version, about = "Stravia Agent infra")]
 struct Args {

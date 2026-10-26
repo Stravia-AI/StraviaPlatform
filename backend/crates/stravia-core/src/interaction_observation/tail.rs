@@ -158,10 +158,11 @@ impl Window {
         self.bytes
     }
 
-    pub(super) fn capture(items: &[AiItem]) -> Option<Self> {
+    pub(super) fn capture<T: std::borrow::Borrow<AiItem>>(items: &[T]) -> Option<Self> {
         let start = items
             .iter()
             .position(|item| {
+                let item: &AiItem = item.borrow();
                 !matches!(
                     item.role,
                     stravia_runtime_contract::protocol::ir::Role::System
@@ -176,6 +177,7 @@ impl Window {
         let mut units = Vec::new();
         let mut bytes = 0;
         for item in items[start..].iter().rev() {
+            let item: &AiItem = item.borrow();
             // An unadorned text item projects to one unit whose encoded size
             // cannot be smaller than its text. Decide the existing suffix
             // limit before copying it; private controls still use projection.
@@ -226,7 +228,9 @@ impl Window {
         })
     }
 
-    pub(super) fn capture_received_input(items: &[AiItem]) -> Option<Self> {
+    pub(super) fn capture_received_input<T: std::borrow::Borrow<AiItem>>(
+        items: &[T],
+    ) -> Option<Self> {
         let mut window = Self::capture(items)?;
         // Delivered outputs and ordinary retained tails never compute this.
         if window.complete {
@@ -234,13 +238,16 @@ impl Window {
         }
         Some(window)
     }
-    fn capture_received_items(items: &[AiItem]) -> Option<Vec<ReceivedItem>> {
+    fn capture_received_items<T: std::borrow::Borrow<AiItem>>(
+        items: &[T],
+    ) -> Option<Vec<ReceivedItem>> {
         if items.len() > MAX_UNITS {
             return None;
         }
         let mut received = Vec::with_capacity(items.len());
         let mut bytes = 0usize;
         for item in items {
+            let item: &AiItem = item.borrow();
             if unadorned_text_exceeds_budget(item, MAX_WINDOW_BYTES - bytes) {
                 return None;
             }

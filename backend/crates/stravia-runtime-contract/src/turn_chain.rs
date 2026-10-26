@@ -144,6 +144,7 @@ pub struct MaterializedTurnChain {
 pub struct TurnReadContext {
     principal: Principal,
     kind: TurnNodeKind,
+    decoder: Option<TurnNodeDecoder>,
     nodes: HashMap<TurnNodeId, SharedTurnNode>,
     bytes: usize,
     budget: usize,
@@ -153,6 +154,8 @@ pub struct TurnReadContext {
     pending_contents: HashMap<String, (Arc<Value>, usize)>,
     pending_bytes: usize,
 }
+
+pub type TurnNodeDecoder = fn(TurnNode) -> Result<Arc<dyn Any + Send + Sync>, String>;
 
 #[derive(Clone)]
 pub struct SharedTurnNode {
@@ -181,6 +184,7 @@ impl TurnReadContext {
         Self {
             principal: principal.clone(),
             kind,
+            decoder: None,
             nodes: HashMap::new(),
             bytes: 0,
             budget: budget.min(Self::BYTE_LIMIT),
@@ -194,6 +198,39 @@ impl TurnReadContext {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// 在各节点恢复后立即消费 JSON，避免整条链的原始树与领域对象同时驻留。
+    /// 领域折叠成功之前仍不得 admit；解码失败不保留本次暂存内容。
+    pub fn with_decoder(mut self, decoder: TurnNodeDecoder) -> Self {
+        self.decoder = Some(decoder);
+        self
+    }
+
+    pub fn retains_node(&self, id: &TurnNodeId) -> bool {
+        self.nodes.contains_key(id)
+    }
+
+    pub fn prepare_node(
+        &self,
+        node: TurnNode,
+        expires_at: Instant,
+    ) -> Result<SharedTurnNode, TurnUnavailable> {
+        let mut shared = SharedTurnNode {
+            id: node.id.clone(),
+            kind: node.kind,
+            parent_id: node.parent_id.clone(),
+            payload_version: node.payload_version,
+            expires_at,
+            raw: None,
+            decoded: None,
+        };
+        if let Some(decode) = self.decoder {
+            shared.decoded = Some(decode(node).map_err(TurnUnavailable::Decode)?);
+        } else {
+            shared.raw = Some(Arc::new(node));
+        }
+        Ok(shared)
     }
 
     pub fn admission_open(&self) -> bool {
@@ -391,6 +428,8 @@ pub enum TurnUnavailable {
     Unavailable,
     #[error("turn storage failed: {0}")]
     Storage(String),
+    #[error("{0}")]
+    Decode(String),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -446,16 +485,8 @@ pub trait TurnChainStore: Send + Sync {
             nodes: chain
                 .nodes
                 .into_iter()
-                .map(|node| SharedTurnNode {
-                    id: node.id.clone(),
-                    kind: node.kind,
-                    parent_id: node.parent_id.clone(),
-                    payload_version: node.payload_version,
-                    expires_at: chain.expires_at,
-                    raw: Some(Arc::new(node)),
-                    decoded: None,
-                })
-                .collect(),
+                .map(|node| context.prepare_node(node, chain.expires_at))
+                .collect::<Result<_, _>>()?,
         })
     }
 

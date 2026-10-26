@@ -28,20 +28,6 @@ impl GenerationDiscoveryWorkspace {
     }
 }
 
-enum DiscoveryReadError {
-    Storage(TurnUnavailable),
-    Decode(String),
-}
-
-impl std::fmt::Display for DiscoveryReadError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Storage(error) => error.fmt(formatter),
-            Self::Decode(error) => formatter.write_str(error),
-        }
-    }
-}
-
 impl DiscoveryWorkspace {
     pub(super) fn new(principal: &Principal, enabled: bool) -> Self {
         Self {
@@ -50,6 +36,7 @@ impl DiscoveryWorkspace {
                     principal,
                     TurnNodeKind::Response,
                 )
+                .with_decoder(Self::decode_shared_node)
             }),
             budget: DISCOVERY_WORKSPACE_BYTES,
         }
@@ -69,7 +56,8 @@ impl DiscoveryWorkspace {
                     principal,
                     TurnNodeKind::Response,
                     self.budget,
-                ),
+                )
+                .with_decoder(Self::decode_shared_node),
             );
         }
     }
@@ -90,7 +78,8 @@ impl DiscoveryWorkspace {
                     principal,
                     TurnNodeKind::Response,
                     budget,
-                ),
+                )
+                .with_decoder(Self::decode_shared_node),
             ),
             budget,
         }
@@ -126,6 +115,12 @@ impl DiscoveryWorkspace {
         nodes.into_iter().map(Self::decode_node).collect()
     }
 
+    fn decode_shared_node(
+        node: stravia_runtime_contract::turn_chain::TurnNode,
+    ) -> Result<Arc<dyn std::any::Any + Send + Sync>, String> {
+        Self::decode_node(node).map(|node| node as Arc<dyn std::any::Any + Send + Sync>)
+    }
+
     fn decode_node(
         mut node: stravia_runtime_contract::turn_chain::TurnNode,
     ) -> Result<Arc<DecodedDiscoveryNode>, String> {
@@ -148,22 +143,18 @@ impl DiscoveryWorkspace {
             Vec<Arc<DecodedDiscoveryNode>>,
             stravia_runtime_contract::turn_chain::SharedMaterializedTurnChain,
         ),
-        DiscoveryReadError,
+        TurnUnavailable,
     > {
         use tracing::Instrument as _;
-        let context = self
-            .context
-            .as_mut()
-            .ok_or(DiscoveryReadError::Storage(TurnUnavailable::Unavailable))?;
+        let context = self.context.as_mut().ok_or(TurnUnavailable::Unavailable)?;
         let span = tracing::info_span!(target: "stravia::perf", "generation_chain.history.load", status = tracing::field::Empty);
         let chain = store
             .materialize_in_context(principal, TurnNodeKind::Response, id, context)
             .instrument(span.clone())
             .await;
         span.record("status", if chain.is_ok() { "completed" } else { "error" });
-        let mut chain = chain.map_err(|error| {
+        let mut chain = chain.inspect_err(|_| {
             context.begin_read();
-            DiscoveryReadError::Storage(error)
         })?;
         let mut nodes = Vec::with_capacity(chain.nodes.len());
         for node in &mut chain.nodes {
@@ -172,17 +163,17 @@ impl DiscoveryWorkspace {
                     .downcast::<DecodedDiscoveryNode>()
                     .map_err(|_| {
                         context.begin_read();
-                        DiscoveryReadError::Decode("invalid request history decode".into())
+                        TurnUnavailable::Decode("invalid request history decode".into())
                     })?
             } else {
                 let raw = node.raw.take().ok_or_else(|| {
                     context.begin_read();
-                    DiscoveryReadError::Decode("missing request history payload".into())
+                    TurnUnavailable::Decode("missing request history payload".into())
                 })?;
                 Self::decode_node(Arc::try_unwrap(raw).unwrap_or_else(|raw| (*raw).clone()))
                     .map_err(|error| {
                         context.begin_read();
-                        DiscoveryReadError::Decode(error)
+                        TurnUnavailable::Decode(error)
                     })?
             };
             nodes.push(decoded);
@@ -195,13 +186,12 @@ impl DiscoveryWorkspace {
         store: &dyn TurnChainStore,
         principal: &Principal,
         id: &TurnNodeId,
-        visit: impl FnMut(&str, &[AiItem], usize),
+        visit: impl FnMut(&str, &[Cow<'_, AiItem>], usize),
     ) -> anyhow::Result<bool> {
         let (nodes, chain) = match self.read(store, principal, id).await {
             Ok(read) => read,
-            Err(DiscoveryReadError::Storage(TurnUnavailable::Unavailable)) => return Ok(false),
-            Err(DiscoveryReadError::Storage(error)) => return Err(anyhow::Error::new(error)),
-            Err(DiscoveryReadError::Decode(error)) => return Err(anyhow::Error::msg(error)),
+            Err(TurnUnavailable::Unavailable) => return Ok(false),
+            Err(error) => return Err(anyhow::Error::new(error)),
         };
         tracing::Span::current().record("node_count", nodes.len() as u64);
         visit_client_items_from_nodes(&nodes, visit);
@@ -243,11 +233,11 @@ impl DiscoveryWorkspace {
         {
             return;
         }
+        let context = self.context.as_ref().expect("enabled request context");
         let decoded = nodes
             .iter()
-            .zip(&chain.nodes)
-            .map(|(node, stored)| {
-                let size = if stored.decoded.is_some() {
+            .map(|node| {
+                let size = if context.retains_node(&node.id) {
                     0
                 } else {
                     serialized_size_bytes(&node.persisted)
@@ -826,11 +816,11 @@ impl GenerationChainStore {
                         .await
                     {
                         Ok(chain) => chain,
-                        Err(DiscoveryReadError::Storage(TurnUnavailable::Unavailable)) => continue,
-                        Err(DiscoveryReadError::Storage(TurnUnavailable::Storage(_))) => {
+                        Err(TurnUnavailable::Unavailable) => continue,
+                        Err(TurnUnavailable::Storage(_)) => {
                             return Err(BeginError::CompactionStorageFailed);
                         }
-                        Err(DiscoveryReadError::Decode(_)) => {
+                        Err(TurnUnavailable::Decode(_)) => {
                             return Err(BeginError::CompactionUnavailable);
                         }
                     };
@@ -847,6 +837,9 @@ impl GenerationChainStore {
                         Err(TurnUnavailable::Unavailable) => continue,
                         Err(TurnUnavailable::Storage(_)) => {
                             return Err(BeginError::CompactionStorageFailed);
+                        }
+                        Err(TurnUnavailable::Decode(_)) => {
+                            return Err(BeginError::CompactionUnavailable);
                         }
                     };
                     materialize_generation_nodes(chain.nodes, chain.expires_at)

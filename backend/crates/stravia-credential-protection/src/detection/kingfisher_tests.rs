@@ -15,7 +15,7 @@ fn matched(rule: &str, text: &str) -> Vec<String> {
         .position(|item| item.id == rule)
         .unwrap();
     detector
-        .find(text, index)
+        .find(text, index, &crate::detection::reference_ranges(text))
         .unwrap()
         .into_iter()
         .map(|finding| finding.secret.to_owned())
@@ -89,7 +89,7 @@ fn reviewed_pairs_keep_distinct_requirements_and_reporting_policies() {
         }))
         .unwrap()
     };
-    let comments = Regex::new(r"(?m)(\(\?#[^)]*\))|(\s\#[\sa-zA-Z]*$)").unwrap();
+    let comments = CommentRegex::new(r"(?m)(\(\?#[^)]*\))|(\s\#[\sa-zA-Z]*$)").unwrap();
     let mut rules = vec![make("kingfisher.plaid.2"), make("kingfisher.plaid.3")];
     rules[1].pattern_requirements.min_digits = 2;
     canonicalize(&mut rules, &comments);
@@ -194,10 +194,12 @@ fn zhipu_rejects_wrong_lengths_low_entropy_and_does_not_join_fields() {
 
 #[test]
 fn capture_priority_and_ascii_boundaries_follow_kingfisher() {
-    let regex = RegexBuilder::new(r"(?P<host>host) (?P<TOKEN>[A-Z0-9]+)|(?P<fallback>other)")
-        .unicode(false)
-        .build()
-        .unwrap();
+    let regex = Regex::with_options(
+        r"(?P<host>host) (?P<TOKEN>[A-Z0-9]+)|(?P<fallback>other)",
+        false,
+        10 * 1024 * 1024,
+    )
+    .unwrap();
     let captures = regex.captures(b"host A7B9").unwrap();
     assert_eq!(
         secret_capture(&regex, &captures).unwrap().as_bytes(),
