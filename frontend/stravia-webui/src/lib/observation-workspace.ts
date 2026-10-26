@@ -42,6 +42,13 @@ export function isValidObservationRange(startMs: number, endMs: number): boolean
   )
 }
 
+// 卡片上的用户输入预览或模型输出预览是否有更新；新出现的卡片只在已带预览文本时算更新，
+// 避免刚创建、尚无内容的卡片抢走视口。
+function previewUpdated(before: InteractionSummary | undefined, after: InteractionSummary): boolean {
+  if (!before) return Boolean(after.input_preview) || after.visible_tail !== ''
+  return before.input_preview !== after.input_preview || before.visible_tail !== after.visible_tail
+}
+
 /** logs 页需要的 admin.observations 窄面；admin.observations 结构满足此接口。 */
 export interface ObservationWorkspaceApi {
   forest(query: ForestQuery): Promise<ForestPage>
@@ -1137,10 +1144,6 @@ export class ObservationWorkspaceController {
     ) {
       this.#failurePending = Math.max(this.#failurePending, streamEvent.sequence)
     }
-    // 「新活动·跟随」只响应输出预览（visible_tail）的追加；思考条目与工具调用
-    // 仍照常落库刷新卡片数据，但不点亮跟随入口、不移动视口。
-    const extendsOutputPreview = streamEvent.kind === 'client_visible_content'
-    if (this.#followPaused && extendsOutputPreview) this.#hasNewActivity = true
     if (!this.#liveWindow && streamEvent.interaction_id && streamEvent.occurred_at >= this.#windowEnd) {
       const root = this.#roots.find((item) =>
         item.interactions.some((interaction) => interaction.id === streamEvent.interaction_id),
@@ -1162,7 +1165,6 @@ export class ObservationWorkspaceController {
       if (streamEvent.kind === 'run_started') this.#selectedLiveActive = true
     }
     this.#scheduleRefresh(streamEvent.boundary)
-    if (!this.#followPaused && this.#liveWindow && extendsOutputPreview) void this.#hooks.focusLatest()
     this.#publish()
   }
 
@@ -1230,6 +1232,7 @@ export class ObservationWorkspaceController {
         await this.#onStreamUpdate({ type: 'reset_required', snapshot_sequence: page.snapshot_sequence })
         return
       }
+      let updatedCard: InteractionSummary | undefined
       for (const change of page.changes) {
         if (page.snapshot_sequence < (this.#rootSequences.get(change.root_id) ?? 0)) continue
         const previous = this.#roots.find((root) => root.id === change.root_id)
@@ -1251,8 +1254,12 @@ export class ObservationWorkspaceController {
           this.#migratedRoots = new Set([...this.#migratedRoots, change.root_id])
         }
         const changesById = new Map(change.interactions.map((item) => [item.id, item]))
-        const knownIds = new Set(previous?.interactions.map((item) => item.id))
+        const knownById = new Map(previous?.interactions.map((item) => [item.id, item]))
         const removed = new Set(change.removed_interaction_ids)
+        for (const item of change.interactions) {
+          if (removed.has(item.id) || !previewUpdated(knownById.get(item.id), item)) continue
+          if (!updatedCard || item.last_active_at >= updatedCard.last_active_at) updatedCard = item
+        }
         if (
           (!change.removal_reason || change.removal_reason === 'window') &&
           selection === this.#selectionVersion &&
@@ -1267,7 +1274,7 @@ export class ObservationWorkspaceController {
             ...(previous?.interactions ?? [])
               .filter((item) => !removed.has(item.id))
               .map((item) => changesById.get(item.id) ?? item),
-            ...change.interactions.filter((item) => !knownIds.has(item.id) && !removed.has(item.id)),
+            ...change.interactions.filter((item) => !knownById.has(item.id) && !removed.has(item.id)),
           ],
         }
         this.#roots = previous ? this.#roots.map((item) => (item.id === root.id ? root : item)) : [...this.#roots, root]
@@ -1291,7 +1298,11 @@ export class ObservationWorkspaceController {
       this.#appliedSequence = Math.max(this.#appliedSequence, page.snapshot_sequence)
       ids.forEach((id) => this.#rootErrors.delete(id))
       this.#loadError = this.#rootErrors.values().next().value
+      // 自动跟随只响应卡片上用户输入预览或模型输出预览的变化；状态、用量、思考与工具调用
+      // 照常刷新卡片，但不点亮跟随入口，也不移动视口。
+      if (updatedCard && this.#followPaused) this.#hasNewActivity = true
       this.#publish()
+      if (updatedCard && !this.#followPaused && this.#liveWindow) void this.#hooks.focusNode(updatedCard.id)
     } catch (error) {
       if (version === this.#rangeVersion) {
         ids.forEach((id) => this.#rootErrors.set(id, error))

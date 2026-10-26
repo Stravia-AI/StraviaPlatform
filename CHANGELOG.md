@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Request history auto-follow now centers only the card whose user-input preview or model-output preview changed, instead of jumping to the latest running card on every output update. The top-left canvas badge no longer shows `loaded / total` chains; it shows how many loaded interactions are currently running.
 - Request-chain queries read retained event watermarks through separate indexed bounds and aggregate Tokens only for candidate roots. Token-filtered root counts and pagination share one query; matching retains whole-root usage, running estimates and the existing snapshot semantics.
 - Structural-history content cleanup scans bounded candidate batches on SQLite and PostgreSQL, including batches containing only referenced content, and rechecks references before deletion. Observation tail persistence batches pending tools, and admission reuses decoded Generation Chain ancestors within one request without changing ownership, expiry or writer ordering.
 - Request-chain details fetch incremental events only when notifications exceed their snapshot watermark, including notifications received during deep-link loading or reset. The canvas reuses unchanged graph derivations, topology and node objects across clock, connection, selection and body updates instead of rebuilding the full graph.

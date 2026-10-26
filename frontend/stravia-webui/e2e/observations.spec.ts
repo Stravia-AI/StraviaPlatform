@@ -4093,7 +4093,8 @@ test.describe('Interaction Observation canvas', () => {
     const fixture = await installObservationFixture(page, true)
     await page.goto('/logs')
 
-    await expect(page.getByText('1 / 3 chains', { exact: true })).toBeVisible()
+    await expect(page.getByText('1 running', { exact: true })).toBeVisible()
+    await expect(node(page, 'Delta', 'completed')).toHaveCount(0)
     const initialPane = (await page.locator('.svelte-flow__pane').boundingBox())!
     await page.mouse.move(initialPane.x + initialPane.width / 2, initialPane.y + initialPane.height * 0.9)
     // Reach the entire multi-level fixture, not only its first child row.
@@ -4102,7 +4103,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.getByRole('button', { name: 'Load and show all chains' }).click()
     await expect(page.getByRole('progressbar', { name: 'Loading all chains' })).toBeVisible()
     fixture.releaseRemainingRoots()
-    await expect(page.getByText('3 / 3 chains', { exact: true })).toBeVisible()
+    await expect(page.getByRole('progressbar', { name: 'Loading all chains' })).toHaveCount(0)
     await expect(node(page, 'Atlas', 'completed')).toHaveCount(1)
 
     await expect(async () => {
@@ -4175,6 +4176,43 @@ test.describe('Interaction Observation canvas', () => {
     await expect.poll(async () => (await viewportTransform(page)).x).not.toBe(afterZoom.x)
   })
 
+  test('auto follow centers the card whose preview updated instead of the latest running card', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    const offsetFromCenter = (label: string) =>
+      page.evaluate((nodeLabel) => {
+        const element = document.querySelector(`.svelte-flow__node[aria-label="${nodeLabel}"]`)
+        if (!element) return Number.POSITIVE_INFINITY
+        const pane = document.querySelector('.svelte-flow__pane')!.getBoundingClientRect()
+        const box = element.getBoundingClientRect()
+        return Math.hypot(
+          box.x + box.width / 2 - (pane.x + pane.width / 2),
+          box.y + box.height / 2 - (pane.y + pane.height / 2),
+        )
+      }, label)
+
+    await expect.poll(() => offsetFromCenter('Cinder, Running')).toBeLessThan(6)
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-boreal',
+      run_id: 'run-interaction-boreal',
+      rejection_id: null,
+      kind: 'client_visible_content',
+      payload: {
+        text: ' Boreal follow-up',
+        parts: [{ type: 'text', text: ' Boreal follow-up' }],
+        item: 'text:0',
+        block_id: 'block:0',
+        complete: true,
+      },
+    })
+    await expect.poll(() => offsetFromCenter('Boreal, Waiting for client'), { timeout: 5_000 }).toBeLessThan(6)
+    await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toContainText('Boreal follow-up')
+  })
+
   test('preserves causal roots through filters while live activity pauses and resumes follow', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
     const fixture = await installObservationFixture(page)
@@ -4202,6 +4240,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(follow).toBeVisible({ timeout: 5_000 })
     await follow.click()
     await expect(follow).toHaveCount(0)
+    await expect(page.getByText('1 running', { exact: true })).toBeVisible()
 
     await page.getByRole('button', { name: 'Filters' }).click()
     await page.getByLabel('Status', { exact: true }).click()
@@ -4229,6 +4268,7 @@ test.describe('Interaction Observation canvas', () => {
       'Completed through a filtered summary',
     )
     await expect(node(page, 'Cinder', 'completed').locator('article')).toHaveCSS('opacity', '1')
+    await expect(page.getByText('0 running', { exact: true })).toBeVisible()
     await expect(node(page, 'Boreal', 'waiting_client')).toBeVisible()
     expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('completed')
     expect(fixture.detailRequests).toHaveLength(1)
@@ -4364,7 +4404,7 @@ test.describe('Interaction Observation canvas', () => {
     // Atlas is outside the initial latest-interaction camera. Fit the forest before
     // keyboard navigation so viewport culling cannot replace the focused node.
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
-    await expect(page.getByText('3 / 3 chains', { exact: true })).toBeVisible()
+    await expect(node(page, 'Ember', 'completed')).toBeVisible()
     const selectedNode = node(page, 'Atlas', 'completed')
     await expect(selectedNode.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
     await selectedNode.focus()

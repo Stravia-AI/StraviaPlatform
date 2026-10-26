@@ -194,6 +194,7 @@ interface Harness {
   calls: { method: string; args: unknown[] }[]
   errors: unknown[]
   focusLatestCalls: number[]
+  focusNodeCalls: string[]
   subscription: { setCursorCalls: number[]; closed: boolean }
   setNow(value: number): void
   now(): number
@@ -203,6 +204,7 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
   const calls: Harness['calls'] = []
   const errors: unknown[] = []
   const focusLatestCalls: number[] = []
+  const focusNodeCalls: string[] = []
   const subscription = { setCursorCalls: [] as number[], closed: false }
   let onUpdate: ((update: ObservationStreamUpdate) => void | Promise<void>) | undefined
   let now = 1_000_000
@@ -288,7 +290,9 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
       focusLatest: () => {
         focusLatestCalls.push(1)
       },
-      focusNode: () => undefined,
+      focusNode: (id) => {
+        focusNodeCalls.push(id)
+      },
       fitAfterAllLoaded: () => undefined,
       onError: (error) => errors.push(error),
     },
@@ -320,6 +324,7 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
     calls,
     errors,
     focusLatestCalls,
+    focusNodeCalls,
     subscription,
     setNow: (value) => {
       now = value
@@ -421,23 +426,67 @@ describe('stream updates', () => {
     expect(h.snap().selectedLiveBlocks.map((b) => b.block_id)).toEqual(['b2'])
   })
 
-  test('follow only reacts to events that extend the output preview', async () => {
-    const h = harness()
+  test('follow moves to the card whose input or output preview changed and ignores other updates', async () => {
+    let sequence = 10
+    let changed: InteractionSummary[] = []
+    const h = harness({
+      forest: () =>
+        Promise.resolve(
+          forestPage([
+            root(
+              'root1',
+              [summary('i1', { last_event_sequence: 5 }), summary('i2', { last_event_sequence: 5 })],
+              999_000,
+            ),
+          ]),
+        ),
+      changes: () =>
+        Promise.resolve({
+          snapshot_sequence: sequence,
+          root_total: 1,
+          reset_required: false,
+          changes: [
+            {
+              root_id: 'root1',
+              last_active_at: 999_500,
+              interactions: changed,
+              removed_interaction_ids: [],
+              removal_reason: null,
+            },
+          ],
+        }),
+    })
+    const update = async (...interactions: InteractionSummary[]) => {
+      sequence += 1
+      changed = interactions.map((item) => ({ ...item, last_event_sequence: sequence }))
+      await h.emit(streamEvent(sequence, interactions[0].id, 999_500))
+    }
     await h.controller.start()
-    // 跟随中：思考增量与工具调用不移动视口，只有输出预览追加触发 focusLatest。
-    const focused = h.focusLatestCalls.length
-    await h.emit(streamEvent(6, 'i1', 999_500, 'model_thinking'))
-    await h.emit(streamEvent(7, 'i1', 999_501, 'platform_tool_finished'))
-    expect(h.focusLatestCalls).toHaveLength(focused)
-    await h.emit(streamEvent(8, 'i1', 999_502, 'client_visible_content'))
-    expect(h.focusLatestCalls).toHaveLength(focused + 1)
-    // 暂停后同理：非预览事件不点亮「新活动·跟随」。
+
+    // 状态等非预览变化只刷新卡片，不移动视口。
+    await update(summary('i1', { status: 'running' }))
+    expect(h.focusNodeCalls).toEqual([])
+    // 跟随有更新的卡片，而不是最新卡片：i2 的输出预览追加，i1 的用户输入预览出现。
+    await update(summary('i2', { visible_tail: 'answer' }))
+    expect(h.focusNodeCalls).toEqual(['i2'])
+    await update(summary('i1', { input_preview: 'question' }))
+    expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
+    // 预览文本没变的重复刷新不算更新。
+    await update(summary('i1', { input_preview: 'question' }))
+    expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
+    // 新卡片出现时还没有预览不抢视口；带上预览后才跟随。
+    await update(summary('i3'))
+    expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
+    await update(summary('i3', { visible_tail: 'hello' }))
+    expect(h.focusNodeCalls).toEqual(['i2', 'i1', 'i3'])
+
+    // 暂停后只点亮「新活动·跟随」，不移动视口；非预览变化不点亮。
     h.controller.pauseFollow()
-    await h.emit(streamEvent(9, 'i1', 999_503, 'model_thinking'))
-    await h.emit(streamEvent(10, 'i1', 999_504, 'client_tool_result'))
+    await update(summary('i3', { status: 'running', visible_tail: 'hello' }))
     expect(h.snap().hasNewActivity).toBe(false)
-    await h.emit(streamEvent(11, 'i1', 999_505, 'client_visible_content'))
+    await update(summary('i3', { visible_tail: 'hello world' }))
     expect(h.snap().hasNewActivity).toBe(true)
+    expect(h.focusNodeCalls).toEqual(['i2', 'i1', 'i3'])
   })
 
   test('live_gap routes capacity gaps away from save-failure gaps', async () => {

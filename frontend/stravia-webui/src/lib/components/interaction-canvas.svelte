@@ -44,7 +44,6 @@ interface Props {
   selectedPath: Set<string>
   loadingMore: boolean
   nextCursor?: string | null
-  rootTotal: number
   latestId?: string
   followPaused: boolean
   newActivityAvailable: boolean
@@ -65,7 +64,6 @@ let {
   selectedPath,
   loadingMore,
   nextCursor,
-  rootTotal,
   latestId,
   followPaused,
   newActivityAvailable,
@@ -102,6 +100,12 @@ let pendingLayout = Promise.resolve()
 let resolveLayout: (() => void) | undefined
 
 let hasMatches = $derived(roots.some((root) => root.interactions.some((interaction) => interaction.matched)))
+let runningCount = $derived(
+  roots.reduce(
+    (total, root) => total + root.interactions.filter((interaction) => interaction.status === 'running').length,
+    0,
+  ),
+)
 
 // 拓扑骨架只随 roots/positions 失效；选中与正文更新不重建它，也不触发画布布局。
 let baseNodes = $derived.by<FlowInteractionNode[]>(() => {
@@ -429,7 +433,7 @@ export async function focusLatest(): Promise<void> {
         maskColor="color-mix(in oklab, var(--background) 70%, transparent)" />
     {/if}
     <Panel position="top-left" class="canvas-progress">
-      <span>{m.observation_roots_loaded({ loaded: roots.length, total: rootTotal })}</span>
+      <span>{m.observation_running_count({ count: runningCount })}</span>
       {#if loadingMore}<span>{m.observation_loading_more()}</span>{/if}
       {#if fitProgress != null}
         <Progress value={fitProgress} max={100} class="h-1.5 w-20" aria-label={m.observation_loading_all_roots()} />

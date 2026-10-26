@@ -1829,7 +1829,7 @@
   "observation_request": "Request",
   "observation_resize_inspector": "Resize details panel",
   "observation_return_running": "Return to running interaction",
-  "observation_roots_loaded": "{loaded} / {total} chains",
+  "observation_running_count": "{count} running",
   "observation_route": "Model ID",
   "observation_show_minimap": "Show minimap",
   "observation_started": "Started",
