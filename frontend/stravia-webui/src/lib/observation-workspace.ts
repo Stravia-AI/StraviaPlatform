@@ -206,6 +206,7 @@ export class ObservationWorkspaceController {
   #failureSequence = 0
   #failureFlight: Promise<void> | undefined
   #failureQueryRequest: Promise<void> | undefined
+  #failureQueryAppend = false
   #failureQueryEpoch = -1
   #liveStream: ObservationSubscription | undefined
   #liveContentEpoch = 0
@@ -299,7 +300,7 @@ export class ObservationWorkspaceController {
       !this.#failureLoading &&
       this.#failures.some((item) => item.started_at < this.#windowStart)
     ) {
-      void this.loadFailures()
+      void this.#requestFailures(true, true)
     }
     this.#publish()
   }
@@ -605,28 +606,49 @@ export class ObservationWorkspaceController {
   }
 
   loadFailures(replace = true): Promise<void> {
-    if (this.#failureQueryRequest && this.#failureQueryEpoch === this.#rangeVersion) return this.#failureQueryRequest
+    return this.#requestFailures(replace, false)
+  }
+
+  /** `background` 为实时事件或窗口滑动触发的静默重查：不置 failureLoading，列表与错误提示保持到新结果到达。 */
+  #requestFailures(replace: boolean, background: boolean): Promise<void> {
+    const inflight = this.#failureQueryRequest
+    if (inflight && this.#failureQueryEpoch === this.#rangeVersion) {
+      if (this.#failureQueryAppend === !replace) return inflight
+      // 追加与重查依赖对方更新后的 cursor 和列表：并入进行中的请求会让后到的操作静默丢失，故排在其后。
+      const version = this.#rangeVersion
+      return inflight.then(
+        (): Promise<void> =>
+          version !== this.#rangeVersion || (!replace && !this.#failureCursor)
+            ? Promise.resolve()
+            : this.#requestFailures(replace, background),
+      )
+    }
     this.#failureQueryEpoch = this.#rangeVersion
-    const request = this.#pullFailures(replace).finally(() => {
+    this.#failureQueryAppend = !replace
+    const request = this.#pullFailures(replace, background).finally(() => {
       if (this.#failureQueryRequest === request) this.#failureQueryRequest = undefined
     })
     this.#failureQueryRequest = request
     return request
   }
 
-  async #pullFailures(replace: boolean): Promise<void> {
+  async #pullFailures(replace: boolean, background: boolean): Promise<void> {
     if (!replace && this.#failureLoading) return
     const version = this.#rangeVersion
     const requestVersion = ++this.#failureRequestVersion
-    this.#failureLoading = true
-    this.#failureError = undefined
-    this.#publish()
+    // 后台重查覆盖已加载的全部行，免得实时事件把「加载更多」翻出的页折回第一页；超出服务端上限时由其截断。
+    const limit = background ? Math.max(FAILURE_BATCH_SIZE, this.#failures.length) : FAILURE_BATCH_SIZE
+    if (!background) {
+      this.#failureLoading = true
+      this.#failureError = undefined
+      this.#publish()
+    }
     try {
       const query = this.#query()
       const page = await this.#api.failures({
         start_at: this.#windowStart,
         end_at: this.#windowEnd,
-        limit: FAILURE_BATCH_SIZE,
+        limit,
         cursor: replace ? undefined : (this.#failureCursor ?? undefined),
         provider: query.provider,
         model: query.model,
@@ -644,6 +666,7 @@ export class ObservationWorkspaceController {
       this.#failureSequence = page.snapshot_sequence
       this.#failureTotal = page.total
       this.#failureCursor = page.next_cursor
+      this.#failureError = undefined
     } catch (error) {
       if (version === this.#rangeVersion && requestVersion === this.#failureRequestVersion) this.#failureError = error
     } finally {
@@ -1194,7 +1217,7 @@ export class ObservationWorkspaceController {
       void this.#refreshSelectedEvents(selected, this.#selectionVersion)
     if (this.#failurePending && !this.#failureFlight && this.#activeTab === 'failures') {
       const version = this.#rangeVersion
-      const request = this.loadFailures().finally(() => {
+      const request = this.#requestFailures(true, true).finally(() => {
         if (this.#failureFlight !== request) return
         this.#failureFlight = undefined
         if (version !== this.#rangeVersion) return
