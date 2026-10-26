@@ -650,9 +650,9 @@ function alignClass(column: Column<typeof dataTableFeatures, TData, unknown>): s
 }
 
 function sizeClass(section: 'head' | 'cell'): string {
-  if (size === 'small') return section === 'head' ? 'h-10 px-2 py-0' : 'px-2 py-1'
-  if (size === 'large') return section === 'head' ? 'h-12 px-3 py-1' : 'px-3 py-3'
-  return section === 'head' ? 'h-11 px-2 py-0.5' : 'p-2'
+  if (size === 'small') return section === 'head' ? 'h-9 px-2 py-0' : 'px-2 py-1'
+  if (size === 'large') return section === 'head' ? 'h-11 px-3 py-1' : 'px-3 py-3'
+  return section === 'head' ? 'h-10 px-2 py-0.5' : 'p-2'
 }
 
 function columnInlineStyle(

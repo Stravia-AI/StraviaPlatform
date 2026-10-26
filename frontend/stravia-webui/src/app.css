@@ -116,6 +116,12 @@
   --shadow-2xl: 0 40px 108px rgb(0 0 0 / 0.58), 0 10px 28px rgb(0 0 0 / 0.38);
 }
 
+/* text-sm 是 13px 正文档，text-xs 是 12px 辅助档；与 body 保持同一基准。 */
+@theme {
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.5;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -234,7 +240,7 @@
     @apply bg-background text-foreground;
     min-height: 100svh;
     overflow-x: hidden;
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     line-height: 1.5;
     text-wrap: pretty;
   }
@@ -342,7 +348,7 @@ html[lang='zh-CN'] .font-structural {
 
 .route-section-title {
   font-family: var(--font-structural);
-  font-size: 1.125rem;
+  font-size: 1rem;
   line-height: 1.35;
   font-weight: 600;
   text-wrap: balance;
@@ -357,8 +363,8 @@ html[lang='zh-CN'] .font-structural {
   margin-top: 0.25rem;
   max-width: 48rem;
   color: var(--muted-foreground);
-  font-size: 0.8125rem;
-  line-height: 1.45;
+  font-size: 0.75rem;
+  line-height: 1.5;
   text-wrap: pretty;
 }
 

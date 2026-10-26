@@ -361,10 +361,12 @@ function saveProvider(): void {
           event.preventDefault()
           saveProvider()
         }}>
-        <div class="route-overlay-body">
+        <div class="route-overlay-body @container/provider-form">
           <div class="mb-6">{@render providerOptionSource(selectedOption)}</div>
-          <Field.Group class="grid gap-6 sm:grid-cols-2">
-            <Field.Field class="sm:col-span-2">
+          <!-- 与连接设置一致：表单列够宽（≥42rem）时名称与 Base URL 同行。 -->
+          <Field.Group
+            class="grid gap-6 @2xl/provider-form:grid-cols-[minmax(0,16rem)_minmax(0,1fr)] @2xl/provider-form:gap-x-6">
+            <Field.Field>
               <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
               <Input
                 id="provider-name"
@@ -373,7 +375,7 @@ function saveProvider(): void {
                 disabled={draft.submitting}
                 oninput={() => draft.nameChanged()} />
             </Field.Field>
-            <Field.Field class="sm:col-span-2">
+            <Field.Field>
               <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
               <Input
                 id="provider-base-url"
@@ -388,7 +390,7 @@ function saveProvider(): void {
               {@const selectedProtocol = selectedOption.channel.protocols.find(
                 (option) => option.value === draft.fields.protocol,
               )}
-              <Field.Field class="sm:col-span-2">
+              <Field.Field>
                 <Field.Label for="provider-protocol">{m.common_protocol()}</Field.Label>
                 <Select.Root
                   type="single"

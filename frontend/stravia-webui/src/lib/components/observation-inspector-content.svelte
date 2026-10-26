@@ -303,7 +303,7 @@ function jumpToRun(runId: string | null) {
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
   <div class="min-w-0">
-    <h2 class="font-structural truncate text-xl font-semibold">{timeline.title}</h2>
+    <h2 class="font-structural truncate text-lg font-semibold">{timeline.title}</h2>
   </div>
   <Button variant="ghost" size="icon" aria-label={m.common_close()} onclick={onclose}><XIcon /></Button>
 </header>
@@ -473,7 +473,7 @@ function jumpToRun(runId: string | null) {
   gap: 0.75rem;
   border-bottom: 1px solid var(--border);
   padding: 1rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
 }
 .diagnostic-log {
   padding: 1rem;

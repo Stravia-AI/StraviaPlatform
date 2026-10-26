@@ -849,8 +849,14 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await page.setViewportSize({ width: 1568, height: 900 })
   const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
   await expect
-    .poll(async () => Math.round(((await page.locator('#route-display-name').boundingBox())?.width ?? 0) / rem))
-    .toBe(48)
+    .poll(async () => {
+      const [name, display] = await Promise.all([
+        page.locator('#route-model-id').boundingBox(),
+        page.locator('#route-display-name').boundingBox(),
+      ])
+      return Math.abs(display!.y - name!.y) <= 1 && display!.x > name!.x
+    })
+    .toBe(true)
   const [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox] = await Promise.all([
     page.locator('#route-model-id').boundingBox(),
     page.locator('#route-display-name').boundingBox(),
@@ -861,22 +867,41 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   for (const box of [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox]) {
     expect(box).not.toBeNull()
   }
-  // 设置列（48rem）在内容容器内居中；名称类控件占满设置列，短选项保持 16rem 并靠设置列右缘。
+  // 设置列（48rem）在内容容器内居中；列宽足够时字段两两并排，短选项保持 16rem 并靠各自单元格左缘。
   expect(columnBox!.width).toBeLessThanOrEqual(48 * rem + 1)
   const route = (await page.locator('.route-page').boundingBox())!
   expect(
     Math.abs(columnBox!.x - route.x - (route.x + route.width - columnBox!.x - columnBox!.width)),
   ).toBeLessThanOrEqual(1)
   const columnRight = columnBox!.x + columnBox!.width
-  // Model ID 的输入框不含右侧清除按钮，因此只校验左缘与不越过设置列。
+  const cellWidth = (columnBox!.width - 1.5 * rem) / 2
+  const rightCellX = columnBox!.x + cellWidth + 1.5 * rem
+  // Model ID 的输入框不含右侧清除按钮，因此只校验左缘与不越过左单元格。
   expect(Math.abs(nameInputBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
-  expect(nameInputBox!.x + nameInputBox!.width).toBeLessThanOrEqual(columnRight + 1)
-  expect(Math.abs(displayInputBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
-  expect(Math.abs(displayInputBox!.width - columnBox!.width)).toBeLessThanOrEqual(1)
+  expect(nameInputBox!.x + nameInputBox!.width).toBeLessThanOrEqual(columnBox!.x + cellWidth + 1)
+  expect(Math.abs(displayInputBox!.x - rightCellX)).toBeLessThanOrEqual(1)
+  expect(Math.abs(displayInputBox!.width - cellWidth)).toBeLessThanOrEqual(1)
+  expect(displayInputBox!.x + displayInputBox!.width).toBeLessThanOrEqual(columnRight + 1)
+  expect(Math.abs(displayInputBox!.y - nameInputBox!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(outputTriggerBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(balanceTriggerBox!.x - rightCellX)).toBeLessThanOrEqual(1)
+  expect(Math.abs(balanceTriggerBox!.y - outputTriggerBox!.y)).toBeLessThanOrEqual(1)
   for (const box of [outputTriggerBox!, balanceTriggerBox!]) {
-    expect(Math.abs(box.x + box.width - columnRight)).toBeLessThanOrEqual(1)
     expect(Math.abs(box.width - 16 * rem)).toBeLessThanOrEqual(2)
   }
+
+  // 设置列不足 42rem 时回到单列，字段自上而下堆叠。
+  await page.setViewportSize({ width: 600, height: 900 })
+  await expect
+    .poll(async () => {
+      const [name, display] = await Promise.all([
+        page.locator('#route-model-id').boundingBox(),
+        page.locator('#route-display-name').boundingBox(),
+      ])
+      return display!.y > name!.y + name!.height - 1 && Math.abs(display!.x - name!.x) <= 1
+    })
+    .toBe(true)
+  await page.setViewportSize({ width: 1568, height: 900 })
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
   for (const index of [1, 2]) {

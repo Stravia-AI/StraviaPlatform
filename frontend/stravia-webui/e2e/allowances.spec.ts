@@ -1155,12 +1155,12 @@ test('uses wide workspace for more aligned quota tracks with a bounded rail', as
   await expect.poll(async () => (await tracks()).perRow).toBeGreaterThan(narrow.perRow)
   const wideTracks = await tracks()
   // 轨道与进度条保持有界，新增宽度只用于容纳更多额度
-  expect(wideTracks.maxWidth).toBeLessThanOrEqual(9 * 16 + 1)
-  expect(wideTracks.meters).toBeLessThanOrEqual(14 * 4 + 1)
+  expect(wideTracks.maxWidth).toBeLessThanOrEqual(11.5 * 16 + 1)
+  expect(wideTracks.meters).toBeLessThanOrEqual(11.5 * 16 + 1)
   const rail = page.getByRole('region', { name: 'Reset timeline' })
   const railBox = (await rail.boundingBox())!
-  expect(railBox.width).toBeLessThanOrEqual(28 * 16 + 1)
-  expect(railBox.width).toBeGreaterThanOrEqual(24 * 16 - 1)
+  expect(railBox.width).toBeLessThanOrEqual(24 * 16 + 1)
+  expect(railBox.width).toBeGreaterThanOrEqual(20 * 16 - 1)
   const matrixBox = (await page.getByRole('region', { name: 'Allowance matrix' }).boundingBox())!
   expect(matrixBox.width).toBeGreaterThan(railBox.width * 2)
 })

@@ -392,7 +392,10 @@ test('real management persists root and destination RPM limits and queue setting
   const initialMetadata = (await readModel()).metadata
   const table = page.locator('.route-desktop-table')
   const contextTrigger = table.getByRole('button', { name: 'Context tokens rpm-upstream', exact: true })
-  const cellEditor = page.locator('[data-slot="popover-content"]')
+  // 推理强度下拉是嵌套的 popover，不能被当成单元格编辑器本身。
+  const cellEditor = page
+    .locator('[data-slot="popover-content"]')
+    .filter({ has: page.getByRole('button', { name: 'Cancel', exact: true }) })
   await contextTrigger.click()
   await cellEditor.getByRole('spinbutton', { name: 'Context tokens', exact: true }).fill('256000')
   const concurrent = await readModel()
@@ -428,8 +431,10 @@ test('real management persists root and destination RPM limits and queue setting
     output: ['text', 'image'],
   })
   await table.getByRole('button', { name: 'Reasoning effort rpm-upstream', exact: true }).click()
-  await cellEditor.getByRole('textbox', { name: 'Custom reasoning effort', exact: true }).fill('custom-effort')
-  await cellEditor.getByRole('button', { name: 'Add', exact: true }).click()
+  await cellEditor.getByRole('combobox', { name: 'Reasoning effort', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Search or enter a custom effort', exact: true }).fill('custom-effort')
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
   await cellEditor.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(cellEditor).toBeHidden()
   expect((await readModel()).metadata.reasoning_efforts).toEqual(['low', 'high', 'future', 'custom-effort'])
@@ -441,14 +446,14 @@ test('real management persists root and destination RPM limits and queue setting
   expect((await readModel()).selection_policy).toBe('force_enabled')
 
   await goto(`${catalogUrl}&model=rpm-upstream`)
-  const detailRpm = page.getByRole('region', { name: 'RPM limit', exact: true })
-  await detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true }).fill('21')
+  const detailRpm = page.getByRole('spinbutton', { name: 'Requests per minute', exact: true })
+  await detailRpm.fill('21')
   await page.getByRole('button', { name: 'Save model', exact: true }).click()
   await expect.poll(async () => (await readDestination())?.rpm_limit).toBe(21)
   expect(await readRpm()).toMatchObject({ preferred_wait_ms: 1500, total_wait_ms: 10000, queue_capacity: 16 })
   await page.reload()
-  await expect(detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true })).toHaveValue('21')
-  await detailRpm.getByRole('spinbutton', { name: 'Requests per minute', exact: true }).fill('')
+  await expect(detailRpm).toHaveValue('21')
+  await detailRpm.fill('')
   await page.getByRole('button', { name: 'Save model', exact: true }).click()
   await expect.poll(readDestination).toBeUndefined()
 

@@ -826,15 +826,16 @@ async function saveModel(): Promise<void> {
       event.preventDefault()
       void saveModel()
     }}>
-    <section class="route-section" aria-labelledby="route-contract-title">
+    <section class="route-section @container/model-contract" aria-labelledby="route-contract-title">
       <div class="route-section-header">
         <div class="flex min-w-0 items-center gap-2">
           <h2 id="route-contract-title" class="route-section-title">{m.model_editor_client_model()}</h2>
           <Field.Help hint={m.model_editor_set_model_name_request_type_client_apps_use()} />
         </div>
       </div>
-      <div>
-        <SettingRow title={m.common_enable_action()} layout="inline">
+      <!-- 设置列够宽（≥42rem）时两两并排：Model ID｜显示名称、输出类型｜请求发送方式；开关行独占一行。 -->
+      <Field.Group class="@2xl/model-contract:grid @2xl/model-contract:grid-cols-2 @2xl/model-contract:gap-x-6">
+        <SettingRow title={m.common_enable_action()} layout="inline" class="py-0 @2xl/model-contract:col-span-2">
           {#snippet children({ titleId })}
             <div data-slot="model-enabled-control" class="flex shrink-0 items-center">
               <Switch
@@ -845,7 +846,8 @@ async function saveModel(): Promise<void> {
             </div>
           {/snippet}
         </SettingRow>
-        <SettingRow title={m.model_editor_model_id()} labelFor="route-model-id" layout="stacked">
+        <Field.Field>
+          <Field.Label for="route-model-id">{m.model_editor_model_id()}</Field.Label>
           <ModelIdCombobox
             id="route-model-id"
             value={form.modelId}
@@ -865,14 +867,16 @@ async function saveModel(): Promise<void> {
               form.modelId = ''
               form.displayName = ''
             }} />
-        </SettingRow>
-        <SettingRow title={m.model_editor_model_name()} labelFor="route-display-name" layout="stacked">
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="route-display-name">{m.model_editor_model_name()}</Field.Label>
           <Input
             id="route-display-name"
             bind:value={form.displayName}
             placeholder={m.model_editor_model_name_placeholder()} />
-        </SettingRow>
-        <SettingRow title={m.route_output_label()} labelFor="route-output-modality" controlSize="setting">
+        </Field.Field>
+        <Field.Field size="setting">
+          <Field.Label for="route-output-modality">{m.route_output_label()}</Field.Label>
           <Select.Root
             type="single"
             bind:value={
@@ -904,12 +908,11 @@ async function saveModel(): Promise<void> {
               </Select.Group>
             </Select.Content>
           </Select.Root>
-        </SettingRow>
-        <SettingRow
-          title={m.model_editor_how_requests_sent()}
-          labelFor="route-balance"
-          hint={strategyHelp(form.balance)}
-          controlSize="setting">
+        </Field.Field>
+        <Field.Field size="setting">
+          <Field.Label for="route-balance" hint={strategyHelp(form.balance)}>
+            {m.model_editor_how_requests_sent()}
+          </Field.Label>
           <Select.Root type="single" bind:value={form.balance}>
             <Select.Trigger id="route-balance" class="w-full" aria-label={m.model_editor_how_requests_sent()}>
               {strategyLabel(form.balance)}
@@ -921,8 +924,8 @@ async function saveModel(): Promise<void> {
               </Select.Group>
             </Select.Content>
           </Select.Root>
-        </SettingRow>
-      </div>
+        </Field.Field>
+      </Field.Group>
       {#if initialModel && !initialModel.output_modality}
         <p class="mt-3 text-sm text-warning" role="status">{m.route_output_reconfigure()}</p>
       {/if}
@@ -1479,11 +1482,12 @@ async function saveModel(): Promise<void> {
       <div class="route-section-header">
         <h2 id="route-thinking-title" class="route-section-title">{m.model_editor_thinking_section()}</h2>
       </div>
-      <div>
-        <SettingRow
-          title={m.model_editor_thinking_levels()}
-          hint={m.model_editor_thinking_levels_help()}
-          layout="stacked">
+      <Field.Group>
+        <Field.Field>
+          <div class="flex w-fit min-w-0 items-center gap-2">
+            <Field.Title>{m.model_editor_thinking_levels()}</Field.Title>
+            <Field.Help hint={m.model_editor_thinking_levels_help()} />
+          </div>
           <div role="group" aria-label={m.model_editor_thinking_levels()} class="flex flex-wrap gap-1.5">
             {#each thinkingLevels as level (level)}
               {@const blockers = thinkingLevelBlockers(level)}
@@ -1517,12 +1521,11 @@ async function saveModel(): Promise<void> {
               {/if}
             {/each}
           </div>
-        </SettingRow>
-        <SettingRow
-          title={m.model_editor_default_thinking_level()}
-          labelFor="route-default-thinking-level"
-          hint={m.model_editor_default_thinking_level_help()}
-          controlSize="setting">
+        </Field.Field>
+        <Field.Field size="setting">
+          <Field.Label for="route-default-thinking-level" hint={m.model_editor_default_thinking_level_help()}>
+            {m.model_editor_default_thinking_level()}
+          </Field.Label>
           <Select.Root type="single" bind:value={form.defaultThinkingLevel}>
             <Select.Trigger
               id="route-default-thinking-level"
@@ -1544,8 +1547,8 @@ async function saveModel(): Promise<void> {
               </Select.Group>
             </Select.Content>
           </Select.Root>
-        </SettingRow>
-      </div>
+        </Field.Field>
+      </Field.Group>
       {#if defaultThinkingLevelUnsupported}
         <p data-slot="default-thinking-level-warning" class="mt-2 text-sm text-destructive">
           {m.model_editor_default_thinking_level_unavailable({ level: form.defaultThinkingLevel })}

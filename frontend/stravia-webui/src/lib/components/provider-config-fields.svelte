@@ -103,9 +103,11 @@ function setText(field: VendorConfigField, value: string): void {
 </script>
 
 {#each groups as [group, groupFields] (group)}
-  <Field.Set class="sm:col-span-2">
+  <Field.Set class="col-span-full">
     {#if group}<Field.Legend>{resolvePluginText(groupLabels.get(group)!, localeState.current)}</Field.Legend>{/if}
-    <Field.Group class="grid gap-4 sm:grid-cols-2">
+    <!-- 短控件最多两列并排，密钥、多行文本与开关卡片独占整行；不足两列的宽度时自然回到单列。 -->
+    <Field.Group
+      class="grid gap-x-6 gap-y-4 grid-cols-[repeat(auto-fill,minmax(max(min(100%,20rem),calc((100%-1.5rem)/2)),1fr))]">
       {#each groupFields as field (field.key)}
         {@const controlId = `${idPrefix}-${field.key}`}
         {@const currentIssues = fieldIssues(field.key)}
@@ -113,7 +115,7 @@ function setText(field: VendorConfigField, value: string): void {
         {#if field.kind.type === 'bool' && !field.secret}
           <Field.Field
             orientation="horizontal"
-            class="justify-between rounded-lg border px-3 py-2 sm:col-span-2"
+            class="col-span-full justify-between rounded-lg border px-3 py-2"
             data-invalid={invalid || undefined}>
             <div>
               <Field.Label for={controlId} hint={fieldHint(field)}
@@ -131,7 +133,9 @@ function setText(field: VendorConfigField, value: string): void {
             {/each}
           </Field.Field>
         {:else}
-          <Field.Field class="sm:col-span-2" data-invalid={invalid || undefined}>
+          <Field.Field
+            class={field.secret || (field.kind.type === 'string' && field.kind.multiline) ? 'col-span-full' : undefined}
+            data-invalid={invalid || undefined}>
             <Field.Label for={controlId} hint={fieldHint(field)}
               >{resolvePluginText(field.label, localeState.current)}</Field.Label>
             {#if field.kind.type === 'bool'}
@@ -250,7 +254,7 @@ function setText(field: VendorConfigField, value: string): void {
 {/each}
 
 {#if unmatchedIssues.length > 0}
-  <ul class="sm:col-span-2 flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
+  <ul class="col-span-full flex list-disc flex-col gap-1 pl-5 text-sm text-destructive">
     {#each unmatchedIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
       <li>{resolvePluginText(issue.message, localeState.current)}</li>
     {/each}

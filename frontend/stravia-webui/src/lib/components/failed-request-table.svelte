@@ -208,7 +208,7 @@ const columns = helper.columns([
   overflow-wrap: anywhere;
 }
 .failure-error {
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
 }
 .failure-facts {

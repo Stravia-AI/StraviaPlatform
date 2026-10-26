@@ -579,7 +579,7 @@ function retryAll(): void {
                 cornerRadius={2}
                 padAngle={0.01} />
               <div class="pointer-events-none absolute inset-0 grid place-items-center">
-                <span class="font-technical text-2xl font-medium tabular-nums"
+                <span class="font-technical text-xl font-medium tabular-nums"
                   >{formatCompactCount(tokenPie.total)}</span>
               </div>
             </div>

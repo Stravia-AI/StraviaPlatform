@@ -72,8 +72,8 @@ const icons = {
     border-radius: 6px;
     border-color: transparent;
     background: transparent;
-    padding: 0.4375rem 0.75rem;
-    font-size: 13px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.875rem;
     font-weight: 500;
     line-height: 1.25rem;
     box-shadow: none;

@@ -235,7 +235,7 @@ function formatContent(content: unknown): string {
   gap: 0.75rem;
   padding: 0.5rem 0 0.75rem 0.75rem;
   border-left: 1px solid var(--border);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   line-height: 1.58;
   overflow-wrap: anywhere;
 }
