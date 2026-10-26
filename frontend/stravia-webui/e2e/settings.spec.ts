@@ -2139,6 +2139,7 @@ test('credential protection table keeps its header above the draggable body scro
     }),
   )
   await page.goto('/reversible-redaction')
+  await page.getByRole('tab', { name: /Current rules/ }).click()
   const table = page.getByRole('table')
   await expect(table.getByRole('button', { name: /Fixture credential 0/ })).toBeVisible()
   const header = table.locator('thead')
@@ -2256,6 +2257,21 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect.poll(() => tabBar.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true)
     const search = page.locator('#credential-rule-search')
     await expect(page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })).toHaveCount(0)
+    // 命中记录是第一个也是默认的页签：每条命中直接显示规则、位置与请求状态。
+    await expect(page.getByRole('tab').first()).toHaveText(zh ? /命中记录/ : /Hit records/)
+    const record = page.getByRole('row').filter({ hasText: 'Fixture key' })
+    await expect(record.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
+    await expect(record.getByRole('listitem')).toHaveText(
+      zh ? ['用户消息', '工具参数'] : ['User message', 'Tool arguments'],
+    )
+    await expect(record.getByRole('status')).toHaveText(zh ? '失败' : 'Failed')
+    await expect(
+      record.getByRole('link', { name: zh ? '查看关联请求记录' : 'Open request observation' }),
+    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas')
+    await page.getByRole('button', { name: zh ? '加载更多发现' : 'Load more discoveries' }).click()
+    await expect(page.getByRole('row').filter({ hasText: 'Second fixture key' })).toBeVisible()
+    expect(cursors).toEqual([null, 'next-fixture'])
+    await page.getByRole('tab', { name: new RegExp(zh ? '现有规则' : 'Current rules') }).click()
     await expect(page.getByRole('button', { name: /Fixture credential 34/ })).toHaveCount(0)
     await page.getByRole('button', { name: zh ? '末页' : 'Last page', exact: true }).click()
     await expect(page.getByRole('button', { name: /Fixture credential 34/ })).toBeVisible()
@@ -2293,16 +2309,6 @@ for (const locale of ['en-US', 'zh-CN']) {
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
     await search.fill('')
-    await page.getByRole('tab', { name: zh ? '命中记录' : 'Hit records', exact: true }).click()
-    await page.getByRole('button', { name: /Fixture key/ }).click()
-    await expect(page.getByText(zh ? '请求状态' : 'Request status', { exact: true })).toBeVisible()
-    await expect(page.getByRole('definition').filter({ hasText: zh ? '失败' : 'Failed' })).toBeVisible()
-    await expect(
-      page.getByRole('link', { name: zh ? '查看关联请求记录' : 'Open request observation' }),
-    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas')
-    await page.getByRole('button', { name: zh ? '加载更多发现' : 'Load more discoveries' }).click()
-    await expect(page.getByRole('button', { name: /Second fixture key/ })).toBeVisible()
-    expect(cursors).toEqual([null, 'next-fixture'])
     await page.getByRole('tab', { name: zh ? '匹配测试' : 'Matching test', exact: true }).click()
     const input = page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })
     const text = '说明😀\n前缀test_credential 后文'
@@ -2460,11 +2466,11 @@ test('credential protection separates setting load failure from empty rules and 
     page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
   ).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('switch')).toBeDisabled()
-  await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
-  await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
   await expect(
     page.getByText('No new credential discoveries in the available observations.', { exact: true }),
   ).toBeVisible()
+  await page.getByRole('tab', { name: /Current rules/ }).click()
+  await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
   settingsUnavailable = false
   await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await expect(page.getByRole('switch')).toBeEnabled()

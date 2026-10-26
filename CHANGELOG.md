@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Credential Protection now opens on Hit records, followed by Current rules and Matching test. Each hit is a table row (a list on narrow screens) showing time, API key, the matched rules by name, source locations, new credential count and request status. A rule name opens that rule's details, and an arrow opens the associated request in Request history; a rule that no longer exists shows its ID. The record list scrolls inside the workspace and keeps Load more discoveries in view.
 - Request history auto-follow now centers only the card whose user-input preview or model-output preview changed, instead of jumping to the latest running card on every output update. The top-left canvas badge no longer shows `loaded / total` chains; it shows how many loaded interactions are currently running.
 - Request-chain queries read retained event watermarks through separate indexed bounds and aggregate Tokens only for candidate roots. Token-filtered root counts and pagination share one query; matching retains whole-root usage, running estimates and the existing snapshot semantics.
 - Structural-history content cleanup scans bounded candidate batches on SQLite and PostgreSQL, including batches containing only referenced content, and rechecks references before deletion. Observation tail persistence batches pending tools, and admission reuses decoded Generation Chain ancestors within one request without changing ownership, expiry or writer ordering.
@@ -31,6 +32,7 @@
 
 ### Fixed
 
+- Provider Catalog synchronization no longer re-downloads, re-parses and rewrites the provider index when the remote revision is unchanged. Hourly and manual refreshes, and each Provider's first scope load, now fetch only the revision marker (plus the scope when requested) and reuse the stored index.
 - Editing a user message after an already-received client tool result now creates a linked child Interaction instead of merging the branch into the original Interaction. Exact input and receipt evidence works across Generation roots and restarts; first-time tool returns and independent sibling receipts retain their existing behavior. Existing observations are not rewritten.
 - Patched Dagre 3.1.1's repeated type-2 conflict tail scan across all shipped JavaScript entry points, reducing transient layout allocations for wide request-chain graphs.
 - Anthropic Messages, including Claude Code, supplies its required `max_tokens` from the upstream model's discovered native maximum when available, otherwise 64,000 instead of 4,096. Automatic limits are not raised by Claude Code thinking-budget normalization; explicit limits retain existing handling. Optional standard-protocol fields remain omitted when unset. Command Code and Devin retain their reverse-engineered CLI defaults of 64,000 and 128,000 respectively. Upgrade the host and rebuild/re-import affected standalone plugins; synchronize or explicitly re-import model metadata to use newly discovered Anthropic maxima.

@@ -164,7 +164,9 @@ impl VendorCatalogSync {
     }
 
     /// Full remote sync: the guest refreshes the index, the host persists it
-    /// as last-good and swaps the effective descriptor set.
+    /// as last-good and swaps the effective descriptor set. An unchanged
+    /// revision comes back without a `snapshot_body`, so nothing is
+    /// re-installed.
     async fn sync_index(&self) -> anyhow::Result<CatalogSyncOutcome> {
         let _guard = self.lock.lock().await;
         let outcome = self.sync_index_locked(None).await?;
