@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Devin now replays unsigned thinking in its native reasoning field instead of turning it into assistant text. This preserves the reasoning/text boundary across Responses tool continuations, matching the official CLI and OMP integration. Rebuild and re-import the standalone Devin plugin; updating the host alone does not replace installed plugins.
 - Draft connection checks now carry the host-selected runtime Provider Catalog profile into temporary execution. Catalog connections such as CommandCode no longer report an unsupported check merely because their profile is absent from Base's compiled manifest.
 - The Request history failed-requests table no longer flashes a "Loading rows…" overlay over its rows every time a live event arrives. Live and window-sliding refreshes now update the list silently; the overlay stays for explicit loads such as switching windows, filters or tabs, and an existing error notice stays until a refresh succeeds. A live refresh re-queries every row already loaded instead of collapsing back to the first page, and Load more clicked during a refresh now runs after it instead of being dropped.
 - Provider Catalog synchronization no longer re-downloads, re-parses and rewrites the provider index when the remote revision is unchanged. Hourly and manual refreshes, and each Provider's first scope load, now fetch only the revision marker (plus the scope when requested) and reuse the stored index.

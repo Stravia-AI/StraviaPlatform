@@ -144,11 +144,11 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 |Claude Code|官方 [native `2.1.300` 发行包](https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.300.tgz)与 [Beta Messages 类型](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/resources/beta/messages/messages.ts)|该 native 包实际运行并捕获含／不含 safeguards 的请求；另用本机 `2.1.248` 核对手动 thinking 与 adaptive/effort。不能把 SDK 的完整公共参数全集直接放行给订阅端点。|
 |Command Code|官方 [npm `1.82.1`](https://registry.npmjs.org/command-code/1.82.1) 的 `createModelClient`|源码确认 model、messages、tools、system、max_tokens、stream、temperature、reasoning_effort 与 promptCache；不发送该工具没有产出的 tool_choice／parallel_tool_calls。发行 tarball SHA-1 为 `0484a5dda887bec30a349db0b84a5a8933df69cd`，与 registry 一致；本轮未实际运行其账号推理。|
 |Grok|官方 [Grok Build 固定提交](https://github.com/xai-org/grok-build/tree/9684fa3cdbf2995e30ea8b9b637f1db008f144fc)的 Responses、sampler、tool override 实现|按源码重建 body、搜索控制与 `x-grok-*` 会话头；本轮未完成官方 CLI 账号抓包。|
-|Devin|已固定 OMP `v18.10.4` 的 `providers/devin.ts`、现有私有 protobuf 编码证据|官方 CLI 隔离配置尝试因无法确定 config directory 失败，捕获请求为零，不能宣称本轮 CLI 抓包成功。真实请求验证与源码证据分开记录。|
+|Devin|[OMP `v18.12.6` 的 `buildChatMessagePrompts`](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/ai/src/providers/devin.ts)、[官方 CLI `3000.11.3` manifest](https://static.devin.ai/cli/3000.11.3/manifest.json) 与授权实调捕获|2026-10-26 使用隔离配置运行官方 CLI，捕获 `deepseek-v4-1-flash-1017-max` 的工具调用、返回与最终正文；无签名思考在续接请求中保留为 `#11`，不降级到 `#3`。修复后的实际 Wasm 经隔离 Stravia HTTP 服务完成同模型的读文件工具循环并返回 `SUM=42`；不据此宣称所有模型或参数均获验证。|
 |OpenCode Zen Free|官方 `1.18.25` 的隔离请求捕获、[原生 ID 算法](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/schema/src/identifier.ts)与匿名单变量探测|捕获完整 UA、会话头和工具输入 schema；实际 Wasm 在 `/inference/v1` 对 `big-pickle` 返回 200 与准确探测文本。不能外推为所有免费模型、其他协议或未来门控的支持证明。|
 |其他插件|各自既有固定官方协议／工具源码、模型目录与 OMP 实现|通过实际 Wasm 合同验证投影与流式解析，不把离线 fixture 当作账号资格证明。Muse Code 账号授权与 Kilo OAuth 仍需要对应账号。|
 
-上述 CLI 捕获均使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对非 compact 操作固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。compact 保持其官方非流式契约。
+除表中明确注明的授权真实调用外，上述 CLI 捕获使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。Devin 的真实调用使用只读生产数据库取得的连接凭据、临时 CLI 配置与临时 Stravia 数据库，不修改生产连接或部署；已安装的独立 Devin 插件须重建并重新导入才能采用无签名思考修复。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对非 compact 操作固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。compact 保持其官方非流式契约。
 
 ### Command Code 模型发现
 

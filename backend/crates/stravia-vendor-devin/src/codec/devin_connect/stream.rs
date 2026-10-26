@@ -1365,6 +1365,81 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_thinking_survives_responses_tool_continuation_without_becoming_text() {
+        let responses = stravia_protocol_codec::registry::ProtocolRegistry::global()
+            .adapter(&stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24)
+            .unwrap();
+        let mut decoder = DevinConnectStreamParser::new();
+        let mut encoder = responses.stream_encoder().unwrap();
+        // 原生 DeepSeek 工具轮同时返回无签名 thinking、空白正文和工具调用。
+        let mut payload = Vec::new();
+        write_string_field(&mut payload, 9, "Read the numbers before calculating.");
+        write_string_field(&mut payload, 3, "\n\n");
+        let mut call = Vec::new();
+        write_string_field(&mut call, 1, "call-read");
+        write_string_field(&mut call, 2, "read");
+        write_string_field(&mut call, 3, r#"{"path":"numbers.txt"}"#);
+        write_message_field(&mut payload, 6, &call);
+        write_varint_field(&mut payload, 5, 10);
+        let mut wire = data_frame(&payload);
+        wire.extend(trailer_frame("{}"));
+        let mut events = encoder.format_deltas(&decoder.parse_chunk(&wire).unwrap());
+        events.extend(encoder.format_deltas(&decoder.finish().unwrap()));
+        let completed: Value = events
+            .iter()
+            .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+            .find(|event| event["type"] == "response.completed")
+            .expect("completed tool handoff");
+        let mut input = vec![serde_json::json!({"role":"user","content":"Add the numbers."})];
+        input.extend(
+            completed["response"]["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned(),
+        );
+        input.push(serde_json::json!({
+            "type":"function_call_output", "call_id":"call-read", "output":"17\n25"
+        }));
+        let request = responses
+            .decode_request(serde_json::json!({"model":"deepseek-v4.1-flash","input":input}))
+            .unwrap();
+        let body = super::super::request::encode_get_chat_message_request_with_platform(
+            &request,
+            "test-token",
+            &super::super::request::session_shape(None),
+            None,
+            super::super::request::DevinClientPlatform::Linux,
+        )
+        .unwrap();
+        let fields = parse_fields(&body).unwrap();
+        let prompts: Vec<_> = fields.iter().filter(|field| field.number == 3).collect();
+        assert_eq!(prompts.len(), 3);
+        let assistant = prompts[1].bytes;
+        assert_eq!(
+            field_text(assistant, 11),
+            "Read the numbers before calculating."
+        );
+        assert_eq!(field_text(assistant, 3), "\n\n");
+        let assistant_fields = parse_fields(assistant).unwrap();
+        assert!(
+            !assistant_fields
+                .iter()
+                .any(|field| [12, 13, 18].contains(&field.number))
+        );
+        let call = assistant_fields
+            .iter()
+            .find(|field| field.number == 6)
+            .unwrap()
+            .bytes;
+        assert_eq!(field_text(call, 1), "call-read");
+        assert_eq!(field_text(call, 2), "read");
+        assert_eq!(field_text(call, 3), r#"{"path":"numbers.txt"}"#);
+        assert_eq!(field_text(prompts[2].bytes, 7), "call-read");
+        assert_eq!(field_text(prompts[2].bytes, 3), "17\n25");
+    }
+
+    #[test]
     fn devin_semantics_responses_roundtrip_aggregates_response_fragments_and_parallel_calls() {
         let responses = stravia_protocol_codec::registry::ProtocolRegistry::global()
             .adapter(&stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24)

@@ -517,7 +517,7 @@ Canonical 请求不保存供应商原生上下文。Model Turn 只把统一 sess
 
 Devin Connect 的 `delta_text`、`delta_thinking` 与 `delta_signature` 是同一响应内的字段增量，不是独立内容块。Decoder 为正文与 thinking 各保留一个稳定的 canonical 索引；即使正文、thinking 与工具调用交错到达，仍分别追加原始字节，不插入分隔符，也不因正文或工具调用新建签名块。晚到的签名归属同一响应，并在 trailer 后封口；不同响应使用不同 parser 实例，签名不会跨轮拼接。
 
-Devin 请求编码只在目标协议边界恢复连续助手段，不改写 canonical 历史。Responses 分开的正文、单个带签名思考项和并行工具调用合入同一 `ChatMessagePrompt`；用户输入和工具结果截断合并。已经独立存在于历史中的签名项仍保留各自 prompt 边界，不拼接或相互覆盖。响应的 `output_id` 保留在 opaque 历史载荷中，但与原生 CLI 一致，不编码到历史 prompt 的 `#15` 字段；`thinking`、`signature` 与 `signature_type` 继续回放。调用结果仍按 call ID 紧跟对应的调用 prompt。
+Devin 请求编码只在目标协议边界恢复连续助手段，不改写 canonical 历史。Responses 分开的正文、单个思考项（签名可选）和并行工具调用合入同一 `ChatMessagePrompt`；用户输入和工具结果截断合并。已经独立存在于历史中的思考项仍保留各自 prompt 边界，不拼接或相互覆盖。无签名思考与原生 CLI 一样写入 `#11 thinking`，不得降级到 `#3 prompt` 冒充助手正文；缺省签名不制造 `#12` 或签名类型。响应的 `output_id` 保留在 opaque 历史载荷中，但与原生 CLI 一致，不编码到历史 prompt 的 `#15` 字段；`thinking`、`signature` 与 `signature_type` 继续回放。调用结果仍按 call ID 紧跟对应的调用 prompt。
 
 工具顶层说明在 system prompt 的工具说明区按自然语言句子和列表条目连续编号，代码围栏与完整 JSON 段保留结构，最后执行 XML 转义。此处理不补回参数 schema 内的说明；原有 ToolDef 名称占位和 schema 注释剥离策略保持不变。
 

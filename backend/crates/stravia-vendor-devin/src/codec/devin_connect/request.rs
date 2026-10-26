@@ -1013,11 +1013,11 @@ fn encode_thinking(block: &ContentBlock) -> Option<ChatMsg> {
         _ => unreachable!("thinking block"),
     };
     let Some(signature) = signature.filter(|value| !value.is_empty()) else {
-        // 没有签名的历史仍保留可读内容，但不能伪装成上游原生签名思考；
-        // 明文降级为普通助手正文，全空则整块丢弃。
+        // 原生 CLI 的 DeepSeek 历史使用无签名 #11；签名缺省不改变思考的角色。
+        // 降级到 #3 会把内部推理冒充已交付正文，污染后续工具轮的上下文。
         return (!text.is_empty()).then(|| ChatMsg {
             source: SOURCE_ASSISTANT,
-            text,
+            thinking: text,
             ..ChatMsg::default()
         });
     };
@@ -2070,63 +2070,6 @@ mod tests {
             );
         }
         assert!(!prompts[call_index].iter().any(|field| field.number == 15));
-    }
-
-    // 无签名/无密文的明文思考：原生 #11/#12/#13 只承载签名形态，明文按契约
-    // 降级为普通助手正文（summary 在前、content 在后，空段跳过）；
-    // 明文与载荷全空的块不产生任何 prompt。
-    #[test]
-    fn unsigned_thinking_degrades_to_assistant_text() {
-        let request = AiRequest::new(
-            "swe-2",
-            vec![
-                text_item(Role::User, "go"),
-                AiItem {
-                    role: Role::Assistant,
-                    content: MessageContent::Blocks(vec![
-                        ContentBlock::Thinking {
-                            thinking: "unsigned draft".into(),
-                            signature: None,
-                        },
-                        ContentBlock::Reasoning {
-                            summary: vec!["summary".into(), String::new()],
-                            content: vec!["body".into()],
-                            encrypted_content: None,
-                        },
-                    ]),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    meta: None,
-                },
-                AiItem::thinking("", None),
-                text_item(Role::User, "continue"),
-            ],
-        );
-        let prompts: Vec<_> = top_level(&request)
-            .iter()
-            .filter(|field| field.number == 3)
-            .map(|field| parse_fields(field.bytes).unwrap())
-            .collect();
-        let sources: Vec<u64> = prompts
-            .iter()
-            .map(|prompt| {
-                prompt
-                    .iter()
-                    .find(|field| field.number == 2)
-                    .unwrap()
-                    .scalar
-            })
-            .collect();
-        assert_eq!(sources, [SOURCE_USER, SOURCE_ASSISTANT, SOURCE_USER]);
-        let assistant = &prompts[1];
-        assert!(
-            assistant
-                .iter()
-                .any(|field| field.number == 3 && field.bytes == b"unsigned draft\n\nsummary\nbody")
-        );
-        for number in [11, 12, 13] {
-            assert!(!assistant.iter().any(|field| field.number == number));
-        }
     }
 
     // 原始签名和无法解包的插件载荷都必须首发给上游尝试。
