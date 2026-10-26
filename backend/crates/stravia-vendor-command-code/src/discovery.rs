@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
-    DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, PluginError,
-    ProviderSnapshot, read_http_body,
+    ConnectionCheckResponse, ConnectionCheckVerification, DiscoverResponse, DiscoveredModel,
+    ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, PluginError, ProviderSnapshot, read_http_body,
 };
 
 use crate::allowance::commandcode_request;
@@ -102,6 +103,56 @@ pub(super) fn execute(
     }
     let catalog = get(host, request)?;
     parse_catalog(catalog, plan, selected.as_ref())
+}
+
+/// 只读取账号；不要求订阅、不拉取目录，也不初始化 CLI 会话。
+pub(super) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let base = base_url(provider);
+    let value = connection_check::json(
+        host,
+        commandcode_request(&base, api_key(provider)?, "/alpha/whoami", &[]),
+    )?;
+    validate_account(value)?;
+    // 自定义端点可能忽略 API key，响应不能证明凭据被接受。
+    let verified = if base.trim_end_matches('/') == crate::DEFAULT_BASE_URL {
+        ConnectionCheckVerification::EndpointAndCredentials
+    } else {
+        ConnectionCheckVerification::Endpoint
+    };
+    Ok(ConnectionCheckResponse { verified })
+}
+
+fn validate_account(value: Value) -> Result<(), PluginError> {
+    let object = value.as_object().ok_or_else(|| {
+        invalid_response("Command Code whoami response must be an account object")
+    })?;
+    if !object.contains_key("org") && !object.get("user").is_some_and(Value::is_object) {
+        return Err(invalid_response(
+            "Command Code whoami response has no account fields",
+        ));
+    }
+    if object
+        .get("user")
+        .is_some_and(|user| !user.is_object() && !user.is_null())
+    {
+        return Err(invalid_response(
+            "Command Code whoami user is not an object",
+        ));
+    }
+    let account: Account = serde_json::from_value(value).map_err(|_| {
+        invalid_response("Command Code whoami response has an invalid account shape")
+    })?;
+    if let Some(org) = account.org
+        && org.id.trim().is_empty()
+    {
+        return Err(invalid_response(
+            "Command Code whoami organization id is empty",
+        ));
+    }
+    Ok(())
 }
 
 fn get<T: serde::de::DeserializeOwned>(
@@ -265,6 +316,25 @@ fn invalid(message: impl Into<String>) -> PluginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_check_requires_a_recognizable_account_response() {
+        assert!(validate_account(json!({"org": {"id": "org-1"}})).is_ok());
+        assert!(validate_account(json!({"org": null})).is_ok());
+        assert!(validate_account(json!({"user": {"email": "local@example.test"}})).is_ok());
+        for malformed in [
+            json!({}),
+            json!([]),
+            json!({"org": {}}),
+            json!({"org": {"id": ""}}),
+            json!({"user": "invalid"}),
+        ] {
+            assert!(matches!(
+                validate_account(malformed).unwrap_err().kind,
+                ErrorKind::InvalidResponse
+            ));
+        }
+    }
 
     #[test]
     fn only_current_subscription_statuses_grant_a_recognized_plan() {

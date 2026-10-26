@@ -1,8 +1,10 @@
 use serde_json::Value;
 use stravia_vendor_common::account::first_account_label;
+use stravia_vendor_common::connection_check;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost,
-    PluginError, ProviderSnapshot, read_http_body,
+    AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, ConnectionCheckResponse,
+    ConnectionCheckVerification, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
+    read_http_body,
 };
 
 use crate::codec::devin_connect::proto::{ProtoField, parse_fields};
@@ -18,11 +20,48 @@ pub(crate) fn execute(
     provider: ProviderSnapshot,
     _request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
-    let credential = session_token(&provider)?;
-    let platform = client_platform(&provider)?;
+    let body = fetch_user_status(host, &provider)?;
+    parse_response(&body).map_err(|()| {
+        error(
+            ErrorKind::upstream_unknown(),
+            "Devin GetUserStatus returned invalid protobuf",
+        )
+    })
+}
+
+/// An authenticated read of the current seat/user. The connection check only
+/// validates its protobuf envelope; it must not materialize quota or account UI.
+pub(crate) fn check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let body = fetch_user_status(host, provider)?;
+    let top = parse_fields(&body).map_err(|_| {
+        connection_check::invalid_response("Devin GetUserStatus returned invalid protobuf")
+    })?;
+    let user = top
+        .iter()
+        .find(|field| field.number == 1 && field.wire_type == 2)
+        .ok_or_else(|| {
+            connection_check::invalid_response("Devin GetUserStatus response omitted user status")
+        })?;
+    parse_fields(user.bytes).map_err(|_| {
+        connection_check::invalid_response("Devin GetUserStatus user status is malformed")
+    })?;
+    Ok(ConnectionCheckResponse {
+        verified: ConnectionCheckVerification::Credentials,
+    })
+}
+
+fn fetch_user_status(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<Vec<u8>, PluginError> {
+    let credential = session_token(provider)?;
+    let platform = client_platform(provider)?;
     let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
         method: "POST".into(),
-        url: endpoint(&provider, GET_USER_STATUS_PATH),
+        url: endpoint(provider, GET_USER_STATUS_PATH),
         headers: vec![
             (
                 "authorization".into(),
@@ -45,13 +84,7 @@ pub(crate) fn execute(
             upstream_status: Some(status),
         });
     }
-    let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
-    parse_response(&body).map_err(|()| {
-        error(
-            ErrorKind::upstream_unknown(),
-            "Devin GetUserStatus returned invalid protobuf",
-        )
-    })
+    read_http_body(&response, MAX_RESPONSE_BYTES)
 }
 
 fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {

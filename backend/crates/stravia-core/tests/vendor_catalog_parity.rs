@@ -261,6 +261,62 @@ fn editor_provider(catalog: &FakeCatalog, vendor: &str) -> CreateProvider {
 }
 
 #[tokio::test]
+async fn runtime_catalog_connection_check_preserves_profile_for_saved_and_draft()
+-> anyhow::Result<()> {
+    let catalog = FakeCatalog::start().await?;
+    catalog
+        .set_index(
+            "connection-check",
+            json!({
+                "commandcode": catalog_entry(
+                    "commandcode", "CommandCode", "@ai-sdk/openai-compatible",
+                    Some(&format!("{}/v1", catalog.base_url()))
+                )
+            }),
+        )
+        .await;
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    let provider = gw
+        .admin()
+        .create_provider(editor_provider(&catalog, "commandcode"))
+        .await?;
+
+    for draft in [false, true] {
+        let result = gw
+            .admin()
+            .test_provider(
+                &provider.id,
+                stravia_core::admin::ProviderConnectionCheckInput {
+                    configuration: draft.then(|| ProviderConfigurationPreviewInput {
+                        vendor_id: "commandcode".into(),
+                        channel: "default".into(),
+                        provider_id: Some(provider.id.clone()),
+                        base_url: format!("{}/v1", catalog.base_url()),
+                        protocol: Some("openai-compatible".into()),
+                        options: Default::default(),
+                        credentials: Default::default(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(
+            matches!(
+                result,
+                stravia_core::db::models::ProviderConnectionCheckResult::Passed {
+                    verified: stravia_vendor_sdk::ConnectionCheckVerification::Endpoint,
+                    ..
+                }
+            ),
+            "runtime catalog connection check (draft={draft}) must probe its endpoint: {result:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn editor_created_provider_imports_scoped_reasoning_levels() -> anyhow::Result<()> {
     let catalog = reasoning_catalog().await?;
     let directory = tempfile::tempdir()?;

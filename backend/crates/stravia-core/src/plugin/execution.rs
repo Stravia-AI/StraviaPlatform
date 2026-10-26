@@ -38,6 +38,7 @@ pub(crate) enum VendorRequest {
     Discover(DiscoverRequest),
     Allowance(AllowanceRequest),
     ConfigValidation(ConfigValidationRequest),
+    ConnectionCheck(stravia_vendor_sdk::ConnectionCheckRequest),
 }
 
 impl VendorRequest {
@@ -69,6 +70,7 @@ impl VendorRequest {
             Self::ConfigValidation(request) => {
                 OperationInput::ConfigValidation { provider, request }
             }
+            Self::ConnectionCheck(request) => OperationInput::ConnectionCheck { provider, request },
         };
         input.encode_for_host()
     }
@@ -83,6 +85,7 @@ impl VendorRequest {
             Self::Discover(_) => Operation::Discover,
             Self::Allowance(_) => Operation::Allowance,
             Self::ConfigValidation(_) => Operation::ConfigValidation,
+            Self::ConnectionCheck(_) => Operation::ConnectionCheck,
         }
     }
 }
@@ -102,6 +105,11 @@ pub(crate) struct VendorExecution {
     /// Exact protocol hint pinned from the acquired component snapshot.
     pub(crate) protocol: String,
 }
+
+/// OAuth 恢复和失效标记会推进版本，失败写回不能继续使用准备阶段的旧版本。
+#[derive(Debug, thiserror::Error)]
+#[error("vendor operation failed for its captured credential generation")]
+pub(crate) struct VendorFailureCredentialVersion(pub(crate) ProviderCredentialVersion);
 
 pub(crate) struct VendorCallContext {
     pub(crate) cancellation: CancellationToken,
@@ -244,6 +252,13 @@ impl Gateway {
             selected_channel(descriptor, &provider.channel)?,
             &provider.protocol,
         );
+        // Runtime catalog profiles are absent from the guest's compiled
+        // manifest; temporary checks need the acquired profile just like saved calls.
+        provider.operation_metadata.insert(
+            "vendor_profile".into(),
+            serde_json::to_value(descriptor)
+                .map_err(|_| anyhow::anyhow!("vendor profile descriptor is not serializable"))?,
+        );
         let origins = NetworkPolicy::compile(
             resolve_permissions(
                 descriptor,
@@ -265,27 +280,6 @@ impl Gateway {
             private_state: Arc::new(Mutex::new(None)),
             origins,
         })
-    }
-
-    pub(crate) async fn execute_vendor(
-        &self,
-        provider_id: &str,
-        model: Option<&str>,
-        request: VendorRequest,
-        context: VendorCallContext,
-    ) -> anyhow::Result<VendorExecution> {
-        if context.cancellation.is_cancelled() {
-            return Err(RuntimeError::Cancelled.into());
-        }
-        let mut prepared = self
-            .prepare_vendor_execution(provider_id, model, request.operation(), &context)
-            .await?;
-        if let VendorRequest::Infer(request) | VendorRequest::Compact(request) = &request {
-            self.select_vendor_protocol(&mut prepared, request, &context)
-                .await?;
-        }
-        self.execute_prepared_vendor(prepared, request, &context)
-            .await
     }
 
     /// 在任何回放转换前固定实际协议；选择与执行持有同一个组件及操作租约。
@@ -411,7 +405,10 @@ impl Gateway {
                 .await?;
             anyhow::ensure!(
                 connection.provider.is_enabled
-                    || matches!(kind, Operation::ConfigValidation | Operation::Auth),
+                    || matches!(
+                        kind,
+                        Operation::ConfigValidation | Operation::ConnectionCheck | Operation::Auth
+                    ),
                 "provider is disabled"
             );
             ensure_recovery_complete(
@@ -613,7 +610,10 @@ impl Gateway {
     ) -> anyhow::Result<VendorExecution> {
         if !matches!(
             prepared.kind,
-            Operation::Discover | Operation::Allowance | Operation::ConfigValidation
+            Operation::Discover
+                | Operation::Allowance
+                | Operation::ConfigValidation
+                | Operation::ConnectionCheck
         ) {
             return self
                 .execute_prepared_vendor_once(prepared, request, context)
@@ -629,12 +629,18 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         if prepared.oauth_connection_id().is_none() {
-            self.mark_provider_credential_invalid(
-                &prepared.provider_id,
-                prepared.credential_version(),
-            )
-            .await;
-            return Err(error);
+            let mut version = prepared.credential_version();
+            if self
+                .mark_provider_credential_invalid(&prepared.provider_id, version)
+                .await
+            {
+                version.provider_revision += 1;
+            }
+            return Err(if prepared.kind == Operation::ConnectionCheck {
+                error.context(VendorFailureCredentialVersion(version))
+            } else {
+                error
+            });
         }
 
         // 管理查询与推理遵守同一规则：先恢复 OAuth，再确认新凭据是否仍被拒绝。
@@ -655,17 +661,25 @@ impl Gateway {
                 context,
             )
             .await?;
-        let version = refreshed.credential_version();
+        let mut version = refreshed.credential_version();
         let result = self
             .execute_prepared_vendor_once(refreshed, request, context)
             .await;
         if let Err(error) = &result
             && is_credential_rejection(error)
+            && self
+                .mark_provider_credential_invalid(&prepared.provider_id, version)
+                .await
         {
-            self.mark_provider_credential_invalid(&prepared.provider_id, version)
-                .await;
+            version.provider_revision += 1;
         }
-        result
+        result.map_err(|error| {
+            if prepared.kind == Operation::ConnectionCheck {
+                error.context(VendorFailureCredentialVersion(version))
+            } else {
+                error
+            }
+        })
     }
 
     async fn execute_prepared_vendor_once(
@@ -726,7 +740,7 @@ impl Gateway {
         Ok(execution)
     }
 
-    /// Executes the two operations that may legitimately target an
+    /// Executes the operations that may legitimately target an
     /// unpersisted connection snapshot. It deliberately does not create a
     /// general bypass around Provider-scoped execution.
     pub(crate) async fn execute_vendor_session(
@@ -742,9 +756,9 @@ impl Gateway {
         anyhow::ensure!(
             matches!(
                 operation_kind,
-                Operation::Auth | Operation::ConfigValidation
+                Operation::Auth | Operation::ConfigValidation | Operation::ConnectionCheck
             ),
-            "unpersisted vendor sessions only support authentication and configuration validation"
+            "unpersisted vendor sessions only support authentication, configuration validation and connection checks"
         );
         // Admission is intentionally taken from the current manager while an
         // auth component remains pinned to the session's original version.
@@ -763,10 +777,13 @@ impl Gateway {
             .descriptor()
             .provider(&session.vendor_id)
             .ok_or_else(|| anyhow::anyhow!("vendor session profile is unavailable"))?;
-        if operation_kind == Operation::ConfigValidation {
+        if matches!(
+            operation_kind,
+            Operation::ConfigValidation | Operation::ConnectionCheck
+        ) {
             anyhow::ensure!(
                 current_plugin.identity() == session.plugin.identity(),
-                "vendor plugin changed while preparing configuration validation"
+                "vendor plugin changed while preparing the connection snapshot"
             );
         }
 
@@ -1352,6 +1369,9 @@ pub(crate) fn is_credential_rejection(error: &anyhow::Error) -> bool {
     let Some(error) = error.downcast_ref::<RuntimeError>() else {
         return false;
     };
+    if error.upstream_status() == Some(403) {
+        return false;
+    }
     if error.is_upstream_failure() {
         return error.upstream_status() == Some(401)
             || (error.upstream_status() != Some(403)
@@ -1801,6 +1821,10 @@ mod tests {
         assert!(!is_credential_rejection(&runtime(
             ErrorKind::upstream(Some(AiErrorKind::AuthorizationError), None),
             Some(403),
+        )));
+        assert!(!is_credential_rejection(&runtime(
+            ErrorKind::Auth,
+            Some(403)
         )));
         // 非认证类上游失败（限流、无效请求）不算
         assert!(!is_credential_rejection(&runtime(

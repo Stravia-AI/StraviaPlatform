@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, types::Json};
+use stravia_vendor_sdk::{ConnectionCheckVerification, ValidationIssue};
 
 use crate::thinking::ThinkingLevelMapping;
 use crate::thinking::mapping_control;
@@ -45,7 +46,7 @@ pub struct Provider {
     pub is_enabled: bool,
     /// ADR-0073 凭据失效：`ok` / `invalid`。上游明确拒绝当前凭据组合后由
     /// 条件写置为 `invalid`，只有新凭据证据（凭据变更、OAuth 重绑或刷新
-    /// 成功、测试成功）才恢复 `ok`。与 `is_enabled` 正交。
+    /// 成功、连接检查明确验证凭据成功）才恢复 `ok`。与 `is_enabled` 正交。
     #[serde(default = "default_credential_status")]
     pub credential_status: String,
     pub credential_invalid_at: Option<String>,
@@ -997,6 +998,44 @@ pub struct TestResult {
     pub latency_ms: u64,
     pub model: Option<String>,
     pub error: Option<String>,
+}
+
+/// Where a connection check stopped. The stage is deliberately coarser than the
+/// host/plugin error kind so the UI can localize one sentence per phase without
+/// parsing vendor diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionCheckStage {
+    Configuration,
+    Transport,
+    Upstream,
+    Response,
+}
+
+/// Result of an explicit connection check. `Passed` only claims the verification
+/// scope reported by the plugin; `Failed` never carries raw upstream or plugin
+/// diagnostics. `Unsupported` means the configuration was locally valid but the
+/// channel cannot probe its upstream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProviderConnectionCheckResult {
+    Passed {
+        verified: ConnectionCheckVerification,
+        duration_ms: u64,
+    },
+    Failed {
+        stage: ConnectionCheckStage,
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream_status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        issues: Vec<ValidationIssue>,
+    },
+    Unsupported {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

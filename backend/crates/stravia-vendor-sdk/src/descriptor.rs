@@ -104,6 +104,8 @@ pub enum Capability {
     Allowance,
     /// Plugin-side validation of proposed config values.
     ConfigValidation,
+    /// Explicit, non-generating upstream connection check.
+    ConnectionCheck,
 }
 
 impl Capability {
@@ -118,6 +120,7 @@ impl Capability {
             Self::ModelDiscovery => "model_discovery",
             Self::Allowance => "allowance",
             Self::ConfigValidation => "config_validation",
+            Self::ConnectionCheck => "connection_check",
         }
     }
 
@@ -132,6 +135,7 @@ impl Capability {
             "model_discovery" => Self::ModelDiscovery,
             "allowance" => Self::Allowance,
             "config_validation" => Self::ConfigValidation,
+            "connection_check" => Self::ConnectionCheck,
             _ => return None,
         })
     }

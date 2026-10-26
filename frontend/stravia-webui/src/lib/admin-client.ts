@@ -68,6 +68,8 @@ import type {
   ProviderMetadata,
   ProviderConfigurationPreview,
   ProviderConfigurationPreviewInput,
+  ProviderConnectionCheckInput,
+  ProviderConnectionCheckResult,
   WebAccessSettings,
   WebAccessBrowserState,
   WebProvider,
@@ -193,7 +195,8 @@ export const admin = {
       request<Provider>('POST', `/providers/${id}/copy`, options),
     update: (id: string, input: UpdateProvider) => request<Provider>('PUT', `/providers/${id}`, input),
     delete: (id: string) => request<void>('DELETE', `/providers/${id}`),
-    test: (id: string) => request<TestResult>('GET', `/providers/${id}/test`),
+    test: (id: string, input: ProviderConnectionCheckInput = {}) =>
+      request<ProviderConnectionCheckResult>('POST', `/providers/${id}/test`, input),
     testModels: (id: string) => request<string[]>('GET', `/providers/${id}/test-models`),
     capabilityDrifts: () => request<ImageCapabilityDrift[]>('GET', '/providers/image-capability-drifts'),
     models: (id: string) => request<ProviderModelList>('GET', `/providers/${id}/models`),

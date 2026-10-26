@@ -10,6 +10,7 @@
 //! 请求），也不接管 base 的 `opencode` Profile——免费通道是一个单独的
 //! `opencode-free` Provider Profile，由管理员导入本插件后新增。
 
+mod connection;
 mod native_identity;
 mod native_tools;
 
@@ -261,6 +262,12 @@ pub fn execute(
             check_provider(channel, &provider)?;
             discover(host, &provider)
         }
+        OperationInput::ConnectionCheck { provider, .. }
+            if operation == Operation::ConnectionCheck =>
+        {
+            check_provider(channel, &provider)?;
+            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
+        }
         other => Err(common::unsupported(
             other.operation().as_str(),
             VENDOR_ID,
@@ -294,7 +301,11 @@ fn string_field(
 }
 
 pub fn descriptor() -> VendorDescriptor {
-    let capabilities = BTreeSet::from([Capability::Infer, Capability::ModelDiscovery]);
+    let capabilities = BTreeSet::from([
+        Capability::Infer,
+        Capability::ModelDiscovery,
+        Capability::ConnectionCheck,
+    ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
         version: Version::parse(env!("CARGO_PKG_VERSION"))

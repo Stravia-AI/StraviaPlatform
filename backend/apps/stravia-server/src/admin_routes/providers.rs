@@ -271,8 +271,10 @@ pub(super) async fn delete_provider_handler(
 pub(super) async fn test_provider_handler(
     State(gw): State<Gateway>,
     Path(id): Path<String>,
+    body: Option<Json<ProviderConnectionCheckInput>>,
 ) -> impl IntoResponse {
-    match gw.admin().test_provider(&id).await {
+    let input = body.map(|Json(input)| input).unwrap_or_default();
+    match gw.admin().test_provider(&id, input).await {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => err(e),
     }

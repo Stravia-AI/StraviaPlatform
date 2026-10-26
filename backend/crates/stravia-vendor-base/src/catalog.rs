@@ -128,6 +128,7 @@ pub(crate) fn provider_set(catalog_profiles: Vec<ProviderDescriptor>) -> Vec<Pro
         for channel in &mut provider.channels {
             channel.consumes_catalog_models = consumes;
         }
+        crate::add_connection_check_capability(provider);
     }
     providers
 }

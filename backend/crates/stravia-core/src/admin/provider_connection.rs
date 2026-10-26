@@ -2,9 +2,11 @@ use super::*;
 use rust_decimal::prelude::ToPrimitive;
 
 mod capabilities;
+mod check;
 mod configuration;
 mod interface;
 
+pub use check::ProviderConnectionCheckInput;
 use configuration::{
     NormalizedConfiguration, require_descriptor, resolved_permissions,
     validate_configuration_fields, validate_persisted_configuration_fields,
@@ -14,8 +16,8 @@ pub use configuration::{
     ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderNetworkPermission,
 };
 pub(crate) use interface::{
-    ProviderConnection, ProviderConnectivityTest, ProviderReconnect, ProviderReconnectCallback,
-    ProviderReconnectResult, ProviderReconnectStart, ProviderSave,
+    ProviderConnection, ProviderReconnect, ProviderReconnectCallback, ProviderReconnectResult,
+    ProviderReconnectStart, ProviderSave,
 };
 
 fn configured_secret_value(value: &Value) -> bool {
@@ -219,18 +221,9 @@ impl AdminService {
                 client_headers: Vec::new(),
                 operation_metadata: std::collections::BTreeMap::new(),
             };
-            let scope = self
-                .gw
-                .create_vendor_session_scope(&descriptor.provider_id, provider)?;
-            let execution = self
-                .gw
-                .execute_vendor_session(
-                    &scope,
-                    crate::plugin::VendorRequest::ConfigValidation(
-                        stravia_vendor_sdk::ConfigValidationRequest {
-                            options: options.clone(),
-                        },
-                    ),
+            let validation = self
+                .validate_provider_configuration_snapshot(
+                    provider,
                     crate::plugin::VendorCallContext::new(
                         stravia_runtime_contract::CancellationToken::new(),
                         stravia_runtime_contract::Deadline::fixed(
@@ -239,12 +232,6 @@ impl AdminService {
                     ),
                 )
                 .await?;
-            let _publication = execution.publication.write_fence().await?;
-            let stravia_vendor_sdk::OperationOutput::ConfigValidation(validation) =
-                execution.output
-            else {
-                anyhow::bail!("vendor returned the wrong configuration validation result")
-            };
             if let Some(proposed) = validation.proposed_base_url {
                 base_url = validate_provider_base_url(&proposed)?;
             }
@@ -261,6 +248,32 @@ impl AdminService {
             issues,
             network_permissions,
         })
+    }
+
+    async fn validate_provider_configuration_snapshot(
+        &self,
+        provider: stravia_vendor_sdk::ProviderSnapshot,
+        context: crate::plugin::VendorCallContext,
+    ) -> anyhow::Result<stravia_vendor_sdk::ConfigValidationResponse> {
+        let request = stravia_vendor_sdk::ConfigValidationRequest {
+            options: provider.options.clone(),
+        };
+        let vendor_id = provider.provider_id.clone();
+        let scope = self.gw.create_vendor_session_scope(&vendor_id, provider)?;
+        let execution = self
+            .gw
+            .execute_vendor_session(
+                &scope,
+                crate::plugin::VendorRequest::ConfigValidation(request),
+                context,
+            )
+            .await?;
+        let _publication = execution.publication.write_fence().await?;
+        let stravia_vendor_sdk::OperationOutput::ConfigValidation(validation) = execution.output
+        else {
+            anyhow::bail!("vendor returned the wrong configuration validation result")
+        };
+        Ok(validation)
     }
 
     pub(in crate::admin) async fn provider_auth_candidate_snapshot(
@@ -1194,137 +1207,11 @@ impl AdminService {
         unreachable!("unbounded provider copy name search must return");
     }
 
-    pub async fn test_provider(&self, id: &str) -> anyhow::Result<TestResult> {
-        crate::admin::provider_connection::ProviderConnection::new(self)
-            .test(
-                crate::admin::provider_connection::ProviderConnectivityTest::Existing(
-                    id.to_string(),
-                ),
-            )
-            .await
-    }
-
-    pub(super) async fn test_provider_record(&self, id: &str) -> anyhow::Result<TestResult> {
-        let provider = self.get_provider(id).await?;
-        let start = Instant::now();
-        let vendor_id = provider
-            .vendor
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
-        let channel_id = provider
-            .channel
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("provider channel is missing"))?;
-        let descriptor = require_descriptor(&self.gw.vendor_plugins, vendor_id)?;
-        let supports_validation = descriptor
-            .channels
-            .iter()
-            .find(|channel| channel.id == channel_id)
-            .is_some_and(|channel| {
-                channel
-                    .capabilities
-                    .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
-            });
-        let result = if supports_validation {
-            let execution = self
-                .gw
-                .execute_vendor(
-                    &provider.id,
-                    None,
-                    crate::plugin::VendorRequest::ConfigValidation(
-                        stravia_vendor_sdk::ConfigValidationRequest {
-                            options: serde_json::from_str(&provider.vendor_options)?,
-                        },
-                    ),
-                    crate::plugin::VendorCallContext::new(
-                        stravia_runtime_contract::CancellationToken::new(),
-                        stravia_runtime_contract::Deadline::fixed(
-                            std::time::Instant::now() + std::time::Duration::from_secs(30),
-                        ),
-                    ),
-                )
-                .await?;
-            let _publication = execution.publication.write_fence().await?;
-            let stravia_vendor_sdk::OperationOutput::ConfigValidation(validation) =
-                execution.output
-            else {
-                anyhow::bail!("vendor returned the wrong configuration validation result")
-            };
-            let error = if validation.issues.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "Vendor configuration validation failed: {}",
-                    serde_json::to_string(&validation.issues)?
-                ))
-            };
-            TestResult {
-                success: error.is_none(),
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error,
-            }
-        } else {
-            TestResult {
-                success: false,
-                latency_ms: start.elapsed().as_millis() as u64,
-                model: None,
-                error: Some(
-                    "Vendor channel does not declare configuration validation; no non-consuming connectivity test is available"
-                        .into(),
-                ),
-            }
-        };
-        self.record_provider_test_result(&provider.id, &result)
-            .await?;
-        Ok(result)
-    }
-
-    pub(super) async fn test_provider_candidate_record(
+    pub async fn test_provider(
         &self,
-        input: CreateProvider,
-    ) -> anyhow::Result<TestResult> {
-        let start = Instant::now();
-        let (record, descriptor) = self.resolve_create_provider(input, false).await?;
-        let channel_id = record
-            .channel
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("provider channel is missing"))?;
-        let supports_validation = descriptor
-            .channels
-            .iter()
-            .find(|channel| channel.id == channel_id)
-            .is_some_and(|channel| {
-                channel
-                    .capabilities
-                    .contains(&stravia_vendor_sdk::Capability::ConfigValidation)
-            });
-        Ok(TestResult {
-            success: supports_validation,
-            latency_ms: start.elapsed().as_millis() as u64,
-            model: None,
-            error: (!supports_validation).then(|| {
-                "Vendor channel does not declare configuration validation; no non-consuming connectivity test is available"
-                    .into()
-            }),
-        })
-    }
-
-    async fn record_provider_test_result(
-        &self,
-        provider_id: &str,
-        result: &TestResult,
-    ) -> anyhow::Result<()> {
-        self.gw
-            .storage
-            .providers()
-            .record_test_result(
-                provider_id,
-                ProviderTestResult {
-                    success: result.success,
-                    tested_at: String::new(),
-                },
-            )
-            .await
+        id: &str,
+        input: ProviderConnectionCheckInput,
+    ) -> anyhow::Result<ProviderConnectionCheckResult> {
+        crate::admin::provider_connection::check::check_provider_connection(self, id, input).await
     }
 }

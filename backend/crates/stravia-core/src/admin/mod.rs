@@ -1,6 +1,5 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +12,6 @@ use crate::auth::types::{
     UpdateAuthSession,
 };
 use crate::db::models::*;
-use crate::storage::traits::ProviderTestResult;
 
 mod api_keys;
 mod auth_data;
@@ -48,7 +46,8 @@ pub use crate::interaction_observation::{
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use provider_connection::{
-    ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderNetworkPermission,
+    ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderConnectionCheckInput,
+    ProviderNetworkPermission,
 };
 pub use routes::{BindRouteInput, RouteTargetStatus, UnbindRouteInput};
 

@@ -46,7 +46,7 @@ async function buildFixture(directory: keyof typeof fixturePackages, library: st
 }
 
 await mkdir(output, { recursive: true })
-await buildFixture('legacy-contract', 'stravia_vendor_legacy_contract_fixture', 'legacy-v0.5.0', {})
+await buildFixture('legacy-contract', 'stravia_vendor_legacy_contract_fixture', 'legacy-entrypoints', {})
 for (const [name, vendor, provider, kind, version, stateFormat, canonicalFormat, author, protocol] of lifecycle) {
   await buildFixture('lifecycle-contract', 'stravia_vendor_lifecycle_contract_fixture', name, {
     STRAVIA_FIXTURE_VENDOR_ID: vendor,

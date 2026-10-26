@@ -130,6 +130,7 @@ pub enum Operation {
     Discover,
     Allowance,
     ConfigValidation,
+    ConnectionCheck,
 }
 
 impl Operation {
@@ -143,6 +144,7 @@ impl Operation {
             Self::Discover => "discover",
             Self::Allowance => "allowance",
             Self::ConfigValidation => "config_validation",
+            Self::ConnectionCheck => "connection_check",
         }
     }
 
@@ -156,6 +158,7 @@ impl Operation {
             Self::Discover => Capability::ModelDiscovery,
             Self::Allowance => Capability::Allowance,
             Self::ConfigValidation => Capability::ConfigValidation,
+            Self::ConnectionCheck => Capability::ConnectionCheck,
         }
     }
 }
@@ -171,6 +174,7 @@ impl From<types::OperationKind> for Operation {
             types::OperationKind::Discover => Self::Discover,
             types::OperationKind::Allowance => Self::Allowance,
             types::OperationKind::ConfigValidation => Self::ConfigValidation,
+            types::OperationKind::ConnectionCheck => Self::ConnectionCheck,
         }
     }
 }
@@ -186,6 +190,7 @@ impl From<Operation> for types::OperationKind {
             Operation::Discover => Self::Discover,
             Operation::Allowance => Self::Allowance,
             Operation::ConfigValidation => Self::ConfigValidation,
+            Operation::ConnectionCheck => Self::ConnectionCheck,
         }
     }
 }
@@ -658,6 +663,26 @@ pub struct ConfigValidationResponse {
     pub proposed_base_url: Option<String>,
 }
 
+/// An explicit check does not generate output, synchronize models, or bind an account.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConnectionCheckRequest {}
+
+/// Evidence from the actual request, not from attaching an authorization header.
+/// A protected account read at a fixed origin only verifies credentials; a public
+/// API response at the configured endpoint only verifies that endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionCheckVerification {
+    Endpoint,
+    Credentials,
+    EndpointAndCredentials,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionCheckResponse {
+    pub verified: ConnectionCheckVerification,
+}
+
 /// Fully decoded operation input. Every operation has a fixed concrete type;
 /// no plugin-facing arbitrary byte escape hatch exists.
 #[derive(Debug, Clone)]
@@ -694,6 +719,10 @@ pub enum OperationInput {
         provider: ProviderSnapshot,
         request: ConfigValidationRequest,
     },
+    ConnectionCheck {
+        provider: ProviderSnapshot,
+        request: ConnectionCheckRequest,
+    },
 }
 
 impl OperationInput {
@@ -707,6 +736,7 @@ impl OperationInput {
             Self::Discover { .. } => Operation::Discover,
             Self::Allowance { .. } => Operation::Allowance,
             Self::ConfigValidation { .. } => Operation::ConfigValidation,
+            Self::ConnectionCheck { .. } => Operation::ConnectionCheck,
         }
     }
 
@@ -719,7 +749,8 @@ impl OperationInput {
             | Self::Auth { provider, .. }
             | Self::Discover { provider, .. }
             | Self::Allowance { provider, .. }
-            | Self::ConfigValidation { provider, .. } => provider,
+            | Self::ConfigValidation { provider, .. }
+            | Self::ConnectionCheck { provider, .. } => provider,
         }
     }
 
@@ -737,6 +768,7 @@ impl OperationInput {
             Self::Discover { provider, request } => (provider, encode_canonical(request)?),
             Self::Allowance { provider, request } => (provider, encode_canonical(request)?),
             Self::ConfigValidation { provider, request } => (provider, encode_canonical(request)?),
+            Self::ConnectionCheck { provider, request } => (provider, encode_canonical(request)?),
         };
         let operation = self.operation().into();
         Ok((
@@ -799,6 +831,10 @@ impl OperationInput {
                 provider,
                 request: decode_body(&input.input)?,
             },
+            Operation::ConnectionCheck => Self::ConnectionCheck {
+                provider,
+                request: decode_body(&input.input)?,
+            },
         })
     }
 }
@@ -813,6 +849,7 @@ pub enum OperationOutput {
     Discover(DiscoverResponse),
     Allowance(AllowanceResponse),
     ConfigValidation(ConfigValidationResponse),
+    ConnectionCheck(ConnectionCheckResponse),
 }
 
 impl OperationOutput {
@@ -829,6 +866,9 @@ impl OperationOutput {
             Operation::ConfigValidation => {
                 Self::ConfigValidation(decode_json(bytes, "config validation result")?)
             }
+            Operation::ConnectionCheck => {
+                Self::ConnectionCheck(decode_json(bytes, "connection check result")?)
+            }
         })
     }
 
@@ -842,6 +882,7 @@ impl OperationOutput {
             (Operation::Discover, Self::Discover(value)) => encode_body(value),
             (Operation::Allowance, Self::Allowance(value)) => encode_body(value),
             (Operation::ConfigValidation, Self::ConfigValidation(value)) => encode_body(value),
+            (Operation::ConnectionCheck, Self::ConnectionCheck(value)) => encode_body(value),
             _ => Err(error(
                 ErrorKind::Invalid,
                 "guest returned an output for a different operation",

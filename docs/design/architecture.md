@@ -871,16 +871,16 @@ model_turn/                  ← 路由与尝试策略；只调用 Gateway::exec
 
 ### 6.1 Descriptor 与操作入口
 
-WIT 契约为 `stravia:vendor@0.5.1`，通过新增 HTTP / WebSocket 压缩函数的独立参数表达强类型策略，保留 `0.5.0` 的 request 形状、旧函数及资源；已有独立组件无需重建或重新导入。宿主只接受这两个明确的 Vendor ABI 版本，新旧入口共用传输与生命周期，旧入口保留原有 HTTP header 驱动行为和无压缩 WS。使用新增函数的插件仍要求支持它们的新宿主。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
+WIT 契约为 `stravia:vendor@0.6.0`，新增独立的 `ConnectionCheck` capability / operation、验证范围和 `InvalidResponse` 错误类型。宿主只接受此明确 ABI 版本，旧 `0.5.x` 独立组件必须重建并重新导入，不保留旧 ABI 准入。手动 HTTP header 驱动行为、无压缩 WebSocket 和显式压缩入口仍共用原有传输与生命周期。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
 
 请求 canonical format 仍为 1；它与 WIT ABI 独立版本化。满足当前 WIT 的 format-1 插件可按兼容读取契约忽略新增且有默认值的 optional 字段；忽略不代表插件支持该新语义。SDK `request_compat.rs` 按目标 family 从唯一 canonical 状态生成旧 `ext`、已知标准字段和 `reasoning.effort` 的 wire 视图，以供兼容读取方使用，不把这些别名恢复成宿主运行时状态，也不把未知 passthrough 提升为上游 body 权限。新增必选语义、破坏读取契约或改变 WIT 仍须版本化，不能以 optional 兼容性绕过。独立插件中的 codec 固化在已安装 WASM 内，须重建并重新导入插件才能获得新 codec／目标投影行为；只升级宿主不会更新旧 WASM。
 
 这里的 `provider_id` 是供应商 profile 身份，不是已保存 Provider 连接的数据库 UUID。SDK 与 WIT 的 `ProviderSnapshot.provider_id` 为必填；准入、channel 校验、网络 origin 与 guest 分派都只使用当前 profile，不能合并其他 profile 的声明。基础 guest 按该身份分派，专属 guest 拒绝其他身份。
 
-Core 的通用执行入口是 `Gateway::execute_vendor`。它按 Provider 绑定取得已安装组件，校验 descriptor 身份和 channel，构造 `ProviderSnapshot`，再将 typed `OperationInput` 交给 guest：
+Core 先通过 `Gateway::prepare_vendor_execution` 固定连接和组件快照，再通过 `execute_prepared_vendor` 执行。它按 Provider 绑定取得已安装组件，校验 descriptor 身份和 channel，构造 `ProviderSnapshot`，再将 typed `OperationInput` 交给 guest：
 
 - `Infer`：canonical `AiRequest` 进入 guest；guest 使用共享 codec 构造 wire 请求并发出 canonical runtime event。
-- `Discover` / `Allowance` / `Auth` / `ConfigValidation`：由声明对应 capability 的 guest 处理；host 不保留同厂商原生实现。
+- `Discover` / `Allowance` / `Auth` / `ConfigValidation` / `ConnectionCheck`：由声明对应 capability 的 guest 处理；host 不保留同厂商原生实现。
 - 运行中的 session 固定已加载组件与 data epoch；组件更新不兼容时，旧 session 不能继续发布结果。
 
 操作结束返回 `VendorExecution { output, publication }`，流事件携带同一 `VendorPublicationFence`。普通完成后 fence 仍可用于最终历史/compaction 写入；caller 取消、deadline 或不兼容插件更新后 fence 失效。最终异步写入在真实写入期间持有读栅栏，插件更新通过写栅栏等待这些发布完成；不得为了方便长期持有 `VendorOperation` lease。

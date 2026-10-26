@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
+use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
-    ProviderSnapshot,
+    AllowanceAmount, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    ConnectionCheckVerification, ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -16,27 +17,8 @@ pub(super) fn execute(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<AllowanceResponse, PluginError> {
-    let access_token = ["access_token", "api_key", "apiKey", "token"]
-        .into_iter()
-        .find_map(|key| provider.credentials.get(key).and_then(non_empty))
-        .ok_or_else(|| PluginError {
-            kind: ErrorKind::Auth,
-            message: "provider credential is missing".into(),
-            upstream_status: None,
-        })?;
-    let mut headers = vec![
-        ("authorization".into(), format!("Bearer {access_token}")),
-        ("accept".into(), "application/json".into()),
-    ];
-    if let Some(account_id) = account_id(provider, access_token) {
-        headers.push(("chatgpt-account-id".into(), account_id));
-    }
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "GET".into(),
-        url: USAGE_URL.into(),
-        headers,
-        body: Vec::new(),
-    })?;
+    let access_token = access_token(provider)?;
+    let response = host.http_start(usage_request(provider, access_token))?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(PluginError {
@@ -57,6 +39,93 @@ pub(super) fn execute(
     })?;
     parsed.account_label = account_label(&provider.credentials);
     Ok(parsed)
+}
+
+/// 固定账号 usage 端点只证明凭据有效；它不请求配置的 Base URL，
+/// 因此不能声称自定义端点已被这次检查确认。
+pub(super) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let access_token = access_token(provider)?;
+    let value = connection_check::json(host, usage_request(provider, access_token))?;
+    validate_usage(&value)?;
+    Ok(ConnectionCheckResponse {
+        verified: ConnectionCheckVerification::Credentials,
+    })
+}
+
+fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
+    ["access_token", "api_key", "apiKey", "token"]
+        .into_iter()
+        .find_map(|key| provider.credentials.get(key).and_then(non_empty))
+        .ok_or_else(|| PluginError {
+            kind: ErrorKind::Auth,
+            message: "provider credential is missing".into(),
+            upstream_status: None,
+        })
+}
+
+fn usage_request(provider: &ProviderSnapshot, access_token: &str) -> HttpRequest {
+    let mut headers = vec![
+        ("authorization".into(), format!("Bearer {access_token}")),
+        ("accept".into(), "application/json".into()),
+    ];
+    if let Some(account_id) = account_id(provider, access_token) {
+        headers.push(("chatgpt-account-id".into(), account_id));
+    }
+    HttpRequest {
+        method: "GET".into(),
+        url: USAGE_URL.into(),
+        headers,
+        body: Vec::new(),
+    }
+}
+
+/// 只接受 wham/usage 已知字段的实际类型；窗口为空或整个字段缺省仍是合法
+/// 用量状态，不能用任意 2xx JSON 冒充检查通过。
+fn validate_usage(value: &Value) -> Result<(), PluginError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_response("Codex usage response must be a JSON object"))?;
+    let mut recognized = false;
+    if let Some(rate_limit) = object.get("rate_limit").filter(|value| !value.is_null()) {
+        recognized = true;
+        let rate_limit = rate_limit
+            .as_object()
+            .ok_or_else(|| invalid_response("Codex usage `rate_limit` must be an object"))?;
+        for field in ["primary_window", "secondary_window"] {
+            if let Some(window) = rate_limit.get(field).filter(|value| !value.is_null())
+                && !window.is_object()
+            {
+                return Err(invalid_response(format!(
+                    "Codex usage `{field}` must be an object"
+                )));
+            }
+        }
+    }
+    for field in ["credits", "spend_control"] {
+        if let Some(value) = object.get(field).filter(|value| !value.is_null()) {
+            recognized = true;
+            if !value.is_object() {
+                return Err(invalid_response(format!(
+                    "Codex usage `{field}` must be an object"
+                )));
+            }
+        }
+    }
+    if let Some(plan) = object.get("plan_type").filter(|value| !value.is_null()) {
+        recognized = true;
+        if !plan.is_string() {
+            return Err(invalid_response("Codex usage `plan_type` must be a string"));
+        }
+    }
+    if !recognized {
+        return Err(invalid_response(
+            "Codex usage response has no recognized fields",
+        ));
+    }
+    Ok(())
 }
 
 /// usage 接口不返回身份；登录时保存的 OIDC `id_token` 带有 `email`、`name` 声明。
@@ -309,7 +378,7 @@ mod tests {
     use serde_json::{Value, json};
     use stravia_vendor_sdk::AllowanceAmount;
 
-    use super::{account_label, parse};
+    use super::{account_label, parse, validate_usage};
 
     fn credentials_with_id_token(claims: Value) -> BTreeMap<String, Value> {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
@@ -412,5 +481,24 @@ mod tests {
         assert!(allowance.remaining.is_none());
         assert!(allowance.limit.is_none());
         assert_eq!(allowance.condition, None);
+    }
+
+    #[test]
+    fn connection_check_accepts_empty_usage_windows_and_rejects_unknown_shapes() {
+        assert!(
+            validate_usage(&json!({
+                "rate_limit": {"primary_window": null, "secondary_window": null}
+            }))
+            .is_ok()
+        );
+        assert!(validate_usage(&json!({"rate_limit": {}, "plan_type": "pro"})).is_ok());
+        assert!(validate_usage(&json!({"credits": {"unlimited": true}})).is_ok());
+        assert!(validate_usage(&json!({"spend_control": {"individual_limit": {}}})).is_ok());
+        assert!(validate_usage(&json!({})).is_err());
+        assert!(validate_usage(&json!([])).is_err());
+        assert!(validate_usage(&json!({"rate_limit": []})).is_err());
+        assert!(validate_usage(&json!({"rate_limit": {"primary_window": 1}})).is_err());
+        assert!(validate_usage(&json!({"credits": 1})).is_err());
+        assert!(validate_usage(&json!({"plan_type": 1})).is_err());
     }
 }

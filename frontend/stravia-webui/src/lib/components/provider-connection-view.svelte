@@ -6,11 +6,19 @@ import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
-import { formatDuration } from '#lib/format.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
+import {
+  mergeProviderValidationIssues,
+  providerConnectionCheckBaseUrlIssues,
+  providerConnectionCheckConfigurationIssues,
+  providerConnectionCheckFailureMessage,
+  providerConnectionCheckFieldIssues,
+  providerConnectionCheckSuccessMessage,
+  providerConnectionCheckUnsupportedMessage,
+} from '#lib/provider-connection-check.js'
 import { ProviderConnectionDraft, type ProviderConnectionSubmission } from '#lib/provider-connection-draft.svelte.js'
-import type { Provider, UpdateProvider } from '#lib/types.js'
+import type { Provider, ProviderValidationIssue, UpdateProvider } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import FormSection from '#lib/components/form-section.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
@@ -34,6 +42,9 @@ const initialProvider = untrack(() => provider)
 const queryClient = useQueryClient()
 let testing = $state(false)
 let connectionError = $state('')
+let connectionNotice = $state('')
+let testIssues = $state<ProviderValidationIssue[]>([])
+let testGeneration = 0
 
 let oauthAuthorization = $state<{
   cancel: () => Promise<void>
@@ -53,7 +64,6 @@ const configFields = $derived(descriptor?.config_fields ?? [])
 const configuredSecretFields = $derived(provider.configured_credential_fields ?? [])
 const oauthProvider = $derived(Boolean(channel?.auth))
 const supportsDiscovery = $derived(channel?.capabilities.includes('model_discovery') ?? false)
-const supportsInference = $derived(channel?.capabilities.includes('infer') ?? false)
 const supportsConfigValidation = $derived(channel?.capabilities.includes('config_validation') ?? false)
 
 function updateProvider(submission: ProviderConnectionSubmission): Promise<Provider> {
@@ -88,7 +98,7 @@ const draft = new ProviderConnectionDraft({
   hooks: {
     onSaved: async (saved) => {
       baseline.reset()
-      connectionError = ''
+      invalidateConnectionCheck()
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
@@ -98,6 +108,7 @@ const draft = new ProviderConnectionDraft({
     },
     onPartialSave: (saved) => {
       baseline.reset()
+      invalidateConnectionCheck()
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
@@ -116,6 +127,10 @@ const previewIssueError = $derived(
     .join(' ') || (previewIssues.length > 0 ? m.provider_config_fix_issues_before_save() : ''),
 )
 
+const connectionIssues = $derived(mergeProviderValidationIssues(previewIssues, testIssues))
+const baseUrlIssues = $derived(providerConnectionCheckBaseUrlIssues(connectionIssues))
+const configurationIssues = $derived(providerConnectionCheckConfigurationIssues(connectionIssues))
+
 const submitMessage = $derived(
   draft.partialSaveError !== undefined
     ? m.provider_config_saved_auth_bind_failed({ error: localizeBackendErrorMessage(draft.partialSaveError) })
@@ -128,7 +143,10 @@ const submitMessage = $derived(
 const baseline = new DraftBaseline(() => draft.fields)
 const guard = new DraftGuard({ dirty: () => baseline.dirty, busy: () => draft.submitting })
 
-onDestroy(() => draft.dispose())
+onDestroy(() => {
+  invalidateConnectionCheck()
+  draft.dispose()
+})
 
 $effect(() => {
   if (!descriptor) return
@@ -148,9 +166,28 @@ $effect(() => {
   }
 })
 
+/**
+ * 草稿、目标或 OAuth 快照变化后，进行中的检查结果不得再写回当前界面。
+ * 递增代际同时收起旧反馈，允许用户立即用新草稿重新检查。
+ */
+function invalidateConnectionCheck(): void {
+  testGeneration += 1
+  testing = false
+  testIssues = []
+  connectionError = ''
+  connectionNotice = ''
+}
+
+$effect(() => {
+  void provider.id
+  void provider.updated_at
+  void descriptor
+  untrack(invalidateConnectionCheck)
+})
+
 // 取消：把草稿还原为已保存的连接并放弃进行中的授权；有改动时先经过离开确认。
 function revert(): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   void draft
     .resetConnection({
       name: provider.name,
@@ -163,42 +200,53 @@ function revert(): void {
 }
 
 function save(): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   void draft.submit()
 }
 
 function nameChanged(): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   draft.nameChanged()
 }
 
 function configurationChanged(): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   draft.configurationChanged()
 }
 
 function useProxyChanged(checked: boolean): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   draft.fields.useProxy = checked
   draft.useProxyChanged()
 }
 
 function oauthStateChanged(sessionId: string | undefined, ready: boolean): void {
-  connectionError = ''
+  invalidateConnectionCheck()
   draft.oauthStateChanged(sessionId, ready)
 }
 
 async function testConnection(): Promise<void> {
+  if (testing || draft.submitting || !descriptor || !channel) return
+  const input = draft.connectionCheckInput({ kind: 'edit', provider, descriptor, channel })
+  invalidateConnectionCheck()
   testing = true
-  connectionError = ''
+  const generation = testGeneration
   try {
-    const result = await admin.providers.test(provider.id)
-    if (result.success) toast.success(m.common_service_response_time({ duration: formatDuration(result.latency_ms) }))
-    else connectionError = result.error || m.common_connection_test_failed()
+    const result = await admin.providers.test(provider.id, input)
+    if (generation !== testGeneration) return
+    if (result.status === 'passed') {
+      toast.success(providerConnectionCheckSuccessMessage(result))
+    } else if (result.status === 'unsupported') {
+      connectionNotice = providerConnectionCheckUnsupportedMessage()
+    } else if (result.status === 'failed') {
+      testIssues = providerConnectionCheckFieldIssues(result)
+      connectionError = providerConnectionCheckFailureMessage(result)
+    }
   } catch (error) {
+    if (generation !== testGeneration) return
     connectionError = localizeBackendErrorMessage(error)
   } finally {
-    testing = false
+    if (generation === testGeneration) testing = false
   }
 }
 </script>
@@ -247,7 +295,7 @@ async function testConnection(): Promise<void> {
               disabled={draft.submitting}
               oninput={nameChanged} />
           </Field.Field>
-          <Field.Field>
+          <Field.Field data-invalid={baseUrlIssues.length > 0 || undefined}>
             <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
             <Input
               id="provider-base-url"
@@ -256,7 +304,11 @@ async function testConnection(): Promise<void> {
               type="url"
               required={!supportsConfigValidation}
               disabled={draft.submitting}
+              aria-invalid={baseUrlIssues.length > 0 || undefined}
               oninput={configurationChanged} />
+            {#each baseUrlIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
+              <Field.Error>{resolvePluginText(issue.message, localeState.current)}</Field.Error>
+            {/each}
           </Field.Field>
           {#if descriptor && channel}
             <ProviderConfigFields
@@ -265,7 +317,7 @@ async function testConnection(): Promise<void> {
               protocol={provider.protocol}
               bind:values={draft.fields.values}
               {configuredSecretFields}
-              issues={previewIssues}
+              issues={configurationIssues}
               idPrefix={`provider-config-${provider.id}`}
               vendorName={descriptor.display_name}
               disabled={draft.submitting}
@@ -311,21 +363,38 @@ async function testConnection(): Promise<void> {
         </SettingRow>
       </FormSection>
 
-      {#if connectionError || submitMessage || previewIssueError}
-        <p class="text-sm text-destructive">{connectionError || submitMessage || previewIssueError}</p>
+      {#if connectionError || submitMessage || previewIssueError || connectionNotice}
+        <p
+          class={connectionError || submitMessage || previewIssueError
+            ? 'text-sm text-destructive'
+            : 'text-sm text-muted-foreground'}
+          role={connectionError || submitMessage || previewIssueError ? 'alert' : 'status'}>
+          {connectionError || submitMessage || previewIssueError || connectionNotice}
+        </p>
       {/if}
       <!-- 固定操作区：在文档流中保留空间，不覆盖最后一个字段；取消在前、保存在后。 -->
       <div
         class="sticky bottom-0 z-20 flex translate-y-2 flex-wrap justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-        {#if supportsInference}
+        {#if descriptor && channel}
           <Button
             type="button"
             variant="outline"
             class="me-auto"
+            data-provider-connection-check
             onclick={() => void testConnection()}
-            disabled={testing || draft.submitting}>
-            {#if testing}<Spinner data-icon="inline-start" />{/if}{m.providers_test_connection()}
+            disabled={testing || draft.submitting}
+            aria-busy={testing}
+            aria-describedby="provider-connection-check-hint">
+            {#if testing}<Spinner data-icon="inline-start" />{/if}
+            <!-- 保留按钮宽度：检查中标签替换为「测试中…」，原标签只占位不朗读。 -->
+            <span class="grid">
+              <span class="col-start-1 row-start-1 {testing ? 'invisible' : ''}">{m.providers_test_connection()}</span>
+              {#if testing}
+                <span class="col-start-1 row-start-1">{m.providers_connection_check_testing()}</span>
+              {/if}
+            </span>
           </Button>
+          <span id="provider-connection-check-hint" class="sr-only">{m.providers_connection_check_draft_hint()}</span>
         {/if}
         <Button
           type="button"

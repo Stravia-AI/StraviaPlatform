@@ -1,5 +1,6 @@
 mod allowance;
 mod auth;
+mod connection;
 mod models;
 mod request;
 mod stream;
@@ -139,6 +140,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::ModelDiscovery,
         Capability::AuthOauth,
         Capability::Allowance,
+        Capability::ConnectionCheck,
     ]);
     let channel = ChannelDescriptor {
         id: "default".into(),
@@ -254,6 +256,9 @@ pub fn execute(
         }
         OperationInput::Allowance { provider, .. } => {
             allowance::execute(host, &provider).map(OperationOutput::Allowance)
+        }
+        OperationInput::ConnectionCheck { provider, .. } => {
+            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
         }
         OperationInput::Infer { provider, request } => request::infer(host, &provider, request),
         _ => Err(fail(ErrorKind::Unsupported, "Unsupported Kilo operation")),

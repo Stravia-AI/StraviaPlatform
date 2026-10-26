@@ -45,6 +45,45 @@ export interface TestResult {
   error?: string
 }
 
+/** What a connection check actually confirmed; never widen this to imply more. */
+export type ConnectionCheckVerification = 'endpoint' | 'credentials' | 'endpoint_and_credentials'
+
+export type ConnectionCheckStage = 'configuration' | 'transport' | 'upstream' | 'response'
+
+export interface ProviderConnectionCheckPassed {
+  status: 'passed'
+  verified: ConnectionCheckVerification
+  duration_ms: number
+}
+
+export interface ProviderConnectionCheckFailed {
+  status: 'failed'
+  stage: ConnectionCheckStage
+  code: string
+  field?: string | null
+  upstream_status?: number | null
+  issues?: ProviderValidationIssue[]
+}
+
+export interface ProviderConnectionCheckUnsupported {
+  status: 'unsupported'
+  code: string
+}
+
+export type ProviderConnectionCheckResult =
+  ProviderConnectionCheckPassed | ProviderConnectionCheckFailed | ProviderConnectionCheckUnsupported
+
+/**
+ * Draft check request. `configuration` carries the current form values;
+ * omitted secret fields keep their saved values server-side. A ready OAuth
+ * session is referenced by `authorization_id` and must not be bound.
+ */
+export interface ProviderConnectionCheckInput {
+  configuration?: ProviderConfigurationPreviewInput
+  use_proxy?: boolean
+  authorization_id?: string
+}
+
 export interface ModelCapabilities {
   provider: string
   model_id: string

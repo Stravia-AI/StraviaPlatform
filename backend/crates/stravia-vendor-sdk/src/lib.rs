@@ -3,7 +3,7 @@
 //! A plugin crate links this SDK, fills a [`VendorDescriptor`], implements
 //! [`VendorGuest`] for the capabilities it claims, and calls
 //! [`export_vendor!`] once. The generated component exposes the versioned
-//! `stravia:vendor@0.5.1` world; all model traffic flows through the canonical
+//! `stravia:vendor@0.6.0` world; all model traffic flows through the canonical
 //! contract in [`stravia_runtime_contract::protocol::ir`].
 //!
 //! The WIT contract lives in `wit/` of this crate and is the single source for
@@ -54,7 +54,8 @@ pub use envelope::{
 pub use guest::{
     AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, AuthRequest, AuthResponse,
     AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
-    ConfigValidationResponse, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
+    ConfigValidationResponse, ConnectionCheckRequest, ConnectionCheckResponse,
+    ConnectionCheckVerification, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
     MediaArtifact, MediaImageAspectRatio, MediaImageRequest, MediaImageResolution,
     MediaImageResponse, MediaReference, ModelAllowance, ModelErrorKind, ModelMetadata, Operation,
     OperationInput, OperationOutput, PluginError, ProviderSnapshot, SearchRequest, SearchResponse,

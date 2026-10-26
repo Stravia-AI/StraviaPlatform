@@ -2,6 +2,7 @@ mod allowance;
 mod auth;
 mod catalog;
 mod client;
+mod connection;
 mod media_generation;
 mod selector;
 mod wire;
@@ -36,6 +37,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
+        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -148,6 +150,9 @@ pub fn execute(
             provider,
             request: _,
         } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
+        OperationInput::ConnectionCheck { provider, .. } => {
+            connection::execute(host, &provider).map(OperationOutput::ConnectionCheck)
+        }
         _ => Err(common::unsupported(operation.as_str(), VENDOR_ID, channel)),
     }
 }

@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, GuestHost, HttpRequest, ModelAllowance,
-    PluginError, ProviderSnapshot, read_http_body,
+    AllowanceAmount, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    ConnectionCheckVerification, GuestHost, HttpRequest, ModelAllowance, PluginError,
+    ProviderSnapshot, read_http_body,
 };
 
 use crate::request::{DEFAULT_CLIENT_VERSION, cli_user_agent};
@@ -30,18 +32,7 @@ pub(crate) fn execute(
     provider: &ProviderSnapshot,
 ) -> Result<AllowanceResponse, PluginError> {
     let access_token = access_token(provider)?;
-    let response = host.http_start(HttpRequest {
-        method: "GET".into(),
-        url: USAGE_URL.into(),
-        headers: vec![
-            ("accept".into(), "application/json, text/plain, */*".into()),
-            ("anthropic-beta".into(), USAGE_BETAS.into()),
-            ("content-type".into(), "application/json".into()),
-            ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
-            ("authorization".into(), format!("Bearer {access_token}")),
-        ],
-        body: Vec::new(),
-    })?;
+    let response = host.http_start(usage_request(access_token))?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_USAGE_BODY)?;
@@ -60,6 +51,70 @@ pub(crate) fn execute(
     response.account_label =
         first_account_label([provider.credentials.get("email").and_then(Value::as_str)]);
     Ok(response)
+}
+
+/// 固定 Anthropic 账号 usage 端点只验证 OAuth 凭据；它不请求配置的 Base URL，
+/// 因此自定义端点不会被这次检查确认。
+pub(crate) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let value = connection_check::json(host, usage_request(access_token(provider)?))?;
+    validate_usage(&value)?;
+    Ok(ConnectionCheckResponse {
+        verified: ConnectionCheckVerification::Credentials,
+    })
+}
+
+fn usage_request(access_token: &str) -> HttpRequest {
+    HttpRequest {
+        method: "GET".into(),
+        url: USAGE_URL.into(),
+        headers: vec![
+            ("accept".into(), "application/json, text/plain, */*".into()),
+            ("anthropic-beta".into(), USAGE_BETAS.into()),
+            ("content-type".into(), "application/json".into()),
+            ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
+            ("authorization".into(), format!("Bearer {access_token}")),
+        ],
+        body: Vec::new(),
+    }
+}
+
+/// 接受 `limits` 的空列表和缺省窗口；只要出现的已知字段类型正确即可通过，
+/// 不用任意 2xx JSON 冒充 usage 响应。
+fn validate_usage(value: &Value) -> Result<(), PluginError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_response("Claude usage response must be a JSON object"))?;
+    let mut recognized = false;
+    if let Some(limits) = object.get("limits").filter(|value| !value.is_null()) {
+        recognized = true;
+        let limits = limits
+            .as_array()
+            .ok_or_else(|| invalid_response("Claude usage `limits` must be an array"))?;
+        if limits.iter().any(|limit| !limit.is_object()) {
+            return Err(invalid_response(
+                "Claude usage `limits` entries must be objects",
+            ));
+        }
+    }
+    for field in ["five_hour", "seven_day", "spend"] {
+        if let Some(window) = object.get(field).filter(|value| !value.is_null()) {
+            recognized = true;
+            if !window.is_object() {
+                return Err(invalid_response(format!(
+                    "Claude usage `{field}` must be an object"
+                )));
+            }
+        }
+    }
+    if !recognized {
+        return Err(invalid_response(
+            "Claude usage response has no recognized fields",
+        ));
+    }
+    Ok(())
 }
 
 /// 取订阅等级。profile 接口只用于展示，失败或无 `user:profile` 权限时降级为
@@ -503,5 +558,20 @@ mod tests {
             None
         );
         assert_eq!(profile_plan_label(&json!({})), None);
+    }
+
+    #[test]
+    fn connection_check_accepts_empty_limits_and_rejects_unknown_shapes() {
+        assert!(validate_usage(&json!({"limits": []})).is_ok());
+        assert!(
+            validate_usage(&json!({"limits": [{"kind": "session"}], "five_hour": null})).is_ok()
+        );
+        assert!(validate_usage(&json!({"five_hour": {"utilization": 1.5}})).is_ok());
+        assert!(validate_usage(&json!({"spend": {"enabled": false}})).is_ok());
+        assert!(validate_usage(&json!({})).is_err());
+        assert!(validate_usage(&json!([])).is_err());
+        assert!(validate_usage(&json!({"limits": {}})).is_err());
+        assert!(validate_usage(&json!({"limits": [1]})).is_err());
+        assert!(validate_usage(&json!({"five_hour": 1})).is_err());
     }
 }

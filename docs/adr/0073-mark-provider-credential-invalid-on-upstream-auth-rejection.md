@@ -8,7 +8,7 @@ status: accepted
 
 OAuth 凭据的 `status = error` 和 `last_error` 仅记录最近一次刷新失败，原凭据和连接身份保留，后续请求与后台调度仍可重试；它不等于 Provider 的 `credential_status = invalid`。失效 Provider 的全部 Target 在调度快照装配时失去资格，不参与新选择，但已开始的请求不中断。
 
-失效只能由新凭据证据撤销：Provider 任何非展示字段（凭据、上游端点、协议、Vendor、代理等）变更、OAuth 重新绑定或刷新成功、手动测试成功均复位为 `ok`；`is_enabled` 切换不复位。不做后台探测或半开重试——失效凭据的自动重试只会产生上游 401 噪音。标记写入以请求发出时的凭据版本（provider 行版本加 OAuth 连接版本）为条件，凭据已变化则放弃标记；`credential_status` 对管理 API 只读。
+失效只能由新凭据证据撤销：Provider 任何非展示字段（凭据、上游端点、协议、Vendor、代理等）变更、OAuth 重新绑定或刷新成功，以及手动连接检查明确验证凭据时复位为 `ok`；`is_enabled` 切换不复位。连接检查的 `credentials` / `endpoint_and_credentials` 成功构成凭据证据；`endpoint` 成功、静态模型、本地配置校验和不支持检查均不能清除失效状态。不做后台探测或半开重试——失效凭据的自动重试只会产生上游 401 噪音。标记写入以请求发出时的凭据版本（provider 行版本加 OAuth 连接版本）为条件，凭据已变化则放弃标记；已保存连接的检查结果还受插件 publication fence 约束，草稿检查不写测试状态或凭据健康。`credential_status` 对管理 API 只读。
 
 不采用熔断器扩展（`TargetRuntimeState` 增加态）：失效是持久化 Provider 级凭据属性，熔断器是内存态、按 Target、自动恢复的瞬态语义，两者混用会重写整套 epoch 与探测语义。也不采用自动改写 `is_enabled`：那会混淆管理员意图与上游证据，凭据修复后将无法区分禁用来源。失效状态在管理面以红点呈现——Provider 启用中失效时主状态显示"凭据失效"，禁用中失效时以副行提示；Target 徽标新增 `credential_invalid` 态并压过冷却态。
 

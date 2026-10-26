@@ -10,10 +10,11 @@ use stravia_vendor_sdk::{
     AiResponse, AiStreamDelta, AllowanceAmount, AllowanceItem, AllowanceResponse, AuthCallback,
     AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse,
     AuthStep, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
-    ConfigFieldKind, ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, HttpRequest, ModelAllowance, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor,
-    VendorGuest, VendorKind, read_http_body,
+    ConfigFieldKind, ConfigGroup, ConnectionCheckResponse, ConnectionCheckVerification,
+    DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, HttpRequest,
+    ModelAllowance, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
+    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorGuest, VendorKind,
+    read_http_body,
 };
 
 struct ManagementContractVendor;
@@ -95,6 +96,11 @@ struct AllowanceWire {
     model_remaining: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConnectionCheckWire {
+    accepted: bool,
+}
+
 impl VendorGuest for ManagementContractVendor {
     fn descriptor() -> VendorDescriptor {
         let profile = Profile::current();
@@ -103,6 +109,7 @@ impl VendorGuest for ManagementContractVendor {
             Capability::AuthOauth,
             Capability::ModelDiscovery,
             Capability::Allowance,
+            Capability::ConnectionCheck,
         ]);
         VendorDescriptor {
             vendor_id: profile.vendor_id().into(),
@@ -203,6 +210,46 @@ impl VendorGuest for ManagementContractVendor {
             }
             (Operation::Allowance, OperationInput::Allowance { provider, .. }) => {
                 allowance(host, &provider).map(OperationOutput::Allowance)
+            }
+            (Operation::ConnectionCheck, OperationInput::ConnectionCheck { provider, .. }) => {
+                require_connection(&provider)?;
+                if provider
+                    .credentials
+                    .get("access_token")
+                    .and_then(Value::as_str)
+                    == Some("fixture-static-check")
+                {
+                    return Ok(OperationOutput::ConnectionCheck(ConnectionCheckResponse {
+                        verified: ConnectionCheckVerification::EndpointAndCredentials,
+                    }));
+                }
+                let wire: ConnectionCheckWire = post_json(
+                    host,
+                    &provider,
+                    "connection_check",
+                    "/check",
+                    serde_json::json!({}),
+                    true,
+                )
+                .map_err(|failure| {
+                    if matches!(failure.kind, ErrorKind::Invalid) {
+                        error(
+                            ErrorKind::InvalidResponse,
+                            "invalid connection check response",
+                        )
+                    } else {
+                        failure
+                    }
+                })?;
+                if !wire.accepted {
+                    return Err(error(
+                        ErrorKind::Auth,
+                        "connection check credentials were rejected",
+                    ));
+                }
+                Ok(OperationOutput::ConnectionCheck(ConnectionCheckResponse {
+                    verified: ConnectionCheckVerification::EndpointAndCredentials,
+                }))
             }
             (Operation::Infer, OperationInput::Infer { provider, request }) => {
                 infer(host, &provider, &request)

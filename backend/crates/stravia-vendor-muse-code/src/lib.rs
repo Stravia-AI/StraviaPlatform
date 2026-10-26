@@ -1,6 +1,7 @@
 //! First-party Meta Responses transport for Muse Code subscriptions.
 //! Contract: oh-my-pi v18.10.4 muse-code/meta provider and auth rules.
 mod auth;
+mod connection;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
 }
@@ -358,6 +359,9 @@ pub fn execute(
         OperationInput::Auth { provider, request } => {
             auth::execute(host, &provider, request).map(OperationOutput::Auth)
         }
+        OperationInput::ConnectionCheck { provider, .. } => {
+            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
+        }
         other => Err(common::unsupported(other.operation().as_str(), ID, channel)),
     }
 }
@@ -366,6 +370,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::Infer,
         Capability::ModelDiscovery,
         Capability::AuthOauth,
+        Capability::ConnectionCheck,
     ]);
     let channel = ChannelDescriptor {
         id: "subscription".into(),

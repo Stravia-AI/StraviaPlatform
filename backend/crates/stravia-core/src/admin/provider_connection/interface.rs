@@ -12,11 +12,6 @@ pub(crate) enum ProviderSave {
     },
 }
 
-pub(crate) enum ProviderConnectivityTest {
-    Existing(String),
-    Candidate(Box<CreateProvider>),
-}
-
 pub(crate) enum ProviderReconnect {
     Start(ProviderReconnectStart),
     Callback(ProviderReconnectCallback),
@@ -153,15 +148,6 @@ impl<'a> ProviderConnection<'a> {
         self.admin.copy_provider_record(provider_id, options).await
     }
 
-    pub(crate) async fn test(&self, input: ProviderConnectivityTest) -> anyhow::Result<TestResult> {
-        match input {
-            ProviderConnectivityTest::Existing(id) => self.admin.test_provider_record(&id).await,
-            ProviderConnectivityTest::Candidate(input) => {
-                self.admin.test_provider_candidate_record(*input).await
-            }
-        }
-    }
-
     pub(crate) async fn delete(&self, provider_id: &str) -> anyhow::Result<()> {
         self.admin.delete_provider_record(provider_id).await
     }
@@ -207,15 +193,6 @@ impl<'a> ProviderConnection<'a> {
 impl AdminService {
     pub async fn catalog_choices(&self) -> crate::provider_catalog::CatalogProviderList {
         ProviderConnection::new(self).catalog_choices().await
-    }
-
-    pub async fn test_provider_candidate(
-        &self,
-        input: CreateProvider,
-    ) -> anyhow::Result<TestResult> {
-        ProviderConnection::new(self)
-            .test(ProviderConnectivityTest::Candidate(Box::new(input)))
-            .await
     }
 }
 
@@ -348,13 +325,17 @@ mod tests {
             }))
             .await?;
 
-        let result = providers
-            .test(ProviderConnectivityTest::Existing(original.id.clone()))
+        let result = admin
+            .test_provider(&original.id, ProviderConnectionCheckInput::default())
             .await?;
-        assert!(result.success);
+        let ProviderConnectionCheckResult::Failed { stage, code, .. } = result else {
+            panic!("an unreachable endpoint must not pass a local-only validation");
+        };
+        assert_eq!(stage, ConnectionCheckStage::Transport);
+        assert_eq!(code, "connection_failed");
         assert_eq!(
             providers.get(&original.id).await?.last_test_success,
-            Some(true)
+            Some(false)
         );
 
         let copied = providers
@@ -579,6 +560,42 @@ mod tests {
         Ok(())
     }
 
+    fn draft_check_input(input: CreateProvider) -> ProviderConnectionCheckInput {
+        let ProviderSourceInput::Custom {
+            vendor,
+            channel,
+            protocol,
+            base_url,
+            ..
+        } = input.source
+        else {
+            panic!("draft check fixture must be a custom connection");
+        };
+        let credentials = match input.credential {
+            ProviderCredentialInput::ApiKey { value } => {
+                BTreeMap::from([("apiKey".into(), json!(value))])
+            }
+            ProviderCredentialInput::SetupToken { value } => {
+                BTreeMap::from([("setupToken".into(), json!(value))])
+            }
+            ProviderCredentialInput::Fields { values } => values,
+            ProviderCredentialInput::None => BTreeMap::new(),
+        };
+        ProviderConnectionCheckInput {
+            configuration: Some(ProviderConfigurationPreviewInput {
+                provider_id: None,
+                vendor_id: vendor,
+                channel,
+                protocol,
+                base_url,
+                options: input.vendor_options.into_iter().collect(),
+                credentials,
+            }),
+            use_proxy: Some(input.use_proxy),
+            authorization_id: None,
+        }
+    }
+
     #[tokio::test]
     async fn testing_a_candidate_does_not_save_the_provider() -> anyhow::Result<()> {
         let (_data_dir, gateway) = memory_gateway().await?;
@@ -601,11 +618,15 @@ mod tests {
             use_proxy: false,
         };
 
-        let result = providers
-            .test(ProviderConnectivityTest::Candidate(Box::new(input)))
+        let result = admin
+            .test_provider("unsaved-candidate", draft_check_input(input))
             .await?;
 
-        assert!(result.success);
+        let ProviderConnectionCheckResult::Failed { stage, code, .. } = result else {
+            panic!("an unreachable draft endpoint must not pass");
+        };
+        assert_eq!(stage, ConnectionCheckStage::Transport);
+        assert_eq!(code, "connection_failed");
         assert!(providers.list().await?.is_empty());
         Ok(())
     }

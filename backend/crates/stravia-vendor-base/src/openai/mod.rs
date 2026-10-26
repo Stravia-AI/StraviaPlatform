@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check as common_check;
 
 use serde_json::Value;
 use stravia_protocol_codec::registry::ProtocolRegistry;
@@ -11,10 +12,11 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
-    ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
-    ProviderSnapshot, TransportPreference, ValidationIssue,
+    ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
+    DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
+    HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
+    TransportPreference, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "openai";
@@ -530,6 +532,41 @@ fn discover(
         models,
         next_cursor: None,
     }))
+}
+
+/// Read the standard models endpoint at the configured base URL. Catalog and
+/// static model overrides are deliberately ignored: this request must hit the
+/// egress endpoint the connection actually uses.
+pub(crate) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let url = common::model_discovery_url(&provider.base_url)?;
+    let api_key = credential(provider, "apiKey");
+    let mut headers = vec![("accept".into(), "application/json".into())];
+    if let Some(api_key) = api_key {
+        headers.push(("authorization".into(), format!("Bearer {api_key}")));
+    }
+    let value = common_check::json(
+        host,
+        HttpRequest {
+            method: "GET".into(),
+            url,
+            headers,
+            body: Vec::new(),
+        },
+    )?;
+    crate::connection_check::validate_models(&value, &["data", "models"], &["id", "slug", "name"])?;
+    Ok(ConnectionCheckResponse {
+        verified: if api_key.is_some() && official_openai_origin(&provider.base_url) {
+            ConnectionCheckVerification::EndpointAndCredentials
+        } else {
+            // A custom base URL may serve a public inventory that ignores the
+            // attached credential, so the successful read only proves the
+            // endpoint.
+            ConnectionCheckVerification::Endpoint
+        },
+    })
 }
 
 fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {

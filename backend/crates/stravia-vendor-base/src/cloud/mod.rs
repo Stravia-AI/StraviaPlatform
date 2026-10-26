@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check::{self as common_check, invalid_response};
 
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
@@ -15,10 +16,11 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AuthResponse, AuthStep, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigGroup, ConfigValidationResponse, DataCompatibility, DefaultModelsSource,
-    DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, LocalizedText, MODELS_SOURCE_CATALOG,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError,
-    ProviderDescriptor, ProviderSnapshot, ValidationIssue, read_http_body,
+    ConfigGroup, ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
+    DataCompatibility, DefaultModelsSource, DiscoverResponse, DiscoveredModel, ErrorKind,
+    GuestHost, LocalizedText, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
+    ValidationIssue, read_http_body,
 };
 use url::Url;
 
@@ -195,7 +197,7 @@ fn infer_vertex(
     } else {
         vertex_openai_url(&base, &encoded.path)
     };
-    let token = vertex_access_token(host, provider)?;
+    let (token, _) = vertex_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     send_inference(
@@ -232,7 +234,7 @@ fn infer_vertex_anthropic(
         "{}/publishers/anthropic/models/{model}:{action}",
         vertex_base_url(provider)?.trim_end_matches('/')
     );
-    let token = vertex_access_token(host, provider)?;
+    let (token, _) = vertex_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     send_inference(
@@ -254,7 +256,7 @@ fn infer_sap(
     let encoded = crate::parameters::encode(provider, "openai-chat-completions", request)?;
     let path = encoded.path.strip_prefix("/v1").unwrap_or(&encoded.path);
     let url = common::endpoint_url(&provider.base_url, path)?;
-    let token = sap_access_token(host, provider)?;
+    let token = sap_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
     set_header(&mut headers, "authorization", format!("Bearer {token}"));
     if let Some(group) = string_value(provider, "resourceGroup") {
@@ -281,7 +283,7 @@ fn infer_gitlab(
     let body = json_body(encoded.body)?;
     let base_headers = common::header_pairs(&encoded.headers)?;
 
-    let access = gitlab_direct_access(host, provider, false)?;
+    let access = gitlab_direct_access(host, provider, false, true)?;
     host.emit_started()?;
     let response = host.http_start(HttpRequest {
         method: "POST".into(),
@@ -395,44 +397,165 @@ fn apply_snapshot_model(
     Ok(())
 }
 
-fn discover_openai(
+/// A connection check performs the provider's existing read-only inventory
+/// exchange: credential exchange (where required) plus a GET at the configured
+/// endpoint. Token caches are bypassed so a check never writes private state.
+pub(crate) fn connection_check(
     host: &GuestHost,
+    vendor_id: &str,
+    channel: &str,
     provider: &ProviderSnapshot,
-) -> Result<OperationOutput, PluginError> {
+) -> Result<ConnectionCheckResponse, PluginError> {
+    if provider.channel != channel {
+        return Err(common::plugin_error(
+            ErrorKind::Invalid,
+            "provider channel does not match requested channel",
+        ));
+    }
+    let (url, headers, credentials_verified) = match (vendor_id, channel) {
+        ("azure", "default") => (
+            azure_models_url(provider, &common::model_discovery_url(&provider.base_url)?)?,
+            azure_models_headers(provider)?,
+            azure_account_origin(&provider.base_url),
+        ),
+        ("sap-ai-core", "default") => (
+            common::model_discovery_url(&provider.base_url)?,
+            sap_models_headers(host, provider, false)?,
+            true,
+        ),
+        ("gitlab", "default") => (
+            common::model_discovery_url(&provider.base_url)?,
+            gitlab_models_headers(host, provider, false)?,
+            true,
+        ),
+        ("google-vertex-anthropic", "default") => {
+            let (token, exchanged) = vertex_access_token(host, provider, false)?;
+            (
+                vertex_anthropic_models_url(provider, None)?,
+                vec![("authorization".into(), format!("Bearer {token}"))],
+                exchanged || vertex_account_origin(&provider.base_url),
+            )
+        }
+        _ => {
+            return Err(common::unsupported("connection_check", vendor_id, channel));
+        }
+    };
+    let value = common_check::json(
+        host,
+        HttpRequest {
+            method: "GET".into(),
+            url,
+            headers,
+            body: Vec::new(),
+        },
+    )?;
+    let (keys, id_fields): (&[&str], &[&str]) = if vendor_id == "google-vertex-anthropic" {
+        (
+            &["models", "publisherModels", "foundationModels"],
+            &["name", "id"],
+        )
+    } else {
+        (&["data", "models"], &["id", "name", "slug"])
+    };
+    crate::connection_check::validate_models(&value, keys, id_fields)?;
+    // A custom inventory endpoint can ignore supplied keys or bearer tokens.
+    // Credential proof requires an authenticated account origin or an exchange.
+    let verified = if credentials_verified {
+        ConnectionCheckVerification::EndpointAndCredentials
+    } else {
+        ConnectionCheckVerification::Endpoint
+    };
+    Ok(ConnectionCheckResponse { verified })
+}
+
+fn vertex_account_origin(base_url: &str) -> bool {
+    Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && url.host_str().is_some_and(|host| {
+                host == "aiplatform.googleapis.com" || host.ends_with("-aiplatform.googleapis.com")
+            })
+    })
+}
+
+fn azure_account_origin(base_url: &str) -> bool {
+    url::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && url.host_str().is_some_and(|host| {
+                host.ends_with(".openai.azure.com")
+                    || host.ends_with(".cognitiveservices.azure.com")
+            })
+    })
+}
+
+fn azure_models_url(provider: &ProviderSnapshot, source: &str) -> Result<String, PluginError> {
+    let mut url = Url::parse(source)
+        .map_err(|_| common::plugin_error(ErrorKind::Invalid, "Azure models URL is invalid"))?;
+    let version = string_value(provider, "apiVersion").unwrap_or_else(|| "v1".into());
+    url.query_pairs_mut().append_pair("api-version", &version);
+    Ok(url.to_string())
+}
+
+fn azure_models_headers(provider: &ProviderSnapshot) -> Result<Vec<(String, String)>, PluginError> {
     let mut headers = Vec::new();
     set_header(
         &mut headers,
         "api-key",
         required_string(provider, "apiKey", "Azure API key is required")?,
     );
-    let mut url = Url::parse(&models_url(provider)?)
-        .map_err(|_| common::plugin_error(ErrorKind::Invalid, "Azure models URL is invalid"))?;
-    let version = string_value(provider, "apiVersion").unwrap_or_else(|| "v1".into());
-    url.query_pairs_mut().append_pair("api-version", &version);
-    discover_json(host, url.as_str(), headers)
+    Ok(headers)
+}
+
+fn sap_models_headers(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    persist: bool,
+) -> Result<Vec<(String, String)>, PluginError> {
+    let token = sap_access_token(host, provider, persist)?;
+    let mut headers = vec![("authorization".into(), format!("Bearer {token}"))];
+    if let Some(group) = string_value(provider, "resourceGroup") {
+        set_header(&mut headers, "AI-Resource-Group", group);
+    }
+    Ok(headers)
+}
+
+fn gitlab_models_headers(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    persist: bool,
+) -> Result<Vec<(String, String)>, PluginError> {
+    let access = gitlab_direct_access(host, provider, false, persist)?;
+    Ok(gitlab_headers(Vec::new(), &access))
+}
+
+fn discover_openai(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<OperationOutput, PluginError> {
+    let url = azure_models_url(provider, &models_url(provider)?)?;
+    discover_json(host, &url, azure_models_headers(provider)?)
 }
 
 fn discover_sap(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<OperationOutput, PluginError> {
-    let token = sap_access_token(host, provider)?;
-    let mut headers = vec![("authorization".into(), format!("Bearer {token}"))];
-    if let Some(group) = string_value(provider, "resourceGroup") {
-        set_header(&mut headers, "AI-Resource-Group", group);
-    }
-    discover_json(host, &models_url(provider)?, headers)
+    discover_json(
+        host,
+        &models_url(provider)?,
+        sap_models_headers(host, provider, true)?,
+    )
 }
 
 fn discover_gitlab(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<OperationOutput, PluginError> {
-    let access = gitlab_direct_access(host, provider, false)?;
     discover_json(
         host,
         &models_url(provider)?,
-        gitlab_headers(Vec::new(), &access),
+        gitlab_models_headers(host, provider, true)?,
     )
 }
 
@@ -571,24 +694,8 @@ fn discover_vertex(
             next_cursor: None,
         }));
     }
-    let token = vertex_access_token(host, provider)?;
-    let configured_base = vertex_base_url(provider)?;
-    let publisher_base = configured_base
-        .strip_suffix("/endpoints/openapi")
-        .unwrap_or(configured_base.as_str());
-    let raw_url = format!(
-        "{}/publishers/anthropic/models",
-        publisher_base.trim_end_matches('/')
-    );
-    let mut parsed_url = Url::parse(&raw_url).map_err(|_| {
-        common::plugin_error(ErrorKind::Invalid, "Vertex model discovery URL is invalid")
-    })?;
-    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
-        parsed_url
-            .query_pairs_mut()
-            .append_pair("pageToken", cursor);
-    }
-    let url = parsed_url.to_string();
+    let (token, _) = vertex_access_token(host, provider, true)?;
+    let url = vertex_anthropic_models_url(provider, cursor)?;
     let response = host.http_start(HttpRequest {
         method: "GET".into(),
         url,
@@ -708,7 +815,8 @@ fn cache_token(
 fn vertex_access_token(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-) -> Result<String, PluginError> {
+    persist: bool,
+) -> Result<(String, bool), PluginError> {
     let secret = string_value(provider, "credentials")
         .or_else(|| string_value(provider, "apiKey"))
         .ok_or_else(|| {
@@ -718,7 +826,7 @@ fn vertex_access_token(
             )
         })?;
     if !secret.trim_start().starts_with('{') {
-        return Ok(secret);
+        return Ok((secret, false));
     }
     let account: GoogleServiceAccount = serde_json::from_str(&secret).map_err(|_| {
         common::plugin_error(ErrorKind::Auth, "Vertex service-account JSON is invalid")
@@ -735,13 +843,19 @@ fn vertex_access_token(
             "Vertex service-account token_uri must use the declared Google OAuth origin",
         ));
     }
-    let cache_key = format!(
-        "google:{}:{}",
-        account.client_email,
-        sha256_hex(secret.as_bytes())
-    );
-    if let Some(token) = cached_token(host, &cache_key)? {
-        return Ok(token);
+    let cache_key = persist.then(|| {
+        format!(
+            "google:{}:{}",
+            account.client_email,
+            sha256_hex(secret.as_bytes())
+        )
+    });
+    // A connection check must not read or write private state; a fresh token
+    // exchange is also stronger credential evidence than a cached token.
+    if let Some(cache_key) = cache_key.as_deref()
+        && let Some(token) = cached_token(host, cache_key)?
+    {
+        return Ok((token, true));
     }
     let now = unix_now();
     let claims = GoogleJwtClaims {
@@ -764,27 +878,26 @@ fn vertex_access_token(
         ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
         ("assertion", &assertion),
     ]);
-    let payload = token_post(host, GOOGLE_TOKEN_URL, body, Vec::new())?;
-    let token = payload
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            common::plugin_error(
-                ErrorKind::upstream_unknown(),
-                "Google OAuth response is missing access_token",
-            )
-        })?
-        .to_string();
-    cache_token(
-        host,
-        &cache_key,
-        token,
-        payload
-            .get("expires_in")
-            .and_then(Value::as_u64)
-            .unwrap_or(3600),
-    )
+    let payload = if persist {
+        token_post(host, GOOGLE_TOKEN_URL, body, Vec::new())?
+    } else {
+        token_post_checked(host, GOOGLE_TOKEN_URL, body, Vec::new())?
+    };
+    let token = oauth_access_token(&payload, persist, "Google OAuth")?;
+    if let Some(cache_key) = cache_key {
+        cache_token(
+            host,
+            &cache_key,
+            token,
+            payload
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .unwrap_or(3600),
+        )
+        .map(|token| (token, true))
+    } else {
+        Ok((token, true))
+    }
 }
 
 #[derive(Deserialize)]
@@ -804,7 +917,11 @@ struct GoogleJwtClaims<'a> {
     exp: u64,
 }
 
-fn sap_access_token(host: &GuestHost, provider: &ProviderSnapshot) -> Result<String, PluginError> {
+fn sap_access_token(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    persist: bool,
+) -> Result<String, PluginError> {
     let token_url = required_string(provider, "tokenUrl", "SAP OAuth token URL is required")?;
     let client_id = required_string(provider, "clientId", "SAP OAuth client ID is required")?;
     let client_secret = required_string(
@@ -812,43 +929,41 @@ fn sap_access_token(host: &GuestHost, provider: &ProviderSnapshot) -> Result<Str
         "clientSecret",
         "SAP OAuth client secret is required",
     )?;
-    let cache_key = format!(
-        "sap:{}",
-        sha256_hex(format!("{token_url}\n{client_id}\n{client_secret}").as_bytes())
-    );
-    if let Some(token) = cached_token(host, &cache_key)? {
+    let cache_key = persist.then(|| {
+        format!(
+            "sap:{}",
+            sha256_hex(format!("{token_url}\n{client_id}\n{client_secret}").as_bytes())
+        )
+    });
+    if let Some(cache_key) = cache_key.as_deref()
+        && let Some(token) = cached_token(host, cache_key)?
+    {
         return Ok(token);
     }
-    let payload = token_post(
-        host,
-        &token_url,
-        form_body(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
-        ]),
-        Vec::new(),
-    )?;
-    let token = payload
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            common::plugin_error(
-                ErrorKind::upstream_unknown(),
-                "SAP OAuth response is missing access_token",
-            )
-        })?
-        .to_string();
-    cache_token(
-        host,
-        &cache_key,
-        token,
-        payload
-            .get("expires_in")
-            .and_then(Value::as_u64)
-            .unwrap_or(3600),
-    )
+    let body = form_body(&[
+        ("grant_type", "client_credentials"),
+        ("client_id", &client_id),
+        ("client_secret", &client_secret),
+    ]);
+    let payload = if persist {
+        token_post(host, &token_url, body, Vec::new())?
+    } else {
+        token_post_checked(host, &token_url, body, Vec::new())?
+    };
+    let token = oauth_access_token(&payload, persist, "SAP OAuth")?;
+    if let Some(cache_key) = cache_key {
+        cache_token(
+            host,
+            &cache_key,
+            token,
+            payload
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .unwrap_or(3600),
+        )
+    } else {
+        Ok(token)
+    }
 }
 
 fn ibm_access_token(host: &GuestHost, provider: &ProviderSnapshot) -> Result<String, PluginError> {
@@ -892,8 +1007,36 @@ fn token_post(
     host: &GuestHost,
     url: &str,
     body: Vec<u8>,
-    mut headers: Vec<(String, String)>,
+    headers: Vec<(String, String)>,
 ) -> Result<Value, PluginError> {
+    let bytes = token_post_bytes(host, url, body, headers)?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        common::plugin_error(
+            ErrorKind::upstream_unknown(),
+            "token endpoint returned invalid JSON",
+        )
+    })
+}
+
+/// Connection checks type a malformed successful token body as a response
+/// failure instead of a transport failure.
+fn token_post_checked(
+    host: &GuestHost,
+    url: &str,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+) -> Result<Value, PluginError> {
+    let bytes = token_post_bytes(host, url, body, headers)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| invalid_response("token endpoint returned invalid JSON"))
+}
+
+fn token_post_bytes(
+    host: &GuestHost,
+    url: &str,
+    body: Vec<u8>,
+    mut headers: Vec<(String, String)>,
+) -> Result<Vec<u8>, PluginError> {
     set_header(
         &mut headers,
         "content-type",
@@ -911,12 +1054,25 @@ fn token_post(
     if !(200..300).contains(&status) {
         return Err(common::oauth_token_error(status, &headers, &bytes));
     }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        common::plugin_error(
-            ErrorKind::upstream_unknown(),
-            "token endpoint returned invalid JSON",
-        )
-    })
+    Ok(bytes)
+}
+
+fn oauth_access_token(payload: &Value, persist: bool, label: &str) -> Result<String, PluginError> {
+    payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            if persist {
+                common::plugin_error(
+                    ErrorKind::upstream_unknown(),
+                    format!("{label} response is missing access_token"),
+                )
+            } else {
+                invalid_response(format!("{label} response is missing access_token"))
+            }
+        })
 }
 
 fn refresh_gitlab(
@@ -936,7 +1092,7 @@ fn refresh_gitlab(
     write_state(host, &state)?;
     // Refresh only the auxiliary direct-access cache. The model request is not
     // replayed here; Model Turn owns the subsequent attempt and its budget.
-    gitlab_direct_access(host, provider, true)?;
+    gitlab_direct_access(host, provider, true, true)?;
     Ok(OperationOutput::Auth(AuthResponse::Credentials {
         values: BTreeMap::from([("apiKey".into(), Value::String(api_key))]),
         expires_at_unix_ms: None,
@@ -947,14 +1103,21 @@ fn gitlab_direct_access(
     host: &GuestHost,
     provider: &ProviderSnapshot,
     force: bool,
+    persist: bool,
 ) -> Result<CachedGitLabAccess, PluginError> {
     let api_key = required_string(provider, "apiKey", "GitLab access token is required")?;
     let instance = string_value(provider, "instanceUrl")
         .unwrap_or_else(|| "https://gitlab.com".into())
         .trim_end_matches('/')
         .to_string();
-    let config_fingerprint = sha256_hex(format!("{instance}\n{api_key}").as_bytes());
-    if !force {
+    let config_fingerprint = if persist {
+        sha256_hex(format!("{instance}\n{api_key}").as_bytes())
+    } else {
+        String::new()
+    };
+    // A connection check neither reads nor writes the cache; the direct-access
+    // exchange itself is the credential evidence.
+    if persist && !force {
         let state = read_state(host)?;
         if let Some(access) = state.gitlab.filter(|access| {
             access.config_fingerprint == config_fingerprint
@@ -977,24 +1140,41 @@ fn gitlab_direct_access(
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
     }
-    let payload: Value =
-        serde_json::from_slice(&read_http_body(&response, 1024 * 1024)?).map_err(|_| {
+    let bytes = read_http_body(&response, 1024 * 1024)?;
+    let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        if persist {
             common::plugin_error(
                 ErrorKind::upstream_unknown(),
                 "GitLab direct-access endpoint returned invalid JSON",
             )
-        })?;
+        } else {
+            invalid_response("GitLab direct-access endpoint returned invalid JSON")
+        }
+    })?;
     let token = payload
         .get("token")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| {
-            common::plugin_error(
-                ErrorKind::upstream_unknown(),
-                "GitLab direct-access response is missing token",
-            )
-        })?
-        .to_string();
+            if persist {
+                common::plugin_error(
+                    ErrorKind::upstream_unknown(),
+                    "GitLab direct-access response is missing token",
+                )
+            } else {
+                invalid_response("GitLab direct-access response is missing token")
+            }
+        })?;
+    if !persist
+        && payload
+            .get("headers")
+            .is_some_and(|value| !value.is_null() && !value.is_object())
+    {
+        return Err(invalid_response(
+            "GitLab direct-access `headers` must be an object",
+        ));
+    }
     let headers = payload
         .get("headers")
         .and_then(Value::as_object)
@@ -1013,9 +1193,11 @@ fn gitlab_direct_access(
         headers,
         expires_at_unix: unix_now().saturating_add(25 * 60),
     };
-    let mut state = read_state(host)?;
-    state.gitlab = Some(access.clone());
-    write_state(host, &state)?;
+    if persist {
+        let mut state = read_state(host)?;
+        state.gitlab = Some(access.clone());
+        write_state(host, &state)?;
+    }
     Ok(access)
 }
 
@@ -1115,6 +1297,27 @@ fn vertex_base_url(provider: &ProviderSnapshot) -> Result<String, PluginError> {
         ));
     }
     Ok(base.to_string())
+}
+
+fn vertex_anthropic_models_url(
+    provider: &ProviderSnapshot,
+    cursor: Option<&str>,
+) -> Result<String, PluginError> {
+    let configured_base = vertex_base_url(provider)?;
+    let publisher_base = configured_base
+        .strip_suffix("/endpoints/openapi")
+        .unwrap_or(configured_base.as_str());
+    let raw_url = format!(
+        "{}/publishers/anthropic/models",
+        publisher_base.trim_end_matches('/')
+    );
+    let mut url = Url::parse(&raw_url).map_err(|_| {
+        common::plugin_error(ErrorKind::Invalid, "Vertex model discovery URL is invalid")
+    })?;
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+        url.query_pairs_mut().append_pair("pageToken", cursor);
+    }
+    Ok(url.to_string())
 }
 
 fn vertex_google_url(base: &str, path: &str) -> String {
@@ -1941,6 +2144,55 @@ mod tests {
                 "/v1/chat/completions",
             ),
             "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/endpoints/openapi/chat/completions"
+        );
+    }
+
+    #[test]
+    fn azure_connection_check_reads_the_configured_resource_inventory() {
+        let mut azure = provider("https://tenant-a.openai.azure.com/openai/v1", "default");
+        azure
+            .credentials
+            .insert("apiKey".into(), Value::String("secret".into()));
+        azure
+            .options
+            .insert("apiVersion".into(), Value::String("2024-10-21".into()));
+        let source = common::model_discovery_url(&azure.base_url).unwrap();
+        assert_eq!(
+            azure_models_url(&azure, &source).unwrap(),
+            "https://tenant-a.openai.azure.com/openai/v1/models?api-version=2024-10-21"
+        );
+        assert_eq!(
+            azure_models_headers(&azure).unwrap(),
+            vec![("api-key".to_owned(), "secret".to_owned())]
+        );
+        assert!(azure_account_origin(&azure.base_url));
+        assert!(azure_account_origin(
+            "https://tenant-a.cognitiveservices.azure.com/openai/v1"
+        ));
+        assert!(!azure_account_origin(
+            "https://proxy.example.test/openai/v1"
+        ));
+        assert!(!azure_account_origin(
+            "http://tenant-a.openai.azure.com/openai/v1"
+        ));
+        assert!(!azure_account_origin(
+            "https://tenant-a.openai.azure.com.evil.test/openai/v1"
+        ));
+    }
+
+    #[test]
+    fn vertex_anthropic_connection_check_targets_the_publisher_inventory() {
+        let vertex = provider(
+            "https://aiplatform.googleapis.com/v1/projects/demo/locations/global",
+            "default",
+        );
+        assert_eq!(
+            vertex_anthropic_models_url(&vertex, None).unwrap(),
+            "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/publishers/anthropic/models"
+        );
+        assert_eq!(
+            vertex_anthropic_models_url(&vertex, Some("next")).unwrap(),
+            "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/publishers/anthropic/models?pageToken=next"
         );
     }
 }

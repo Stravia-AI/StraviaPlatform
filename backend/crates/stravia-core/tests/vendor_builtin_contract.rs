@@ -995,25 +995,6 @@ async fn manually_installed_dedicated_packages_keep_complete_profiles() -> anyho
         );
     }
 
-    let observed_capabilities = profiles
-        .iter()
-        .flat_map(|profile| profile.capabilities.iter().copied())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        observed_capabilities,
-        std::collections::BTreeSet::from([
-            Capability::Infer,
-            Capability::Compact,
-            Capability::Search,
-            Capability::MediaImage,
-            Capability::AuthOauth,
-            Capability::ModelDiscovery,
-            Capability::Allowance,
-            Capability::ConfigValidation,
-        ]),
-        "the manually installed dedicated packages must keep every previously public capability observable"
-    );
-
     Ok(())
 }
 

@@ -3,6 +3,7 @@ import type {
   Provider,
   ProviderConfigurationPreview,
   ProviderConfigurationPreviewInput,
+  ProviderConnectionCheckInput,
   ProviderDescriptor,
   VendorChannelDescriptor,
   VendorConfigField,
@@ -234,6 +235,18 @@ export class ProviderConnectionDraftController {
         ? providerConfigValues(fields.values, target.descriptor.config_fields, false, preservedOptions(target))
         : {},
       credentials: target ? providerConfigValues(fields.values, target.descriptor.config_fields, true) : {},
+    }
+  }
+
+  /**
+   * 当前草稿的连接检查请求：与保存共用同一份字段过滤与 preview 输入，
+   * 空 secret 继续留给服务端合并；只有 ready 的 OAuth session 才引用临时账号快照。
+   */
+  connectionCheckInput(target: ProviderConnectionDraftTarget): ProviderConnectionCheckInput {
+    return {
+      configuration: this.#previewInput(target),
+      use_proxy: this.#fields.useProxy,
+      ...(this.#oauthReady && this.#oauthSessionId ? { authorization_id: this.#oauthSessionId } : {}),
     }
   }
 

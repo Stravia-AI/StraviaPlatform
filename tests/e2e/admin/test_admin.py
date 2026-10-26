@@ -804,6 +804,64 @@ def test_proxy_rejects_untrusted_cors_origin_and_method(
 
 @pytest.mark.e2e
 @pytest.mark.admin
+def test_provider_connection_check_uses_draft_without_saving_or_generating(
+    admin_env: dict[str, str],
+) -> None:
+    providers_url = f"{admin_env['admin']}/api/v1/providers"
+    status, created = http_request(
+        "POST", providers_url,
+        payload={
+            "name": "Connection check draft isolation",
+            "source": {
+                "type": "custom", "vendor": "openai", "channel": "default",
+                "protocol": "openai-compatible", "base_url": "http://127.0.0.1:9",
+                "static_models": "static-must-not-bypass-network",
+            },
+            "credential": {"type": "api_key", "value": "saved-synthetic-key"},
+            "vendor_options": {}, "use_proxy": False,
+        },
+        headers=admin_env["auth"],
+    )
+    assert status == 200, created
+    provider_id = created["data"]["id"]
+    provider_url = f"{providers_url}/{provider_id}"
+
+    with _model_probe_endpoint() as (upstream, received):
+        status, checked = http_request(
+            "POST", f"{provider_url}/test",
+            payload={
+                "configuration": {
+                    "provider_id": provider_id, "vendor_id": "openai", "channel": "default",
+                    "base_url": f"{upstream}/draft/v1", "protocol": "openai-compatible",
+                    "options": {}, "credentials": {"apiKey": "draft-synthetic-key"},
+                },
+                "use_proxy": False,
+            },
+            headers=admin_env["auth"],
+        )
+        assert status == 200, checked
+        assert checked["data"]["status"] == "passed", checked
+        assert checked["data"]["verified"] == "endpoint"
+        assert [request["path"] for request in received] == ["/draft/v1/models"]
+        assert received[0]["headers"]["authorization"] == "Bearer draft-synthetic-key"
+
+    status, stored = http_request("GET", provider_url, headers=admin_env["auth"])
+    assert status == 200
+    assert stored["data"]["base_url"] == "http://127.0.0.1:9"
+    assert stored["data"]["last_test_success"] is None
+    status, checked = http_request("POST", f"{provider_url}/test", headers=admin_env["auth"])
+    assert status == 200, checked
+    assert checked["data"]["status"] == "failed", checked
+    assert checked["data"]["stage"] == "transport", checked
+    status, stored = http_request("GET", provider_url, headers=admin_env["auth"])
+    assert status == 200
+    assert stored["data"]["last_test_success"] is False
+    status, _ = http_request("GET", f"{provider_url}/test", headers=admin_env["auth"])
+    assert status == 405
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_provider_crud(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider")
 

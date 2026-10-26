@@ -193,21 +193,41 @@ impl ProviderStore for SqliteProviderStore {
     async fn record_test_result(
         &self,
         provider_id: &str,
-        result: ProviderTestResult,
-    ) -> anyhow::Result<()> {
-        // ADR-0073：手动测试成功是恢复路径——上游接受了当前凭据，清除失效。
+        expected: ProviderCredentialVersion,
+        result: ProviderConnectionCheckWrite,
+    ) -> anyhow::Result<bool> {
+        // ADR-0073：只有本次检查实际验证了凭据，成功才构成恢复证据；
+        // 条件写保证迟到的检查不能覆盖更新的凭据/配置代际。
         let mut connection = self.pool.acquire_write().await?;
-        sqlx::query(
-    "UPDATE providers SET last_test_success = ?, last_test_at = datetime('now'), revision = revision + 1, credential_status = CASE WHEN ? THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN ? THEN NULL ELSE credential_invalid_at END WHERE id = ?",
-            )
-            .bind(result.success)
-            .bind(result.success)
-            .bind(result.success)
-            .bind(provider_id)
-            .execute(&mut *connection)
-            .await?;
+        let updated = sqlx::query(
+            "UPDATE providers
+     SET last_test_success = ?,
+         last_test_at = datetime('now'),
+         credential_status = CASE WHEN ? AND ? THEN 'ok' ELSE credential_status END,
+         credential_invalid_at = CASE WHEN ? AND ? THEN NULL ELSE credential_invalid_at END,
+         revision = revision + 1
+     WHERE id = ?
+       AND revision = ?
+       AND ((? IS NULL AND NOT EXISTS (
+               SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
+            OR (? IS NOT NULL AND EXISTS (
+               SELECT 1 FROM provider_oauth_credentials
+               WHERE provider_id = providers.id AND status_version = ?)))",
+        )
+        .bind(result.success)
+        .bind(result.success)
+        .bind(result.credentials_verified)
+        .bind(result.success)
+        .bind(result.credentials_verified)
+        .bind(provider_id)
+        .bind(expected.provider_revision)
+        .bind(expected.oauth_status_version)
+        .bind(expected.oauth_status_version)
+        .bind(expected.oauth_status_version.unwrap_or(0))
+        .execute(&mut *connection)
+        .await?;
         connection.finish().await?;
-        Ok(())
+        Ok(updated.rows_affected() == 1)
     }
 
     async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>> {
@@ -625,7 +645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_test_result_clears_credential_invalid() {
+    async fn successful_test_result_clears_credential_invalid_only_with_credentials_verified() {
         let store = store().await;
         let provider = create_provider(&store, "p1").await;
         assert!(
@@ -640,23 +660,60 @@ mod tests {
                 .await
                 .expect("mark")
         );
-
-        store
-            .record_test_result(
-                &provider.id,
-                crate::storage::traits::ProviderTestResult {
-                    success: true,
-                    tested_at: "2026-01-01T00:00:00Z".into(),
-                },
-            )
-            .await
-            .expect("record");
-        let provider = store
+        let invalid = store
             .get(&provider.id)
             .await
             .expect("get")
             .expect("provider");
-        assert!(!provider.credential_invalid());
-        assert!(provider.credential_invalid_at.is_none());
+
+        // Endpoint-only success records the probe but cannot clear credential evidence.
+        assert!(
+            store
+                .record_test_result(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: invalid.revision,
+                        oauth_status_version: None,
+                    },
+                    ProviderConnectionCheckWrite {
+                        success: true,
+                        credentials_verified: false,
+                    },
+                )
+                .await
+                .expect("record endpoint-only")
+        );
+        let endpoint_only = store
+            .get(&provider.id)
+            .await
+            .expect("get")
+            .expect("provider");
+        assert!(endpoint_only.credential_invalid());
+        assert!(endpoint_only.credential_invalid_at.is_some());
+        assert_eq!(endpoint_only.last_test_success, Some(true));
+
+        assert!(
+            store
+                .record_test_result(
+                    &provider.id,
+                    ProviderCredentialVersion {
+                        provider_revision: endpoint_only.revision,
+                        oauth_status_version: None,
+                    },
+                    ProviderConnectionCheckWrite {
+                        success: true,
+                        credentials_verified: true,
+                    },
+                )
+                .await
+                .expect("record verified")
+        );
+        let recovered = store
+            .get(&provider.id)
+            .await
+            .expect("get")
+            .expect("provider");
+        assert!(!recovered.credential_invalid());
+        assert!(recovered.credential_invalid_at.is_none());
     }
 }

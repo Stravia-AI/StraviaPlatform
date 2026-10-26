@@ -7,7 +7,7 @@ use crate::db::models::{
     AllowanceSuspensionState, CreateProviderRecord, Provider, ProviderCredentialVersion,
     UpdateProvider,
 };
-use crate::storage::traits::{ProviderStore, ProviderTestResult};
+use crate::storage::traits::{ProviderConnectionCheckWrite, ProviderStore};
 
 #[async_trait]
 impl ProviderStore for RuntimeConfig {
@@ -57,13 +57,14 @@ impl ProviderStore for RuntimeConfig {
     async fn record_test_result(
         &self,
         provider_id: &str,
-        result: ProviderTestResult,
-    ) -> anyhow::Result<()> {
+        expected: ProviderCredentialVersion,
+        result: ProviderConnectionCheckWrite,
+    ) -> anyhow::Result<bool> {
         let mutation = self.projection.begin();
         let result = self
             .source
             .providers()
-            .record_test_result(provider_id, result)
+            .record_test_result(provider_id, expected, result)
             .await;
         mutation.finish();
         result

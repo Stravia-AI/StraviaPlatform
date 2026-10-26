@@ -478,13 +478,13 @@ fn options(entries: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Valu
 }
 
 #[tokio::test]
-async fn frozen_0_5_0_component_preserves_manual_raw_and_preencoded_http() -> anyhow::Result<()> {
+async fn manual_entrypoints_preserve_raw_and_preencoded_http() -> anyhow::Result<()> {
     use async_compression::tokio::{bufread::GzipDecoder, write::GzipEncoder};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
-    install(&gateway, "legacy-v0.5.0.wasm", false).await?;
+    install(&gateway, "legacy-entrypoints.wasm", false).await?;
     let mut upstream = TestUpstream::start().await;
     let mut targets = Vec::with_capacity(3);
 
@@ -558,13 +558,13 @@ async fn frozen_0_5_0_component_preserves_manual_raw_and_preencoded_http() -> an
 }
 
 #[tokio::test]
-async fn frozen_0_5_0_component_exchanges_uncompressed_websocket_messages() -> anyhow::Result<()> {
+async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow::Result<()> {
     use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::routing::get;
 
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
-    install(&gateway, "legacy-v0.5.0.wasm", false).await?;
+    install(&gateway, "legacy-entrypoints.wasm", false).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let (observed, mut messages) = mpsc::unbounded_channel();

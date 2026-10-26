@@ -1,10 +1,10 @@
-// Stravia vendor plugin contract, version 0.5.1.
+// Stravia vendor plugin contract, version 0.6.0.
 //
 // One package = one vendor. The guest orchestrates vendor flows and drives
 // controlled HTTP / WebSocket through host imports; it never gets raw sockets,
 // filesystem, env, or background tasks. Host enforces origin allowlists,
 // backpressure, cancellation, and resource limits.
-package stravia:vendor@0.5.1;
+package stravia:vendor@0.6.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
@@ -27,6 +27,8 @@ interface types {
         allowance,
         /// Business validation of proposed config values.
         config-validation,
+        /// Explicit non-generating upstream connection check.
+        connection-check,
     }
 
     /// Wire for canonical payloads. The host wraps/unwraps a versioned,
@@ -121,6 +123,8 @@ interface types {
         unsupported,
         /// Caller input fails validation; not retryable.
         invalid,
+        /// Upstream replied, but its successful body violates the expected protocol.
+        invalid-response,
         /// Auth failure or missing credentials; host may re-auth.
         auth,
         /// Verified upstream evidence that the requested continuation no longer

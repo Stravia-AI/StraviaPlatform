@@ -15,8 +15,8 @@ use crate::db::models::{
 use crate::plugin::PluginStore;
 use crate::storage::traits::{
     AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, OAuthCredentialStore,
-    ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
-    StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
+    ProviderConnectionCheckWrite, ProviderModelStore, ProviderStore, RouteStore, SettingsStore,
+    Storage, StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
 };
 mod admin_identity;
 mod provider_models;

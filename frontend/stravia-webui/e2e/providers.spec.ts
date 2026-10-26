@@ -124,6 +124,171 @@ test('Provider detail header names the provider, keeps status on the title row, 
   await expect(page.getByRole('link', { name: 'Back to providers' })).toHaveAttribute('href', '/providers')
 })
 
+interface CheckRequestBody {
+  configuration?: {
+    provider_id?: string
+    vendor_id?: string
+    channel?: string
+    base_url?: string
+    options?: Record<string, unknown>
+    credentials?: Record<string, unknown>
+  }
+  use_proxy?: boolean
+  authorization_id?: string
+}
+
+test('Provider detail checks the current draft, separates stages, and never saves it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = {
+    id: 'check-provider',
+    name: 'Check Provider',
+    vendor: 'openai',
+    channel: 'default',
+    protocol: 'openai-compatible',
+    base_url: 'https://fixture.invalid/v1',
+    use_proxy: false,
+    configured_credential_fields: ['api_key'],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  await page.route('**/api/v1/providers/check-provider/models', (route) =>
+    route.fulfill({ json: { data: { models: [] } } }),
+  )
+
+  const requests: Array<{ method: string; body: CheckRequestBody }> = []
+  const saves: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/v1/providers/check-provider') {
+      saves.push(request.url())
+    }
+  })
+
+  let mode: 'configuration' | 'upstream' | 'unsupported' | 'passed' = 'configuration'
+  let gateForStale = false
+  const release = Promise.withResolvers<void>()
+  const staleRelease = Promise.withResolvers<void>()
+  await page.route('**/api/v1/providers/check-provider/test', async (route) => {
+    requests.push({ method: route.request().method(), body: route.request().postDataJSON() })
+    if (mode === 'configuration') {
+      await (gateForStale ? staleRelease.promise : release.promise)
+      await route.fulfill({
+        json: {
+          data: {
+            status: 'failed',
+            stage: 'configuration',
+            code: 'invalid_configuration',
+            field: 'base_url',
+            issues: [
+              {
+                field: 'base_url',
+                code: 'invalid_value',
+                message: { 'en-US': 'Enter a valid Base URL.', 'zh-CN': '请输入有效的 Base URL。' },
+              },
+              {
+                field: 'api_key',
+                code: 'required',
+                message: { 'en-US': 'API key is required.', 'zh-CN': 'API 密钥为必填项。' },
+              },
+            ],
+          },
+        },
+      })
+      return
+    }
+    if (mode === 'upstream') {
+      await route.fulfill({
+        json: {
+          data: {
+            status: 'failed',
+            stage: 'upstream',
+            code: 'authentication_failed',
+            upstream_status: 401,
+            issues: [],
+          },
+        },
+      })
+      return
+    }
+    if (mode === 'unsupported') {
+      await route.fulfill({ json: { data: { status: 'unsupported', code: 'connection_check_unsupported' } } })
+      return
+    }
+    await route.fulfill({ json: { data: { status: 'passed', verified: 'endpoint_and_credentials', duration_ms: 12 } } })
+  })
+
+  await page.goto('/providers/check-provider?view=connection')
+  const testButton = page.locator('[data-provider-connection-check]')
+  await expect(testButton).toBeVisible()
+  await expect(testButton).toHaveText('Test connection')
+  await expect(testButton).toHaveAttribute('aria-busy', 'false')
+
+  await testButton.click()
+  await expect(testButton).toHaveAttribute('aria-busy', 'true')
+  await expect(testButton).toContainText('Testing…')
+  await expect(testButton.getByText('Test connection', { exact: true })).toBeHidden()
+  release.resolve()
+  const configurationAlert = page.getByRole('alert').filter({ hasText: 'Configuration check failed' })
+  await expect(configurationAlert).toBeVisible()
+  await expect(page.locator('#provider-base-url')).toHaveAttribute('aria-invalid', 'true')
+  await expect(page.getByText('Enter a valid Base URL.', { exact: true })).toBeVisible()
+  await expect(page.getByText('API key is required.', { exact: true })).toBeVisible()
+  await expect(page.locator('#provider-base-url')).toHaveValue('https://fixture.invalid/v1')
+  expect(requests[0].method).toBe('POST')
+  expect(requests[0].body).toMatchObject({
+    configuration: {
+      provider_id: 'check-provider',
+      vendor_id: 'openai',
+      channel: 'default',
+      base_url: 'https://fixture.invalid/v1',
+      options: {},
+      credentials: {},
+    },
+    use_proxy: false,
+  })
+  expect(requests[0].body).not.toHaveProperty('authorization_id')
+
+  await page.locator('#provider-base-url').fill('https://changed.invalid/v1')
+  await expect(configurationAlert).toHaveCount(0)
+  await expect(page.getByText('Enter a valid Base URL.', { exact: true })).toHaveCount(0)
+
+  mode = 'upstream'
+  await testButton.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Upstream' })).toContainText('401')
+  expect(requests[1].body.configuration?.base_url).toBe('https://changed.invalid/v1')
+
+  mode = 'unsupported'
+  await testButton.click()
+  await expect(testButton).toHaveAttribute('aria-busy', 'false')
+  await expect(page.getByRole('alert').filter({ hasText: 'check failed' })).toHaveCount(0)
+
+  mode = 'passed'
+  await testButton.click()
+  await expect(testButton).toHaveAttribute('aria-busy', 'false')
+  expect(requests).toHaveLength(4)
+
+  // 检查进行中修改草稿：旧结果即使随后返回也不得写回当前界面。
+  mode = 'configuration'
+  gateForStale = true
+  await testButton.click()
+  await expect(testButton).toHaveAttribute('aria-busy', 'true')
+  await page.locator('#provider-base-url').fill('https://later.invalid/v1')
+  await expect(testButton).toHaveAttribute('aria-busy', 'false')
+  const staleResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith('/api/v1/providers/check-provider/test') && response.request().method() === 'POST',
+  )
+  staleRelease.resolve()
+  await (await staleResponse).finished()
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  await expect(configurationAlert).toHaveCount(0)
+  expect(requests).toHaveLength(5)
+  expect(requests[4].body.configuration?.base_url).toBe('https://changed.invalid/v1')
+  await expect(page.locator('#provider-base-url')).toHaveValue('https://later.invalid/v1')
+  expect(saves).toHaveLength(0)
+})
+
 test('service cards filter sign-in methods and use local logos before remote fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
   let failLogo = false
@@ -709,6 +874,36 @@ test('OAuth service menu reauthorizes without updating the saved connection', as
     `POST /providers/${provider.id}/oauth/bind`,
   ])
   expect(cancellations).toBe(0)
+})
+
+test('Provider list tests the saved connection over POST and localizes the failed stage', async ({ page }) => {
+  const provider = {
+    id: 'list-check-provider',
+    name: 'List Check Provider',
+    vendor: 'openai',
+    channel: 'default',
+    protocol: 'openai-compatible',
+    base_url: 'https://fixture.invalid/v1',
+    use_proxy: false,
+    configured_credential_fields: ['api_key'],
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  const requests: Array<{ method: string; body: unknown }> = []
+  await page.route('**/api/v1/providers/list-check-provider/test', async (route) => {
+    requests.push({ method: route.request().method(), body: route.request().postDataJSON() })
+    await route.fulfill({
+      json: { data: { status: 'failed', stage: 'upstream', code: 'rate_limited', upstream_status: 429, issues: [] } },
+    })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: `More actions for ${provider.name}` }).click()
+  await page.getByRole('menuitem', { name: 'Test connection', exact: true }).click()
+  await expect(page.getByText(/Upstream.*429/)).toBeVisible()
+  expect(requests).toEqual([{ method: 'POST', body: {} }])
 })
 
 test('OAuth Provider connection view saves and binds automatically when authorization completes', async ({ page }) => {

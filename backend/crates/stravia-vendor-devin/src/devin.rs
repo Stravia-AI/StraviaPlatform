@@ -89,6 +89,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
+        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: "devin".into(),
@@ -210,6 +211,9 @@ pub(crate) fn execute(
         }
         (Operation::Allowance, OperationInput::Allowance { provider, request }) => {
             crate::allowance::execute(host, provider, request).map(OperationOutput::Allowance)
+        }
+        (Operation::ConnectionCheck, OperationInput::ConnectionCheck { provider, .. }) => {
+            crate::allowance::check(host, &provider).map(OperationOutput::ConnectionCheck)
         }
         (kind, input) if kind == input.operation() => Err(error(
             ErrorKind::Unsupported,

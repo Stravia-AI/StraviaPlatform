@@ -2,18 +2,10 @@ use std::io::{Read as _, Write as _};
 
 use serde_json::{Value, json};
 
-// 不依赖当前 SDK；否则 SDK 升级会让兼容性回归随之迁移到新 ABI。
+// 使用当前 WIT 的手动编码入口，保护原始 HTTP/WS 字节契约。
 wit_bindgen::generate!({
-    path: [
-        "../../wit/deps/wasi-io",
-        "../../wit/deps/wasi-clocks",
-        "../../wit/deps/wasi-random",
-        "../../wit/deps/wasi-filesystem",
-        "../../wit/deps/wasi-sockets",
-        "../../wit/deps/wasi-cli",
-        "wit",
-    ],
-    world: "stravia:vendor/vendor@0.5.0",
+    path: "../../wit",
+    world: "vendor",
     generate_all,
 });
 

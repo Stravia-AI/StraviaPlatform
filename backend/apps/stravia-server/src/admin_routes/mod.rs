@@ -8,7 +8,9 @@ use axum::{Extension, Json, Router};
 use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
-use stravia_core::admin::{BindRouteInput, CopyProviderOptions, UnbindRouteInput};
+use stravia_core::admin::{
+    BindRouteInput, CopyProviderOptions, ProviderConnectionCheckInput, UnbindRouteInput,
+};
 use stravia_core::auth::{
     AuthCompletionInput, AuthSessionCandidate, AuthSessionStatusData, OAuthCallbackMode,
 };
@@ -108,7 +110,7 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         )
         .route("/providers/{id}/copy", post(copy_provider_handler))
         .route("/providers/{id}", providers_item)
-        .route("/providers/{id}/test", get(test_provider_handler))
+        .route("/providers/{id}/test", post(test_provider_handler))
         .route(
             "/web-providers",
             get(list_web_providers_handler).post(create_web_provider_handler),

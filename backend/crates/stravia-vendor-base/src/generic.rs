@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check as common_check;
 use stravia_vendor_common::thinking;
 
 use serde_json::{Value, json};
@@ -13,9 +14,10 @@ use stravia_runtime_contract::protocol::ids::{
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
-    ConfigValidationResponse, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
-    GuestHost, HttpRequest, MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput,
-    PluginError, ProviderSnapshot, ValidationIssue, read_http_body,
+    ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
+    DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, HttpRequest,
+    MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput, PluginError,
+    ProviderSnapshot, ValidationIssue, read_http_body,
 };
 
 use crate::metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS;
@@ -609,19 +611,7 @@ fn inference_url(
     path: &str,
 ) -> Result<String, PluginError> {
     if vendor_id == "cloudflare-ai-gateway" {
-        let base = if provider.base_url.trim().is_empty() {
-            let account = setting(provider, "accountId").unwrap_or_default();
-            let gateway = setting(provider, "gatewayId").unwrap_or_default();
-            if account.trim().is_empty() || gateway.trim().is_empty() {
-                return Err(common::plugin_error(
-                    ErrorKind::Invalid,
-                    "Cloudflare accountId and gatewayId are required",
-                ));
-            }
-            cloudflare_base_url(account, gateway)
-        } else {
-            provider.base_url.trim().to_owned()
-        };
+        let base = effective_base_url(vendor_id, provider)?;
         let compat_path = path.strip_prefix("/v1/").unwrap_or(path);
         return common::endpoint_url(&base, compat_path);
     }
@@ -635,6 +625,24 @@ fn inference_url(
         url.push_str(&urlencoding::encode(key));
     }
     Ok(url)
+}
+
+/// The saved base URL, or the derived Cloudflare compat base when no URL is
+/// stored yet. Connection checks and inference share this resolution so they
+/// always target the same endpoint.
+fn effective_base_url(vendor_id: &str, provider: &ProviderSnapshot) -> Result<String, PluginError> {
+    if vendor_id == "cloudflare-ai-gateway" && provider.base_url.trim().is_empty() {
+        let account = setting(provider, "accountId").unwrap_or_default();
+        let gateway = setting(provider, "gatewayId").unwrap_or_default();
+        if account.trim().is_empty() || gateway.trim().is_empty() {
+            return Err(common::plugin_error(
+                ErrorKind::Invalid,
+                "Cloudflare accountId and gatewayId are required",
+            ));
+        }
+        return Ok(cloudflare_base_url(account, gateway));
+    }
+    Ok(provider.base_url.trim().to_owned())
 }
 
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
@@ -1088,9 +1096,155 @@ fn check_channel(
         .ok_or_else(|| common::unsupported("channel", vendor_id, channel))
 }
 
+/// Read the configured endpoint's inventory. Compatible, Custom, Ollama, and
+/// gateway profiles cannot prove credential validity from a models read (the
+/// endpoint may be public or may ignore the attached token), so the evidence
+/// is endpoint reachability only.
+pub(crate) fn connection_check(
+    host: &GuestHost,
+    vendor_id: &str,
+    channel: &str,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    check_channel(vendor_id, channel, provider)?;
+    let protocol = protocol_for(vendor_id, provider)?;
+    let request = connection_check_request(vendor_id, provider, &protocol)?;
+    let value = common_check::json(host, request)?;
+    let (keys, id_fields): (&[&str], &[&str]) = if protocol == GEMINI_PROTOCOL {
+        (&["models"], &["name", "id"])
+    } else {
+        (&["data", "models"], &["id", "name", "slug"])
+    };
+    crate::connection_check::validate_models(&value, keys, id_fields)?;
+    Ok(ConnectionCheckResponse {
+        verified: ConnectionCheckVerification::Endpoint,
+    })
+}
+
+fn connection_check_request(
+    vendor_id: &str,
+    provider: &ProviderSnapshot,
+    protocol: &str,
+) -> Result<HttpRequest, PluginError> {
+    let base = effective_base_url(vendor_id, provider)?;
+    let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
+    let url = if protocol == GEMINI_PROTOCOL {
+        // Native Google inventory authenticates with the `key` query; the
+        // configured API key is the only credential this protocol uses.
+        let mut url = common::endpoint_url(&base, "/v1beta/models")?;
+        if let Some(key) = setting(provider, "apiKey").filter(|key| !key.trim().is_empty()) {
+            url.push(if url.contains('?') { '&' } else { '?' });
+            url.push_str("key=");
+            url.push_str(&urlencoding::encode(key));
+        }
+        url
+    } else {
+        apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
+        models_list_url(vendor_id, &base)?
+    };
+    Ok(HttpRequest {
+        method: "GET".to_owned(),
+        url,
+        headers,
+        body: Vec::new(),
+    })
+}
+
+/// Fixed gateway and Cohere deployments serve inventory from `/v1/models`,
+/// not from their language-model protocol path. Custom bases keep the saved
+/// API prefix.
+fn models_list_url(vendor_id: &str, base: &str) -> Result<String, PluginError> {
+    if vendor_id == "gateway" && same_origin(base, "https://ai-gateway.vercel.sh") {
+        return Ok("https://ai-gateway.vercel.sh/v1/models".to_owned());
+    }
+    if vendor_id == "cohere" && same_origin(base, "https://api.cohere.com") {
+        return Ok("https://api.cohere.com/v1/models".to_owned());
+    }
+    common::model_discovery_url(base)
+}
+
+fn same_origin(left: &str, right: &str) -> bool {
+    url::Url::parse(left)
+        .ok()
+        .zip(url::Url::parse(right).ok())
+        .is_some_and(|(left, right)| {
+            left.scheme() == right.scheme()
+                && left.host_str() == right.host_str()
+                && left.port_or_known_default() == right.port_or_known_default()
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_check_uses_the_configured_endpoint_and_protocol_auth() {
+        let snapshot = provider(OPENAI_CHAT_PROTOCOL, "sk-test");
+        let request = connection_check_request("custom", &snapshot, OPENAI_CHAT_PROTOCOL).unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.url, "https://upstream.test/v1/models");
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "authorization" && value == "Bearer sk-test")
+        );
+
+        let snapshot = provider(ANTHROPIC_PROTOCOL, "sk-ant");
+        let request = connection_check_request("custom", &snapshot, ANTHROPIC_PROTOCOL).unwrap();
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "x-api-key" && value == "sk-ant")
+        );
+        assert!(
+            request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "anthropic-version" && value == "2023-06-01")
+        );
+
+        let mut google = provider(GEMINI_PROTOCOL, "key +&");
+        google.base_url = "https://generativelanguage.googleapis.com".into();
+        let request = connection_check_request("google", &google, GEMINI_PROTOCOL).unwrap();
+        assert_eq!(
+            request.url,
+            "https://generativelanguage.googleapis.com/v1beta/models?key=key%20%2B%26"
+        );
+        assert!(
+            !request
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        );
+    }
+
+    #[test]
+    fn connection_check_uses_documented_gateway_and_cohere_inventory_paths() {
+        let mut gateway = provider(OPENAI_CHAT_PROTOCOL, "sk-gateway");
+        gateway.provider_id = "gateway".into();
+        gateway.base_url = "https://ai-gateway.vercel.sh/v4/ai".into();
+        let request = connection_check_request("gateway", &gateway, GATEWAY_PROTOCOL).unwrap();
+        assert_eq!(request.url, "https://ai-gateway.vercel.sh/v1/models");
+
+        // A custom base keeps its API prefix instead of claiming the official
+        // origin was reached.
+        gateway.base_url = "https://proxy.test/v4/ai".into();
+        let request = connection_check_request("gateway", &gateway, GATEWAY_PROTOCOL).unwrap();
+        assert_eq!(request.url, "https://proxy.test/v4/ai/models");
+
+        let mut cohere = provider(OPENAI_CHAT_PROTOCOL, "sk-cohere");
+        cohere.provider_id = "cohere".into();
+        cohere.base_url = "https://api.cohere.com/v2".into();
+        let request = connection_check_request("cohere", &cohere, COHERE_PROTOCOL).unwrap();
+        assert_eq!(request.url, "https://api.cohere.com/v1/models");
+
+        cohere.base_url = "https://proxy.test/cohere/v2".into();
+        let request = connection_check_request("cohere", &cohere, COHERE_PROTOCOL).unwrap();
+        assert_eq!(request.url, "https://proxy.test/cohere/v2/models");
+    }
 
     #[test]
     fn legacy_custom_reasoning_names_do_not_authorize_request_fields() {

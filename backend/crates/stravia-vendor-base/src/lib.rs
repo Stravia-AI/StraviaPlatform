@@ -3,6 +3,7 @@ mod anthropic;
 mod catalog;
 mod cloud;
 mod codec;
+mod connection_check;
 mod generic;
 mod metadata;
 mod parameters;
@@ -90,12 +91,29 @@ fn add_allowance_capabilities(mut descriptor: ProviderDescriptor) -> ProviderDes
             channel.capabilities.insert(Capability::Allowance);
         }
     }
+    add_connection_check_capability(&mut descriptor);
+    descriptor
+}
+
+/// Declare `ConnectionCheck` exactly where a real probe exists. Catalog
+/// profiles are derived outside this function, so `catalog::provider_set`
+/// applies the same predicate to every profile it publishes.
+pub(crate) fn add_connection_check_capability(descriptor: &mut ProviderDescriptor) {
+    let implementation = descriptor.implementation.clone();
+    for channel in &mut descriptor.channels {
+        if connection_check::supports(
+            &descriptor.provider_id,
+            &channel.id,
+            implementation.as_deref(),
+        ) {
+            channel.capabilities.insert(Capability::ConnectionCheck);
+        }
+    }
     descriptor.capabilities = descriptor
         .channels
         .iter()
         .flat_map(|channel| channel.capabilities.iter().copied())
         .collect();
-    descriptor
 }
 
 /// Returns the single fallback manifest exported by this component.
@@ -213,6 +231,23 @@ pub fn execute(
         }
         return allowance::execute(&provider_id, host, provider, request)
             .map(OperationOutput::Allowance);
+    }
+    if operation == Operation::ConnectionCheck {
+        let OperationInput::ConnectionCheck {
+            provider,
+            request: _,
+        } = input
+        else {
+            return Err(error(ErrorKind::Invalid, "connection check input mismatch"));
+        };
+        if provider.channel != channel {
+            return Err(error(
+                ErrorKind::Invalid,
+                "snapshot channel does not match execute channel",
+            ));
+        }
+        return connection_check::execute(host, channel, &provider)
+            .map(OperationOutput::ConnectionCheck);
     }
 
     match provider_id.as_str() {

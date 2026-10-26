@@ -427,6 +427,10 @@ impl VendorRuntime {
         {
             return Err(RuntimeError::InvalidOutput);
         }
+        // 本地校验或静态目录不能冒充一次完成的上游连接检查。
+        if operation == Operation::ConnectionCheck && !store.data().received_check_response {
+            return Err(RuntimeError::InvalidOutput);
+        }
         OperationOutput::decode_for_host(operation, &bytes).map_err(|_| RuntimeError::InvalidOutput)
     }
 
@@ -504,10 +508,7 @@ impl VendorRuntime {
         for (name, _) in component.component_type().imports(&self.engine) {
             let allowed = matches!(
                 name,
-                "stravia:vendor/host@0.5.0"
-                    | "stravia:vendor/types@0.5.0"
-                    | "stravia:vendor/host@0.5.1"
-                    | "stravia:vendor/types@0.5.1"
+                "stravia:vendor/host@0.6.0" | "stravia:vendor/types@0.6.0"
             ) || name.rsplit_once('@').is_some_and(|(interface, version)| {
                 // Component compilation already validates SemVer. Ignore build
                 // metadata and admit only stable 0.2.x; the linker still checks
@@ -621,6 +622,7 @@ impl VendorRuntime {
                 operation,
                 catalog_sync,
                 upstream_starts: 0,
+                received_check_response: false,
             },
         );
         // Fuel stays enabled only so the async yield interval can preempt
@@ -651,6 +653,7 @@ struct StoreState {
     /// connection-scoped import remains rejected.
     catalog_sync: bool,
     upstream_starts: usize,
+    received_check_response: bool,
 }
 
 impl WasiView for StoreState {
@@ -820,6 +823,12 @@ impl wit_host::Host for StoreState {
         if let Err(error) = self.operation_active() {
             return Ok(Err(to_wit_failure(error)));
         }
+        if self.operation == Some(Operation::ConnectionCheck) {
+            return Ok(Err(to_wit_failure(HostFailure::new(
+                ErrorKind::Unsupported,
+                "connection checks cannot write private state",
+            ))));
+        }
         match self.services.write_private_state(bytes).await {
             Ok(()) => Ok(Ok(())),
             Err(error) => Ok(Err(to_wit_failure(error))),
@@ -833,6 +842,12 @@ impl wit_host::Host for StoreState {
             Ok(operation) => operation,
             Err(error) => return Ok(Err(to_wit_failure(error))),
         };
+        if operation == Operation::ConnectionCheck {
+            return Ok(Err(to_wit_failure(HostFailure::new(
+                ErrorKind::Unsupported,
+                "connection checks cannot start generation",
+            ))));
+        }
         if matches!(operation, Operation::Infer | Operation::Compact) && self.upstream_starts != 0 {
             return Ok(Err(to_wit_failure(HostFailure::new(
                 ErrorKind::Trapped,
@@ -858,6 +873,12 @@ impl wit_host::Host for StoreState {
     ) -> Result<Result<(), wit_types::PluginError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
             return Ok(Err(to_wit_failure(error)));
+        }
+        if self.operation == Some(Operation::ConnectionCheck) {
+            return Ok(Err(to_wit_failure(HostFailure::new(
+                ErrorKind::Unsupported,
+                "connection checks cannot emit generation events",
+            ))));
         }
         if let wit_types::CanonicalEvent::Failed(failure) = &event {
             self.services.log(LogLevel::Warn, &failure.message);
@@ -897,7 +918,17 @@ impl wit_host::HostHttpResponse for StoreState {
             return Ok(Err(to_wit_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
-        Ok(response.status().await.map_err(to_wit_failure))
+        match response.status().await {
+            Ok(status) => {
+                if self.operation == Some(Operation::ConnectionCheck)
+                    && (200..300).contains(&status)
+                {
+                    self.received_check_response = true;
+                }
+                Ok(Ok(status))
+            }
+            Err(error) => Ok(Err(to_wit_failure(error))),
+        }
     }
 
     async fn headers(
@@ -1049,6 +1080,9 @@ fn convert_operation(
         stravia_vendor_sdk::wit::types::OperationKind::ConfigValidation => {
             wit_types::OperationKind::ConfigValidation
         }
+        stravia_vendor_sdk::wit::types::OperationKind::ConnectionCheck => {
+            wit_types::OperationKind::ConnectionCheck
+        }
     }
 }
 
@@ -1091,6 +1125,7 @@ fn convert_error_kind(value: wit_types::ErrorKind) -> ErrorKind {
     match value {
         wit_types::ErrorKind::Unsupported => ErrorKind::Unsupported,
         wit_types::ErrorKind::Invalid => ErrorKind::Invalid,
+        wit_types::ErrorKind::InvalidResponse => ErrorKind::InvalidResponse,
         wit_types::ErrorKind::Auth => ErrorKind::Auth,
         wit_types::ErrorKind::ContinuationNotFound => ErrorKind::ContinuationNotFound,
         wit_types::ErrorKind::ContinuationUnavailable => ErrorKind::ContinuationUnavailable,
@@ -1170,6 +1205,7 @@ fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
     let kind = match value.kind {
         ErrorKind::Unsupported => wit_types::ErrorKind::Unsupported,
         ErrorKind::Invalid => wit_types::ErrorKind::Invalid,
+        ErrorKind::InvalidResponse => wit_types::ErrorKind::InvalidResponse,
         ErrorKind::Auth => wit_types::ErrorKind::Auth,
         ErrorKind::ContinuationNotFound => wit_types::ErrorKind::ContinuationNotFound,
         ErrorKind::ContinuationUnavailable => wit_types::ErrorKind::ContinuationUnavailable,
@@ -1473,6 +1509,7 @@ mod deadline_tests {
             generation: 0,
             operation: None,
             upstream_starts: 0,
+            received_check_response: false,
             catalog_sync: false,
         }
     }

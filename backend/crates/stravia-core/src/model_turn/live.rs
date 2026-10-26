@@ -2558,6 +2558,10 @@ fn classify_vendor_kind(
             "vendor_request_invalid",
             "Vendor operation input was rejected",
         ),
+        ErrorKind::InvalidResponse => AttemptFailure::terminal(
+            "vendor_response_invalid",
+            "Vendor upstream response could not be parsed",
+        ),
         ErrorKind::Trapped => {
             AttemptFailure::terminal("vendor_plugin_trapped", "Vendor plugin execution failed")
         }

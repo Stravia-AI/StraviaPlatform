@@ -1,4 +1,5 @@
 use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check as common_check;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,10 +8,10 @@ use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
-    ConfigValidationResponse, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
-    OperationInput, OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot,
-    ValidationIssue,
+    ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
+    DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
+    HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "anthropic";
@@ -300,6 +301,52 @@ fn discover(
         models,
         next_cursor,
     }))
+}
+
+/// Read the standard models endpoint at the configured base URL, ignoring
+/// catalog and static model overrides so the request reaches the actual
+/// egress endpoint.
+pub(crate) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let url = endpoint(&provider.base_url, "/v1/models");
+    let api_key = credential(provider, "apiKey");
+    let mut headers = vec![
+        ("accept".into(), "application/json".into()),
+        ("anthropic-version".into(), "2023-06-01".into()),
+    ];
+    if let Some(api_key) = api_key {
+        headers.push(("x-api-key".into(), api_key.into()));
+    }
+    let value = common_check::json(
+        host,
+        HttpRequest {
+            method: "GET".into(),
+            url,
+            headers,
+            body: Vec::new(),
+        },
+    )?;
+    crate::connection_check::validate_models(&value, &["data", "models"], &["id", "name"])?;
+    Ok(ConnectionCheckResponse {
+        verified: if api_key.is_some() && official_anthropic_origin(&provider.base_url) {
+            ConnectionCheckVerification::EndpointAndCredentials
+        } else {
+            // A custom base URL may serve a public inventory that ignores the
+            // attached credential, so the successful read only proves the
+            // endpoint.
+            ConnectionCheckVerification::Endpoint
+        },
+    })
+}
+
+fn official_anthropic_origin(base_url: &str) -> bool {
+    url::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("api.anthropic.com")
+            && url.port_or_known_default() == Some(443)
+    })
 }
 
 fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {

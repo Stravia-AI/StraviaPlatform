@@ -24,6 +24,15 @@ pub struct ProviderTestResult {
     pub tested_at: String,
 }
 
+/// Conditional write-back for an explicit Provider connection check.
+/// `credentials_verified` is the plugin's explicit authentication evidence:
+/// only a check that actually verified credentials may clear an invalid marker.
+#[derive(Debug, Clone)]
+pub struct ProviderConnectionCheckWrite {
+    pub success: bool,
+    pub credentials_verified: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiKeyAccessRecord {
     pub id: String,
@@ -59,11 +68,15 @@ pub trait ProviderStore: Send + Sync {
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider>;
     async fn delete(&self, id: &str) -> anyhow::Result<()>;
     async fn exists_by_name(&self, name: &str, exclude_id: Option<&str>) -> anyhow::Result<bool>;
+    /// Conditional on the credential generation captured when the check started.
+    /// Returns false when a newer credential/configuration generation won, so a
+    /// late check can never overwrite fresher evidence.
     async fn record_test_result(
         &self,
         provider_id: &str,
-        result: ProviderTestResult,
-    ) -> anyhow::Result<()>;
+        expected: ProviderCredentialVersion,
+        result: ProviderConnectionCheckWrite,
+    ) -> anyhow::Result<bool>;
     /// ADR-0073 条件写：仅当凭据代际未变时将 Provider 标记为凭据失效。
     /// 返回 true 表示已标记；代际不匹配（凭据已被新证据替换）返回 false。
     /// 写失败由调用方记 `tracing::warn!`，不改变原请求结果。

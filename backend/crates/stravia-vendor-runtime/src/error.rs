@@ -63,6 +63,7 @@ impl RuntimeError {
         let safe_summary = match &kind {
             ErrorKind::Unsupported => "vendor operation is not supported",
             ErrorKind::Invalid => "vendor operation input was rejected",
+            ErrorKind::InvalidResponse => "vendor upstream response could not be parsed",
             ErrorKind::Auth => "vendor authentication failed",
             ErrorKind::ContinuationNotFound => "vendor continuation is no longer available",
             ErrorKind::ContinuationUnavailable => "vendor continuation socket is unavailable",

@@ -1,10 +1,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use stravia_vendor_common::common;
+use stravia_vendor_common::connection_check::invalid_response;
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceItem, AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost, HttpRequest,
-    PluginError, ProviderSnapshot, read_http_body,
+    AllowanceItem, AllowanceRequest, AllowanceResponse, ConnectionCheckResponse,
+    ConnectionCheckVerification, ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot,
+    read_http_body,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -18,7 +21,80 @@ pub(crate) fn execute(
     _request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     let credential = access_token(&provider)?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(usage_request(credential))?;
+    let status = response.status()?;
+    if !(200..300).contains(&status) {
+        return Err(status_error(status));
+    }
+    let headers = response.headers()?;
+    check_grpc_status(&headers)?;
+    let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
+    let mut parsed =
+        parse_xai(&body, current_unix_ms()?).map_err(|()| invalid_allowance_response())?;
+    // 额度接口只返回用量百分比与账期，不含订阅等级；官方 grok-build 在额度页
+    // 另外请求 cli-chat-proxy 的 `/user?include=subscription` 读取
+    // `subscriptionTier`（如 SuperGrokPro、X Premium），这里沿用同一来源。
+    // 附加请求失败（例如凭据是 API key）只影响等级展示，不拖垮额度刷新。
+    parsed.plan_label = fetch_plan_label(host, credential);
+    // 额度接口不返回身份；`email` 在登录或刷新令牌时从 id_token 保存，旧凭据下次刷新后才有。
+    parsed.account_label = stravia_vendor_common::account::first_account_label([provider
+        .credentials
+        .get("email")
+        .and_then(serde_json::Value::as_str)]);
+    Ok(parsed)
+}
+
+/// 固定 grok.com 账号计费端点只验证凭据；它不请求配置的 Base URL，
+/// 因此自定义端点不会被这次检查确认。
+pub(crate) fn connection_check(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+) -> Result<ConnectionCheckResponse, PluginError> {
+    let credential = access_token(provider)?;
+    let response = host.http_start(usage_request(credential))?;
+    let status = response.status()?;
+    let headers = response.headers()?;
+    let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
+    if !(200..300).contains(&status) {
+        return Err(common::upstream_error(status, &headers, &body));
+    }
+    let header_status = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("grpc-status"))
+        .map(|(_, value)| value.parse::<u16>())
+        .transpose()
+        .map_err(|_| invalid_response("Grok response has an invalid grpc-status header"))?;
+    if let Some(code) = header_status.filter(|code| *code != 0) {
+        let mut failure = grpc_status_error(code);
+        failure.upstream_status = Some(status);
+        return Err(failure);
+    }
+    let (payloads, trailer_status) = parse_grpc_web(&body)
+        .map_err(|()| invalid_response("Grok usage response is not valid gRPC-web"))?;
+    if let Some(code) = trailer_status
+        && code != 0
+    {
+        let mut failure = grpc_status_error(code);
+        failure.upstream_status = Some(status);
+        return Err(failure);
+    }
+    if payloads.is_empty() {
+        return Err(invalid_response(
+            "Grok usage response has no message payload",
+        ));
+    }
+    let mut scan = ProtobufScan::default();
+    for payload in payloads {
+        scan_protobuf(payload, &[], 0, &mut scan)
+            .map_err(|()| invalid_response("Grok usage response is not valid protobuf"))?;
+    }
+    Ok(ConnectionCheckResponse {
+        verified: ConnectionCheckVerification::Credentials,
+    })
+}
+
+fn usage_request(credential: &str) -> HttpRequest {
+    HttpRequest {
         method: "POST".into(),
         url: ALLOWANCE_URL.into(),
         headers: vec![
@@ -32,26 +108,7 @@ pub(crate) fn execute(
             ("user-agent".into(), "Stravia".into()),
         ],
         body: vec![0, 0, 0, 0, 0],
-    })?;
-    let status = response.status()?;
-    if !(200..300).contains(&status) {
-        return Err(status_error(status));
     }
-    let headers = response.headers()?;
-    check_grpc_status(&headers)?;
-    let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
-    let mut parsed = parse_xai(&body, current_unix_ms()?).map_err(|()| invalid_response())?;
-    // 额度接口只返回用量百分比与账期，不含订阅等级；官方 grok-build 在额度页
-    // 另外请求 cli-chat-proxy 的 `/user?include=subscription` 读取
-    // `subscriptionTier`（如 SuperGrokPro、X Premium），这里沿用同一来源。
-    // 附加请求失败（例如凭据是 API key）只影响等级展示，不拖垮额度刷新。
-    parsed.plan_label = fetch_plan_label(host, credential);
-    // 额度接口不返回身份；`email` 在登录或刷新令牌时从 id_token 保存，旧凭据下次刷新后才有。
-    parsed.account_label = stravia_vendor_common::account::first_account_label([provider
-        .credentials
-        .get("email")
-        .and_then(serde_json::Value::as_str)]);
-    Ok(parsed)
 }
 
 /// 订阅等级不在 GetGrokCreditsConfig 的响应里：官方客户端把
@@ -185,10 +242,22 @@ struct VarintField {
 }
 
 fn grpc_web_payloads(body: &[u8]) -> Result<Vec<&[u8]>, ()> {
-    if body.len() < 5 || body[0] & 0x7f != 0 {
-        return looks_like_protobuf(body).then_some(vec![body]).ok_or(());
+    let (payloads, trailer_status) = parse_grpc_web(body)?;
+    if trailer_status.is_some_and(|status| status != 0) {
+        return Err(());
     }
-    let (mut payloads, mut index, mut trailers) = (Vec::new(), 0, false);
+    (!payloads.is_empty()).then_some(payloads).ok_or(())
+}
+
+/// 同时返回消息帧和 trailer 里的 `grpc-status`，让连接检查能保留上游
+/// 逻辑拒绝的 typed 分类，而不是把它降级成解析失败。
+fn parse_grpc_web(body: &[u8]) -> Result<(Vec<&[u8]>, Option<u16>), ()> {
+    if body.len() < 5 || body[0] & 0x7f != 0 {
+        return looks_like_protobuf(body)
+            .then_some((vec![body], None))
+            .ok_or(());
+    }
+    let (mut payloads, mut index, mut trailers, mut trailer_status) = (Vec::new(), 0, false, None);
     while index < body.len() {
         if index + 5 > body.len() {
             return Err(());
@@ -211,26 +280,25 @@ fn grpc_web_payloads(body: &[u8]) -> Result<Vec<&[u8]>, ()> {
             .ok_or(())?;
         if trailer {
             trailers = true;
-            validate_grpc_trailer(&body[index..end])?;
+            trailer_status = validate_grpc_trailer(&body[index..end])?;
         } else {
             payloads.push(&body[index..end]);
         }
         index = end;
     }
-    (!payloads.is_empty()).then_some(payloads).ok_or(())
+    Ok((payloads, trailer_status))
 }
 
-fn validate_grpc_trailer(body: &[u8]) -> Result<(), ()> {
+fn validate_grpc_trailer(body: &[u8]) -> Result<Option<u16>, ()> {
     let text = std::str::from_utf8(body).map_err(|_| ())?;
+    let mut status = None;
     for line in text.lines().filter(|line| !line.is_empty()) {
         let (key, value) = line.split_once(':').ok_or(())?;
-        if key.trim().eq_ignore_ascii_case("grpc-status")
-            && value.trim().parse::<u32>().map_err(|_| ())? != 0
-        {
-            return Err(());
+        if key.trim().eq_ignore_ascii_case("grpc-status") {
+            status = Some(value.trim().parse::<u16>().map_err(|_| ())?);
         }
     }
-    Ok(())
+    Ok(status)
 }
 
 fn looks_like_protobuf(body: &[u8]) -> bool {
@@ -332,7 +400,11 @@ fn check_grpc_status(headers: &[(String, String)]) -> Result<(), PluginError> {
     if status == 0 {
         return Ok(());
     }
-    Err(match status {
+    Err(grpc_status_error(status))
+}
+
+fn grpc_status_error(status: u16) -> PluginError {
+    match status {
         16 => error(ErrorKind::Auth, "upstream authentication failed", None),
         4 => error(
             ErrorKind::upstream(
@@ -363,7 +435,7 @@ fn check_grpc_status(headers: &[(String, String)]) -> Result<(), PluginError> {
             "upstream allowance request failed",
             None,
         ),
-    })
+    }
 }
 
 fn current_unix_ms() -> Result<i64, PluginError> {
@@ -387,7 +459,7 @@ fn status_error(status: u16) -> PluginError {
     error(kind, "upstream allowance request failed", Some(status))
 }
 
-fn invalid_response() -> PluginError {
+fn invalid_allowance_response() -> PluginError {
     error(
         ErrorKind::upstream_unknown(),
         "upstream allowance response has an unsupported shape",
@@ -405,8 +477,9 @@ fn error(kind: ErrorKind, message: &str, upstream_status: Option<u16>) -> Plugin
 
 #[cfg(test)]
 mod tests {
-    use super::plan_label;
+    use super::{ProtobufScan, grpc_status_error, parse_grpc_web, plan_label, scan_protobuf};
     use serde_json::json;
+    use stravia_vendor_sdk::ErrorKind;
 
     /// 形状取自官方 grok-build 的 `UserInfo`：`/v1/user?include=subscription`
     /// 在有有效订阅时返回 `subscriptionTier`，无订阅时整个字段缺省。
@@ -437,5 +510,32 @@ mod tests {
         assert_eq!(plan_label(&json!({"userId": "u-3"})), None);
         assert_eq!(plan_label(&json!({"subscriptionTier": null})), None);
         assert_eq!(plan_label(&json!({"subscriptionTier": "  "})), None);
+    }
+
+    #[test]
+    fn connection_check_parses_grpc_web_frames_and_preserves_trailer_status() {
+        // 0x08 0x01 is field 1, varint 1.
+        let mut body = vec![0, 0, 0, 0, 2, 0x08, 0x01];
+        let (payloads, trailer) = parse_grpc_web(&body).unwrap();
+        assert_eq!(payloads, vec![&body[5..]]);
+        assert_eq!(trailer, None);
+        let mut scan = ProtobufScan::default();
+        scan_protobuf(payloads[0], &[], 0, &mut scan).unwrap();
+        assert_eq!(scan.varints.len(), 1);
+
+        let trailer = b"grpc-status: 16\r\n";
+        body.push(0x80);
+        body.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
+        body.extend_from_slice(trailer);
+        let (_, status) = parse_grpc_web(&body).unwrap();
+        assert_eq!(status, Some(16));
+        assert!(matches!(grpc_status_error(16).kind, ErrorKind::Auth));
+    }
+
+    #[test]
+    fn connection_check_rejects_non_protobuf_and_truncated_frames() {
+        assert!(parse_grpc_web(b"{}").is_err());
+        assert!(parse_grpc_web(&[]).is_err());
+        assert!(parse_grpc_web(&[0, 0, 0, 0, 4, 0x08]).is_err());
     }
 }

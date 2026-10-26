@@ -14,8 +14,12 @@ import { getModelChanges } from '#lib/model-changes.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { providerOAuthStatusLabel } from '#lib/provider-oauth.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
-import { formatDuration } from '#lib/format.js'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '#lib/logical-model.js'
+import {
+  providerConnectionCheckFailureMessage,
+  providerConnectionCheckSuccessMessage,
+  providerConnectionCheckUnsupportedMessage,
+} from '#lib/provider-connection-check.js'
 
 import type {
   ImageCapabilityDrift,
@@ -290,10 +294,12 @@ async function testProvider(provider: Provider): Promise<void> {
   actingProviderId = provider.id
   try {
     const result = await admin.providers.test(provider.id)
-    if (result.success) {
-      toast.success(m.common_service_response_time({ duration: formatDuration(result.latency_ms) }))
-    } else {
-      toast.error(result.error || m.common_connection_test_failed())
+    if (result.status === 'passed') {
+      toast.success(providerConnectionCheckSuccessMessage(result))
+    } else if (result.status === 'unsupported') {
+      toast.info(providerConnectionCheckUnsupportedMessage())
+    } else if (result.status === 'failed') {
+      toast.error(providerConnectionCheckFailureMessage(result))
     }
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
@@ -376,11 +382,12 @@ async function copyProvider(): Promise<void> {
             {m.providers_reauthorize()}
           </DropdownMenu.Item>
         {/if}
-        {#if channel?.capabilities.includes('infer')}
-          <DropdownMenu.Item onSelect={() => void testProvider(provider)} disabled={actingProviderId === provider.id}>
-            {m.providers_test_connection()}
-          </DropdownMenu.Item>
-        {/if}
+        <DropdownMenu.Item
+          onSelect={() => void testProvider(provider)}
+          disabled={actingProviderId === provider.id}
+          title={m.providers_connection_check_saved_hint()}>
+          {m.providers_test_connection()}
+        </DropdownMenu.Item>
         <DropdownMenu.Item onSelect={() => void toggleProvider(provider)} disabled={actingProviderId === provider.id}>
           {provider.is_enabled ? m.providers_disable_service() : m.providers_enable_service()}
         </DropdownMenu.Item>

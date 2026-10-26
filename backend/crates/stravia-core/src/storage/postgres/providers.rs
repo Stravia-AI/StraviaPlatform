@@ -192,20 +192,39 @@ impl ProviderStore for PostgresProviderStore {
     async fn record_test_result(
         &self,
         provider_id: &str,
-        result: ProviderTestResult,
-    ) -> anyhow::Result<()> {
-        let _ = result.tested_at;
-        // ADR-0073：手动测试成功是恢复路径——上游接受了当前凭据，清除失效。
-        sqlx::query(
-    "UPDATE providers SET last_test_success = $1, last_test_at = CURRENT_TIMESTAMP, revision = revision + 1, credential_status = CASE WHEN $2 THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN $3 THEN NULL ELSE credential_invalid_at END WHERE id = $4",
-            )
-            .bind(result.success)
-            .bind(result.success)
-            .bind(result.success)
-            .bind(provider_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        expected: ProviderCredentialVersion,
+        result: ProviderConnectionCheckWrite,
+    ) -> anyhow::Result<bool> {
+        // ADR-0073：只有本次检查实际验证了凭据，成功才构成恢复证据；
+        // 条件写保证迟到的检查不能覆盖更新的凭据/配置代际。
+        let updated = sqlx::query(
+            "UPDATE providers
+     SET last_test_success = $1,
+         last_test_at = CURRENT_TIMESTAMP,
+         credential_status = CASE WHEN $2 AND $3 THEN 'ok' ELSE credential_status END,
+         credential_invalid_at = CASE WHEN $4 AND $5 THEN NULL ELSE credential_invalid_at END,
+         revision = revision + 1
+     WHERE id = $6
+       AND revision = $7
+       AND (($8::integer IS NULL AND NOT EXISTS (
+               SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
+            OR ($9::integer IS NOT NULL AND EXISTS (
+               SELECT 1 FROM provider_oauth_credentials
+               WHERE provider_id = providers.id AND status_version = $10)))",
+        )
+        .bind(result.success)
+        .bind(result.success)
+        .bind(result.credentials_verified)
+        .bind(result.success)
+        .bind(result.credentials_verified)
+        .bind(provider_id)
+        .bind(expected.provider_revision)
+        .bind(expected.oauth_status_version)
+        .bind(expected.oauth_status_version)
+        .bind(expected.oauth_status_version.unwrap_or(0))
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
     }
 
     async fn guarded_allowance_keys(&self, id: &str) -> anyhow::Result<Vec<String>> {
@@ -504,6 +523,49 @@ mod tests {
                     .contains(&provider.id)
             );
 
+            let invalid = store.get(&provider.id).await?.expect("provider");
+            assert!(
+                store
+                    .record_test_result(
+                        &provider.id,
+                        ProviderCredentialVersion {
+                            provider_revision: invalid.revision,
+                            oauth_status_version: None,
+                        },
+                        ProviderConnectionCheckWrite {
+                            success: true,
+                            credentials_verified: false
+                        },
+                    )
+                    .await?
+            );
+            let endpoint_only = store.get(&provider.id).await?.expect("provider");
+            assert!(endpoint_only.credential_invalid());
+            assert_eq!(endpoint_only.last_test_success, Some(true));
+            assert!(endpoint_only.last_test_at.is_some());
+            assert!(
+                !store
+                    .record_test_result(
+                        &provider.id,
+                        ProviderCredentialVersion {
+                            provider_revision: invalid.revision,
+                            oauth_status_version: None,
+                        },
+                        ProviderConnectionCheckWrite {
+                            success: true,
+                            credentials_verified: true
+                        },
+                    )
+                    .await?
+            );
+            assert!(
+                store
+                    .get(&provider.id)
+                    .await?
+                    .expect("provider")
+                    .credential_invalid()
+            );
+
             // 仅意图字段写入不清除；preserve 回填不清除；凭据写入清除
             let updated = store
                 .update(
@@ -574,6 +636,48 @@ mod tests {
                     )
                     .await?
             );
+            let invalid = store.get(&provider.id).await?.expect("provider");
+            assert!(
+                !store
+                    .record_test_result(
+                        &provider.id,
+                        ProviderCredentialVersion {
+                            provider_revision: invalid.revision,
+                            oauth_status_version: Some(status_version + 1),
+                        },
+                        ProviderConnectionCheckWrite {
+                            success: true,
+                            credentials_verified: true
+                        },
+                    )
+                    .await?
+            );
+            assert!(
+                store
+                    .get(&provider.id)
+                    .await?
+                    .expect("provider")
+                    .credential_invalid()
+            );
+            assert!(
+                store
+                    .record_test_result(
+                        &provider.id,
+                        ProviderCredentialVersion {
+                            provider_revision: invalid.revision,
+                            oauth_status_version: Some(status_version),
+                        },
+                        ProviderConnectionCheckWrite {
+                            success: true,
+                            credentials_verified: true
+                        },
+                    )
+                    .await?
+            );
+            let recovered = store.get(&provider.id).await?.expect("provider");
+            assert!(!recovered.credential_invalid());
+            assert!(recovered.credential_invalid_at.is_none());
+            assert_eq!(recovered.last_test_success, Some(true));
             Ok::<(), anyhow::Error>(())
         }
         .await;

@@ -69,6 +69,10 @@ pub fn execute(
         OperationInput::Allowance { provider, request } => {
             allowance::execute(host, provider, request).map(OperationOutput::Allowance)
         }
+        OperationInput::ConnectionCheck {
+            provider,
+            request: _,
+        } => allowance::connection_check(host, &provider).map(OperationOutput::ConnectionCheck),
         other => Err(common::unsupported(
             other.operation().as_str(),
             VENDOR_ID,
@@ -83,6 +87,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
+        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),

@@ -866,20 +866,24 @@ impl Gateway {
         &self,
         provider_id: &str,
         expected: crate::db::models::ProviderCredentialVersion,
-    ) {
+    ) -> bool {
         match self
             .storage
             .providers()
             .mark_credential_invalid(provider_id, expected)
             .await
         {
-            Ok(true) => tracing::warn!(
-                provider_id,
-                "provider credentials marked invalid after upstream authentication rejection"
-            ),
-            Ok(false) => {}
+            Ok(true) => {
+                tracing::warn!(
+                    provider_id,
+                    "provider credentials marked invalid after upstream authentication rejection"
+                );
+                true
+            }
+            Ok(false) => false,
             Err(error) => {
-                tracing::warn!(provider_id, %error, "failed to record provider credential invalidation")
+                tracing::warn!(provider_id, %error, "failed to record provider credential invalidation");
+                false
             }
         }
     }

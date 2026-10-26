@@ -20,12 +20,26 @@ Core 统一管理已保存 OAuth 连接的刷新，不由各管理入口或 Vend
 - 同一 Provider、OAuth 连接与配置代际共享一次在途交换，存储 CAS 租约负责跨 Gateway 的互斥。等待方不得拿旧凭据冒充刷新成功；单个请求取消或超时只结束自己的等待，共享交换仍可完成并保存轮换后的令牌。共享操作有 120 秒时限，超过 125 秒的存储租约才可回收；应用关闭、连接替换与不兼容组件变更仍取消或阻止旧任务写回。
 - 暂时刷新失败保留 access token、refresh token、到期时间和连接身份，记录 OAuth `error` / `last_error`，后续请求或后台调度仍可尝试。刷新响应未轮换 refresh token 或返回空值时保留原值。SQLite、PostgreSQL 与 Memory 使用相同状态与活跃租约规则。
 - 上游 401 的恢复遵守原组件、连接代际、截止时间与结果提交边界；推理和独立能力使用既有 Target 恢复预算，管理操作的单次 Vendor 调用最多刷新并重发一次。分页发现与独立能力的普通重试沿用本次恢复后的快照，不再次发送旧 token。刷新失败保留真实错误分类；只有明确授权拒绝、不可恢复的已拒凭据或刷新后的凭据仍被拒绝，才按 [ADR-0073](../adr/0073-mark-provider-credential-invalid-on-upstream-auth-rejection.md) 条件标记 Provider 失效。
-- 已保存连接的显式 `ConfigValidation` 不要求启用 Provider，测试不会修改 `is_enabled`；其它非认证操作仍遵守停用状态。
+- 已保存连接的显式 `ConfigValidation` 和 `ConnectionCheck` 不要求启用 Provider，检查不会修改 `is_enabled`；其它非认证操作仍遵守停用状态。
 - 额度缓存及守卫证据采用最终成功执行的凭据版本和连接身份；本次刷新可以更新缓存身份，但不能把旧配置、旧账号连接或旧组件身份的查询结果写入新身份。
 
 `OAuth status = error` 是最近一次刷新结果，`Provider credential_status = invalid` 是持久化的授权失效判定，两者不同。后台任务跳过已失效或禁用的 Provider，不以半开探测自动解封。此前已被标记失效的连接，升级后可显式「重新连接」：刷新成功即恢复 `ok`；上游明确撤销 refresh grant 时仍需重新登录，不删除或自动重绑原连接。
 
 宿主生命周期修复需要升级并重启宿主；令牌错误分类和响应解析修复位于各 Wasm 插件，已安装的 Antigravity、Claude Code、Codex、Devin、Grok 等独立插件还须重新构建并导入。仅更新宿主不会替换已安装的独立组件。
+
+### 单入口连接检查
+
+管理面保留一个「测试连接」动作。`POST /api/v1/providers/{id}/test` 无 body 或 `{}` 时检查已保存连接；携带 `configuration` 时检查当前草稿，包括未保存的 Base URL、配置、凭据、代理选择和 Ready 状态的 staged OAuth。空密钥沿用同一已保存连接的值。草稿不保存 Provider、不绑定 OAuth、不写原连接的测试状态或凭据健康；OAuth 返回值不能扩张临时执行的网络授权。
+
+临时执行与已保存连接一样，由宿主在 `operation_metadata.vendor_profile` 中传入本次取得的有效 Profile。动态目录 Profile 不一定存在于 Base 的编译时清单，草稿检查和配置校验不能因此丢失实现路由、误报 `unsupported`；此元数据不扩张网络授权。
+
+Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再执行显式声明的 `ConnectionCheck`。失败使用 `configuration`、`transport`、`upstream`、`response` 阶段和本地化 code；宿主不把原始上游 body 或插件执行诊断作为错误展示。上游拒绝请求属于 `upstream`，成功响应无法按协议解析属于 `response`。未声明安全检查能力返回中性 `unsupported`，不能记作连接失败，也不能以配置校验或静态模型冒充连通。
+
+成功结果只声明实际证据范围：`endpoint` 证明访问过配置端点，`credentials` 证明固定账号端点接受凭据，`endpoint_and_credentials` 同时证明两者。公开或鉴权语义未知的模型目录只能证明端点；仅携带认证头不能证明凭据已被接受。Vertex 自定义端点配合直接 access token 同样只能证明端点，不能清除凭据失效标记。只有明确的凭据验证成功才能恢复凭据健康；已保存检查按最终执行的 Provider / OAuth 版本及插件 publication fence 条件写回。
+
+准备阶段的正常 OAuth 刷新可以推进凭据健康版本。若此时保存的连接配置与已校验快照不一致，或结果提交时版本失配，检查返回 `cancelled`，不覆盖新状态；不能仅因正常刷新推进了健康版本就误取消检查。
+
+探针必须真实读取 HTTP 状态并验证响应结构，不生成内容、同步模型、执行 onboarding、`AssignModel` 或写插件私有状态。宿主拒绝没有实际 HTTP 2xx 响应的静态成功，以及检查期间的私有状态写入和生成事件。HTTP POST 本身不表示写操作，供应商只读 RPC 可以使用 POST。Base 中没有安全既有探针的 Bedrock、原生 Vertex 和 Watsonx 明确不支持；其它实现使用真实目录或账号只读查询。已保存 OAuth 连接仍遵守前述新鲜度和单次认证恢复预算，不新增普通重试。耗时表示整个检查用时，不是推理延迟。
 
 ### 组件身份映射
 
@@ -373,7 +387,7 @@ base 插件为 `custom` Profile 的 OpenAI-compatible Chat Completions 声明固
 ## 已确认的技术栈与插件契约
 
 - 唯一目标技术栈为 Wasmtime + WebAssembly Component Model + WIT，不同时提供 Extism 或另一套自定义 Core Wasm ABI。
-- Wasmtime 负责加载、执行与能力隔离；`stravia:vendor@0.5.1` WIT 通过新增 `http-start-with-compression` 与 `ws-connect-with-compression` 表达传输压缩。`0.5.0` 的 HTTP/WS request 字段、顺序、旧函数和资源契约不变，已有插件无需重编译或重新导入；只有采用新增压缩入口的插件需要更新。宿主明确接受 `0.5.0`、`0.5.1`，不推断未来 patch 或其他 ABI 兼容；canonical format、客户端 API 与数据库 schema 不变。
+- Wasmtime 负责加载、执行与能力隔离；当前 WIT 为 `stravia:vendor@0.6.0`，包含独立的连接检查操作、验证范围和响应解析错误。宿主只接受此明确 ABI 版本；旧 `0.5.x` 独立组件须重建并重新导入。HTTP / WebSocket 的显式压缩入口与手动字节传输入口保留；canonical format、模型客户端协议与数据库 schema 不变。
 - `VendorDescriptor` 包含 `vendor_id`、版本、展示元数据、canonical 格式版本、`kind` 与 `providers`；`kind` 为 `fallback` 或 `dedicated`。每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、channel、能力、配置、网络权限和数据兼容信息。
 - `fallback` 描述符的 Vendor ID 必须是 `base`，可声明多个互不重复的 Profile；`dedicated` 描述符必须恰有一个 Profile，且 `provider_id` 等于 `vendor_id`。旧描述符形状不保留 alias 或兼容 shim。
 - `ProviderSnapshot.provider_id` 在 SDK 与 WIT 中均为必填供应商 Profile ID，不是连接 UUID。运行时按该字段选择唯一 `ProviderDescriptor` 后再做能力、channel 和网络准入，不得合并其他 Profile；`base` guest 据此分派，专属 guest 拒绝其他 ID。
@@ -384,7 +398,7 @@ base 插件为 `custom` Profile 的 OpenAI-compatible Chat Completions 声明固
 - `descriptor`、`select-protocol`、`execute` 的导出结构保持不变。首先提供 Rust 插件 SDK，以复用现有供应商实现；WIT 契约不限定插件必须使用 Rust，其他语言的实际工具链兼容性需要验证。
 - 发布产物为单个自包含 Wasm Component，携带锁定的 codec 依赖；不直接跨契约暴露 Gateway、数据库对象或 Rust trait 内存布局。
 - 宿主与插件通过明确版本的类型和资源交互。Wasmtime 版本以根目录 `Cargo.toml` 与 `Cargo.lock` 为准，guest 工具链以 `rust-toolchain.toml` 为准；技术栈决策见 [ADR-0072](../adr/0072-use-wasmtime-components-and-wit-for-vendor-plugins.md)。
-- SDK 的 WASI WIT 依赖统一为 `0.2.12`，来自 [Wasmtime v49.0.1 的 WASIp2 定义](https://github.com/bytecodealliance/wasmtime/tree/v49.0.1/crates/wasi/src/p2/wit/deps)。宿主接受稳定版 WASI `0.2.x` 的既定受限接口，包括 `0.2.9`、`0.2.12` 及同一 Component 内不同 patch 的混合导入。WASI patch 兼容不放宽独立的 Vendor ABI 准入：Vendor imports 仍只接受上述两个明确版本，函数、类型和资源必须通过 Linker 校验。
+- SDK 的 WASI WIT 依赖统一为 `0.2.12`，来自 [Wasmtime v49.0.1 的 WASIp2 定义](https://github.com/bytecodealliance/wasmtime/tree/v49.0.1/crates/wasi/src/p2/wit/deps)。宿主接受稳定版 WASI `0.2.x` 的既定受限接口，包括 `0.2.9`、`0.2.12` 及同一 Component 内不同 patch 的混合导入。WASI patch 兼容不放宽独立的 Vendor ABI 准入：Vendor imports 仍只接受当前 `0.6.0` 版本，函数、类型和资源必须通过 Linker 校验。
 - WASI 准入按完整接口名称与稳定版本系列校验：仅允许既有的 stdio、terminal、空 environment、exit、clocks、random 与 io 支持接口；拒绝相似名称、无版本、预发布版及其他 major/minor 系列。SemVer build metadata 不影响稳定版判定。版本系列匹配不承诺未来所有功能可用：[Wasmtime Linker](https://docs.rs/wasmtime/49.0.1/wasmtime/component/struct.Linker.html) 仍校验所需函数签名和资源类型，宿主缺少函数或类型不兼容时明确加载失败。`WasiCtx` 不继承宿主 stdio、环境或目录；filesystem、sockets 与 WASI HTTP imports 始终拒绝，插件网络仍只能使用受控的 `stravia:vendor/host`。
 - 当前 Rust 预编译标准库仍导入 WASI `0.2.9`，因此新构建的插件可以同时包含 SDK 的 `0.2.12` 与标准库的 `0.2.9` imports。更新项目 `wasip2` 依赖不会替换工具链的标准库；本次不更换 Rust 工具链或自建标准库。构建产物的实际 imports 可用 `wasm-tools component wit <component.wasm>` 检查。
 - 推理与原生压缩在执行前调用同一固定版本的 `select-protocol` 导出，由插件根据连接快照与 canonical 请求选择实际上游协议。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消与截止时间约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
@@ -402,8 +416,8 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 ### 实现与验证入口
 
 - 所有 crate（包括 Wasm 契约 fixture）的 package 版本与依赖统一由根 `Cargo.toml` 的 workspace 声明，依赖解析由唯一的根 `Cargo.lock` 管理；子清单继承 workspace，不维护独立版本、依赖版本或锁文件。
-- `stravia-vendor-capability-contract-fixture`、`stravia-vendor-lifecycle-contract-fixture`、`stravia-vendor-management-contract-fixture`、`stravia-vendor-legacy-contract-fixture` 是根 workspace 中的 Wasm 专用工作负载，通过 `task build:vendor-fixtures` 构建，并由真实 Component 契约、生命周期及管理回归覆盖。legacy fixture 使用独立冻结的 `0.5.0` Vendor WIT，不依赖当前 SDK，验证旧 HTTP 协商、原始响应、预编码请求及无压缩 WS。常规 host clippy 与 unit lane（包括测试预编译）显式排除这四个 crate，不在 host 上编译 fixture；unit lane 仍排除 `stravia-desktop`。
-- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.5.1` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
+- `stravia-vendor-capability-contract-fixture`、`stravia-vendor-lifecycle-contract-fixture`、`stravia-vendor-management-contract-fixture`、`stravia-vendor-legacy-contract-fixture` 是根 workspace 中的 Wasm 专用工作负载，通过 `task build:vendor-fixtures` 构建，并由真实 Component 契约、生命周期及管理回归覆盖。手动 entrypoint fixture 使用当前 `0.6.0` WIT，不依赖 SDK 的 guest 封装，验证 HTTP 协商、原始响应、预编码请求及无压缩 WS；它不承诺旧 ABI 兼容。常规 host clippy 与 unit lane（包括测试预编译）显式排除这四个 crate，不在 host 上编译 fixture；unit lane 仍排除 `stravia-desktop`。
+- `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.6.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - 同一 Engine 的运行时克隆可复用相同完整 SHA-256 字节身份、仍被已加载版本持有的不可变编译 Component，并合并同一身份的并发编译。缓存只保存有界元数据与弱引用，不延长退役版本的生命周期，也不缓存加载失败；每次加载仍检查 imports，并使用新的 Store 实例读取和验证 descriptor。操作的 HostServices、私有状态、取消与权限边界不共享。
 - 每个已加载版本在检查 imports 后准备一次 typed `VendorPre<StoreState>`，复用导入解析与导出索引；descriptor、协议选择、执行和 catalog 同步统一从该 blueprint 实例化，但每次仍创建独立 Store、HostServices 与资源表。blueprint 绑定组件原 Engine，因此由另一 `VendorRuntime` 执行时也不能改用调用方的 Engine。`with_descriptor` 同时保留 blueprint 和外层 `Arc<Component>`；后者让已有弱编译缓存继续有效，全部版本句柄释放后仍可回收，不改成强引用常驻缓存。
@@ -449,11 +463,11 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 - Command Code 的 zdr 等供应商选项通过同一声明机制呈现、校验和保存，不在宿主前端添加供应商专属表单代码。
 - OAuth 使用宿主提供的打开授权链接、输入授权码、等待完成等标准交互；供应商登录网站在浏览器打开，不作为插件自带页面嵌入管理面。
 - 此限制不缩减插件对 OAuth 请求构造、token 交换与供应商响应解析的所有权，也不授予插件访问管理会话的能力。
-- 宿主在 `AuthStep::Start` 中提议 `state`。上游要求特定格式时，插件可在 `AuthResponse::Authorization.state` 返回替换值（仅 URL 非保留字符 `A-Z a-z 0-9 - . _ ~`，1–256 字节，不合法则拒绝创建会话），宿主随后按该值校验回调。该字段是认证结果 JSON 中的可选字段，不改变 WIT 版本；不返回该字段的插件（含此前构建的旧插件）继续使用宿主提议的 `state`。返回该字段的插件在不认识此字段的旧宿主上会因回调 state 不一致而登录失败。
+- 宿主在 `AuthStep::Start` 中提议 `state`。上游要求特定格式时，插件可在 `AuthResponse::Authorization.state` 返回替换值（仅 URL 非保留字符 `A-Z a-z 0-9 - . _ ~`，1–256 字节，不合法则拒绝创建会话），宿主随后按该值校验回调。该字段是认证结果 JSON 中的可选字段，不改变 WIT 版本；不返回该字段且符合当前 WIT ABI 的插件继续使用宿主提议的 `state`。返回该字段的插件在不认识此字段的旧宿主上会因回调 state 不一致而登录失败。
 
 ### 已确认的动态表单多语言契约
 
-动态表单多语言使用当前 `stravia:vendor@0.5.1` 契约，与既有 `0.5.0` 的描述符和本地化文本形状兼容。语言只改变展示，不改变配置含义、校验规则、网络授权或插件执行行为。
+动态表单多语言使用当前 `stravia:vendor@0.6.0` 契约，描述符中的本地化文本形状不变；这不表示旧 WIT ABI 仍可准入。语言只改变展示，不改变配置含义、校验规则、网络授权或插件执行行为。
 
 #### 文本所有权与结构
 

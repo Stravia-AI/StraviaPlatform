@@ -19,9 +19,9 @@ use crate::provider_models::{
 };
 
 use super::traits::{
-    ApiKeyStore, AuthAccessStore, OAuthCredentialStore, ProviderModelStore, ProviderStore,
-    ProviderTestResult, RouteStore, SettingsStore, Storage, StorageBackend, StorageBootstrap,
-    StorageHealth, UsageStatsStore,
+    ApiKeyStore, AuthAccessStore, OAuthCredentialStore, ProviderConnectionCheckWrite,
+    ProviderModelStore, ProviderStore, RouteStore, SettingsStore, Storage, StorageBackend,
+    StorageBootstrap, StorageHealth, UsageStatsStore,
 };
 
 use std::sync::Arc;
@@ -261,23 +261,40 @@ impl ProviderStore for MemoryStorage {
     async fn record_test_result(
         &self,
         provider_id: &str,
-        result: ProviderTestResult,
-    ) -> anyhow::Result<()> {
+        expected: ProviderCredentialVersion,
+        result: ProviderConnectionCheckWrite,
+    ) -> anyhow::Result<bool> {
         let mut providers = self.providers.write().await;
-        let provider = providers
-            .iter_mut()
-            .find(|provider| provider.id == provider_id)
-            .context("provider not found for test result")?;
+        let Some(index) = providers
+            .iter()
+            .position(|provider| provider.id == provider_id)
+        else {
+            return Ok(false);
+        };
+        if providers[index].revision != expected.provider_revision {
+            return Ok(false);
+        }
+        let oauth_status_version = self
+            .oauth_credentials
+            .credentials
+            .read()
+            .await
+            .get(provider_id)
+            .map(|credential| credential.status_version);
+        if oauth_status_version != expected.oauth_status_version {
+            return Ok(false);
+        }
+        let provider = &mut providers[index];
         provider.last_test_success = Some(result.success);
-        provider.last_test_at = Some(result.tested_at);
-        // ADR-0073：测试成功是恢复路径——上游接受了当前凭据，清除失效。
-        if result.success {
+        provider.last_test_at = Some(now_rfc3339());
+        // ADR-0073：只有本次检查实际验证了凭据，成功才构成恢复证据。
+        if result.success && result.credentials_verified {
             provider.credential_status = "ok".to_string();
             provider.credential_invalid_at = None;
         }
         provider.revision += 1;
         provider.updated_at = now_rfc3339();
-        Ok(())
+        Ok(true)
     }
 
     async fn mark_credential_invalid(
@@ -2044,7 +2061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_test_result_clears_credential_invalid() {
+    async fn successful_test_result_clears_credential_invalid_only_with_credentials_verified() {
         let storage = MemoryStorage::new(vec![provider("p1")], vec![], vec![]);
         let store = storage.providers();
         assert!(
@@ -2060,38 +2077,67 @@ mod tests {
                 .expect("mark")
         );
 
-        store
-            .record_test_result(
-                "p1",
-                ProviderTestResult {
-                    success: false,
-                    tested_at: now_rfc3339(),
-                },
-            )
-            .await
-            .expect("record failure");
+        let invalid = store.get("p1").await.expect("get").expect("provider");
         assert!(
             store
-                .get("p1")
+                .record_test_result(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: invalid.revision,
+                        oauth_status_version: None,
+                    },
+                    ProviderConnectionCheckWrite {
+                        success: false,
+                        credentials_verified: false,
+                    },
+                )
                 .await
-                .expect("get")
-                .expect("provider")
-                .credential_invalid()
+                .expect("record failure")
         );
+        let failed = store.get("p1").await.expect("get").expect("provider");
+        assert!(failed.credential_invalid());
+        assert_eq!(failed.last_test_success, Some(false));
 
-        store
-            .record_test_result(
-                "p1",
-                ProviderTestResult {
-                    success: true,
-                    tested_at: now_rfc3339(),
-                },
-            )
-            .await
-            .expect("record success");
-        let provider = store.get("p1").await.expect("get").expect("provider");
-        assert!(!provider.credential_invalid());
-        assert!(provider.credential_invalid_at.is_none());
+        // Endpoint-only success records the probe but cannot clear credential evidence.
+        assert!(
+            store
+                .record_test_result(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: failed.revision,
+                        oauth_status_version: None,
+                    },
+                    ProviderConnectionCheckWrite {
+                        success: true,
+                        credentials_verified: false,
+                    },
+                )
+                .await
+                .expect("record endpoint-only")
+        );
+        let endpoint_only = store.get("p1").await.expect("get").expect("provider");
+        assert!(endpoint_only.credential_invalid());
+        assert_eq!(endpoint_only.last_test_success, Some(true));
+
+        assert!(
+            store
+                .record_test_result(
+                    "p1",
+                    ProviderCredentialVersion {
+                        provider_revision: endpoint_only.revision,
+                        oauth_status_version: None,
+                    },
+                    ProviderConnectionCheckWrite {
+                        success: true,
+                        credentials_verified: true,
+                    },
+                )
+                .await
+                .expect("record verified")
+        );
+        let recovered = store.get("p1").await.expect("get").expect("provider");
+        assert!(!recovered.credential_invalid());
+        assert!(recovered.credential_invalid_at.is_none());
     }
 
     // ── Provider Model reimport：快照 + 关联 Target Generated Mapping +

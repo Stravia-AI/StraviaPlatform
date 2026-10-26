@@ -44,6 +44,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::ModelDiscovery,
         Capability::Allowance,
         Capability::ConfigValidation,
+        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -197,6 +198,10 @@ pub fn execute(
             provider,
             request: _,
         } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
+        OperationInput::ConnectionCheck {
+            provider,
+            request: _,
+        } => allowance::connection_check(host, &provider).map(OperationOutput::ConnectionCheck),
         OperationInput::ConfigValidation {
             provider: _,
             request,

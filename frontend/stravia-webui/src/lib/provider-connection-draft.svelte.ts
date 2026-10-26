@@ -4,9 +4,14 @@ import {
   type ProviderConnectionDraftDeps,
   type ProviderConnectionDraftFields,
   type ProviderConnectionDraftSnapshot,
+  type ProviderConnectionDraftTarget,
   type ProviderConnectionSubmitOutcome,
 } from '#lib/provider-connection-draft.js'
-import type { OAuthCandidateConfiguration, ProviderConfigurationPreview } from '#lib/types.js'
+import type {
+  OAuthCandidateConfiguration,
+  ProviderConfigurationPreview,
+  ProviderConnectionCheckInput,
+} from '#lib/types.js'
 
 export { ProviderConnectionDraftController, emptyProviderConnectionDraft } from '#lib/provider-connection-draft.js'
 export type {
@@ -61,6 +66,9 @@ export class ProviderConnectionDraft {
   get oauthConfiguration(): OAuthCandidateConfiguration {
     return this.#controller.oauthConfiguration(this.fields, this.#deps.target())
   }
+
+  connectionCheckInput = (target: ProviderConnectionDraftTarget): ProviderConnectionCheckInput =>
+    this.#controller.connectionCheckInput(target)
 
   submit = (): Promise<ProviderConnectionSubmitOutcome> => this.#controller.submit()
   dispose = (): void => this.#controller.dispose()

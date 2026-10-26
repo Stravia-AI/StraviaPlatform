@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context;
 use axum::Router;
@@ -9,7 +10,9 @@ use axum::http::{HeaderMap, Method, Request, StatusCode, Uri};
 use axum::response::Response;
 
 use stravia_core::Gateway;
-use stravia_core::admin::ForestQuery;
+use stravia_core::admin::{
+    ForestQuery, ProviderConfigurationPreviewInput, ProviderConnectionCheckInput,
+};
 use stravia_core::auth::{
     AuthCompletionInput, AuthCompletionValue, AuthSessionCandidate, AuthSessionStatusData,
     OAuthCallbackMode, OAuthSessionStartOptions,
@@ -17,12 +20,14 @@ use stravia_core::auth::{
 use stravia_core::config::GatewayConfig;
 use stravia_core::data_paths::DataPaths;
 use stravia_core::db::models::{
-    CreateApiKey, CreateProvider, CreateRoute, ProviderCredentialInput, ProviderSourceInput,
-    UpdateProvider,
+    ConnectionCheckStage, CreateApiKey, CreateProvider, CreateRoute, ProviderConnectionCheckResult,
+    ProviderCredentialInput, ProviderCredentialVersion, ProviderSourceInput, UpdateProvider,
 };
 use stravia_core::plugin::ConfirmPluginUpdate;
 use stravia_core::proxy::server::create_router;
+use stravia_core::storage::{DynStorage, MemoryStorage};
 use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_vendor_sdk::ConnectionCheckVerification;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
 
@@ -206,6 +211,19 @@ async fn new_gateway(data_dir: PathBuf) -> anyhow::Result<Gateway> {
     .await
 }
 
+async fn new_memory_gateway(data_dir: PathBuf) -> anyhow::Result<(Gateway, DynStorage)> {
+    let storage: DynStorage = Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new()));
+    let gateway = Gateway::from_storage(
+        GatewayConfig {
+            data_dir,
+            ..GatewayConfig::default()
+        },
+        storage.clone(),
+    )
+    .await?;
+    Ok((gateway, storage))
+}
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -349,6 +367,16 @@ async fn sync_models(
     let summary = sync.await??;
     assert_eq!(summary.added + summary.restored, 1);
     Ok(())
+}
+
+fn spawn_connection_check(
+    gateway: &Gateway,
+    provider_id: &str,
+    input: ProviderConnectionCheckInput,
+) -> tokio::task::JoinHandle<anyhow::Result<ProviderConnectionCheckResult>> {
+    let gateway = gateway.clone();
+    let provider_id = provider_id.to_owned();
+    tokio::spawn(async move { gateway.admin().test_provider(&provider_id, input).await })
 }
 
 async fn create_route(
@@ -562,8 +590,6 @@ async fn disabled_saved_provider_explicit_test_validates_and_persists_success_wi
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
     let mut upstream = TestUpstream::start().await;
-    // The installed base Vendor validates OpenAI configuration locally, without
-    // consuming an inference request or contacting a real upstream.
     let provider = gateway
         .admin()
         .create_provider(CreateProvider {
@@ -596,13 +622,472 @@ async fn disabled_saved_provider_explicit_test_validates_and_persists_success_wi
     assert!(!disabled.is_enabled);
     assert_eq!(disabled.last_test_success, None);
 
-    let result = gateway.admin().test_provider(&provider.id).await?;
-    assert!(result.success, "{:?}", result.error);
-    assert!(result.error.is_none());
+    let gw = gateway.clone();
+    let provider_id = provider.id.clone();
+    let check = tokio::spawn(async move {
+        gw.admin()
+            .test_provider(&provider_id, ProviderConnectionCheckInput::default())
+            .await
+    });
+    let request = upstream.next().await;
+    assert_eq!(request.method, Method::GET);
+    assert_eq!(request.uri.path(), "/v1/models");
+    assert!(
+        request
+            .header("authorization")
+            .is_some_and(|value| value.starts_with("Bearer "))
+    );
+    request.reply(UpstreamReply::json(serde_json::json!({ "data": [] })));
+    let result = check.await??;
+    assert!(matches!(
+        result,
+        stravia_core::db::models::ProviderConnectionCheckResult::Passed { .. }
+    ));
     let stored = gateway.admin().get_provider(&provider.id).await?;
     assert_eq!(stored.last_test_success, Some(true));
     assert!(stored.last_test_at.is_some());
     assert!(!stored.is_enabled);
+    upstream.assert_no_request();
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_connection_check_reports_upstream_status_and_parse_failures() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = new_gateway(directory.path().to_owned()).await?;
+    let mut upstream = TestUpstream::start().await;
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Saved check failures".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "openai".into(),
+                channel: "default".into(),
+                protocol: Some("openai".into()),
+                base_url: upstream.base_url.clone(),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "synthetic-check-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await?;
+
+    let check = spawn_connection_check(&gateway, &provider.id, Default::default());
+    let request = upstream.next().await;
+    assert_eq!(request.uri.path(), "/v1/models");
+    request.reply(UpstreamReply {
+        status: StatusCode::UNAUTHORIZED,
+        body: serde_json::to_vec(&serde_json::json!({"error": "upstream-secret"}))?,
+    });
+    let result = check.await??;
+    let serialized = serde_json::to_string(&result)?;
+    assert!(!serialized.contains("upstream-secret"));
+    match result {
+        ProviderConnectionCheckResult::Failed {
+            stage: ConnectionCheckStage::Upstream,
+            code,
+            upstream_status,
+            ..
+        } => {
+            assert_eq!(code, "authentication_failed");
+            assert_eq!(upstream_status, Some(401));
+        }
+        other => panic!("expected upstream failure, got {other:?}"),
+    }
+    assert_eq!(
+        gateway
+            .admin()
+            .get_provider(&provider.id)
+            .await?
+            .last_test_success,
+        Some(false)
+    );
+    assert!(
+        gateway
+            .admin()
+            .get_provider(&provider.id)
+            .await?
+            .credential_invalid()
+    );
+
+    let check = spawn_connection_check(&gateway, &provider.id, Default::default());
+    let request = upstream.next().await;
+    assert_eq!(request.uri.path(), "/v1/models");
+    request.reply(UpstreamReply {
+        status: StatusCode::OK,
+        body: b"<html>upstream-secret</html>".to_vec(),
+    });
+    let result = check.await??;
+    let serialized = serde_json::to_string(&result)?;
+    assert!(!serialized.contains("upstream-secret"));
+    match result {
+        ProviderConnectionCheckResult::Failed {
+            stage: ConnectionCheckStage::Response,
+            code,
+            ..
+        } => assert_eq!(code, "invalid_response"),
+        other => panic!("expected response failure, got {other:?}"),
+    }
+    assert_eq!(
+        gateway
+            .admin()
+            .get_provider(&provider.id)
+            .await?
+            .last_test_success,
+        Some(false)
+    );
+
+    let check = spawn_connection_check(&gateway, &provider.id, Default::default());
+    let request = upstream.next().await;
+    assert_eq!(request.uri.path(), "/v1/models");
+    request.reply(UpstreamReply {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        body: serde_json::to_vec(&serde_json::json!({"error": "auth-secret"}))?,
+    });
+    let result = check.await??;
+    let serialized = serde_json::to_string(&result)?;
+    assert!(!serialized.contains("auth-secret"));
+    match result {
+        ProviderConnectionCheckResult::Failed {
+            stage: ConnectionCheckStage::Upstream,
+            code,
+            upstream_status,
+            ..
+        } => {
+            assert_eq!(code, "upstream_error");
+            assert_eq!(upstream_status, Some(500));
+        }
+        other => panic!("expected upstream failure, got {other:?}"),
+    }
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert!(stored.credential_invalid());
+    upstream.assert_no_request();
+    Ok(())
+}
+
+#[tokio::test]
+async fn draft_connection_check_uses_draft_base_url_and_keeps_saved_provider() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let gateway = new_gateway(directory.path().to_owned()).await?;
+    let mut saved_upstream = TestUpstream::start().await;
+    let mut draft_upstream = TestUpstream::start().await;
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("Saved draft base".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "openai".into(),
+                channel: "default".into(),
+                protocol: Some("openai".into()),
+                base_url: saved_upstream.base_url.clone(),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "saved-secret".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await?;
+    let input = ProviderConnectionCheckInput {
+        configuration: Some(ProviderConfigurationPreviewInput {
+            provider_id: Some(provider.id.clone()),
+            vendor_id: "openai".into(),
+            channel: "default".into(),
+            protocol: Some("openai".into()),
+            base_url: draft_upstream.base_url.clone(),
+            options: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+        }),
+        use_proxy: Some(false),
+        authorization_id: None,
+    };
+    let check = spawn_connection_check(&gateway, &provider.id, input);
+    let request = draft_upstream.next().await;
+    assert_eq!(request.uri.path(), "/v1/models");
+    assert!(
+        request
+            .header("authorization")
+            .is_some_and(|value| value.contains("saved-secret")),
+        "draft check must merge the saved secret"
+    );
+    request.reply(UpstreamReply::json(serde_json::json!({ "data": [] })));
+    let result = check.await??;
+    assert!(matches!(
+        result,
+        ProviderConnectionCheckResult::Passed { .. }
+    ));
+    saved_upstream.assert_no_request();
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert_eq!(stored.base_url, saved_upstream.base_url);
+    assert_eq!(stored.last_test_success, None);
+    assert_eq!(stored.last_test_at, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn draft_connection_check_uses_saved_or_staged_oauth_without_binding_or_saving()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, storage) = new_memory_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "management-v2.wasm", false).await?;
+    let mut saved_upstream = TestUpstream::start().await;
+    let mut draft_upstream = TestUpstream::start().await;
+    let provider = create_oauth_provider(
+        &gateway,
+        &mut saved_upstream,
+        MANAGEMENT_VENDOR,
+        "Draft staged OAuth",
+        "saved-token",
+    )
+    .await?;
+    let mut input = ProviderConnectionCheckInput {
+        configuration: Some(ProviderConfigurationPreviewInput {
+            provider_id: Some(provider.id.clone()),
+            vendor_id: MANAGEMENT_VENDOR.into(),
+            channel: "default".into(),
+            protocol: Some("fixture-management".into()),
+            base_url: draft_upstream.base_url.clone(),
+            options: options(),
+            credentials: BTreeMap::new(),
+        }),
+        use_proxy: Some(false),
+        authorization_id: None,
+    };
+    let check = spawn_connection_check(&gateway, &provider.id, input.clone());
+    let request = draft_upstream.next().await;
+    assert_eq!(request.uri.path(), "/check");
+    assert_eq!(request.header("authorization"), Some("Bearer saved-token"));
+    request.reply(UpstreamReply::json(serde_json::json!({"accepted": true})));
+    assert!(matches!(
+        check.await??,
+        ProviderConnectionCheckResult::Passed { .. }
+    ));
+    let started = begin_oauth(
+        &gateway,
+        MANAGEMENT_VENDOR,
+        Some(provider.id.clone()),
+        &draft_upstream.base_url,
+    )
+    .await?;
+    let gw = gateway.clone();
+    let session_id = started.session_id.clone();
+    let completion_input = completion(&started);
+    let exchange = tokio::spawn(async move {
+        gw.admin()
+            .complete_oauth_session(&session_id, completion_input)
+            .await
+    });
+    let request = draft_upstream.next().await;
+    assert_eq!(request.uri.path(), "/oauth/exchange");
+    let staged_token = "draft-token";
+    request.reply(UpstreamReply::token(staged_token, "draft-refresh-token"));
+    assert!(matches!(
+        exchange.await??,
+        AuthSessionStatusData::Ready { .. }
+    ));
+
+    input.authorization_id = Some(started.session_id.clone());
+    let check = spawn_connection_check(&gateway, &provider.id, input);
+    let request = draft_upstream.next().await;
+    assert_eq!(request.method, Method::POST);
+    assert_eq!(request.uri.path(), "/check");
+    assert_eq!(request.operation(), "connection_check");
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {staged_token}").as_str())
+    );
+    assert_eq!(request.header("x-workspace"), Some("contract-workspace"));
+    request.reply(UpstreamReply::json(serde_json::json!({"accepted": true})));
+    let result = check.await??;
+    assert!(matches!(
+        result,
+        ProviderConnectionCheckResult::Passed {
+            verified: ConnectionCheckVerification::EndpointAndCredentials,
+            ..
+        }
+    ));
+    saved_upstream.assert_no_request();
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert_eq!(stored.last_test_success, None);
+    assert_eq!(stored.base_url, saved_upstream.base_url);
+    let saved_oauth = storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("saved oauth credential");
+    assert_eq!(saved_oauth.access_token, "saved-token");
+    assert!(matches!(
+        gateway
+            .admin()
+            .get_oauth_session_status(&started.session_id)
+            .await?,
+        AuthSessionStatusData::Ready { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_saved_connection_check_clears_invalid_credentials() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, storage) = new_memory_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "management-v2.wasm", false).await?;
+    let mut upstream = TestUpstream::start().await;
+    let provider = create_oauth_provider(
+        &gateway,
+        &mut upstream,
+        MANAGEMENT_VENDOR,
+        "Verified saved check",
+        "verified-token",
+    )
+    .await?;
+    let oauth = storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("saved oauth credential");
+    storage
+        .oauth_credentials()
+        .upsert(
+            &provider.id,
+            stravia_core::db::models::UpsertOAuthCredential {
+                driver_key: oauth.driver_key,
+                scheme: oauth.scheme,
+                access_token: oauth.access_token,
+                refresh_token: oauth.refresh_token,
+                expires_at: Some("2020-01-01T00:00:00Z".into()),
+                resource_url: oauth.resource_url,
+                subject_id: oauth.subject_id,
+                scopes: Some(oauth.scopes),
+                meta: Some(oauth.meta),
+            },
+        )
+        .await?;
+    let oauth = storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("expired credential");
+    assert!(
+        storage
+            .providers()
+            .mark_credential_invalid(
+                &provider.id,
+                ProviderCredentialVersion {
+                    provider_revision: provider.revision,
+                    oauth_status_version: Some(oauth.status_version),
+                },
+            )
+            .await?
+    );
+    // 底层存储写入仅用于准备失效证据；展示字段更新经过正式的缓存失效路径。
+    let invalid = gateway
+        .admin()
+        .update_provider(
+            &provider.id,
+            UpdateProvider {
+                name: Some("Verified saved check (invalid)".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(invalid.credential_invalid());
+    let mut check = spawn_connection_check(&gateway, &provider.id, Default::default());
+    let request = upstream.next().await;
+    assert_eq!(request.uri.path(), "/oauth/refresh");
+    request.reply(UpstreamReply::token(
+        "freshly-verified-token",
+        "fresh-refresh-token",
+    ));
+    let request = tokio::select! {
+        request = upstream.next() => request,
+        result = &mut check => panic!("check ended before probing refreshed credentials: {result:?}"),
+    };
+    assert_eq!(request.uri.path(), "/check");
+    assert_eq!(request.operation(), "connection_check");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer freshly-verified-token")
+    );
+    request.reply(UpstreamReply::json(serde_json::json!({"accepted": true})));
+    let result = check.await??;
+    assert!(
+        matches!(
+            result,
+            ProviderConnectionCheckResult::Passed {
+                verified: ConnectionCheckVerification::EndpointAndCredentials,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert!(!stored.credential_invalid());
+    assert!(stored.credential_invalid_at.is_none());
+    assert_eq!(stored.last_test_success, Some(true));
+    Ok(())
+}
+
+#[tokio::test]
+async fn static_connection_check_cannot_pass_or_clear_invalid() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, storage) = new_memory_gateway(directory.path().to_owned()).await?;
+    install(&gateway, "management-v2.wasm", false).await?;
+    let mut upstream = TestUpstream::start().await;
+    let provider = create_oauth_provider(
+        &gateway,
+        &mut upstream,
+        MANAGEMENT_VENDOR,
+        "Static fake success",
+        "fixture-static-check",
+    )
+    .await?;
+    let oauth = storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("saved oauth credential");
+    assert!(
+        storage
+            .providers()
+            .mark_credential_invalid(
+                &provider.id,
+                ProviderCredentialVersion {
+                    provider_revision: provider.revision,
+                    oauth_status_version: Some(oauth.status_version),
+                },
+            )
+            .await?
+    );
+    let invalid = gateway
+        .admin()
+        .update_provider(
+            &provider.id,
+            UpdateProvider {
+                name: Some("Static fake success (invalid)".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(invalid.credential_invalid());
+    let check = spawn_connection_check(&gateway, &provider.id, Default::default());
+    let result = check.await??;
+    match result {
+        ProviderConnectionCheckResult::Failed {
+            stage: ConnectionCheckStage::Response,
+            ..
+        } => {}
+        other => panic!("static fake success must fail in the response stage, got {other:?}"),
+    }
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert!(stored.credential_invalid());
+    assert_ne!(stored.last_test_success, Some(true));
     upstream.assert_no_request();
     Ok(())
 }
