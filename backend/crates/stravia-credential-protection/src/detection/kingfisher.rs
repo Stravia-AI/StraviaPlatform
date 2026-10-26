@@ -2,9 +2,10 @@
 //! See LICENSE.kingfisher, NOTICE.kingfisher and UPSTREAM.kingfisher.json.
 //! The rule data and matching semantics are adapted from that pinned release.
 //! Validation dependencies are not detection prerequisites in Kingfisher.
+use super::pattern::{Captures, Match, Regex};
 use super::{CredentialRule, Detector, Finding, Program, RedactionError, Result, Rule};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use regex::bytes::{Captures, Match, Regex, RegexBuilder};
+use regex::bytes::Regex as CommentRegex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -111,7 +112,7 @@ fn same_policy(a: &SourceRule, a_pattern: &[u8], b: &SourceRule, b_pattern: &[u8
         && a.pattern_requirements == b.pattern_requirements
 }
 
-fn canonicalize(rules: &mut Vec<SourceRule>, comments: &Regex) {
+fn canonicalize(rules: &mut Vec<SourceRule>, comments: &CommentRegex) {
     for (canonical, duplicate) in [
         ("kingfisher.artifactory.2", "kingfisher.jfrog.1"),
         ("kingfisher.plaid.2", "kingfisher.plaid.3"),
@@ -147,11 +148,12 @@ pub(super) fn extend(detector: &mut Detector) -> Result<()> {
     detector.kingfisher_safe_list = snapshot
         .safe_list
         .iter()
-        .map(|pattern| Regex::new(pattern).map_err(|_| invalid()))
+        .map(|pattern| CommentRegex::new(pattern).map_err(|_| invalid()))
         .collect::<Result<_>>()?;
     // Match the upstream comment removal and byte/ASCII regex mode. Betterleaks'
     // RE2 translation is deliberately not applied to these Rust-native patterns.
-    let comments = Regex::new(r"(?m)(\(\?#[^)]*\))|(\s\#[\sa-zA-Z]*$)").map_err(|_| invalid())?;
+    let comments =
+        CommentRegex::new(r"(?m)(\(\?#[^)]*\))|(\s\#[\sa-zA-Z]*$)").map_err(|_| invalid())?;
     // Reviewed pairs only; retain the first upstream identity and its ordering.
     // Both entries share this adapter's capture, safe-list and priority policy.
     // If an upstream update changes any effective condition, keep both rules.
@@ -172,11 +174,7 @@ pub(super) fn extend(detector: &mut Detector) -> Result<()> {
         }
         let uncommented = comments.replace_all(source.pattern.as_bytes(), &b""[..]);
         let pattern = std::str::from_utf8(&uncommented).map_err(|_| invalid())?;
-        let regex = RegexBuilder::new(pattern)
-            .unicode(false)
-            .size_limit(16 * 1024 * 1024)
-            .build()
-            .map_err(|_| invalid())?;
+        let regex = Regex::with_options(pattern, false, 16 * 1024 * 1024).map_err(|_| invalid())?;
         let checksum = source
             .pattern_requirements
             .checksum

@@ -1,7 +1,6 @@
 use super::*;
 
 use futures::TryStreamExt;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum SqlTurnChainStore {
@@ -48,16 +47,8 @@ impl SqlTurnChainStore {
                         nodes: chain
                             .nodes
                             .into_iter()
-                            .map(|node| SharedTurnNode {
-                                id: node.id.clone(),
-                                kind: node.kind,
-                                parent_id: node.parent_id.clone(),
-                                payload_version: node.payload_version,
-                                expires_at: chain.expires_at,
-                                raw: Some(Arc::new(node)),
-                                decoded: None,
-                            })
-                            .collect(),
+                            .map(|node| context.prepare_node(node, chain.expires_at))
+                            .collect::<Result<_, _>>()?,
                     });
                 }
             },
@@ -71,12 +62,19 @@ impl SqlTurnChainStore {
             .iter()
             .map(|row| deadline_from_unix_millis(row.4, now))
             .collect();
-        let mut nodes = rows
+        let nodes = rows
             .into_iter()
             .map(|(id, parent, version, payload, _, _)| {
                 decode_node(TurnNodeId::new(id), kind, parent, version, payload)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut deadlines = deadlines.into_iter();
+        let finish = |node, context: Option<&TurnReadContext>| {
+            context
+                .expect("history read context")
+                .prepare_node(node, deadlines.next().expect("history node deadline"))
+                .map_err(anyhow::Error::new)
+        };
         let restored = match self {
             Self::Sqlite(pool) => {
                 content::restore_sqlite_context(
@@ -85,8 +83,9 @@ impl SqlTurnChainStore {
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
                     &principal_key,
-                    &mut nodes,
+                    nodes,
                     Some(context),
+                    finish,
                 )
                 .await
             }
@@ -97,27 +96,22 @@ impl SqlTurnChainStore {
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
                     &principal_key,
-                    &mut nodes,
+                    nodes,
                     Some(context),
+                    finish,
                 )
                 .await
             }
         };
-        if let Err(error) = restored {
+        let nodes = restored.map_err(|error| {
             context.begin_read();
-            return Err(TurnUnavailable::Storage(error.to_string()));
-        }
-        for (node, expires_at) in nodes.into_iter().zip(deadlines) {
-            prefix.expires_at = prefix.expires_at.min(expires_at);
-            prefix.nodes.push(SharedTurnNode {
-                id: node.id.clone(),
-                kind,
-                parent_id: node.parent_id.clone(),
-                payload_version: node.payload_version,
-                expires_at,
-                raw: Some(Arc::new(node)),
-                decoded: None,
-            });
+            error
+                .downcast::<TurnUnavailable>()
+                .unwrap_or_else(|error| TurnUnavailable::Storage(error.to_string()))
+        })?;
+        for node in nodes {
+            prefix.expires_at = prefix.expires_at.min(node.expires_at);
+            prefix.nodes.push(node);
         }
         Ok(prefix)
     }
@@ -466,7 +460,7 @@ impl TurnChainStore for SqlTurnChainStore {
             .map(|(_, _, _, _, expires_at, _)| deadline_from_unix_millis(*expires_at, now))
             .min()
             .ok_or(TurnUnavailable::Unavailable)?;
-        let mut nodes = rows
+        let nodes = rows
             .into_iter()
             .map(|(id, parent_id, payload_version, payload, _, _)| {
                 decode_node(
@@ -478,7 +472,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        match self {
+        let nodes = match self {
             Self::Sqlite(pool) => {
                 content::restore_sqlite(
                     &mut *pool
@@ -486,7 +480,7 @@ impl TurnChainStore for SqlTurnChainStore {
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
                     &principal,
-                    &mut nodes,
+                    nodes,
                 )
                 .await
             }
@@ -497,7 +491,7 @@ impl TurnChainStore for SqlTurnChainStore {
                         .await
                         .map_err(|error| TurnUnavailable::Storage(error.to_string()))?,
                     &principal,
-                    &mut nodes,
+                    nodes,
                 )
                 .await
             }
@@ -987,13 +981,13 @@ impl TurnChainStore for SqlTurnChainStore {
                 ).bind(&metadata.id).bind(&metadata.principal)
                     .fetch_one(&mut *transaction).await
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
-                let mut restored = [decode_node(
+                let nodes = vec![decode_node(
                     TurnNodeId::new(metadata.id.clone()), TurnNodeKind::Response,
                     metadata.parent_id.clone(), version, payload,
                 )?];
-                content::$restore(&mut transaction, &metadata.principal, &mut restored).await
+                let restored = content::$restore(&mut transaction, &metadata.principal, nodes).await
                     .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
-                let [node] = restored;
+                let node = restored.into_iter().next().expect("restored node");
                 let prefix = decode(node, metadata.completed_at)
                     .map_err(TurnUnavailable::Storage)?;
                 // Current/no-index ancestors only populate the decoder's domain
@@ -1092,17 +1086,17 @@ impl SqlTurnChainStore {
                 for (id, principal, payload) in rows {
                     let envelope: serde_json::Value =
                         serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                    let mut nodes = vec![TurnNode {
+                    let nodes = vec![TurnNode {
                         id: TurnNodeId::new(id.clone()),
                         kind: TurnNodeKind::Response,
                         parent_id: None,
                         payload_version: 1,
                         payload: envelope,
                     }];
-                    {
+                    let nodes = {
                         let mut connection = $pool.acquire().await?;
-                        content::$restore(&mut connection, &principal, &mut nodes).await?;
-                    }
+                        content::$restore(&mut connection, &principal, nodes).await?
+                    };
                     let mut payload = nodes.into_iter().next().expect("restored node").payload;
                     edit(&mut payload);
                     let mut encoded = tokio::task::spawn_blocking(move || content::encode(payload))

@@ -10,6 +10,12 @@ Turn Chain 的不可变节点继续拥有模型历史事实，存储表示改为
 
 节点 envelope 为 `{"data": <外置槽位为 null 的原 payload>, "slots": [[json_pointer,key_index], ...], "contents": [content_key, ...]}`。contents 中每个摘要只出现一次，slots 保留重复项、数组位置与路径，key_index 指向 contents；嵌套父容器先于子槽恢复。节点 payload 只编码/解码一次，物化按整条链汇集唯一摘要并批量读取内容，验证解码正文 SHA-256 与 content_key 一致后按记录顺序还原。
 
+请求局部 Generation 读取在每个节点恢复后立即消费其 JSON 树并解码为领域节点，不同时保留整条链的展开 JSON 与解码结果。全部节点解码和领域折叠成功后，才允许将领域节点及暂存的外置内容纳入同一个请求局部字节预算；提前解码不等于缓存命中，也不能绕过预算。存储失败与领域解码失败分别传播，失败读取清除本次暂存内容，不污染已验证祖先或跨越 Principal、kind 与有效期边界。普通原始物化仍返回完整独立 JSON，持久化格式不变。
+
+归因只读访问祖先窗口时，累计视图借用已解码的内容项，不逐祖先深拷贝工具正文与元数据；仅缺少历史客户端输出的旧节点生成自有回退内容。Append、Replace 与输入／输出分界仍复用同一套客户端历史选择规则，借用只持续到访问回调结束，窗口预算和完整历史事实不变。
+
+独立 Server 使用不显式申请透明大页的 mimalloc，减少大型历史跨线程释放后的页驻留，并避免在碎片化主机上为透明大页同步整理内存；不更改存储格式、缓存预算、回收延迟或主机配置。真实数据库副本的整体进程测量、CPU 与吞吐口径见[内存回放验证](../research/protocol-http-benchmark.md#真实数据库副本凭据保护与历史读取的整体内存)。
+
 `turn_chain_contents` 使用 `(principal, content_key)` 唯一键、`(principal,id)` 唯一约束及单调分配的数值 id。`turn_chain_node_contents` 以 `(node_id,content_id)` 为主键，只保存节点对不同内容的引用集合，不保存 path；复合外键 `(node_id,principal)` 与 `(principal,content_id)` 保证归属一致。SQLite 此关联表使用 WITHOUT ROWID。写入先批量查询已存在内容（PostgreSQL `FOR KEY SHARE`），只对缺失项批量 INSERT RETURNING id，并写入不同内容引用；并发插入冲突后定向查询，不用无意义 DO UPDATE，不在热写入重复比较摘要冲突正文。
 
 同一 Gateway 的 SQLite 历史与普通 Observation 写入口共享异步写锁，在取得连接与写事务前排队，持有到提交完成，避免两类写入在 SQLite busy handler 中竞争。历史清理、引用重建与 Observation 生命周期写入使用同一锁；独立只读查询与文件 I/O 不持有它，也不在外部持锁后调用写入口。其他业务存储和其他进程不由此锁协调；PostgreSQL 不使用它，仍遵循数据库锁协议。

@@ -11,6 +11,8 @@
 mod expression;
 #[path = "detection/kingfisher.rs"]
 mod kingfisher;
+#[path = "detection/pattern.rs"]
+mod pattern;
 #[path = "detection/user_rules.rs"]
 mod user_rules;
 
@@ -18,7 +20,7 @@ pub use user_rules::CompiledCustomRules;
 
 use super::RedactionError;
 use expression::{Context, Program};
-use regex::bytes::Regex;
+use pattern::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -299,7 +301,7 @@ pub(super) struct Detector {
     tokenizer: tiktoken_rs::CoreBPE,
     words: HashSet<&'static str>,
     word_lengths: Vec<usize>,
-    kingfisher_safe_list: Vec<Regex>,
+    kingfisher_safe_list: Vec<regex::bytes::Regex>,
 }
 #[derive(Clone)]
 struct Finding<'a> {
@@ -463,6 +465,7 @@ impl Detector {
             let empty = self.context(raw, "", "", 0, 0);
             let skip_betterleaks = self.prefilter.evaluate(&empty)?;
             let lower = raw.to_lowercase();
+            let references = reference_ranges(raw);
             let mut candidates: Vec<Option<Vec<Finding<'_>>>> =
                 (0..self.rules.len()).map(|_| None).collect();
             let mut composites: Vec<Composite<'_>> = Vec::new();
@@ -476,13 +479,14 @@ impl Detector {
                     continue;
                 }
                 if candidates[index].is_none() {
-                    candidates[index] = Some(self.find(raw, index)?);
+                    candidates[index] = Some(self.find(raw, index, &references)?);
                 }
                 for component in &rule.components {
                     // Upstream component scans bypass keyword routing and do not
                     // recursively require their own components or skipReport.
                     if candidates[component.rule].is_none() {
-                        candidates[component.rule] = Some(self.find(raw, component.rule)?);
+                        candidates[component.rule] =
+                            Some(self.find(raw, component.rule, &references)?);
                     }
                 }
                 for primary in candidates[index].as_deref().unwrap_or_default() {
@@ -600,13 +604,17 @@ impl Detector {
         }
     }
 
-    fn find<'a>(&self, raw: &'a str, index: usize) -> Result<Vec<Finding<'a>>> {
+    fn find<'a>(
+        &self,
+        raw: &'a str,
+        index: usize,
+        references: &[std::ops::Range<usize>],
+    ) -> Result<Vec<Finding<'a>>> {
         let mut findings = if let Some(conditions) = &self.rules[index].kingfisher {
             kingfisher::find(self, raw, index, conditions)?
         } else {
             self.find_betterleaks(raw, index)?
         };
-        let references = reference_ranges(raw);
         findings.retain(|finding| {
             !references
                 .iter()

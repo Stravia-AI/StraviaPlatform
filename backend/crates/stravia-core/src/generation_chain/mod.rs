@@ -415,7 +415,7 @@ impl GenerationChain {
         principal: &Principal,
         node: &str,
         workspace: &mut Option<GenerationDiscoveryWorkspace>,
-        visit: impl FnMut(&str, &[AiItem], usize) + Send,
+        visit: impl FnMut(&str, &[Cow<'_, AiItem>], usize) + Send,
     ) -> anyhow::Result<bool> {
         workspace
             .get_or_insert_with(|| GenerationDiscoveryWorkspace::new(principal))

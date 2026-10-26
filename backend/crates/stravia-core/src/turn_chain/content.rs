@@ -485,24 +485,25 @@ macro_rules! backend {
             Ok(())
         }
 
-        /// Restores node payloads in place. Envelopes carry every slot path and
+        /// Restores node payloads. Envelopes carry every slot path and
         /// content key, so the reference table is never read here: unique keys
         /// are collected across the whole chain, fetched once and verified
         /// against their content_key before any slot is spliced.
         pub(super) async fn $restore(
             connection: &mut $conn,
             principal: &str,
-            nodes: &mut [TurnNode],
-        ) -> anyhow::Result<()> {
-            $restore_context(connection, principal, nodes, None).await
+            nodes: Vec<TurnNode>,
+        ) -> anyhow::Result<Vec<TurnNode>> {
+            $restore_context(connection, principal, nodes, None, |node, _| Ok(node)).await
         }
 
-        pub(super) async fn $restore_context(
+        pub(super) async fn $restore_context<T>(
             connection: &mut $conn,
             principal: &str,
-            nodes: &mut [TurnNode],
+            nodes: Vec<TurnNode>,
             mut context: Option<&mut stravia_runtime_contract::turn_chain::TurnReadContext>,
-        ) -> anyhow::Result<()> {
+            mut finish: impl FnMut(TurnNode, Option<&stravia_runtime_contract::turn_chain::TurnReadContext>) -> anyhow::Result<T> + Send,
+        ) -> anyhow::Result<Vec<T>> {
             let mut plans: Vec<Vec<(String, String)>> = Vec::with_capacity(nodes.len());
             let mut uses: HashMap<String, usize> = HashMap::new();
             for node in nodes.iter() {
@@ -585,7 +586,8 @@ macro_rules! backend {
                 ensure!(values.contains_key(*key), "missing history content");
             }
             drop(needed);
-            for (node, plan) in nodes.iter_mut().zip(plans) {
+            let mut restored = Vec::with_capacity(nodes.len());
+            for (mut node, plan) in nodes.into_iter().zip(plans) {
                 let mut data = node
                     .payload
                     .get_mut("data")
@@ -606,10 +608,11 @@ macro_rules! backend {
                     };
                 }
                 node.payload = data;
+                restored.push(finish(node, context.as_deref())?);
             }
             tracing::info!(target: "stravia::perf", content_read_count = content_reads,
                 reference_count = content_reads, "turn_chain.content.restore");
-            Ok(())
+            Ok(restored)
         }
     };
 }

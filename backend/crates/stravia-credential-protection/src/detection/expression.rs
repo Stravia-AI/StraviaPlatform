@@ -1,7 +1,7 @@
 //! Compiler for the finite local-filter vocabulary in the pinned Betterleaks snapshot.
 //! No validation expressions, dynamic functions, I/O, or runtime regex compilation.
 use super::super::RedactionError;
-use regex::bytes::{Regex, RegexBuilder};
+use super::pattern::Regex;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -44,10 +44,7 @@ pub(super) fn regex(source: &str) -> Result<Regex> {
             }
         }
     }
-    RegexBuilder::new(&pattern)
-        .size_limit(32 * 1024 * 1024)
-        .build()
-        .map_err(|_| invalid())
+    Regex::with_options(&pattern, true, 32 * 1024 * 1024).map_err(|_| invalid())
 }
 
 fn counted_repetition(mut chars: std::str::Chars<'_>) -> bool {

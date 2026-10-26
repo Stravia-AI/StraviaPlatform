@@ -21,6 +21,7 @@ path = "src/storage_test_harness.rs"
 required-features = ["test-harness"]
 
 [dependencies]
+mimalloc = { workspace = true }
 stravia-core = { workspace = true }
 stravia-runtime-contract = { workspace = true }
 stravia-media = { workspace = true }

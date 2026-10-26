@@ -710,3 +710,51 @@ uv run --locked --group test python -m tests.common.measure_protocol_http \
 BLAKE3 默认同为 256-bit 输出，不代表摘要等于 SHA256。按 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)，内容键和读回校验明确使用 raw JSON 的 SHA256，canonical 指纹也必须保留既有域、字节序与版本。因此不直接替换算法；若将来授权改变契约，必须一起设计算法标识、内容键与节点引用迁移，以及既有指纹的重建，而不是只替换 `Sha256` 类型。
 
 同算法换实现原则上可保留摘要，但全局后端切换仍需检查平台边界：[runtime-contract](../../backend/crates/stravia-runtime-contract/Cargo.toml) 被宿主与 Wasm 共享，[仓库目标](../../rust-toolchain.toml) 含 `wasm32-wasip2`，而 [AWS 支持矩阵](https://aws.github.io/aws-lc-rs/platform_support.html) 列出的 Wasm 是 Emscripten，不能用本机 native 微测代替 WASI 验证。当前保留 `sha2` 和全部持久化指纹契约。
+
+## 真实数据库副本：凭据保护与历史读取的整体内存
+
+此项验证使用真实数据库的一致性副本和配套 Debug 捕获，与上文新库、合成大正文的矩阵分开。原库只读，经 SQLite backup 获得 1,493,147,648 字节快照，`quick_check` 为 `ok`；2,324 条捕获请求全部成功索引。选择 claude-code、devin、antigravity、openai-codex、workbuddy 各一条中位附近和一条大请求，共十条，入口正文为 107,045–2,423,632 字节。它们覆盖真实 Vendor 的 Anthropic、Devin Connect、Gemini、Responses WebSocket 和 Chat Completions 上游路径。
+
+所有回放运行在仅有 loopback 的 Linux network namespace 内，以 CONNECT/TLS/HTTP/WebSocket 返回已录制的上游响应；保留原 Vendor、域名与区域校验，使用独立测试 CA 验证 TLS，不替换成 generic Provider。数据库写入、历史节点和凭据映射只落副本，正文、凭据和完整日志不进入仓库。并发批次必须恰好消费预期数量的录制推理 exchange，不允许额外推理 POST 请求；源码声明的模型发现、账户发现及额度 POST 查询仍被隔离阻断并单独计数，不伪造成功响应或关闭这些后台功能。其他辅助 GET 同样返回隔离错误，但未纳入此 POST 计数。比较客户端终态、文本、思考（含 encrypted content）和工具调用，归一化新生成的 History Marker 身份；不把 HTTP 200 视为输出等价，也不声称该比较器覆盖 usage、全部 metadata 或 Marker 授权。
+
+候选组合包括跨线程借还 regex 搜索工作区、每个输入只解析一次既有 Marker 范围、逐节点恢复后消费 JSON 解码，以及归因历史窗口借用内容项；独立 Server 入口使用 mimalloc，库与桌面入口不设置全局 allocator。不删检测规则，不关闭保护、历史或 Observation，不改变请求内容、Principal 边界、有效期与请求局部共享预算，也不调整 allocator purge 参数。
+
+初始 mimalloc 配置出现系统态 CPU 回退；内核采样定位到 `_mi_meta_zalloc` / `mi_page_extend_free` 引发透明大页缺页，进入 `compact_zone`、`migrate_pages` 和文件缓存页搬迁，而用户态扫描成本未增加。启用依赖已有的 `no_thp` feature，跳过 allocator 的显式 `MADV_HUGEPAGE` 建议；不修改主机 THP 策略，不以延长或缩短回收参数代替修复。在本机 `madvise` 策略下，这避免为 allocator 映射同步整理连续大页。诊断采样保存在私有 `cpu-kernel-candidate.perf.data`，不用于正式性能比值。
+
+测量采用无 profiler 的 `cargo build --locked --release -p stravia-server --no-default-features` 产物，Linux x64、Rust 1.99.1、20 个可用逻辑处理器。每次从同一快照新建副本；先预热两版各自的 Wasm 产物，再冻结并复制同一份受信任编译缓存，避免只命中基线缓存而让候选重新编译。每条 case 启动独立 Server，worker 复用 HTTP 连接，每条 case 跑八轮，前两轮只从热态 CPU 与吞吐统计中排除。并发一和八分别执行两组配对，顺序为基线→候选、候选→基线。
+
+整体峰值取子进程 `ru_maxrss`，不是请求前后 RSS 差值或局部分配器峰值；全生命周期 CPU 包含启动、全部请求及后台写入排空，另列热态 CPU/请求和客户端完整响应吞吐。回放器等待正常退出并要求退出码为零：通用 E2E 的八秒清理窗口曾强杀基线的大历史 case，不能把那些截断结果用于验收。WebSocket 回放的解掩码改用内置整数 XOR，边界结果与逐字节实现一致，避免 Python 字节循环在并发回放中成为瓶颈；同一驱动同时用于基线和候选。此结果只代表已选真实样本与负载，不外推为生产上游延迟或所有机器的保证。
+
+最终验收采用 `clean-c1`、`clean-c8` 两组记录。基线二进制 SHA256 为 `ae541d6f4e0a629e5379c983190ff333a3f24ab29e2c0f085bcb16a2ad76e694`；优化后二进制为 `51a1d4fd77066d179cd8b69e19fb7571496d57a8b173c205ba4f164827643816`。同一版本在全部配对中的摘要一致。
+
+|并发|配对 / 版本|整体峰值 RSS，MiB|全生命周期 CPU，ms/请求|热态 CPU，ms/请求|热态吞吐，请求/秒|
+|---:|---|---:|---:|---:|---:|
+|1|0 / 基线|1875.72|668.41|347.50|3.742|
+|1|0 / 优化|821.69|565.67|297.83|4.272|
+|1|1 / 基线|1699.88|642.79|330.50|3.829|
+|1|1 / 优化|824.03|563.97|296.00|4.257|
+|8|0 / 基线|3040.66|1011.67|390.92|14.147|
+|8|0 / 优化|1413.21|778.69|352.88|15.640|
+|8|1 / 基线|3050.98|994.41|383.56|13.259|
+|8|1 / 优化|1453.33|790.12|350.23|15.646|
+
+四次配对均满足整体峰值至少减半，且全生命周期 CPU、热态 CPU 与热态吞吐均无回退。共 2,880 次 HTTP 请求全部为 200，比较范围内的输出全部一致，录制推理 exchange 数量全部符合预期，断流、未知推理 POST 与计时批次内被阻断的辅助 POST 均为零；80 个 Server 进程全部正常退出，没有强杀截断。
+
+退出后将每份副本与初始快照按记录 ID 作只读差集核对：每次回放分别新增预期的 80 或 640 个 Generation 节点与 Run。合计 2,880 个新 Run 全为 `completed`，客户端输出已提交，完成与交付时间非空，全部关联 Generation，且 `background_active` 与 `user_interrupted` 均为 false；没有用缺失持久化记录或遗留后台工作换取资源数字。
+
+最终当前状态复核重新构建 Server，二进制摘要仍与实测产物一致；重新执行上述完整 Rust 单测和隔离 PostgreSQL contract，并从原始响应字节重新比较全部回放输出。八份测量副本的凭据保护开关均为 true，均有五条新建映射（四条已发布）和三条续期映射；按 Principal、受保护值与发布状态比较，基线与候选一致。快照未配置自定义规则，复核未添加或删除规则。另以只读连接抽查生产库中的八个不可变节点，载荷与快照一致；全部复核只输出计数，不输出正文或凭据。
+
+热态吞吐只是有限批次的客户端完整响应速率，不等于长期稳态承载上限。并发八的大历史 case 在最后一批响应后仍有后台归因写入排空：基线两次约 343 / 358 秒，优化后约 230 / 244 秒。这些工作全部计入上表的生命周期 CPU 与整体峰值，不计入热态吞吐；不通过丢弃后台任务或缩短超时掩盖积压。此路径仍有继续优化空间，但不在本次达标结论之外另作性能保证。
+
+准备完整 Vendor fixtures 后，Core 为 1,414 passed / 4 ignored，Credential Protection 为 33 passed，Runtime Contract 为 93 passed；另外使用仅 Unix socket 的隔离 PostgreSQL 实际执行并通过 reusable-prefix store contract，不以未配置 PostgreSQL 时的提前返回计数。全工作区 Rust 格式检查、Credential Protection 的 `clippy --all-targets -- -D warnings` 与 Server release 构建通过。Core 广域 Clippy 仍有原有的未使用 `bundled`、参数数量和可合并 `if` 告警；未执行全仓 `task test:all` 或桌面实机验证。
+
+早期强杀、编译缓存不对等、默认 THP 配置及诊断进程遗留的记录均不用于验收。另有一轮 `no-thp-c1` 在一条 case 启动阶段超时，系统态 CPU 异常；随后定向内核采样与最终完整配对未复现。其与当时宿主内存压力、诊断进程遗留的因果关系未证实，不能声称已证明所有启动场景稳定。原始失败记录保留，不与最终成功样本混合。
+
+脱敏汇总为 `target/test-results/memory-replay-summary.json`。真实数据、录制内容、证书、日志、驱动与逐轮结果仅留在权限 `0700` 的 `/tmp/stravia-memory-ejfi0vja/`，未写入仓库；复测需要该私有目录及有效测试证书。相同条件可用新标签运行以下命令，不能覆盖已有结果目录：
+
+```bash
+.venv/bin/python /tmp/stravia-memory-ejfi0vja/run-pairs.py \
+  --label repeat-c1 --concurrency 1 --rounds 8 --pairs 2
+.venv/bin/python /tmp/stravia-memory-ejfi0vja/run-pairs.py \
+  --label repeat-c8 --concurrency 8 --rounds 8 --pairs 2
+```
