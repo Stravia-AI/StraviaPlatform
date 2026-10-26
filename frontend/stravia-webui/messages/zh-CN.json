@@ -1819,7 +1819,7 @@
   "observation_request": "请求",
   "observation_resize_inspector": "调整详情面板宽度",
   "observation_return_running": "回到运行中交互",
-  "observation_roots_loaded": "已加载 {loaded} / {total} 条链路",
+  "observation_running_count": "{count} 条运行中",
   "observation_route": "模型 ID",
   "observation_show_minimap": "显示小地图",
   "observation_started": "开始时间",

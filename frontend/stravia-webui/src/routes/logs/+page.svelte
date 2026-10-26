@@ -361,7 +361,6 @@ async function downloadBundle(): Promise<void> {
               selectedPath={ws.selectedPath}
               loadingMore={ws.loadingMore}
               nextCursor={ws.nextCursor}
-              rootTotal={ws.rootTotal}
               latestId={ws.latestInteraction?.id}
               followPaused={ws.followPaused}
               newActivityAvailable={ws.hasNewActivity}
