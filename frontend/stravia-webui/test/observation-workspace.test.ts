@@ -8,6 +8,7 @@ import {
 import type {
   ConfirmedUsage,
   FailedRequestDetail,
+  FailedRequestPage,
   FailedRequestSummary,
   ForestPage,
   ForestRoot,
@@ -1164,6 +1165,151 @@ describe('bounded refresh orchestration', () => {
     await h.advance(100)
     expect(h.snap().failures.map((item) => item.id)).toEqual(['failed'])
     expect(h.snap().failureTotal).toBe(1)
+    h.controller.dispose()
+  })
+
+  test('live failure refresh keeps visible rows without entering the loading state', async () => {
+    const refresh = deferred<FailedRequestPage>()
+    let failures = 0
+    const h = harness({
+      failures: () =>
+        ++failures === 1
+          ? Promise.resolve({ items: [failureSummary('old')], total: 1, next_cursor: null, snapshot_sequence: 10 })
+          : refresh.promise,
+    })
+    await h.controller.start()
+    await h.controller.tabChanged('failures')
+    expect(h.snap().failureLoading).toBe(false)
+    await h.emit(streamEvent(11, 'i1', 999_500))
+    expect(failures).toBe(2)
+    expect(h.snap().failureLoading).toBe(false)
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['old'])
+    refresh.resolve({
+      items: [failureSummary('new'), failureSummary('old')],
+      total: 2,
+      next_cursor: null,
+      snapshot_sequence: 11,
+    })
+    await h.advance(0)
+    expect(h.snap().failureLoading).toBe(false)
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['new', 'old'])
+    h.controller.dispose()
+  })
+
+  test('a failed live refresh keeps the error visible while the next refresh is in flight', async () => {
+    const retry = deferred<FailedRequestPage>()
+    let failures = 0
+    const h = harness({
+      failures: () => {
+        failures += 1
+        if (failures === 2) return Promise.reject(new Error('offline'))
+        if (failures === 3) return retry.promise
+        return Promise.resolve({ items: [failureSummary('old')], total: 1, next_cursor: null, snapshot_sequence: 10 })
+      },
+    })
+    await h.controller.start()
+    await h.controller.tabChanged('failures')
+    await h.emit(streamEvent(11, 'i1', 999_500))
+    expect(h.snap().failureError).toBeInstanceOf(Error)
+    await h.emit(streamEvent(12, 'i1', 999_500))
+    expect(failures).toBe(3)
+    expect(h.snap().failureError).toBeInstanceOf(Error)
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['old'])
+    retry.resolve({ items: [failureSummary('new')], total: 1, next_cursor: null, snapshot_sequence: 12 })
+    await h.advance(0)
+    expect(h.snap().failureError).toBeUndefined()
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['new'])
+    h.controller.dispose()
+  })
+
+  test('load-more clicked during a live refresh runs after it from the refreshed cursor', async () => {
+    const refresh = deferred<FailedRequestPage>()
+    let failures = 0
+    const h = harness({
+      failures: (query) => {
+        failures += 1
+        if (failures === 2) return refresh.promise
+        if (query.cursor === 'c3')
+          return Promise.resolve({ items: [failureSummary('f3')], total: 3, next_cursor: null, snapshot_sequence: 100 })
+        return Promise.resolve({ items: [failureSummary('f1')], total: 3, next_cursor: 'c2', snapshot_sequence: 100 })
+      },
+    })
+    await h.controller.start()
+    await h.controller.tabChanged('failures')
+    await h.emit(streamEvent(11, 'i1', 999_500))
+    const more = h.controller.loadFailures(false)
+    expect(failures).toBe(2)
+    refresh.resolve({
+      items: [failureSummary('f0'), failureSummary('f1')],
+      total: 3,
+      next_cursor: 'c3',
+      snapshot_sequence: 100,
+    })
+    await more
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['f0', 'f1', 'f3'])
+    expect(h.snap().failureCursor).toBeNull()
+    expect(h.snap().failureLoading).toBe(false)
+    h.controller.dispose()
+  })
+
+  test('a live refresh arriving during load-more runs after it instead of being merged into it', async () => {
+    const more = deferred<FailedRequestPage>()
+    let failures = 0
+    const h = harness({
+      failures: (query) => {
+        failures += 1
+        if (failures === 1)
+          return Promise.resolve({ items: [failureSummary('f1')], total: 2, next_cursor: 'c2', snapshot_sequence: 10 })
+        if (failures === 2) return more.promise
+        expect(query.cursor).toBeUndefined()
+        return Promise.resolve({
+          items: [failureSummary('fresh'), failureSummary('f1'), failureSummary('f2')],
+          total: 3,
+          next_cursor: null,
+          snapshot_sequence: 100,
+        })
+      },
+    })
+    await h.controller.start()
+    await h.controller.tabChanged('failures')
+    const pending = h.controller.loadFailures(false)
+    await h.emit(streamEvent(11, 'i1', 999_500))
+    expect(failures).toBe(2)
+    more.resolve({ items: [failureSummary('f2')], total: 2, next_cursor: null, snapshot_sequence: 10 })
+    await pending
+    for (let i = 0; i < 20; i += 1) await Promise.resolve()
+    expect(failures).toBe(3)
+    expect(h.snap().failures.map((item) => item.id)).toEqual(['fresh', 'f1', 'f2'])
+    h.controller.dispose()
+  })
+
+  test('live refresh re-queries every loaded row so earlier load-more pages survive', async () => {
+    const rows = (from: number, count: number) =>
+      Array.from({ length: count }, (_, index) => failureSummary(`f${from + index}`))
+    const limits: number[] = []
+    const h = harness({
+      failures: (query) => {
+        limits.push(query.limit ?? 30)
+        return Promise.resolve(
+          query.cursor === 'c2'
+            ? { items: rows(30, 10), total: 40, next_cursor: null, snapshot_sequence: 100 }
+            : {
+                items: rows(0, Math.min(query.limit ?? 30, 40)),
+                total: 40,
+                next_cursor: (query.limit ?? 30) < 40 ? 'c2' : null,
+                snapshot_sequence: 100,
+              },
+        )
+      },
+    })
+    await h.controller.start()
+    await h.controller.tabChanged('failures')
+    await h.controller.loadFailures(false)
+    expect(h.snap().failures).toHaveLength(40)
+    await h.emit(streamEvent(11, 'i1', 999_500))
+    expect(limits).toEqual([30, 30, 40])
+    expect(h.snap().failures).toHaveLength(40)
+    expect(h.snap().failureCursor).toBeNull()
     h.controller.dispose()
   })
 })
