@@ -26,7 +26,9 @@ from tests.e2e.admin.test_observations import _create_route, _detail, _route_int
 
 
 @contextmanager
-def continuation_provider(protocol: str) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+def continuation_provider(
+    protocol: str, *, tool_whitespace: bool = False,
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
     """只模拟外部 wire；续接、Marker、usage 和 Observation 均走真实服务。"""
     received: list[dict[str, Any]] = []
 
@@ -88,6 +90,8 @@ def continuation_provider(protocol: str) -> Iterator[tuple[str, list[dict[str, A
                     "content": None if calls else "Synthetic tool work complete.",
                 }
                 if calls:
+                    if tool_whitespace and round_index > 0:
+                        message["content"] = "\n\n"
                     message["tool_calls"] = [
                         {"id": call["id"], "type": "function",
                          "function": {"name": call["name"], "arguments": json.dumps(call["args"])}}
@@ -149,7 +153,7 @@ def continuation_provider(protocol: str) -> Iterator[tuple[str, list[dict[str, A
 
 
 def replay_round(env: dict[str, Any], key: str, model: str, history: list[dict[str, Any]],
-                 stream: bool) -> dict[str, Any]:
+                 stream: bool, *, omit_tool_whitespace: bool = False) -> dict[str, Any]:
     payload = {
         "model": model, "stream": stream, "input": history,
         "tools": [{"type": "function", "name": "local_probe",
@@ -177,16 +181,23 @@ def replay_round(env: dict[str, Any], key: str, model: str, history: list[dict[s
         )
         assert status == 200, response
         delivered_items = response["output"]
-    # 回放真实交付的 item；只省略协议规定的非语义身份/状态，绝不手工改写边界。
+    # 常规路径完整回放；容错场景模拟客户端省略工具轮纯空白消息，不修改工具或推理。
+    has_calls = any(item["type"] == "function_call" for item in delivered_items)
     history.extend(
         {name: value for name, value in item.items() if name not in ("id", "status")}
         for item in delivered_items
+        if not (
+            omit_tool_whitespace and has_calls and item["type"] == "message"
+            and all(part.get("type") == "output_text" and not part.get("text", "").strip()
+                    for part in item.get("content", []))
+        )
     )
     return response
 
 
 def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict[str, Any]:
-    with continuation_provider(protocol) as (upstream, received):
+    omit_tool_whitespace = mode == "omitted-tool-whitespace"
+    with continuation_provider(protocol, tool_whitespace=omit_tool_whitespace) as (upstream, received):
         model = f"synthetic-continuation-{protocol}-{mode}"
         route, key = _create_route({**env, "mock": upstream}, model, retry_budget=0, protocol=protocol)
         status, body = http_request("PUT", f"{env['admin']}/api/v1/observations/debug",
@@ -195,11 +206,17 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
         question = "Read synthetic local values, then report completion."
         history: list[dict[str, Any]] = [{"role": "user", "content": question}]
         previous_node: str | None = None
+        previous_run: str | None = None
+        first_node: str | None = None
         current_detail: dict[str, Any] = {}
         delivered_usage: list[dict[str, Any]] = []
         for round_index in range(6):
-            stream = mode == "stream" or (mode == "alternating" and round_index % 2 == 0)
-            response = replay_round(env, key, model, history, stream)
+            stream = mode in ("stream", "omitted-tool-whitespace") or (
+                mode == "alternating" and round_index % 2 == 0
+            )
+            response = replay_round(
+                env, key, model, history, stream, omit_tool_whitespace=omit_tool_whitespace,
+            )
             delivered_usage.append(response["usage"])
             calls = [item for item in response["output"] if item["type"] == "function_call"]
             history.extend({"type": "function_call_output", "call_id": call["call_id"],
@@ -220,8 +237,16 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
 
             current_detail = _wait_for("persisted actual-wire continuation", persisted)
             current_run = current_detail["runs"][-1]
-            assert current_run["generation_parent_id"] == previous_node
+            assert current_run["generation_parent_id"] == (
+                first_node if omit_tool_whitespace else previous_node
+            )
+            assert current_run["parent_run_id"] == previous_run
+            assert all(run["status"] == "superseded" and not run["user_interrupted"]
+                       for run in current_detail["runs"][:-1])
             previous_node = current_run["generation_node_id"]
+            previous_run = current_run["id"]
+            if first_node is None:
+                first_node = previous_node
             assert calls or round_index == 5
         assert len(received) == 6
         events = [event for run in current_detail["runs"] for event in run["events"]]
@@ -258,8 +283,11 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
 @pytest.mark.e2e
 @pytest.mark.storage
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-@pytest.mark.parametrize("protocol", ["google-gemini", "openai-compatible"])
-@pytest.mark.parametrize("mode", ["stream", "nonstream", "alternating"])
+@pytest.mark.parametrize("protocol,mode", [
+    (protocol, mode)
+    for protocol in ["google-gemini", "openai-compatible"]
+    for mode in ["stream", "nonstream", "alternating"]
+] + [("openai-compatible", "omitted-tool-whitespace")])
 def test_actual_wire_history_preserves_ancestry_and_confirmed_usage(
     stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path: Path,
     backend: str, protocol: str, mode: str,
