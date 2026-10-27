@@ -464,12 +464,21 @@ impl Gateway {
                                 | (VendorRequest::MediaImage(_), OperationOutput::MediaImage(_))
                         );
                         if !output_matches {
+                            // 本地协议契约失败，不是上游错误。
                             attempt.finish(
                                 "failed",
                                 None,
                                 Some("vendor_output_invalid".into()),
                                 None,
-                                None,
+                                Some(&crate::interaction_observation::FailureDiagnostic {
+                                    source: Some("platform".into()),
+                                    code: Some("vendor_output_invalid".into()),
+                                    message: Some(
+                                        "Vendor returned an output for the wrong operation".into(),
+                                    ),
+                                    status_code: None,
+                                    upstream_code: None,
+                                }),
                             );
                             anyhow::bail!("Vendor returned an output for the wrong operation");
                         }
@@ -506,6 +515,20 @@ impl Gateway {
                             if !sent.load(std::sync::atomic::Ordering::Acquire) {
                                 policy.release_unsent_exception();
                             }
+                            // 未发送的本地失败：来源固定为 platform，不能计入上游错误。
+                            attempt.finish(
+                                "failed",
+                                None,
+                                Some(error.code.clone()),
+                                None,
+                                Some(&crate::interaction_observation::FailureDiagnostic {
+                                    source: Some("platform".into()),
+                                    code: Some(error.code.clone()),
+                                    message: Some(error.message.clone()),
+                                    status_code: None,
+                                    upstream_code: None,
+                                }),
+                            );
                             policy.skip_current();
                             if matches!(error.code.as_str(), "target_ineligible" | "target_output_modality_mismatch") {
                                 excluded.insert(selected_target_key(&target));
@@ -525,15 +548,13 @@ impl Gateway {
                             )
                             .await;
                         }
+                        let diagnostic = failure.diagnostic();
                         attempt.finish(
                             "failed",
-                            failure
-                                .error
-                                .downcast_ref::<RuntimeError>()
-                                .and_then(RuntimeError::upstream_status),
+                            diagnostic.status_code,
                             Some(failure.code.to_owned()),
                             None,
-                            None,
+                            Some(&diagnostic),
                         );
                         let Some(kind) = failure.retry_kind.clone() else {
                             return Err(failure.error);
@@ -753,6 +774,8 @@ struct RouteFailure {
     retry_kind: Option<AiErrorKind>,
     retry_after: Option<Duration>,
     code: &'static str,
+    /// 上游请求是否已经发出。取消、未发送的本地失败不得计入上游错误。
+    upstream_started: bool,
 }
 
 impl RouteFailure {
@@ -806,6 +829,39 @@ impl RouteFailure {
             retry_kind,
             retry_after,
             code,
+            upstream_started,
+        }
+    }
+
+    /// 尝试行错误来源。上游可用率只统计真正由上游产生、或上游已开始后
+    /// 超时的失败；本地准备失败、未发送与取消保持 platform。
+    /// `retry_kind` 会过滤请求级 4xx 且不表达取消，不能作为来源判定。
+    fn diagnostic(&self) -> crate::interaction_observation::FailureDiagnostic {
+        use stravia_vendor_sdk::ErrorKind;
+        let runtime = self.error.downcast_ref::<RuntimeError>();
+        let upstream = runtime.is_some_and(|runtime| {
+            runtime.is_upstream_failure()
+                || crate::plugin::execution::is_credential_rejection(&self.error)
+                || (self.upstream_started
+                    && matches!(
+                        runtime,
+                        RuntimeError::DeadlineExceeded
+                            | RuntimeError::Plugin {
+                                kind: ErrorKind::DeadlineExceeded,
+                                ..
+                            }
+                    ))
+        });
+        crate::interaction_observation::FailureDiagnostic {
+            source: Some(if upstream { "upstream" } else { "platform" }.into()),
+            code: Some(self.code.into()),
+            message: Some(
+                runtime
+                    .and_then(RuntimeError::diagnostic_message)
+                    .map_or_else(|| self.error.to_string(), str::to_owned),
+            ),
+            status_code: runtime.and_then(RuntimeError::upstream_status),
+            upstream_code: None,
         }
     }
 }

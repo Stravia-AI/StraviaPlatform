@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Instant;
 
@@ -144,6 +144,9 @@ pub(crate) struct AttemptObservation {
     thinking_active: AtomicBool,
     thinking_items: Mutex<ObservedThinkingItems>,
     first_token_timed_out: Option<Arc<AtomicBool>>,
+    /// 上游传输状态位；仅 live Model Turn 提供，用于在 Drop 收尾时区分
+    /// 「上游已开始的首 token 超时」与本地准备超时。
+    upstream_state: Option<Arc<AtomicU8>>,
 }
 
 impl AttemptObservation {
@@ -197,7 +200,13 @@ impl AttemptObservation {
             thinking_active: AtomicBool::new(false),
             thinking_items: Mutex::new(ObservedThinkingItems::default()),
             first_token_timed_out,
+            upstream_state: None,
         }
+    }
+
+    pub(crate) fn with_upstream_state(mut self, state: Arc<AtomicU8>) -> Self {
+        self.upstream_state = Some(state);
+        self
     }
 
     pub(crate) fn with_usage_ledger(
@@ -443,16 +452,44 @@ impl Drop for AttemptObservation {
         if let Some(span) = self.first_token_span.get_mut().take() {
             span.record("status", "abandoned");
         }
-        let reason = if self
+        let timed_out = self
             .first_token_timed_out
             .as_ref()
-            .is_some_and(|signal| signal.load(Ordering::Acquire))
-        {
+            .is_some_and(|signal| signal.load(Ordering::Acquire));
+        let reason = if timed_out {
             "first_token_timeout"
         } else {
             "attempt_aborted"
         };
-        self.finish("failed", None, Some(reason.into()), None, None);
+        // 首 token 超时的收尾发生在 driver 被取消之后，普通 finish 路径不会
+        // 再带诊断。上游已发出请求时它是上游错误；本地准备超时仍是 platform。
+        let diagnostic = timed_out.then(|| {
+            let upstream = self
+                .upstream_state
+                .as_ref()
+                .is_some_and(|state| super::live::upstream_request_started(state));
+            FailureDiagnostic {
+                source: Some(if upstream { "upstream" } else { "platform" }.into()),
+                code: Some(reason.into()),
+                message: Some(
+                    if upstream {
+                        "Target did not produce a First Token before its timeout"
+                    } else {
+                        "Local Provider preparation exceeded the First Token timeout"
+                    }
+                    .into(),
+                ),
+                status_code: None,
+                upstream_code: None,
+            }
+        });
+        self.finish(
+            "failed",
+            None,
+            Some(reason.into()),
+            None,
+            diagnostic.as_ref(),
+        );
     }
 }
 

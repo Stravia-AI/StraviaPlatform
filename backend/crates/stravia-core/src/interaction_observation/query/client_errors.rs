@@ -1,8 +1,15 @@
 use super::*;
 
-// 失败列表使用请求级失败事实，不能从轮次或尝试状态推断请求失败。
-const FAILED_SELECT: &str = "
-SELECT r.id,'rejection' AS kind,COALESCE(r.started_at,r.occurred_at) AS started_at,
+// 客户端错误使用请求级终局事实，不能从轮次或尝试状态推断请求失败。
+// 拒绝记录一律是“错误的请求”；运行按收口时写入的 `rejected_before_target`
+// 区分“错误的请求”（未进入 Target 选择）与“失败的请求”。
+// 取消类终止原因（`CANCELLED_TERMINAL_REASONS`）既不是失败的请求也不是
+// 错误的请求，与运行终态事件的排除规则保持一致。
+fn client_error_select() -> String {
+    format!(
+        "
+SELECT r.id,'rejection' AS kind,'rejected' AS error_type,
+COALESCE(r.started_at,r.occurred_at) AS started_at,
 r.duration_ms,r.api_key_id,r.api_key_name,r.request_model AS model,
 (SELECT id FROM models WHERE model_id=r.request_model) AS route_id,
 NULL AS model_display_name,NULL AS interaction_id,NULL AS root_id,NULL AS run_id,
@@ -12,7 +19,9 @@ r.started_at IS NULL AS observation_gap,r.expires_at
 FROM rejected_request_observations r
 WHERE r.status_code<>499 AND r.code NOT IN ('request_aborted','cancelled','client_disconnected')
 UNION ALL
-SELECT r.id,'run' AS kind,r.started_at,r.finished_at-r.started_at AS duration_ms,
+SELECT r.id,'run' AS kind,
+CASE WHEN r.rejected_before_target THEN 'rejected' ELSE 'failed' END AS error_type,
+r.started_at,r.finished_at-r.started_at AS duration_ms,
 i.api_key_id,i.api_key_name,r.request_model AS model,r.route_id,r.model_display_name,
 i.id AS interaction_id,i.root_id,r.id AS run_id,r.failure_json,r.terminal_reason AS code,
 CAST(NULL AS BIGINT) AS status_code,
@@ -20,12 +29,15 @@ CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
 i.observation_gap OR r.failure_json IS NULL AS observation_gap,r.expires_at
 FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id
 WHERE r.status='failed' AND r.finished_at IS NOT NULL
-AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted'))";
+AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ({CANCELLED_TERMINAL_REASONS}))"
+    )
+}
 
 #[derive(FromRow)]
-struct FailedRow {
+struct ClientErrorRow {
     id: String,
     kind: String,
+    error_type: String,
     started_at: i64,
     duration_ms: Option<i64>,
     api_key_id: Option<String>,
@@ -42,8 +54,8 @@ struct FailedRow {
     observation_gap: bool,
 }
 
-impl FailedRow {
-    fn summary(mut self, store: &ObservationStore) -> anyhow::Result<FailedRequestSummary> {
+impl ClientErrorRow {
+    fn summary(mut self, store: &ObservationStore) -> anyhow::Result<ClientErrorSummary> {
         if self.debug_status != "none" {
             let trace = if self.kind == "rejection" {
                 store.debug_trace_index().for_rejection(&self.id)
@@ -62,10 +74,11 @@ impl FailedRow {
                 upstream_code: None,
             },
         };
-        Ok(FailedRequestSummary {
+        Ok(ClientErrorSummary {
             request_id: self.id.clone(),
             id: self.id,
             kind: self.kind,
+            request_type: self.error_type,
             started_at: self.started_at,
             duration_ms: self.duration_ms,
             api_key_id: self.api_key_id,
@@ -84,18 +97,19 @@ impl FailedRow {
     }
 }
 
-type FailedCursor = (i64, String, String);
+type ClientErrorCursor = (i64, String, String);
 
 // 两个后端使用同一查询形状，仅绑定参数的编码由 SQLx 后端决定。
-macro_rules! failed_rows {
+macro_rules! client_error_rows {
     ($pool:expr, $db:ty, $query:expr, $cursor:expr, $window:expr, $limit:expr, $identity:expr) => {{
-        let q: &FailedRequestQuery = $query;
+        let q: &ClientErrorQuery = $query;
         let window: &QueryWindow = $window;
         let identity: Option<(&str, &str)> = $identity;
+        let select = client_error_select();
         let now = chrono::Utc::now().timestamp_millis();
         let filtered = |columns: &str| {
             let mut sql = QueryBuilder::<$db>::new("SELECT ");
-            sql.push(columns).push(" FROM (").push(FAILED_SELECT).push(") f WHERE f.expires_at>").push_bind(now);
+            sql.push(columns).push(" FROM (").push(&select).push(") f WHERE f.expires_at>").push_bind(now);
             if let Some((kind, id)) = identity {
                 sql.push(" AND f.kind=").push_bind(kind).push(" AND f.id=").push_bind(id);
             } else {
@@ -113,6 +127,9 @@ macro_rules! failed_rows {
                 if let Some(provider) = &q.provider {
                     sql.push(" AND EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=f.run_id AND a.provider_id=")
                         .push_bind(provider).push(")");
+                }
+                if let Some(request_type) = &q.request_type {
+                    sql.push(" AND f.error_type=").push_bind(request_type);
                 }
             }
             sql
@@ -132,39 +149,42 @@ macro_rules! failed_rows {
                 .push(" AND f.id>").push_bind(id).push("))))");
         }
         sql.push(" ORDER BY f.started_at DESC,f.kind,f.id LIMIT ").push_bind($limit);
-        (total, sql.build_query_as::<FailedRow>().fetch_all($pool).await?)
+        (total, sql.build_query_as::<ClientErrorRow>().fetch_all($pool).await?)
     }};
 }
 
 impl super::super::InteractionObservation {
-    pub(crate) async fn failed_requests(
+    pub(crate) async fn client_errors(
         &self,
-        q: FailedRequestQuery,
-    ) -> anyhow::Result<FailedRequestPage> {
-        self.inner.store.failed_requests(q).await
+        q: ClientErrorQuery,
+    ) -> anyhow::Result<ClientErrorPage> {
+        self.inner.store.client_errors(q).await
     }
 
-    pub(crate) async fn failed_request_detail(
+    pub(crate) async fn client_error_detail(
         &self,
         kind: &str,
         id: &str,
-    ) -> anyhow::Result<Option<FailedRequestDetail>> {
-        self.inner.store.failed_request_detail(kind, id).await
+    ) -> anyhow::Result<Option<ClientErrorDetail>> {
+        self.inner.store.client_error_detail(kind, id).await
     }
 }
 
 impl ObservationStore {
-    pub async fn failed_requests(
-        &self,
-        q: FailedRequestQuery,
-    ) -> anyhow::Result<FailedRequestPage> {
+    pub async fn client_errors(&self, q: ClientErrorQuery) -> anyhow::Result<ClientErrorPage> {
+        if let Some(request_type) = &q.request_type {
+            anyhow::ensure!(
+                matches!(request_type.as_str(), "failed" | "rejected"),
+                ObservationQueryError::InvalidFilter
+            );
+        }
         let window = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
-        let cursor: Option<FailedCursor> = q
+        let cursor: Option<ClientErrorCursor> = q
             .cursor
             .as_deref()
             .map(|value| {
                 anyhow::ensure!(value.len() <= 1024, ObservationQueryError::InvalidEventPage);
-                let cursor: FailedCursor = serde_json::from_str(value)
+                let cursor: ClientErrorCursor = serde_json::from_str(value)
                     .map_err(|_| ObservationQueryError::InvalidEventPage)?;
                 anyhow::ensure!(
                     matches!(cursor.1.as_str(), "rejection" | "run"),
@@ -175,7 +195,7 @@ impl ObservationStore {
             .transpose()?;
         let limit = i64::from(q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
         let (total, mut rows) = match self {
-            Self::Sqlite(pool, _) => failed_rows!(
+            Self::Sqlite(pool, _) => client_error_rows!(
                 pool,
                 sqlx::Sqlite,
                 &q,
@@ -184,7 +204,7 @@ impl ObservationStore {
                 limit + 1,
                 None
             ),
-            Self::Postgres(pool, _) => failed_rows!(
+            Self::Postgres(pool, _) => client_error_rows!(
                 pool,
                 sqlx::Postgres,
                 &q,
@@ -209,8 +229,8 @@ impl ObservationStore {
             .into_iter()
             .map(|row| row.summary(self))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        self.failed_services(&mut items).await?;
-        Ok(FailedRequestPage {
+        self.client_error_services(&mut items).await?;
+        Ok(ClientErrorPage {
             items,
             total,
             next_cursor,
@@ -218,7 +238,7 @@ impl ObservationStore {
         })
     }
 
-    async fn failed_services(&self, items: &mut [FailedRequestSummary]) -> anyhow::Result<()> {
+    async fn client_error_services(&self, items: &mut [ClientErrorSummary]) -> anyhow::Result<()> {
         let ids: Vec<&str> = items
             .iter()
             .filter_map(|item| item.run_id.as_deref())
@@ -250,12 +270,12 @@ impl ObservationStore {
                 sql.build_query_as().fetch_all(pool).await?
             }
         };
-        let mut services = std::collections::HashMap::<String, Vec<FailedRequestService>>::new();
+        let mut services = std::collections::HashMap::<String, Vec<ClientErrorService>>::new();
         for (run, id, name) in rows {
             services
                 .entry(run)
                 .or_default()
-                .push(FailedRequestService { id, name });
+                .push(ClientErrorService { id, name });
         }
         for item in items {
             if let Some(run) = &item.run_id {
@@ -265,19 +285,19 @@ impl ObservationStore {
         Ok(())
     }
 
-    pub async fn failed_request_detail(
+    pub async fn client_error_detail(
         &self,
         kind: &str,
         id: &str,
-    ) -> anyhow::Result<Option<FailedRequestDetail>> {
+    ) -> anyhow::Result<Option<ClientErrorDetail>> {
         if !matches!(kind, "rejection" | "run") {
             return Ok(None);
         }
-        let q = FailedRequestQuery::default();
+        let q = ClientErrorQuery::default();
         let window = query_window(None, None, None, None)?;
-        let cursor: Option<&FailedCursor> = None;
+        let cursor: Option<&ClientErrorCursor> = None;
         let (_, rows) = match self {
-            Self::Sqlite(pool, _) => failed_rows!(
+            Self::Sqlite(pool, _) => client_error_rows!(
                 pool,
                 sqlx::Sqlite,
                 &q,
@@ -286,7 +306,7 @@ impl ObservationStore {
                 1i64,
                 Some((kind, id))
             ),
-            Self::Postgres(pool, _) => failed_rows!(
+            Self::Postgres(pool, _) => client_error_rows!(
                 pool,
                 sqlx::Postgres,
                 &q,
@@ -300,7 +320,7 @@ impl ObservationStore {
             return Ok(None);
         };
         let mut request = row.summary(self)?;
-        self.failed_services(std::slice::from_mut(&mut request))
+        self.client_error_services(std::slice::from_mut(&mut request))
             .await?;
         let snapshot_sequence = self.max_sequence().await?;
         let (events, trace) = if kind == "rejection" {
@@ -317,7 +337,7 @@ impl ObservationStore {
             };
             (events, self.manifest_for_run(id).await?)
         };
-        Ok(Some(FailedRequestDetail {
+        Ok(Some(ClientErrorDetail {
             request,
             events,
             trace,

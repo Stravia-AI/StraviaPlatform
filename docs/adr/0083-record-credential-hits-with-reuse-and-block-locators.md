@@ -29,4 +29,4 @@ status: accepted
 
 - 旧事件没有 `locators`，仍按规则与来源并集显示，进入请求记录时不高亮。
 - 部分工具结果 ID 可能被 Generation Chain 重映射，此时命中退化为 Run 级定位。
-- 迁移 `0026_credential_mapping_rules` 为映射增加 `rule_ids`，参考 schema 一并重新生成；已有映射得到空数组，其保护不变。
+- 迁移 `0028_credential_mapping_rules` 为映射增加 `rule_ids`，参考 schema 一并重新生成；已有映射得到空数组，其保护不变。

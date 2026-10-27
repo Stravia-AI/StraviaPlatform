@@ -623,11 +623,17 @@ impl TailIndex {
         self.interactions.get(run).map(String::as_str)
     }
 
-    pub(super) fn pending_runs(&self, tool_id: &str, principal: &str) -> Vec<(String, String)> {
+    pub(super) fn pending_runs(
+        &self,
+        tool_id: &str,
+        principal: &str,
+        now: i64,
+    ) -> Vec<(String, String)> {
         self.pending_tools
             .get(tool_id)
             .into_iter()
             .flatten()
+            .filter(|run| self.expiries.get(*run).is_some_and(|expiry| *expiry > now))
             .filter(|run| self.principals.get(*run).map(String::as_str) == Some(principal))
             .filter_map(|run| {
                 self.interactions

@@ -4,10 +4,16 @@ import { mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '
 import type { ObservationSubscription } from '#lib/observation-stream.js'
 import type {
   BundleResourceKind,
-  FailedRequestDetail,
-  FailedRequestPage,
-  FailedRequestQuery,
-  FailedRequestSummary,
+  ClientErrorDetail,
+  ClientErrorPage,
+  ClientErrorQuery,
+  ClientErrorSummary,
+  ClientErrorType,
+  UpstreamErrorDetail,
+  UpstreamErrorOutcome,
+  UpstreamErrorPage,
+  UpstreamErrorQuery,
+  UpstreamErrorSummary,
   ForestPage,
   ForestQuery,
   ForestRoot,
@@ -30,7 +36,7 @@ export const OBSERVATION_MIN_TOKEN_STOPS = [
   0, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000,
 ]
 export const OBSERVATION_DEFAULT_MIN_TOKEN_STOP = 4
-const FAILURE_BATCH_SIZE = 30
+const ERROR_BATCH_SIZE = 30
 export const OBSERVATION_REFRESH_WINDOW_MS = 100
 
 export function isValidObservationRange(startMs: number, endMs: number): boolean {
@@ -53,10 +59,12 @@ function previewUpdated(before: InteractionSummary | undefined, after: Interacti
 export interface ObservationWorkspaceApi {
   forest(query: ForestQuery): Promise<ForestPage>
   changes(query: RootChangesQuery): Promise<RootChangesPage>
-  failures(query: FailedRequestQuery): Promise<FailedRequestPage>
+  clientErrors(query: ClientErrorQuery): Promise<ClientErrorPage>
+  upstreamErrors(query: UpstreamErrorQuery): Promise<UpstreamErrorPage>
   interaction(id: string, query?: ForestQuery): Promise<InteractionDetail>
   interactionEvents(id: string, query: InteractionEventsQuery): Promise<InteractionEventsPage>
-  failure(kind: FailedRequestSummary['kind'], id: string): Promise<FailedRequestDetail>
+  clientError(kind: ClientErrorSummary['kind'], id: string): Promise<ClientErrorDetail>
+  upstreamError(id: string): Promise<UpstreamErrorDetail>
 }
 
 export type ObservationWorkspaceSubscribe = (
@@ -107,10 +115,7 @@ export interface ObservationWorkspaceSnapshot {
   selectedMigrated?: string
   migratedRoots: ReadonlySet<string>
   selectedInteraction?: InteractionSummary
-  selectedFailure?: FailedRequestSummary
   interactionDetail?: InteractionDetail
-  failureDetail?: FailedRequestDetail
-  failureDetailError: unknown
   detailLoading: boolean
   olderLoading: boolean
   selectedLiveBlocks: LiveContentBlock[]
@@ -129,16 +134,110 @@ export interface ObservationWorkspaceSnapshot {
   loadError: unknown
   nextCursor: string | null | undefined
   rootTotal: number
-  failures: FailedRequestSummary[]
-  failureTotal: number
-  failureCursor: string | null | undefined
-  failureLoading: boolean
-  failureError: unknown
+  clientErrorTypeFilter: ClientErrorType | 'all'
+  selectedClientError?: ClientErrorSummary
+  clientErrorDetail?: ClientErrorDetail
+  clientErrorDetailError: unknown
+  clientErrorDetailLoading: boolean
+  clientErrors: ClientErrorSummary[]
+  clientErrorTotal: number
+  clientErrorCursor: string | null | undefined
+  clientErrorLoading: boolean
+  clientErrorError: unknown
+  upstreamErrorOutcomeFilter: UpstreamErrorOutcome | 'all'
+  selectedUpstreamError?: UpstreamErrorSummary
+  upstreamErrorDetail?: UpstreamErrorDetail
+  upstreamErrorDetailError: unknown
+  upstreamErrorDetailLoading: boolean
+  upstreamErrors: UpstreamErrorSummary[]
+  upstreamErrorTotal: number
+  upstreamErrorCursor: string | null | undefined
+  upstreamErrorLoading: boolean
+  upstreamErrorError: unknown
+}
+
+interface ObservationErrorPage<T> {
+  items: T[]
+  total: number
+  next_cursor: string | null
+  snapshot_sequence: number
+}
+
+/**
+ * 一个观测错误列表的完整状态机：列表分页、待刷新水位与选中详情。
+ * 客户端错误与上游错误各持一个实例；范围版本、请求版本与选择版本互不共享，
+ * 任一侧的重查或重置不会覆盖另一侧。
+ */
+class ObservationErrorList<T, D> {
+  readonly identity: (item: T) => string
+  /** 查询范围（窗口与筛选）版本；作废该列表上所有在途请求。 */
+  scope = 0
+  /** 该列表单次请求的版本；同一范围内后发请求覆盖先回请求。 */
+  requestVersion = 0
+  items: T[] = []
+  total = 0
+  cursor: string | null | undefined
+  loading = false
+  error: unknown
+  /** 最近写入列表的快照序列，用来判断待刷新水位是否已被覆盖。 */
+  sequence = 0
+  pending = 0
+  query: Promise<void> | undefined
+  queryAppend = false
+  queryScope = -1
+  flight: Promise<void> | undefined
+  selected: T | undefined
+  detail: D | undefined
+  detailError: unknown
+  detailLoading = false
+  #detailVersion = 0
+
+  constructor(identity: (item: T) => string) {
+    this.identity = identity
+  }
+
+  get detailVersion(): number {
+    return this.#detailVersion
+  }
+
+  /** 作废在途请求，保留已显示的行；替换查询会在结果到达后覆盖它们。 */
+  invalidate(): void {
+    this.scope += 1
+    this.requestVersion += 1
+    this.pending = 0
+    this.flight = undefined
+    this.query = undefined
+    this.queryScope = -1
+  }
+
+  /** 范围重置：行、游标、错误与选择一并清空。 */
+  reset(): void {
+    this.invalidate()
+    this.items = []
+    this.total = 0
+    this.cursor = undefined
+    this.loading = false
+    this.error = undefined
+    this.sequence = 0
+    this.clearSelection()
+  }
+
+  clearSelection(): void {
+    this.#detailVersion += 1
+    this.selected = undefined
+    this.detail = undefined
+    this.detailError = undefined
+    this.detailLoading = false
+  }
+
+  beginDetail(): number {
+    return ++this.#detailVersion
+  }
 }
 
 /**
  * logs 页观测工作区的编排状态机：roots/cursor 和解、live 窗口、selection 竞态守卫、
- * live-block 保留、reset 恢复、failures 分页与深链 reveal 都收敛在这里；
+ * live-block 保留、reset 恢复、clientErrors 分页与深链 reveal 都收敛在这里；
  * 页面只持有 DOM、对话框与 toast。竞态用内部 epoch 计数，调用方不再见到版本号。
  */
 export class ObservationWorkspaceController {
@@ -151,7 +250,10 @@ export class ObservationWorkspaceController {
 
   #rangeVersion = 0
   #selectionVersion = 0
-  #failureRequestVersion = 0
+  readonly #clientErrorList = new ObservationErrorList<ClientErrorSummary, ClientErrorDetail>(
+    (item) => `${item.kind}:${item.id}`,
+  )
+  readonly #upstreamErrorList = new ObservationErrorList<UpstreamErrorSummary, UpstreamErrorDetail>((item) => item.id)
 
   #anchorAt: number
   #windowIndex = 0
@@ -165,6 +267,8 @@ export class ObservationWorkspaceController {
   #modelFilter = 'all'
   #apiKeyFilter = 'all'
   #statusFilter = 'all'
+  #clientErrorTypeFilter: ClientErrorType | 'all' = 'all'
+  #upstreamErrorOutcomeFilter: UpstreamErrorOutcome | 'all' = 'all'
   #minTokenStop = OBSERVATION_DEFAULT_MIN_TOKEN_STOP
 
   #roots: ForestRoot[] = []
@@ -196,12 +300,6 @@ export class ObservationWorkspaceController {
   #refreshTimer: ReturnType<typeof setTimeout> | undefined
   #eventsRequest: Promise<void> | undefined
   #eventsPending = 0
-  #failurePending = 0
-  #failureSequence = 0
-  #failureFlight: Promise<void> | undefined
-  #failureQueryRequest: Promise<void> | undefined
-  #failureQueryAppend = false
-  #failureQueryEpoch = -1
   #liveStream: ObservationSubscription | undefined
   #liveContentEpoch = 0
   #selectedLiveActive = false
@@ -216,12 +314,9 @@ export class ObservationWorkspaceController {
 
   #selectedInteraction: InteractionSummary | undefined
   #requestedInteractionId: string | undefined
-  #selectedFailure: FailedRequestSummary | undefined
   #interactionDetail: InteractionDetail | undefined
   #interactionDetailEpoch = -1
   #resetRecoveryPending = false
-  #failureDetail: FailedRequestDetail | undefined
-  #failureDetailError: unknown
   #detailLoading = false
   #olderLoading = false
 
@@ -238,12 +333,6 @@ export class ObservationWorkspaceController {
   // 跳转、深链与跟随聚焦把它显式 reveal 后才可见。
   #revealedFailures = new Set<string>()
   #fitProgress: number | undefined
-
-  #failures: FailedRequestSummary[] = []
-  #failureTotal = 0
-  #failureCursor: string | null | undefined
-  #failureLoading = false
-  #failureError: unknown
 
   constructor(deps: ObservationWorkspaceDeps) {
     this.#api = deps.api
@@ -290,11 +379,18 @@ export class ObservationWorkspaceController {
       void this.#loadForest(true)
     }
     if (
-      this.#activeTab === 'failures' &&
-      !this.#failureLoading &&
-      this.#failures.some((item) => item.started_at < this.#windowStart)
+      this.#activeTab === 'client-errors' &&
+      !this.#clientErrorList.loading &&
+      this.#clientErrorList.items.some((item) => item.started_at < this.#windowStart)
     ) {
-      void this.#requestFailures(true, true)
+      void this.#requestErrors(this.#clientErrorList, true, true, (query) => this.#clientErrorPage(query))
+    }
+    if (
+      this.#activeTab === 'upstream-errors' &&
+      !this.#upstreamErrorList.loading &&
+      this.#upstreamErrorList.items.some((item) => item.started_at < this.#windowStart)
+    ) {
+      void this.#requestErrors(this.#upstreamErrorList, true, true, (query) => this.#upstreamErrorPage(query))
     }
     this.#publish()
   }
@@ -366,10 +462,13 @@ export class ObservationWorkspaceController {
     this.#followPaused = !this.#liveWindow
     this.#hasNewActivity = false
     this.#migratedRoots = new Set()
-    // 先推进实时窗口再查询，两次推进之间完成的失败不会被旧 end_at 排除。
-    if (this.#activeTab === 'failures') {
+    // 先推进实时窗口再查询，两次推进之间完成的错误不会被旧 end_at 排除。
+    if (this.#activeTab === 'client-errors') {
       this.#updateLiveBounds()
-      await this.loadFailures()
+      await this.loadClientErrors()
+    } else if (this.#activeTab === 'upstream-errors') {
+      this.#updateLiveBounds()
+      await this.loadUpstreamErrors()
     } else await this.#loadForest(true)
   }
 
@@ -378,6 +477,8 @@ export class ObservationWorkspaceController {
     this.#modelFilter = 'all'
     this.#apiKeyFilter = 'all'
     this.#statusFilter = 'all'
+    this.#clientErrorTypeFilter = 'all'
+    this.#upstreamErrorOutcomeFilter = 'all'
     // 滑到 0 才显示被默认 10k 阈值隐藏的小链路。
     this.#minTokenStop = 0
     this.#publish()
@@ -408,16 +509,29 @@ export class ObservationWorkspaceController {
     this.#publish()
   }
 
+  setClientErrorTypeFilter(value: ClientErrorType | 'all'): void {
+    this.#clientErrorTypeFilter = value
+    this.#publish()
+  }
+
+  setUpstreamErrorOutcomeFilter(value: UpstreamErrorOutcome | 'all'): void {
+    this.#upstreamErrorOutcomeFilter = value
+    this.#publish()
+  }
+
   async tabChanged(value: string): Promise<void> {
     this.#rangeVersion += 1
     this.#resetRefreshState()
     this.#activeTab = value
     this.closeInspector()
     this.#publish()
-    // 先推进实时窗口再查询，两次推进之间完成的失败不会被旧 end_at 排除。
-    if (value === 'failures') {
+    // 先推进实时窗口再查询，两次推进之间完成的错误不会被旧 end_at 排除。
+    if (value === 'client-errors') {
       this.#updateLiveBounds()
-      await this.loadFailures()
+      await this.loadClientErrors()
+    } else if (value === 'upstream-errors') {
+      this.#updateLiveBounds()
+      await this.loadUpstreamErrors()
     } else await this.#loadForest(true)
   }
 
@@ -471,19 +585,38 @@ export class ObservationWorkspaceController {
     }
   }
 
-  async selectFailure(failure: FailedRequestSummary): Promise<void> {
+  async selectClientError(clientError: ClientErrorSummary): Promise<void> {
     this.closeInspector()
-    const selection = this.#selectionVersion
-    this.#selectedFailure = failure
-    this.#detailLoading = true
+    await this.#loadErrorDetail(this.#clientErrorList, clientError, (item) => this.#api.clientError(item.kind, item.id))
+  }
+
+  async selectUpstreamError(upstreamError: UpstreamErrorSummary): Promise<void> {
+    this.closeInspector()
+    await this.#loadErrorDetail(this.#upstreamErrorList, upstreamError, (item) => this.#api.upstreamError(item.id))
+  }
+
+  /** 两个错误列表各自持有详情版本；后一次选择或关闭会作废先前在途的详情请求。 */
+  async #loadErrorDetail<T, D>(
+    state: ObservationErrorList<T, D>,
+    item: T,
+    load: (item: T) => Promise<D>,
+    keepDetail = false,
+    propagate = false,
+  ): Promise<void> {
+    const detailVersion = state.beginDetail()
+    state.selected = item
+    if (!keepDetail) state.detail = undefined
+    state.detailError = undefined
+    state.detailLoading = true
     this.#publish()
     try {
-      const detail = await this.#api.failure(failure.kind, failure.id)
-      if (selection === this.#selectionVersion) this.#failureDetail = detail
+      const detail = await load(item)
+      if (detailVersion === state.detailVersion) state.detail = detail
     } catch (error) {
-      if (selection === this.#selectionVersion) this.#failureDetailError = error
+      if (detailVersion === state.detailVersion) state.detailError = error
+      if (propagate) throw error
     } finally {
-      if (selection === this.#selectionVersion) this.#detailLoading = false
+      if (detailVersion === state.detailVersion) state.detailLoading = false
       this.#publish()
     }
   }
@@ -514,10 +647,9 @@ export class ObservationWorkspaceController {
     this.#liveBlocks = []
     this.#selectedInteraction = undefined
     this.#requestedInteractionId = undefined
-    this.#selectedFailure = undefined
     this.#interactionDetail = undefined
-    this.#failureDetail = undefined
-    this.#failureDetailError = undefined
+    this.#clientErrorList.clearSelection()
+    this.#upstreamErrorList.clearSelection()
     this.#detailLoading = false
     this.#publish()
   }
@@ -549,9 +681,20 @@ export class ObservationWorkspaceController {
     }
   }
 
-  async openFailureInteraction(): Promise<void> {
-    const id = this.#failureDetail?.request.interaction_id
+  async openClientErrorInteraction(): Promise<void> {
+    const id = this.#clientErrorList.detail?.request.interaction_id
     if (!id) return
+    await this.#openInteractionById(id)
+  }
+
+  async openUpstreamErrorInteraction(): Promise<void> {
+    const id = this.#upstreamErrorList.detail?.error.interaction_id
+    if (!id) return
+    await this.#openInteractionById(id)
+  }
+
+  /** 零输出终态失败不在交互链路中；从错误详情打开时显式 reveal，不改链路成员规则。 */
+  async #openInteractionById(id: string): Promise<void> {
     const selection = this.#selectionVersion
     try {
       const snapshot = await this.#api.interaction(id)
@@ -578,94 +721,155 @@ export class ObservationWorkspaceController {
     this.#detailError = undefined
     const selection = this.#selectionVersion
     const interactionId = this.#selectedInteraction?.id
-    const failure = this.#selectedFailure
     try {
       if (interactionId && selection === this.#selectionVersion) {
         this.#applySelectedDetail(await this.#api.interaction(interactionId, this.#query()), selection)
         await this.#refreshSelectedEvents(interactionId, selection)
       }
-      if (failure && selection === this.#selectionVersion) {
-        const detail = await this.#api.failure(failure.kind, failure.id)
-        if (selection === this.#selectionVersion) this.#failureDetail = detail
-      }
     } catch (error) {
-      if (selection === this.#selectionVersion) {
-        if (interactionId) {
-          if (!this.#removeMissingSelection(error, selection)) this.#detailError = error
-        } else this.#failureDetailError = error
+      if (selection === this.#selectionVersion && interactionId) {
+        if (!this.#removeMissingSelection(error, selection)) this.#detailError = error
       }
     } finally {
       this.#publish()
     }
+    const clientError = this.#clientErrorList.selected
+    if (clientError)
+      await this.#loadErrorDetail(
+        this.#clientErrorList,
+        clientError,
+        (item) => this.#api.clientError(item.kind, item.id),
+        true,
+      )
+    const upstreamError = this.#upstreamErrorList.selected
+    if (upstreamError)
+      await this.#loadErrorDetail(
+        this.#upstreamErrorList,
+        upstreamError,
+        (item) => this.#api.upstreamError(item.id),
+        true,
+      )
   }
 
-  loadFailures(replace = true): Promise<void> {
-    return this.#requestFailures(replace, false)
+  loadClientErrors(replace = true): Promise<void> {
+    return this.#requestErrors(this.#clientErrorList, replace, false, (query) => this.#clientErrorPage(query))
   }
 
-  /** `background` 为实时事件或窗口滑动触发的静默重查：不置 failureLoading，列表与错误提示保持到新结果到达。 */
-  #requestFailures(replace: boolean, background: boolean): Promise<void> {
-    const inflight = this.#failureQueryRequest
-    if (inflight && this.#failureQueryEpoch === this.#rangeVersion) {
-      if (this.#failureQueryAppend === !replace) return inflight
+  loadUpstreamErrors(replace = true): Promise<void> {
+    return this.#requestErrors(this.#upstreamErrorList, replace, false, (query) => this.#upstreamErrorPage(query))
+  }
+
+  #clientErrorPage(query: { cursor?: string; limit: number }): Promise<ClientErrorPage> {
+    return this.#api.clientErrors({
+      ...query,
+      start_at: this.#windowStart,
+      end_at: this.#windowEnd,
+      provider: this.#providerFilter === 'all' ? undefined : this.#providerFilter,
+      model: this.#modelFilter === 'all' ? undefined : this.#modelFilter,
+      api_key: this.#apiKeyFilter === 'all' ? undefined : this.#apiKeyFilter,
+      type: this.#clientErrorTypeFilter === 'all' ? undefined : this.#clientErrorTypeFilter,
+    })
+  }
+
+  #upstreamErrorPage(query: { cursor?: string; limit: number }): Promise<UpstreamErrorPage> {
+    return this.#api.upstreamErrors({
+      ...query,
+      start_at: this.#windowStart,
+      end_at: this.#windowEnd,
+      provider: this.#providerFilter === 'all' ? undefined : this.#providerFilter,
+      model: this.#modelFilter === 'all' ? undefined : this.#modelFilter,
+      api_key: this.#apiKeyFilter === 'all' ? undefined : this.#apiKeyFilter,
+      outcome: this.#upstreamErrorOutcomeFilter === 'all' ? undefined : this.#upstreamErrorOutcomeFilter,
+    })
+  }
+
+  /**
+   * 单个错误列表的分页请求。范围版本与请求版本都取自该列表自身，
+   * 因此另一个 tab 的重置或重查不会作废这里的在途结果。
+   * `background` 为实时事件或窗口滑动触发的静默重查：不置 loading，列表与错误提示保持到新结果到达。
+   */
+  #requestErrors<T>(
+    state: ObservationErrorList<T, unknown>,
+    replace: boolean,
+    background: boolean,
+    fetchPage: (query: { cursor?: string; limit: number }) => Promise<ObservationErrorPage<T>>,
+  ): Promise<void> {
+    const inflight = state.query
+    if (inflight && state.queryScope === state.scope) {
+      if (state.queryAppend === !replace) return inflight
       // 追加与重查依赖对方更新后的 cursor 和列表：并入进行中的请求会让后到的操作静默丢失，故排在其后。
-      const version = this.#rangeVersion
+      const scope = state.scope
       return inflight.then((): Promise<void> =>
-        version !== this.#rangeVersion || (!replace && !this.#failureCursor)
+        scope !== state.scope || (!replace && !state.cursor)
           ? Promise.resolve()
-          : this.#requestFailures(replace, background),
+          : this.#requestErrors(state, replace, background, fetchPage),
       )
     }
-    this.#failureQueryEpoch = this.#rangeVersion
-    this.#failureQueryAppend = !replace
-    const request = this.#pullFailures(replace, background).finally(() => {
-      if (this.#failureQueryRequest === request) this.#failureQueryRequest = undefined
+    state.queryScope = state.scope
+    state.queryAppend = !replace
+    const request = this.#pullErrors(state, replace, background, fetchPage).finally(() => {
+      if (state.query === request) state.query = undefined
     })
-    this.#failureQueryRequest = request
+    state.query = request
     return request
   }
 
-  async #pullFailures(replace: boolean, background: boolean): Promise<void> {
-    if (!replace && this.#failureLoading) return
-    const version = this.#rangeVersion
-    const requestVersion = ++this.#failureRequestVersion
+  async #pullErrors<T>(
+    state: ObservationErrorList<T, unknown>,
+    replace: boolean,
+    background: boolean,
+    fetchPage: (query: { cursor?: string; limit: number }) => Promise<ObservationErrorPage<T>>,
+  ): Promise<void> {
+    if (!replace && state.loading) return
+    const scope = state.scope
+    const requestVersion = ++state.requestVersion
     // 后台重查覆盖已加载的全部行，免得实时事件把「加载更多」翻出的页折回第一页；超出服务端上限时由其截断。
-    const limit = background ? Math.max(FAILURE_BATCH_SIZE, this.#failures.length) : FAILURE_BATCH_SIZE
+    const limit = background ? Math.max(ERROR_BATCH_SIZE, state.items.length) : ERROR_BATCH_SIZE
     if (!background) {
-      this.#failureLoading = true
-      this.#failureError = undefined
+      state.loading = true
+      state.error = undefined
       this.#publish()
     }
     try {
-      const query = this.#query()
-      const page = await this.#api.failures({
-        start_at: this.#windowStart,
-        end_at: this.#windowEnd,
-        limit,
-        cursor: replace ? undefined : (this.#failureCursor ?? undefined),
-        provider: query.provider,
-        model: query.model,
-        api_key: query.api_key,
-      })
-      if (version !== this.#rangeVersion || requestVersion !== this.#failureRequestVersion) return
-      this.#failures = replace
+      const page = await fetchPage({ cursor: replace ? undefined : (state.cursor ?? undefined), limit })
+      if (scope !== state.scope || requestVersion !== state.requestVersion) return
+      state.items = replace
         ? page.items
         : [
-            ...this.#failures,
+            ...state.items,
             ...page.items.filter(
-              (item) => !this.#failures.some((known) => known.kind === item.kind && known.id === item.id),
+              (item) => !state.items.some((known) => state.identity(known) === state.identity(item)),
             ),
           ]
-      this.#failureSequence = page.snapshot_sequence
-      this.#failureTotal = page.total
-      this.#failureCursor = page.next_cursor
-      this.#failureError = undefined
+      state.sequence = page.snapshot_sequence
+      state.total = page.total
+      state.cursor = page.next_cursor
+      state.error = undefined
     } catch (error) {
-      if (version === this.#rangeVersion && requestVersion === this.#failureRequestVersion) this.#failureError = error
+      if (scope === state.scope && requestVersion === state.requestVersion) state.error = error
     } finally {
-      if (version === this.#rangeVersion && requestVersion === this.#failureRequestVersion) this.#failureLoading = false
+      if (scope === state.scope && requestVersion === state.requestVersion) state.loading = false
       this.#publish()
     }
+  }
+
+  /** 实时事件只在对应 tab 且处于实时窗口时标记待刷新；范围本身不移动。 */
+  #flushErrorList<T, D>(
+    state: ObservationErrorList<T, D>,
+    fetchPage: (query: { cursor?: string; limit: number }) => Promise<ObservationErrorPage<T>>,
+  ): void {
+    if (!state.pending || state.flight) return
+    const scope = state.scope
+    const flight = this.#requestErrors(state, true, true, fetchPage).finally(() => {
+      if (state.flight !== flight) return
+      state.flight = undefined
+      if (scope !== state.scope) return
+      if (!state.error) {
+        if (state.pending <= state.sequence) state.pending = 0
+        else this.#scheduleRefresh(false)
+      }
+    })
+    state.flight = flight
   }
 
   pauseFollow(): void {
@@ -680,13 +884,13 @@ export class ObservationWorkspaceController {
   }
 
   bundleTarget(): { kind: BundleResourceKind; id: string } | null {
-    const kind =
-      this.#interactionDetail || this.#failureDetail?.request.interaction_id ? 'interaction' : 'rejected_request'
-    const id =
+    const clientError = this.#clientErrorList.detail?.request
+    const interactionId =
       this.#interactionDetail?.interaction.id ??
-      this.#failureDetail?.request.interaction_id ??
-      this.#failureDetail?.request.id
-    return id ? { kind, id } : null
+      clientError?.interaction_id ??
+      this.#upstreamErrorList.detail?.error.interaction_id
+    if (interactionId) return { kind: 'interaction', id: interactionId }
+    return clientError ? { kind: 'rejected_request', id: clientError.id } : null
   }
 
   get #liveWindow(): boolean {
@@ -801,11 +1005,15 @@ export class ObservationWorkspaceController {
     this.#migratedRoots = new Set()
     this.#followPaused = !this.#liveWindow
     this.#hasNewActivity = false
-    this.#failures = []
-    this.#failureCursor = undefined
+    this.#clientErrorList.reset()
+    this.#upstreamErrorList.reset()
     await Promise.all([
       this.#loadForest(true),
-      this.#activeTab === 'failures' ? this.loadFailures() : Promise.resolve(),
+      this.#activeTab === 'client-errors'
+        ? this.loadClientErrors()
+        : this.#activeTab === 'upstream-errors'
+          ? this.loadUpstreamErrors()
+          : Promise.resolve(),
     ])
   }
 
@@ -1039,8 +1247,9 @@ export class ObservationWorkspaceController {
     this.#rootTotalSequence = 0
     this.#pendingRoots.clear()
     this.#rootErrors.clear()
-    this.#failurePending = 0
-    this.#failureFlight = undefined
+    // 两个错误列表各自作废在途请求；已显示的行保留到替换结果到达。
+    this.#clientErrorList.invalidate()
+    this.#upstreamErrorList.invalidate()
     if (this.#refreshTimer) clearTimeout(this.#refreshTimer)
     this.#refreshTimer = undefined
     this.#refreshDeadline = undefined
@@ -1098,14 +1307,20 @@ export class ObservationWorkspaceController {
       this.#closeLiveScope()
       const selection = this.#selectionVersion
       const interactionId = this.#selectedInteraction?.id ?? this.#requestedInteractionId
-      const failure = this.#selectedFailure
-      this.#detailLoading = Boolean(interactionId || failure)
-      this.#failureDetailError = undefined
+      const clientError = this.#clientErrorList.selected
+      const upstreamError = this.#upstreamErrorList.selected
+      this.#detailLoading = Boolean(interactionId)
+      this.#clientErrorList.detailError = undefined
+      this.#upstreamErrorList.detailError = undefined
       this.#publish()
       try {
         await Promise.all([
           this.#loadForest(true, false),
-          this.#activeTab === 'failures' ? this.loadFailures() : Promise.resolve(),
+          this.#activeTab === 'client-errors'
+            ? this.loadClientErrors()
+            : this.#activeTab === 'upstream-errors'
+              ? this.loadUpstreamErrors()
+              : Promise.resolve(),
           interactionId
             ? this.#api
                 .interaction(interactionId, this.#query())
@@ -1117,19 +1332,37 @@ export class ObservationWorkspaceController {
                     throw error
                   }
                 })
-            : failure
-              ? this.#api.failure(failure.kind, failure.id).then((detail) => {
-                  if (selection === this.#selectionVersion) this.#failureDetail = detail
-                })
-              : Promise.resolve(),
+            : Promise.resolve(),
+          clientError
+            ? this.#loadErrorDetail(
+                this.#clientErrorList,
+                clientError,
+                (item) => this.#api.clientError(item.kind, item.id),
+                true,
+                true,
+              )
+            : Promise.resolve(),
+          upstreamError
+            ? this.#loadErrorDetail(
+                this.#upstreamErrorList,
+                upstreamError,
+                (item) => this.#api.upstreamError(item.id),
+                true,
+                true,
+              )
+            : Promise.resolve(),
         ])
         if (version !== this.#rangeVersion) return
-        if (this.#failureError && this.#activeTab === 'failures')
-          throw this.#failureError instanceof Error
-            ? this.#failureError
-            : new Error(
-                typeof this.#failureError === 'string' ? this.#failureError : 'observation failures reload failed',
-              )
+        const activeError =
+          this.#activeTab === 'client-errors'
+            ? this.#clientErrorList.error
+            : this.#activeTab === 'upstream-errors'
+              ? this.#upstreamErrorList.error
+              : undefined
+        if (activeError)
+          throw activeError instanceof Error
+            ? activeError
+            : new Error(typeof activeError === 'string' ? activeError : 'observation error list reload failed')
         if (this.#loadError) {
           const loadError = this.#loadError
           throw loadError instanceof Error
@@ -1141,7 +1374,6 @@ export class ObservationWorkspaceController {
         this.#scheduleRefresh(true)
       } catch (error) {
         if (version !== this.#rangeVersion) return
-        if (failure && selection === this.#selectionVersion) this.#failureDetailError = error
         this.#loadError = error
         this.#publish()
         throw error
@@ -1152,12 +1384,17 @@ export class ObservationWorkspaceController {
       return
     }
     const streamEvent = update.event
-    if (
-      this.#liveWindow &&
-      this.#activeTab === 'failures' &&
-      ['request_rejected', 'run_finished'].includes(streamEvent.kind)
-    ) {
-      this.#failurePending = Math.max(this.#failurePending, streamEvent.sequence)
+    if (this.#liveWindow) {
+      if (this.#activeTab === 'client-errors' && ['request_rejected', 'run_finished'].includes(streamEvent.kind)) {
+        this.#clientErrorList.pending = Math.max(this.#clientErrorList.pending, streamEvent.sequence)
+      }
+      if (
+        this.#activeTab === 'upstream-errors' &&
+        streamEvent.kind === 'target_attempt_finished' &&
+        streamEvent.error_source === 'upstream'
+      ) {
+        this.#upstreamErrorList.pending = Math.max(this.#upstreamErrorList.pending, streamEvent.sequence)
+      }
     }
     if (!this.#liveWindow && streamEvent.interaction_id && streamEvent.occurred_at >= this.#windowEnd) {
       const root = this.#roots.find((item) =>
@@ -1207,18 +1444,10 @@ export class ObservationWorkspaceController {
     const selected = this.#selectedInteraction?.id
     if (selected && this.#eventsPending > (this.#interactionDetail?.snapshot_sequence ?? 0))
       void this.#refreshSelectedEvents(selected, this.#selectionVersion)
-    if (this.#failurePending && !this.#failureFlight && this.#activeTab === 'failures') {
-      const version = this.#rangeVersion
-      const request = this.#requestFailures(true, true).finally(() => {
-        if (this.#failureFlight !== request) return
-        this.#failureFlight = undefined
-        if (version !== this.#rangeVersion) return
-        if (!this.#failureError) {
-          if (this.#failurePending <= this.#failureSequence) this.#failurePending = 0
-          else this.#scheduleRefresh(false)
-        }
-      })
-      this.#failureFlight = request
+    if (this.#activeTab === 'client-errors') {
+      this.#flushErrorList(this.#clientErrorList, (query) => this.#clientErrorPage(query))
+    } else if (this.#activeTab === 'upstream-errors') {
+      this.#flushErrorList(this.#upstreamErrorList, (query) => this.#upstreamErrorPage(query))
     }
   }
 
@@ -1358,6 +1587,8 @@ export class ObservationWorkspaceController {
           this.#modelFilter,
           this.#apiKeyFilter,
           ...(this.#activeTab === 'interactions' ? [this.#statusFilter] : []),
+          ...(this.#activeTab === 'client-errors' ? [this.#clientErrorTypeFilter] : []),
+          ...(this.#activeTab === 'upstream-errors' ? [this.#upstreamErrorOutcomeFilter] : []),
         ].filter((value) => value !== 'all').length + Number(this.#activeTab === 'interactions' && minTokensFilter > 0),
       canvasRoots: this.#canvasView().canvasRoots,
       latestInteraction: this.#latestInteraction(),
@@ -1367,10 +1598,7 @@ export class ObservationWorkspaceController {
         : undefined,
       migratedRoots: this.#migratedRoots,
       selectedInteraction: this.#selectedInteraction,
-      selectedFailure: this.#selectedFailure,
       interactionDetail: this.#interactionDetail,
-      failureDetail: this.#failureDetail,
-      failureDetailError: this.#failureDetailError,
       detailLoading: this.#detailLoading,
       olderLoading: this.#olderLoading,
       selectedLiveBlocks: this.#liveBlocks.filter((block) => block.interaction_id === this.#selectedInteraction?.id),
@@ -1389,11 +1617,26 @@ export class ObservationWorkspaceController {
       loadError: this.#loadError,
       nextCursor: this.#nextCursor,
       rootTotal: this.#rootTotal,
-      failures: this.#failures,
-      failureTotal: this.#failureTotal,
-      failureCursor: this.#failureCursor,
-      failureLoading: this.#failureLoading,
-      failureError: this.#failureError,
+      clientErrorTypeFilter: this.#clientErrorTypeFilter,
+      selectedClientError: this.#clientErrorList.selected,
+      clientErrorDetail: this.#clientErrorList.detail,
+      clientErrorDetailError: this.#clientErrorList.detailError,
+      clientErrorDetailLoading: this.#clientErrorList.detailLoading,
+      clientErrors: this.#clientErrorList.items,
+      clientErrorTotal: this.#clientErrorList.total,
+      clientErrorCursor: this.#clientErrorList.cursor,
+      clientErrorLoading: this.#clientErrorList.loading,
+      clientErrorError: this.#clientErrorList.error,
+      upstreamErrorOutcomeFilter: this.#upstreamErrorOutcomeFilter,
+      selectedUpstreamError: this.#upstreamErrorList.selected,
+      upstreamErrorDetail: this.#upstreamErrorList.detail,
+      upstreamErrorDetailError: this.#upstreamErrorList.detailError,
+      upstreamErrorDetailLoading: this.#upstreamErrorList.detailLoading,
+      upstreamErrors: this.#upstreamErrorList.items,
+      upstreamErrorTotal: this.#upstreamErrorList.total,
+      upstreamErrorCursor: this.#upstreamErrorList.cursor,
+      upstreamErrorLoading: this.#upstreamErrorList.loading,
+      upstreamErrorError: this.#upstreamErrorList.error,
     }
   }
 

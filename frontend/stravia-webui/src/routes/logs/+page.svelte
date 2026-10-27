@@ -19,7 +19,7 @@ import { formatCompactCount } from '#lib/format.js'
 import { HIT_HIGHLIGHT_QUERY, HIT_HIGHLIGHT_VALUE } from '#lib/credential-hit-records.js'
 import { credentialRulesQuery, customCredentialRulesQuery } from '#lib/credential-protection-queries.js'
 import { effectiveModelDisplayName } from '#lib/logical-model.js'
-import { observationStatusLabel } from '#lib/observation-labels.js'
+import { clientErrorTypeLabel, observationStatusLabel, upstreamErrorOutcomeLabel } from '#lib/observation-labels.js'
 import { observationOutputPreview } from '#lib/observation-conversation.js'
 import { navigateToBundle, subscribeToInteractionLive, subscribeToObservations } from '#lib/observation-stream.js'
 import {
@@ -28,10 +28,17 @@ import {
   OBSERVATION_PRESET_MINUTES,
   ObservationWorkspace,
 } from '#lib/observation-workspace.svelte.js'
-import type { FailedRequestSummary, InteractionSummary } from '#lib/types.js'
+import type {
+  ClientErrorSummary,
+  ClientErrorType,
+  InteractionSummary,
+  UpstreamErrorOutcome,
+  UpstreamErrorSummary,
+} from '#lib/types.js'
 import InteractionCanvas from '#lib/components/interaction-canvas.svelte'
 import ObservationInspector from '#lib/components/observation-inspector.svelte'
-import FailedRequestTable from '#lib/components/failed-request-table.svelte'
+import ClientErrorTable from '#lib/components/client-error-table.svelte'
+import UpstreamErrorTable from '#lib/components/upstream-error-table.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
@@ -310,12 +317,15 @@ async function downloadBundle(): Promise<void> {
         <Tabs.Root value={ws.activeTab} onValueChange={(value: string) => void ws.tabChanged(value)}>
           <Tabs.List
             ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
-              value="failures">{m.observation_failed_requests()}</Tabs.Trigger
-            ></Tabs.List>
+              value="client-errors">{m.observation_client_errors()}</Tabs.Trigger
+            ><Tabs.Trigger value="upstream-errors">{m.observation_upstream_errors()}</Tabs.Trigger></Tabs.List>
         </Tabs.Root>
-        {#if ws.activeTab === 'failures'}
+        {#if ws.activeTab === 'client-errors'}
           <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status"
-            >{ws.failures.length} / {ws.failureTotal}</span>
+            >{ws.clientErrors.length} / {ws.clientErrorTotal}</span>
+        {:else if ws.activeTab === 'upstream-errors'}
+          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status"
+            >{ws.upstreamErrors.length} / {ws.upstreamErrorTotal}</span>
         {/if}
       </div>
       <TimeWindowControls
@@ -427,42 +437,87 @@ async function downloadBundle(): Promise<void> {
               : undefined} />
         {/if}
       </div>
-    {:else}
-      <div class="failures-view">
-        <h2 class="sr-only">{m.observation_failed_requests()}</h2>
-        {#if ws.failureError}
+    {:else if ws.activeTab === 'client-errors'}
+      <div class="error-list-view">
+        <h2 class="sr-only">{m.observation_client_errors()}</h2>
+        {#if ws.clientErrorError}
           <RequestFailure
-            message={localizeBackendErrorMessage(ws.failureError)}
-            retry={() => ws.loadFailures()}
-            retrying={ws.failureLoading} />
+            message={localizeBackendErrorMessage(ws.clientErrorError)}
+            retry={() => ws.loadClientErrors()}
+            retrying={ws.clientErrorLoading} />
         {/if}
-        {#if ws.failureLoading && ws.failures.length === 0}
-          <div class="stage-state" role="status">{m.observation_loading_failures()}</div>
-        {:else if ws.failures.length === 0 && !ws.failureError}<Empty.Root class="flex-1"
+        {#if ws.clientErrorLoading && ws.clientErrors.length === 0}
+          <div class="stage-state" role="status">{m.observation_loading_client_errors()}</div>
+        {:else if ws.clientErrors.length === 0 && !ws.clientErrorError}<Empty.Root class="flex-1"
             ><Empty.Header
-              ><Empty.Title>{m.observation_no_failures()}</Empty.Title><Empty.Description
-                >{m.observation_no_failures_description()}</Empty.Description
+              ><Empty.Title>{m.observation_no_client_errors()}</Empty.Title><Empty.Description
+                >{m.observation_no_client_errors_description()}</Empty.Description
               ></Empty.Header
             ></Empty.Root>
-        {:else if ws.failures.length > 0}
-          <FailedRequestTable
-            items={ws.failures}
-            loading={ws.failureLoading}
-            onselect={(failure: FailedRequestSummary) => void ws.selectFailure(failure)} />
+        {:else if ws.clientErrors.length > 0}
+          <ClientErrorTable
+            items={ws.clientErrors}
+            loading={ws.clientErrorLoading}
+            onselect={(clientError: ClientErrorSummary) => void ws.selectClientError(clientError)} />
         {/if}
-        {#if ws.failureCursor}<div class="border-t p-3 text-center">
-            <Button variant="outline" disabled={ws.failureLoading} onclick={() => void ws.loadFailures(false)}
-              >{ws.failureLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+        {#if ws.clientErrorCursor}<div class="border-t p-3 text-center">
+            <Button variant="outline" disabled={ws.clientErrorLoading} onclick={() => void ws.loadClientErrors(false)}
+              >{ws.clientErrorLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
           </div>{/if}
-        {#if ws.selectedFailure}<ObservationInspector
+        {#if ws.selectedClientError}<ObservationInspector
             portalTarget={fullscreen ? workspaceEl : undefined}
-            failure={ws.failureDetail}
-            error={ws.failureDetailError ? localizeBackendErrorMessage(ws.failureDetailError) : undefined}
+            clientError={ws.clientErrorDetail}
+            error={ws.clientErrorDetailError ? localizeBackendErrorMessage(ws.clientErrorDetailError) : undefined}
             onretry={() => void ws.refreshSelectedDetail()}
-            oninteraction={ws.failureDetail?.request.interaction_id
-              ? () => void ws.openFailureInteraction()
+            oninteraction={ws.clientErrorDetail?.request.interaction_id
+              ? () => void ws.openClientErrorInteraction()
               : undefined}
-            loading={ws.detailLoading}
+            loading={ws.clientErrorDetailLoading}
+            width={inspectorWidth}
+            containerWidth={workspaceWidth}
+            onwidthchange={(value: number) => (inspectorWidth = value)}
+            onclose={ws.closeInspector}
+            onbundle={() => void downloadBundle()} />{/if}
+      </div>
+    {:else if ws.activeTab === 'upstream-errors'}
+      <div class="error-list-view">
+        <h2 class="sr-only">{m.observation_upstream_errors()}</h2>
+        {#if ws.upstreamErrorError}
+          <RequestFailure
+            message={localizeBackendErrorMessage(ws.upstreamErrorError)}
+            retry={() => ws.loadUpstreamErrors()}
+            retrying={ws.upstreamErrorLoading} />
+        {/if}
+        {#if ws.upstreamErrorLoading && ws.upstreamErrors.length === 0}
+          <div class="stage-state" role="status">{m.observation_loading_upstream_errors()}</div>
+        {:else if ws.upstreamErrors.length === 0 && !ws.upstreamErrorError}<Empty.Root class="flex-1"
+            ><Empty.Header
+              ><Empty.Title>{m.observation_no_upstream_errors()}</Empty.Title><Empty.Description
+                >{m.observation_no_upstream_errors_description()}</Empty.Description
+              ></Empty.Header
+            ></Empty.Root>
+        {:else if ws.upstreamErrors.length > 0}
+          <UpstreamErrorTable
+            items={ws.upstreamErrors}
+            loading={ws.upstreamErrorLoading}
+            onselect={(upstreamError: UpstreamErrorSummary) => void ws.selectUpstreamError(upstreamError)} />
+        {/if}
+        {#if ws.upstreamErrorCursor}<div class="border-t p-3 text-center">
+            <Button
+              variant="outline"
+              disabled={ws.upstreamErrorLoading}
+              onclick={() => void ws.loadUpstreamErrors(false)}
+              >{ws.upstreamErrorLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+          </div>{/if}
+        {#if ws.selectedUpstreamError}<ObservationInspector
+            portalTarget={fullscreen ? workspaceEl : undefined}
+            upstreamError={ws.upstreamErrorDetail}
+            error={ws.upstreamErrorDetailError ? localizeBackendErrorMessage(ws.upstreamErrorDetailError) : undefined}
+            onretry={() => void ws.refreshSelectedDetail()}
+            oninteraction={ws.upstreamErrorDetail?.error.interaction_id
+              ? () => void ws.openUpstreamErrorInteraction()
+              : undefined}
+            loading={ws.upstreamErrorDetailLoading}
             width={inspectorWidth}
             containerWidth={workspaceWidth}
             onwidthchange={(value: number) => (inspectorWidth = value)}
@@ -589,6 +644,48 @@ async function downloadBundle(): Promise<void> {
               ></Select.Content
             ></Select.Root
           ></Field.Field>
+        {#if ws.activeTab === 'client-errors'}<Field.Field
+            ><Field.FieldLabel for="observation-client-error-type">{m.observation_client_error_type()}</Field.FieldLabel
+            ><Select.Root
+              type="single"
+              bind:value={
+                () => ws.clientErrorTypeFilter,
+                (value: string) => ws.setClientErrorTypeFilter(value as ClientErrorType | 'all')
+              }
+              ><Select.Trigger id="observation-client-error-type" class="w-full"
+                >{ws.clientErrorTypeFilter === 'all'
+                  ? m.observation_all()
+                  : clientErrorTypeLabel(ws.clientErrorTypeFilter)}</Select.Trigger
+              ><Select.Content
+                ><Select.Group
+                  >{#each ['all', 'failed', 'rejected'] as type (type)}<Select.Item value={type}
+                      >{type === 'all' ? m.observation_all() : clientErrorTypeLabel(type)}</Select.Item
+                    >{/each}</Select.Group
+                ></Select.Content
+              ></Select.Root
+            ></Field.Field>
+        {:else if ws.activeTab === 'upstream-errors'}<Field.Field
+            ><Field.FieldLabel for="observation-upstream-outcome">{m.observation_upstream_result()}</Field.FieldLabel
+            ><Select.Root
+              type="single"
+              bind:value={
+                () => ws.upstreamErrorOutcomeFilter,
+                (value: string) => ws.setUpstreamErrorOutcomeFilter(value as UpstreamErrorOutcome | 'all')
+              }
+              ><Select.Trigger id="observation-upstream-outcome" class="w-full"
+                >{ws.upstreamErrorOutcomeFilter === 'all'
+                  ? m.observation_all()
+                  : upstreamErrorOutcomeLabel(ws.upstreamErrorOutcomeFilter)}</Select.Trigger
+              ><Select.Content
+                ><Select.Group
+                  >{#each ['all', 'recovered', 'caused_failure', 'in_progress', 'interrupted'] as outcome (outcome)}<Select.Item
+                      value={outcome}
+                      >{outcome === 'all' ? m.observation_all() : upstreamErrorOutcomeLabel(outcome)}</Select.Item
+                    >{/each}</Select.Group
+                ></Select.Content
+              ></Select.Root
+            ></Field.Field>
+        {/if}
         {#if ws.activeTab === 'interactions'}<Field.Field
             ><Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
               type="single"
@@ -680,8 +777,10 @@ async function downloadBundle(): Promise<void> {
 .toolbar-tabs {
   display: flex;
   min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem 0.75rem;
 }
 .observation-workspace.workspace-fullscreen,
 .observation-workspace:fullscreen {
@@ -718,7 +817,7 @@ async function downloadBundle(): Promise<void> {
   /* Windows Chromium 会在非滚动容器上残留 scrollbar-button 残影；此处无滚动语义，显式关闭 */
   scrollbar-width: none;
 }
-.failures-view {
+.error-list-view {
   position: relative;
   display: flex;
   flex: 1;
@@ -726,10 +825,10 @@ async function downloadBundle(): Promise<void> {
   min-height: 0;
   overflow: hidden;
 }
-.failures-view > .border-t {
+.error-list-view > .border-t {
   flex-shrink: 0;
 }
-.failures-view > .stage-state {
+.error-list-view > .stage-state {
   flex: 1;
   min-height: 0;
   overflow-y: auto;

@@ -513,14 +513,14 @@ describe('Stravia desktop smoke', () => {
         async () => {
           const failures = (await adminRequest(
             port,
-            `/observations/failed-requests?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
+            `/observations/client-errors?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
           )) as { items: Array<{ model: string | null }> }
           return models.every((model) => failures.items.some((item) => item.model === model))
         },
         { timeoutMsg: 'Native rejected requests did not persist both diagnostic records' },
       )
       await $('a[href="/logs"]').click()
-      await $('button=Failed Requests').click()
+      await $('button=Client Errors').click()
       for (const model of models) {
         const row = await $(`//tr[contains(normalize-space(), "${model}")]`)
         await row.$('button').click()
@@ -1262,8 +1262,8 @@ describe('Stravia desktop smoke', () => {
     expect(rejected.status).toBe(401)
     await $('a[href="/logs"]').click()
     await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
-    await $('button=Failed Requests').click()
-    const request = await $('table[aria-label="Failed Requests"] tbody tr')
+    await $('button=Client Errors').click()
+    const request = await $('table[aria-label="Client Errors"] tbody tr')
     await expect(request).toHaveText(expect.stringContaining('Unauthenticated'))
     await expect(request).toHaveText(expect.stringContaining('HTTP 401'))
     await request.$('button').click()
@@ -1282,7 +1282,7 @@ describe('Stravia desktop smoke', () => {
     await $('button[aria-label="More actions"]').click()
     await $('[role="menuitem"]=Clear history').click()
     await (await $('[role="alertdialog"]')).$('button=Clear history').click()
-    await expect($('table[aria-label="Failed Requests"]')).not.toExist()
+    await expect($('table[aria-label="Client Errors"]')).not.toExist()
   })
 
   it('persists reversible redaction changes through the native management interface', async () => {

@@ -3,11 +3,13 @@ import * as m from '#lib/paraglide/messages.js'
 import { renderSnippet } from '@tanstack/svelte-table'
 import { formatDuration, formatLogTime } from '#lib/format.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
-import { failureOriginLabel } from '#lib/observation-labels.js'
-import type { FailedRequestSummary } from '#lib/types.js'
+import { clientErrorTypeLabel, clientErrorTypeTone, failureOriginLabel } from '#lib/observation-labels.js'
+import type { ClientErrorSummary } from '#lib/types.js'
+import { Badge } from '#lib/components/ui/badge/index.js'
 import {
   DataTable,
   createDataTableColumnHelper,
+  type DataTableRow,
   type DataTableRowPointerEvent,
 } from '#lib/components/ui/data-table/index.js'
 
@@ -15,73 +17,83 @@ let {
   items,
   loading,
   onselect,
-}: { items: FailedRequestSummary[]; loading: boolean; onselect: (request: FailedRequestSummary) => void } = $props()
+}: { items: ClientErrorSummary[]; loading: boolean; onselect: (request: ClientErrorSummary) => void } = $props()
 const labels = $derived(getDataTableLabels())
-const helper = createDataTableColumnHelper<FailedRequestSummary>()
+const helper = createDataTableColumnHelper<ClientErrorSummary>()
 
-function sourceLabel(row: FailedRequestSummary): string {
+function sourceLabel(row: ClientErrorSummary): string {
   return (
     row.api_key_name ??
     row.client ??
     (row.kind === 'rejection' && !row.observation_gap ? m.failed_request_unauthenticated() : '—')
   )
 }
-const modelLabel = (row: FailedRequestSummary): string => row.model_display_name ?? row.model ?? '—'
-const servicesLabel = (row: FailedRequestSummary): string =>
-  row.services.map((service) => service.name).join(', ') || '—'
-const originLabel = (row: FailedRequestSummary): string => failureOriginLabel(row.error.source) ?? '—'
-const errorLabel = (row: FailedRequestSummary): string => row.error.message ?? row.error.code ?? '—'
-const durationLabel = (row: FailedRequestSummary): string =>
+const modelLabel = (row: ClientErrorSummary): string => row.model_display_name ?? row.model ?? '—'
+const servicesLabel = (row: ClientErrorSummary): string => row.services.map((service) => service.name).join(', ') || '—'
+const originLabel = (row: ClientErrorSummary): string => failureOriginLabel(row.error.source) ?? '—'
+const errorLabel = (row: ClientErrorSummary): string => row.error.message ?? row.error.code ?? '—'
+const durationLabel = (row: ClientErrorSummary): string =>
   row.duration_ms == null ? '—' : formatDuration(Number(row.duration_ms))
 
-// 时间、来源、耗时保持紧凑；多出的宽度只交给模型、供应商名称与错误三列。
+// 时间、类型、来源与耗时保持紧凑；多出的宽度只交给错误列，模型与供应商不抢占。
 const columns = helper.columns([
   helper.accessor('started_at', {
     header: () => m.failed_request_time(),
     cell: ({ row }) => renderSnippet(requestTime, row.original),
-    size: 170,
+    size: 149,
     enableSorting: false,
     meta: { width: 'compact', cellClass: 'font-technical text-xs tabular-nums' },
+  }),
+  helper.accessor('type', {
+    header: () => m.observation_client_error_type(),
+    cell: ({ row }) => renderSnippet(typeCell, row.original),
+    size: 104,
+    enableSorting: false,
+    meta: { width: 'compact' },
   }),
   helper.accessor(sourceLabel, {
     id: 'source',
     header: () => m.failed_request_client(),
-    size: 150,
+    size: 118,
     enableSorting: false,
-    meta: { width: 'compact' },
+    cell: ({ row }) => renderSnippet(clippedCell, sourceLabel(row.original)),
+    meta: { width: 'compact', cellClass: 'max-w-0' },
   }),
   helper.accessor(modelLabel, {
     id: 'model',
     header: () => m.common_model(),
-    size: 160,
+    size: 90,
     enableSorting: false,
-    meta: { width: 'fill' },
+    cell: ({ row }) => renderSnippet(clippedCell, modelLabel(row.original)),
+    meta: { width: 'compact', cellClass: 'max-w-0' },
   }),
   helper.accessor(servicesLabel, {
     id: 'services',
     header: () => m.common_model_service(),
-    size: 180,
+    size: 90,
     enableSorting: false,
-    meta: { width: 'fill' },
+    cell: ({ row }) => renderSnippet(clippedCell, servicesLabel(row.original)),
+    meta: { width: 'compact', cellClass: 'max-w-0' },
   }),
   helper.accessor(originLabel, {
     id: 'origin',
     header: () => m.failed_request_origin(),
-    size: 110,
+    size: 70,
     enableSorting: false,
-    meta: { width: 'compact' },
+    cell: ({ row }) => renderSnippet(clippedCell, originLabel(row.original)),
+    meta: { width: 'compact', cellClass: 'max-w-0' },
   }),
   helper.accessor(errorLabel, {
     id: 'error',
     header: () => m.failed_request_error(),
-    size: 320,
+    size: 160,
     enableSorting: false,
     cell: ({ row }) => renderSnippet(errorCell, row.original),
-    meta: { width: 'fill' },
+    meta: { width: 'fill', cellClass: 'max-w-0' },
   }),
   helper.accessor('duration_ms', {
     header: () => m.failed_request_duration(),
-    size: 90,
+    size: 71,
     enableSorting: false,
     cell: ({ row }) => durationLabel(row.original),
     meta: { width: 'compact', align: 'end', cellClass: 'font-technical text-xs tabular-nums' },
@@ -89,7 +101,15 @@ const columns = helper.columns([
 ])
 </script>
 
-{#snippet requestTime(request: FailedRequestSummary)}
+{#snippet clippedCell(value: string)}
+  <span class="block truncate" title={value}>{value}</span>
+{/snippet}
+
+{#snippet typeCell(request: ClientErrorSummary)}
+  <Badge variant={clientErrorTypeTone(request.type)}>{clientErrorTypeLabel(request.type)}</Badge>
+{/snippet}
+
+{#snippet requestTime(request: ClientErrorSummary)}
   <button
     class="text-start underline-offset-4 hover:underline"
     onclick={(event) => {
@@ -100,7 +120,7 @@ const columns = helper.columns([
   </button>
 {/snippet}
 
-{#snippet errorCell(request: FailedRequestSummary)}
+{#snippet errorCell(request: ClientErrorSummary)}
   <div class="min-w-0">
     <span class="block truncate" title={request.error.message ?? request.error.code ?? undefined}>
       {errorLabel(request)}
@@ -111,28 +131,35 @@ const columns = helper.columns([
   </div>
 {/snippet}
 
-<div class="failed-request-table">
+<div class="client-error-table">
   <div class="desktop-table">
     <DataTable
       data={items}
       {columns}
       {labels}
       {loading}
-      ariaLabel={m.observation_failed_requests()}
-      getRowId={(row: FailedRequestSummary) => `${row.kind}:${row.id}`}
+      ariaLabel={m.observation_client_errors()}
+      getRowId={(row: ClientErrorSummary) => `${row.kind}:${row.id}`}
       class="isolate flex-1"
       workbench
       stickyHeader
-      onRowClick={({ row }: DataTableRowPointerEvent<FailedRequestSummary>) => onselect(row.original)} />
+      selectionMode="single"
+      selectOnRowClick={false}
+      onRowSelect={(row: DataTableRow<ClientErrorSummary>) => onselect(row.original)}
+      onRowClick={({ row }: DataTableRowPointerEvent<ClientErrorSummary>) => onselect(row.original)} />
   </div>
-  <!-- 窄工作区：先模型、实际错误与时间，再以 dl 列出客户端／密钥、供应商、来源与耗时。 -->
-  <ul class="mobile-list" aria-label={m.observation_failed_requests()} aria-busy={loading || undefined}>
+  <!-- 窄工作区：先模型、类型、实际错误与时间，再以 dl 列出客户端／密钥、供应商、来源与耗时。 -->
+  <ul class="mobile-list" aria-label={m.observation_client_errors()} aria-busy={loading || undefined}>
     {#each items as request (`${request.kind}:${request.id}`)}
+      <!-- 行本身只响应指针；键盘用户通过行内时间按钮打开详情，避免在按钮内嵌套按钮。 -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
       <li class="failure-row" onclick={() => onselect(request)}>
         <div class="failure-head">
           <p class="failure-model">{modelLabel(request)}</p>
-          {@render requestTime(request)}
+          <div class="failure-head-meta">
+            {@render typeCell(request)}
+            {@render requestTime(request)}
+          </div>
         </div>
         <p class="failure-error">{errorLabel(request)}</p>
         {#if request.error.status_code !== null}
@@ -154,7 +181,7 @@ const columns = helper.columns([
 </div>
 
 <style>
-.failed-request-table {
+.client-error-table {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -185,15 +212,31 @@ const columns = helper.columns([
   padding: 0.85rem 0.75rem;
   cursor: pointer;
 }
-.failure-row:hover {
+.failure-row:hover,
+.failure-row:focus-visible {
   background: color-mix(in oklab, var(--muted) 45%, var(--background));
+}
+.failure-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 .failure-head {
   display: flex;
   min-width: 0;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.25rem 0.75rem;
+}
+.failure-head-meta {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-inline-start: auto;
 }
 .failure-head :global(button) {
   flex: none;

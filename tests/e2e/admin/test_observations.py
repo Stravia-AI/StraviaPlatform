@@ -193,7 +193,7 @@ def test_websocket_waiting_client_disconnects_without_losing_generation(
     )
     assert disconnected["runs"][0]["terminal_reason"] == "client_disconnected"
     assert disconnected["runs"][0]["generation_node_id"] == generation
-    assert _failed_requests(admin_env, model=route_id)["items"] == []
+    assert _client_errors(admin_env, model=route_id)["items"] == []
     response = event["response"]
     call = next(item for item in response["output"] if item["type"] == "function_call")
     status, resumed = http_request(
@@ -241,11 +241,22 @@ def _forest(env: dict[str, Any], **query: object) -> dict[str, Any]:
     return body["data"]
 
 
-def _failed_requests(env: dict[str, Any], **query: object) -> dict[str, Any]:
+def _client_errors(env: dict[str, Any], **query: object) -> dict[str, Any]:
     params = {"anchor_at": int(time.time() * 1000) + 1_000, "window_index": 0, **query}
     status, body = http_request(
         "GET",
-        f"{env['admin']}/api/v1/observations/failed-requests?{urlencode(params)}",
+        f"{env['admin']}/api/v1/observations/client-errors?{urlencode(params)}",
+        headers=env["auth"],
+    )
+    assert status == 200, body
+    return body["data"]
+
+
+def _upstream_errors(env: dict[str, Any], **query: object) -> dict[str, Any]:
+    params = {"anchor_at": int(time.time() * 1000) + 1_000, "window_index": 0, **query}
+    status, body = http_request(
+        "GET",
+        f"{env['admin']}/api/v1/observations/upstream-errors?{urlencode(params)}",
         headers=env["auth"],
     )
     assert status == 200, body
@@ -268,7 +279,7 @@ def test_failed_request_authentication_has_no_invented_identity_or_interaction(
     def authentication_failure() -> dict[str, Any] | None:
         return next(
             (
-                item for item in _failed_requests(admin_env)["items"]
+                item for item in _client_errors(admin_env)["items"]
                 if item["started_at"] >= started_at and item["error"]["status_code"] == 401
             ),
             None,
@@ -286,7 +297,7 @@ def test_failed_request_authentication_has_no_invented_identity_or_interaction(
     assert failure["duration_ms"] is not None and failure["duration_ms"] >= 0
     status, body = http_request(
         "GET",
-        f"{admin_env['admin']}/api/v1/observations/failed-requests/rejection/{failure['id']}",
+        f"{admin_env['admin']}/api/v1/observations/client-errors/rejection/{failure['id']}",
         headers=admin_env["auth"],
     )
     assert status == 200, body
@@ -307,7 +318,7 @@ def test_failed_request_survives_successful_client_retry_in_same_interaction(
     assert _proxy(admin_env, key, model, messages)[0] >= 500
     failure = _wait_for(
         "final upstream failure",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert failure["error"]["status_code"] == 503
@@ -324,11 +335,11 @@ def test_failed_request_survives_successful_client_retry_in_same_interaction(
         ),
     )
     assert {run["status"] for run in detail["runs"]} == {"failed", "completed"}
-    assert [item["id"] for item in _failed_requests(admin_env, model=route_id)["items"]] == [failure["id"]]
+    assert [item["id"] for item in _client_errors(admin_env, model=route_id)["items"]] == [failure["id"]]
     before_usage = detail["interaction"]["usage"]
     status, body = http_request(
         "GET",
-        f"{admin_env['admin']}/api/v1/observations/failed-requests/run/{failure['id']}",
+        f"{admin_env['admin']}/api/v1/observations/client-errors/run/{failure['id']}",
         headers=admin_env["auth"],
     )
     assert status == 200, body
@@ -352,7 +363,7 @@ def test_failed_request_records_stream_error_after_http_success(
     )
     with urlopen(request, timeout=15) as response:
         assert response.status == 200
-        assert _failed_requests(admin_env, model=route_id)["items"] == []
+        assert _client_errors(admin_env, model=route_id)["items"] == []
         admin_env["mock_server"].stream_error_release.set()
         output = response.read().decode()
     assert "partial" in output
@@ -377,7 +388,7 @@ def test_failed_request_records_stream_error_after_http_success(
     }
     failure = _wait_for(
         "stream error after successful headers",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert "upstream failed after output" in failure["error"]["message"]
@@ -421,7 +432,7 @@ def test_failed_request_excludes_recovered_internal_retry(admin_env: dict[str, A
         event for event in exported["events"] if event["kind"] == "target_attempt_finished"
     ]
     assert exported_attempts[0]["payload"]["error"] == error
-    assert _failed_requests(admin_env, model=route_id)["items"] == []
+    assert _client_errors(admin_env, model=route_id)["items"] == []
 
 
 @pytest.mark.e2e
@@ -436,7 +447,7 @@ def test_failed_request_records_connection_refusal(admin_env: dict[str, Any]) ->
     assert status >= 500
     failure = _wait_for(
         "connection failure",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert failure["error"]["status_code"] is None
@@ -463,7 +474,7 @@ def test_failed_request_records_upstream_timeout(admin_env: dict[str, Any]) -> N
     ), "timeout must occur after the real upstream received this request"
     failure = _wait_for(
         "upstream first-token timeout",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert "timeout" in failure["error"]["code"]
@@ -487,7 +498,7 @@ def test_failed_request_records_admitted_platform_error_without_upstream(admin_e
     assert status >= 400
     failure = _wait_for(
         "admitted platform failure",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     assert failure["kind"] == "run"
     assert failure["interaction_id"] is not None
@@ -510,7 +521,7 @@ def test_failed_request_preserves_verified_source_before_run_admission(admin_env
     assert status >= 400
     failure = _wait_for(
         "authenticated rejection before admission",
-        lambda: next((item for item in _failed_requests(admin_env)["items"]
+        lambda: next((item for item in _client_errors(admin_env)["items"]
                       if item["started_at"] >= started and item["kind"] == "rejection"), None),
     )
     assert failure["api_key_name"] == f"{model}-key"
@@ -519,8 +530,8 @@ def test_failed_request_preserves_verified_source_before_run_admission(admin_env
     assert failure["services"] == []
     assert failure["run_id"] is None
     assert failure["interaction_id"] is None
-    assert [item["id"] for item in _failed_requests(admin_env, api_key=failure["api_key_id"])["items"]] == [failure["id"]]
-    assert [item["id"] for item in _failed_requests(admin_env, model=route_id)["items"]] == [failure["id"]]
+    assert [item["id"] for item in _client_errors(admin_env, api_key=failure["api_key_id"])["items"]] == [failure["id"]]
+    assert [item["id"] for item in _client_errors(admin_env, model=route_id)["items"]] == [failure["id"]]
 
 
 @pytest.mark.e2e
@@ -533,7 +544,7 @@ def test_failed_request_preserves_diagnostics_but_redacts_client_error(admin_env
     assert "upstream-secret" not in json.dumps(client_error)
     failure = _wait_for(
         "all exhausted attempts",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     detail = _detail(admin_env, failure["interaction_id"])
     attempts = [event for event in detail["runs"][0]["events"] if event["kind"] == "target_attempt_finished"]
@@ -559,10 +570,10 @@ def test_failed_request_preserves_diagnostics_but_redacts_client_error(admin_env
     assert key not in json.dumps(failure)
     usage = detail["interaction"]["usage"]
     for _ in range(2):
-        page = _failed_requests(admin_env, model=route_id)
+        page = _client_errors(admin_env, model=route_id)
         assert [(item["kind"], item["id"]) for item in page["items"]] == [("run", failure["id"])]
         status, response = http_request(
-            "GET", f"{admin_env['admin']}/api/v1/observations/failed-requests/run/{failure['id']}",
+            "GET", f"{admin_env['admin']}/api/v1/observations/client-errors/run/{failure['id']}",
             headers=admin_env["auth"],
         )
         assert status == 200
@@ -608,7 +619,7 @@ def test_failed_request_excludes_client_disconnect_during_stream(admin_env: dict
         detail = _detail(admin_env, interaction["id"])
         assert detail["runs"][0]["status"] in ("cancelled", "interrupted")
         assert detail["runs"][0]["generation_node_id"] is None
-        assert _failed_requests(admin_env, model=route_id)["items"] == []
+        assert _client_errors(admin_env, model=route_id)["items"] == []
     finally:
         admin_env["mock_server"].stream_error_release.set()
 
@@ -622,10 +633,10 @@ def test_failed_request_preserves_nested_diagnostics_but_redacts_client_error(ad
     assert "nested-diagnostic-secret" not in json.dumps(client_error)
     failure = _wait_for(
         "structured upstream failure",
-        lambda: next(iter(_failed_requests(admin_env, model=route_id)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     status, detail = http_request(
-        "GET", f"{admin_env['admin']}/api/v1/observations/failed-requests/run/{failure['id']}",
+        "GET", f"{admin_env['admin']}/api/v1/observations/client-errors/run/{failure['id']}",
         headers=admin_env["auth"],
     )
     assert status == 200
@@ -650,7 +661,7 @@ def test_failed_request_mixed_history_uses_start_time_and_keyset_pages(admin_env
         assert status == 401
     whole = _wait_for(
         "mixed final requests",
-        lambda: page if (page := _failed_requests(admin_env, model=route_id, limit=100))["total"] == 6 else None,
+        lambda: page if (page := _client_errors(admin_env, model=route_id, limit=100))["total"] == 6 else None,
     )
     start = min(item["started_at"] for item in whole["items"])
     end = max(item["started_at"] for item in whole["items"]) + 1
@@ -661,7 +672,7 @@ def test_failed_request_mixed_history_uses_start_time_and_keyset_pages(admin_env
     seen = []
     cursor = None
     while True:
-        page = _failed_requests(admin_env, model=route_id, start_at=start, end_at=end, limit=1, **({"cursor": cursor} if cursor else {}))
+        page = _client_errors(admin_env, model=route_id, start_at=start, end_at=end, limit=1, **({"cursor": cursor} if cursor else {}))
         assert page["total"] == 6
         seen.extend((item["kind"], item["id"]) for item in page["items"])
         cursor = page["next_cursor"]
@@ -670,12 +681,12 @@ def test_failed_request_mixed_history_uses_start_time_and_keyset_pages(admin_env
         assert len(seen) <= 6
     assert seen == [(item["kind"], item["id"]) for item in whole["items"]]
     assert len(set(seen)) == 6
-    assert _failed_requests(admin_env, model=route_id, start_at=end, end_at=end + 1)["items"] == []
+    assert _client_errors(admin_env, model=route_id, start_at=end, end_at=end + 1)["items"] == []
 
 
 @pytest.mark.e2e
 @pytest.mark.admin
-@pytest.mark.parametrize("resource", ["interactions", "rejections", "failed-requests", "interactions/changes"])
+@pytest.mark.parametrize("resource", ["interactions", "rejections", "client-errors", "upstream-errors", "interactions/changes"])
 @pytest.mark.parametrize("bounds", [
     {"start_at": 1_000},
     {"end_at": 2_000},
@@ -1092,9 +1103,11 @@ def test_observation_resources_require_admin_and_rejections_invent_no_principal(
         "/api/v1/observations/interactions/missing/events",
         "/api/v1/observations/interactions/missing/live",
         "/api/v1/observations/rejections",
-        "/api/v1/observations/failed-requests",
-        "/api/v1/observations/failed-requests/run/missing",
-        "/api/v1/observations/failed-requests/rejection/missing",
+        "/api/v1/observations/client-errors",
+        "/api/v1/observations/client-errors/run/missing",
+        "/api/v1/observations/client-errors/rejection/missing",
+        "/api/v1/observations/upstream-errors",
+        "/api/v1/observations/upstream-errors/missing",
         "/api/v1/observations/events?after=0",
         "/api/v1/observations/debug",
     )

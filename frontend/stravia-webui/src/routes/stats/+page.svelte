@@ -14,7 +14,7 @@ import * as m from '#lib/paraglide/messages.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
 import type { SortingState } from '@tanstack/svelte-table'
-import { BarChart, PieChart } from 'layerchart'
+import { PieChart } from 'layerchart'
 
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
@@ -28,10 +28,18 @@ import {
   formatTime,
   formatTps,
 } from '#lib/format.js'
-import { buildActivityGrid, buildLatencyChart, planActivityGrid } from '#lib/stats-chart.js'
+import {
+  buildActivityGrid,
+  buildAvailabilityChart,
+  buildAvailabilitySummary,
+  buildLatencyChart,
+  planActivityGrid,
+} from '#lib/stats-chart.js'
 import { STATS_TOP_N, sortStatsRows, visibleStatsRows } from '#lib/stats-table.js'
 import type { ApiKeyStats, ProviderStats } from '#lib/types.js'
 import MetricStrip from '#lib/components/metric-strip.svelte'
+import AvailabilityChart from '#lib/components/availability-chart.svelte'
+import AvailabilitySummary from '#lib/components/availability-summary.svelte'
 import LatencySpeedChart from '#lib/components/latency-speed-chart.svelte'
 import LatencySpeedSummary from '#lib/components/latency-speed-summary.svelte'
 import TokenActivityGrid from '#lib/components/token-activity-grid.svelte'
@@ -171,12 +179,22 @@ let providerSorting = $state.raw<SortingState>([])
 let apiKeySorting = $state.raw<SortingState>([])
 let showAllProviders = $state(false)
 let showAllApiKeys = $state(false)
+// 上游错误率按该供应商自身的尝试计；没有上游请求时保持未知（“—”），不补成 0%。
+function providerErrorRate(provider: ProviderStats): number | null {
+  return provider.upstream_request_count > 0 ? provider.upstream_error_count / provider.upstream_request_count : null
+}
+
+function formatProviderErrorRate(provider: ProviderStats): string {
+  const rate = providerErrorRate(provider)
+  return rate == null ? '—' : formatPercent(rate)
+}
+
 const providerRows = $derived(
   sortStatsRows(providerStats, providerSorting, {
     provider: providerLabel,
-    request_count: (provider) => provider.request_count,
-    error_count: (provider) => provider.error_count,
-    errorRate: (provider) => (provider.request_count > 0 ? provider.error_count / provider.request_count : 0),
+    upstream_request_count: (provider) => provider.upstream_request_count,
+    upstream_error_count: (provider) => provider.upstream_error_count,
+    errorRate: providerErrorRate,
     avg_output_tps: (provider) => provider.avg_output_tps,
   }),
 )
@@ -194,9 +212,11 @@ const apiKeyRows = $derived(
 const visibleProviders = $derived(visibleStatsRows(providerRows, showAllProviders))
 const visibleApiKeys = $derived(visibleStatsRows(apiKeyRows, showAllApiKeys))
 
-// 零个错误保持中性色；只有真实错误才使用 destructive。
+// 零个上游错误保持中性色；只有真实错误才使用 destructive。
 function providerCellClass(cell: DataTableCell<ProviderStats>): string | undefined {
-  return cell.column.id === 'error_count' && cell.row.original.error_count > 0 ? 'text-destructive' : undefined
+  return cell.column.id === 'upstream_error_count' && cell.row.original.upstream_error_count > 0
+    ? 'text-destructive'
+    : undefined
 }
 const providerStatsColumnHelper = createDataTableColumnHelper<ProviderStats>()
 const providerStatsColumns = providerStatsColumnHelper.columns([
@@ -205,24 +225,21 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
     header: () => m.common_model_service(),
     meta: { label: () => m.common_model_service(), headerClass: 'w-full', cellClass: 'font-medium' },
   }),
-  providerStatsColumnHelper.accessor('request_count', {
-    header: () => m.common_request_count_label(),
+  providerStatsColumnHelper.accessor('upstream_request_count', {
+    header: () => m.stats_upstream_request_count(),
     cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
+    meta: { label: () => m.stats_upstream_request_count(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  providerStatsColumnHelper.accessor('error_count', {
-    header: () => m.common_error_count_label(),
-    meta: { label: () => m.common_error_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  providerStatsColumnHelper.accessor('upstream_error_count', {
+    header: () => m.stats_upstream_error_count(),
+    meta: { label: () => m.stats_upstream_error_count(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  providerStatsColumnHelper.accessor(
-    (provider) => (provider.request_count > 0 ? provider.error_count / provider.request_count : 0),
-    {
-      id: 'errorRate',
-      header: () => m.common_error_rate(),
-      cell: (context) => formatPercent(context.getValue()),
-      meta: { label: () => m.common_error_rate(), align: 'end', cellClass: 'font-technical tabular-nums' },
-    },
-  ),
+  providerStatsColumnHelper.accessor(formatProviderErrorRate, {
+    id: 'errorRate',
+    header: () => m.stats_upstream_error_rate(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.stats_upstream_error_rate(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
   providerStatsColumnHelper.accessor('avg_output_tps', {
     header: () => m.stats_output_speed(),
     cell: (context) => formatTps(context.getValue()),
@@ -278,9 +295,12 @@ const activityGrid = $derived(
 )
 const latencyChart = $derived(buildLatencyChart(seriesStats, seriesStats[0]?.bucket_ms ?? seriesBucketSeconds * 1_000))
 const hasLatencyMetrics = $derived(latencyChart.some((point) => point.firstToken != null || point.outputTps != null))
-const errorChart = $derived(
-  seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
+// 窗口聚合取概览的总量相除，与折线同窗口但不经过桶边界；概览缺失时保持中性的未知值。
+const availabilityChart = $derived(
+  buildAvailabilityChart(seriesStats, seriesStats[0]?.bucket_ms ?? seriesBucketSeconds * 1_000),
 )
+const availabilitySummary = $derived(overview ? buildAvailabilitySummary(overview) : { client: null, upstream: null })
+const hasAvailability = $derived(availabilityChart.some((point) => point.client != null || point.upstream != null))
 interface PieSlice {
   key: string
   label: string
@@ -537,26 +557,22 @@ function retryAll(): void {
       </section>
     </div>
 
-    <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给错误趋势。 -->
+    <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给可用率趋势。 -->
     <div
       class="grid gap-8 @min-[36rem]/route-page:grid-cols-2 @min-[80rem]/route-page:grid-cols-[minmax(0,1fr)_minmax(15rem,22rem)_minmax(15rem,22rem)] @min-[80rem]/route-page:gap-x-6">
       <section
         class="route-section @min-[36rem]/route-page:col-span-2 @min-[80rem]/route-page:col-span-1"
-        aria-labelledby="error-trend-title">
+        aria-labelledby="availability-title">
         <div class="route-section-header">
-          <h2 id="error-trend-title" class="route-section-title">{m.common_errors_label()}</h2>
-          <span class={['font-technical text-xs tabular-nums', (overview?.error_count ?? 0) > 0 && 'text-destructive']}
-            >{overview?.error_count ?? '–'}</span>
+          <h2 id="availability-title" class="route-section-title">{m.stats_availability()}</h2>
+          <AvailabilitySummary summary={availabilitySummary} />
         </div>
         {#if seriesQuery.error && seriesQuery.data === undefined}
           {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
-        {:else if hasTraffic && errorChart.length > 0}<div class="h-40 min-w-0">
-            <BarChart
-              data={errorChart}
-              x={(item: (typeof errorChart)[number]) => item.bucket}
-              series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
-              props={{ xAxis: { ticks: 4 } }} />
-          </div>{:else}{@render stateLine(m.stats_no_error_data())}{/if}
+        {:else if seriesQuery.isPending}<Skeleton class="h-40" />
+        {:else if hasAvailability}<div class="h-40 min-w-0">
+            <AvailabilityChart points={availabilityChart} {formatBucket} />
+          </div>{:else}{@render stateLine(m.stats_no_availability_data())}{/if}
       </section>
 
       <section class="route-section" aria-labelledby="token-breakdown-title">
@@ -668,11 +684,12 @@ function retryAll(): void {
                   <p class="truncate font-medium">{providerLabel(provider)}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatTps(provider.avg_output_tps)} ·
-                    <span class={provider.error_count > 0 ? 'text-destructive' : undefined}
-                      >{provider.error_count} {m.common_errors()}</span>
+                    <span class={provider.upstream_error_count > 0 ? 'text-destructive' : undefined}
+                      >{provider.upstream_error_count} {m.stats_upstream_errors()}</span>
+                    · {formatProviderErrorRate(provider)}
                   </p>
                 </div>
-                <p class="font-technical tabular-nums">{formatCompactCount(provider.request_count)}</p>
+                <p class="font-technical tabular-nums">{formatCompactCount(provider.upstream_request_count)}</p>
               </div>{/each}
           </div>
         {/if}

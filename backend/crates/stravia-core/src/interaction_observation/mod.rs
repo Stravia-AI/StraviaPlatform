@@ -81,7 +81,10 @@ impl ClientConnectionObservation {
             return;
         }
         let writer = self.observation.inner.writer.clone();
-        let command = WriterCommand::ClientDisconnected { runs };
+        let command = WriterCommand::ClientDisconnected {
+            runs,
+            occurred_at: writer::now(),
+        };
         let perf_context = crate::performance::current_context();
         if let Err(error) = writer.try_send(command) {
             // 断线不阻塞传输清理；队列繁忙时仍按写者顺序提交状态更新。
@@ -798,6 +801,7 @@ impl IngressObserver {
     /// One admission carries everything Run Attribution needs; there is no
     /// separate input-registration call to get out of order.
     pub(crate) fn admit(mut self, start: RunStart, facts: AdmissionFacts) -> RunObserver {
+        let occurred_at = writer::now();
         let ingress = self.start.take();
         let debug_enabled = self.observation.inner.debug.load(Ordering::Acquire);
         let discarded_trace = if !debug_enabled {
@@ -829,6 +833,8 @@ impl IngressObserver {
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
             client_output_committed: AtomicBool::new(false),
+            rejected_before_target: AtomicBool::new(false),
+            target_attempted: AtomicBool::new(false),
             admission_queued: false,
             event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
@@ -879,6 +885,7 @@ impl IngressObserver {
                     start,
                     facts,
                     received_at: self.received_at,
+                    occurred_at,
                     metadata: std::mem::take(&mut self.metadata),
                     debug_enabled,
                     trace: inner.trace.clone(),
@@ -908,6 +915,7 @@ impl IngressObserver {
         self.reject_inner(outcome);
     }
     fn reject_inner(&mut self, outcome: RejectedOutcome) {
+        let occurred_at = writer::now();
         if let Some(start) = self.start.take() {
             if self
                 .observation
@@ -919,7 +927,8 @@ impl IngressObserver {
                     metadata: std::mem::take(&mut self.metadata),
                     debug_enabled: self.debug_enabled,
                     started_at: self.received_at,
-                    duration_ms: writer::now().saturating_sub(self.received_at),
+                    duration_ms: occurred_at.saturating_sub(self.received_at),
+                    occurred_at,
                 })
                 .is_err()
             {
@@ -946,6 +955,7 @@ impl Drop for IngressObserver {
                 trace: self.trace.take(),
                 pending_finish: None,
                 gap: false,
+                occurred_at: writer::now(),
             });
         }
     }
@@ -975,6 +985,10 @@ struct RunObserverInner {
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
     client_output_committed: AtomicBool,
+    /// 请求阶段 Hook 拒绝发生在 Target 选择之前：这类 Run 是拒绝请求，不是失败请求。
+    rejected_before_target: AtomicBool,
+    /// 已发出过 Target 尝试：此后的模型不可用或访问禁止属于失败的请求，不能再按错误码归为错误的请求。
+    target_attempted: AtomicBool,
     admission_queued: bool,
     event_boundary: Mutex<()>,
     gap: AtomicBool,
@@ -1084,8 +1098,9 @@ impl RunObserver {
         if !self.inner.admission_queued {
             return;
         }
+        let occurred_at = writer::now();
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
-        self.send_tool_results(tool_results);
+        self.send_tool_results(tool_results, occurred_at);
         let Some(preview) = self.inner.pending_preview.lock().take() else {
             return;
         };
@@ -1098,6 +1113,7 @@ impl RunObserver {
             .try_send(WriterCommand::InputPreview {
                 run_id: self.inner.run_id.clone(),
                 preview,
+                occurred_at,
             })
             .is_err()
         {
@@ -1155,6 +1171,13 @@ impl RunObserver {
         self.record(RunEvent::RequestFailed { error });
     }
 
+    /// 请求阶段的 Hook 拒绝：拒绝码由 Hook 自定，不能按码推断，必须显式标记。
+    pub(crate) fn mark_rejected_before_target(&self) {
+        self.inner
+            .rejected_before_target
+            .store(true, Ordering::Release);
+    }
+
     pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
         // 最终 Target 或流处理边界比 HTTP 错误转换保留更准确的上游事实。
         if self.inner.failure.lock().is_none() {
@@ -1172,6 +1195,9 @@ impl RunObserver {
     pub(crate) fn record(&self, mut event: RunEvent) {
         if !self.inner.admission_queued {
             return;
+        }
+        if matches!(event, RunEvent::TargetAttemptStarted { .. }) {
+            self.inner.target_attempted.store(true, Ordering::Release);
         }
         match &mut event {
             RunEvent::ModelTurnStarted {
@@ -1272,7 +1298,7 @@ impl RunObserver {
             }
         }
     }
-    fn send_tool_results(&self, events: Vec<RunEvent>) {
+    fn send_tool_results(&self, events: Vec<RunEvent>, occurred_at: i64) {
         if !self.inner.admission_queued {
             return;
         }
@@ -1288,6 +1314,7 @@ impl RunObserver {
             .try_send(WriterCommand::ClientToolResults {
                 run_id: self.inner.run_id.clone(),
                 events,
+                occurred_at,
             })
             .is_err()
         {
@@ -1298,6 +1325,7 @@ impl RunObserver {
         if !self.inner.admission_queued {
             return;
         }
+        let occurred_at = writer::now();
         // Keep concurrently produced activity ordered with Finish without rejecting
         // meaningful background events that arrive after client delivery.
         let _boundary = self.inner.event_boundary.lock();
@@ -1308,7 +1336,7 @@ impl RunObserver {
                 .store(true, Ordering::Release);
         }
         if matches!(event, RunEvent::ClientToolResult { .. }) {
-            self.send_tool_results(vec![event]);
+            self.send_tool_results(vec![event], occurred_at);
             return;
         }
         if matches!(event, RunEvent::Wire { .. }) {
@@ -1351,6 +1379,7 @@ impl RunObserver {
                     event: RunEvent::ObservationGap {
                         reason: "writer_overflow".into(),
                     },
+                    occurred_at,
                 })
                 .is_err()
             {
@@ -1391,7 +1420,7 @@ impl RunObserver {
                 self.inner.gap.store(true, Ordering::Release);
                 return;
             };
-            let pending = Arc::new(Mutex::new(writer::QueuedText::new(event)));
+            let pending = Arc::new(Mutex::new(writer::QueuedText::new(event, occurred_at)));
             *queued = Some(Arc::clone(&pending));
             WriterCommand::Text {
                 run_id: self.inner.run_id.clone(),
@@ -1403,6 +1432,7 @@ impl RunObserver {
             WriterCommand::Event {
                 run_id: self.inner.run_id.clone(),
                 event,
+                occurred_at,
             }
         };
         if let Err(error) = self.inner.observation.inner.writer.try_send(command) {
@@ -1420,9 +1450,17 @@ impl RunObserver {
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         let finished_at = writer::now();
+        let mut rejected_before_target = self.inner.rejected_before_target.load(Ordering::Acquire);
         if let Some(error) = self.inner.failure.lock().as_ref() {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
+            // 未进入 Target 选择的固定失败：模型不可用与禁止访问模型；
+            // 已发出过尝试后再出现同码（如隐藏轮次路由被删）则属于失败的请求。
+            rejected_before_target |= !self.inner.target_attempted.load(Ordering::Acquire)
+                && error
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| matches!(code, "model_not_found" | "STRAVIA_FORBIDDEN"));
         }
         self.finish_thinking();
         self.inner.queued_text.lock().take();
@@ -1435,6 +1473,7 @@ impl RunObserver {
                 run_id: self.inner.run_id.clone(),
                 outcome,
                 finished_at,
+                rejected_before_target,
             };
             // 收据与 Finish 分别保留槽位；不能等待最后一个后台发布句柄 Drop 才落终态。
             if self.inner.admission_queued {
@@ -1500,6 +1539,7 @@ impl RunPublicationGuard {
                 discovery.marker = None;
             }
         }
+        let occurred_at = writer::now();
         let _boundary = self.inner.event_boundary.lock();
         let event = event(discoveries, omitted_discoveries);
         if self
@@ -1510,6 +1550,7 @@ impl RunPublicationGuard {
             .try_send(WriterCommand::Event {
                 run_id: self.inner.run_id.clone(),
                 event,
+                occurred_at,
             })
             .is_err()
         {
@@ -1561,6 +1602,7 @@ fn bound_locators(discovery: &mut CredentialDiscovery, client_input: bool) {
 
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
+        let occurred_at = writer::now();
         if !self.admission_queued {
             // 拒绝观测准入不是一个可持久化 Run；只清理已捕获的 Trace，绝不发送孤儿事件。
             self.observation
@@ -1575,6 +1617,7 @@ impl Drop for RunObserverInner {
                     trace: self.trace.take(),
                     pending_finish: None,
                     gap: true,
+                    occurred_at,
                 });
             }
             return;
@@ -1591,6 +1634,7 @@ impl Drop for RunObserverInner {
                             model_turn_id: model_turn_id.clone(),
                             attempt_id,
                         },
+                        occurred_at,
                     })
                     .is_err()
                 {
@@ -1611,6 +1655,7 @@ impl Drop for RunObserverInner {
                     generation_root_id: None,
                 },
                 writer::now(),
+                false,
             ));
         }
         let command = WriterCommand::Finalize {
@@ -1619,6 +1664,7 @@ impl Drop for RunObserverInner {
             trace: self.trace.take(),
             pending_finish,
             gap: *self.gap.get_mut(),
+            occurred_at,
         };
         if let Some(permit) = self.finalization.get_mut().take() {
             permit.send(command);
@@ -2371,6 +2417,213 @@ mod snapshot_tests {
         drop(run);
         drop(guard);
         observation.flush().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backlogged_lifecycle_events_keep_capture_times_across_batches_and_deferred_commands()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let blocker = test_run(&observation, "backlog-blocker", facts(Vec::new()));
+        let run = test_run(&observation, "backlog-lifecycle", facts(Vec::new()));
+        observation.flush().await?;
+
+        // 单独持有唯一连接：写者会阻塞在 blocker 的持久化上，后续目标事件只能在
+        // 释放后出队。若时间在出队时采样，必然晚于这里记录的交付时刻。
+        let mut lock = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *lock).await?;
+        blocker.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "blocker-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // 非 Event 命令夹在批处理边界之间，强制走 deferred 路径。
+        run.record(RunEvent::ClientToolResult {
+            tool_id: "deferred-tool".into(),
+            content: serde_json::json!("done"),
+            is_error: false,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://upstream.invalid".into(),
+        });
+        run.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 1,
+            first_token_ms: None,
+            usage: None,
+        });
+        run.record(RunEvent::DeliveryFinished {
+            status: "delivered".into(),
+            reason: None,
+        });
+        let delivered_at = writer::now();
+        while writer::now() <= delivered_at {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sqlx::query("ROLLBACK").execute(&mut *lock).await?;
+        drop(lock);
+
+        run.observe_client_completion(&[], &[], delivered_at, false);
+        run.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(delivered_at),
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let events: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT kind,occurred_at FROM observation_events WHERE run_id='backlog-lifecycle' AND kind IN ('model_turn_started','client_tool_result','target_attempt_started','target_attempt_finished') ORDER BY sequence",
+        ).fetch_all(&pool).await?;
+        for (kind, occurred_at) in &events {
+            assert!(
+                *occurred_at <= delivered_at,
+                "{kind} sampled {occurred_at} after client delivery {delivered_at}"
+            );
+        }
+        let at = |kind: &str| -> i64 {
+            events
+                .iter()
+                .find(|(event_kind, _)| event_kind.as_str() == kind)
+                .map(|(_, occurred_at)| *occurred_at)
+                .unwrap_or_else(|| panic!("missing {kind} event"))
+        };
+        let turn_at = at("model_turn_started");
+        let tool_at = at("client_tool_result");
+        let attempt_at = at("target_attempt_started");
+        assert!(
+            tool_at - turn_at >= 5,
+            "batched and deferred commands must keep their own source times: turn={turn_at} tool={tool_at}"
+        );
+        assert!(
+            attempt_at - tool_at >= 5,
+            "batched commands must keep their own source times: tool={tool_at} attempt={attempt_at}"
+        );
+
+        let started: (i64, i64) = sqlx::query_as(
+            "SELECT m.started_at,a.started_at FROM model_turn_observations m JOIN target_attempt_observations a ON a.model_turn_id=m.id WHERE m.id='turn' AND a.id='attempt'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(started, (turn_at, attempt_at));
+
+        let finish_payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='backlog-lifecycle' AND kind='run_finished'",
+        ).fetch_one(&pool).await?;
+        let finish_payload = stored_payload(&finish_payload)?;
+        assert_eq!(
+            finish_payload["delivery"]["status"].as_str(),
+            Some("delivered")
+        );
+        let delivered_completed_at = finish_payload["delivery"]["completed_at"]
+            .as_i64()
+            .expect("delivery completion time");
+        assert!(
+            delivered_completed_at <= delivered_at,
+            "DeliveryFinished was resampled at writer dequeue: {delivered_completed_at} > {delivered_at}"
+        );
+        drop(run);
+        drop(blocker);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backlogged_text_and_deferred_tool_result_keep_first_receive_times()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let blocker = test_run(&observation, "backlog-text-blocker", facts(Vec::new()));
+        let run = test_run(&observation, "backlog-text", facts(Vec::new()));
+        observation.flush().await?;
+
+        let mut lock = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *lock).await?;
+        blocker.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "blocker-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record_visible_delta(0, (false, 0), "hello");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record_visible_delta(0, (false, 0), " world");
+        run.record(RunEvent::ClientToolResult {
+            tool_id: "text-tool".into(),
+            content: serde_json::json!("done"),
+            is_error: false,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record(RunEvent::ClientVisibleContent {
+            text: "hello world".into(),
+            parts: vec![serde_json::json!({"type":"text","text":"hello world"})],
+            block_id: canonical_item_block_id("backlog-text", 0),
+            item: serde_json::json!({"id":"message","role":"assistant","content":"hello world"}),
+            complete: true,
+        });
+        let delivered_at = writer::now();
+        while writer::now() <= delivered_at {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sqlx::query("ROLLBACK").execute(&mut *lock).await?;
+        drop(lock);
+        observation.flush().await?;
+
+        let text_payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='backlog-text' AND kind='client_visible_content' ORDER BY sequence DESC LIMIT 1",
+        ).fetch_one(&pool).await?;
+        let text_payload = stored_payload(&text_payload)?;
+        let first_received_at = text_payload["first_received_at"]
+            .as_i64()
+            .expect("first received time");
+        assert!(
+            first_received_at <= delivered_at,
+            "first text receive was sampled at writer dequeue: {first_received_at} > {delivered_at}"
+        );
+        let tool_at: i64 = sqlx::query_scalar(
+            "SELECT occurred_at FROM observation_events WHERE run_id='backlog-text' AND kind='client_tool_result'",
+        ).fetch_one(&pool).await?;
+        assert!(
+            tool_at <= delivered_at,
+            "deferred client tool result was sampled at writer dequeue: {tool_at} > {delivered_at}"
+        );
+        assert!(
+            tool_at - first_received_at >= 5,
+            "merged text must retain its first receive time: text={first_received_at} tool={tool_at}"
+        );
+        drop(run);
+        drop(blocker);
+        observation.shutdown().await;
+        pool.close().await;
         Ok(())
     }
 

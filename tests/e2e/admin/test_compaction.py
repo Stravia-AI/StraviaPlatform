@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from tests.common.helpers import http_request
-from tests.e2e.admin.test_observations import _detail, _failed_requests, _route_interactions, _wait_for
+from tests.e2e.admin.test_observations import _detail, _client_errors, _route_interactions, _wait_for
 
 
 def _window_semantics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -453,7 +453,7 @@ def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_e
     assert len(compaction_provider[2]) == 1, "neither the current nor fallback Target may retry compaction"
     failure = _wait_for(
         "upstream compaction failure",
-        lambda: next(iter(_failed_requests(admin_env, model=route)["items"]), None),
+        lambda: next(iter(_client_errors(admin_env, model=route)["items"]), None),
     )
     assert failure["error"]["source"] == "upstream"
     assert failure["error"]["status_code"] == 503

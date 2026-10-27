@@ -1,8 +1,9 @@
 import { computeTps, formatDuration, formatList, formatTime } from '#lib/format.js'
 import { observationEventSummary } from '#lib/observation-event-summary.js'
+import { clientErrorTitle } from '#lib/observation-labels.js'
 import { payloadCount, payloadRecord, payloadString } from '#lib/observation-payload.js'
 import * as m from '#lib/paraglide/messages.js'
-import type { FailedRequestDetail, InteractionDetail, ObservationEvent, RunDetail } from '#lib/types/observation.js'
+import type { ClientErrorDetail, InteractionDetail, ObservationEvent, RunDetail } from '#lib/types/observation.js'
 
 export type StreamItem =
   | { type: 'event'; event: ObservationEvent }
@@ -64,6 +65,11 @@ function streamItems(events: readonly ObservationEvent[]): StreamItem[] {
     }
   }
   return items
+}
+
+/** 上游错误详情的事件没有 Run 归属；按与失败详情相同的顺序和分组规则拍平。 */
+export function deriveEventItems(events: readonly ObservationEvent[]): StreamItem[] {
+  return streamItems(orderedEvents([...events]))
 }
 
 export function itemEvents(item: StreamItem): ObservationEvent[] {
@@ -153,7 +159,7 @@ export function runMetrics(run: RunDetail): RunMetrics {
 
 export function deriveTimeline(
   interaction: InteractionDetail | undefined,
-  failure: FailedRequestDetail | undefined,
+  failure: ClientErrorDetail | undefined,
 ): ObservationTimeline {
   const orderedRuns = [...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at)
   // Run 的父子关系表达续接与因果，不是包含：续接链按时间拍平展示，父 Run 仅以编号引用。
@@ -169,7 +175,7 @@ export function deriveTimeline(
       interaction.interaction.first_model_display_name?.trim() ||
       interaction.interaction.first_route_id
     : failure
-      ? m.observation_request_failed()
+      ? clientErrorTitle(failure.request.type)
       : m.observation_details()
 
   const timelines = new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)]))

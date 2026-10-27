@@ -5,7 +5,7 @@ import { attemptTpsInput, observationEventSummary } from '../src/lib/observation
 import * as m from '../src/lib/paraglide/messages.js'
 import type {
   ConfirmedUsage,
-  FailedRequestDetail,
+  ClientErrorDetail,
   InteractionDetail,
   ObservationEvent,
   RunDetail,
@@ -82,11 +82,12 @@ function detail(runs: RunDetail[], started_at = 0): InteractionDetail {
   }
 }
 
-function failureDetail(events: ObservationEvent[]): FailedRequestDetail {
+function failureDetail(events: ObservationEvent[], type: 'failed' | 'rejected' = 'failed'): ClientErrorDetail {
   return {
     request: {
       id: 'f1',
-      kind: 'rejection',
+      kind: type === 'rejected' ? 'rejection' : 'run',
+      type,
       request_id: 'req1',
       started_at: 10_000,
       duration_ms: 5,
@@ -291,6 +292,13 @@ describe('title', () => {
 
   test('a failure detail titles as a failed request', () => {
     expect(deriveTimeline(undefined, failureDetail([])).title).toBe(m.observation_request_failed())
+  })
+
+  // 错误的请求不是失败的请求（GLOSSARY.md），详情标题不能写“请求失败”。
+  test('a rejected request detail does not title as a failed request', () => {
+    expect(deriveTimeline(undefined, failureDetail([], 'rejected')).title).toBe(
+      m.observation_client_error_type_rejected(),
+    )
   })
 })
 
