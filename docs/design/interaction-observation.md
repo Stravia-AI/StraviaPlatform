@@ -17,7 +17,9 @@
 
 本设计同时适用于 SQLite 和 PostgreSQL 存储，但实时状态与 Debug 开关只承诺单 Gateway 实例。多实例聚合不在本设计范围内。
 
-对话正文与 Thinking、工具活动按同一 Run 的首次接收顺序交错展示，不再按类型分组。writer 在首次接收文本块时保存 `first_received_at` 和进程内单调 `receive_order`，易失块与 Canonical Item 收口事件沿用同一序号；工具生命周期事件在同一接收序列中取号。元数据仅存在既有 JSON payload 与 live block 中，不需要 SQL schema 迁移，也不改变事件自身的落盘 sequence 或 occurred_at。刷新后优先使用已记录的接收序号，不能把条目最终闭包的时间当作首次收到。没有这些元数据的历史仍使用已知事件 sequence，不推断或回写旧顺序；只包含 History Marker 的空正文不生成展示块。
+对话正文与 Thinking、工具活动按同一 Run 的首次接收顺序交错展示，不再按类型分组。文本首段在观察入口采集 `first_received_at`；writer 分配进程内单调 `receive_order`，易失块与 Canonical Item 收口事件沿用同一序号，工具生命周期事件在同一接收序列中取号。元数据仅存在既有 JSON payload 与 live block 中，不需要 SQL schema 迁移。刷新后优先使用已记录的接收序号，不能把条目最终闭包的时间当作首次收到。没有这些元数据的历史仍使用已知事件 sequence，不推断或回写旧顺序；只包含 History Marker 的空正文不生成展示块。
+
+模型、工具与交付生命周期事件在生产者进入观察模块时采集发生时间，随写命令传递；排队、异步发送、批处理和 deferred 命令不得在出队时重新取时，文本合流保留首段的接收时间。已有实际交付和完成时间直接沿用，不从 `duration_ms` 反推。事件的 `occurred_at`、writer 接收序号和落盘 sequence 各自保留语义，不按时间重排事件；批内聚合活跃时间取实际持久化事件的最大发生时间，迟到事件不能掩盖同批较新的活动，迟到准入也不能回退 Interaction 已知的活跃时间。此规则适用于新记录，不推测或回写旧记录的发生时间。
 
 控制台对话按 Responses 输出项顺序渲染正文与公开思考；流式检查点另存交错的 `partialBlocks`，使中断、失败或刷新后保持已观察到的块布局。旧检查点缺少交错证据时保留其原有布局，不从拼接正文推测边界。
 
@@ -178,6 +180,8 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为对启用后准入的请求生效。
 
 已确认的当前工具续接优先于 Generation parent 的常规观测分组：本次回传来源 Run 当前待完成工具调用的结果时，即使已有 Generation parent、同时夹带额外的 User 输入，也继续来源 Interaction，并将观测父节点指向来源 Run，不受尾部归并五分钟窗口限制。Generation 父边不变。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
+
+交付时建立的 pending-tool 索引已经证明来源 Run 的待回传工具集合；准入直接合并内存与持久化索引中的有效来源，不再重建来源 Window 或等待 Generation 提交来重复核验。内存来源与持久化来源使用相同的 Principal、过期和唯一性约束；本次尾部的所有结果必须对应同一个已交付 Run，实际交付时间不得晚于本次 ingress。客户端省略工具轮空白消息时，执行父边可以回退，但诊断父边仍指向已确认的工具来源。归属修复沿用既有祖先收据去重与等待接替规则，不按工具 ID 全局消费，不改写存量观察记录。
 
 客户端可能省略 thinking-only 输出，再把上次收到的完整输入加一条 User 提醒重新提交。只有同 Principal、未过期的 `client_tool_result` 收据和完整收到输入的 canonical 严格前缀共同证明这种回放，且新增后缀仅为普通 User 输入时，才排除当前工具／pending-tool 归并优先级并跳过本 Run 的重复结果捕获。User 内容块中的 ToolResult 是新工具结果，不属于 User-only 后缀。该判定只影响 Observation；原有精确父节点、两秒快速续接和尾部规则继续适用，模型输入与 Generation 父边不变。
 

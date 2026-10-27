@@ -582,7 +582,7 @@ impl ObservationStore {
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
                     .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=?,last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
@@ -643,7 +643,7 @@ impl ObservationStore {
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
                     .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=$1,last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,$13)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
@@ -1159,10 +1159,12 @@ impl ObservationStore {
         if prepared.is_empty() {
             return Ok(Vec::new());
         }
-        let durable_count = prepared
+        let (durable_count, latest_at) = prepared
             .iter()
             .filter(|(_, _, kind, _)| kind != "usage_confirmed")
-            .count();
+            .fold((0, i64::MIN), |(count, latest), (_, at, _, _)| {
+                (count + 1, latest.max(*at))
+            });
         let mut result = Vec::with_capacity(durable_count);
         match self {
             Self::Sqlite(pool, _) => {
@@ -1268,8 +1270,8 @@ impl ObservationStore {
                     if !visible.is_empty() {
                         sqlx::query("UPDATE interaction_observations SET visible_tail=substr(visible_tail || ?, -4096) WHERE id=?").bind(&visible).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;
@@ -1379,8 +1381,8 @@ impl ObservationStore {
                     if !visible.is_empty() {
                         sqlx::query("UPDATE interaction_observations SET visible_tail=RIGHT(visible_tail || $1,4096) WHERE id=$2").bind(&visible).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(latest_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(latest_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
             }
@@ -4911,6 +4913,59 @@ mod tests {
             .await?,
         };
         assert_eq!(last_sequence, after.sequence);
+
+        // 生产者时间可以与入队顺序不同：保留原事件时间和序号，但活跃时间取最大值。
+        let reordered = store
+            .persist_run_events(
+                "interleaved",
+                "interleaved",
+                &[
+                    (
+                        RunEvent::ObservationGap {
+                            reason: "newer".into(),
+                        },
+                        None,
+                        10,
+                    ),
+                    (
+                        RunEvent::ObservationGap {
+                            reason: "older".into(),
+                        },
+                        None,
+                        9,
+                    ),
+                ],
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(
+            (reordered[0].occurred_at, reordered[1].occurred_at),
+            (10, 9)
+        );
+        assert!(reordered[0].sequence < reordered[1].sequence);
+        let sql = "SELECT i.last_active_at,r.last_active_at FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id WHERE r.id='interleaved'";
+        let activity: (i64, i64) = match store {
+            ObservationStore::Sqlite(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+            ObservationStore::Postgres(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+        };
+        assert_eq!(activity, (10, 10), "late events cannot hide newer activity");
+
+        admit_waiting_scenario_run(
+            store,
+            "interleaved",
+            "delayed-admission",
+            Some("interleaved"),
+        )
+        .await?;
+        let activity: (i64, i64) = match store {
+            ObservationStore::Sqlite(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+            ObservationStore::Postgres(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+        };
+        assert_eq!(
+            activity,
+            (10, 10),
+            "late admission cannot move interaction activity backwards"
+        );
         Ok(())
     }
 
