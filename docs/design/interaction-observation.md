@@ -98,8 +98,8 @@ WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前�
 
 Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 
-- 用量分析总览、时间分桶和 Provider 汇总的错误数与「失败的请求」共用同一请求级失败分类，分别从长期汇总和保留中的详情读取：包括准入前拒绝，以及终态为 `failed` 且已结束的 Inference Run；排除内部恢复后成功、进行中、单纯取消、断线和中断。按请求开始时间归入窗口和分桶；长期 Stats Usage 不按 Observation 保留期过滤，而「失败的请求」诊断列表仍仅查询保留中的详情；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示错误；
-- 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。Provider 汇总按请求涉及的服务归属，每个服务内对同一请求去重；没有涉及任何服务的拒绝不归属 Provider，一次跨服务的最终失败可分别计入多个服务，不能将各服务错误数相加当作全局错误数。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
+- 用量分析总览、时间分桶与「客户端错误」共用同一请求级分类，但读取来源不同：长期汇总读取 `terminal_request_count` 与 `failed_request_count`，保留中的详情读取客户端错误列表。已终结请求 = 终态为 `completed`、`waiting_client`（向客户端交接工具调用）、`superseded` 或 `failed`、已结束、非取消类终止且不是错误的请求的 Inference Run；失败的请求是其中 `failed` 的部分，因此恒有失败 ≤ 已终结。准入前拒绝与未进入 Target 选择就终止的「错误的请求」不计入可用率分母；取消、断线、进行中同样不入账。按请求开始时间归入窗口和分桶；长期 Stats Usage 不按 Observation 保留期过滤，而客户端错误列表仍仅查询保留中的详情；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示请求数；上游请求数（已完成的尝试 + 上游错误）与上游错误数按 Target 尝试计数，包括被重试或切换吸收的错误，按所属 Model Turn 的起点入桶；
+- 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。供应商汇总改按上游尝试计数：上游请求数 = 已完成的 Target 尝试 + 上游错误，上游错误数 = 来源为上游的失败尝试，重试与切换各自独立计入，因此各供应商数字不是客户端请求的拆分，也不与全局失败的请求数相加。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
 - 管理面 `input_tokens` 统一表示净输入：每个 attempt 的总输入与缓存读取均已知时，先计算 `max(input_tokens - cache_read_tokens, 0)`，再累计各 attempt 的已知净值；缓存写入不参与扣减。任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 计入该缺失；
 - output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。管理面按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
@@ -282,7 +282,7 @@ clear_history() -> ClearHistoryResult
 
 生命周期事件把 `usage_confirmed` 合并到 `target_attempt_finished.usage`（`ConfirmedUsage | null`），把 `delivery_finished` 合并到 `run_finished.delivery`（`{status, reason, completed_at} | null`）；失败、中断前已收到的用量与交付事实也保留，早到事实先更新投影，不能因尚未终态而丢弃。`delivery_completed_at` 保存于 Run 投影。`generation_associated`、`client_output_committed` 只更新投影，不再落独立事件；启动恢复以 `run_state_changed` 维持 SSE 唤醒。
 
-推理尝试已有失败诊断时，`target_attempt_finished.error` 保存可选的 `FailureDiagnostic`（`source`、`code`、`message`、`status_code`、`upstream_code`）。它沿用普通 Observation 的 Authorization-only 写入过滤，随事件查询和 Bundle 导出，原因摘要可能包含原始凭据；即使后续重试成功，该尝试的原因摘要也不会被丢弃。既有 `error_code` 与状态语义不变，成功尝试不附带 `error`，旧记录与没有诊断的恢复终态允许缺省；无需数据库迁移，也不为旧记录补造原因。恢复成功的内部失败仍不成为最终 Failed Request；进程日志和面向客户端的普通错误继续使用原有强脱敏。
+推理尝试已有失败诊断时，`target_attempt_finished.error` 保存可选的 `FailureDiagnostic`（`source`、`code`、`message`、`status_code`、`upstream_code`）。它沿用普通 Observation 的 Authorization-only 写入过滤，随事件查询和 Bundle 导出，原因摘要可能包含原始凭据；即使后续重试成功，该尝试的原因摘要也不会被丢弃。既有 `error_code` 与状态语义不变，成功尝试不附带 `error`，旧记录与没有诊断的恢复终态允许缺省；无需数据库迁移，也不为旧记录补造原因。恢复成功的内部失败仍不成为最终客户端错误；进程日志和面向客户端的普通错误继续使用原有强脱敏。
 
 `model_thinking_delta` 与 `client_visible_content_delta` 仅用于易失实时通道，不是持久化 kind。`model_thinking_delta` 只接收上游可读 thinking / reasoning summary 文本，并以 Model Turn、Target attempt、Canonical Item 与项内 part 隔离汇聚状态，不再执行正文凭据增量脱敏。签名、密文、obfuscation 和不透明快照不作为普通思考正文。`client_visible_content_delta` 仍只接收 Client Projection 已交付的可见内容。
 
@@ -405,11 +405,11 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 #### `rejected_request_observations`
 
-保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联和过期时间。Migration 0045 起额外保存可空的 `started_at`、`duration_ms`、`failure_json` 与来源快照 `request_model`、`api_key_id`、`api_key_name`，供失败请求投影使用；这些列全部可空、不回填历史，也不引入新的 Principal 外键。它不保存 Principal，也不伪造 Interaction ID。
+保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联和过期时间。Migration 0045 起额外保存可空的 `started_at`、`duration_ms`、`failure_json` 与来源快照 `request_model`、`api_key_id`、`api_key_name`，供客户端错误投影使用；这些列全部可空、不回填历史，也不引入新的 Principal 外键。它不保存 Principal，也不伪造 Interaction ID。
 
 #### Debug manifest（文件，不是关系表）
 
-`debug_trace_manifests` 已由迁移 0008 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、失败请求列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先写入 manifest 终态，不再持久化或广播 `trace_manifest_updated`。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。升级的有界并发、临时查询索引和中断续迁契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+`debug_trace_manifests` 已由迁移 0008 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、客户端错误列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先写入 manifest 终态，不再持久化或广播 `trace_manifest_updated`。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。升级的有界并发、临时查询索引和中断续迁契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
 
 ### 6.1.1 独立长期 Stats Usage
 
@@ -451,7 +451,7 @@ diagnostics/observation-debug/
 
 传输失败、协议解码失败和规范化错误沿用普通 Observation 的错误分类、阶段、状态与安全原因摘要，不作为 Debug 内容记录。对应方向没有实际收发时不得补造 Wire；Trace manifest 如实表达缺失或 `partial`。这些诊断不改变重试、回退、超时或成功判定，也不为旧 Trace 补录原因。
 
-宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。推理尝试终态及最终失败请求的普通 Observation 采用 Authorization-only 写入过滤；进程日志和面向客户端的普通错误仍按既有强脱敏规则处理，不能直接复用观测原文。不改变 Wire Debug 的捕获边界，也不能恢复旧记录中已丢失的原因。
+宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。推理尝试终态及最终客户端错误的普通 Observation 采用 Authorization-only 写入过滤；进程日志和面向客户端的普通错误仍按既有强脱敏规则处理，不能直接复用观测原文。不改变 Wire Debug 的捕获边界，也不能恢复旧记录中已丢失的原因。
 
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 
@@ -706,8 +706,10 @@ GET    /api/v1/observations/interactions/{id}/events
 GET    /api/v1/observations/interactions/{id}/live
 GET    /api/v1/observations/rejections
 GET    /api/v1/observations/rejections/{id}
-GET    /api/v1/observations/failed-requests
-GET    /api/v1/observations/failed-requests/{kind}/{id}
+GET    /api/v1/observations/client-errors
+GET    /api/v1/observations/client-errors/{kind}/{id}
+GET    /api/v1/observations/upstream-errors
+GET    /api/v1/observations/upstream-errors/{attempt_id}
 GET    /api/v1/observations/events?after=<sequence>
 GET    /api/v1/observations/debug
 PUT    /api/v1/observations/debug
@@ -720,18 +722,18 @@ GET    /api/v1/observations/debug-bundles/{ticket}
 
 Interaction forest 查询参数：
 
-- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest、Rejected Requests 与 Failed Requests 使用相同约束；
-- `live_window`：ForestQuery 的可选布尔值，默认 `false`。实时 forest/changes 使用 `true` 时仍校验显式边界及跨度，但不因 `last_active_at >= end_at` 拒绝新活动，避免时钟差或查询在途造成实时遗漏；历史和自定义固定窗口仍遵守上界。此例外不改变失败列表或拒绝请求的固定时间范围语义。
+- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest、Rejected Requests、客户端错误与上游错误使用相同约束；
+- `live_window`：ForestQuery 的可选布尔值，默认 `false`。实时 forest/changes 使用 `true` 时仍校验显式边界及跨度，但不因 `last_active_at >= end_at` 拒绝新活动，避免时钟差或查询在途造成实时遗漏；历史和自定义固定窗口仍遵守上界。此例外不改变客户端错误、上游错误或拒绝请求的固定时间范围语义。
 - `anchor_at` / `window_index`：仅为现有 API 调用者保留的旧窗口参数；未提供显式边界时，0 为下界固定在 `anchor-24h`、无上界的实时页，后续历史页按 24 小时分段。WebUI 始终发送显式边界，包括实时预设；
 - `cursor` / `limit`：同一时间页内按根链游标分批加载；
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
-- 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条按「失败的请求」口径的失败 Run（判定谓词与失败列表一致），后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
+- 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条属于客户端错误视图的终局错误 Run（失败的请求，或已准入但未进入 Target 选择即终止的错误的请求；取消类除外），用于交互链路成员规则，其失败事实归宿于客户端错误视图，后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
 
 响应同时给出 window bounds、根链总数、next cursor 与 snapshot event sequence。根链按其最新 Interaction 的 `last_active_at` 归入且只归入一个时间页；返回时补全该根 DAG 在保留期内的全部 Interaction。`last_active_at` 只由真实请求准入、请求事件与完成活动推进；断连判定、等待超时、重启恢复、残留观察收口，以及新请求对旧 Run 的打断或接替，不推进旧 Run 的活动时间。Interaction 从所属 Run 聚合活动时间；状态判定事件仍保留实际 `occurred_at` 与递增 sequence，不能因较晚发现中断而把旧链重新归入最近时间窗。旧版本已写入的错误活动时间不自动回填。
 
 SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser` 解析；Admin token 不进入 query string。
 
-全局 `GET /api/v1/observations/events?after=<sequence>` 只发送 `ObservationChange { sequence, occurred_at, interaction_id?, root_id?, run_id?, rejection_id?, kind, boundary }` 与显式恢复信号，不发送 `live_*`、完整 payload、正文或工具参数/结果。`root_id` 用于发现尚未加载的新匹配链路，`boundary` 用于首尾立即刷新。通知不是新的事实存储；生命周期、usage、delivery、工具与 Canonical Item 正文仍可由持久时间线读取。选中正文独立使用 `GET /api/v1/observations/interactions/{id}/live`，仅发送该 Interaction 所属 Run 的可见输出、可读 Thinking 与缺口/收口信号；`live_finished` 为 `{ interaction_id, run_id }`。两条订阅独立存续，未选详情或关闭检查器时不订阅完整正文；切换先取消旧作用域，并以 selection epoch 拒绝旧快照和消息。画布选中输出复用此订阅，不增加 HTTP 或 SSE；Thinking 不充当客户端输出，未交付的暂存内容不能提前显示。
+全局 `GET /api/v1/observations/events?after=<sequence>` 只发送 `ObservationChange { sequence, occurred_at, interaction_id?, root_id?, run_id?, rejection_id?, kind, boundary, error_source? }` 与显式恢复信号，不发送 `live_*`、完整 payload、正文或工具参数/结果。`root_id` 用于发现尚未加载的新匹配链路，`boundary` 用于首尾立即刷新。`error_source` 只在 `kind=target_attempt_finished` 且事件载荷带 `error.source` 时出现，取自已经解码的事件载荷，不额外读取数据库；成功尝试与其他 kind 省略该字段，上游错误页签据此标记待刷新。通知不是新的事实存储；生命周期、usage、delivery、工具与 Canonical Item 正文仍可由持久时间线读取。选中正文独立使用 `GET /api/v1/observations/interactions/{id}/live`，仅发送该 Interaction 所属 Run 的可见输出、可读 Thinking 与缺口/收口信号；`live_finished` 为 `{ interaction_id, run_id }`。两条订阅独立存续，未选详情或关闭检查器时不订阅完整正文；切换先取消旧作用域，并以 selection epoch 拒绝旧快照和消息。画布选中输出复用此订阅，不增加 HTTP 或 SSE；Thinking 不充当客户端输出，未交付的暂存内容不能提前显示。
 
 `POST /api/v1/observations/interactions/changes` 接收 JSON：
 
@@ -769,14 +771,23 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 
 普通详情只返回整个 Interaction 最新 200 条事件及 `older_events_cursor`。事件分页使用互斥的 `after_sequence` / `before_sequence`，以及固定快照上界 `through_sequence`；`limit` 默认 200、最大 500。负游标、超出快照的游标及无效 limit 返回 400。返回 `runs`、`snapshot_sequence`、`next_cursor`，每个 Run 包含本页事件，页内按 sequence 升序；仅在仍有后续页时返回游标。增量读取固定同一上界直至分页完成，历史加载向前翻页。诊断包独立读取完整截止历史，不受详情窗口限制。
 
-失败请求列表 `GET /api/v1/observations/failed-requests` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
+客户端错误列表 `GET /api/v1/observations/client-errors` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
 
-- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 筛选；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的供应商；
+- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `type` 筛选；`type` 取 `failed | rejected`，缺省返回全部，非法值返回 400；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的供应商，错误的请求没有尝试、不会命中供应商筛选；
 - 排序为 `started_at` DESC、`kind` ASC、`id` ASC，`next_cursor` 是不透明的 JSON keyset 游标，相同时间记录跨页不重复、不遗漏；`total` 为当前时间范围与筛选条件下的总数；
-- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `FailedRequestSummary` 包含 `id`、`kind`（`rejection | run`）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的供应商去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
-- 分类以一次客户端请求的最终结果为准：内部重试或切换供应商后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
-- 失败 Run 的开始时间取 ingress 接收时间，结束时间在终止方截取，不使用 writer 入队时间；历史记录缺少的字段如实表达缺口：0045 之前的 Rejected Request 无 `started_at` 时回退按 `occurred_at` 排序并置 `observation_gap=true`，缺失诊断保持未知，不能补回；
-- `GET /api/v1/observations/failed-requests/{kind}/{id}` 返回 `{ data: { request, events, trace, snapshot_sequence } }`；`trace` 是既有 Debug manifest 元数据。诊断包仍通过既有 Interaction/Rejection ticket 与下载入口获取，该列表不新增 Debug 捕获，也不改变脱敏与保留期规则。
+- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `ClientErrorSummary` 包含 `id`、`kind`（`rejection | run`）、`type`（`failed | rejected`，与 `kind` 正交）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的供应商去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
+- 分类以一次客户端请求的最终结果为准：`rejected` 覆盖全部准入前拒绝，以及已准入但未进入 Target 选择即终止、终止原因属于固定错误码集合（模型不存在、API Key 不允许该模型、请求 Hook 拒绝）的 Run；其余最终 `failed` 的 Run 为 `failed`。请求 Hook 可以指定任意错误码，因此拒绝路径以显式分类标记表达，不按错误码推断。内部重试或切换供应商后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
+- 客户端错误记录的开始时间取 ingress 接收时间，结束时间在终止方截取，不使用 writer 入队时间；历史记录缺少的字段如实表达缺口：0045 之前的 Rejected Request 无 `started_at` 时回退按 `occurred_at` 排序并置 `observation_gap=true`，缺失诊断保持未知，不能补回；
+- `GET /api/v1/observations/client-errors/{kind}/{id}` 返回 `{ data: { request, events, trace, snapshot_sequence } }`；`request` 带 `type`。`trace` 是既有 Debug manifest 元数据。诊断包仍通过既有 Interaction/Rejection ticket 与下载入口获取，该列表不新增 Debug 捕获，也不改变脱敏与保留期规则。
+
+上游错误列表 `GET /api/v1/observations/upstream-errors` 以 Target 尝试为单位，只投影保留期内 `status=failed` 且 `error_source=upstream` 的尝试；包含多模态理解、媒体生成等 capability 经 Provider 发出的尝试：
+
+- 查询参数沿用同一时间窗口（`start_at` / `end_at`，或 `anchor_at` / `window_index`，24 小时上限与非法窗口 400）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `outcome` 筛选；`outcome` 取 `recovered | caused_failure | in_progress | interrupted`，缺省返回全部，非法值返回 400；
+- 排序为 `started_at` DESC、`id` ASC，游标为不透明的 JSON keyset；`total` 与 `snapshot_sequence` 语义同上；
+- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `UpstreamErrorSummary` 包含 `id`（attempt ID）、`run_id`、`interaction_id`、`root_id`、`request_id`、`started_at`、`duration_ms`、`provider_id`、`provider_name`、`upstream_model`、`model`、`model_display_name`、`api_key_id`、`api_key_name`、`client`、`error`（同 `FailureDiagnostic`，含上游错误码）、`outcome`、`debug_status` 与 `observation_gap`；
+- `outcome` 在查询时从所属运行派生，不持久化：运行 `completed`、已把工具调用交给 Connect Client 并以 `waiting_client` 结束、以及随后被续接的 `superseded` 都是 `recovered`；运行 `failed` 为 `caused_failure`；运行尚未结束（`finished_at` 为空）为 `in_progress`；运行被取消或中断为 `interrupted`。取消、断线、中断、本地准备失败、因 RPM 占满未发送、观察丢失与来源未知的尝试不进入列表；
+- 尝试记录不单独保存过期时间，保留期跟随所属 Inference Run 的 `expires_at`；运行过期或清除历史后，列表与详情同时消失，统计桶不受影响；
+- `GET /api/v1/observations/upstream-errors/{attempt_id}` 返回 `{ data: { error, attempts, events, trace, snapshot_sequence } }`：`attempts` 是同一运行内全部尝试的时序（按开始时间升序，含状态、耗时、供应商、上游模型、状态码、错误码与来源），`events` 是该运行截至快照的事件（可为空），`trace` 是既有 Debug manifest 元数据。尝试不存在或已过期返回 404；诊断包仍通过既有 Interaction ticket 与下载入口获取。
 
 ## 10. 请求记录页面
 
@@ -785,19 +796,21 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 页面标题和导航继续使用“请求记录”，主体分为：
 
 - `交互链路`：默认页签，Interaction forest 无限画布；
-- `失败的请求`：Failed Requests 表格列表与详情，不伪造画布节点。
+- `客户端错误`：Client Errors 表格列表与详情，含类型列与筛选，不伪造画布节点；
+- `上游错误`：Upstream Errors 表格列表与详情，按 Target 尝试一行。
 
-页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选和“清除历史记录”。Debug 开关及“清除 Debug 数据”统一位于设置页「诊断」。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
+页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选和“清除历史记录”。Debug 开关及“清除 Debug 数据”统一位于设置页「诊断」。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供，上游错误详情通过所属 Interaction 导出。
 
-#### 失败请求列表
+#### 客户端错误列表
 
-“失败的请求 / Failed Requests”页签使用传统表格列表，不使用卡片或拓扑。失败口径遵循 `CONTEXT.md` 的 Failed Request 定义，以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断：准入前拒绝与最终 `status=failed` 的 Run 进入列表；内部重试或切换供应商后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 且交付过客户端可见输出的失败 Run 仍保留在原交互链路中；从未交付任何客户端可见输出且最终失败的交互按 `CONTEXT.md`「交互链路」成员规则默认不进画布，可从失败列表跳转或深链回看。准入前失败只在失败列表展示，不伪造交互关联。
+“客户端错误 / Client Errors”页签使用传统表格列表，不使用卡片或拓扑。口径遵循 `GLOSSARY.md` 的「客户端错误」：以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断。`type=rejected` 覆盖全部准入前拒绝，以及已准入但未进入 Target 选择即终止的「错误的请求」（模型不存在、无权使用该模型、请求 Hook 拒绝）；其余最终 `status=failed` 的 Run 为 `type=failed`。内部重试或切换供应商后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 且交付过客户端可见输出的失败 Run 仍保留在原交互链路中；从未交付任何客户端可见输出且最终失败的交互按「交互链路」成员规则默认不进画布，可从客户端错误列表跳转或深链回看。准入前失败只在客户端错误列表展示，不伪造交互关联。
 
-列表按请求开始时间倒序（`started_at` DESC、`kind` ASC、`id` ASC，契约见第 9 节），每次失败请求一行，默认七列为：
+列表按请求开始时间倒序（`started_at` DESC、`kind` ASC、`id` ASC，契约见第 9 节），每次客户端错误一行，默认八列为：
 
 | 列               | 内容                                                                                    |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | 时间             | 请求开始时间；缺少开始时间的旧拒绝记录回退按 ingress 时间排序并标记 `observation_gap`。 |
+| 类型             | 失败的请求或错误的请求；与记录种类（拒绝记录 / 运行）正交，筛选默认显示全部。           |
 | 客户端 / API Key | API Key 名称或客户端来源；未认证时显示“未认证”，不可得时显示“—”。                       |
 | 模型             | 请求的路由模型；无法解析时显示“—”。                                                     |
 | 供应商           | 实际调用的供应商；未调用上游时显示“—”。                                                 |
@@ -805,7 +818,27 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 | 错误             | 简短原因及可用的 HTTP 状态码，完整内容进入详情。                                        |
 | 耗时             | 请求开始到终止的持续时间；不可得时显示“—”。                                             |
 
-点击行打开失败请求详情，查看完整错误、请求标识、事件与已有 Debug manifest 状态；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误。历史缺失的来源快照与失败诊断不能补回，缺失字段如实显示，不虚构数据。诊断包沿用既有 Interaction/Rejection 下载入口，不新增 Debug 捕获；Debug 保留期与脱敏规则不变。
+点击行打开客户端错误详情，查看完整错误、请求标识、事件与已有 Debug manifest 状态；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误。历史缺失的来源快照与失败诊断不能补回，缺失字段如实显示，不虚构数据。诊断包沿用既有 Interaction/Rejection 下载入口，不新增 Debug 捕获；Debug 保留期与脱敏规则不变。
+
+#### 上游错误列表
+
+“上游错误 / Upstream Errors”页签同样使用传统表格列表，每次失败的 Target 尝试一行，包含多模态理解、媒体生成等 capability 经 Provider 发出的尝试。上游口径遵循 `GLOSSARY.md` 的「上游错误」：HTTP 非 2xx、连接或传输失败、首 token 超时、200 之后的流错误与凭据被拒都进入列表；上游判定请求本身无效的 4xx 也计入。本地准备失败、因 RPM 占满等未发送、取消、中断、观察丢失、进行中与来源未知的尝试不出现。被重试或切换吸收、客户端毫无感知的错误同样保留。
+
+列表按尝试开始时间倒序（`started_at` DESC、`id` ASC，契约见第 9 节），默认九列为：
+
+| 列               | 内容                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| 时间             | 尝试开始时间。                                                                          |
+| 供应商           | 实际调用的供应商；筛选按供应商标识匹配。                                                |
+| 上游模型         | 实际发往上游的模型；未知时显示“—”。                                                     |
+| 路由模型         | 客户端请求的路由模型及显示名；无法解析时显示“—”。                                       |
+| 客户端 / API Key | API Key 名称或客户端来源；不可得时显示“—”。                                             |
+| 状态码           | 上游返回或本地归类的 HTTP 状态码；不可得时显示“—”。                                     |
+| 错误             | 简短原因及可用的错误码，完整内容进入详情。                                              |
+| 结果             | 已恢复、导致请求失败、进行中或请求已中断；查询时从所属运行派生。                        |
+| 耗时             | 尝试开始到终止的持续时间；不可得时显示“—”。                                             |
+
+结果筛选只在 `上游错误` 出现，取 `recovered | caused_failure | in_progress | interrupted`，默认显示全部。点击行打开上游错误详情，查看该尝试的错误来源、状态码、错误码、上游错误码、消息与耗时，以及同一运行内其他尝试的时序；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误，历史缺失字段如实显示，不虚构数据。
 
 ### 10.2 画布
 
@@ -831,9 +864,9 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 
 一个时间页先加载最新一批根链的完整子树；横向接近已加载边缘时按 cursor 加载下一批。画布左上角显示已加载交互中当前运行中（`running`）的条数，不含等待客户端的交互；未加载的根链不计入。“适配全部”先加载剩余根链并显示进度，再计算完整 bounds。
 
-`ObservationWorkspaceController`（`frontend/stravia-webui/src/lib/observation-workspace.ts`）拥有通知、forest、selection、range、failure、cursor 和正文编排。常规摘要更新使用 §9 的 root changes；公开的单节点 `/summary` 接口及其客户端路径删除，不保留兼容 alias。选中详情与失败请求跳转通过 Interaction detail 获取摘要和 root 上下文，并按既有 deep-link reveal 规则定位画布；内部 store summary 只作为详情组成，不是独立管理资源。按 root 汇集通知，最多等待 100ms，截止以第一条待处理变化固定；首段及终态立即触发，已有在途请求不因此无限并发。同一 root 仅一个在途刷新，请求期间的新变化保留，响应只清除实际水位覆盖的待处理变化，未覆盖的继续补拉。
+`ObservationWorkspaceController`（`frontend/stravia-webui/src/lib/observation-workspace.ts`）拥有通知、forest、selection、range、客户端错误与上游错误两套列表状态、cursor 和正文编排。常规摘要更新使用 §9 的 root changes；公开的单节点 `/summary` 接口及其客户端路径删除，不保留兼容 alias。选中详情与客户端错误跳转通过 Interaction detail 获取摘要和 root 上下文，并按既有 deep-link reveal 规则定位画布；内部 store summary 只作为详情组成，不是独立管理资源。按 root 汇集通知，最多等待 100ms，截止以第一条待处理变化固定；首段及终态立即触发，已有在途请求不因此无限并发。同一 root 仅一个在途刷新，请求期间的新变化保留，响应只清除实际水位覆盖的待处理变化，未覆盖的继续补拉。
 
-选中详情初次加载有界详情，后续事件按持久 sequence 合并增量补齐，分页固定 `through_sequence` 上界、去重并升序；失败列表使用独立单一待刷新状态合并终态通知，不能把每个 `run_finished` 都判为失败。通知消费不等待每条 HTTP 请求，失败页不逐事件刷新隐藏画布，切回恢复正确视图。查询失败保留可用数据、待处理变化与可见错误/恢复操作；已收到通知游标不能冒充成功应用水位。切换 selection、range、filter、tab 或关闭详情后，旧响应不得污染新上下文。向上历史分页保持滚动锚点，未变化 Run、消息和节点沿用原引用。易失正文仅更新选中预览，不触发 HTTP。Forest、changes 与 detail 共用有界批量关联事件读取，保持 sequence 顺序与快照上界。点击下载不沿用页面旧截止序号，由服务端完成目标屏障后固定票据快照。
+选中详情初次加载有界详情，后续事件按持久 sequence 合并增量补齐，分页固定 `through_sequence` 上界、去重并升序；客户端错误列表沿用对 `request_rejected` / `run_finished` 的单一待刷新状态；上游错误列表只对携带上游错误的 `target_attempt_finished` 标记待刷新。两者各自拥有请求版本与范围版本，不互相覆盖，也不能把每个 `run_finished` 都判为失败。通知消费不等待每条 HTTP 请求，错误列表不逐事件刷新隐藏画布，切回恢复正确视图。查询失败保留可用数据、待处理变化与可见错误/恢复操作；已收到通知游标不能冒充成功应用水位。切换 selection、range、filter、tab 或关闭详情后，旧响应不得污染新上下文。向上历史分页保持滚动锚点，未变化 Run、消息和节点沿用原引用。易失正文仅更新选中预览，不触发 HTTP。Forest、changes 与 detail 共用有界批量关联事件读取，保持 sequence 顺序与快照上界。点击下载不沿用页面旧截止序号，由服务端完成目标屏障后固定票据快照。
 
 reset 恢复开启新的 view epoch，取消或拒绝旧上下文结果；在权威重建成功前保留当前可用旧数据，并明确未刷新或恢复中的状态，不提前清成看似成功的空视图。恢复失败显示真实错误和显式 Retry，保留恢复需求；成功后以 fresh forest、详情与选中正文替换旧基线，即使其 `snapshot_sequence` 更低或为 0，也不得重新合入已删除旧节点。
 
@@ -898,7 +931,7 @@ reset 恢复开启新的 view epoch，取消或拒绝旧上下文结果；在权
 
 实时预设的 forest/changes 携带 `live_window=true`，适用 §9 的上界例外；所显示窗口宽度仍随当前时间推进，不扩大用户所选时长。下述固定 `[start_at, end_at)` 上界适用于历史/自定义范围及失败、拒绝请求列表。
 
-实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains、Rejected Requests 与 Failed Requests 使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
+实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains、Rejected Requests、客户端错误与上游错误使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
 
 根链若因新活动跨入更新的时间页：
 
@@ -912,7 +945,7 @@ reset 恢复开启新的 view epoch，取消或拒绝旧上下文结果；在权
 固定尺寸卡片显示：
 
 - `本地开始时间 · 首个 Run 的 Model Display Name`；为空回退 Route ID；模型名字号比原卡片标题缩小一级，为正文预览留出空间；
-- 主状态；只有真实执行时显示绿色呼吸圆点；含失败 Run 的交互终态按「失败的请求」口径显示为「失败」（destructive 菱形），运行中与等待客户端保持过程状态；
+- 主状态；只有真实执行时显示绿色呼吸圆点；含终局错误 Run（客户端错误视图中的运行类记录）的交互终态显示为「失败」（destructive 菱形），运行中与等待客户端保持过程状态；
 - 模型名下显示用户输入预览框，约两行，展示本次交互用户消息开头；`input_preview` 为 nullable 文本，旧记录或没有文本输入时明确显示未记录，不从历史消息或工具结果伪造；
 - Confirmed Upstream Usage；未知字段显示等待上游，不显示 0；
 - 用量栏下显示同宽的输出预览框，约三行，底部对齐并裁去上方溢出，内容更新及字体或尺寸变化后仍显示最新一行；

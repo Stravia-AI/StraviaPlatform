@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildActivityGrid, buildLatencyChart, planActivityGrid } from '../src/lib/stats-chart'
+import {
+  buildActivityGrid,
+  buildAvailabilityChart,
+  buildAvailabilitySummary,
+  buildLatencyChart,
+  planActivityGrid,
+} from '../src/lib/stats-chart'
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
@@ -63,6 +69,110 @@ describe('latency chart', () => {
     expect(times).toEqual([...times].sort((a, b) => a - b))
     expect(new Set(times).size).toBe(times.length)
     expect(points.every((point) => point.bucket instanceof Date)).toBe(true)
+  })
+})
+
+describe('availability chart', () => {
+  const row = (
+    bucket_start: number,
+    terminal_request_count: number,
+    failed_request_count: number,
+    upstream_request_count: number,
+    upstream_error_count: number,
+  ) => ({ bucket_start, terminal_request_count, failed_request_count, upstream_request_count, upstream_error_count })
+
+  test('missing buckets stay null so both lines break instead of claiming 100%', () => {
+    const start = Date.UTC(2026, 8, 2, 18, 15)
+    const points = buildAvailabilityChart([row(start, 4, 1, 8, 2), row(start + 8_100_000, 4, 0, 4, 4)], 2_700_000)
+
+    expect(points).toEqual([
+      {
+        bucket: new Date(start),
+        terminalRequests: 4,
+        failedRequests: 1,
+        upstreamRequests: 8,
+        upstreamErrors: 2,
+        client: 0.75,
+        upstream: 0.75,
+      },
+      {
+        bucket: new Date(start + 2_700_000),
+        terminalRequests: 0,
+        failedRequests: 0,
+        upstreamRequests: 0,
+        upstreamErrors: 0,
+        client: null,
+        upstream: null,
+      },
+      {
+        bucket: new Date(start + 5_400_000),
+        terminalRequests: 0,
+        failedRequests: 0,
+        upstreamRequests: 0,
+        upstreamErrors: 0,
+        client: null,
+        upstream: null,
+      },
+      {
+        bucket: new Date(start + 8_100_000),
+        terminalRequests: 4,
+        failedRequests: 0,
+        upstreamRequests: 4,
+        upstreamErrors: 4,
+        client: 1,
+        upstream: 0,
+      },
+    ])
+  })
+
+  test('a zero denominator is unknown while a zero numerator is a real 100%', () => {
+    const start = Date.UTC(2026, 8, 2, 18)
+    const points = buildAvailabilityChart(
+      [row(start, 0, 0, 3, 0), row(start + HOUR_MS, 5, 0, 0, 0), row(start + 2 * HOUR_MS, 5, 5, 3, 3)],
+      HOUR_MS,
+    )
+
+    expect(points.map((point) => [point.client, point.upstream])).toEqual([
+      [null, 1],
+      [1, null],
+      [0, 0],
+    ])
+  })
+
+  test('the window aggregate divides overview totals instead of averaging buckets', () => {
+    const start = Date.UTC(2026, 8, 2, 18)
+    const points = buildAvailabilityChart([row(start, 1, 0, 1, 0), row(start + HOUR_MS, 9, 1, 9, 0)], HOUR_MS)
+
+    expect(points.map((point) => point.client)).toEqual([1, 1 - 1 / 9])
+    // 聚合只读概览的整数总量：1 − 1/10，而不是桶均值；请求总数取概览而不是折线求和。
+    expect(
+      buildAvailabilitySummary({
+        terminal_request_count: 10,
+        failed_request_count: 1,
+        upstream_request_count: 10,
+        upstream_error_count: 0,
+      }),
+    ).toEqual({ client: 0.9, upstream: 1 })
+  })
+
+  test('an empty window has no points and neutral overview aggregates', () => {
+    expect(buildAvailabilityChart([], HOUR_MS)).toEqual([])
+    expect(
+      buildAvailabilitySummary({
+        terminal_request_count: 0,
+        failed_request_count: 0,
+        upstream_request_count: 0,
+        upstream_error_count: 0,
+      }),
+    ).toEqual({ client: null, upstream: null })
+    expect(
+      buildAvailabilitySummary({
+        terminal_request_count: 0,
+        failed_request_count: 0,
+        upstream_request_count: 4,
+        upstream_error_count: 1,
+      }),
+    ).toEqual({ client: null, upstream: 0.75 })
   })
 })
 

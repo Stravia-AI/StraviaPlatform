@@ -417,11 +417,14 @@ test('real gateway accepts original images and persisted reasoning replay under 
     const statsQuery = `start_at=${statsEnd - 86_400_000}&end_at=${statsEnd}`
     const expectedUsage = {
       total_requests: 3,
+      terminal_request_count: 3,
+      failed_request_count: 0,
+      upstream_request_count: 3,
+      upstream_error_count: 0,
       total_input_tokens: 36,
       total_output_tokens: 27,
       total_cache_read_tokens: 15,
       total_reasoning_tokens: 9,
-      error_count: 0,
     }
     await expect
       .poll(async () => {

@@ -21,7 +21,7 @@ from tests.common.helpers import (
     wait_for_setup_token,
     wait_until_ready,
 )
-from tests.e2e.admin.test_observations import _create_route, _detail, _failed_requests, _proxy, _wait_for
+from tests.e2e.admin.test_observations import _create_route, _detail, _client_errors, _proxy, _wait_for
 from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_provider, set_enabled
 
 
@@ -61,7 +61,7 @@ def test_failed_request_projection_survives_restart_and_clear(
     schema = None
     database = {"backend": "sqlite"}
     if backend == "postgres":
-        schema = storage_runtime["make_isolated_schema"]("stravia_failed_requests")
+        schema = storage_runtime["make_isolated_schema"]("stravia_client_errors")
         storage_runtime["run_schema_action"]("create", pg_url=pg_url, schema=schema)
         database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
     mock_port = find_free_port()
@@ -86,14 +86,14 @@ def test_failed_request_projection_survives_restart_and_clear(
         assert status == 401
         before = _wait_for(
             "both failed request sources",
-            lambda: page if (page := _failed_requests(env))["total"] == 2 else None,
+            lambda: page if (page := _client_errors(env))["total"] == 2 else None,
         )
         identities = [(item["kind"], item["id"]) for item in before["items"]]
         assert {kind for kind, _ in identities} == {"run", "rejection"}
         run = next(item for item in before["items"] if item["kind"] == "run")
         assert run["error"]["source"] == "upstream"
         assert "upstream-secret" in run["error"]["message"]
-        assert [(item["kind"], item["id"]) for item in _failed_requests(env, model=route_id)["items"]] == identities
+        assert [(item["kind"], item["id"]) for item in _client_errors(env, model=route_id)["items"]] == identities
         usage = _detail(env, run["interaction_id"])["interaction"]["usage"]
         stop_stravia_server(process, logs)
         process = None
@@ -103,8 +103,8 @@ def test_failed_request_projection_survives_restart_and_clear(
         status, _ = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
         assert status == 200
         env["auth"] = session.auth_headers()
-        first = _failed_requests(env, limit=1)
-        second = _failed_requests(env, limit=1, cursor=first["next_cursor"])
+        first = _client_errors(env, limit=1)
+        second = _client_errors(env, limit=1, cursor=first["next_cursor"])
         restored = first["items"] + second["items"]
         assert [(item["kind"], item["id"]) for item in restored] == identities
         assert next(item for item in restored if item["kind"] == "run")["error"] == run["error"]
@@ -112,7 +112,7 @@ def test_failed_request_projection_survives_restart_and_clear(
         assert _detail(env, run["interaction_id"])["interaction"]["usage"] == usage
         status, _ = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
         assert status == 200
-        assert _failed_requests(env)["items"] == []
+        assert _client_errors(env)["items"] == []
     finally:
         if process is not None:
             stop_stravia_server(process, logs)
@@ -159,7 +159,11 @@ def test_usage_statistics_survive_clear_and_restart(
         assert status == 200, body
         before = body["data"]
         assert before["total_requests"] == 1, before
-        assert before["error_count"] == 0, before
+        assert before["terminal_request_count"] == 1, before
+        assert before["failed_request_count"] == 0, before
+        assert before["upstream_request_count"] == 1, before
+        assert before["upstream_error_count"] == 0, before
+        assert "error_count" not in before, before
         assert before["total_input_tokens"] is None, before
         assert before["total_output_tokens"] == 2, before
         assert before["total_cache_read_tokens"] is None, before

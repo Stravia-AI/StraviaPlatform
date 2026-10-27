@@ -883,6 +883,8 @@ impl IngressObserver {
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
             client_output_committed: AtomicBool::new(false),
+            rejected_before_target: AtomicBool::new(false),
+            target_attempted: AtomicBool::new(false),
             admission_queued: false,
             event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
@@ -1029,6 +1031,10 @@ struct RunObserverInner {
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
     client_output_committed: AtomicBool,
+    /// 请求阶段 Hook 拒绝发生在 Target 选择之前：这类 Run 是拒绝请求，不是失败请求。
+    rejected_before_target: AtomicBool,
+    /// 已发出过 Target 尝试：此后的模型不可用或访问禁止属于失败的请求，不能再按错误码归为错误的请求。
+    target_attempted: AtomicBool,
     admission_queued: bool,
     event_boundary: Mutex<()>,
     gap: AtomicBool,
@@ -1210,6 +1216,13 @@ impl RunObserver {
         self.record(RunEvent::RequestFailed { error });
     }
 
+    /// 请求阶段的 Hook 拒绝：拒绝码由 Hook 自定，不能按码推断，必须显式标记。
+    pub(crate) fn mark_rejected_before_target(&self) {
+        self.inner
+            .rejected_before_target
+            .store(true, Ordering::Release);
+    }
+
     pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
         // 最终 Target 或流处理边界比 HTTP 错误转换保留更准确的上游事实。
         if self.inner.failure.lock().is_none() {
@@ -1227,6 +1240,9 @@ impl RunObserver {
     pub(crate) fn record(&self, mut event: RunEvent) {
         if !self.inner.admission_queued {
             return;
+        }
+        if matches!(event, RunEvent::TargetAttemptStarted { .. }) {
+            self.inner.target_attempted.store(true, Ordering::Release);
         }
         match &mut event {
             RunEvent::ModelTurnStarted {
@@ -1492,9 +1508,17 @@ impl RunObserver {
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         let finished_at = writer::now();
+        let mut rejected_before_target = self.inner.rejected_before_target.load(Ordering::Acquire);
         if let Some(error) = self.inner.failure.lock().as_ref() {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
+            // 未进入 Target 选择的固定失败：模型不可用与禁止访问模型；
+            // 已发出过尝试后再出现同码（如隐藏轮次路由被删）则属于失败的请求。
+            rejected_before_target |= !self.inner.target_attempted.load(Ordering::Acquire)
+                && error
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| matches!(code, "model_not_found" | "STRAVIA_FORBIDDEN"));
         }
         self.finish_thinking();
         self.inner.queued_text.lock().take();
@@ -1507,6 +1531,7 @@ impl RunObserver {
                 run_id: self.inner.run_id.clone(),
                 outcome,
                 finished_at,
+                rejected_before_target,
             };
             // 收据与 Finish 分别保留槽位；不能等待最后一个后台发布句柄 Drop 才落终态。
             if self.inner.admission_queued {
@@ -1622,6 +1647,7 @@ impl Drop for RunObserverInner {
                     generation_root_id: None,
                 },
                 writer::now(),
+                false,
             ));
         }
         let command = WriterCommand::Finalize {

@@ -1,13 +1,14 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
-import type { InteractionDetail, LiveContentBlock, FailedRequestDetail } from '#lib/types.js'
+import type { ClientErrorDetail, InteractionDetail, LiveContentBlock, UpstreamErrorDetail } from '#lib/types.js'
 import ObservationInspectorContent from '#lib/components/observation-inspector-content.svelte'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 
 interface Props {
   interaction?: InteractionDetail
-  failure?: FailedRequestDetail
+  clientError?: ClientErrorDetail
+  upstreamError?: UpstreamErrorDetail
   error?: string
   onretry?: () => void
   oninteraction?: () => void
@@ -32,7 +33,8 @@ interface Props {
 
 let {
   interaction,
-  failure,
+  clientError,
+  upstreamError,
   error,
   onretry,
   oninteraction,
@@ -139,7 +141,8 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
 {#snippet content()}
   <ObservationInspectorContent
     {interaction}
-    {failure}
+    {clientError}
+    {upstreamError}
     {error}
     {onretry}
     {oninteraction}

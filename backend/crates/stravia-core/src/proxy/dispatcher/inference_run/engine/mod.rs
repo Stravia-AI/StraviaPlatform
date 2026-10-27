@@ -942,6 +942,9 @@ async fn dispatch_round(
             ));
         }
     };
+    // 只有最初的请求阶段拒绝属于「错误的请求」；隐藏轮次/后续跟进的拒绝
+    // 发生在目标选择与输出之后，仍按失败请求处理。
+    let request_phase = matches!(phase.current(), Phase::Request);
     if ctx.cancellation.is_cancelled() {
         return error_response(499, "request cancelled");
     }
@@ -1022,6 +1025,21 @@ async fn dispatch_round(
                 .await;
             }
             Ok(control) => {
+                if request_phase
+                    && matches!(
+                        control,
+                        stravia_runtime_contract::hook::HookControl::Reject(_)
+                    )
+                {
+                    // 请求 Hook 拒绝的错误码由 Hook 任意指定，无法按固定码集合
+                    // 归类；必须在拒绝路径显式标记「未进入 Target 选择」。
+                    if let Some(observer) = ctx
+                        .extensions
+                        .get::<crate::interaction_observation::RunObserver>()
+                    {
+                        observer.mark_rejected_before_target();
+                    }
+                }
                 return render_hook_control(control, ingress, request.stream.enabled);
             }
             Err(error) => return hook_failure_response(error),

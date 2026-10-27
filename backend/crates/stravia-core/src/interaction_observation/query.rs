@@ -1,10 +1,16 @@
 use std::collections::HashSet;
-pub(super) mod failed;
+pub(super) mod client_errors;
+pub(super) mod upstream;
 
 use futures::TryStreamExt;
 use sqlx::{FromRow, QueryBuilder, Row};
 
 use super::{store::ObservationStore, types::*};
+
+/// 取消类终止原因：既不是失败的请求也不是错误的请求；客户端错误据此排除，
+/// 上游错误据此把所属运行判为“请求已中断”。
+pub(super) const CANCELLED_TERMINAL_REASONS: &str =
+    "'cancelled','client_disconnected','websocket_delivery_dropped','request_aborted'";
 
 pub(super) struct BundleRunRecord {
     pub id: String,
@@ -1847,7 +1853,7 @@ mod tests {
     use crate::interaction_observation::store::Admission;
 
     #[tokio::test]
-    async fn failed_requests_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
+    async fn client_errors_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
         use crate::interaction_observation::store::{Admission, Rejection};
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1909,6 +1915,7 @@ mod tests {
                     },
                     at + 20,
                     i64::MAX,
+                    false,
                 )
                 .await?;
             store
@@ -1938,7 +1945,7 @@ mod tests {
         let mut seen = Vec::new();
         loop {
             let page = store
-                .failed_requests(FailedRequestQuery {
+                .client_errors(ClientErrorQuery {
                     start_at: Some(at),
                     end_at: Some(at + 1),
                     cursor,
@@ -2062,6 +2069,7 @@ mod tests {
                     },
                     at + 10,
                     i64::MAX,
+                    false,
                 )
                 .await?;
         }
@@ -2807,6 +2815,7 @@ mod tests {
                 },
                 2,
                 i64::MAX,
+                false,
             )
             .await?;
         let filters = ForestQuery {
@@ -3222,6 +3231,7 @@ mod tests {
                 },
                 150,
                 i64::MAX,
+                false,
             )
             .await?;
         let historical = store
@@ -3567,6 +3577,7 @@ mod tests {
                 },
                 13,
                 i64::MAX,
+                false,
             )
             .await?;
         store.mark_clear_tombstones().await?;
@@ -3795,6 +3806,7 @@ mod tests {
                 },
                 20_012,
                 i64::MAX,
+                false,
             )
             .await?;
         admit_chain_run_profile(

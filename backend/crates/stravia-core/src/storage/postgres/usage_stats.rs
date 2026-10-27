@@ -81,7 +81,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
         window.validate()?;
         Ok(sqlx::query_as::<_, StatsOverview>(
             "SELECT (COALESCE(SUM(request_count), 0))::BIGINT AS total_requests,
-       (COALESCE(SUM(error_count), 0))::BIGINT AS error_count,
+       (COALESCE(SUM(terminal_request_count), 0))::BIGINT AS terminal_request_count,
+       (COALESCE(SUM(failed_request_count), 0))::BIGINT AS failed_request_count,
+       (COALESCE(SUM(upstream_request_count), 0))::BIGINT AS upstream_request_count,
+       (COALESCE(SUM(upstream_error_count), 0))::BIGINT AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN (SUM(input_tokens_sum))::BIGINT END AS total_input_tokens,
        CASE WHEN SUM(output_tokens_known) > 0 THEN (SUM(output_tokens_sum))::BIGINT END AS total_output_tokens,
        CASE WHEN SUM(cache_read_tokens_known) > 0 THEN (SUM(cache_read_tokens_sum))::BIGINT END AS total_cache_read_tokens,
@@ -123,7 +126,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
         let bucket_ms = display_bucket_ms(start, end, bucket_ms);
         Ok(sqlx::query_as::<_, StatsSeries>(
             "SELECT (bucket_start - $4) / $3 * $3 + $4 AS bucket_start, $3 AS bucket_ms, (COALESCE(SUM(request_count), 0))::BIGINT AS request_count,
-       (COALESCE(SUM(error_count), 0))::BIGINT AS error_count,
+       (COALESCE(SUM(terminal_request_count), 0))::BIGINT AS terminal_request_count,
+       (COALESCE(SUM(failed_request_count), 0))::BIGINT AS failed_request_count,
+       (COALESCE(SUM(upstream_request_count), 0))::BIGINT AS upstream_request_count,
+       (COALESCE(SUM(upstream_error_count), 0))::BIGINT AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN (SUM(input_tokens_sum))::BIGINT END AS total_input_tokens,
        CASE WHEN SUM(output_tokens_known) > 0 THEN (SUM(output_tokens_sum))::BIGINT END AS total_output_tokens,
        CASE WHEN SUM(cache_read_tokens_known) > 0 THEN (SUM(cache_read_tokens_sum))::BIGINT END AS total_cache_read_tokens,
@@ -159,10 +165,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
     async fn stats_by_provider(&self, window: StatsWindow) -> anyhow::Result<Vec<ProviderStats>> {
         window.validate()?;
         Ok(sqlx::query_as::<_, ProviderStats>(
-            "SELECT entity_id AS provider_id, MAX(label) AS provider, NOT EXISTS (SELECT 1 FROM providers live WHERE live.id = b.entity_id) AS deleted, (COALESCE(SUM(request_count), 0))::BIGINT AS request_count,
-       (COALESCE(SUM(error_count), 0))::BIGINT AS error_count,
+            "SELECT entity_id AS provider_id, MAX(label) AS provider, NOT EXISTS (SELECT 1 FROM providers live WHERE live.id = b.entity_id) AS deleted, (COALESCE(SUM(upstream_request_count), 0))::BIGINT AS upstream_request_count,
+       (COALESCE(SUM(upstream_error_count), 0))::BIGINT AS upstream_error_count,
        SUM(duration_ms_sum)::FLOAT8 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum)::FLOAT8 * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps FROM stats_usage_buckets b WHERE scope = 'provider' AND bucket_start >= COALESCE($1::BIGINT, -9223372036854775808) AND bucket_start < COALESCE($2::BIGINT, 9223372036854775807) GROUP BY identity, entity_id ORDER BY request_count DESC, identity",
+       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum)::FLOAT8 * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps FROM stats_usage_buckets b WHERE scope = 'provider' AND bucket_start >= COALESCE($1::BIGINT, -9223372036854775808) AND bucket_start < COALESCE($2::BIGINT, 9223372036854775807) GROUP BY identity, entity_id ORDER BY upstream_request_count DESC, identity",
         )
         .bind(window.start_at)
         .bind(window.end_at)
@@ -438,8 +444,16 @@ mod tests {
             Some(5),
         )
         .await?;
-        // 同一请求的多次尝试和隐藏轮次不能重复计错。
+        // 同一请求的多次尝试各自计一次上游错误；隐藏轮次没有尝试，不重复计。
         insert_failed_attempt(pool, "upstream-error-retry", "upstream-error", recent).await?;
+        for id in ["upstream-error-failed", "upstream-error-retry"] {
+            sqlx::query(
+                "UPDATE target_attempt_observations SET error_source='upstream' WHERE id=$1",
+            )
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
         sqlx::query(
             "INSERT INTO model_turn_observations
             (id,run_id,interaction_id,route_id,status,started_at,finished_at,last_event_sequence)
@@ -469,32 +483,76 @@ mod tests {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
+        let recent_overview = store.stats_overview(window(1)).await?;
         assert_eq!(
-            store.stats_overview(window(1)).await?.error_count,
-            recent_baseline.error_count + 4
+            recent_overview.terminal_request_count,
+            recent_baseline.terminal_request_count + 4
         );
         assert_eq!(
-            store.stats_overview(window(1)).await?.total_requests,
+            recent_overview.failed_request_count,
+            recent_baseline.failed_request_count + 3
+        );
+        assert_eq!(
+            recent_overview.upstream_request_count,
+            recent_baseline.upstream_request_count + 4
+        );
+        assert_eq!(
+            recent_overview.upstream_error_count,
+            recent_baseline.upstream_error_count + 2
+        );
+        assert_eq!(
+            recent_overview.total_requests,
             recent_baseline.total_requests + 12
         );
+        let all_overview = store.stats_overview(StatsWindow::default()).await?;
         assert_eq!(
-            store
-                .stats_overview(StatsWindow::default())
-                .await?
-                .error_count,
-            all_baseline.error_count + 5
+            all_overview.terminal_request_count,
+            all_baseline.terminal_request_count + 5
         );
         assert_eq!(
-            store
-                .stats_overview(StatsWindow::default())
-                .await?
-                .total_requests,
+            all_overview.failed_request_count,
+            all_baseline.failed_request_count + 4
+        );
+        assert_eq!(
+            all_overview.upstream_request_count,
+            all_baseline.upstream_request_count + 4
+        );
+        assert_eq!(
+            all_overview.upstream_error_count,
+            all_baseline.upstream_error_count + 2
+        );
+        assert_eq!(
+            all_overview.total_requests,
             all_baseline.total_requests + 13
         );
         let series = store.stats_series(window(1), 900_000).await?;
         assert_eq!(
-            series.iter().map(|bucket| bucket.error_count).sum::<i64>(),
-            recent_baseline.error_count + 4
+            series
+                .iter()
+                .map(|bucket| bucket.terminal_request_count)
+                .sum::<i64>(),
+            recent_baseline.terminal_request_count + 4
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.failed_request_count)
+                .sum::<i64>(),
+            recent_baseline.failed_request_count + 3
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.upstream_request_count)
+                .sum::<i64>(),
+            recent_baseline.upstream_request_count + 4
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.upstream_error_count)
+                .sum::<i64>(),
+            recent_baseline.upstream_error_count + 2
         );
         assert_eq!(
             series
@@ -503,32 +561,27 @@ mod tests {
                 .sum::<i64>(),
             recent_baseline.total_requests + 12
         );
-        assert_eq!(
-            series
-                .iter()
-                .find(|bucket| bucket.bucket_start == (now - 1_800_000) / 900_000 * 900_000)
-                .unwrap()
-                .error_count,
-            1
-        );
         let providers = store.stats_by_provider(window(1)).await?;
         assert_eq!(
-            providers[0].error_count,
+            providers[0].upstream_error_count,
             recent_provider_baseline
                 .as_ref()
-                .map_or(0, |p| p.error_count)
-                + 3
+                .map_or(0, |p| p.upstream_error_count)
+                + 2
         );
         assert_eq!(
-            providers[0].request_count,
+            providers[0].upstream_request_count,
             recent_provider_baseline
                 .as_ref()
-                .map_or(0, |p| p.request_count)
-                + 9
+                .map_or(0, |p| p.upstream_request_count)
+                + 4
         );
         assert_eq!(
-            store.stats_by_provider(StatsWindow::default()).await?[0].error_count,
-            all_provider_baseline.as_ref().map_or(0, |p| p.error_count) + 4
+            store.stats_by_provider(StatsWindow::default()).await?[0].upstream_error_count,
+            all_provider_baseline
+                .as_ref()
+                .map_or(0, |p| p.upstream_error_count)
+                + 2
         );
         Ok(())
     }
@@ -696,20 +749,20 @@ mod tests {
                 assert_eq!(api_keys[0].reasoning_tokens, Some(2));
 
                 let providers = store.stats_by_provider(window(3)).await?;
-                // Two successful attempts belong to one request; the old turn's recent attempt
-                // does not move its provider contribution into the recent window.
+                // 两个已完成尝试各计一次上游请求；失败与进行中的尝试既不进分子也不进分母。
+                // 旧 Turn 的近期尝试不会把供应商贡献移入近期窗口。
                 assert_eq!(
                     providers
                         .iter()
                         .map(|provider| (
                             provider.provider_id.as_deref(),
                             provider.provider.as_str(),
-                            provider.request_count,
-                            provider.error_count,
+                            provider.upstream_request_count,
+                            provider.upstream_error_count,
                             provider.avg_output_tps,
                         ))
                         .collect::<Vec<_>>(),
-                    vec![(Some("provider"), "Provider", 1, 1, Some(5.0))]
+                    vec![(Some("provider"), "Provider", 2, 0, Some(5.0))]
                 );
                 let old_bucket = old / BASE_BUCKET_MS * BASE_BUCKET_MS;
                 let old_providers = store
@@ -724,8 +777,8 @@ mod tests {
                         .map(|provider| (
                             provider.provider_id.as_deref(),
                             provider.provider.as_str(),
-                            provider.request_count,
-                            provider.error_count,
+                            provider.upstream_request_count,
+                            provider.upstream_error_count,
                             provider.avg_output_tps,
                         ))
                         .collect::<Vec<_>>(),
@@ -903,26 +956,41 @@ mod tests {
         let providers = store.stats_by_provider(selected).await?;
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].provider, "Revised provider");
-        assert_eq!(providers[0].request_count, 1);
+        assert_eq!(providers[0].upstream_request_count, 1);
+        assert_eq!(providers[0].upstream_error_count, 0);
         sqlx::query("UPDATE inference_run_observations SET status='failed',terminal_reason='cancelled' WHERE id='revision-a'")
             .execute(pool).await?;
-        assert_eq!(store.stats_overview(selected).await?.error_count, 0);
+        // 取消既不是已终结请求也不是失败的请求。
+        let cancelled = store.stats_overview(selected).await?;
+        assert_eq!(cancelled.terminal_request_count, 0);
+        assert_eq!(cancelled.failed_request_count, 0);
         sqlx::query(
             "UPDATE inference_run_observations SET failure_json='{}' WHERE id='revision-a'",
         )
         .execute(pool)
         .await?;
-        assert_eq!(store.stats_overview(selected).await?.error_count, 1);
-        assert_eq!(store.stats_by_provider(selected).await?[0].error_count, 1);
+        let failed = store.stats_overview(selected).await?;
+        assert_eq!(failed.terminal_request_count, 1);
+        assert_eq!(failed.failed_request_count, 1);
+        // 拒绝记录属于错误的请求：只进 request_count，不改变四个新计数。
         sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at) VALUES ('revision-rejection',900000,'POST','/v1/responses','responses','authentication','cancelled',400,false,0,9223372036854775807)")
             .execute(pool).await?;
-        assert_eq!(store.stats_overview(selected).await?.error_count, 1);
+        assert_eq!(
+            store.stats_overview(selected).await?.failed_request_count,
+            1
+        );
         sqlx::query("UPDATE rejected_request_observations SET code='invalid_api_key',started_at=1800000 WHERE id='revision-rejection'")
             .execute(pool).await?;
-        assert_eq!(store.stats_overview(selected).await?.error_count, 2);
+        assert_eq!(
+            store.stats_overview(selected).await?.failed_request_count,
+            1
+        );
         sqlx::query("UPDATE rejected_request_observations SET status_code=499 WHERE id='revision-rejection'")
             .execute(pool).await?;
-        assert_eq!(store.stats_overview(selected).await?.error_count, 1);
+        assert_eq!(
+            store.stats_overview(selected).await?.failed_request_count,
+            1
+        );
         // 无关更新和相关列原值赋值都必须保持公开统计结果不变。
         let before = serde_json::to_value(store.stats_overview(selected).await?)?;
         for statement in [

@@ -6,11 +6,15 @@ export interface FailureDiagnostic {
   upstream_code: string | null
 }
 
-export type FailedRequestQuery = Omit<ForestQuery, 'status'>
+export type ClientErrorType = 'failed' | 'rejected'
 
-export interface FailedRequestSummary {
+export type ClientErrorQuery = Omit<ForestQuery, 'status'> & { type?: ClientErrorType }
+
+export interface ClientErrorSummary {
   id: string
   kind: 'rejection' | 'run'
+  /** 终局错误的客户端分类；与记录种类（拒绝记录 / 运行）正交。 */
+  type: ClientErrorType
   request_id: string
   started_at: number
   duration_ms: number | null
@@ -28,15 +32,73 @@ export interface FailedRequestSummary {
   observation_gap: boolean
 }
 
-export interface FailedRequestPage {
-  items: FailedRequestSummary[]
+export interface ClientErrorPage {
+  items: ClientErrorSummary[]
   total: number
   next_cursor: string | null
   snapshot_sequence: number
 }
 
-export interface FailedRequestDetail {
-  request: FailedRequestSummary
+export interface ClientErrorDetail {
+  request: ClientErrorSummary
+  events: ObservationEvent[]
+  trace: TraceManifest | null
+  snapshot_sequence: number
+}
+
+export type UpstreamErrorOutcome = 'recovered' | 'caused_failure' | 'in_progress' | 'interrupted'
+
+export type UpstreamErrorQuery = Omit<ForestQuery, 'status'> & { outcome?: UpstreamErrorOutcome }
+
+export interface UpstreamErrorSummary {
+  /** Target attempt id。 */
+  id: string
+  run_id: string
+  interaction_id: string | null
+  root_id: string | null
+  request_id: string
+  started_at: number
+  duration_ms: number | null
+  provider_id: string | null
+  provider_name: string
+  /** 实际发往上游的模型。 */
+  upstream_model: string | null
+  /** 客户端请求的路由模型。 */
+  model: string | null
+  model_display_name: string | null
+  api_key_id: string | null
+  api_key_name: string | null
+  client: string | null
+  error: FailureDiagnostic
+  outcome: UpstreamErrorOutcome
+  debug_status: string
+  observation_gap: boolean
+}
+
+export interface UpstreamErrorPage {
+  items: UpstreamErrorSummary[]
+  total: number
+  next_cursor: string | null
+  snapshot_sequence: number
+}
+
+export interface UpstreamAttemptTiming {
+  id: string
+  started_at: number
+  duration_ms: number | null
+  status: string
+  provider_id: string | null
+  provider_name: string
+  upstream_model: string | null
+  status_code: number | null
+  error_code: string | null
+  error_source: FailureDiagnostic['source']
+}
+
+export interface UpstreamErrorDetail {
+  error: UpstreamErrorSummary
+  /** 同一运行内的全部尝试，按开始时间升序。 */
+  attempts: UpstreamAttemptTiming[]
   events: ObservationEvent[]
   trace: TraceManifest | null
   snapshot_sequence: number
@@ -171,6 +233,8 @@ export interface ObservationChange {
   rejection_id: string | null
   kind: string
   boundary: boolean
+  /** 仅 `target_attempt_finished` 携带；上游错误列表据此判断是否需要静默刷新。 */
+  error_source?: FailureDiagnostic['source']
 }
 
 export interface TraceManifest {

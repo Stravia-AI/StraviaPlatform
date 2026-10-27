@@ -923,8 +923,14 @@ pub struct StatsOverview {
     /// 成功 attempt 的 Σ输出 Token / Σ完整耗时（tok/s），包含首字等待。
     /// 无成功样本、任一输出或耗时未知、或总耗时不为正时为 null。
     pub avg_output_tps: Option<f64>,
-    /// 与「失败的请求」相同的最终失败请求数，不包含恢复成功、取消或中断。
-    pub error_count: i64,
+    /// 已终结请求：完成或最终失败、非客户端取消、且未在 Target 选择前被拒绝。
+    pub terminal_request_count: i64,
+    /// 已终结请求中最终失败的数量；取消、断线与进行中不计入。
+    pub failed_request_count: i64,
+    /// 上游请求：已完成尝试 + 上游错误；本地失败与未知来源不计入。
+    pub upstream_request_count: i64,
+    /// 上游错误：失败且错误来源为上游的 Target 尝试。
+    pub upstream_error_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -935,8 +941,14 @@ pub struct StatsSeries {
     pub bucket_ms: i64,
     /// 按客户端请求开始时间分桶的请求数，包括准入前拒绝。
     pub request_count: i64,
-    /// 本桶内最终失败的客户端请求数；同一请求的内部轮次和重试只计一次。
-    pub error_count: i64,
+    /// 本桶内已终结请求数；取消、断线与进行中不计入。
+    pub terminal_request_count: i64,
+    /// 本桶内已终结请求中最终失败的数量。
+    pub failed_request_count: i64,
+    /// 本桶内上游请求数（已完成尝试 + 上游错误）。
+    pub upstream_request_count: i64,
+    /// 本桶内失败且来源为上游的 Target 尝试数。
+    pub upstream_error_count: i64,
     /// 已完成 attempt 的已知净输入合计；逐次扣 cache-read 并截为零，不扣 cache-write。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
@@ -967,10 +979,10 @@ pub struct ProviderStats {
     pub provider_id: Option<String>,
     pub deleted: bool,
     pub provider: String,
-    /// 涉及该服务的客户端请求数，不按内部轮次或尝试重复计数。
-    pub request_count: i64,
-    /// 涉及该服务的最终失败请求数；跨服务失败可分别计入多个服务。
-    pub error_count: i64,
+    /// 该 Provider 的上游请求数：已完成尝试 + 上游错误；重试会重复计入。
+    pub upstream_request_count: i64,
+    /// 该 Provider 的上游错误数：失败且来源为上游的尝试。
+    pub upstream_error_count: i64,
     pub avg_duration_ms: Option<f64>,
     /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ完整上游耗时。
     /// 不扣首 Token 等待；任一已完成 attempt 未报告输出或耗时，或总耗时为零时为 null。

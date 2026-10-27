@@ -9,12 +9,16 @@ import {
 } from '#lib/observation-workspace.js'
 import type {
   BundleResourceKind,
-  FailedRequestDetail,
-  FailedRequestSummary,
+  ClientErrorDetail,
+  ClientErrorSummary,
+  ClientErrorType,
   ForestRoot,
   InteractionDetail,
   InteractionSummary,
   LiveContentBlock,
+  UpstreamErrorDetail,
+  UpstreamErrorOutcome,
+  UpstreamErrorSummary,
 } from '#lib/types/observation.js'
 
 export {
@@ -54,10 +58,7 @@ export class ObservationWorkspace {
   selectedMigrated = $state.raw<string>()
   migratedRoots = $state.raw<ReadonlySet<string>>(new SvelteSet())
   selectedInteraction = $state.raw<InteractionSummary>()
-  selectedFailure = $state.raw<FailedRequestSummary>()
   interactionDetail = $state.raw<InteractionDetail>()
-  failureDetail = $state.raw<FailedRequestDetail>()
-  failureDetailError = $state.raw<unknown>()
   detailLoading = $state(false)
   olderLoading = $state(false)
   selectedLiveBlocks = $state.raw<LiveContentBlock[]>([])
@@ -76,11 +77,26 @@ export class ObservationWorkspace {
   loadError = $state.raw<unknown>()
   nextCursor = $state.raw<string | null>()
   rootTotal = $state(0)
-  failures = $state.raw<FailedRequestSummary[]>([])
-  failureTotal = $state(0)
-  failureCursor = $state.raw<string | null>()
-  failureLoading = $state(false)
-  failureError = $state.raw<unknown>()
+  clientErrorTypeFilter = $state<ClientErrorType | 'all'>('all')
+  selectedClientError = $state.raw<ClientErrorSummary>()
+  clientErrorDetail = $state.raw<ClientErrorDetail>()
+  clientErrorDetailError = $state.raw<unknown>()
+  clientErrorDetailLoading = $state(false)
+  clientErrors = $state.raw<ClientErrorSummary[]>([])
+  clientErrorTotal = $state(0)
+  clientErrorCursor = $state.raw<string | null>()
+  clientErrorLoading = $state(false)
+  clientErrorError = $state.raw<unknown>()
+  upstreamErrorOutcomeFilter = $state<UpstreamErrorOutcome | 'all'>('all')
+  selectedUpstreamError = $state.raw<UpstreamErrorSummary>()
+  upstreamErrorDetail = $state.raw<UpstreamErrorDetail>()
+  upstreamErrorDetailError = $state.raw<unknown>()
+  upstreamErrorDetailLoading = $state(false)
+  upstreamErrors = $state.raw<UpstreamErrorSummary[]>([])
+  upstreamErrorTotal = $state(0)
+  upstreamErrorCursor = $state.raw<string | null>()
+  upstreamErrorLoading = $state(false)
+  upstreamErrorError = $state.raw<unknown>()
 
   readonly #controller: ObservationWorkspaceController
 
@@ -115,18 +131,26 @@ export class ObservationWorkspace {
   setApiKeyFilter = (value: string): void => this.#controller.setApiKeyFilter(value)
   setStatusFilter = (value: string): void => this.#controller.setStatusFilter(value)
   setMinTokenStop = (value: number): void => this.#controller.setMinTokenStop(value)
+  setClientErrorTypeFilter = (value: ClientErrorType | 'all'): void => this.#controller.setClientErrorTypeFilter(value)
+  setUpstreamErrorOutcomeFilter = (value: UpstreamErrorOutcome | 'all'): void =>
+    this.#controller.setUpstreamErrorOutcomeFilter(value)
   tabChanged = (value: string): Promise<void> => this.#controller.tabChanged(value)
   loadNextRootBatch = (): Promise<void> => this.#controller.loadNextRootBatch()
   fitAll = (): Promise<void> => this.#controller.fitAll()
   selectInteraction = (interaction: InteractionSummary): Promise<void> =>
     this.#controller.selectInteraction(interaction)
-  selectFailure = (failure: FailedRequestSummary): Promise<void> => this.#controller.selectFailure(failure)
+  selectClientError = (clientError: ClientErrorSummary): Promise<void> =>
+    this.#controller.selectClientError(clientError)
+  selectUpstreamError = (upstreamError: UpstreamErrorSummary): Promise<void> =>
+    this.#controller.selectUpstreamError(upstreamError)
   deepLinkInteraction = (id: string): Promise<void> => this.#controller.deepLinkInteraction(id)
   closeInspector = (): void => this.#controller.closeInspector()
   loadOlderEvents = (): Promise<void> => this.#controller.loadOlderEvents()
-  openFailureInteraction = (): Promise<void> => this.#controller.openFailureInteraction()
+  openClientErrorInteraction = (): Promise<void> => this.#controller.openClientErrorInteraction()
+  openUpstreamErrorInteraction = (): Promise<void> => this.#controller.openUpstreamErrorInteraction()
   refreshSelectedDetail = (): Promise<void> => this.#controller.refreshSelectedDetail()
-  loadFailures = (replace = true): Promise<void> => this.#controller.loadFailures(replace)
+  loadClientErrors = (replace = true): Promise<void> => this.#controller.loadClientErrors(replace)
+  loadUpstreamErrors = (replace = true): Promise<void> => this.#controller.loadUpstreamErrors(replace)
   pauseFollow = (): void => this.#controller.pauseFollow()
   resumeFollow = (): void => this.#controller.resumeFollow()
   bundleTarget = (): { kind: BundleResourceKind; id: string } | null => this.#controller.bundleTarget()
@@ -151,10 +175,7 @@ export class ObservationWorkspace {
     this.selectedMigrated = snapshot.selectedMigrated
     this.migratedRoots = snapshot.migratedRoots
     this.selectedInteraction = snapshot.selectedInteraction
-    this.selectedFailure = snapshot.selectedFailure
     this.interactionDetail = snapshot.interactionDetail
-    this.failureDetail = snapshot.failureDetail
-    this.failureDetailError = snapshot.failureDetailError
     this.detailLoading = snapshot.detailLoading
     this.olderLoading = snapshot.olderLoading
     this.selectedLiveBlocks = snapshot.selectedLiveBlocks
@@ -173,10 +194,25 @@ export class ObservationWorkspace {
     this.loadError = snapshot.loadError
     this.nextCursor = snapshot.nextCursor
     this.rootTotal = snapshot.rootTotal
-    this.failures = snapshot.failures
-    this.failureTotal = snapshot.failureTotal
-    this.failureCursor = snapshot.failureCursor
-    this.failureLoading = snapshot.failureLoading
-    this.failureError = snapshot.failureError
+    this.clientErrorTypeFilter = snapshot.clientErrorTypeFilter
+    this.selectedClientError = snapshot.selectedClientError
+    this.clientErrorDetail = snapshot.clientErrorDetail
+    this.clientErrorDetailError = snapshot.clientErrorDetailError
+    this.clientErrorDetailLoading = snapshot.clientErrorDetailLoading
+    this.clientErrors = snapshot.clientErrors
+    this.clientErrorTotal = snapshot.clientErrorTotal
+    this.clientErrorCursor = snapshot.clientErrorCursor
+    this.clientErrorLoading = snapshot.clientErrorLoading
+    this.clientErrorError = snapshot.clientErrorError
+    this.upstreamErrorOutcomeFilter = snapshot.upstreamErrorOutcomeFilter
+    this.selectedUpstreamError = snapshot.selectedUpstreamError
+    this.upstreamErrorDetail = snapshot.upstreamErrorDetail
+    this.upstreamErrorDetailError = snapshot.upstreamErrorDetailError
+    this.upstreamErrorDetailLoading = snapshot.upstreamErrorDetailLoading
+    this.upstreamErrors = snapshot.upstreamErrors
+    this.upstreamErrorTotal = snapshot.upstreamErrorTotal
+    this.upstreamErrorCursor = snapshot.upstreamErrorCursor
+    this.upstreamErrorLoading = snapshot.upstreamErrorLoading
+    this.upstreamErrorError = snapshot.upstreamErrorError
   }
 }

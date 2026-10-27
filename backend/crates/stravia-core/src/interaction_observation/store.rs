@@ -1847,6 +1847,7 @@ impl ObservationStore {
         outcome: &RunOutcome,
         now: i64,
         expires_at: i64,
+        rejected_before_target: bool,
     ) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool, _) => {
@@ -1854,7 +1855,7 @@ impl ObservationStore {
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
                 // 耗时采用实际结束时刻；终态事件不能排到延迟记录的前序事件之前。
-                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6 WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6,rejected_before_target=MAX(rejected_before_target,?8) WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,?),client_output_committed=MAX(client_output_committed,?),terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=? RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at")
                         .bind(outcome.delivery_completed_at)
                         .bind(outcome.client_output_committed)
@@ -1899,7 +1900,7 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6,rejected_before_target=rejected_before_target OR $8 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,$1),client_output_committed=client_output_committed OR $2,terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=$3 RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at").bind(outcome.delivery_completed_at).bind(outcome.client_output_committed).bind(run_id).fetch_one(&mut *tx).await?;
                 let mut payload = finish_payload(outcome, interrupted)?;
                 payload["finished_at"] = Value::from(now);
@@ -2536,12 +2537,13 @@ async fn apply_sqlite(
             status,
             status_code,
             error_code,
+            error,
             duration_ms,
             first_token_ms,
             usage,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
+            sqlx::query("UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(error.as_ref().and_then(|error| error.source.as_deref())).bind(error.as_ref().and_then(|error| error.message.as_deref())).bind(error.as_ref().and_then(|error| error.upstream_code.as_deref())).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
             if let Some(usage) = usage {
                 usage_sqlite(tx, iid, attempt_id, usage, seq).await?;
             }
@@ -2633,12 +2635,13 @@ async fn apply_postgres(
             status,
             status_code,
             error_code,
+            error,
             duration_ms,
             first_token_ms,
             usage,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,finished_at=$4,duration_ms=$5,first_token_ms=$6,last_event_sequence=$7 WHERE id=$8").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
+            sqlx::query("UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,last_event_sequence=$10 WHERE id=$11").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(error.as_ref().and_then(|error| error.source.as_deref())).bind(error.as_ref().and_then(|error| error.message.as_deref())).bind(error.as_ref().and_then(|error| error.upstream_code.as_deref())).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
             if let Some(usage) = usage {
                 usage_postgres(tx, iid, attempt_id, usage, seq).await?;
             }
@@ -2897,7 +2900,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::interaction_observation::types::{FailedRequestQuery, ForestQuery};
+    use crate::interaction_observation::types::{ClientErrorQuery, ForestQuery};
 
     #[tokio::test]
     async fn confirmed_usage_aggregates_all_runs_without_foreign_interactions() -> anyhow::Result<()>
@@ -3530,12 +3533,13 @@ mod tests {
                 },
                 10,
                 i64::MAX,
+                false,
             )
             .await?;
         assert!(finished.sequence > failure.sequence);
         assert!(finished.occurred_at >= failure.occurred_at);
         let page = store
-            .failed_requests(FailedRequestQuery {
+            .client_errors(ClientErrorQuery {
                 start_at: Some(0),
                 end_at: Some(30),
                 ..Default::default()
@@ -3585,11 +3589,12 @@ mod tests {
                     },
                     3,
                     i64::MAX,
+                    false,
                 )
                 .await?;
         }
         let page = store
-            .failed_requests(FailedRequestQuery {
+            .client_errors(ClientErrorQuery {
                 start_at: Some(0),
                 end_at: Some(10),
                 ..Default::default()
@@ -3663,6 +3668,7 @@ mod tests {
                 },
                 3,
                 i64::MAX,
+                false,
             )
             .await?;
         Ok(())
@@ -3776,6 +3782,7 @@ mod tests {
                         },
                         6,
                         i64::MAX,
+                        false,
                     )
                     .await?;
             }
@@ -3845,6 +3852,7 @@ mod tests {
                 },
                 3,
                 i64::MAX,
+                false,
             )
             .await?;
         assert!(

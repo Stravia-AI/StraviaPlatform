@@ -302,6 +302,8 @@ pub(super) enum WriterCommand {
         run_id: String,
         outcome: RunOutcome,
         finished_at: i64,
+        /// 请求阶段 Hook 拒绝或未进入 Target 选择的固定失败。
+        rejected_before_target: bool,
     },
     Reject {
         ingress: IngressStart,
@@ -315,7 +317,7 @@ pub(super) enum WriterCommand {
         run_id: Option<String>,
         rejection_id: Option<String>,
         trace: Option<super::trace::TraceHandle>,
-        pending_finish: Option<(RunOutcome, i64)>,
+        pending_finish: Option<(RunOutcome, i64, bool)>,
         gap: bool,
     },
     FlushInteraction {
@@ -646,7 +648,7 @@ impl WriterCommand {
                     + optional_len(rejection_id)
                     + pending_finish
                         .as_ref()
-                        .map_or(0, |(outcome, _)| outcome_bytes(outcome))
+                        .map_or(0, |(outcome, _, _)| outcome_bytes(outcome))
             }
             Self::FlushInteraction { interaction_id, .. } => interaction_id.len(),
         };
@@ -1360,6 +1362,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     run_id,
                     mut outcome,
                     finished_at,
+                    rejected_before_target,
                 }) => {
                     replayed_tool_results.remove(&run_id);
                     if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
@@ -1399,7 +1402,10 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &mut pending_text,
                         &run_id,
                         &outcome,
-                        finished_at,
+                        FinishFacts {
+                            at: finished_at,
+                            rejected_before_target,
+                        },
                     )
                     .await;
                 }
@@ -1500,7 +1506,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 }
                             }
                         }
-                        if let Some((mut outcome, finished_at)) = pending_finish {
+                        if let Some((mut outcome, finished_at, rejected_before_target)) = pending_finish {
                             if let Some((delivery, committed)) = terminal_facts.remove(run_id) {
                                 outcome.client_output_committed |= committed;
                                 if outcome.delivery.is_none() {
@@ -1514,7 +1520,10 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 &mut pending_text,
                                 run_id,
                                 &outcome,
-                                finished_at,
+                                FinishFacts {
+                                    at: finished_at,
+                                    rejected_before_target,
+                                },
                             )
                             .await;
                         }
@@ -1764,6 +1773,12 @@ fn ensure_usage_complete(incomplete_usage: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 收口时与 `RunOutcome` 一起写入的运行级事实；独立成组以免 `persist_finish` 参数继续膨胀。
+struct FinishFacts {
+    at: i64,
+    rejected_before_target: bool,
+}
+
 async fn persist_finish(
     incomplete_usage: &mut bool,
     context: &WriterContext<'_>,
@@ -1771,8 +1786,12 @@ async fn persist_finish(
     pending_text: &mut TextBuffer,
     run_id: &str,
     outcome: &RunOutcome,
-    at: i64,
+    finish: FinishFacts,
 ) {
+    let FinishFacts {
+        at,
+        rejected_before_target,
+    } = finish;
     flush_one(pending_text, run_id);
     pending_text.retain(|run| run != run_id);
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
@@ -1781,7 +1800,14 @@ async fn persist_finish(
         let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
         let result = context
             .store
-            .finish_run(interaction, run_id, outcome, at, expiry)
+            .finish_run(
+                interaction,
+                run_id,
+                outcome,
+                at,
+                expiry,
+                rejected_before_target,
+            )
             .instrument(span.clone())
             .await;
         span.record("status", if result.is_ok() { "completed" } else { "error" });

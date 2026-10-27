@@ -341,7 +341,7 @@ async fn failed_terminal_body_drop_preserves_failed_run_without_generation() {
     // eligibility, so the real failure receipt is ready when that decision runs.
     // Notifications only wake the durable query; the persisted Run is the
     // evidence, within the existing one-second completion budget.
-    let (run, failed_requests) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let (run, client_errors) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         recovery_gate.entered.notified().await;
         recovery_gate.release.notify_one();
         loop {
@@ -368,12 +368,12 @@ async fn failed_terminal_body_drop_preserves_failed_run_without_generation() {
                 .into_iter()
                 .find(|run| run.id == run_id && run.finished_at.is_some())
             {
-                let failed_requests = gateway
+                let client_errors = gateway
                     .observation
-                    .failed_requests(Default::default())
+                    .client_errors(Default::default())
                     .await
-                    .expect("durable failed request query");
-                break (run, failed_requests);
+                    .expect("durable client error query");
+                break (run, client_errors);
             }
         }
     })
@@ -389,10 +389,10 @@ async fn failed_terminal_body_drop_preserves_failed_run_without_generation() {
         run.generation_parent_id, None,
         "failure has no Generation parent"
     );
-    assert_eq!(failed_requests.total, 1);
-    assert_eq!(failed_requests.items.len(), 1);
+    assert_eq!(client_errors.total, 1);
+    assert_eq!(client_errors.items.len(), 1);
     assert_eq!(
-        failed_requests.items[0].run_id.as_deref(),
+        client_errors.items[0].run_id.as_deref(),
         Some(run.id.as_str())
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1, "must not replay upstream");
@@ -940,7 +940,7 @@ async fn assert_marker_failure_diagnostics(gateway: &Gateway) {
     gateway.observation.flush().await.expect("flush failures");
     let failures = gateway
         .observation
-        .failed_requests(Default::default())
+        .client_errors(Default::default())
         .await
         .expect("failed requests");
     assert_eq!(failures.items.len(), 2);

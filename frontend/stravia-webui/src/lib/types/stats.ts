@@ -11,6 +11,14 @@ export interface GatewayStatus {
 
 export interface StatsOverview {
   total_requests: number
+  /** 已完成或最终失败、非取消、且不是错误的请求。 */
+  terminal_request_count: number
+  /** 已终结请求中最终失败的请求。 */
+  failed_request_count: number
+  /** 已得到上游判定结果的 Target 尝试。 */
+  upstream_request_count: number
+  /** 上游来源的终态失败尝试。 */
+  upstream_error_count: number
   total_input_tokens: number | null
   total_output_tokens: number | null
   total_cache_read_tokens: number | null
@@ -20,7 +28,6 @@ export interface StatsOverview {
   avg_first_token_ms: number | null
   /** 成功 Target attempts 的总输出 / 总完整耗时（tok/s）；任一样本缺输出或耗时为 null。 */
   avg_output_tps: number | null
-  error_count: number
 }
 
 export interface StatsSeries {
@@ -29,7 +36,10 @@ export interface StatsSeries {
   /** Absolute presentation bucket start (epoch ms), anchored to the selected start. */
   bucket_start: number
   request_count: number
-  error_count: number
+  terminal_request_count: number
+  failed_request_count: number
+  upstream_request_count: number
+  upstream_error_count: number
   total_input_tokens: number | null
   total_output_tokens: number | null
   total_cache_read_tokens: number | null
@@ -56,8 +66,10 @@ export interface ProviderStats {
   provider_id: string | null
   deleted: boolean
   provider: string
-  request_count: number
-  error_count: number
+  /** 该供应商的 Target 尝试数；重试会使其高于客户端请求数。 */
+  upstream_request_count: number
+  /** 该供应商来源的上游错误尝试数。 */
+  upstream_error_count: number
   avg_duration_ms: number | null
   /** 已完成请求的输出 Token 总速（tok/s）；未完整报告输出或耗时为 null。 */
   avg_output_tps: number | null

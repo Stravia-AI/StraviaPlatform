@@ -200,7 +200,7 @@ pub(crate) fn upstream_body_code(body: &serde_json::Value) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FailedRequestQuery {
+pub struct ClientErrorQuery {
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
     pub anchor_at: Option<i64>,
@@ -210,18 +210,25 @@ pub struct FailedRequestQuery {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    /// 客户端错误的类型（`failed` / `rejected`）；缺省为全部，非法值 400。
+    /// 与记录种类（拒绝记录 / 运行）正交。
+    #[serde(rename = "type")]
+    pub request_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestService {
+pub struct ClientErrorService {
     pub id: String,
     pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestSummary {
+pub struct ClientErrorSummary {
     pub id: String,
     pub kind: String,
+    /// 客户端视角的分类：未进入 Target 选择即终止为 `rejected`，其余失败为 `failed`。
+    #[serde(rename = "type")]
+    pub request_type: String,
     pub request_id: String,
     pub started_at: i64,
     pub duration_ms: Option<i64>,
@@ -230,7 +237,7 @@ pub struct FailedRequestSummary {
     pub client: Option<String>,
     pub model: Option<String>,
     pub model_display_name: Option<String>,
-    pub services: Vec<FailedRequestService>,
+    pub services: Vec<ClientErrorService>,
     pub error: FailureDiagnostic,
     pub interaction_id: Option<String>,
     pub root_id: Option<String>,
@@ -240,16 +247,91 @@ pub struct FailedRequestSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestPage {
-    pub items: Vec<FailedRequestSummary>,
+pub struct ClientErrorPage {
+    pub items: Vec<ClientErrorSummary>,
     pub total: i64,
     pub next_cursor: Option<String>,
     pub snapshot_sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestDetail {
-    pub request: FailedRequestSummary,
+pub struct ClientErrorDetail {
+    pub request: ClientErrorSummary,
+    pub events: Vec<ObservationEvent>,
+    pub trace: Option<TraceManifest>,
+    pub snapshot_sequence: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpstreamErrorQuery {
+    pub start_at: Option<i64>,
+    pub end_at: Option<i64>,
+    pub anchor_at: Option<i64>,
+    pub window_index: Option<u32>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    /// 查询时派生的结果（`recovered` / `caused_failure` / `in_progress` / `interrupted`）。
+    pub outcome: Option<String>,
+}
+
+/// 一次失败的上游 Target 尝试（含 capability 尝试）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorSummary {
+    /// Target attempt id。
+    pub id: String,
+    pub run_id: String,
+    pub interaction_id: Option<String>,
+    pub root_id: Option<String>,
+    /// 与 `ClientErrorSummary.request_id` 同义：所属运行的请求标识。
+    pub request_id: String,
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    pub provider_id: Option<String>,
+    pub provider_name: String,
+    /// 实际发往上游的模型。
+    pub upstream_model: Option<String>,
+    /// 客户端请求的路由模型（run.request_model）。
+    pub model: Option<String>,
+    pub model_display_name: Option<String>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub client: Option<String>,
+    pub error: FailureDiagnostic,
+    pub outcome: String,
+    pub debug_status: String,
+    pub observation_gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorPage {
+    pub items: Vec<UpstreamErrorSummary>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
+    pub snapshot_sequence: i64,
+}
+
+/// 同一运行内的一次尝试时序；详情按开始时间升序返回。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UpstreamAttemptTiming {
+    pub id: String,
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub provider_id: Option<String>,
+    pub provider_name: String,
+    pub upstream_model: Option<String>,
+    pub status_code: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorDetail {
+    pub error: UpstreamErrorSummary,
+    pub attempts: Vec<UpstreamAttemptTiming>,
     pub events: Vec<ObservationEvent>,
     pub trace: Option<TraceManifest>,
     pub snapshot_sequence: i64,
@@ -531,6 +613,10 @@ pub struct ObservationChange {
     pub rejection_id: Option<String>,
     pub kind: String,
     pub boundary: bool,
+    /// 仅 `target_attempt_finished` 且尝试带错误时取事件载荷中的 `error.source`；
+    /// 上游错误列表据此判断是否需要静默刷新，读取载荷不额外查询存储。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_source: Option<String>,
 }
 
 impl ObservationChange {
@@ -544,6 +630,16 @@ impl ObservationChange {
                 | "model_thinking"
                 | "request_rejected"
         );
+        let error_source = (event.kind == "target_attempt_finished")
+            .then(|| {
+                event
+                    .payload
+                    .get("error")
+                    .and_then(|error| error.get("source"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
         Self {
             sequence: event.sequence,
             occurred_at: event.occurred_at,
@@ -553,6 +649,7 @@ impl ObservationChange {
             rejection_id: event.rejection_id,
             kind: event.kind,
             boundary,
+            error_source,
         }
     }
 }
@@ -581,6 +678,8 @@ pub enum ObservationQueryError {
     InvalidWindow,
     #[error("invalid observation event page")]
     InvalidEventPage,
+    #[error("invalid observation filter")]
+    InvalidFilter,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -619,8 +718,8 @@ pub struct InteractionSummary {
     /// Opening text of the normalized initiating user message; absent for uncaptured input.
     pub input_preview: Option<String>,
     pub visible_tail: String,
-    /// The interaction contains at least one run qualifying as a Failed Request
-    /// (same predicate as the failed-requests view).
+    /// The interaction contains at least one terminal-error run that the client-errors view
+    /// lists as a run record (failed request, or request rejected before Target selection).
     pub failed_request: bool,
     /// Any run in this interaction committed client-visible output, i.e. the client
     /// received at least one visible byte (text, public tool call, or thinking preview).

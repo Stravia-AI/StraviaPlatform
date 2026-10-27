@@ -34,15 +34,15 @@ mod web_access;
 mod web_search;
 
 pub use crate::interaction_observation::{
-    BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
-    CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState,
-    DownloadTicket, FailedRequestDetail, FailedRequestPage, FailedRequestQuery,
-    FailedRequestSummary, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
-    InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot, InteractionSummary,
-    KnownInteraction, ObservationChange, ObservationEvent, ObservationQueryError,
-    ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery,
-    RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery,
-    RunDetail, TraceManifest, UsageCoverage,
+    BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ClientErrorDetail,
+    ClientErrorPage, ClientErrorQuery, ClientErrorSummary, ConfirmedUsage, CredentialDiscoveryPage,
+    CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState, DownloadTicket, ForestPage,
+    ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage, InteractionEventsQuery,
+    InteractionSnapshot, InteractionSummary, KnownInteraction, ObservationChange, ObservationEvent,
+    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
+    RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage,
+    RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming, UpstreamErrorDetail,
+    UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use provider_connection::{
