@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from contextlib import closing
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import closing, contextmanager
+from pathlib import Path
+from typing import Any, Iterator
 from urllib.parse import urlencode
 
 import pytest
 
-from tests.common.helpers import http_request
+from tests.common.helpers import http_request, stop_stravia_server
+from tests.e2e.admin.test_observation_failures import _start_initialized
 from tests.e2e.admin.test_observations import _create_route, _detail, _proxy, _route_interactions, _wait_for
 from tests.e2e.admin.test_reversible_redaction import SECRET, REFERENCE, echo_provider, mapping_sql, set_enabled
 
@@ -319,3 +322,121 @@ def test_custom_rules_crud_validation_and_protected_roundtrip(admin_env: dict[st
             set_enabled(env, False)
         status, body = http_request("GET", f"{env['admin']}{custom}", headers=env["auth"])
         assert status == 200 and body["data"] == [], body
+
+
+@contextmanager
+def _sqlite_write_lock(database_path: Path) -> Iterator[sqlite3.Connection]:
+    """Hold an external SQLite write transaction without blocking readers."""
+    connection = sqlite3.connect(database_path, isolation_level=None, timeout=30.0)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        yield connection
+    finally:
+        try:
+            connection.rollback()
+        finally:
+            connection.close()
+
+
+@pytest.mark.parametrize("debug_enabled", [False, True], ids=["debug-off", "debug-on"])
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_discoveries_read_committed_events_without_waiting_for_blocked_writer(
+    stravia_binary: Path, tmp_path: Path, debug_enabled: bool
+) -> None:
+    model = "credential-discovery-blocked-writer"
+    # The observation writer's SQLite busy timeout is 5s per rejected request.
+    # Three unrelated rejections make a flush-based read take at least 15s,
+    # while a committed read must return well inside this watchdog.
+    watchdog = 8.0
+    with echo_provider() as (url, received):
+        env, process, logs = _start_initialized(stravia_binary, tmp_path, url)
+        executor: ThreadPoolExecutor | None = None
+        try:
+            _route, key = _create_route(env, model)
+            set_enabled(env, True)
+            status, _response = _proxy(
+                env, key, model,
+                [{"role": "user", "content": f"unrelated prefix {SECRET}"}],
+            )
+            assert status == 200, "credential-bearing request failed"
+
+            def committed_page() -> dict[str, Any] | None:
+                page = discoveries(env, limit=20)
+                if page["items"] and page["items"][0]["status"] == "completed":
+                    return page
+                return None
+
+            baseline = _wait_for("persisted credential discovery", committed_page)
+            assert len(baseline["items"]) == 1
+            expected = baseline["items"][0]
+            assert expected["api_key_name"] == f"{model}-key"
+            assert expected["new_credential_count"] == 1
+            assert "github-pat" in expected["rule_ids"]
+            assert "user_message" in expected["source_types"]
+            assert baseline["next_cursor"] is None
+            assert baseline["observation_gap"] is False
+
+            if debug_enabled:
+                status, body = http_request(
+                    "PUT",
+                    f"{env['admin']}/api/v1/observations/debug",
+                    payload={"enabled": True, "confirmed": True},
+                    headers=env["auth"],
+                )
+                assert status == 200, body
+
+            executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="credential-discovery-read",
+            )
+            with _sqlite_write_lock(tmp_path / "db" / "gateway.db"):
+                for _ in range(3):
+                    status, _body = http_request(
+                        "POST",
+                        f"{env['proxy']}/v1/chat/completions",
+                        payload={
+                            "model": model,
+                            "messages": [{"role": "user", "content": "unrelated rejected observation"}],
+                        },
+                        timeout=10.0,
+                    )
+                    assert status == 401, "unauthenticated request must be rejected"
+                assert len(received) == 1, "rejected requests must not reach the provider"
+                future = executor.submit(
+                    http_request,
+                    "GET",
+                    f"{env['admin']}{BASE}/discoveries?{urlencode({'limit': 20})}",
+                    headers=env["auth"],
+                    timeout=watchdog + 2.0,
+                )
+                started = time.monotonic()
+                try:
+                    status, body = future.result(timeout=watchdog)
+                except FutureTimeoutError:
+                    if future.done():
+                        raise
+                    pytest.fail(
+                        "credential discovery read waited for the observation writer while the "
+                        f"SQLite write lock was held (waited {time.monotonic() - started:.1f}s, "
+                        f"watchdog {watchdog:.0f}s, debug={debug_enabled})"
+                    )
+                assert status == 200, f"credential discovery read returned HTTP {status}"
+                page = body["data"]
+                assert page["next_cursor"] is None
+                assert page["observation_gap"] is False
+                assert len(page["items"]) == 1
+                item = page["items"][0]
+                assert item["interaction_id"] == expected["interaction_id"]
+                assert item["api_key_name"] == expected["api_key_name"]
+                assert item["discovered_at"] == expected["discovered_at"]
+                assert item["new_credential_count"] == expected["new_credential_count"]
+                assert item["rule_ids"] == expected["rule_ids"]
+                assert item["source_types"] == expected["source_types"]
+                assert item["status"] == expected["status"]
+                assert item["observation_gap"] == expected["observation_gap"]
+        finally:
+            try:
+                if executor is not None:
+                    executor.shutdown(wait=True)
+            finally:
+                stop_stravia_server(process, logs)

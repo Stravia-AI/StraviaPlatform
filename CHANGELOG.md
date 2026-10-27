@@ -4,6 +4,7 @@
 
 ### Added
 
+- Debug performance traces now distinguish SQLite write-lease ownership, normal release and cancellation cleanup, explicit transaction boundaries, observation manifest writes and file syncs, and Trace flush/finish barriers. Observation command spans include a fixed, privacy-safe command category. Background lease cleanup preserves causal attribution without extending a finished request's trace lifetime; SQL query accounting, storage durability and terminal-publication ordering are unchanged.
 - Media understanding now accepts WAV, MP3, FLAC, OGG, AAC and AIFF audio through `StraviaRead` and the media bridge. Audio has its own enable switch, model and thinking level on the Media understanding page, separate from images and documents. Admin API change: `GET /api/v1/media-understanding` now returns `{ image, audio }`, and settings are saved per kind with `PUT /api/v1/media-understanding/{kind}` (`image` or `audio`) instead of `PUT /api/v1/media-understanding`.
 
 ### Changed
@@ -35,6 +36,7 @@
 
 ### Fixed
 
+- Credential Protection Hit records now read persisted discoveries without waiting for unrelated observation writes or Debug trace flushes. Discovery-specific indexes and batched payload reads avoid scanning unrelated events and querying each interaction separately on SQLite and PostgreSQL. Newly queued discoveries and request statuses may become visible later; retention, pagination, gap reporting and credential protection remain unchanged.
 - Release builds no longer compile a bundled-plugin accessor used only by debug-mode development reconciliation, fixing warnings-as-errors failures without disabling the development path. Desktop smoke coverage now handles both responsive observation inspectors, scopes inline settings actions correctly, and opens General settings before exercising updates. WebUI formatting is also normalized for CI.
 - Rust regression fixtures use named observation profiles and equivalent progress-handler control flow to satisfy Clippy without suppressing warnings or changing production behavior.
 - Devin now replays unsigned thinking in its native reasoning field instead of turning it into assistant text. This preserves the reasoning/text boundary across Responses tool continuations, matching the official CLI and OMP integration. Rebuild and re-import the standalone Devin plugin; updating the host alone does not replace installed plugins.

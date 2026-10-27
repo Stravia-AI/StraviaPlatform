@@ -654,6 +654,29 @@ impl WriterCommand {
     }
 }
 
+/// 静态命令分类，只用于观测命令处理墙钟；不携带任何请求内容或运行标识。
+fn command_kind(command: Option<&WriterCommand>) -> &'static str {
+    match command {
+        Some(WriterCommand::ClearTail) => "clear_tail",
+        Some(WriterCommand::ClearDebug { .. }) => "clear_debug",
+        Some(WriterCommand::ClientDisconnected { .. }) => "client_disconnected",
+        Some(WriterCommand::ClientToolResults { .. }) => "client_tool_results",
+        Some(WriterCommand::InputPreview { .. }) => "input_preview",
+        Some(WriterCommand::Purge { .. }) => "purge",
+        Some(WriterCommand::ClientCompletion { .. }) => "client_completion",
+        Some(WriterCommand::Admit(_)) => "admit",
+        Some(WriterCommand::Event { .. }) => "event",
+        Some(WriterCommand::Text { .. }) => "text",
+        Some(WriterCommand::Finish { .. }) => "finish",
+        Some(WriterCommand::Reject { .. }) => "reject",
+        Some(WriterCommand::Finalize { .. }) => "finalize",
+        Some(WriterCommand::FlushInteraction { .. }) => "flush_interaction",
+        Some(WriterCommand::Barrier(_)) => "barrier",
+        Some(WriterCommand::Shutdown(_)) => "shutdown",
+        None => "closed",
+    }
+}
+
 fn metadata_bytes(metadata: &super::RequestMetadata) -> usize {
     optional_len(&metadata.model)
         + optional_len(&metadata.api_key_id)
@@ -795,7 +818,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             let processing = tracing::info_span!(
                 target: "stravia::perf", "observation.command.process",
                 causal_parent_id = perf_context.span_id(),
-                causal_epoch = perf_context.epoch()
+                causal_epoch = perf_context.epoch(),
+                command_kind = command_kind(command.as_ref())
             );
             let stop = async {
             let command = match command {
@@ -1275,7 +1299,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     parent: None,
                                     "observation.command.process",
                                     causal_parent_id = context.span_id(),
-                                    causal_epoch = context.epoch()
+                                    causal_epoch = context.epoch(),
+                                    command_kind = "event"
                                 ));
                                 let block_id = canonical_block_id(&event);
                                 receive_order += 1;

@@ -64,7 +64,7 @@ async fn postgres_queries_transactions_and_database_errors_keep_their_results()
         return Ok(());
     };
     let captured = Captured::default();
-    let _subscriber = tracing::subscriber::set_default(captured.subscriber());
+    let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = PgPool::connect(&url).await?;
     let mut transaction = pool.begin().await?;
     let schema = format!(

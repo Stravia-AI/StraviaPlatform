@@ -162,6 +162,8 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         generation_root_id: None,
     });
     // Terminal delivery must not wait for the held mapping acknowledgement.
+    // Drain queued events so an empty page also excludes premature emission.
+    gateway.observation.flush().await.unwrap();
     let before_ack = gateway
         .observation
         .credential_discoveries(Default::default())
@@ -191,6 +193,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     // synchronous event emission. On the old implementation the cancelled
     // intern never acknowledges; the bounded wait then exposes the missing row.
     let _ = tokio::time::timeout(Duration::from_secs(1), held.acknowledged.notified()).await;
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())
@@ -210,6 +213,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         .protect(&principal, &mut request, Some(&reused_observer))
         .await
         .unwrap();
+    gateway.observation.flush().await.unwrap();
     let reused = gateway
         .observation
         .credential_discoveries(Default::default())
@@ -273,6 +277,8 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         generation_root_id: None,
     });
     drop(observer);
+    // Persist the discovery emitted asynchronously by the intern task.
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())
@@ -302,6 +308,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     ));
     drop(observer);
     assert!(store.inner.active(&other).await.unwrap().is_empty());
+    gateway.observation.flush().await.unwrap();
     assert_eq!(
         gateway
             .observation
@@ -331,11 +338,8 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
         .unwrap();
     let principal = Principal::new("discovery-gap-owner");
     let observer = credential_observer(&gateway, &principal);
-    gateway
-        .observation
-        .credential_discoveries(Default::default())
-        .await
-        .unwrap();
+    // 安装故障触发器前先排空准入事件。
+    gateway.observation.flush().await.unwrap();
     sqlx::query("CREATE TRIGGER reject_discovery_event BEFORE INSERT ON observation_events WHEN NEW.kind = 'credential_mappings_created' BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END").execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
@@ -363,6 +367,8 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
         generation_root_id: None,
     });
     drop(observer);
+    // Consume the injected write failure before asserting the gap.
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())

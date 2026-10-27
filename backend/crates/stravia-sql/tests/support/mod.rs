@@ -14,7 +14,7 @@ use tracing_subscriber::{
     registry::LookupSpan,
 };
 
-type Fields = BTreeMap<String, String>;
+pub type Fields = BTreeMap<String, String>;
 
 #[derive(Clone, Default)]
 pub struct Captured(Arc<Mutex<Vec<Fields>>>);
@@ -45,6 +45,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Captured {
     fn on_new_span(&self, attributes: &Attributes<'_>, id: &Id, context: Context<'_, S>) {
         let span = context.span(id).unwrap();
         let mut fields = Fields::new();
+        fields.insert("span_name".into(), attributes.metadata().name().to_owned());
+        fields.insert(
+            "span_target".into(),
+            attributes.metadata().target().to_owned(),
+        );
         attributes.record(&mut Values(&mut fields));
         span.extensions_mut().insert(fields);
     }
@@ -66,9 +71,14 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Captured {
 }
 
 impl Captured {
-    pub fn subscriber(&self) -> impl Subscriber + Send + Sync + 'static {
+    pub fn subscriber(
+        &self,
+        targets: &'static [&'static str],
+    ) -> impl Subscriber + Send + Sync + 'static {
         tracing_subscriber::registry().with(self.clone().with_filter(
-            tracing_subscriber::filter::filter_fn(|metadata| metadata.target() == "stravia::sql"),
+            tracing_subscriber::filter::filter_fn(move |metadata| {
+                targets.iter().any(|target| *target == metadata.target())
+            }),
         ))
     }
 

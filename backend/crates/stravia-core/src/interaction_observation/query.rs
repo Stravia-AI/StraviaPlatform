@@ -447,11 +447,11 @@ struct RejectionRow {
 }
 
 impl super::InteractionObservation {
+    /// 读取已落库的发现记录；排队中的新发现可能暂不可见，不等待无关观测写入或 Debug 刷盘。
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
-        self.flush().await?;
         let mut page = self.inner.store.credential_discoveries(query).await?;
         page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
             chrono::Utc::now().timestamp_millis(),
@@ -473,6 +473,61 @@ struct DiscoveryRow {
 }
 
 const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind='credential_mappings_created' AND i.expires_at>";
+
+#[derive(Default)]
+struct DiscoveryAggregate {
+    count: i64,
+    rule_ids: std::collections::BTreeSet<String>,
+    source_types: std::collections::BTreeSet<String>,
+}
+
+macro_rules! discovery_payload_reader {
+    ($name:ident, $db:ty, $pool:ty) => {
+        async fn $name(
+            pool: &$pool,
+            rows: &[DiscoveryRow],
+            now: i64,
+        ) -> anyhow::Result<Vec<DiscoveryAggregate>> {
+            if rows.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut builder = QueryBuilder::<$db>::new(
+                "WITH page(ordinal,interaction_id,discovered_at) AS (",
+            );
+            builder.push_values(rows.iter().enumerate(), |mut row, (ordinal, discovery)| {
+                row.push_bind(ordinal as i64)
+                    .push_bind(discovery.interaction_id.as_str())
+                    .push_bind(discovery.discovered_at);
+            });
+            builder.push(") SELECT page.ordinal,e.payload FROM page JOIN observation_events e ON e.interaction_id=page.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+                .push_bind(now)
+                .push(" AND e.occurred_at<=page.discovered_at");
+            let query = builder.build_query_as::<(i64, Vec<u8>)>();
+            let mut payloads = query.fetch(pool);
+            let mut aggregates: Vec<DiscoveryAggregate> =
+                (0..rows.len()).map(|_| DiscoveryAggregate::default()).collect();
+            // 仅解码当前页的安全元数据；逐事件归并，避免一次保留整页原始 payload。
+            // 沿用选页时的发现时间上界，排除发现时间更晚的事件。
+            while let Some((ordinal, payload)) = payloads.try_next().await? {
+                #[derive(serde::Deserialize)]
+                struct Payload {
+                    discoveries: Vec<CredentialDiscovery>,
+                }
+                let payload: Payload =
+                    serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
+                let aggregate = &mut aggregates[ordinal as usize];
+                aggregate.count += payload.discoveries.len() as i64;
+                for discovery in payload.discoveries {
+                    aggregate.rule_ids.extend(discovery.rule_ids);
+                    aggregate.source_types.extend(discovery.source_types);
+                }
+            }
+            Ok(aggregates)
+        }
+    };
+}
+discovery_payload_reader!(discovery_payloads_sqlite, sqlx::Sqlite, sqlx::SqlitePool);
+discovery_payload_reader!(discovery_payloads_postgres, sqlx::Postgres, sqlx::PgPool);
 
 impl ObservationStore {
     pub(super) async fn observation_root_id(
@@ -586,39 +641,20 @@ impl ObservationStore {
             None
         };
         rows.truncate(limit);
+        let aggregates = match self {
+            Self::Sqlite(pool, _) => discovery_payloads_sqlite(pool, &rows, now).await?,
+            Self::Postgres(pool, _) => discovery_payloads_postgres(pool, &rows, now).await?,
+        };
         let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 只读取普通发现事件的安全元数据，不读取请求正文或秘密映射。
-            let payloads: Vec<Vec<u8>> = match self {
-                Self::Sqlite(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=? AND kind='credential_mappings_created' AND expires_at>? AND occurred_at<=?")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-                Self::Postgres(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='credential_mappings_created' AND expires_at>$2 AND occurred_at<=$3")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-            };
-            let mut count = 0i64;
-            let mut rule_ids = std::collections::BTreeSet::new();
-            let mut source_types = std::collections::BTreeSet::new();
-            for payload in payloads {
-                #[derive(serde::Deserialize)]
-                struct Payload {
-                    discoveries: Vec<CredentialDiscovery>,
-                }
-                let payload: Payload =
-                    serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                count += payload.discoveries.len() as i64;
-                for discovery in payload.discoveries {
-                    rule_ids.extend(discovery.rule_ids);
-                    source_types.extend(discovery.source_types);
-                }
-            }
-            if count > 0 {
+        for (row, aggregate) in rows.into_iter().zip(aggregates) {
+            if aggregate.count > 0 {
                 items.push(CredentialDiscoverySummary {
                     interaction_id: row.interaction_id,
                     api_key_name: row.api_key_name,
                     discovered_at: row.discovered_at,
-                    new_credential_count: count,
-                    rule_ids: rule_ids.into_iter().collect(),
-                    source_types: source_types.into_iter().collect(),
+                    new_credential_count: aggregate.count,
+                    rule_ids: aggregate.rule_ids.into_iter().collect(),
+                    source_types: aggregate.source_types.into_iter().collect(),
                     status: row.status,
                     observation_gap: row.observation_gap,
                 });

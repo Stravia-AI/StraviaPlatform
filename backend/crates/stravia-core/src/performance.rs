@@ -139,6 +139,7 @@ struct SqlActivity {
 struct ActiveSpan {
     name: &'static str,
     request_id: Option<String>,
+    command_kind: Option<&'static str>,
     id: u64,
     parent_id: Option<u64>,
     started: Instant,
@@ -159,6 +160,7 @@ struct ActiveSpan {
 struct TraceRecord {
     name: &'static str,
     request_id: Option<String>,
+    command_kind: Option<&'static str>,
     id: u64,
     parent_id: Option<u64>,
     started: Instant,
@@ -181,6 +183,7 @@ impl ActiveSpan {
         TraceRecord {
             name: self.name,
             request_id: self.request_id.clone(),
+            command_kind: self.command_kind,
             id: self.id,
             parent_id: self.parent_id,
             started: self.started,
@@ -461,6 +464,9 @@ fn trace_event(span: TraceRecord, capture_state: &str) -> Value {
     if let Some(parent_id) = span.parent_id {
         args["parent_id"] = json!(parent_id);
     }
+    if let Some(command_kind) = span.command_kind {
+        args["command_kind"] = json!(command_kind);
+    }
     if let Some(status) = span.status {
         args["status"] = json!(status);
     }
@@ -652,11 +658,14 @@ struct StatusVisitor {
     // Only enabled for inference root creation while Debug capture is active.
     capture_request_id: bool,
     request_id: Option<String>,
+    capture_command_kind: bool,
+    command_kind: Option<&'static str>,
     status: Option<&'static str>,
     work: [Option<u64>; 4],
     detail: SqlDetails,
     causal_parent_id: u64,
     causal_epoch: Option<u64>,
+    causal_registry_parent_id: u64,
 }
 
 impl Visit for StatusVisitor {
@@ -668,6 +677,10 @@ impl Visit for StatusVisitor {
             "event_count" => 3,
             "causal_parent_id" => {
                 self.causal_parent_id = value;
+                return;
+            }
+            "causal_registry_parent_id" => {
+                self.causal_registry_parent_id = value;
                 return;
             }
             "causal_epoch" => {
@@ -687,6 +700,29 @@ impl Visit for StatusVisitor {
             if self.capture_request_id && stravia_runtime_contract::identifier::valid_id(value) {
                 self.request_id = Some(value.to_owned());
             }
+        } else if field.name() == "command_kind" {
+            if self.capture_command_kind {
+                self.command_kind = match value {
+                    "clear_tail" => Some("clear_tail"),
+                    "clear_debug" => Some("clear_debug"),
+                    "client_disconnected" => Some("client_disconnected"),
+                    "client_tool_results" => Some("client_tool_results"),
+                    "input_preview" => Some("input_preview"),
+                    "purge" => Some("purge"),
+                    "client_completion" => Some("client_completion"),
+                    "admit" => Some("admit"),
+                    "event" => Some("event"),
+                    "text" => Some("text"),
+                    "finish" => Some("finish"),
+                    "reject" => Some("reject"),
+                    "finalize" => Some("finalize"),
+                    "flush_interaction" => Some("flush_interaction"),
+                    "barrier" => Some("barrier"),
+                    "shutdown" => Some("shutdown"),
+                    "closed" => Some("closed"),
+                    _ => None,
+                };
+            }
         } else if field.name() == "status" {
             self.status = match value {
                 "completed" => Some("completed"),
@@ -704,7 +740,7 @@ impl Visit for StatusVisitor {
 }
 
 /// 静态 span 名称是唯一 operation 标签；根请求的内部 ID 只进入 Debug 时间线，
-/// 不进入指标标签；其余字段仍仅接受状态、工作量数值和 SQL 白名单。
+/// 不进入指标标签；其余字段仅接受状态、静态观测命令类型、工作量数值和 SQL 白名单。
 /// 活动 span、有界历史缓冲和短写队列驻留内存；溢出历史写入本轮匿名临时文件。
 /// STRAVIA_PERF_TRACE_ACTIVE_CAPACITY 保护活动并发；满额的活动 span 不导出也不记指标。
 pub struct PerformanceLayer;
@@ -723,14 +759,24 @@ where
             return;
         }
         let epoch = EPOCH.load(Ordering::Acquire);
+        let mut status = StatusVisitor {
+            capture_request_id: attrs.metadata().name() == "proxy.inference_run"
+                && kind == SpanKind::Operation,
+            capture_command_kind: attrs.metadata().name() == "observation.command.process"
+                && kind == SpanKind::Operation,
+            ..StatusVisitor::default()
+        };
+        attrs.record(&mut status);
+        // SQL 边界不依赖 Core：只在创建租约时借用当前 registry ID 解析因果身份，
+        // 不让跨取消清理的 hold span 持有请求父 span。后续生命周期仍使用 epoch。
+        let registry_parent = (attrs.metadata().name() == "sqlite.write_gate.hold"
+            && status.causal_registry_parent_id != 0)
+            .then(|| Id::from_u64(status.causal_registry_parent_id));
         let current = ctx.current_span();
-        let parent = attrs.parent().or_else(|| {
-            if attrs.is_contextual() {
-                current.id()
-            } else {
-                None
-            }
-        });
+        let parent = attrs
+            .parent()
+            .or_else(|| attrs.is_contextual().then(|| current.id()).flatten())
+            .or(registry_parent.as_ref());
         let parent_context = parent.and_then(|parent| ctx.span(parent)).and_then(|span| {
             // 业务日志 span 可能夹在两级 perf span 之间，沿真实 tracing 父链
             // 找最近的 perf 祖先，而不是把非 perf span 误当成根。
@@ -741,12 +787,6 @@ where
                     .map(|perf| (perf.id, perf.operation, perf.owner_id, perf.epoch))
             })
         });
-        let mut status = StatusVisitor {
-            capture_request_id: attrs.metadata().name() == "proxy.inference_run"
-                && kind == SpanKind::Operation,
-            ..StatusVisitor::default()
-        };
-        attrs.record(&mut status);
         let Some(span) = ctx.span(id) else { return };
         let rejected_epoch = parent_context
             .filter(|parent| parent.3 != epoch)
@@ -784,6 +824,7 @@ where
             ActiveSpan {
                 name: attrs.metadata().name(),
                 request_id: status.request_id,
+                command_kind: status.command_kind,
                 id: span_id,
                 parent_id,
                 started,
@@ -992,6 +1033,7 @@ pub(crate) fn record_wait(
     TIMELINE.lock().push(TraceRecord {
         name: operation,
         request_id: None,
+        command_kind: None,
         id: NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed),
         parent_id: (context.span_id != 0).then_some(context.span_id),
         started,
@@ -1218,6 +1260,13 @@ mod tests {
                 drop(stale);
                 set_debug(&debug, true);
                 emit_reused_callsite();
+                for command_kind in ["admit", "private-command-kind"] {
+                    let command = tracing::info_span!(target: "stravia::perf",
+                        "observation.command.process", command_kind);
+                    // 类型在创建时固定，后续记录不能把正文写进诊断字段。
+                    command.record("command_kind", "private-command-revision");
+                    drop(command);
+                }
                 let first_request_id = stravia_runtime_contract::identifier::new_id();
                 let second_request_id = stravia_runtime_contract::identifier::new_id();
                 let roots: Vec<_> = [
@@ -1234,7 +1283,8 @@ mod tests {
                 roots[0].record("request_id", second_request_id.as_str());
                 roots[0].in_scope(|| {
                     let child = tracing::info_span!(target: "stravia::perf",
-                        "test.identity_child", request_id = second_request_id.as_str());
+                        "test.identity_child", request_id = second_request_id.as_str(),
+                        command_kind = "admit");
                     drop(child);
                 });
                 drop(roots);
@@ -1267,6 +1317,7 @@ mod tests {
                     .find(|event| event["name"] == "test.identity_child")
                     .unwrap();
                 assert!(child["args"].get("request_id").is_none());
+                assert!(child["args"].get("command_kind").is_none());
                 let first_root = roots
                     .iter()
                     .find(|root| root["args"]["request_id"] == first_request_id.as_str())
@@ -1323,6 +1374,7 @@ mod tests {
             );
         }
         assert!(!output.contains("test.old_session"));
+        assert!(!output.contains("command_kind"));
         assert!(!output.contains("SELECT"));
         assert!(!output.contains("password"));
         let snapshot = timeline_snapshot();
@@ -1335,6 +1387,25 @@ mod tests {
                 .find(|event| event["name"] == name && event["ph"] == "X")
                 .expect("completed trace")
         };
+        let commands: Vec<_> = events
+            .iter()
+            .filter(|event| event["name"] == "observation.command.process" && event["ph"] == "X")
+            .collect();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|event| event["args"]["command_kind"] == "admit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|event| event["args"].get("command_kind").is_none())
+                .count(),
+            1
+        );
         let parent = get("test.parent");
         assert!(
             parent["ts"].as_u64().unwrap() > get("test.reused")["ts"].as_u64().unwrap(),
@@ -1368,6 +1439,8 @@ mod tests {
             "secret-error",
             "SELECT",
             "not-a-valid-status",
+            "private-command-kind",
+            "private-command-revision",
             "secret-request-id",
         ] {
             assert!(!serialized.contains(secret), "sensitive field leaked");
@@ -1848,6 +1921,69 @@ mod tests {
                 assert!(!output.contains(secret), "query data leaked into telemetry");
             }
         }
+    }
+
+    #[test]
+    fn sqlite_cleanup_keeps_hold_without_extending_cancelled_request() {
+        if !isolated("sqlite_cleanup_keeps_hold_without_extending_cancelled_request") {
+            return;
+        }
+        let debug = Arc::new(AtomicBool::new(false));
+        bind_debug(&debug);
+        tracing::subscriber::set_global_default(subscriber()).expect("isolated subscriber");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .test_before_acquire(false)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
+            set_debug(&debug, true);
+            let request = tracing::info_span!(target: "stravia::perf", "proxy.inference_run",
+                status = tracing::field::Empty);
+            let connection = pool
+                .acquire_write()
+                .instrument(request.clone())
+                .await
+                .unwrap();
+            request.record("status", "cancelled");
+            drop(request);
+            drop(connection);
+
+            // 当前线程尚未让出执行权：清理任务仍未 poll，租约必须继续活动，
+            // 但它的因果父边不能把已经取消的请求延长到后台清理完成。
+            let snapshot = timeline_snapshot();
+            let events = snapshot["traceEvents"].as_array().unwrap();
+            let root = events
+                .iter()
+                .find(|event| event["name"] == "proxy.inference_run")
+                .unwrap();
+            assert_eq!(root["ph"], "X", "cleanup must not retain the request span");
+            assert_eq!(root["args"]["status"], "cancelled");
+            let hold = events
+                .iter()
+                .find(|event| event["name"] == "sqlite.write_gate.hold")
+                .unwrap();
+            assert_eq!(hold["ph"], "B");
+            assert_eq!(hold["args"]["parent_id"], root["args"]["span_id"]);
+            let hold_id = hold["args"]["span_id"].clone();
+            pool.acquire_write().await.unwrap().finish().await.unwrap();
+            pool.close().await;
+
+            let completed = timeline_snapshot();
+            let hold = completed["traceEvents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| event["args"]["span_id"] == hold_id)
+                .unwrap();
+            assert_eq!(hold["ph"], "X");
+            assert_eq!(hold["args"]["status"], "cancelled");
+        });
     }
 
     #[test]

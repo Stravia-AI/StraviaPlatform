@@ -149,6 +149,7 @@ const workspace = [
 const localIgnored: Record<string, true> = {
   "agent::artifact::tests::postgres_download_lifecycle_survives_reconstruction": true,
   "compaction::retention_tests::postgres_retention_contracts": true,
+  "interaction_observation::snapshot_tests::postgres_credential_discoveries_match_persisted_contract": true,
   postgres_admin_history_preserves_batches_and_retention: true,
   postgres_upgrade_defaults_unconfigured_routes_to_text_and_preserves_identity: true,
   "browser::tests::chrome_javascript_redirect_rebinds_readiness": true,

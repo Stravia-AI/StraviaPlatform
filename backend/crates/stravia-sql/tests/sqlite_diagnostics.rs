@@ -18,7 +18,7 @@ async fn isolated_pool() -> Pool<Sqlite> {
 #[tokio::test(flavor = "current_thread")]
 async fn real_query_results_errors_and_private_values_are_preserved() {
     let captured = Captured::default();
-    let _subscriber = tracing::subscriber::set_default(captured.subscriber());
+    let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = isolated_pool().await;
     let secret = "private-bind-not-for-diagnostics";
     let value: String = stravia_sql::query_scalar("SELECT ?")
@@ -88,7 +88,7 @@ async fn real_query_results_errors_and_private_values_are_preserved() {
 #[tokio::test(flavor = "current_thread")]
 async fn pool_failure_and_cancelled_acquisition_do_not_claim_query_execution() {
     let captured = Captured::default();
-    let _subscriber = tracing::subscriber::set_default(captured.subscriber());
+    let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = isolated_pool().await;
     let held = pool.acquire().await.unwrap();
     captured.take();
@@ -130,7 +130,7 @@ async fn pool_failure_and_cancelled_acquisition_do_not_claim_query_execution() {
 #[tokio::test(flavor = "current_thread")]
 async fn transactions_query_builders_and_stream_cancellation_keep_native_behavior() {
     let captured = Captured::default();
-    let _subscriber = tracing::subscriber::set_default(captured.subscriber());
+    let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = isolated_pool().await;
     stravia_sql::query("CREATE TABLE sample(value INTEGER NOT NULL)")
         .execute(&pool)

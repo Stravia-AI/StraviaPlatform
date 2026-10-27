@@ -758,6 +758,10 @@ CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_
 
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
 
+CREATE INDEX observation_events_credential_discovery_idx
+    ON observation_events(interaction_id, occurred_at DESC, expires_at)
+    WHERE kind = 'credential_mappings_created';
+
 CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id,sequence);
 
 CREATE INDEX observation_events_operation_idx ON observation_events(operation_id,sequence) WHERE operation_id IS NOT NULL;

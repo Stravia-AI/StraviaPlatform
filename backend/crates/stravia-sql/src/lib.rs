@@ -24,12 +24,50 @@ use std::{
 pub use sqlx_native::*;
 mod diagnostics;
 mod write;
+use write::Lease;
 pub use write::WriteConnection;
 
 pub type SqlitePool = Pool<Sqlite>;
 pub type PgPool = Pool<Postgres>;
 pub type SqliteConnection<'c> = ConnectionHandle<'c, Sqlite>;
 pub type PgConnection<'c> = ConnectionHandle<'c, Postgres>;
+
+/// Wall-clock phase spans for explicit transaction wrappers.
+///
+/// Deliberately never entered: entering would reparent the wrapper's pool/query
+/// spans and let SQLite workers keep a phase span alive beyond its future.
+fn transaction_begin_phase<DB: Database>(pool: &'static str) -> diagnostics::Phase {
+    diagnostics::Phase::new(tracing::info_span!(
+        target: "stravia::perf",
+        "sql.transaction.begin",
+        backend = DB::NAME,
+        pool = pool,
+        status = tracing::field::Empty,
+        error_kind = tracing::field::Empty,
+    ))
+}
+
+fn transaction_commit_phase<DB: Database>(pool: &'static str) -> diagnostics::Phase {
+    diagnostics::Phase::new(tracing::info_span!(
+        target: "stravia::perf",
+        "sql.transaction.commit",
+        backend = DB::NAME,
+        pool = pool,
+        status = tracing::field::Empty,
+        error_kind = tracing::field::Empty,
+    ))
+}
+
+fn transaction_rollback_phase<DB: Database>(pool: &'static str) -> diagnostics::Phase {
+    diagnostics::Phase::new(tracing::info_span!(
+        target: "stravia::perf",
+        "sql.transaction.rollback",
+        backend = DB::NAME,
+        pool = pool,
+        status = tracing::field::Empty,
+        error_kind = tracing::field::Empty,
+    ))
+}
 
 pub mod sqlite {
     pub use sqlx_native::sqlite::*;
@@ -129,8 +167,32 @@ impl<DB: Database> Pool<DB> {
             ),
             None => None,
         };
-        let connection = self.acquire().await?;
-        Ok(WriteConnection::new(connection, guard))
+        let Some(guard) = guard else {
+            let connection = self.acquire().await?;
+            return Ok(WriteConnection::new(connection, None));
+        };
+        // 只有取得 mutex 后才开始 hold 计时。租约可以跨越请求的 poll 生命周期，
+        // 因此不进入此 span，并让它严格随协调权释放而关闭。
+        let hold = diagnostics::Phase::new(tracing::info_span!(
+            target: "stravia::perf",
+            parent: None,
+            "sqlite.write_gate.hold",
+            causal_registry_parent_id = tracing::Span::current().id().map_or(0, |id| id.into_u64()),
+            backend = DB::NAME,
+            pool = self.name,
+            status = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
+        ));
+        let mut lease = Lease::new(guard, hold, self.name);
+        match self.acquire().await {
+            Ok(connection) => Ok(WriteConnection::new(connection, Some(lease))),
+            Err(error) => {
+                lease.fail(&error);
+                // 先释放协调权，再关闭 hold span。
+                drop(lease);
+                Err(error)
+            }
+        }
     }
     #[track_caller]
     pub fn begin(
@@ -153,18 +215,26 @@ impl<DB: Database> Pool<DB> {
         let acquisition = diagnostics::acquire_named(&self.inner, self.name);
         let name = self.name;
         async move {
-            let connection = acquisition.await?;
-            let transaction = sqlx_native::Transaction::begin(
-                sqlx_native::pool::MaybePoolConnection::PoolConnection(connection),
-                statement,
-            )
-            .await?;
-            Ok(Transaction {
-                handle: ConnectionHandle {
-                    inner: ConnectionInner::Transaction(transaction),
-                    name,
+            let mut phase = transaction_begin_phase::<DB>(name);
+            let result = match acquisition.await {
+                Ok(connection) => match sqlx_native::Transaction::begin(
+                    sqlx_native::pool::MaybePoolConnection::PoolConnection(connection),
+                    statement,
+                )
+                .await
+                {
+                    Ok(transaction) => Ok(Transaction {
+                        handle: ConnectionHandle {
+                            inner: ConnectionInner::Transaction(transaction),
+                            name,
+                        },
+                    }),
+                    Err(error) => Err(error),
                 },
-            })
+                Err(error) => Err(error),
+            };
+            phase.finish(result.as_ref().err());
+            result
         }
     }
     pub fn close(&self) -> impl Future<Output = ()> + '_ {
@@ -288,13 +358,18 @@ impl<DB: Database> ConnectionHandle<'_, DB> {
     }
     pub async fn begin(&mut self) -> Result<Transaction<'_, DB>, Error> {
         let name = self.name;
-        let transaction = self.raw().begin().await?;
-        Ok(Transaction {
-            handle: ConnectionHandle {
-                inner: ConnectionInner::Transaction(transaction),
-                name,
-            },
-        })
+        let mut phase = transaction_begin_phase::<DB>(name);
+        let result = match self.raw().begin().await {
+            Ok(transaction) => Ok(Transaction {
+                handle: ConnectionHandle {
+                    inner: ConnectionInner::Transaction(transaction),
+                    name,
+                },
+            }),
+            Err(error) => Err(error),
+        };
+        phase.finish(result.as_ref().err());
+        result
     }
     pub fn begin_with(
         &mut self,
@@ -303,13 +378,18 @@ impl<DB: Database> ConnectionHandle<'_, DB> {
         let name = self.name;
         let future = self.raw().begin_with(statement.into_sql_str());
         async move {
-            let transaction = future.await?;
-            Ok(Transaction {
-                handle: ConnectionHandle {
-                    inner: ConnectionInner::Transaction(transaction),
-                    name,
-                },
-            })
+            let mut phase = transaction_begin_phase::<DB>(name);
+            let result = match future.await {
+                Ok(transaction) => Ok(Transaction {
+                    handle: ConnectionHandle {
+                        inner: ConnectionInner::Transaction(transaction),
+                        name,
+                    },
+                }),
+                Err(error) => Err(error),
+            };
+            phase.finish(result.as_ref().err());
+            result
         }
     }
     pub fn close_on_drop(&mut self) {
@@ -321,10 +401,16 @@ impl<DB: Database> ConnectionHandle<'_, DB> {
         self.raw().ping().await
     }
     pub async fn close(self) -> Result<(), Error> {
+        let name = self.name;
         match self.inner {
             ConnectionInner::Direct(connection) => connection.close().await,
             ConnectionInner::Pooled(connection) => connection.close().await,
-            ConnectionInner::Transaction(transaction) => transaction.rollback().await,
+            ConnectionInner::Transaction(transaction) => {
+                let mut phase = transaction_rollback_phase::<DB>(name);
+                let result = transaction.rollback().await;
+                phase.finish(result.as_ref().err());
+                result
+            }
         }
     }
 }
@@ -400,16 +486,24 @@ impl<DB: Database> DerefMut for Transaction<'_, DB> {
 }
 impl<DB: Database> Transaction<'_, DB> {
     pub async fn commit(self) -> Result<(), Error> {
-        match self.handle.inner {
+        let name = self.handle.name;
+        let mut phase = transaction_commit_phase::<DB>(name);
+        let result = match self.handle.inner {
             ConnectionInner::Transaction(transaction) => transaction.commit().await,
             _ => unreachable!("transaction handle invariant"),
-        }
+        };
+        phase.finish(result.as_ref().err());
+        result
     }
     pub async fn rollback(self) -> Result<(), Error> {
-        match self.handle.inner {
+        let name = self.handle.name;
+        let mut phase = transaction_rollback_phase::<DB>(name);
+        let result = match self.handle.inner {
             ConnectionInner::Transaction(transaction) => transaction.rollback().await,
             _ => unreachable!("transaction handle invariant"),
-        }
+        };
+        phase.finish(result.as_ref().err());
+        result
     }
 }
 

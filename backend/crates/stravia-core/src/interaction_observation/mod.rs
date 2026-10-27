@@ -4108,6 +4108,291 @@ mod snapshot_tests {
         Ok(())
     }
 
+    fn credential_discovery_payload(rules: &[&str], sources: &[&str]) -> anyhow::Result<Vec<u8>> {
+        crate::storage_codec::encode(
+            serde_json::json!({
+                "kind": "credential_mappings_created",
+                "discoveries": [{"rule_ids": rules, "source_types": sources}]
+            })
+            .to_string()
+            .as_bytes()
+            .into(),
+        )
+    }
+
+    async fn seed_credential_discoveries(
+        store: &store::ObservationStore,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let live_until = now + 86_400_000;
+        let interactions = [
+            ("first", "failed", now + 100, false, live_until),
+            ("second", "interrupted", now + 200, false, live_until),
+            ("tied", "completed", now + 300, false, live_until),
+            ("expired-newer", "completed", now + 400, false, live_until),
+            // 已过期交互的载荷即使无法解码也不能进入当前页。
+            ("expired-owner", "completed", now + 500, false, 0),
+            ("missing", "completed", now, true, live_until),
+        ];
+        let events = [
+            (
+                1,
+                Some("first"),
+                now - 30,
+                &["rule-a"][..],
+                &["user_message"][..],
+                live_until,
+            ),
+            (
+                2,
+                Some("second"),
+                now - 20,
+                &["rule-b"],
+                &["tool_result"],
+                live_until,
+            ),
+            // 同一交互的重复规则与来源只聚合一次。
+            (
+                3,
+                Some("first"),
+                now - 10,
+                &["rule-a", "rule-c"],
+                &["tool_result", "user_message", "tool_result"],
+                live_until,
+            ),
+            // 未归属交互的发现不进入列表。
+            (
+                4,
+                None,
+                now,
+                &["internal-rule"],
+                &["system_history"],
+                live_until,
+            ),
+            // 同一最新毫秒按交互 ID 降序稳定排序。
+            (
+                5,
+                Some("tied"),
+                now - 10,
+                &["rule-tie"],
+                &["system_or_history"],
+                live_until,
+            ),
+            // 只有过期的新事件被排除，较旧的未过期事件仍决定发现时间。
+            (
+                6,
+                Some("expired-newer"),
+                now - 40,
+                &["rule-live"],
+                &["user_message"],
+                live_until,
+            ),
+            (
+                7,
+                Some("expired-newer"),
+                now - 5,
+                &["rule-expired"],
+                &["system_or_history"],
+                0,
+            ),
+        ];
+        let unrelated = crate::storage_codec::encode(
+            serde_json::json!({"status": "running"})
+                .to_string()
+                .as_bytes()
+                .into(),
+        )?;
+        // 过期事件若被送去解码会使整页失败；过期交互同理。事件 10 的
+        // occurred_at 落在 first 的发现时间上界内，只有到期过滤能排除它。
+        let undecodable =
+            crate::storage_codec::encode(b"not a credential discovery payload".as_slice().into())?;
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                for (id, status, last_active, gap, expires_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                        .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
+                        .bind("test-route").bind(status).bind(now - 100).bind(last_active)
+                        .bind(gap).bind(expires_at).execute(pool).await?;
+                }
+                for (sequence, interaction, occurred_at, rules, sources, expires_at) in events {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
+                        .bind(sequence).bind(occurred_at).bind(interaction)
+                        .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
+                        .execute(pool).await?;
+                }
+                // 非发现事件既不参与最新发现时间，也不贡献规则或来源。
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,?,'first','run_admitted',?,?)")
+                    .bind(now - 5).bind(unrelated).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,?,'expired-owner','credential_mappings_created',?,?)")
+                    .bind(now - 1).bind(undecodable.clone()).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,?,'first','credential_mappings_created',?,0)")
+                    .bind(now - 20).bind(undecodable)
+                    .execute(pool).await?;
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                for (id, status, last_active, gap, expires_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                        .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
+                        .bind("test-route").bind(status).bind(now - 100).bind(last_active)
+                        .bind(gap).bind(expires_at).execute(pool).await?;
+                }
+                for (sequence, interaction, occurred_at, rules, sources, expires_at) in events {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES ($1,$2,$3,'credential_mappings_created',$4,$5)")
+                        .bind(sequence).bind(occurred_at).bind(interaction)
+                        .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
+                        .execute(pool).await?;
+                }
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,$1,'first','run_admitted',$2,$3)")
+                    .bind(now - 5).bind(unrelated).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,$1,'expired-owner','credential_mappings_created',$2,$3)")
+                    .bind(now - 1).bind(undecodable.clone()).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,$1,'first','credential_mappings_created',$2,0)")
+                    .bind(now - 20).bind(undecodable)
+                    .execute(pool).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn assert_credential_discovery_contract(
+        store: &store::ObservationStore,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let all = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: None,
+                limit: Some(10),
+            })
+            .await?;
+        assert!(all.observation_gap);
+        assert!(all.next_cursor.is_none());
+        let ids: Vec<_> = all
+            .items
+            .iter()
+            .map(|item| item.interaction_id.as_str())
+            .collect();
+        assert_eq!(ids, ["tied", "first", "second", "expired-newer"]);
+
+        let tied = &all.items[0];
+        assert_eq!(tied.discovered_at, now - 10);
+        assert_eq!(tied.new_credential_count, 1);
+        assert_eq!(tied.rule_ids, ["rule-tie"]);
+        assert_eq!(tied.source_types, ["system_or_history"]);
+        assert_eq!(tied.status, "completed");
+        assert!(!tied.observation_gap);
+
+        let first = &all.items[1];
+        assert_eq!(first.discovered_at, now - 10);
+        assert_eq!(first.new_credential_count, 2);
+        assert_eq!(first.rule_ids, ["rule-a", "rule-c"]);
+        assert_eq!(first.source_types, ["tool_result", "user_message"]);
+        assert_eq!(first.status, "failed");
+        assert!(!first.observation_gap);
+
+        let second = &all.items[2];
+        assert_eq!(second.discovered_at, now - 20);
+        assert_eq!(second.new_credential_count, 1);
+        assert_eq!(second.rule_ids, ["rule-b"]);
+        assert_eq!(second.source_types, ["tool_result"]);
+        assert_eq!(second.status, "interrupted");
+
+        let expired_newer = &all.items[3];
+        assert_eq!(expired_newer.discovered_at, now - 40);
+        assert_eq!(expired_newer.new_credential_count, 1);
+        assert_eq!(expired_newer.rule_ids, ["rule-live"]);
+        assert_eq!(expired_newer.source_types, ["user_message"]);
+
+        // 游标切在同一毫秒的两条发现之间，仍不能重复或遗漏交互。
+        let first_page = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: None,
+                limit: Some(1),
+            })
+            .await?;
+        let first_ids: Vec<_> = first_page
+            .items
+            .iter()
+            .map(|item| item.interaction_id.as_str())
+            .collect();
+        assert_eq!(first_ids, ["tied"]);
+        let first_cursor = first_page.next_cursor.expect("more discoveries after tied");
+        let second_page = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: Some(first_cursor),
+                limit: Some(1),
+            })
+            .await?;
+        let second_ids: Vec<_> = second_page
+            .items
+            .iter()
+            .map(|item| item.interaction_id.as_str())
+            .collect();
+        assert_eq!(second_ids, ["first"]);
+        let second_cursor = second_page.next_cursor.expect("older discoveries remain");
+        let last_page = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: Some(second_cursor),
+                limit: Some(2),
+            })
+            .await?;
+        let last_ids: Vec<_> = last_page
+            .items
+            .iter()
+            .map(|item| item.interaction_id.as_str())
+            .collect();
+        assert_eq!(last_ids, ["second", "expired-newer"]);
+        assert!(last_page.next_cursor.is_none());
+
+        assert!(
+            store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    cursor: Some("invalid".into()),
+                    limit: None,
+                })
+                .await
+                .is_err()
+        );
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                sqlx::query("UPDATE observation_events SET expires_at=0")
+                    .execute(pool)
+                    .await?;
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                sqlx::query("UPDATE observation_events SET expires_at=0")
+                    .execute(pool)
+                    .await?;
+            }
+        }
+        let empty = store
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(empty.items.is_empty());
+        assert!(empty.observation_gap);
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                sqlx::query("UPDATE interaction_observations SET expires_at=0")
+                    .execute(pool)
+                    .await?;
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                sqlx::query("UPDATE interaction_observations SET expires_at=0")
+                    .execute(pool)
+                    .await?;
+            }
+        }
+        let expired = store
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(expired.items.is_empty());
+        assert!(!expired.observation_gap);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn discoveries_group_by_latest_discovery_and_survive_restart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -4121,53 +4406,12 @@ mod snapshot_tests {
             .await?;
         crate::migrations::migrate_sqlite(&pool, None).await?;
         let now = chrono::Utc::now().timestamp_millis();
-        for (id, status, last_active, gap) in [
-            ("first", "failed", now + 100, false),
-            ("second", "interrupted", now + 200, false),
-            ("missing", "completed", now, true),
-        ] {
-            sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
-                .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
-                .bind("test-route").bind(status).bind(now - 100).bind(last_active)
-                .bind(gap).bind(now + 86_400_000).execute(&pool).await?;
-        }
-        let discovery = |rules: &[&str], sources: &[&str]| {
-            serde_json::json!({
-                "kind": "credential_mappings_created",
-                "discoveries": [{"rule_ids": rules, "source_types": sources}]
-            })
-            .to_string()
-        };
-        for (sequence, interaction, time, payload) in [
-            (
-                1,
-                Some("first"),
-                now - 30,
-                discovery(&["rule-a"], &["user_message"]),
-            ),
-            (
-                2,
-                Some("second"),
-                now - 20,
-                discovery(&["rule-b"], &["tool_result"]),
-            ),
-            (
-                3,
-                Some("first"),
-                now - 10,
-                discovery(&["rule-a", "rule-c"], &["tool_result"]),
-            ),
-            (
-                4,
-                None,
-                now,
-                discovery(&["internal-rule"], &["system_history"]),
-            ),
-        ] {
-            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
-                .bind(sequence).bind(time).bind(interaction).bind(crate::storage_codec::encode(payload.as_bytes().into())?)
-                .bind(now + 86_400_000).execute(&pool).await?;
-        }
+        let seed_store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
+        );
+        seed_credential_discoveries(&seed_store, now).await?;
+        drop(seed_store);
         pool.close().await;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -4177,57 +4421,7 @@ mod snapshot_tests {
             pool.clone(),
             Arc::new(manifest_index::DebugTraceIndex::load(directory.path())?),
         );
-        let first = store
-            .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: None,
-                limit: Some(1),
-            })
-            .await?;
-        assert!(first.observation_gap);
-        assert_eq!(first.items.len(), 1);
-        let item = &first.items[0];
-        assert_eq!(item.interaction_id, "first");
-        assert_eq!(item.discovered_at, now - 10);
-        assert_eq!(item.new_credential_count, 2);
-        assert_eq!(item.rule_ids, ["rule-a", "rule-c"]);
-        assert_eq!(item.source_types, ["tool_result", "user_message"]);
-        assert_eq!(item.status, "failed");
-        assert!(!item.observation_gap);
-        let second = store
-            .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: first.next_cursor,
-                limit: Some(1),
-            })
-            .await?;
-        assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].interaction_id, "second");
-        assert_eq!(second.items[0].status, "interrupted");
-        assert!(second.next_cursor.is_none());
-        assert!(
-            store
-                .credential_discoveries(CredentialDiscoveryQuery {
-                    cursor: Some("invalid".into()),
-                    limit: None,
-                })
-                .await
-                .is_err()
-        );
-        sqlx::query("UPDATE observation_events SET expires_at=0")
-            .execute(&pool)
-            .await?;
-        let empty = store
-            .credential_discoveries(CredentialDiscoveryQuery::default())
-            .await?;
-        assert!(empty.items.is_empty());
-        assert!(empty.observation_gap);
-        sqlx::query("UPDATE interaction_observations SET expires_at=0")
-            .execute(&pool)
-            .await?;
-        let expired = store
-            .credential_discoveries(CredentialDiscoveryQuery::default())
-            .await?;
-        assert!(expired.items.is_empty());
-        assert!(!expired.observation_gap);
+        assert_credential_discovery_contract(&store, now).await?;
         pool.close().await;
         assert!(
             store
@@ -4235,6 +4429,81 @@ mod snapshot_tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+    async fn postgres_credential_discoveries_match_persisted_contract() -> anyhow::Result<()> {
+        let url = std::env::var("STRAVIA_TEST_POSTGRES_URL")
+            .expect("set STRAVIA_TEST_POSTGRES_URL to run PostgreSQL discovery contracts");
+        let directory = tempfile::tempdir()?;
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+        let schema = format!("stravia_discovery_test_{}", uuid::Uuid::new_v4().simple());
+        let options: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("PostgreSQL connection options");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.clone().options([("search_path", schema.as_str())]))
+            .await
+            .expect("isolated PostgreSQL pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated PostgreSQL schema");
+
+        let diagnostics = directory.path().to_path_buf();
+        let scenario_pool = pool.clone();
+        let scenario_schema = schema.clone();
+        let scenario = tokio::spawn(async move {
+            crate::migrations::migrate_postgres(&scenario_pool, None)
+                .await
+                .expect("PostgreSQL migrations");
+            let now = chrono::Utc::now().timestamp_millis();
+            let seed_store = store::ObservationStore::Postgres(
+                scenario_pool.clone(),
+                Arc::new(manifest_index::DebugTraceIndex::empty(&diagnostics)),
+            );
+            seed_credential_discoveries(&seed_store, now)
+                .await
+                .expect("seed credential discoveries");
+            drop(seed_store);
+            scenario_pool.close().await;
+            // Reconnect to the same isolated schema to prove the page is built
+            // from committed storage rather than writer state.
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options.options([("search_path", scenario_schema.as_str())]))
+                .await
+                .expect("reconnect isolated PostgreSQL pool");
+            let store = store::ObservationStore::Postgres(
+                pool.clone(),
+                Arc::new(manifest_index::DebugTraceIndex::empty(&diagnostics)),
+            );
+            assert_credential_discovery_contract(&store, now)
+                .await
+                .expect("credential discovery contract");
+            pool.close().await;
+        })
+        .await;
+
+        // Keep cleanup outside the task so contract panics still drop the schema.
+        pool.close().await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        cleanup.expect("drop isolated PostgreSQL schema");
+        if let Err(error) = scenario {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("PostgreSQL discovery contract task failed: {error}");
+        }
         Ok(())
     }
 

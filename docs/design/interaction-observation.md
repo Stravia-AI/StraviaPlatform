@@ -159,7 +159,11 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 同一 Interaction 的多次发现合并，按最后一次新增事件时间倒序；后续复用、还原和状态更新不改变发现时间。请求结果单独读取现有 Interaction 状态，`interrupted` 的详情仍保留失败或取消的 Run。该投影不要求 Debug，也不等待客户端交付或 Generation Chain 成功；清理观察不删除保护映射，后续有效复用不会重新计数。
 
-`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询现有写者已处理的事件，采用有界 `limit` 与 `next_cursor` 翻页。返回 `items`、`next_cursor` 和 `observation_gap`；条目只含交互 ID、API Key 名称、发现时间、新增数量、规则与来源类型、请求状态及缺失标志。查询失败与空记录分别表达。迁移 `0036_credential_discovery_coverage` 把升级前保留的交互标为观察缺失，不扫描秘密库或历史补造发现。已归属交互的写入失败尽可能持久化 gap；尚不能落盘的准入或队列损失按 Run 保存易失的发生时间和代次，并用当前观察保留期判断是否仍可见。清理历史只移除本次实际删除的已知 Run 所属且代次未变的标记；活动记录、清理期间新发生的损失和无法确认归属的准入损失继续保留，直至当前保留期到期。该易失标记不承诺跨进程崩溃保留，Observation 仍是可丢失诊断投影。
+`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询已持久化的事件，采用有界 `limit` 与 `next_cursor` 翻页。读取不等待全局 Observation writer 屏障，也不触发活动 Debug Trace 刷盘；尚在队列中的新发现或请求状态允许延迟可见，不保证写后立即可读。返回 `items`、`next_cursor` 和 `observation_gap`；条目只含交互 ID、API Key 名称、发现时间、新增数量、规则与来源类型、请求状态及缺失标志。查询失败与空记录分别表达。
+
+SQLite 与 PostgreSQL 均为 `credential_mappings_created` 事件建立 `observation_events_credential_discovery_idx` 部分索引，支持仅扫描发现事件。当前页的发现载荷通过一次批量查询流式解码，按交互聚合新增数量并去重规则与来源，不再逐交互查询。聚合继续使用同一次查询的过期时间边界，并以分页行的最后发现时间为载荷读取上界；排序、游标和缺失标志语义不变。迁移 `0026_credential_discovery_index` 在正常数据库升级时创建索引，首次升级的建索引开销取决于保留的事件规模。
+
+迁移 `0036_credential_discovery_coverage` 把升级前保留的交互标为观察缺失，不扫描秘密库或历史补造发现。已归属交互的写入失败尽可能持久化 gap；尚不能落盘的准入或队列损失按 Run 保存易失的发生时间和代次，并用当前观察保留期判断是否仍可见。清理历史只移除本次实际删除的已知 Run 所属且代次未变的标记；活动记录、清理期间新发生的损失和无法确认归属的准入损失继续保留，直至当前保留期到期。该易失标记不承诺跨进程崩溃保留，Observation 仍是可丢失诊断投影。
 
 ## 4. 模块与 seam
 
@@ -539,6 +543,23 @@ writer 在每批提交后立即失效对应的实时状态和归属索引；后�
 
 关键等待与后续处理分开记录：`sqlite.write_gate.wait` 是宿主 SQLite 写协调器等待，不是数据库引擎锁；`rpm.candidate.wait` 是候选准入等待；`upstream.send_admission.wait` 和 `upstream.http.response_headers.wait` 分别覆盖出站准入及发送至收到响应头。`observation.queue.wait` 从真正入队计到出队，不包含等待队列容量；`observation.command.process` 表示后台处理。队列只复制内部 ID／epoch，不保存请求 span，因此请求可以先结束，后台通过因果边关联；同批 SQL 不能据此均摊为每个请求的独占成本。
 
+SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段；它们描述客户端墙钟边界，不改变写协调、事务、持久性或终态发布顺序：
+
+| 操作 | 计时边界 |
+| --- | --- |
+| `sqlite.write_gate.hold` | 获得写协调权后开始，释放协调权后结束；包括随后取连接、调用方持有租约及正常结束或异步清理，不包含获得协调权之前的排队 |
+| `sqlite.write_gate.finish` | 正常归还写连接时的 driver `ping` 屏障与事务状态检查，不是 COMMIT |
+| `sqlite.write_gate.cleanup` | 原有取消／错误清理任务的调度与执行；覆盖屏障以及必要的连接关闭，不为正常归还另建后台任务 |
+| `sql.transaction.begin` / `commit` / `rollback` | 显式事务包装边界，包括连接／嵌套事务；池级 begin 包含取连接，隐式 Drop 回滚仍由 driver 执行，不伪装为一条受采集查询 |
+| `observation.manifest.persist` | `write_entry` 的异步生命周期，包括序列化、阻塞任务调度／执行及索引更新；不含调用方此前等待 mutation lock 的时间 |
+| `observation.manifest.write` | 阻塞写文件闭包实际执行时间，不含等待阻塞线程调度 |
+| `observation.manifest.sync` | 上述闭包中的 `sync_all()` 调用 |
+| `observation.trace.flush` / `finish` | Trace barrier 入队与回执等待；finish 还读取最终 manifest，只有存储成功且 manifest 完整时才标记 `completed` |
+
+写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
+
+这些区间存在包含与重叠，不能直接求和作为请求独占耗时；`persist - write` 还包含序列化和索引更新，不能直接称为阻塞线程排队时间。COMMIT 或 `sync_all()` 变慢可以定位等待边界，但仅凭客户端时长不能证明磁盘、WAL checkpoint 或操作系统调度中的哪一项是根因。
+
 #### 7.1.2 查询次数与调用来源
 
 工作区 `sqlx` 依赖统一指向 `stravia-sql`。业务保持正常的 query／QueryBuilder、池、连接和事务写法，不在每处执行表达式添加 `observe(...)`。查询构造、驱动、原生事务嵌套及 Drop 回滚仍由上游 SQLx 承担；集中边界发出 `stravia::sql` 的 `sql.query`、`sql.pool.acquire` span，关闭 Debug 时直接委托原生执行，不计算指纹或增加诊断 future／stream box。
@@ -561,6 +582,7 @@ SQL 明细记录模板实际 UTF-8 字节的 SHA-256 `query_id`（`query_identit
 | `reference_count`                                         | 内容写入的引用条目数；不能据此推断读取的外置内容行数                                                               |
 | `candidate_count`                                         | 前缀查询返回或对应发现阶段已统计的候选数；未完成统计时可能省略                                                     |
 | `event_count`                                             | `observation.writer.persist_events` 收到的事件批量大小，包含随后可能被过滤掉的事件                                 |
+| `command_kind`                                            | 仅限 `observation.command.process` 创建时的静态命令分类；事件批次为 `event`，未知值不导出，后续 record 不能覆盖；不增加 Prometheus 标签 |
 
 SQL 只计入最近的业务操作，不重复累加到祖先或 SQL 自身记录。父操作直属计数为零不表示整条请求没有 SQL；分析总量需要汇总业务操作子树，并检查淘汰、不完整标记及后台因果边界。SQL 耗时是各调用时长之和，并发时可超过操作墙钟，不是 CPU 时间。每次受采集 query／acquire 都有独立有界明细，不能再把明细与操作上的累计计数相加。
 

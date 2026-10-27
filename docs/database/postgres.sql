@@ -3204,6 +3204,13 @@ CREATE INDEX model_turns_run_status_idx ON public.model_turn_observations USING 
 
 
 --
+-- Name: observation_events_credential_discovery_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_credential_discovery_idx ON public.observation_events USING btree (interaction_id, occurred_at DESC, expires_at) WHERE (kind = 'credential_mappings_created'::text);
+
+
+--
 -- Name: observation_events_interaction_idx; Type: INDEX; Schema: public; Owner: -
 --
 
