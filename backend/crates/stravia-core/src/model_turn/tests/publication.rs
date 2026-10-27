@@ -35,7 +35,7 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
     async fn intern(
         &self,
         principal: &Principal,
-        secrets: &[String],
+        secrets: &[stravia_credential_protection::store::DetectedSecret],
     ) -> Result<
         stravia_credential_protection::store::InternedMappings,
         stravia_runtime_contract::redaction::RedactionError,
@@ -240,6 +240,130 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         reused.items[1].interaction_id
     );
     assert_eq!(store.starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replayed_history() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    let principal = Principal::new("replay-owner");
+    let known = "api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"";
+    let fresh = "api_key = \"Z3m8Qp1Wd6Nf4Rk9Tb2Hy7Vc\"";
+    let user = |text: &str| AiItem {
+        role: Role::User,
+        content: MessageContent::Text(Arc::new(text.into())),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let call = || {
+        AiItem::function_call(ToolCall {
+            id: "call-1".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        })
+    };
+    let send = |items: Vec<AiItem>| {
+        let observer = credential_observer(&gateway, &principal);
+        let redaction = gateway.redaction.clone();
+        let principal = principal.clone();
+        async move {
+            let mut request = Arc::new(AiRequest::new("discovery-model", items));
+            redaction
+                .protect(&principal, &mut request, Some(&observer))
+                .await
+                .unwrap();
+        }
+    };
+    let rows = || async {
+        gateway
+            .observation
+            .credential_discoveries(Default::default())
+            .await
+            .unwrap()
+            .items
+    };
+
+    send(vec![user(known)]).await;
+    assert_eq!(rows().await.len(), 1);
+
+    // 客户端把同一段历史连同新问题再发一遍：凭据只出现在重放的历史里，不产生记录。
+    send(vec![user(known), AiItem::output_text("ok"), user("thanks")]).await;
+    assert_eq!(rows().await.len(), 1);
+
+    // 本次提交的新用户消息再次带上同一凭据：这是一次真实的使用。
+    send(vec![user(known), AiItem::output_text("ok"), user(known)]).await;
+    let after_user = rows().await;
+    assert_eq!(after_user.len(), 2);
+    assert_eq!(after_user[0].reused.len(), 1);
+    assert_eq!(after_user[0].reused[0].source_type, "user_message");
+    assert_eq!(after_user[0].reused[0].latest_input, Some(true));
+
+    // 工具结果带回凭据：紧跟在最后一条 Assistant 之后的结果是本次提交的。
+    let result = AiItem::function_call_output("call-1", serde_json::Value::String(known.into()));
+    send(vec![user("read it"), call(), result.clone()]).await;
+    let after_tool = rows().await;
+    assert_eq!(after_tool.len(), 3);
+    assert_eq!(after_tool[0].reused[0].source_type, "tool_result");
+
+    // 下一轮把这条工具结果当历史重放。
+    send(vec![
+        user("read it"),
+        call(),
+        result,
+        AiItem::output_text("done"),
+        user("next"),
+    ])
+    .await;
+    assert_eq!(rows().await.len(), 3);
+
+    // 已知凭据以裸值出现，没有检测器认得出的上下文：照样按实际发生的替换记录，
+    // 规则取自创建映射时的归因。
+    let bare = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
+    assert!(
+        gateway
+            .redaction
+            .test_text(bare.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    send(vec![
+        user("read it"),
+        call(),
+        AiItem::function_call_output("call-1", serde_json::Value::String(bare.into())),
+    ])
+    .await;
+    let after_bare = rows().await;
+    assert_eq!(after_bare.len(), 4);
+    assert_eq!(after_bare[0].reused.len(), 1);
+    assert_eq!(after_bare[0].reused[0].source_type, "tool_result");
+    assert_eq!(
+        after_bare[0].reused[0].rule_id,
+        after_bare[3].created[0].rule_id
+    );
+
+    // 全新的凭据出现在重放的历史里时，它从未被记录过，仍然是一次新增发现。
+    send(vec![user(fresh), AiItem::output_text("ok"), user("go on")]).await;
+    let after_fresh = rows().await;
+    assert_eq!(after_fresh.len(), 5);
+    assert_eq!(after_fresh[0].new_credential_count, 1);
+    assert_eq!(after_fresh[0].created[0].source_type, "user_message");
+    assert_eq!(after_fresh[0].created[0].latest_input, Some(false));
+    assert!(after_fresh[0].reused.is_empty());
 }
 
 #[tokio::test]

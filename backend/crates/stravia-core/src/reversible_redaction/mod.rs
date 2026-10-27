@@ -77,6 +77,12 @@ impl RedactionObserver for ObservationHost {
     }
 }
 
+fn observation_host(observer: Option<&RunObserver>) -> Option<Arc<dyn RedactionObserver>> {
+    observer
+        .and_then(RunObserver::publication_guard)
+        .map(|publication| Arc::new(ObservationHost(publication)) as Arc<dyn RedactionObserver>)
+}
+
 #[derive(Clone)]
 pub(crate) struct ReversibleRedaction {
     capability: stravia_credential_protection::ReversibleRedaction,
@@ -114,12 +120,9 @@ impl ReversibleRedaction {
         request: &mut Arc<AiRequest>,
         observer: Option<&RunObserver>,
     ) -> Result<Vec<Mapping>, RedactionError> {
-        let observer = observer
-            .and_then(RunObserver::publication_guard)
-            .map(|publication| {
-                Arc::new(ObservationHost(publication)) as Arc<dyn RedactionObserver>
-            });
-        self.capability.protect(principal, request, observer).await
+        self.capability
+            .protect(principal, request, observation_host(observer))
+            .await
     }
 
     pub(crate) async fn publish(
@@ -135,8 +138,10 @@ impl ReversibleRedaction {
         input: CanonicalEventStream,
         mappings: Vec<Mapping>,
         trace: RedactionTrace,
+        observer: Option<&RunObserver>,
     ) -> CanonicalEventStream {
-        self.capability.restore_stream(input, mappings, trace)
+        self.capability
+            .restore_stream(input, mappings, trace, observation_host(observer))
     }
 }
 

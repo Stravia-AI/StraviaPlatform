@@ -14,13 +14,13 @@ pub use detection::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
 };
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 
-use store::{Mapping, MappingStore};
+use store::{DetectedSecret, Mapping, MappingStore};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -65,25 +65,22 @@ pub struct CredentialLocator {
     pub latest_input: Option<bool>,
 }
 
-/// 同一映射的全部命中。拥有块标识的位置会吸收同规则同来源的无标识位置：
-/// 供应商原始副本与规范条目镜像同一段文本，但前者无法判定块。
-fn describe(
-    findings: &[detection::DetectedFinding],
-    origins: &[text::TextOrigin],
-) -> CredentialDiscovery {
-    let mut locators = BTreeSet::new();
-    for finding in findings {
-        let origin = &origins[finding.source_index];
-        let tool = matches!(origin.source, "tool_arguments" | "tool_result");
-        locators.insert(CredentialLocator {
-            rule_id: finding.rule_id.clone(),
-            source_type: origin.source.to_owned(),
-            tool_id: origin.tool_id.clone().filter(|_| tool),
-            latest_input: origin
-                .latest_input
-                .filter(|_| origin.source == "user_message"),
-        });
+fn locator(rule_id: &str, origin: &text::TextOrigin) -> CredentialLocator {
+    let tool = matches!(origin.source, "tool_arguments" | "tool_result");
+    CredentialLocator {
+        rule_id: rule_id.to_owned(),
+        source_type: origin.source.to_owned(),
+        tool_id: origin.tool_id.clone().filter(|_| tool),
+        latest_input: origin
+            .latest_input
+            .filter(|_| origin.source == "user_message"),
     }
+}
+
+/// 拥有块标识的位置会吸收同规则同来源的无标识位置：
+/// 供应商原始副本与规范条目镜像同一段文本，但前者无法判定块。
+/// 没有任何位置时返回 `None`；占位符由调用方填写。
+fn discovery(mut locators: BTreeSet<CredentialLocator>) -> Option<CredentialDiscovery> {
     let refined: BTreeSet<_> = locators
         .iter()
         .filter(|locator| locator.tool_id.is_some() || locator.latest_input.is_some())
@@ -94,7 +91,10 @@ fn describe(
             || locator.latest_input.is_some()
             || !refined.contains(&(locator.rule_id.clone(), locator.source_type.clone()))
     });
-    CredentialDiscovery {
+    if locators.is_empty() {
+        return None;
+    }
+    Some(CredentialDiscovery {
         rule_ids: locators
             .iter()
             .map(|locator| locator.rule_id.clone())
@@ -109,7 +109,64 @@ fn describe(
             .collect(),
         locators: locators.into_iter().collect(),
         marker: String::new(),
+    })
+}
+
+/// 新建映射的命中：检测器在每个出现位置认出的规则，逐项配对。
+fn detected(
+    findings: &[detection::DetectedFinding],
+    origins: &[text::TextOrigin],
+) -> Option<CredentialDiscovery> {
+    discovery(
+        findings
+            .iter()
+            .map(|finding| locator(&finding.rule_id, &origins[finding.source_index]))
+            .collect(),
+    )
+}
+
+/// 已有映射的复用命中：位置来自实际发生的替换或还原，规则取自映射创建时的归因。
+/// 创建之前的映射没有规则，无法归因，不产生命中。
+fn reused(mapping: &Mapping, origins: &BTreeSet<text::TextOrigin>) -> Option<CredentialDiscovery> {
+    let mut found = discovery(
+        origins
+            .iter()
+            .flat_map(|origin| {
+                mapping
+                    .rule_ids
+                    .as_slice()
+                    .iter()
+                    .map(move |rule_id| locator(rule_id, origin))
+            })
+            .collect(),
+    )?;
+    found.marker.clone_from(&mapping.reference);
+    Some(found)
+}
+
+/// 模型输出的工具调用参数里被还原的映射。
+fn restored_in_tool_calls(
+    mappings: &[Mapping],
+    tool_calls: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<CredentialDiscovery> {
+    let mut origins: BTreeMap<&str, BTreeSet<text::TextOrigin>> = BTreeMap::new();
+    for (tool_id, references) in tool_calls {
+        for reference in references {
+            origins
+                .entry(reference)
+                .or_default()
+                .insert(text::TextOrigin {
+                    source: "tool_arguments",
+                    tool_id: Some(tool_id.clone()),
+                    latest_input: None,
+                    fresh: true,
+                });
+        }
     }
+    mappings
+        .iter()
+        .filter_map(|mapping| reused(mapping, origins.get(mapping.reference.as_str())?))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -147,16 +204,34 @@ impl ReversibleRedaction {
         let mut mappings = self.mappings.active(principal).await?;
         if enabled {
             let (texts, origins) = text::request_text_origins(request, true)?;
-            let detected = detection::detect(texts, self.custom_rules.compiled().await?).await?;
-            if !detected.is_empty() {
-                let (secrets, findings): (Vec<_>, Vec<_>) = detected
+            let found = detection::detect(texts, self.custom_rules.compiled().await?).await?;
+            // 本次请求新建的映射；其余被替换的映射都是复用。
+            let mut created_references = BTreeSet::new();
+            let reuse_observer = observer.clone();
+            if !found.is_empty() {
+                let (secrets, findings): (Vec<_>, Vec<_>) = found
                     .into_iter()
-                    .map(|credential| (credential.secret, credential.findings))
+                    .map(|credential| {
+                        let rule_ids = credential
+                            .findings
+                            .iter()
+                            .map(|finding| finding.rule_id.clone())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
+                        (
+                            DetectedSecret {
+                                secret: credential.secret,
+                                rule_ids,
+                            },
+                            credential.findings,
+                        )
+                    })
                     .unzip();
                 // 在请求被改写之前完成；位置是自有数据，可以进入提交任务。
                 let discoveries: Vec<_> = findings
                     .iter()
-                    .map(|findings| describe(findings, &origins))
+                    .map(|findings| detected(findings, &origins))
                     .collect();
                 let store = self.mappings.clone();
                 let principal = principal.clone();
@@ -167,31 +242,31 @@ impl ReversibleRedaction {
                     // 创建归属由映射事务裁决；后续替换失败也不能抹去已提交的发现。
                     if let Some(observer) = observer {
                         observer.protect_secrets(&discovered.mappings);
-                        let mut created = Vec::new();
-                        let mut reused = Vec::new();
-                        for (index, (mut discovery, mapping)) in discoveries
+                        let created: Vec<_> = discoveries
                             .into_iter()
                             .zip(&discovered.mappings)
                             .enumerate()
-                        {
-                            discovery.marker.clone_from(&mapping.reference);
-                            if discovered.created.contains(&index) {
-                                created.push(discovery);
-                            } else {
-                                reused.push(discovery);
-                            }
-                        }
+                            .filter(|(index, _)| discovered.created.contains(index))
+                            .filter_map(|(_, (found, mapping))| {
+                                let mut found = found?;
+                                found.marker.clone_from(&mapping.reference);
+                                Some(found)
+                            })
+                            .collect();
                         if !created.is_empty() {
                             observer.mappings_created(created);
-                        }
-                        if !reused.is_empty() {
-                            observer.mappings_reused(reused);
                         }
                     }
                     Ok::<_, RedactionError>(discovered)
                 })
                 .await
                 .map_err(|_| RedactionError::Storage)??;
+                created_references.extend(
+                    discovered
+                        .created
+                        .iter()
+                        .map(|&index| discovered.mappings[index].reference.clone()),
+                );
                 for mapping in discovered.mappings {
                     if !mappings
                         .iter()
@@ -202,8 +277,21 @@ impl ReversibleRedaction {
                 }
             }
             let request = Arc::make_mut(request);
-            let references = text::redact_request(request, &mappings)?;
-            request.meta.redaction.record(references)?;
+            let redacted = text::redact_request(request, &mappings)?;
+            request.meta.redaction.record(redacted.references)?;
+            // 复用命中以实际发生的替换为准，已知凭据出现在检测器认不出的位置也会记录。
+            if let Some(observer) = reuse_observer {
+                let reuses: Vec<_> = mappings
+                    .iter()
+                    .filter(|mapping| !created_references.contains(&mapping.reference))
+                    .filter_map(|mapping| {
+                        reused(mapping, redacted.placements.get(&mapping.reference)?)
+                    })
+                    .collect();
+                if !reuses.is_empty() {
+                    observer.mappings_reused(reuses);
+                }
+            }
         }
         if !mappings.is_empty() {
             let texts = text::request_texts(request, enabled)?;
@@ -251,6 +339,7 @@ impl ReversibleRedaction {
         input: CanonicalEventStream,
         mappings: Vec<Mapping>,
         trace: RedactionTrace,
+        observer: Option<Arc<dyn RedactionObserver>>,
     ) -> CanonicalEventStream {
         if mappings.is_empty() {
             return input;
@@ -259,6 +348,7 @@ impl ReversibleRedaction {
             input: CanonicalEventStream,
             mappings: Vec<Mapping>,
             trace: RedactionTrace,
+            observer: Option<Arc<dyn RedactionObserver>>,
             restorer: stream::StreamRestorer,
             pending: VecDeque<Result<CanonicalEvent, ModelTurnError>>,
             ended: bool,
@@ -267,6 +357,7 @@ impl ReversibleRedaction {
             input,
             mappings,
             trace,
+            observer,
             restorer: stream::StreamRestorer::new(),
             pending: VecDeque::new(),
             ended: false,
@@ -316,9 +407,16 @@ impl ReversibleRedaction {
                             state
                                 .trace
                                 .record(state.restorer.take_restored_references())?;
-                            state
-                                .trace
-                                .record(text::restore_response(&mut response, &state.mappings)?)?;
+                            let restored = text::restore_response(&mut response, &state.mappings)?;
+                            state.trace.record(restored.references)?;
+                            // 模型在工具调用参数里使用了凭据；完整响应才有稳定的调用 ID。
+                            if let Some(observer) = &state.observer {
+                                let reuses =
+                                    restored_in_tool_calls(&state.mappings, &restored.tool_calls);
+                                if !reuses.is_empty() {
+                                    observer.mappings_reused(reuses);
+                                }
+                            }
                             state.pending.extend(
                                 deltas
                                     .into_iter()
@@ -344,5 +442,59 @@ impl ReversibleRedaction {
                 }
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use store::RuleIds;
+
+    fn mapping(rule_ids: &[&str]) -> Mapping {
+        Mapping {
+            reference: format!(
+                "{}{}{}",
+                marker::PREFIX,
+                "g".repeat(marker::IDENTIFIER_LEN),
+                marker::SUFFIX
+            ),
+            secret: "sk-known-9f2c41".into(),
+            expires_at: i64::MAX,
+            rule_ids: RuleIds::from(
+                rule_ids
+                    .iter()
+                    .map(|rule| (*rule).to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+
+    #[test]
+    fn reuse_pairs_every_stored_rule_with_each_place_and_skips_unattributed_mappings() {
+        let place = |source: &'static str, tool_id: Option<&str>| text::TextOrigin {
+            source,
+            tool_id: tool_id.map(str::to_owned),
+            latest_input: None,
+            fresh: true,
+        };
+        let origins = BTreeSet::from([
+            place("tool_arguments", Some("call-1")),
+            place("other_text", None),
+        ]);
+
+        let found = reused(&mapping(&["custom_rule", "github-pat"]), &origins).unwrap();
+
+        assert_eq!(found.rule_ids, ["custom_rule", "github-pat"]);
+        assert_eq!(found.source_types, ["other_text", "tool_arguments"]);
+        assert_eq!(found.locators.len(), 4);
+        assert!(
+            found
+                .locators
+                .iter()
+                .filter(|locator| locator.source_type == "tool_arguments")
+                .all(|locator| locator.tool_id.as_deref() == Some("call-1"))
+        );
+        // 创建之前的映射没有规则：不能编造归因，也就不产生命中。
+        assert!(reused(&mapping(&[]), &origins).is_none());
     }
 }

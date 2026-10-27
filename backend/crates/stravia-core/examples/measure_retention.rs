@@ -12,7 +12,7 @@ use stravia_core::history_marker::{
     ClaimOutcome, HiddenHistorySegment, HistoryMarkerStore, PlatformExecutionState,
     PlatformMarkerInput, SqlHistoryMarkerStore,
 };
-use stravia_credential_protection::store::{MappingStore, SqlMappingStore};
+use stravia_credential_protection::store::{DetectedSecret, MappingStore, SqlMappingStore};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::{ContentBlock, ToolCall};
 
@@ -80,8 +80,12 @@ async fn measure(
     match workload {
         Workload::Mapping => {
             let secrets = (0..count)
-                .map(|index| format!("synthetic-only-secret-{count}-{index}"))
-                .collect::<Vec<_>>();
+                .map(|index| {
+                    format!("synthetic-only-secret-{count}-{index}")
+                        .as_str()
+                        .into()
+                })
+                .collect::<Vec<DetectedSecret>>();
             let interned = mappings.intern(&principal, &secrets).await?;
             ensure!(
                 interned.created.len() == count,

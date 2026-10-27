@@ -1,5 +1,8 @@
 //! The readable canonical surface. Protocol identities and opaque payloads never enter it.
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde_json::Value;
 
@@ -21,6 +24,8 @@ pub(super) struct Origin<'a> {
     pub tool_id: Option<&'a str>,
     /// 仅 `user_message` 有意义。`None` 表示无法判定（例如供应商原始副本）。
     pub latest_input: Option<bool>,
+    /// 本次请求新提交的内容；为假表示客户端重放的历史，或无法与历史区分的整请求副本。
+    pub fresh: bool,
 }
 
 impl<'a> Origin<'a> {
@@ -29,6 +34,7 @@ impl<'a> Origin<'a> {
             source,
             tool_id: None,
             latest_input: None,
+            fresh: true,
         }
     }
 
@@ -42,6 +48,7 @@ impl<'a> Origin<'a> {
                 None
             },
             latest_input: self.latest_input,
+            fresh: self.fresh,
         }
     }
 
@@ -50,6 +57,7 @@ impl<'a> Origin<'a> {
             source,
             tool_id: Some(id),
             latest_input: self.latest_input,
+            fresh: self.fresh,
         }
     }
 
@@ -64,6 +72,7 @@ impl<'a> Origin<'a> {
                 source,
                 tool_id: None,
                 latest_input: self.latest_input,
+                fresh: self.fresh,
             },
         }
     }
@@ -75,21 +84,28 @@ impl<'a> Origin<'a> {
         }
     }
 
+    pub(super) fn with_fresh(self, fresh: bool) -> Origin<'a> {
+        Origin { fresh, ..self }
+    }
+
     /// 遍历回调里的块标识只在回调内有效；检测之后才用到它，所以转成自有数据保存。
     fn to_owned(self) -> TextOrigin {
         TextOrigin {
             source: self.source,
             tool_id: self.tool_id.map(str::to_owned),
             latest_input: self.latest_input,
+            fresh: self.fresh,
         }
     }
 }
 
 /// [`Origin`] 的自有形式，与 `request_text_origins` 返回的文本一一对应。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct TextOrigin {
     pub source: &'static str,
     pub tool_id: Option<String>,
     pub latest_input: Option<bool>,
+    pub fresh: bool,
 }
 
 pub(super) fn active(mapping: &Mapping) -> bool {
@@ -633,10 +649,20 @@ pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, l
 
 
 pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: bool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    // 本次提交的内容是最后一条 Assistant 之后的条目（新用户消息或工具结果）；更早的是客户端重放的历史。
+    // 末尾若只剩 Assistant（预填），其前的条目才是本次输入，故边界在最后一条非 Assistant 条目之前找。
+    let history_end = request.items.iter().rposition(|item| item.role != stravia_runtime_contract::protocol::ir::Role::Assistant)
+        .and_then(|end| request.items[..end].iter().rposition(|item| item.role == stravia_runtime_contract::protocol::ir::Role::Assistant))
+        .map(|boundary| boundary + 1);
+    // 指令、工具定义、元数据和供应商整请求副本每轮都会重发，无法单独判定新旧：有历史就一律不算新输入。
+    let location = location.with_fresh(history_end.is_none());
     if let Some(text) = & $($qualifier)* request.instructions { apply(text, None, location.with_source("system_or_history"), visit)?; }
     // 只有请求窗口内最后一条 User 条目才是本次输入；其余 User 条目是客户端重放的历史。
     let latest_input = request.items.iter().rposition(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User);
-    for (index, item) in (& $($qualifier)* request.items).into_iter().enumerate() { item_text(item, reject_ambiguous, location.with_latest_input(Some(index) == latest_input), visit)?; }
+    for (index, item) in (& $($qualifier)* request.items).into_iter().enumerate() {
+        let origin = location.with_latest_input(Some(index) == latest_input).with_fresh(index >= history_end.unwrap_or(0));
+        item_text(item, reject_ambiguous, origin, visit)?;
+    }
     if let Some(embedding) = & $($qualifier)* request.embedding { match & $($qualifier)* embedding.input { EmbeddingInput::Text(text) => apply(text, None, location, visit)?, EmbeddingInput::Texts(texts) => for text in texts { apply(text, None, location, visit)?; }, _ => {} } }
     if let Some(tools) = & $($qualifier)* request.tools { for tool in tools { function_tool(tool, location, visit)?; } }
     if let Some(ResponseFormat::JsonSchema { schema: value, description, .. }) = & $($qualifier)* request.response_format {
@@ -973,21 +999,50 @@ fn collect_texts(
     Ok(texts)
 }
 
+/// 出站改写的结果。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Redacted {
+    /// 请求里被替换过的全部引用。
+    pub references: Vec<String>,
+    /// 每个引用在哪些本次新提交的位置被替换；客户端重放的历史不在其中。
+    pub placements: BTreeMap<String, BTreeSet<TextOrigin>>,
+}
+
 pub fn redact_request(
     value: &mut AiRequest,
     mappings: &[Mapping],
-) -> Result<Vec<String>, RedactionError> {
+) -> Result<Redacted, RedactionError> {
     let mut used = BTreeSet::new();
-    write_surface::request(value, true, Origin::of("other_text"), &mut |text, _, _| {
-        Ok(replace(text, mappings, false, &mut used))
-    })?;
+    let mut placements: BTreeMap<String, BTreeSet<TextOrigin>> = BTreeMap::new();
+    write_surface::request(
+        value,
+        true,
+        Origin::of("other_text"),
+        &mut |text, _, origin| {
+            let mut here = BTreeSet::new();
+            let replaced = replace(text, mappings, false, &mut here);
+            if origin.fresh {
+                for reference in &here {
+                    placements
+                        .entry(reference.clone())
+                        .or_default()
+                        .insert(origin.to_owned());
+                }
+            }
+            used.extend(here);
+            Ok(replaced)
+        },
+    )?;
     if mappings
         .iter()
         .any(|mapping| used.contains(&mapping.reference) && !active(mapping))
     {
         return Err(RedactionError::InvalidText);
     }
-    Ok(used.into_iter().collect())
+    Ok(Redacted {
+        references: used.into_iter().collect(),
+        placements,
+    })
 }
 
 // 还原与出站保护共用同一遍历：转义损坏区域对引用同样不可判定（引用也可能
@@ -1060,15 +1115,43 @@ pub(super) fn restore_compaction(
     Ok(used.into_iter().collect())
 }
 
-pub fn restore_response(
+/// 还原模型响应的结果。
+pub(super) struct Restored {
+    /// 响应里被还原过的全部引用。
+    pub references: Vec<String>,
+    /// 工具调用 ID 到该调用参数里被还原的引用。
+    pub tool_calls: BTreeMap<String, BTreeSet<String>>,
+}
+
+pub(super) fn restore_response(
     value: &mut AiResponse,
     mappings: &[Mapping],
-) -> Result<Vec<String>, RedactionError> {
+) -> Result<Restored, RedactionError> {
     let mut used = BTreeSet::new();
+    let mut tool_calls: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for item in &mut value.items {
-        restore_item(item, mappings, &mut used)?;
+        write_surface::item_text(
+            item,
+            false,
+            Origin::of("other_text"),
+            &mut |text, _, origin| {
+                let mut here = BTreeSet::new();
+                let restored = replace(text, mappings, true, &mut here);
+                if let (Some(id), "tool_arguments") = (origin.tool_id, origin.source) {
+                    tool_calls
+                        .entry(id.to_owned())
+                        .or_default()
+                        .extend(here.iter().cloned());
+                }
+                used.extend(here);
+                Ok(restored)
+            },
+        )?;
     }
-    Ok(used.into_iter().collect())
+    Ok(Restored {
+        references: used.into_iter().collect(),
+        tool_calls,
+    })
 }
 
 #[cfg(test)]
@@ -1083,11 +1166,13 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "密钥-long".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let second = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "密钥".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mappings = [second, first];
         let mut used = BTreeSet::new();
@@ -1119,6 +1204,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "not-present".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         }];
         for original in [
             " { \"key\" : \"前缀\\u003c-no-reference\", \"number\": 1.00e+02 } ",
@@ -1141,6 +1227,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: identifier.into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut used = BTreeSet::new();
         let input = format!("{reference} {identifier}");
@@ -1159,6 +1246,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1199,6 +1287,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1246,6 +1335,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let payload = serde_json::json!([{"type": "image", "value": mapping.secret}]).to_string();
         let item = AiItem::function_call_output("call-json", Value::String(payload.clone()));
@@ -1274,6 +1364,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "synthetic snapshot secret".into(),
             expires_at: 0,
+            rule_ids: Default::default(),
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.instructions = Some(mapping.secret.clone());
@@ -1294,7 +1385,7 @@ mod tests {
         assert!(used.is_empty());
         request.instructions = Some("ordinary text".into());
         assert_eq!(
-            redact_request(&mut request, &[mapping]).unwrap(),
+            redact_request(&mut request, &[mapping]).unwrap().references,
             Vec::<String>::new()
         );
         assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
@@ -1306,6 +1397,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = format!("{{\"key\":\"{}\"", mapping.secret);
 
@@ -1350,6 +1442,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"sk\\u002dlive\\u002d7f3a9c\",\"t\":".to_string();
         let mut request = AiRequest::new(
@@ -1388,6 +1481,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "a\"b".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"a\\\"b\",\"t\":".to_string();
         let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
@@ -1410,6 +1504,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "sk-native-prompt-secret".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.parameters.session.id = Some(mapping.secret.clone());
@@ -1477,6 +1572,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         for malformed in ["{\"k\":\"sk\\live", "{\"k\":\"a\\qb\",\"t\":"] {
             let request = |malformed: &str| {
@@ -1518,5 +1614,95 @@ mod tests {
                 Err(RedactionError::InvalidText)
             ));
         }
+    }
+
+    fn known_mapping(letter: &str, rule_ids: &[&str]) -> Mapping {
+        Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", letter.repeat(IDENTIFIER_LEN)),
+            secret: "sk-known-9f2c41".into(),
+            expires_at: i64::MAX,
+            rule_ids: rule_ids
+                .iter()
+                .map(|rule| (*rule).to_owned())
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+
+    #[test]
+    fn redaction_places_a_known_secret_only_where_the_request_submits_it() {
+        use stravia_runtime_contract::protocol::ir::{Role, ToolCall};
+
+        let mapping = known_mapping("e", &["github-pat"]);
+        let user = |text: &str| AiItem {
+            role: Role::User,
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let call = AiItem::function_call(ToolCall {
+            id: "call-9".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        });
+        let result = AiItem::function_call_output("call-9", Value::String(mapping.secret.clone()));
+
+        // 密钥只在客户端重放的历史里：替换了，但没有本次提交的位置。
+        let mut replayed = AiRequest::new(
+            "model",
+            vec![
+                user(&mapping.secret),
+                AiItem::output_text("ok"),
+                user("thanks"),
+            ],
+        );
+        let outcome = redact_request(&mut replayed, std::slice::from_ref(&mapping)).unwrap();
+        assert_eq!(outcome.references, vec![mapping.reference.clone()]);
+        assert!(outcome.placements.is_empty());
+
+        // 同一密钥出现在最后一条 Assistant 之后的工具结果里：那是本次提交的位置，不是裸文本位置。
+        let mut submitted = AiRequest::new("model", vec![user(&mapping.secret), call, result]);
+        let outcome = redact_request(&mut submitted, std::slice::from_ref(&mapping)).unwrap();
+        let places = &outcome.placements[&mapping.reference];
+        assert_eq!(places.len(), 1);
+        let place = places.iter().next().unwrap();
+        assert_eq!(place.source, "tool_result");
+        assert_eq!(place.tool_id.as_deref(), Some("call-9"));
+    }
+
+    #[test]
+    fn restoring_a_response_attributes_references_to_the_tool_call_that_carried_them() {
+        use stravia_runtime_contract::protocol::ir::ToolCall;
+
+        let mapping = known_mapping("f", &["github-pat"]);
+        let mut response = AiResponse::new("resp", "model");
+        response
+            .items
+            .push(AiItem::output_text(format!("saw {}", mapping.reference)));
+        response.items.push(AiItem::function_call(ToolCall {
+            id: "call-a".into(),
+            name: "run".into(),
+            arguments: format!("{{\"token\":\"{}\"}}", mapping.reference),
+        }));
+        response.items.push(AiItem::function_call(ToolCall {
+            id: "call-b".into(),
+            name: "run".into(),
+            arguments: "{}".into(),
+        }));
+
+        let restored = restore_response(&mut response, std::slice::from_ref(&mapping)).unwrap();
+
+        assert_eq!(restored.references, vec![mapping.reference.clone()]);
+        // 助手文本里的还原不是工具调用；没有引用的调用不出现。
+        assert_eq!(
+            restored.tool_calls,
+            BTreeMap::from([(
+                "call-a".to_owned(),
+                BTreeSet::from([mapping.reference.clone()])
+            )])
+        );
+        let calls = response.items[1].tool_calls.as_ref().unwrap();
+        assert!(calls[0].arguments.contains(&mapping.secret));
     }
 }

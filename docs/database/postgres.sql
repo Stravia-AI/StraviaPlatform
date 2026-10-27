@@ -1546,7 +1546,8 @@ CREATE TABLE public.reversible_redaction_mappings (
     published_at bigint,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
-    expires_at bigint NOT NULL
+    expires_at bigint NOT NULL,
+    rule_ids text DEFAULT '[]'::text NOT NULL
 );
 
 

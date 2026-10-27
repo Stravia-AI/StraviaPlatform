@@ -177,7 +177,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     };
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
-                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone(), observer.as_ref());
                     let thinking_source = turn.target.thinking_source();
                     {
                         use futures::StreamExt;

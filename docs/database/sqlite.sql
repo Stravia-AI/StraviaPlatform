@@ -479,7 +479,8 @@ CREATE TABLE reversible_redaction_mappings (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
-);
+, rule_ids TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(rule_ids) AND json_type(rule_ids) = 'array'));
 
 CREATE TABLE settings (
     name       TEXT PRIMARY KEY,
