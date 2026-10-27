@@ -1,10 +1,11 @@
 <script lang="ts">
-import type { Snippet } from 'svelte'
+import { tick, type Snippet } from 'svelte'
 import * as m from '#lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
+import type { CredentialHitHighlight } from '#lib/credential-hit-highlights.js'
 import { formatDuration, formatLogTime, formatNumber, formatTps } from '#lib/format.js'
 import ObservationConversation from '#lib/components/observation-conversation.svelte'
 import ObservationLogViewport from '#lib/components/observation-log-viewport.svelte'
@@ -40,6 +41,7 @@ interface Props {
   liveCapacity?: boolean
   olderLoading?: boolean
   onolder?: () => Promise<void>
+  credentialHits?: CredentialHitHighlight
   loading?: boolean
   activeTab: string
   onclose: () => void
@@ -60,6 +62,7 @@ let {
   liveCapacity = false,
   olderLoading = false,
   onolder,
+  credentialHits,
   loading = false,
   activeTab = $bindable(),
   onclose,
@@ -79,6 +82,12 @@ function jumpToRun(runId: string | null) {
   flashTimer = setTimeout(() => {
     if (flashRun === runId) flashRun = null
   }, 1600)
+}
+
+async function showRunInDiagnostics(runId: string) {
+  activeTab = 'diagnostics'
+  await tick()
+  jumpToRun(runId)
 }
 </script>
 
@@ -406,7 +415,9 @@ function jumpToRun(runId: string | null) {
             {liveActive}
             {liveContentEpoch}
             {olderLoading}
-            {onolder} />
+            {onolder}
+            {credentialHits}
+            onjumprun={(runId: string) => void showRunInDiagnostics(runId)} />
         {/key}
       {/if}
     </Tabs.Content>

@@ -131,6 +131,8 @@ export function observationConversationBlocks(
 export interface ObservationChatMessage {
   id: string
   role: 'user' | 'assistant'
+  /** 用户消息：该输入所属的 Run。凭据命中按 Run 的最新输入定位到这条消息。 */
+  runId?: string
   text: string
   at: number
   model: string
@@ -227,6 +229,7 @@ export function observationConversationMessages(
     {
       id: `user:${interaction.id}`,
       role: 'user',
+      runId: runs[0]?.id,
       text: interaction.input_preview ?? firstInput ?? '',
       at: interaction.started_at,
       model: '',
@@ -242,6 +245,7 @@ export function observationConversationMessages(
       messages.push({
         id: `user:${run.id}`,
         role: 'user',
+        runId: run.id,
         text: input,
         at: run.started_at,
         model: '',
@@ -293,6 +297,7 @@ export function observationConversationMessages(
   return messages.map((message) => {
     const prior = byId.get(message.id)
     return prior &&
+      prior.runId === message.runId &&
       prior.text === message.text &&
       prior.live === message.live &&
       prior.unsaved === message.unsaved &&

@@ -199,7 +199,9 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].new_credential_count, 1);
     assert_eq!(page.items[0].status, "interrupted");
-    assert_eq!(page.items[0].source_types, ["system_or_history"]);
+    assert_eq!(page.items[0].created.len(), 1);
+    assert_eq!(page.items[0].created[0].source_type, "system_or_history");
+    assert!(page.items[0].reused.is_empty());
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
     assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
@@ -215,9 +217,28 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         .credential_discoveries(Default::default())
         .await
         .unwrap();
-    assert_eq!(reused.items.len(), 1);
-    assert_eq!(reused.items[0].new_credential_count, 1);
-    assert_eq!(reused.items[0].status, "interrupted");
+    // 复用发生在另一次请求里：它成为新的一行，而首次新增的那一行保持不变。
+    assert_eq!(reused.items.len(), 2);
+    assert_eq!(reused.items[0].new_credential_count, 0);
+    assert!(reused.items[0].created.is_empty());
+    assert_eq!(reused.items[0].reused.len(), 1);
+    assert_eq!(reused.items[0].reused[0].source_type, "system_or_history");
+    assert_eq!(reused.items[1].new_credential_count, 1);
+    assert_eq!(reused.items[1].status, "interrupted");
+    assert!(reused.items[1].reused.is_empty());
+    let created_only = gateway
+        .observation
+        .credential_discoveries(crate::interaction_observation::CredentialDiscoveryQuery {
+            kind: crate::interaction_observation::CredentialHitKind::Created,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(created_only.items.len(), 1);
+    assert_eq!(
+        created_only.items[0].interaction_id,
+        reused.items[1].interaction_id
+    );
     assert_eq!(store.starts.load(Ordering::SeqCst), 0);
 }
 
@@ -315,7 +336,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
 }
 
 #[tokio::test]
-async fn discovery_event_write_failure_does_not_change_protection_and_reports_gap() {
+async fn discovery_event_write_failure_does_not_change_protection_and_marks_interaction_gap() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.path().to_path_buf(),
@@ -369,7 +390,12 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
         .await
         .unwrap();
     assert!(page.items.is_empty());
-    assert!(page.observation_gap);
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .unwrap();
+    assert!(forest.roots[0].interactions[0].observation_gap);
 }
 
 async fn held_publication_turn(
@@ -604,7 +630,10 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
         .unwrap();
     assert_eq!(discoveries.items.len(), 1);
     assert_eq!(discoveries.items[0].new_credential_count, 1);
-    assert_eq!(discoveries.items[0].source_types, ["system_or_history"]);
+    assert_eq!(
+        discoveries.items[0].created[0].source_type,
+        "system_or_history"
+    );
     assert_ne!(discoveries.items[0].status, "completed");
 }
 

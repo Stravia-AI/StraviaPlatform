@@ -97,6 +97,15 @@ function returnToLatest(): void {
   scrollToLatest()
 }
 
+/** 把 `element` 滚到视口中央并停止跟随最新，让读者停在该处。 */
+export function reveal(element: HTMLElement): void {
+  if (!viewport) return
+  following = false
+  element.scrollIntoView({ block: 'center' })
+  previousTop = viewport.scrollTop
+  pausedPosition = readingPosition()
+}
+
 interface ReadingPosition {
   distance: number
   anchor?: { element: HTMLElement; offset: number }

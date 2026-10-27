@@ -732,9 +732,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 `reversible_redaction_enabled` 是高级功能中的实例级持久化开关，默认关闭；开启后适用于全部有效 API Key，不依赖 Transparent Injection。`model_turn::execute` 在每个真实模型回合处理 Hook、历史恢复和工具循环产生的当前 canonical 请求，因而普通 Inference Run、隐藏回合和 Agent Runner 共用同一保护边界。Target 重试与 failover 复用已经替换的请求，不另设协议旁路。工具权限、连接认证、Client Output Commit、Delivery 与 Generation Chain 的所有权保持不变。
 
-管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、交互新增发现查询及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
+管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、按 Interaction 聚合的命中记录查询及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
 
-映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；每个新映射只携带规则 ID 集合及最小来源类型。已有有效映射复用、续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
+映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时同一独立任务发送 `CredentialMappingsReused`。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；Run 起点 Debug 快照开启时另带不透明占位符 `marker`，由观察守卫统一裁决，不进入列表接口。复用只进入命中记录的复用侧，续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
 
 映射预留与发现投递共用一个独立任务，覆盖数据库提交与调用方收到确认之间的取消窗口。调用方取消后不等待该任务；任务只能完成已启动的预留及诊断投递，不调用 Provider、不执行替换或发布，预留仍按既有 pending 保留期过期。
 

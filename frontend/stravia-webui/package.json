@@ -24,6 +24,7 @@
     "@dagrejs/dagre": "3.1.1",
     "@tanstack/svelte-query": "^6.3.4",
     "@tanstack/svelte-table": "9.3.1",
+    "@tanstack/svelte-virtual": "^3.13.49",
     "@tauri-apps/api": "~2.12.4",
     "@tauri-apps/plugin-dialog": "2.8.3",
     "@tauri-apps/plugin-opener": "2.7.2",

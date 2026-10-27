@@ -4048,6 +4048,204 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector).toBeHidden()
   })
 
+  test.describe('credential hit highlight', () => {
+    const hitEvent = (
+      sequence: number,
+      kind: 'credential_mappings_created' | 'credential_mappings_reused',
+      discoveries: unknown[],
+    ): ObservationEvent => ({
+      sequence,
+      occurred_at: startedAt + sequence,
+      interaction_id: 'interaction-atlas',
+      run_id: 'run-interaction-atlas',
+      rejection_id: null,
+      kind,
+      payload: { discoveries },
+    })
+    const located = (...locators: Array<Record<string, unknown>>) => ({
+      rule_ids: [...new Set(locators.map((locator) => locator.rule_id))],
+      source_types: [...new Set(locators.map((locator) => locator.source_type))],
+      locators,
+    })
+    const toolEvents = (): ObservationEvent[] =>
+      (
+        [
+          ['platform_tool_started', { tool_id: 'call-a', name: 'Deploy', input: { query: 'hit-tool-input' } }],
+          ['platform_tool_finished', { tool_id: 'call-a', status: 'completed', content: 'hit-tool-result' }],
+        ] as const
+      ).map(([kind, payload], index) => ({
+        sequence: 30 + index,
+        occurred_at: startedAt + 30 + index,
+        interaction_id: 'interaction-atlas',
+        run_id: 'run-interaction-atlas',
+        rejection_id: null,
+        kind,
+        payload,
+      }))
+    const withHits =
+      (events: ObservationEvent[]) =>
+      (detail: InteractionDetail): void => {
+        if (detail.interaction.id === 'interaction-atlas') detail.runs[0].events = events
+      }
+    const ruleCatalog = async (page: Page): Promise<void> => {
+      await page.route('**/api/v1/reversible-redaction/rules', (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              rules: [
+                { id: 'github-pat', name: 'GitHub token' },
+                { id: 'aws-key', name: 'AWS key' },
+              ],
+              prefilter: '',
+              filter: '',
+            },
+          },
+        }),
+      )
+      await page.route('**/api/v1/reversible-redaction/custom-rules', (route) => route.fulfill({ json: { data: [] } }))
+    }
+    const mixedHits = [
+      hitEvent(20, 'credential_mappings_created', [
+        located(
+          { rule_id: 'github-pat', source_type: 'user_message', latest_input: true },
+          { rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'call-a' },
+        ),
+      ]),
+      hitEvent(21, 'credential_mappings_reused', [
+        located(
+          { rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-a' },
+          { rule_id: 'aws-key', source_type: 'system_or_history' },
+          { rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'earlier-interaction-call' },
+        ),
+      ]),
+      ...toolEvents(),
+    ]
+
+    test('marks new and reused blocks, opens the hit tool for the session and keeps the saved preference', async ({
+      page,
+    }) => {
+      await ruleCatalog(page)
+      const fixture = await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      const banner = inspector.getByRole('status').filter({ hasText: 'credential hits' })
+      await expect(banner).toContainText('5 credential hits (2 new / 3 reused)')
+      await expect(banner).toContainText('2 came from earlier history or have no retained text.')
+
+      const conversation = inspector.getByRole('log', { name: 'Conversation' })
+      await expect(conversation.locator('[data-credential-hit="created"]')).toHaveCount(2)
+      await expect(conversation.locator('[data-credential-hit="reused"]')).toHaveCount(1)
+      await expect(conversation.getByRole('button', { name: 'New: GitHub token', exact: true })).toHaveCount(2)
+      await expect(conversation.getByRole('button', { name: 'Reused: AWS key', exact: true })).toHaveCount(1)
+      // The user message holds the first new hit, so the reading position lands there rather than at the latest content.
+      await expect(conversation.locator('[data-credential-hit="created"]').first()).toBeInViewport()
+      await expect(conversation.locator('[data-credential-hit="created"]').first()).toContainText('Atlas user question')
+
+      // Hit tool blocks open without being asked and without touching the saved expansion preference.
+      await expect(conversation.getByText('hit-tool-input')).toBeVisible()
+      await expect(conversation.getByText('hit-tool-result')).toBeVisible()
+      expect(
+        await page.evaluate(() =>
+          Object.keys(localStorage).filter((key) => key.startsWith('stravia:observation-activity:')),
+        ),
+      ).toEqual([])
+
+      const detailRequests = fixture.detailRequests.length
+      await banner.getByRole('button', { name: 'Clear highlight' }).click()
+      await expect(conversation.locator('[data-credential-hit]')).toHaveCount(0)
+      await expect(banner).toHaveCount(0)
+      await expect.poll(() => new URL(page.url()).search).toBe('?interaction=interaction-atlas')
+      expect(fixture.detailRequests).toHaveLength(detailRequests)
+      await expect(inspector).toBeVisible()
+    })
+
+    test('sends hits without a block to their run in diagnostics', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await inspector.getByRole('button', { name: 'Show in diagnostics' }).click()
+      await expect(inspector.getByRole('tab', { name: 'Diagnostics' })).toHaveAttribute('aria-selected', 'true')
+      await expect(inspector.locator('#obs-run-run-interaction-atlas')).toBeInViewport()
+    })
+
+    test('loads earlier events until the new hit appears', async ({ page }) => {
+      await ruleCatalog(page)
+      const filler: ObservationEvent[] = Array.from({ length: 250 }, (_, index) => ({
+        sequence: 100 + index,
+        occurred_at: startedAt + 100 + index,
+        interaction_id: 'interaction-atlas',
+        run_id: 'run-interaction-atlas',
+        rejection_id: null,
+        kind: 'checkpoint',
+        payload: { stage: `stage-${index}` },
+      }))
+      const events = [
+        hitEvent(20, 'credential_mappings_created', [
+          located({ rule_id: 'github-pat', source_type: 'user_message', latest_input: true }),
+        ]),
+        ...filler,
+        hitEvent(400, 'credential_mappings_reused', [
+          located({ rule_id: 'aws-key', source_type: 'system_or_history' }),
+        ]),
+      ]
+      const fixture = await installObservationFixture(page, false, false, true, withHits(events))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.getByRole('status').filter({ hasText: 'credential hits' })).toContainText(
+        '2 credential hits (1 new / 1 reused)',
+      )
+      await expect(inspector.locator('[data-credential-hit="created"]')).toHaveCount(1)
+      expect(fixture.eventRequests.some((url) => url.searchParams.has('before_sequence'))).toBe(true)
+    })
+
+    test('says so for records that predate locators and highlights nothing', async ({ page }) => {
+      await ruleCatalog(page)
+      const legacy = hitEvent(20, 'credential_mappings_created', [
+        { rule_ids: ['github-pat'], source_types: ['user_message'] },
+      ])
+      await installObservationFixture(page, false, false, true, withHits([legacy]))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(
+        inspector.getByRole('status').filter({ hasText: 'No credential hit in this request can be located' }),
+      ).toBeVisible()
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+    })
+
+    test('leaves ordinary browsing untouched even when events carry locators', async ({ page }) => {
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas user question')
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+      await expect(inspector.getByRole('status').filter({ hasText: 'credential hits' })).toHaveCount(0)
+    })
+
+    test('drops the highlight together with the inspector', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(3)
+      await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+      await expect(inspector).toHaveCount(0)
+      await expect.poll(() => new URL(page.url()).searchParams.has('highlight')).toBe(false)
+    })
+
+    test('drops the highlight when another interaction is selected', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(3)
+      await node(page, 'Cinder', 'running').press('Enter')
+      await expect(inspector.getByRole('heading', { name: 'Cinder', exact: true, level: 2 })).toBeVisible()
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+      expect(new URL(page.url()).searchParams.has('highlight')).toBe(false)
+    })
+  })
+
   test('downloads the bundle as a file without entering the application router', async ({ page }) => {
     await installObservationFixture(page)
     await page.route('**/api/v1/observations/interactions/interaction-atlas/debug-bundle-tickets', (route) =>

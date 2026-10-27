@@ -37,12 +37,20 @@ const savedRule: CustomCredentialRule = {
   updated_at: 1,
 }
 
+interface DiscoveryQuery {
+  kind: string | null
+  cursor: string | null
+}
+
+type DiscoveryReply = { items: CredentialDiscoverySummary[]; next_cursor?: string | null } | { status: number }
+
 interface Mock {
   customRules: CustomCredentialRule[]
   writes: Array<{ method: string; path: string; body: unknown }>
   failNextWrite: { status: number; json: unknown } | null
   testText: string[]
   failTest: boolean
+  discoveryRequests: DiscoveryQuery[]
 }
 
 function discovery(index: number, overrides: Partial<CredentialDiscoverySummary> = {}): CredentialDiscoverySummary {
@@ -51,11 +59,29 @@ function discovery(index: number, overrides: Partial<CredentialDiscoverySummary>
     api_key_name: 'omp-key',
     discovered_at: 1_788_854_400_000 - index * 1000,
     new_credential_count: 2,
-    rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
-    source_types: ['tool_result'],
+    created: [
+      { rule_id: 'fixture-rule-0', source_type: 'tool_result' },
+      { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
+    ],
+    reused: [],
     status: 'running',
     observation_gap: false,
     ...overrides,
+  }
+}
+
+/** 按 30 条一页切分 `total` 条命中记录，游标是下一页的起始下标。 */
+function pagedDiscoveries(total: number) {
+  return ({ cursor }: DiscoveryQuery): DiscoveryReply => {
+    const offset = cursor ? Number(cursor) : 0
+    const count = Math.min(30, total - offset)
+    const next = offset + count
+    return {
+      items: Array.from({ length: count }, (_, index) =>
+        discovery(offset + index, { api_key_name: `key-${offset + index}` }),
+      ),
+      next_cursor: next < total ? String(next) : null,
+    }
   }
 }
 
@@ -69,8 +95,8 @@ async function mockRedaction(
     rules?: number
     custom?: CustomCredentialRule[]
     discoveries?: CredentialDiscoverySummary[]
-    nextCursor?: string
-    observationGap?: boolean
+    /** 按请求顺序给出每一页；`call` 从 1 开始，便于模拟某一次请求失败。 */
+    discoveryPage?: (query: DiscoveryQuery, call: number) => DiscoveryReply
   } = {},
 ) {
   const state: Mock = {
@@ -79,6 +105,7 @@ async function mockRedaction(
     failNextWrite: null,
     testText: [],
     failTest: false,
+    discoveryRequests: [],
   }
   const rules = Array.from({ length: options.rules ?? 35 }, (_, index) => builtin(index))
   await page.route('**/api/v1/settings/reversible_redaction_enabled', (route) =>
@@ -90,16 +117,16 @@ async function mockRedaction(
     const method = request.method()
     if (pathname.endsWith('/rules')) return route.fulfill({ json: { data: { rules, prefilter: '', filter: '' } } })
     if (pathname.endsWith('/discoveries')) {
-      const more = new URL(request.url()).searchParams.has('cursor')
-      return route.fulfill({
-        json: {
-          data: {
-            items: more ? [] : (options.discoveries ?? []),
-            next_cursor: more ? null : (options.nextCursor ?? null),
-            observation_gap: options.observationGap ?? false,
-          },
-        },
-      })
+      const params = new URL(request.url()).searchParams
+      const query = { kind: params.get('kind'), cursor: params.get('cursor') }
+      state.discoveryRequests.push(query)
+      const reply = options.discoveryPage?.(query, state.discoveryRequests.length) ?? {
+        items: query.cursor ? [] : (options.discoveries ?? []),
+      }
+      if ('status' in reply) {
+        return route.fulfill({ status: reply.status, json: { error: 'Fixture hit records unavailable' } })
+      }
+      return route.fulfill({ json: { data: { items: reply.items, next_cursor: reply.next_cursor ?? null } } })
     }
     if (pathname.endsWith('/test')) {
       const { text } = request.postDataJSON() as { text: string }
@@ -164,10 +191,22 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+const rowOf = (page: Page, apiKey: string) =>
+  page.getByRole('row').filter({ has: page.getByRole('cell', { name: apiKey, exact: true }) })
+
+const chip = (scope: Locator, rule: string, source: string) =>
+  scope.getByRole('button', { name: `${rule} found in ${source}`, exact: true })
+
+const hitViewport = (page: Page) => page.locator('[data-slot="hit-records-viewport"]')
+
+async function scrollHits(page: Page, to: 'top' | 'bottom' | number) {
+  await hitViewport(page).evaluate((element, target) => {
+    element.scrollTop = target === 'top' ? 0 : target === 'bottom' ? element.scrollHeight : target
+  }, to)
+}
+
 test.describe('hit records', () => {
-  test('is the first and default tab and shows each hit with its rules, source and status in one row', async ({
-    page,
-  }) => {
+  test('is the first and default tab and shows each hit as a rule-from-source chip in one row', async ({ page }) => {
     await mockRedaction(page, { discoveries: [discovery(0)] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
@@ -177,23 +216,62 @@ test.describe('hit records', () => {
     await expect(tabs.nth(2)).toHaveText(/Matching test/)
     await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true')
 
-    const row = page.getByRole('row').filter({ hasText: 'omp-key' })
-    await expect(row.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
-    await expect(row.getByRole('button', { name: 'Fixture credential 1', exact: true })).toBeVisible()
-    await expect(row.getByRole('cell').nth(3).getByRole('listitem')).toHaveText(['Tool result'])
-    await expect(row.getByRole('cell').nth(4)).toHaveText('2')
+    const row = rowOf(page, 'omp-key')
+    const created = row.getByRole('cell').nth(2)
+    await expect(chip(created, 'Fixture credential 0', 'Tool result')).toBeVisible()
+    await expect(chip(created, 'Fixture credential 1', 'Tool result')).toBeVisible()
+    await expect(created).toContainText('2 new credentials')
+    await expect(row.getByRole('cell').nth(3)).toHaveText('—')
     await expect(row.getByRole('status')).toHaveText('Running')
     await expect(row.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
       'href',
-      '/logs?interaction=interaction-0',
+      '/logs?interaction=interaction-0&highlight=credential-hits',
     )
+  })
+
+  test('keeps new and reused hits in separate columns and tells replayed user messages from the latest input', async ({
+    page,
+  }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          api_key_name: 'mixed-key',
+          new_credential_count: 1,
+          created: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true }],
+          reused: [
+            { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false },
+            { rule_id: 'fixture-rule-1', source_type: 'tool_arguments' },
+          ],
+        }),
+        discovery(1, {
+          api_key_name: 'reuse-only-key',
+          new_credential_count: 0,
+          created: [],
+          reused: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }],
+        }),
+      ],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+
+    const mixed = rowOf(page, 'mixed-key')
+    await expect(chip(mixed.getByRole('cell').nth(2), 'Fixture credential 0', 'User message')).toBeVisible()
+    await expect(mixed.getByRole('cell').nth(2).getByRole('button')).toHaveCount(1)
+    const reused = mixed.getByRole('cell').nth(3)
+    await expect(chip(reused, 'Fixture credential 0', 'Earlier user message')).toBeVisible()
+    await expect(chip(reused, 'Fixture credential 1', 'Tool arguments')).toBeVisible()
+    await expect(reused.getByRole('button')).toHaveCount(2)
+
+    const reuseOnly = rowOf(page, 'reuse-only-key')
+    await expect(reuseOnly.getByRole('cell').nth(2)).toHaveText('—')
+    await expect(chip(reuseOnly.getByRole('cell').nth(3), 'Fixture credential 1', 'Tool result')).toBeVisible()
   })
 
   test('opens the matched rule from its chip and keeps the rule ID reachable there', async ({ page }) => {
     await mockRedaction(page, { discoveries: [discovery(0)] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
-    await page.getByRole('button', { name: 'Fixture credential 1', exact: true }).click()
+    await chip(page.getByRole('row'), 'Fixture credential 1', 'Tool result').click()
     const inspector = page.getByRole('dialog')
     await expect(inspector.getByRole('heading', { name: 'Fixture credential 1' })).toBeVisible()
     await expect(inspector.getByText('fixture-rule-1', { exact: true })).toBeVisible()
@@ -203,37 +281,198 @@ test.describe('hit records', () => {
     await expect(page.getByRole('tab', { name: 'Hit records' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('falls back to the rule ID for a rule that is gone and flags rows with incomplete observation', async ({
+  test('falls back to the rule ID for a rule that is gone and flags only the row with incomplete observation', async ({
     page,
   }) => {
     await mockRedaction(page, {
-      discoveries: [discovery(0, { rule_ids: ['retired-rule'], observation_gap: true })],
-      observationGap: true,
+      discoveries: [
+        discovery(0, {
+          created: [{ rule_id: 'retired-rule', source_type: 'tool_result' }],
+          new_credential_count: 1,
+          observation_gap: true,
+        }),
+        discovery(1, { api_key_name: 'complete-key' }),
+      ],
     })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
-    const row = page.getByRole('row').filter({ hasText: 'omp-key' })
+    const row = rowOf(page, 'omp-key')
     await expect(row.getByText('retired-rule', { exact: true })).toBeVisible()
     await expect(row.getByRole('button')).toHaveCount(0)
     await expect(row.getByRole('status').filter({ hasText: 'Observation incomplete' })).toBeVisible()
-    await expect(page.getByRole('alert')).toContainText('Observation data is incomplete.')
+    await expect(
+      rowOf(page, 'complete-key').getByRole('status').filter({ hasText: 'Observation incomplete' }),
+    ).toHaveCount(0)
+    // 页面级的「观察数据不完整」提示、刷新与加载更多按钮都已取消。
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(page.getByText('Observation data is incomplete.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Refresh|Load more/ })).toHaveCount(0)
   })
 
-  test('scrolls long histories inside the workspace and keeps load more reachable', async ({ page }) => {
+  test('loads further pages on scroll and renders only the rows near the viewport', async ({ page }) => {
+    const state = await mockRedaction(page, { discoveryPage: pagedDiscoveries(70) })
+    await page.setViewportSize({ width: 1280, height: 700 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'key-0')).toBeVisible()
+    expect(state.discoveryRequests.map((request) => request.cursor)).toEqual([null])
+    expect(await page.getByRole('row').count()).toBeLessThan(25)
+
+    await expect(async () => {
+      await scrollHits(page, 'bottom')
+      await expect(rowOf(page, 'key-69')).toBeVisible({ timeout: 1000 })
+    }).toPass()
+    expect(state.discoveryRequests.map((request) => request.cursor)).toEqual([null, '30', '60'])
+    // 70 条记录全部加载后，DOM 里仍只有视口附近的行。
+    expect(await page.getByRole('row').count()).toBeLessThan(25)
+    await expect(rowOf(page, 'key-0')).toHaveCount(0)
+    expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
+  })
+
+  test('sizes rows to their content and never lets neighbouring rows overlap', async ({ page }) => {
     await mockRedaction(page, {
-      discoveries: Array.from({ length: 30 }, (_, index) => discovery(index)),
-      nextCursor: 'more',
+      discoveries: [
+        discovery(0, { api_key_name: 'key-0', created: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }] }),
+        discovery(1, {
+          api_key_name: 'key-1',
+          created: Array.from({ length: 9 }, (_, index) => ({
+            rule_id: `fixture-rule-${index}`,
+            source_type: ['tool_result', 'tool_arguments', 'system_or_history'][index % 3],
+          })),
+        }),
+        discovery(2, { api_key_name: 'key-2', created: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }] }),
+      ],
+    })
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/reversible-redaction')
+    await expect(async () => {
+      const [first, tall, last] = await Promise.all(['key-0', 'key-1', 'key-2'].map((name) => box(rowOf(page, name))))
+      expect(tall.height).toBeGreaterThan(first.height * 1.5)
+      expect(overlaps(first, tall)).toBe(false)
+      expect(overlaps(tall, last)).toBe(false)
+    }).toPass()
+  })
+
+  test('shows an error with Retry when the first page cannot be loaded', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveryPage: (_query, call) => (call === 1 ? { status: 503 } : { items: [discovery(0)] }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(page.getByRole('alert')).toContainText('Hit records are unavailable.')
+    await expect(page.getByText('No credential hits in the available observations.')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('keeps loaded rows and offers Retry when a further page fails', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveryPage: (query, call) => (call === 2 ? { status: 503 } : pagedDiscoveries(40)(query)),
     })
     await page.setViewportSize({ width: 1280, height: 700 })
     await page.goto('/reversible-redaction')
-    const viewport = page.getByRole('tabpanel').locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
-    await expect(viewport).toBeVisible()
-    expect(await viewport.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
-    expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
-    const more = page.getByRole('button', { name: 'Load more discoveries' })
-    await expect(more).toBeInViewport()
-    await more.click()
-    await expect(more).toHaveCount(0)
+    await expect(rowOf(page, 'key-0')).toBeVisible()
+    await scrollHits(page, 'bottom')
+    const alert = page.getByRole('alert')
+    await expect(alert).toContainText('Hit records are unavailable.')
+    await expect(rowOf(page, 'key-29')).toBeVisible()
+    await page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(async () => {
+      await scrollHits(page, 'bottom')
+      await expect(rowOf(page, 'key-39')).toBeVisible({ timeout: 1000 })
+    }).toPass()
+    await expect(alert).toHaveCount(0)
+    expect(state.discoveryRequests.map((request) => request.cursor)).toEqual([null, '30', '30'])
+  })
+
+  test('filters on the server and restarts the list from the first page', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveryPage: ({ kind }) => ({
+        items: [discovery(0, { api_key_name: kind === 'created' ? 'created-key' : 'all-key' })],
+      }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'all-key')).toBeVisible()
+    await page.getByLabel('Hit type').click()
+    await page.getByRole('option', { name: 'New only' }).click()
+    await expect(rowOf(page, 'created-key')).toBeVisible()
+    await expect(rowOf(page, 'all-key')).toHaveCount(0)
+    expect(state.discoveryRequests).toEqual([
+      { kind: 'all', cursor: null },
+      { kind: 'created', cursor: null },
+    ])
+  })
+
+  test('refreshes every 30 seconds at the top, merges new rows in front and ignores a failed refresh', async ({
+    page,
+  }) => {
+    await page.clock.install({ time: new Date('2026-10-27T09:00:00Z') })
+    const state = await mockRedaction(page, {
+      discoveryPage: (_query, call) => {
+        if (call === 2) return { status: 503 }
+        return { items: call === 1 ? [discovery(1)] : [discovery(0, { api_key_name: 'fresh-key' }), discovery(1)] }
+      },
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+    await page.clock.pauseAt(new Date('2026-10-27T09:00:10Z'))
+
+    await page.clock.runFor(30_000)
+    await expect.poll(() => state.discoveryRequests.length).toBe(2)
+    // 后台刷新失败时保留现有列表，不弹出错误。
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+
+    await page.clock.runFor(30_000)
+    await expect.poll(() => state.discoveryRequests.length).toBe(3)
+    await expect(rowOf(page, 'fresh-key')).toBeVisible()
+    await expect(rowOf(page, 'omp-key')).toHaveCount(1)
+    expect((await box(rowOf(page, 'fresh-key'))).y).toBeLessThan((await box(rowOf(page, 'omp-key'))).y)
+  })
+
+  test('stops refreshing away from the top, on another tab or in a hidden page, then catches up', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-10-27T09:00:00Z') })
+    const state = await mockRedaction(page, {
+      discoveries: Array.from({ length: 40 }, (_, index) => discovery(index, { api_key_name: `key-${index}` })),
+    })
+    await page.setViewportSize({ width: 1280, height: 700 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'key-0')).toBeVisible()
+    await page.clock.pauseAt(new Date('2026-10-27T09:00:10Z'))
+    const requests = () => state.discoveryRequests.length
+    // 回到可刷新状态后，距上次刷新已超过一个周期，应立刻补一次刷新。
+    const catchUp = async (expected: number) => {
+      await expect(async () => {
+        await page.clock.runFor(1)
+        expect(requests()).toBe(expected)
+      }).toPass()
+    }
+
+    await scrollHits(page, 2000)
+    await expect(rowOf(page, 'key-0')).toHaveCount(0)
+    await page.clock.runFor(120_000)
+    expect(requests()).toBe(1)
+    await scrollHits(page, 'top')
+    await catchUp(2)
+
+    await page.getByRole('tab', { name: /Current rules/ }).click()
+    await page.clock.runFor(120_000)
+    expect(requests()).toBe(2)
+    await page.getByRole('tab', { name: 'Hit records' }).click()
+    await catchUp(3)
+
+    const setVisibility = (mode: 'hidden' | 'visible') =>
+      page.evaluate((next) => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => next })
+        document.dispatchEvent(new Event('visibilitychange'))
+      }, mode)
+    await setVisibility('hidden')
+    await page.clock.runFor(120_000)
+    expect(requests()).toBe(3)
+    await setVisibility('visible')
+    await catchUp(4)
   })
 
   for (const width of [1440, 1280]) {
@@ -242,11 +481,20 @@ test.describe('hit records', () => {
     }) => {
       await mockRedaction(page, {
         discoveries: [
-          discovery(0, { source_types: ['user_message', 'tool_arguments'], observation_gap: true }),
+          discovery(0, {
+            observation_gap: true,
+            created: [
+              { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
+              { rule_id: 'fixture-rule-1', source_type: 'tool_arguments' },
+            ],
+            reused: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false }],
+          }),
           discovery(1, {
             api_key_name: 'Second fixture key',
-            rule_ids: ['fixture-rule-0', 'fixture-rule-1', 'fixture-rule-2', 'fixture-rule-3'],
-            source_types: ['system_or_history'],
+            created: Array.from({ length: 4 }, (_, index) => ({
+              rule_id: `fixture-rule-${index}`,
+              source_type: 'system_or_history',
+            })),
             new_credential_count: 14,
           }),
         ],
@@ -254,9 +502,8 @@ test.describe('hit records', () => {
       await page.setViewportSize({ width, height: 800 })
       await page.goto('/reversible-redaction')
       const panel = page.getByRole('tabpanel')
-      const viewport = panel.locator('[data-slot="data-table-viewport"] [data-scroll-area-viewport]')
       await expect(panel.getByRole('table')).toBeVisible()
-      expect(await viewport.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+      expect(await hitViewport(page).evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
       const links = panel.getByRole('link', { name: 'Open request observation' })
       await expect(links).toHaveCount(2)
       await expect(links.first()).toBeInViewport({ ratio: 1 })
@@ -268,24 +515,37 @@ test.describe('hit records', () => {
     await mockRedaction(page, { discoveries: [discovery(0), discovery(1)] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
-    const table = page.getByRole('tabpanel').locator('[data-slot="data-table-viewport"]')
-    await expect(table).toBeVisible()
+    const table = page.getByRole('table', { name: 'Hit records' })
+    await expect(rowOf(page, 'omp-key').first()).toBeVisible()
     expect((await box(table)).height).toBeLessThan(300)
   })
 
   for (const width of [390, 320]) {
-    test(`reflows into a list without horizontal overflow at ${width}px`, async ({ page }) => {
-      await mockRedaction(page, { discoveries: [discovery(0), discovery(1)] })
+    test(`reflows into stacked rows without horizontal overflow at ${width}px`, async ({ page }) => {
+      await mockRedaction(page, {
+        discoveries: [
+          discovery(0, {
+            new_credential_count: 1,
+            created: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true }],
+            reused: [{ rule_id: 'fixture-rule-1', source_type: 'tool_arguments' }],
+          }),
+          discovery(1, { api_key_name: 'reuse-only-key', new_credential_count: 0, created: [] }),
+        ],
+      })
       await page.setViewportSize({ width, height: 800 })
       await page.goto('/reversible-redaction')
-      await expect(page.getByRole('table')).toHaveCount(0)
-      const item = page.getByRole('listitem').filter({ hasText: 'omp-key' }).first()
-      await expect(item.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
-      await expect(item.getByText('2 new credentials · Tool result')).toBeVisible()
-      await expect(item.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
+      const row = rowOf(page, 'omp-key')
+      await expect(page.getByRole('columnheader')).toHaveCount(0)
+      await expect(chip(row, 'Fixture credential 0', 'User message')).toBeVisible()
+      await expect(row.getByText('1 new credentials')).toBeVisible()
+      await expect(row.getByText('Reused', { exact: true })).toBeVisible()
+      await expect(chip(row, 'Fixture credential 1', 'Tool arguments')).toBeVisible()
+      await expect(row.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
         'href',
-        '/logs?interaction=interaction-0',
+        '/logs?interaction=interaction-0&highlight=credential-hits',
       )
+      // 没有新增的一侧不占位。
+      await expect(rowOf(page, 'reuse-only-key').getByText('1 new credentials')).toHaveCount(0)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     })
   }

@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
+import type { CredentialHitHighlight } from '#lib/credential-hit-highlights.js'
 import type { InteractionDetail, LiveContentBlock, FailedRequestDetail } from '#lib/types.js'
 import ObservationInspectorContent from '#lib/components/observation-inspector-content.svelte'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
@@ -18,6 +19,7 @@ interface Props {
   liveCapacity?: boolean
   olderLoading?: boolean
   onolder?: () => Promise<void>
+  credentialHits?: CredentialHitHighlight
   loading?: boolean
   /** Chosen panel width in rem; clamped to the workspace before it is applied. */
   width: number
@@ -43,6 +45,7 @@ let {
   liveCapacity = false,
   olderLoading = false,
   onolder,
+  credentialHits,
   loading = false,
   width,
   containerWidth,
@@ -151,6 +154,7 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
     {liveCapacity}
     {olderLoading}
     {onolder}
+    {credentialHits}
     bind:activeTab
     {onclose}
     {onbundle}

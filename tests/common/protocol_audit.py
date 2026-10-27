@@ -232,14 +232,24 @@ def _credential_proof(row: dict, detail: dict, run: dict, expected: dict,
     serialized = json.dumps(detail, ensure_ascii=False)
     if any(value in serialized for value in secrets):
         failures.append("credential_ordinary_observation_leak")
-    discoveries = [discovery for event in run.get("events", [])
-                   if event.get("kind") == "credential_mappings_created"
-                   for discovery in event.get("payload", {}).get("discoveries", [])]
+    def hits(kind: str) -> list[dict]:
+        return [discovery for event in run.get("events", []) if event.get("kind") == kind
+                for discovery in event.get("payload", {}).get("discoveries", [])]
+
+    discoveries = hits("credential_mappings_created")
+    # 复用事件在每次重放历史时重复出现，敏感内容与占位符的约束与新增事件相同。
+    recorded = discoveries + hits("credential_mappings_reused")
     if len(discoveries) != 2 or any(
             not isinstance(discovery.get("rule_ids"), list) or not discovery["rule_ids"]
             or "user_message" not in discovery.get("source_types", []) for discovery in discoveries):
         failures.append("credential_discovery_missing_or_mismatched")
-    if any(value in json.dumps(discoveries, ensure_ascii=False) for value in (*secrets, *references)):
+    # 只有 Debug 开启的 Run 可以在 `marker` 字段携带本次请求的占位符；其余字段与普通 Run 不得出现。
+    markers = [discovery["marker"] for discovery in recorded if "marker" in discovery]
+    unmarked = [{key: value for key, value in discovery.items() if key != "marker"} for discovery in recorded]
+    if (any(item in json.dumps(recorded, ensure_ascii=False) for item in secrets)
+            or any(item in json.dumps(unmarked, ensure_ascii=False) for item in references)
+            or (markers and not run.get("debug_enabled"))
+            or not set(markers) <= set(references)):
         failures.append("credential_discovery_sensitive_payload")
     checks = capture.get("credential_checks", {}).get(row.get("nonce"), {})
     for field in ("metadata_masked", "client_authorization_masked",

@@ -361,16 +361,10 @@ fn event_bytes(event: &RunEvent) -> usize {
     use RunEvent::*;
     let payload = match event {
         RequestFailed { error } => failure_bytes(error),
-        CredentialMappingsCreated { discoveries } => discoveries
-            .iter()
-            .map(|d| {
-                d.rule_ids
-                    .iter()
-                    .chain(&d.source_types)
-                    .map(String::len)
-                    .sum::<usize>()
-            })
-            .sum(),
+        CredentialMappingsCreated { discoveries, .. }
+        | CredentialMappingsReused { discoveries, .. } => {
+            discoveries.iter().map(CredentialDiscovery::bytes).sum()
+        }
         CompactionOperation {
             operation_id,
             model_turn_id,
@@ -669,7 +663,6 @@ pub(super) struct WriterDeps {
     pub traces: super::trace::TraceManager,
     pub active_traces: Arc<Mutex<HashMap<String, super::trace::TraceHandle>>>,
     pub partial_trace_count: Arc<AtomicU64>,
-    pub unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
     pub live: Arc<super::live::LiveState>,
     pub generation_chains: crate::generation_chain::GenerationChain,
 }
@@ -693,7 +686,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         traces,
         active_traces,
         partial_trace_count,
-        unpersisted_gaps,
         live,
         generation_chains,
     } = deps;
@@ -718,7 +710,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: Arc::clone(&live),
-            gaps: unpersisted_gaps.clone(),
         };
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut terminal_facts: HashMap<String, (Option<DeliveryOutcome>, bool)> = HashMap::new();
@@ -765,8 +756,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         continue;
                     },
                     _ = interval.tick() => {
-                        unpersisted_gaps.lock()
-                            .expire(now(), retention_days.load(Ordering::Acquire));
                         attribution.sweep(now());
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
@@ -843,7 +832,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                             Ok(None) => {}
                             Err(error) => {
-                                unpersisted_gaps.lock().record(&run_id, now());
                                 if let Some(interaction) = attribution.interaction_for_run(&run_id)
                                 {
                                     pending_gaps.insert(interaction.to_owned(), now());
@@ -880,7 +868,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     .await;
                     if let Err(error) = result {
-                        unpersisted_gaps.lock().record(&run_id, at);
                         pending_gaps.insert(interaction.to_owned(), at);
                         // SQL errors may include result bind values; never log payloads.
                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
@@ -1034,7 +1021,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         trace.mark_partial("observation_gap", false);
                     }
                     if let Some(error) = &decision.parent_evidence_error {
-                        unpersisted_gaps.lock().record(&start.id, now);
                         tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
                     }
                     // 无关请求不应切碎活跃流；只刷新可能被本次准入中断的父链。
@@ -1126,7 +1112,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                     Ok(None) => {}
                                     Err(error) => {
-                                        unpersisted_gaps.lock().record(&start.id, now);
                                         pending_gaps.insert(decision.interaction_id.clone(), now);
                                         tracing::warn!(run_id=%start.id, %error, "parent observation gap persistence failed");
                                     }
@@ -1161,7 +1146,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             attribution.abandon_admission(&start.id);
                             replayed_tool_results.remove(&start.id);
                             incomplete_usage = true;
-                            unpersisted_gaps.lock().record(&start.id, now);
                             tracing::warn!(run_id=%start.id, %error, "observation admission persistence failed")
                         }
                     }
@@ -1344,7 +1328,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 if batch.iter().any(|(event, _, _)| affects_usage(event)) {
                                     incomplete_usage = true;
                                 }
-                                unpersisted_gaps.lock().record(&run_id, at);
                                 pending_gaps.insert(interaction.to_owned(), at);
                                 live.emit(ObservationUpdate::LiveGap {
                                     interaction_id: interaction.to_owned(),
@@ -1468,7 +1451,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        unpersisted_gaps.lock().record(run_id, at);
                                         pending_gaps.insert(interaction.to_owned(), at);
                                         tracing::warn!(%run_id,%error,"observation gap persistence failed")
                                     }
@@ -1532,7 +1514,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    unpersisted_gaps.lock().record(run_id, at);
                                     pending_gaps.insert(interaction.to_owned(), at);
                                     tracing::warn!(%run_id, %error, "observation activity finalization failed");
                                 }
@@ -1797,7 +1778,6 @@ async fn persist_finish(
             }
             Err(error) => {
                 *incomplete_usage = true;
-                pending_text.gaps.lock().record(run_id, at);
                 if let Err(error) = context.store.mark_observation_gap(interaction).await {
                     tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
                 }
@@ -1945,7 +1925,6 @@ struct TextBuffer {
     retained_bytes: usize,
     blocks: HashMap<String, TextBlock>,
     live: Arc<super::live::LiveState>,
-    gaps: Arc<Mutex<super::UnpersistedGaps>>,
 }
 impl TextBuffer {
     fn publish_block(
@@ -2143,7 +2122,6 @@ mod block_tests {
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: mirror.clone(),
-            gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
         };
         let mut receiver = mirror.subscribe("interaction".into());
         assert!(
@@ -2196,7 +2174,6 @@ mod block_tests {
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: live.clone(),
-            gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
         };
         let mut block = TextBlock::new(
             RunEvent::ClientVisibleContentDelta {

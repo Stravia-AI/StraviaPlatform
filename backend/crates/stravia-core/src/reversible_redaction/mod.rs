@@ -33,6 +33,35 @@ impl RedactionHost for SettingsHost {
 
 struct ObservationHost(RunPublicationGuard);
 
+fn observed(
+    discoveries: Vec<CredentialDiscovery>,
+) -> Vec<crate::interaction_observation::CredentialDiscovery> {
+    discoveries
+        .into_iter()
+        .map(
+            |discovery| crate::interaction_observation::CredentialDiscovery {
+                rule_ids: discovery.rule_ids,
+                source_types: discovery.source_types,
+                locators: discovery
+                    .locators
+                    .into_iter()
+                    .map(
+                        |locator| crate::interaction_observation::CredentialLocator {
+                            rule_id: locator.rule_id,
+                            source_type: locator.source_type,
+                            tool_id: locator.tool_id,
+                            latest_input: locator.latest_input,
+                        },
+                    )
+                    .collect(),
+                omitted_locators: 0,
+                // 是否记录由 Run 的 Debug 快照裁决，见 RunPublicationGuard。
+                marker: Some(discovery.marker),
+            },
+        )
+        .collect()
+}
+
 impl RedactionObserver for ObservationHost {
     fn protect_secrets(&self, mappings: &[Mapping]) {
         self.0
@@ -40,17 +69,11 @@ impl RedactionObserver for ObservationHost {
     }
 
     fn mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
-        self.0.credential_mappings_created(
-            discoveries
-                .into_iter()
-                .map(
-                    |discovery| crate::interaction_observation::CredentialDiscovery {
-                        rule_ids: discovery.rule_ids,
-                        source_types: discovery.source_types,
-                    },
-                )
-                .collect(),
-        );
+        self.0.credential_mappings_created(observed(discoveries));
+    }
+
+    fn mappings_reused(&self, discoveries: Vec<CredentialDiscovery>) {
+        self.0.credential_mappings_reused(observed(discoveries));
     }
 }
 

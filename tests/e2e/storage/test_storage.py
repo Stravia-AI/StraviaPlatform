@@ -525,7 +525,8 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
                 lambda: key_discoveries(env, f"{model}-key"),
             )
             assert len(initial) == 1 and initial[0]["new_credential_count"] == 1
-            assert "github-pat" in initial[0]["rule_ids"]
+            assert [(hit["rule_id"], hit["source_type"]) for hit in initial[0]["created"]] == [("github-pat", "user_message")]
+            assert initial[0]["reused"] == []
             preview = _wait_for(
                 "original input preview before restart",
                 lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
@@ -568,7 +569,15 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert status == 200, reused
             assert reused["choices"][0]["message"]["content"] == SECRET
             assert set(REFERENCE.findall(json.dumps(received[-1]["body"]))) == {reference}
-            assert key_discoveries(env, f"{model}-key") == []
+            # 清空历史后，旧映射仍被复用：新的命中记录只含复用，没有新增。
+            reuse_rows = _wait_for(
+                "reuse-only hit after history clearing",
+                lambda: key_discoveries(env, f"{model}-key"),
+            )
+            assert len(reuse_rows) == 1
+            assert reuse_rows[0]["new_credential_count"] == 0 and reuse_rows[0]["created"] == []
+            assert [hit["rule_id"] for hit in reuse_rows[0]["reused"]] == ["github-pat"]
+            assert key_discoveries(env, f"{model}-key", kind="created") == []
             new_interactions = _wait_for(
                 "new observation after restart and history clearing",
                 lambda: _route_interactions(env, route_id),

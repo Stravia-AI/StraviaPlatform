@@ -2134,9 +2134,7 @@ test('credential protection table keeps its header above the draggable body scro
     route.fulfill({ json: { data: credentialCatalog } }),
   )
   await page.route('**/api/v1/reversible-redaction/discoveries?**', (route) =>
-    route.fulfill({
-      json: { data: { items: [], next_cursor: null, observation_gap: false } satisfies CredentialDiscoveryPage },
-    }),
+    route.fulfill({ json: { data: { items: [], next_cursor: null } satisfies CredentialDiscoveryPage } }),
   )
   await page.goto('/reversible-redaction')
   await page.getByRole('tab', { name: /Current rules/ }).click()
@@ -2206,14 +2204,16 @@ for (const locale of ['en-US', 'zh-CN']) {
                   api_key_name: cursor ? 'Second fixture key' : 'Fixture key',
                   discovered_at: 1_788_854_400_000,
                   new_credential_count: 2,
-                  rule_ids: ['fixture-rule-0'],
-                  source_types: ['user_message', 'tool_arguments'],
+                  created: [
+                    { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
+                    { rule_id: 'fixture-rule-0', source_type: 'tool_arguments' },
+                  ],
+                  reused: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false }],
                   status: 'failed',
                   observation_gap: false,
                 },
               ],
               next_cursor: cursor ? null : 'next-fixture',
-              observation_gap: false,
             },
           },
         })
@@ -2259,16 +2259,21 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })).toHaveCount(0)
     // 命中记录是第一个也是默认的页签：每条命中直接显示规则、位置与请求状态。
     await expect(page.getByRole('tab').first()).toHaveText(zh ? /命中记录/ : /Hit records/)
-    const record = page.getByRole('row').filter({ hasText: 'Fixture key' })
-    await expect(record.getByRole('button', { name: 'Fixture credential 0', exact: true })).toBeVisible()
-    await expect(record.getByRole('listitem')).toHaveText(
-      zh ? ['用户消息', '工具参数'] : ['User message', 'Tool arguments'],
-    )
+    const record = page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Fixture key', exact: true }) })
+    const chipRule = zh ? 'Fixture credential 0 出现在' : 'Fixture credential 0 found in'
+    await expect(record.getByRole('listitem')).toHaveCount(3)
+    await expect(record.getByRole('button', { name: `${chipRule} ${zh ? '用户消息' : 'User message'}` })).toBeVisible()
+    await expect(
+      record.getByRole('button', { name: `${chipRule} ${zh ? '工具参数' : 'Tool arguments'}` }),
+    ).toBeVisible()
+    await expect(
+      record.getByRole('button', { name: `${chipRule} ${zh ? '历史用户消息' : 'Earlier user message'}` }),
+    ).toBeVisible()
     await expect(record.getByRole('status')).toHaveText(zh ? '失败' : 'Failed')
     await expect(
       record.getByRole('link', { name: zh ? '查看关联请求记录' : 'Open request observation' }),
-    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas')
-    await page.getByRole('button', { name: zh ? '加载更多发现' : 'Load more discoveries' }).click()
+    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas&highlight=credential-hits')
+    // 第二页随滚动自动加载，不再有「加载更多」按钮。
     await expect(page.getByRole('row').filter({ hasText: 'Second fixture key' })).toBeVisible()
     expect(cursors).toEqual([null, 'next-fixture'])
     await page.getByRole('tab', { name: new RegExp(zh ? '现有规则' : 'Current rules') }).click()
@@ -2387,7 +2392,7 @@ test('credential protection distinguishes failed saves, unavailable observations
     } else if (path.endsWith('/custom-rules')) {
       await route.fulfill({ json: { data: [] } })
     } else {
-      await route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: true } } })
+      await route.fulfill({ json: { data: { items: [], next_cursor: null } } })
     }
   })
   await page.goto('/reversible-redaction')
@@ -2415,17 +2420,17 @@ test('credential protection distinguishes failed saves, unavailable observations
   expect(saveAttempts).toBe(2)
   expect(saved).toBe('true')
   const catalog = page.getByRole('region', { name: 'Current rules' })
-  const timeline = page.getByRole('region', { name: 'Recent discoveries' })
+  const timeline = page.getByRole('region', { name: 'Hit records' })
   await expect(catalog.getByRole('alert')).toContainText('Rules could not be loaded.', { timeout: 15_000 })
   unavailable = false
   await catalog.getByRole('button', { name: 'Retry', exact: true }).click()
   await expect(catalog.locator('#credential-rule-search')).toBeVisible()
   await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
-  await expect(timeline.getByRole('alert')).toContainText('Discovery observations are unavailable.')
-  await expect(timeline.getByText('No new credential discoveries in the available observations.')).toHaveCount(0)
+  await expect(timeline.getByRole('alert')).toContainText('Hit records are unavailable.')
+  await expect(timeline.getByText('No credential hits in the available observations.')).toHaveCount(0)
   await timeline.getByRole('button', { name: 'Retry', exact: true }).click()
-  await expect(timeline.getByRole('alert')).toContainText('Observation data is incomplete.')
-  await expect(timeline.getByText('No new credential discoveries in the available observations.')).toHaveCount(0)
+  await expect(timeline.getByText('No credential hits in the available observations.')).toBeVisible()
+  await expect(timeline.getByRole('alert')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
   await page.getByRole('textbox', { name: 'Text to test', exact: true }).fill('test_credential')
   await page.getByRole('button', { name: 'Test matching', exact: true }).click()
@@ -2457,7 +2462,7 @@ test('credential protection separates setting load failure from empty rules and 
           ? { rules: [], prefilter: '', filter: '' }
           : pathname.endsWith('/custom-rules')
             ? []
-            : { items: [], next_cursor: null, observation_gap: false },
+            : { items: [], next_cursor: null },
       },
     })
   })
@@ -2466,9 +2471,7 @@ test('credential protection separates setting load failure from empty rules and 
     page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
   ).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('switch')).toBeDisabled()
-  await expect(
-    page.getByText('No new credential discoveries in the available observations.', { exact: true }),
-  ).toBeVisible()
+  await expect(page.getByText('No credential hits in the available observations.', { exact: true })).toBeVisible()
   await page.getByRole('tab', { name: /Current rules/ }).click()
   await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
   settingsUnavailable = false

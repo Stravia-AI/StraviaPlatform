@@ -1033,7 +1033,7 @@ impl ObservationStore {
         let mut prepared = Vec::with_capacity(events.len());
         for (index, (run_event, block_id, now)) in events.iter().enumerate() {
             let now = *now;
-            if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries } if discoveries.is_empty())
+            if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries, .. } | RunEvent::CredentialMappingsReused { discoveries, .. } if discoveries.is_empty())
             {
                 continue;
             }
@@ -4751,6 +4751,7 @@ mod tests {
         };
         let empty_credentials = || RunEvent::CredentialMappingsCreated {
             discoveries: Vec::new(),
+            omitted_discoveries: 0,
         };
         admit_tool_run(store, "interleaved", None, "alice").await?;
 

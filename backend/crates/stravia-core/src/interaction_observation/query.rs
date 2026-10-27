@@ -452,14 +452,7 @@ impl super::InteractionObservation {
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
         self.flush().await?;
-        let mut page = self.inner.store.credential_discoveries(query).await?;
-        page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
-            chrono::Utc::now().timestamp_millis(),
-            self.inner
-                .retention_days
-                .load(std::sync::atomic::Ordering::Acquire),
-        );
-        Ok(page)
+        self.inner.store.credential_discoveries(query).await
     }
 }
 
@@ -472,7 +465,59 @@ struct DiscoveryRow {
     observation_gap: bool,
 }
 
-const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind='credential_mappings_created' AND i.expires_at>";
+#[derive(serde::Deserialize)]
+struct DiscoveryPayload {
+    discoveries: Vec<CredentialDiscovery>,
+    #[serde(default)]
+    omitted_discoveries: usize,
+}
+
+/// 一个 Interaction 在筛选范围内的全部命中，新增与复用各自按「规则 ← 来源」去重。
+#[derive(Default)]
+struct DiscoveryHits {
+    observed: bool,
+    new_credential_count: i64,
+    created: std::collections::BTreeSet<CredentialHit>,
+    reused: std::collections::BTreeSet<CredentialHit>,
+}
+
+impl DiscoveryHits {
+    fn add(&mut self, created: bool, payload: DiscoveryPayload) {
+        self.observed = true;
+        if created {
+            self.new_credential_count +=
+                (payload.discoveries.len() + payload.omitted_discoveries) as i64;
+        }
+        let side = if created {
+            &mut self.created
+        } else {
+            &mut self.reused
+        };
+        for discovery in payload.discoveries {
+            if discovery.locators.is_empty() {
+                // 升级前的事件只有规则集合与来源集合；对单个映射，二者的组合是对原位置的最佳还原。
+                for rule_id in &discovery.rule_ids {
+                    for source_type in &discovery.source_types {
+                        side.insert(CredentialHit {
+                            rule_id: rule_id.clone(),
+                            source_type: source_type.clone(),
+                            latest_input: None,
+                        });
+                    }
+                }
+            }
+            for locator in discovery.locators {
+                side.insert(CredentialHit {
+                    rule_id: locator.rule_id,
+                    source_type: locator.source_type,
+                    latest_input: locator.latest_input,
+                });
+            }
+        }
+    }
+}
+
+const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind IN (";
 
 impl ObservationStore {
     pub(super) async fn observation_root_id(
@@ -495,27 +540,6 @@ impl ObservationStore {
         })
     }
 
-    pub(super) async fn contains_gap_run(&self, run_id: &str) -> anyhow::Result<bool> {
-        Ok(match self {
-            Self::Sqlite(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=?)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-            Self::Postgres(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=$1)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-        })
-    }
-
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
@@ -524,18 +548,19 @@ impl ObservationStore {
             .cursor
             .as_deref()
             .map(|cursor| {
-                anyhow::ensure!(cursor.len() <= 512, "凭据发现游标过长");
-                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("凭据发现游标无效"))
+                anyhow::ensure!(cursor.len() <= 512, "命中记录游标过长");
+                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("命中记录游标无效"))
             })
             .transpose()?;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
-        let (mut rows, observation_gap): (Vec<DiscoveryRow>, bool) = match self {
+        let kinds = query.kind.event_kinds();
+        let mut rows: Vec<DiscoveryRow> = match self {
             Self::Sqlite(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=1 AND expires_at>?)")
-                    .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DISCOVERY_SELECT);
                 builder
+                    .push(kinds)
+                    .push(") AND i.expires_at>")
                     .push_bind(now)
                     .push(" AND e.expires_at>")
                     .push_bind(now)
@@ -551,13 +576,13 @@ impl ObservationStore {
                 builder
                     .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
                     .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
+                builder.build_query_as().fetch_all(pool).await?
             }
             Self::Postgres(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=TRUE AND expires_at>$1)")
-                    .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Postgres>::new(DISCOVERY_SELECT);
                 builder
+                    .push(kinds)
+                    .push(") AND i.expires_at>")
                     .push_bind(now)
                     .push(" AND e.expires_at>")
                     .push_bind(now)
@@ -573,7 +598,7 @@ impl ObservationStore {
                 builder
                     .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
                     .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
+                builder.build_query_as().fetch_all(pool).await?
             }
         };
         let next_cursor = if rows.len() > limit {
@@ -588,47 +613,57 @@ impl ObservationStore {
         rows.truncate(limit);
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            // 只读取普通发现事件的安全元数据，不读取请求正文或秘密映射。
-            let payloads: Vec<Vec<u8>> = match self {
-                Self::Sqlite(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=? AND kind='credential_mappings_created' AND expires_at>? AND occurred_at<=?")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-                Self::Postgres(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='credential_mappings_created' AND expires_at>$2 AND occurred_at<=$3")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
+            // 只读取普通命中事件的安全元数据，不读取请求正文或秘密映射。
+            let events: Vec<(String, Vec<u8>)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT kind,payload FROM observation_events WHERE interaction_id=",
+                    );
+                    builder
+                        .push_bind(&row.interaction_id)
+                        .push(" AND kind IN (")
+                        .push(kinds)
+                        .push(") AND expires_at>")
+                        .push_bind(now)
+                        .push(" AND occurred_at<=")
+                        .push_bind(row.discovered_at);
+                    builder.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT kind,payload FROM observation_events WHERE interaction_id=",
+                    );
+                    builder
+                        .push_bind(&row.interaction_id)
+                        .push(" AND kind IN (")
+                        .push(kinds)
+                        .push(") AND expires_at>")
+                        .push_bind(now)
+                        .push(" AND occurred_at<=")
+                        .push_bind(row.discovered_at);
+                    builder.build_query_as().fetch_all(pool).await?
+                }
             };
-            let mut count = 0i64;
-            let mut rule_ids = std::collections::BTreeSet::new();
-            let mut source_types = std::collections::BTreeSet::new();
-            for payload in payloads {
-                #[derive(serde::Deserialize)]
-                struct Payload {
-                    discoveries: Vec<CredentialDiscovery>,
-                }
-                let payload: Payload =
+            let mut hits = DiscoveryHits::default();
+            for (kind, payload) in events {
+                let payload: DiscoveryPayload =
                     serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                count += payload.discoveries.len() as i64;
-                for discovery in payload.discoveries {
-                    rule_ids.extend(discovery.rule_ids);
-                    source_types.extend(discovery.source_types);
-                }
+                hits.add(kind == "credential_mappings_created", payload);
             }
-            if count > 0 {
+            if hits.observed {
                 items.push(CredentialDiscoverySummary {
                     interaction_id: row.interaction_id,
                     api_key_name: row.api_key_name,
                     discovered_at: row.discovered_at,
-                    new_credential_count: count,
-                    rule_ids: rule_ids.into_iter().collect(),
-                    source_types: source_types.into_iter().collect(),
+                    new_credential_count: hits.new_credential_count,
+                    created: hits.created.into_iter().collect(),
+                    reused: hits.reused.into_iter().collect(),
                     status: row.status,
                     observation_gap: row.observation_gap,
                 });
             }
         }
-        Ok(CredentialDiscoveryPage {
-            items,
-            next_cursor,
-            observation_gap,
-        })
+        Ok(CredentialDiscoveryPage { items, next_cursor })
     }
 
     pub async fn query_root_changes(

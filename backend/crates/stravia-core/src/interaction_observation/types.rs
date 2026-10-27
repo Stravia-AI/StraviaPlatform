@@ -277,26 +277,105 @@ pub(crate) struct RunOutcome {
     pub generation_root_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 一个映射在一次请求里的命中。`marker` 只在 Debug 开启的 Run 中记录，永不进入列表接口。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct CredentialDiscovery {
     pub rule_ids: Vec<String>,
     pub source_types: Vec<String>,
+    /// 旧事件没有该字段，按空处理。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locators: Vec<CredentialLocator>,
+    /// 超出上限而未记录的位置数。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_locators: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+}
+
+/// 块级位置：不含偏移、片段或条目下标。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CredentialLocator {
+    pub rule_id: String,
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_input: Option<bool>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+impl CredentialDiscovery {
+    /// 写入队列的容量估算；与其他事件一样只计变长内容。
+    pub(super) fn bytes(&self) -> usize {
+        let locators: usize = self
+            .locators
+            .iter()
+            .map(|locator| {
+                locator.rule_id.len()
+                    + locator.source_type.len()
+                    + locator.tool_id.as_ref().map_or(0, String::len)
+            })
+            .sum();
+        self.rule_ids
+            .iter()
+            .chain(&self.source_types)
+            .map(String::len)
+            .sum::<usize>()
+            + locators
+            + self.marker.as_ref().map_or(0, String::len)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialHitKind {
+    #[default]
+    All,
+    Created,
+    Reused,
+}
+
+impl CredentialHitKind {
+    /// 对应的事件 `kind` 列取值；只含固定字面量，可直接拼入 SQL。
+    pub(super) fn event_kinds(self) -> &'static str {
+        match self {
+            Self::All => "'credential_mappings_created','credential_mappings_reused'",
+            Self::Created => "'credential_mappings_created'",
+            Self::Reused => "'credential_mappings_reused'",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CredentialDiscoveryQuery {
     pub cursor: Option<String>,
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub kind: CredentialHitKind,
+}
+
+/// 命中记录列表里的一个「规则 ← 来源」配对。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CredentialHit {
+    pub rule_id: String,
+    pub source_type: String,
+    /// 仅用户消息有意义：`true` 是本次输入，`false` 是客户端重放的历史。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_input: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialDiscoverySummary {
     pub interaction_id: String,
     pub api_key_name: Option<String>,
+    /// 当前筛选下该 Interaction 最近一次命中的时间。
     pub discovered_at: i64,
     pub new_credential_count: i64,
-    pub rule_ids: Vec<String>,
-    pub source_types: Vec<String>,
+    pub created: Vec<CredentialHit>,
+    pub reused: Vec<CredentialHit>,
     pub status: String,
     pub observation_gap: bool,
 }
@@ -305,7 +384,6 @@ pub struct CredentialDiscoverySummary {
 pub struct CredentialDiscoveryPage {
     pub items: Vec<CredentialDiscoverySummary>,
     pub next_cursor: Option<String>,
-    pub observation_gap: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +411,14 @@ pub(crate) enum RunEvent {
     },
     CredentialMappingsCreated {
         discoveries: Vec<CredentialDiscovery>,
+        /// 超出单事件上限而未记录的映射数。
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted_discoveries: usize,
+    },
+    CredentialMappingsReused {
+        discoveries: Vec<CredentialDiscovery>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted_discoveries: usize,
     },
     CompactionOperation {
         operation_id: String,

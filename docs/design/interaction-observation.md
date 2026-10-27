@@ -151,15 +151,17 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 数据库、事务日志或实例文件存储失败（包括容量耗尽）适用 [ADR-0060 的请求/任务局部处理约束](../adr/0060-own-interaction-observation-outside-generation-chain.md#存储失败只影响所属请求或任务)：关键同步操作沿原 Result 失败当前相关请求或任务，Observation/Debug 独立异步写入失败只归所属诊断任务并保留 gap/partial，不牵连推理与无关请求/后台任务，Server/Desktop 继续服务。诊断不作为执行事实源；不新增全局 fatal 广播、全入口 scope、降级模式、健康检查或自动重试，不补造用量、不自动重放模型调用。独立长期 Stats 未可靠汇总时相关破坏性清理仍明确失败。队列满、Trace 限额及普通缺口保留原语义；该局部策略已实现并通过真实 Server SQLite/PostgreSQL 与 Desktop SQLite 的宿主/HTTP 验收，覆盖在途/后续请求、已交付后的后台 Media 任务、诊断 gap/partial 与双库 Stats 写失败的清理保护；真实 SQLITE_FULL 与隔离固定 PostgreSQL trigger 的边界见[整体架构 §4.10](architecture.md#410-interaction-observation)。专项及完整本地测试矩阵已通过，运行记录见[本地规格](../../.scratch/independent-usage-statistics/spec.md)。
 
-### 3.5 凭据新增发现
+### 3.5 凭据命中记录
 
-凭据保护页从普通 `credential_mappings_created` 事件投影最近发现，不另建秘密目录或会话事实源。事件在映射实际新建提交后、可失败的替换前由 `RunObserver` 发出，载荷为 `discoveries: [{ rule_ids, source_types }]`，每个元素对应一个实际新建映射；不含秘密、指纹、可恢复引用、消息片段或完整 JSON 路径。来源类型为 `user_message`、`system_or_history`、`tool_arguments`、`tool_result`、`other_text`，来自本次提取和最终规则命中，不从历史正文补推。
+命中记录从普通 `credential_mappings_created` 与 `credential_mappings_reused` 事件投影，不另建秘密目录或会话事实源。两个事件载荷同形：`discoveries: [{ rule_ids, source_types, locators, omitted_locators?, marker? }]` 加可选 `omitted_discoveries`，每个元素对应一个映射。`created` 在映射实际新建提交后、可失败的替换前由 `RunObserver` 发出；`reused` 在同一 Model Turn 命中已有有效映射时发出，二者来自同一独立任务，同一 Model Turn 两类都有时各发一个事件。`locators` 逐项保存「规则 + 来源」配对及块级标识：工具参数与工具结果带 provider 原始 `tool_id`，用户消息只带 `latest_input`（是否为请求窗口里最后一条用户输入；内部 Agent 轮次的用户条目是平台构造的，一律为假），其余来源不带标识；去重后每个映射至多 50 项，每个事件至多 50 个映射，超出部分只记 `omitted_locators` / `omitted_discoveries` 计数；位置超限时每种「规则 + 来源 + 是否最新输入」先各留一项，再按序补满，不让排在后面的来源整体丢失。不使用请求条目下标（`protect` 之前历史标记还原会拆分、注入条目），不保存字符偏移、消息片段、指纹或完整 JSON 路径。来源类型为 `user_message`、`system_or_history`、`tool_arguments`、`tool_result`、`other_text`，来自本次提取和最终规则命中，不从历史正文补推。没有 `locators` 的旧事件按空处理：列表回退为 `rule_ids` × `source_types` 的组合，请求记录只打开 Interaction 而不高亮。`marker` 是该映射的不透明占位符，只在 Run 起点 Debug 快照开启的 Run 中记录，由 Core 的观察守卫统一裁决，永不进入命中记录列表接口；Debug Trace 仍只保存 wire 本身。因此事件不含秘密、指纹和消息片段，仅 Debug 开启的 Run 可含占位符标记；Interaction 中途开启 Debug 时更早的 Run 没有标记，沿用既有 partial 语义。
 
 映射预留与发现投递由同一独立任务持有，防止数据库已经提交、调用方尚未收到确认时取消导致遗漏。取消不等待此任务，也不执行后续替换、Provider 调用或发布；已启动的预留可以完成，并沿用未发布映射的既有保留期。
 
-同一 Interaction 的多次发现合并，按最后一次新增事件时间倒序；后续复用、还原和状态更新不改变发现时间。请求结果单独读取现有 Interaction 状态，`interrupted` 的详情仍保留失败或取消的 Run。该投影不要求 Debug，也不等待客户端交付或 Generation Chain 成功；清理观察不删除保护映射，后续有效复用不会重新计数。
+同一 Interaction 的命中合并为一行，新增与复用各自按「规则 ← 来源」去重，复用不显示次数，按筛选范围内最后一次命中的事件时间倒序；`kind=all|created|reused`（默认 `all`）在服务端筛选，游标只在同一 `kind` 下有效。请求结果单独读取现有 Interaction 状态，`interrupted` 的详情仍保留失败或取消的 Run。该投影不要求 Debug，也不等待客户端交付或 Generation Chain 成功；清理观察不删除保护映射，历史重放产生的复用在清理后会重新出现为复用，不会重新计为新增。
 
-`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询现有写者已处理的事件，采用有界 `limit` 与 `next_cursor` 翻页。返回 `items`、`next_cursor` 和 `observation_gap`；条目只含交互 ID、API Key 名称、发现时间、新增数量、规则与来源类型、请求状态及缺失标志。查询失败与空记录分别表达。迁移 `0036_credential_discovery_coverage` 把升级前保留的交互标为观察缺失，不扫描秘密库或历史补造发现。已归属交互的写入失败尽可能持久化 gap；尚不能落盘的准入或队列损失按 Run 保存易失的发生时间和代次，并用当前观察保留期判断是否仍可见。清理历史只移除本次实际删除的已知 Run 所属且代次未变的标记；活动记录、清理期间新发生的损失和无法确认归属的准入损失继续保留，直至当前保留期到期。该易失标记不承诺跨进程崩溃保留，Observation 仍是可丢失诊断投影。
+`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询现有写者已处理的事件，采用有界 `limit`、`kind` 与 `next_cursor` 翻页。返回 `items` 和 `next_cursor`；条目含交互 ID、API Key 名称、命中时间 `discovered_at`、新增映射数 `new_credential_count`（含超出事件上限的 `omitted_discoveries`）、新增与复用两组 `{ rule_id, source_type, latest_input? }` 配对、请求状态和该交互的 `observation_gap`。查询失败与空记录分别表达。不再有页面级 `observation_gap`：「缺失记录不代表没有发现凭据」的限制说明移入凭据保护页的「保护详情与限制」，每行仍显示自己的观察缺失标记。迁移 `0036_credential_discovery_coverage` 把升级前保留的交互标为观察缺失，不扫描秘密库或历史补造命中。已归属交互的写入失败尽可能持久化 gap；尚不能落盘的准入或队列损失不再保存为易失的页面级标记，Observation 仍是可丢失诊断投影。
+
+请求记录从命中记录进入时携带 `highlight=credential-hits`，仅此入口触发高亮。WebUI 在已加载的事件里按 `locators` 解析目标：`tool_arguments` / `tool_result` 按 `tool_id` 匹配对话中的工具调用与结果块，`user_message` 且 `latest_input` 为真的命中匹配所属 Run 的用户消息（工具续跑没有新的用户输入，沿用此前最近的那条用户消息），其余命中（更早 Interaction 的工具调用、历史用户消息、system、其他来源）只能定位到 Run，在提示条里汇总并可跳到诊断标签中的该 Run。新增与复用用不同样式和「新增」「复用」徽标区分，徽标 tooltip 列出规则名；命中所在的折叠工具活动在会话内临时展开，不写入本地展开偏好。深链向前加载更早事件直到出现新增命中或加载穷尽，并滚动到第一个新增命中（没有则第一个复用命中）。清除高亮、关闭检查器或选中另一个 Interaction 都会移除该 URL 参数。
 
 ## 4. 模块与 seam
 

@@ -62,18 +62,29 @@ export interface CredentialMatch {
   end_column: number
 }
 
+export type CredentialHitKind = 'all' | 'created' | 'reused'
+
 export interface CredentialDiscoveryQuery {
   cursor?: string
   limit?: number
+  kind?: CredentialHitKind
+}
+
+/** 一个「规则 ← 来源」配对；`latest_input` 仅用户消息有意义，`false` 表示客户端重放的历史。 */
+export interface CredentialHit {
+  rule_id: string
+  source_type: string
+  latest_input?: boolean
 }
 
 export interface CredentialDiscoverySummary {
   interaction_id: string
   api_key_name: string | null
+  /** 当前筛选下该 Interaction 最近一次命中的时间。 */
   discovered_at: number
   new_credential_count: number
-  rule_ids: string[]
-  source_types: string[]
+  created: CredentialHit[]
+  reused: CredentialHit[]
   status: string
   observation_gap: boolean
 }
@@ -81,5 +92,4 @@ export interface CredentialDiscoverySummary {
 export interface CredentialDiscoveryPage {
   items: CredentialDiscoverySummary[]
   next_cursor: string | null
-  observation_gap: boolean
 }

@@ -40,6 +40,7 @@ const PROCESS_KINDS: Record<string, true> = {
   native_compaction_associated: true,
   input_preview_recorded: true,
   credential_mappings_created: true,
+  credential_mappings_reused: true,
   checkpoint: true,
   wire: true,
   client_visible_content: true,

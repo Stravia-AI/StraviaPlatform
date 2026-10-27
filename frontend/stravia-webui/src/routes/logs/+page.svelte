@@ -1,6 +1,8 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { onMount, tick } from 'svelte'
+import { goto } from '$app/navigation'
+import { resolve } from '$app/paths'
 import { page } from '$app/state'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { SvelteFlowProvider } from '@xyflow/svelte'
@@ -14,6 +16,8 @@ import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { formatCompactCount } from '#lib/format.js'
+import { HIT_HIGHLIGHT_QUERY, HIT_HIGHLIGHT_VALUE } from '#lib/credential-hit-records.js'
+import { credentialRulesQuery, customCredentialRulesQuery } from '#lib/credential-protection-queries.js'
 import { effectiveModelDisplayName } from '#lib/logical-model.js'
 import { observationStatusLabel } from '#lib/observation-labels.js'
 import { observationOutputPreview } from '#lib/observation-conversation.js'
@@ -123,11 +127,31 @@ $effect(() => {
   }
 })
 
+// 派生值按值去重：只改 highlight 参数的导航不会重新打开 Interaction。
+const deepLinkId = $derived(page.url.searchParams.get('interaction'))
 $effect(() => {
-  const id = page.url.searchParams.get('interaction')
-  if (!id) return
-  void ws.deepLinkInteraction(id)
+  if (deepLinkId) void ws.deepLinkInteraction(deepLinkId)
 })
+
+// 仅从命中记录进入（highlight 参数）时高亮；离开该 Interaction 或点「清除高亮」即清除参数。
+const highlightId = $derived(page.url.searchParams.get(HIT_HIGHLIGHT_QUERY) === HIT_HIGHLIGHT_VALUE ? deepLinkId : null)
+const hitRulesQuery = createQuery(() => credentialRulesQuery(highlightId !== null))
+const hitCustomRulesQuery = createQuery(() => customCredentialRulesQuery(highlightId !== null))
+const hitRuleNames = $derived(
+  new Map(
+    [...(hitCustomRulesQuery.data ?? []), ...(hitRulesQuery.data?.rules ?? [])].map((rule) => [rule.id, rule.name]),
+  ),
+)
+
+function clearHighlight(): void {
+  if (!highlightId) return
+  void goto(resolve(`logs?interaction=${encodeURIComponent(highlightId)}`), { replace: true, reset: false })
+}
+const credentialHits = $derived(
+  highlightId !== null && ws.selectedInteraction?.id === highlightId
+    ? { ruleNames: hitRuleNames, onclear: clearHighlight }
+    : undefined,
+)
 
 function durationLabel(minutes: number): string {
   if (minutes < 60) return m.observation_window_minutes({ count: minutes })
@@ -365,7 +389,10 @@ async function downloadBundle(): Promise<void> {
               followPaused={ws.followPaused}
               newActivityAvailable={ws.hasNewActivity}
               fitProgress={ws.fitProgress}
-              onselect={(item: InteractionSummary) => void ws.selectInteraction(item)}
+              onselect={(item: InteractionSummary) => {
+                if (item.id !== highlightId) clearHighlight()
+                void ws.selectInteraction(item)
+              }}
               onloadmore={() => void ws.loadNextRootBatch()}
               onfitall={() => void ws.fitAll()}
               onmanualmove={() => ws.pauseFollow()}
@@ -385,11 +412,15 @@ async function downloadBundle(): Promise<void> {
             liveCapacity={ws.liveCapacityGaps.includes(ws.selectedInteraction.id)}
             olderLoading={ws.olderLoading}
             onolder={ws.loadOlderEvents}
+            {credentialHits}
             loading={ws.detailLoading}
             width={inspectorWidth}
             containerWidth={workspaceWidth}
             onwidthchange={(value: number) => (inspectorWidth = value)}
-            onclose={ws.closeInspector}
+            onclose={() => {
+              clearHighlight()
+              ws.closeInspector()
+            }}
             onbundle={() => void downloadBundle()}
             onlatest={ws.selectedMigrated && ws.migratedRoots.has(ws.selectedMigrated)
               ? () => void ws.refreshAnchor(ws.selectedInteraction?.id)

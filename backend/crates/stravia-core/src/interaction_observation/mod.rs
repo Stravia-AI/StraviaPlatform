@@ -102,6 +102,11 @@ impl ClientConnectionObservation {
 /// client_wait_expired 转 disconnected。窗口必须覆盖合法的长时客户端工具执行。
 const WAITING_CLIENT_IDLE_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// 单个凭据命中事件最多记录的映射数。
+const MAX_EVENT_DISCOVERIES: usize = 50;
+/// 单个映射最多记录的位置数。
+const MAX_DISCOVERY_LOCATORS: usize = 50;
+
 struct Inner {
     store: ObservationStore,
     writer: writer::WriterSender,
@@ -117,42 +122,8 @@ struct Inner {
     bundles: BundleExport,
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
-    unpersisted_gaps: Arc<Mutex<UnpersistedGaps>>,
     ephemeral_root: Option<PathBuf>,
     stopped: AtomicBool,
-}
-
-#[derive(Default)]
-struct UnpersistedGaps {
-    generation: u64,
-    runs: HashMap<String, (i64, u64)>,
-}
-
-impl UnpersistedGaps {
-    fn record(&mut self, run_id: &str, occurred_at: i64) {
-        self.generation += 1;
-        self.runs
-            .insert(run_id.to_owned(), (occurred_at, self.generation));
-    }
-
-    fn visible(&self, now: i64, retention_days: u32) -> bool {
-        self.runs
-            .values()
-            .any(|(at, _)| writer::expires(*at, retention_days) > now)
-    }
-
-    fn expire(&mut self, now: i64, retention_days: u32) {
-        self.runs
-            .retain(|_, (at, _)| writer::expires(*at, retention_days) > now);
-    }
-
-    fn clear_removed(&mut self, covered: &HashMap<String, (i64, u64)>, removed: &[String]) {
-        for run_id in removed {
-            if self.runs.get(run_id) == covered.get(run_id) {
-                self.runs.remove(run_id);
-            }
-        }
-    }
 }
 
 impl InteractionObservation {
@@ -220,7 +191,6 @@ impl InteractionObservation {
         let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
         let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
-        let unpersisted_gaps = Arc::new(Mutex::new(UnpersistedGaps::default()));
         let (writer, task) = writer::spawn(writer::WriterDeps {
             store: store.clone(),
             debug_trace_index: Arc::clone(&debug_trace_index),
@@ -230,7 +200,6 @@ impl InteractionObservation {
             traces: traces.clone(),
             active_traces: Arc::clone(&active_traces),
             partial_trace_count: Arc::clone(&partial_trace_count),
-            unpersisted_gaps: Arc::clone(&unpersisted_gaps),
             live: Arc::clone(&live_content),
             generation_chains,
         });
@@ -261,7 +230,6 @@ impl InteractionObservation {
                 bundles,
                 active_traces,
                 partial_trace_count,
-                unpersisted_gaps,
                 ephemeral_root,
                 stopped: AtomicBool::new(false),
             }),
@@ -373,17 +341,10 @@ impl InteractionObservation {
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
-        let covered = self.inner.unpersisted_gaps.lock().runs.clone();
         if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
             tracing::debug!(%error, "observation writer unavailable during history clear");
         }
         self.flush().await?;
-        let mut known_runs = Vec::new();
-        for run_id in covered.keys() {
-            if self.inner.store.contains_gap_run(run_id).await? {
-                known_runs.push(run_id.clone());
-            }
-        }
         let result = self.inner.store.mark_clear_tombstones().await?;
         let (_, tomb) = self.inner.store.manifest_ids().await?;
         let mut deleted = Vec::new();
@@ -395,17 +356,6 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         self.purge_history(None).await?;
-        let mut removed = Vec::new();
-        for run_id in known_runs {
-            if !self.inner.store.contains_gap_run(&run_id).await? {
-                removed.push(run_id);
-            }
-        }
-        // Missing admission ownership is not proof that cleanup covered the loss.
-        self.inner
-            .unpersisted_gaps
-            .lock()
-            .clear_removed(&covered, &removed);
         let (_, partial) = self
             .inner
             .store
@@ -448,10 +398,6 @@ impl InteractionObservation {
                 .fetch_max(event.sequence, Ordering::AcqRel);
             let _ = self.inner.updates.send(ObservationUpdate::Event(event));
         }
-        self.inner
-            .unpersisted_gaps
-            .lock()
-            .expire(now, self.inner.retention_days.load(Ordering::Acquire));
         let (_, partial) = self
             .inner
             .store
@@ -950,16 +896,12 @@ impl IngressObserver {
                 inner.finalization.lock().take();
             }
             inner.gap.store(true, Ordering::Release);
-            self.observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&inner.run_id, writer::now());
         }
         drop(ingress);
         RunObserver {
             inner: Arc::new(inner),
             retention_detached: false,
+            client_input: true,
         }
     }
     pub(crate) fn reject(mut self, outcome: RejectedOutcome) {
@@ -1013,12 +955,16 @@ impl Drop for IngressObserver {
 pub(crate) struct RunObserver {
     inner: Arc<RunObserverInner>,
     retention_detached: bool,
+    /// 句柄观察的 Model Turn 请求是否就是客户端的请求。内部 Agent 轮次共用客户端 Run，
+    /// 但它的最后一条用户条目是平台构造的，不是客户端的本次输入。
+    client_input: bool,
 }
 
 /// A committed asynchronous publication may outlive the request future that
 /// started it. Holding the shared observer keeps finalization behind that publication.
 pub(crate) struct RunPublicationGuard {
     inner: Arc<RunObserverInner>,
+    client_input: bool,
 }
 
 struct RunObserverInner {
@@ -1052,6 +998,16 @@ impl RunObserver {
         Self {
             inner: self.inner.clone(),
             retention_detached: true,
+            client_input: self.client_input,
+        }
+    }
+
+    /// 内部 Agent 轮次使用：凭据命中不再把平台构造的用户条目当作客户端的本次输入。
+    pub(crate) fn for_agent_turn(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            retention_detached: self.retention_detached,
+            client_input: false,
         }
     }
 
@@ -1146,12 +1102,6 @@ impl RunObserver {
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
 
@@ -1186,12 +1136,6 @@ impl RunObserver {
         });
         if writer.is_closed() {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
@@ -1204,6 +1148,7 @@ impl RunObserver {
         let _boundary = self.inner.event_boundary.lock();
         (!self.inner.terminal.load(Ordering::Acquire)).then(|| RunPublicationGuard {
             inner: self.inner.clone(),
+            client_input: self.client_input,
         })
     }
     pub(crate) fn record_failure(&self, error: FailureDiagnostic) {
@@ -1347,12 +1292,6 @@ impl RunObserver {
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     fn send_event(&self, mut event: RunEvent) {
@@ -1450,12 +1389,6 @@ impl RunObserver {
             else {
                 *queued = None;
                 self.inner.gap.store(true, Ordering::Release);
-                self.inner
-                    .observation
-                    .inner
-                    .unpersisted_gaps
-                    .lock()
-                    .record(&self.inner.run_id, writer::now());
                 return;
             };
             let pending = Arc::new(Mutex::new(writer::QueuedText::new(event)));
@@ -1483,11 +1416,6 @@ impl RunObserver {
             let _ = error;
             *queued = None;
             self.inner.gap.store(true, Ordering::Release);
-            let observation = &self.inner.observation.inner;
-            observation
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
@@ -1520,12 +1448,6 @@ impl RunObserver {
                 // 保留槽只保证容量；接收端退出时 send 不返回错误，仍须留下缺口。
                 if sender.is_closed() {
                     self.inner.gap.store(true, Ordering::Release);
-                    self.inner
-                        .observation
-                        .inner
-                        .unpersisted_gaps
-                        .lock()
-                        .record(&self.inner.run_id, finished_at);
                 }
             }
             // Preserve Finish/Admit FIFO ordering without waiting for observation
@@ -1543,11 +1465,43 @@ impl RunPublicationGuard {
     }
 
     pub(crate) fn credential_mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
+        self.credential_hits(discoveries, |discoveries, omitted_discoveries| {
+            RunEvent::CredentialMappingsCreated {
+                discoveries,
+                omitted_discoveries,
+            }
+        });
+    }
+
+    pub(crate) fn credential_mappings_reused(&self, discoveries: Vec<CredentialDiscovery>) {
+        self.credential_hits(discoveries, |discoveries, omitted_discoveries| {
+            RunEvent::CredentialMappingsReused {
+                discoveries,
+                omitted_discoveries,
+            }
+        });
+    }
+
+    /// 命中事件的载荷上限在这里统一执行：长会话重放会让每个 Model Turn 都命中大量历史秘密，
+    /// 不能让它们占满观察写入队列。凭据标记只对 Debug 开启的 Run 保留。
+    fn credential_hits(
+        &self,
+        mut discoveries: Vec<CredentialDiscovery>,
+        event: impl FnOnce(Vec<CredentialDiscovery>, usize) -> RunEvent,
+    ) {
         if !self.inner.admission_queued {
             return;
         }
+        let omitted_discoveries = discoveries.len().saturating_sub(MAX_EVENT_DISCOVERIES);
+        discoveries.truncate(MAX_EVENT_DISCOVERIES);
+        for discovery in &mut discoveries {
+            bound_locators(discovery, self.client_input);
+            if !self.inner.debug_enabled {
+                discovery.marker = None;
+            }
+        }
         let _boundary = self.inner.event_boundary.lock();
-        let event = RunEvent::CredentialMappingsCreated { discoveries };
+        let event = event(discoveries, omitted_discoveries);
         if self
             .inner
             .observation
@@ -1560,14 +1514,49 @@ impl RunPublicationGuard {
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
+}
+
+/// 按上限裁剪一个映射的位置。位置按规则、来源、工具 ID 排序，直接截断会先丢掉排在后面的
+/// `tool_result` 与 `user_message`，所以每种（规则，来源，是否最新输入）先各留第一项，再按顺序补满。
+fn bound_locators(discovery: &mut CredentialDiscovery, client_input: bool) {
+    if !client_input {
+        for locator in &mut discovery.locators {
+            if locator.source_type == "user_message" {
+                locator.latest_input = Some(false);
+            }
+        }
+        discovery.locators.sort_by(|a, b| {
+            (&a.rule_id, &a.source_type, &a.tool_id, a.latest_input).cmp(&(
+                &b.rule_id,
+                &b.source_type,
+                &b.tool_id,
+                b.latest_input,
+            ))
+        });
+        discovery.locators.dedup_by(|a, b| {
+            (&a.rule_id, &a.source_type, &a.tool_id, a.latest_input)
+                == (&b.rule_id, &b.source_type, &b.tool_id, b.latest_input)
+        });
+    }
+    if discovery.locators.len() <= MAX_DISCOVERY_LOCATORS {
+        return;
+    }
+    let mut kinds = std::collections::BTreeSet::new();
+    let (mut kept, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut discovery.locators)
+        .into_iter()
+        .partition(|locator| {
+            kinds.insert((
+                locator.rule_id.clone(),
+                locator.source_type.clone(),
+                locator.latest_input,
+            ))
+        });
+    kept.extend(rest);
+    discovery.omitted_locators = kept.len().saturating_sub(MAX_DISCOVERY_LOCATORS);
+    kept.truncate(MAX_DISCOVERY_LOCATORS);
+    discovery.locators = kept;
 }
 
 impl Drop for RunObserverInner {
@@ -2060,7 +2049,9 @@ mod snapshot_tests {
                 discoveries: vec![CredentialDiscovery {
                     rule_ids: vec!["rule".into()],
                     source_types: vec!["user_message".into()],
+                    ..Default::default()
                 }],
+                omitted_discoveries: 0,
             };
             let usage = RunEvent::UsageConfirmed {
                 model_turn_id: "mixed-turn".into(),
@@ -2440,14 +2431,6 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(missing, 0);
-        assert!(
-            observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .runs
-                .contains_key("no-receipt-slot")
-        );
         Ok(())
     }
 
@@ -3828,6 +3811,101 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn credential_hit_events_bound_locators_without_losing_a_rule_source_pair()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "credential-hit-bounds", facts(Vec::new()));
+        let locator =
+            |source: &str, tool: Option<String>, latest: Option<bool>| CredentialLocator {
+                rule_id: "github-pat".into(),
+                source_type: source.into(),
+                tool_id: tool,
+                latest_input: latest,
+            };
+        let hit = |locators| CredentialDiscovery {
+            rule_ids: vec!["github-pat".into()],
+            source_types: vec![
+                "tool_arguments".into(),
+                "tool_result".into(),
+                "user_message".into(),
+            ],
+            locators,
+            omitted_locators: 0,
+            marker: Some("<!--sr:abcdefghijklmnopqrstuvwxyzab-->".into()),
+        };
+        // 引擎按规则、来源、工具 ID 排序；上限截断不能先丢掉排在最后的来源。
+        let mut replay: Vec<_> = (0..120)
+            .map(|n| locator("tool_arguments", Some(format!("call-{n:03}")), None))
+            .collect();
+        replay.push(locator("tool_result", Some("call-000".into()), None));
+        replay.push(locator("user_message", None, Some(true)));
+        run.publication_guard()
+            .expect("live run")
+            .credential_mappings_reused(vec![hit(replay)]);
+        // 内部 Agent 轮次的最后一条用户条目是平台构造的，不能被当作客户端的本次输入。
+        run.for_agent_turn()
+            .publication_guard()
+            .expect("live run")
+            .credential_mappings_created(vec![hit(vec![
+                locator("user_message", None, Some(false)),
+                locator("user_message", None, Some(true)),
+            ])]);
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let payload = |kind: &str| {
+            let pool = pool.clone();
+            let kind = kind.to_owned();
+            async move {
+                let bytes: Vec<u8> = sqlx::query_scalar(
+                    "SELECT payload FROM observation_events WHERE run_id='credential-hit-bounds' AND kind=?",
+                )
+                .bind(kind)
+                .fetch_one(&pool)
+                .await?;
+                stored_payload(&bytes)
+            }
+        };
+        let reused = payload("credential_mappings_reused").await?;
+        let discovery = &reused["discoveries"][0];
+        let locators = discovery["locators"].as_array().unwrap();
+        assert_eq!(locators.len(), MAX_DISCOVERY_LOCATORS);
+        assert_eq!(discovery["omitted_locators"], 122 - MAX_DISCOVERY_LOCATORS);
+        assert!(
+            locators
+                .iter()
+                .any(|item| item["source_type"] == "tool_result")
+        );
+        assert!(
+            locators
+                .iter()
+                .any(|item| item["source_type"] == "user_message" && item["latest_input"] == true)
+        );
+        assert!(
+            discovery.get("marker").is_none(),
+            "Debug 关闭的 Run 不记录占位符"
+        );
+
+        let created = payload("credential_mappings_created").await?;
+        let locators = created["discoveries"][0]["locators"].as_array().unwrap();
+        assert_eq!(locators.len(), 1);
+        assert_eq!(locators[0]["latest_input"], false);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn verified_parent_historical_user_preview_is_not_republished() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
 
@@ -4138,34 +4216,58 @@ mod snapshot_tests {
             })
             .to_string()
         };
-        for (sequence, interaction, time, payload) in [
+        // 升级后的复用事件：带逐项位置，且规则与来源在同一映射里不能被误配对。
+        let reused = serde_json::json!({
+            "kind": "credential_mappings_reused",
+            "discoveries": [{
+                "rule_ids": ["rule-a", "rule-d"],
+                "source_types": ["user_message", "tool_result"],
+                "locators": [
+                    {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false},
+                    {"rule_id": "rule-d", "source_type": "tool_result", "tool_id": "call-1"},
+                ],
+            }]
+        })
+        .to_string();
+        for (sequence, interaction, time, kind, payload) in [
             (
                 1,
                 Some("first"),
                 now - 30,
+                "credential_mappings_created",
                 discovery(&["rule-a"], &["user_message"]),
             ),
             (
                 2,
                 Some("second"),
                 now - 20,
+                "credential_mappings_created",
                 discovery(&["rule-b"], &["tool_result"]),
             ),
             (
                 3,
                 Some("first"),
                 now - 10,
+                "credential_mappings_created",
                 discovery(&["rule-a", "rule-c"], &["tool_result"]),
             ),
             (
                 4,
                 None,
                 now,
+                "credential_mappings_created",
                 discovery(&["internal-rule"], &["system_history"]),
             ),
+            (
+                5,
+                Some("first"),
+                now - 5,
+                "credential_mappings_reused",
+                reused,
+            ),
         ] {
-            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
-                .bind(sequence).bind(time).bind(interaction).bind(crate::storage_codec::encode(payload.as_bytes().into())?)
+            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?)")
+                .bind(sequence).bind(time).bind(interaction).bind(kind).bind(crate::storage_codec::encode(payload.as_bytes().into())?)
                 .bind(now + 86_400_000).execute(&pool).await?;
         }
         pool.close().await;
@@ -4177,37 +4279,92 @@ mod snapshot_tests {
             pool.clone(),
             Arc::new(manifest_index::DebugTraceIndex::load(directory.path())?),
         );
+        let hit = |rule_id: &str, source_type: &str, latest_input| CredentialHit {
+            rule_id: rule_id.into(),
+            source_type: source_type.into(),
+            latest_input,
+        };
         let first = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: None,
                 limit: Some(1),
+                ..Default::default()
             })
             .await?;
-        assert!(first.observation_gap);
         assert_eq!(first.items.len(), 1);
         let item = &first.items[0];
         assert_eq!(item.interaction_id, "first");
-        assert_eq!(item.discovered_at, now - 10);
+        // 默认筛选包含复用：行时间是最近一次命中，不是最近一次新增。
+        assert_eq!(item.discovered_at, now - 5);
         assert_eq!(item.new_credential_count, 2);
-        assert_eq!(item.rule_ids, ["rule-a", "rule-c"]);
-        assert_eq!(item.source_types, ["tool_result", "user_message"]);
+        // 升级前的事件没有逐项位置，按单个映射的规则集合与来源集合组合还原。
+        assert_eq!(
+            item.created,
+            [
+                hit("rule-a", "tool_result", None),
+                hit("rule-a", "user_message", None),
+                hit("rule-c", "tool_result", None),
+            ]
+        );
+        assert_eq!(
+            item.reused,
+            [
+                hit("rule-a", "user_message", Some(false)),
+                hit("rule-d", "tool_result", None),
+            ]
+        );
         assert_eq!(item.status, "failed");
         assert!(!item.observation_gap);
         let second = store
             .credential_discoveries(CredentialDiscoveryQuery {
                 cursor: first.next_cursor,
                 limit: Some(1),
+                ..Default::default()
             })
             .await?;
         assert_eq!(second.items.len(), 1);
         assert_eq!(second.items[0].interaction_id, "second");
         assert_eq!(second.items[0].status, "interrupted");
         assert!(second.next_cursor.is_none());
+        for (kind, time, count, created, reused) in [
+            (CredentialHitKind::Created, now - 10, 2, 3, 0),
+            (CredentialHitKind::Reused, now - 5, 0, 0, 2),
+        ] {
+            let page = store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    kind,
+                    ..Default::default()
+                })
+                .await?;
+            // 仅复用时没有新增的 Interaction 不会出现；仅新增时不看复用事件的时间。
+            let ids: Vec<_> = page
+                .items
+                .iter()
+                .map(|item| item.interaction_id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                if created > 0 {
+                    vec!["first", "second"]
+                } else {
+                    vec!["first"]
+                }
+            );
+            let item = &page.items[0];
+            assert_eq!(
+                (
+                    item.discovered_at,
+                    item.new_credential_count,
+                    item.created.len(),
+                    item.reused.len()
+                ),
+                (time, count, created, reused)
+            );
+        }
         assert!(
             store
                 .credential_discoveries(CredentialDiscoveryQuery {
                     cursor: Some("invalid".into()),
-                    limit: None,
+                    ..Default::default()
                 })
                 .await
                 .is_err()
@@ -4219,7 +4376,6 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
         assert!(empty.items.is_empty());
-        assert!(empty.observation_gap);
         sqlx::query("UPDATE interaction_observations SET expires_at=0")
             .execute(&pool)
             .await?;
@@ -4227,7 +4383,6 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
         assert!(expired.items.is_empty());
-        assert!(!expired.observation_gap);
         pool.close().await;
         assert!(
             store
@@ -4427,33 +4582,8 @@ mod snapshot_tests {
         Ok(())
     }
 
-    #[test]
-    fn undurable_gaps_follow_current_retention_and_clear_generations() {
-        let day = 86_400_000;
-        let mut gaps = UnpersistedGaps::default();
-        gaps.record("completed", day);
-        assert!(!gaps.visible(3 * day, 1));
-        assert!(gaps.visible(3 * day, 7));
-        assert!(!gaps.visible(3 * day, 0));
-
-        let covered = gaps.runs.clone();
-        // Even a loss in the same millisecond must survive the in-flight clear.
-        gaps.record("completed", day);
-        gaps.clear_removed(&covered, &["completed".into()]);
-        assert!(gaps.visible(day, 1));
-        let covered = gaps.runs.clone();
-        gaps.clear_removed(&covered, &["completed".into()]);
-        assert!(!gaps.visible(day, 1));
-
-        let covered = gaps.runs.clone();
-        gaps.record("new-admission", day);
-        gaps.clear_removed(&covered, &[]);
-        assert!(gaps.visible(day, 1));
-    }
-
     #[tokio::test]
-    async fn clearing_gaps_preserves_active_discoveries_and_unknown_admissions()
-    -> anyhow::Result<()> {
+    async fn clearing_history_preserves_active_interaction_discoveries() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
@@ -4480,11 +4610,22 @@ mod snapshot_tests {
         };
         let active = make_run("active");
         let completed = make_run("completed");
+        let discovery = |rule: &str| CredentialDiscovery {
+            rule_ids: vec![rule.into()],
+            source_types: vec!["user_message".into()],
+            ..Default::default()
+        };
         active.record(RunEvent::CredentialMappingsCreated {
-            discoveries: vec![CredentialDiscovery {
-                rule_ids: vec!["rule".into()],
-                source_types: vec!["user_message".into()],
-            }],
+            discoveries: vec![discovery("created")],
+            omitted_discoveries: 0,
+        });
+        active.record(RunEvent::CredentialMappingsReused {
+            discoveries: vec![discovery("reused")],
+            omitted_discoveries: 0,
+        });
+        completed.record(RunEvent::CredentialMappingsCreated {
+            discoveries: vec![discovery("completed")],
+            omitted_discoveries: 0,
         });
         completed.finish(RunOutcome {
             client_output_committed: false,
@@ -4496,31 +4637,15 @@ mod snapshot_tests {
             generation_root_id: None,
         });
         observation.flush().await?;
-        {
-            let mut gaps = observation.inner.unpersisted_gaps.lock();
-            gaps.record("completed", writer::now());
-        }
         observation.clear_history().await?;
         let page = observation
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
-        assert!(!page.observation_gap);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].status, "running");
         assert_eq!(page.items[0].new_credential_count, 1);
-        let active_interaction = page.items[0].interaction_id.clone();
-        observation
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .record("active", writer::now());
-        observation.clear_history().await?;
-        let page = observation
-            .credential_discoveries(CredentialDiscoveryQuery::default())
-            .await?;
-        assert!(page.observation_gap);
-        assert_eq!(page.items[0].interaction_id, active_interaction);
-        assert_eq!(page.items[0].new_credential_count, 1);
+        assert_eq!(page.items[0].created.len(), 1);
+        assert_eq!(page.items[0].reused.len(), 1);
 
         active.finish(RunOutcome {
             client_output_committed: false,
@@ -4533,39 +4658,11 @@ mod snapshot_tests {
         });
         observation.clear_history().await?;
         assert!(
-            !observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
-        );
-        let mut clearing = Box::pin(observation.clear_history());
-        // The single-threaded runtime cannot consume the writer barrier in this poll.
-        assert!(futures::poll!(clearing.as_mut()).is_pending());
-        observation
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .record("lost-admission", writer::now());
-        clearing.await?;
-        assert!(
             observation
                 .credential_discoveries(CredentialDiscoveryQuery::default())
                 .await?
-                .observation_gap
-        );
-        observation.clear_history().await?;
-        assert!(
-            observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
-        );
-        observation.set_retention_days(0).await?;
-        assert!(
-            !observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
+                .items
+                .is_empty()
         );
         drop(active);
         drop(completed);

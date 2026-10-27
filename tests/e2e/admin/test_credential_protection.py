@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
+import string
 import time
 from contextlib import closing
 from typing import Any
@@ -33,18 +35,46 @@ def discoveries(env: dict[str, Any], **query: object) -> dict[str, Any]:
     return body["data"]
 
 
-def key_discoveries(env: dict[str, Any], key_name: str) -> list[dict[str, Any]]:
+def key_discoveries(env: dict[str, Any], key_name: str, **query: object) -> list[dict[str, Any]]:
     items = []
     cursor = None
     seen = set()
     while True:
-        page = discoveries(env, **({"cursor": cursor} if cursor else {}), limit=100)
+        page = discoveries(env, **({"cursor": cursor} if cursor else {}), limit=100, **query)
         items.extend(item for item in page["items"] if item["api_key_name"] == key_name)
         cursor = page["next_cursor"]
         if cursor is None:
             return items
         assert cursor not in seen
         seen.add(cursor)
+
+
+def pairs(hits: list[dict[str, Any]]) -> set[tuple[str, str, bool | None]]:
+    return {(hit["rule_id"], hit["source_type"], hit.get("latest_input")) for hit in hits}
+
+
+def hit_events(env: dict[str, Any], interaction_id: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Run 事件流里的命中事件，连同所属 Run（用于读取 Debug 快照）。"""
+    return [
+        (run, event)
+        for run in _detail(env, interaction_id)["runs"]
+        for event in run["events"]
+        if event["kind"] in {"credential_mappings_created", "credential_mappings_reused"}
+    ]
+
+
+def synthetic_token(label: str, index: int) -> str:
+    """确定性的 GitHub PAT 形态合成令牌；不是任何真实凭据。"""
+    alphabet = string.ascii_letters + string.digits
+    return "ghp_" + "".join(random.Random(f"{label}-{index}").choices(alphabet, k=36))
+
+
+def set_debug(env: dict[str, Any], enabled: bool) -> None:
+    status, body = http_request(
+        "PUT", f"{env['admin']}/api/v1/observations/debug",
+        payload={"enabled": enabled, "confirmed": enabled}, headers=env["auth"],
+    )
+    assert status == 200, body
 
 
 @pytest.mark.e2e
@@ -149,7 +179,11 @@ def test_bare_kingfisher_credentials_are_protected_and_restored(admin_env: dict[
             assert mapping_sql(env, "SELECT COUNT(*) FROM reversible_redaction_mappings")[0][0] == before + 2
             rows = _wait_for("Kingfisher discoveries", lambda: key_discoveries(env, f"{model}-key"))
             assert rows[0]["new_credential_count"] == 2
-            assert {"kingfisher.openai.1", "kingfisher.zhipu.1"} <= set(rows[0]["rule_ids"])
+            assert {
+                ("kingfisher.openai.1", "user_message", True),
+                ("kingfisher.zhipu.1", "user_message", True),
+            } <= pairs(rows[0]["created"])
+            assert rows[0]["reused"] == []
             assert all(first not in line and second not in line for line in env["logs"])
         finally:
             set_enabled(env, False)
@@ -178,10 +212,28 @@ def test_discoveries_group_tool_continuation_and_split_new_user(admin_env: dict[
             assert status == 200, response
             grouped = _wait_for("second mapping in same interaction", lambda: (lambda rows: rows if len(rows) == 1 and rows[0]["new_credential_count"] == 2 else None)(key_discoveries(env, f"{model}-key")))[0]
             assert grouped["interaction_id"] == first_item["interaction_id"]
-            assert {"user_message", "tool_result"} <= set(grouped["source_types"])
-            assert "github-pat" in grouped["rule_ids"]
+            # 同一 Interaction 的第二次请求：工具结果里的新凭据是新增，重放的用户消息里的旧凭据是复用。
+            assert ("github-pat", "user_message", True) in pairs(grouped["created"])
+            assert any(hit["source_type"] == "tool_result" for hit in grouped["created"])
+            assert ("github-pat", "user_message", True) in pairs(grouped["reused"])
             detail = _wait_for("two completed runs", lambda: (lambda value: value if len(value["runs"]) == 2 else None)(_detail(env, grouped["interaction_id"])))
             assert len(detail["runs"]) == 2
+            # 块级定位的契约：工具来源带客户端的工具调用 ID，用户消息只带是否为最新输入，其余来源两者都没有。
+            call_id = assistant["tool_calls"][0]["id"]
+            locators = [
+                locator
+                for _, event in hit_events(env, grouped["interaction_id"])
+                for discovery in event["payload"]["discoveries"]
+                for locator in discovery["locators"]
+            ]
+            assert {locator["tool_id"] for locator in locators if locator["source_type"] == "tool_result"} == {call_id}
+            assert {locator["tool_id"] for locator in locators if locator["source_type"] == "tool_arguments"} <= {call_id}
+            assert all(
+                ("tool_id" in locator) == (locator["source_type"] in {"tool_arguments", "tool_result"})
+                and ("latest_input" in locator) == (locator["source_type"] == "user_message")
+                for locator in locators
+            ), locators
+            assert any(locator.get("latest_input") is True for locator in locators)
             # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
             time.sleep(2.01)
             messages += [response["choices"][0]["message"], {"role": "user", "content": third}]
@@ -191,6 +243,22 @@ def test_discoveries_group_tool_continuation_and_split_new_user(admin_env: dict[
             assert [row["new_credential_count"] for row in rows] == [1, 2]
             assert rows[0]["interaction_id"] != grouped["interaction_id"]
             assert rows[0]["discovered_at"] >= rows[1]["discovered_at"]
+            newest = rows[0]
+            assert any(hit["source_type"] == "user_message" and hit["latest_input"] is True for hit in newest["created"])
+            # 客户端重放的旧用户消息不再是本次输入。
+            assert ("github-pat", "user_message", False) in pairs(newest["reused"])
+            assert any(hit["source_type"] == "tool_result" for hit in newest["reused"])
+            name = f"{model}-key"
+            created_only = key_discoveries(env, name, kind="created")
+            assert [row["interaction_id"] for row in created_only] == [row["interaction_id"] for row in rows]
+            assert all(row["reused"] == [] for row in created_only)
+            reused_only = key_discoveries(env, name, kind="reused")
+            assert {row["interaction_id"] for row in reused_only} == {row["interaction_id"] for row in rows}
+            assert all(row["created"] == [] and row["new_credential_count"] == 0 for row in reused_only)
+            status, invalid = http_request(
+                "GET", f"{env['admin']}{BASE}/discoveries?kind=everything", headers=env["auth"],
+            )
+            assert status in {400, 422}, invalid
             assert {row["interaction_id"] for row in rows} == {row["id"] for row in _route_interactions(env, route)}
             serialized = json.dumps(rows)
             assert all(secret not in serialized for secret in [SECRET, second, third])
@@ -202,10 +270,11 @@ def test_discoveries_group_tool_continuation_and_split_new_user(admin_env: dict[
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_observation_write_gap_follows_retention_changes(admin_env: dict[str, Any]) -> None:
+def test_hit_write_failure_keeps_the_request_and_marks_only_its_interaction(admin_env: dict[str, Any]) -> None:
     with echo_provider() as (url, _received):
         env = {**admin_env, "mock": url}
-        _, key = _create_route(env, "credential-retention-gap")
+        model = "credential-hit-write-gap"
+        route, key = _create_route(env, model)
         set_enabled(env, True)
         mapping_sql(env, """
             CREATE TRIGGER reject_credential_observation BEFORE INSERT ON observation_events
@@ -213,25 +282,121 @@ def test_observation_write_gap_follows_retention_changes(admin_env: dict[str, An
             BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END
         """)
         try:
-            status, response = _proxy(
-                env, key, "credential-retention-gap", [{"role": "user", "content": SECRET}]
-            )
+            status, response = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
             assert status == 200, response
-            assert discoveries(env)["observation_gap"]
-            status, body = http_request(
-                "PUT", f"{env['admin']}/api/v1/settings/log_retention_days",
-                payload={"value": "0"}, headers=env["auth"],
+            assert response["choices"][0]["message"]["content"] == SECRET
+            interaction = _wait_for(
+                "Interaction with the missing hit event",
+                lambda: next((item for item in _route_interactions(env, route) if item["observation_gap"]), None),
             )
-            assert status == 200, body
-            assert not discoveries(env)["observation_gap"]
+            page = discoveries(env)
+            assert "observation_gap" not in page
+            assert all(item["interaction_id"] != interaction["id"] for item in page["items"])
         finally:
             mapping_sql(env, "DROP TRIGGER reject_credential_observation")
             set_enabled(env, False)
-            status, body = http_request(
-                "PUT", f"{env['admin']}/api/v1/settings/log_retention_days",
-                payload={"value": "7"}, headers=env["auth"],
-            )
-            assert status == 200, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_failed_upstream_request_keeps_its_hits(admin_env: dict[str, Any]) -> None:
+    with echo_provider(reject=True) as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-hit-failed"
+        _, key = _create_route(env, model)
+        set_enabled(env, True)
+        try:
+            status, _ = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
+            assert status != 200
+            assert received and SECRET not in json.dumps(received)
+            rows = _wait_for("hit of the failed request", lambda: key_discoveries(env, f"{model}-key"))
+            assert pairs(rows[0]["created"]) == {("github-pat", "user_message", True)}
+            assert rows[0]["status"] != "completed"
+        finally:
+            set_enabled(env, False)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_hit_events_carry_placeholder_markers_only_for_debug_runs(admin_env: dict[str, Any]) -> None:
+    other = synthetic_token("marker", 0)
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-hit-markers"
+        route, key = _create_route(env, model)
+        set_enabled(env, True)
+        try:
+            status, response = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
+            assert status == 200, response
+            set_debug(env, True)
+            status, response = _proxy(env, key, model, [{"role": "user", "content": f"{SECRET} {other}"}])
+            assert status == 200, response
+            outbound = received[-1]["body"]["messages"][-1]["content"]
+            references = set(REFERENCE.findall(outbound))
+            assert len(references) == 2 and other not in outbound
+
+            def debug_run_events() -> list[tuple[dict[str, Any], dict[str, Any]]] | None:
+                events = [
+                    pair for interaction in _route_interactions(env, route)
+                    for pair in hit_events(env, interaction["id"])
+                ]
+                return events if {run["debug_enabled"] for run, _ in events} == {False, True} else None
+
+            events = _wait_for("hit events from a plain and a Debug Run", debug_run_events)
+            debug_markers: set[str] = set()
+            for run, event in events:
+                for discovery in event["payload"]["discoveries"]:
+                    if run["debug_enabled"]:
+                        assert REFERENCE.fullmatch(discovery["marker"]), discovery
+                        debug_markers.add(discovery["marker"])
+                    else:
+                        assert "marker" not in discovery, discovery
+            assert debug_markers == references
+            # Debug 关闭后的复用同样不得带占位符；复用事件在每次重放时重复出现，这是最常见的路径。
+            set_debug(env, False)
+            status, response = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
+            assert status == 200, response
+
+            def plain_reuse() -> bool | None:
+                return any(
+                    not run["debug_enabled"] and event["kind"] == "credential_mappings_reused"
+                    for interaction in _route_interactions(env, route)
+                    for run, event in hit_events(env, interaction["id"])
+                ) or None
+
+            _wait_for("a reuse event from a plain Run", plain_reuse)
+            for interaction in _route_interactions(env, route):
+                for run, event in hit_events(env, interaction["id"]):
+                    assert run["debug_enabled"] or all("marker" not in item for item in event["payload"]["discoveries"])
+            listed = json.dumps(discoveries(env))
+            assert REFERENCE.search(listed) is None and '"marker"' not in listed
+        finally:
+            set_debug(env, False)
+            set_enabled(env, False)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_hit_event_caps_discoveries_and_counts_the_overflow(admin_env: dict[str, Any]) -> None:
+    tokens = [synthetic_token("cap", index) for index in range(51)]
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-hit-cap"
+        route, key = _create_route(env, model)
+        set_enabled(env, True)
+        try:
+            assert len(detect_text(env, " ".join(tokens))) == 51
+            status, response = _proxy(env, key, model, [{"role": "user", "content": " ".join(tokens)}])
+            assert status == 200, response
+            assert not any(token in json.dumps(received) for token in tokens)
+            row = _wait_for("capped hit row", lambda: key_discoveries(env, f"{model}-key"))[0]
+            assert row["new_credential_count"] == 51
+            assert pairs(row["created"]) == {("github-pat", "user_message", True)}
+            (_, event), = hit_events(env, row["interaction_id"])
+            assert len(event["payload"]["discoveries"]) == 50
+            assert event["payload"]["omitted_discoveries"] == 1
+        finally:
+            set_enabled(env, False)
 
 
 @pytest.mark.e2e
