@@ -132,7 +132,7 @@ $effect(() => {
   <article class="min-w-0 border-b last:border-b-0">
     <Button
       variant="ghost"
-      class="w-full items-start justify-start gap-3 rounded-md px-2 py-3 text-left font-normal whitespace-normal"
+      class="h-auto w-full items-start justify-start gap-3 rounded-md px-2 py-3 text-left font-normal whitespace-normal"
       aria-expanded={open}
       aria-controls={`batch-${record.id}`}
       onclick={() => (expanded[record.id] = !expanded[record.id])}>
@@ -142,9 +142,9 @@ $effect(() => {
           open && 'rotate-90',
         )}
         aria-hidden="true" />
-      <span class="flex min-w-0 flex-1 flex-col gap-1">
-        <span class="flex min-w-0 items-baseline justify-between gap-3">
-          <span class="min-w-0 truncate font-medium">{record.provider_name}</span>
+      <span class="flex min-w-0 flex-1 flex-col gap-1.5">
+        <span class="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <span class="max-w-full min-w-0 truncate font-medium">{record.provider_name}</span>
           <time class="shrink-0 font-technical text-xs text-muted-foreground" datetime={record.checked_at}
             >{formatLogTime(record.checked_at)}</time>
         </span>
@@ -169,7 +169,7 @@ $effect(() => {
           {#if record.provider_deleted}<Badge variant="outline">{m.model_changes_deleted()}</Badge>{/if}
         </span>
         {#if !open && updatedModels.length > 0}
-          <span class="text-[0.8125rem] break-words text-foreground">
+          <span class="text-xs break-words text-muted-foreground">
             {m.model_changes_specification_updated()}:
             {updatedModels
               .slice(0, 3)
