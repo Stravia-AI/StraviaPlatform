@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- Release builds no longer compile a bundled-plugin accessor used only by debug-mode development reconciliation, fixing warnings-as-errors failures without disabling the development path. Desktop smoke coverage now handles both responsive observation inspectors, scopes inline settings actions correctly, and opens General settings before exercising updates. WebUI formatting is also normalized for CI.
+- Rust regression fixtures use named observation profiles and equivalent progress-handler control flow to satisfy Clippy without suppressing warnings or changing production behavior.
 - Devin now replays unsigned thinking in its native reasoning field instead of turning it into assistant text. This preserves the reasoning/text boundary across Responses tool continuations, matching the official CLI and OMP integration. Rebuild and re-import the standalone Devin plugin; updating the host alone does not replace installed plugins.
 - Draft connection checks now carry the host-selected runtime Provider Catalog profile into temporary execution. Catalog connections such as CommandCode no longer report an unsupported check merely because their profile is absent from Base's compiled manifest.
 - The Request history failed-requests table no longer flashes a "Loading rows…" overlay over its rows every time a live event arrives. Live and window-sliding refreshes now update the list silently; the overlay stays for explicit loads such as switching windows, filters or tabs, and an existing error notice stays until a refresh succeeds. A live refresh re-queries every row already loaded instead of collapsing back to the first page, and Load more clicked during a refresh now runs after it instead of being dropped.

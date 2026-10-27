@@ -3087,8 +3087,7 @@ test.describe('Interaction Observation canvas', () => {
       })
       await expect(conversation.getByRole('status', { name: 'Loading earlier events', exact: true })).toBeInViewport()
       // Bodies are windowed: the previous page's oldest paragraph is mounted only while the loader is next to it.
-      if (pageIndex === 1)
-        await expect(conversation.getByText('History paragraph 51', { exact: true })).toHaveCount(1)
+      if (pageIndex === 1) await expect(conversation.getByText('History paragraph 51', { exact: true })).toHaveCount(1)
       release()
       await response
     }

@@ -179,16 +179,10 @@ export class ObservationWorkspaceController {
       }
     | undefined
   #rootInteractionsCache:
-    | {
-        roots: ForestRoot[]
-        byId: Map<string, InteractionSummary>
-        rootIds: Map<string, string>
-      }
-    | undefined
+    { roots: ForestRoot[]; byId: Map<string, InteractionSummary>; rootIds: Map<string, string> } | undefined
   #latestCache: { canvasRoots: ForestRoot[]; value: InteractionSummary | undefined } | undefined
   #selectedPathCache:
-    | { canvasRoots: ForestRoot[]; selection: InteractionSummary | undefined; value: Set<string> }
-    | undefined
+    { canvasRoots: ForestRoot[]; selection: InteractionSummary | undefined; value: Set<string> } | undefined
   #rootTotal = 0
   #rootTotalSequence = 0
   #nextCursor: string | null | undefined
@@ -616,11 +610,10 @@ export class ObservationWorkspaceController {
       if (this.#failureQueryAppend === !replace) return inflight
       // 追加与重查依赖对方更新后的 cursor 和列表：并入进行中的请求会让后到的操作静默丢失，故排在其后。
       const version = this.#rangeVersion
-      return inflight.then(
-        (): Promise<void> =>
-          version !== this.#rangeVersion || (!replace && !this.#failureCursor)
-            ? Promise.resolve()
-            : this.#requestFailures(replace, background),
+      return inflight.then((): Promise<void> =>
+        version !== this.#rangeVersion || (!replace && !this.#failureCursor)
+          ? Promise.resolve()
+          : this.#requestFailures(replace, background),
       )
     }
     this.#failureQueryEpoch = this.#rangeVersion
@@ -907,8 +900,7 @@ export class ObservationWorkspaceController {
   }
 
   #refreshSelectedEvents(id: string, selection: number): Promise<void> {
-    if (selection !== this.#selectionVersion || this.#interactionDetail?.interaction.id !== id)
-      return Promise.resolve()
+    if (selection !== this.#selectionVersion || this.#interactionDetail?.interaction.id !== id) return Promise.resolve()
     if (this.#eventsRequest) return this.#eventsRequest
     // 详情已带快照内的首批事件与 runs；只有待处理通知水位超过它时才串行补齐。
     if (this.#eventsPending <= (this.#interactionDetail?.snapshot_sequence ?? 0)) return Promise.resolve()

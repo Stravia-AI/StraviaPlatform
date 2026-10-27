@@ -2105,31 +2105,48 @@ mod tests {
     ) -> anyhow::Result<()> {
         admit_chain_run_profile(
             store,
+            ChainRunProfile {
+                id,
+                run_id,
+                root_id,
+                parent,
+                now,
+                debug_enabled,
+                api_key_name: None,
+                route_id: "route",
+                model_display_name: None,
+            },
+        )
+        .await
+    }
+
+    struct ChainRunProfile<'a> {
+        id: &'a str,
+        run_id: &'a str,
+        root_id: &'a str,
+        parent: Option<&'a str>,
+        now: i64,
+        debug_enabled: bool,
+        api_key_name: Option<&'a str>,
+        route_id: &'a str,
+        model_display_name: Option<&'a str>,
+    }
+
+    async fn admit_chain_run_profile(
+        store: &ObservationStore,
+        profile: ChainRunProfile<'_>,
+    ) -> anyhow::Result<()> {
+        let ChainRunProfile {
             id,
             run_id,
             root_id,
             parent,
             now,
             debug_enabled,
-            None,
-            "route",
-            None,
-        )
-        .await
-    }
-
-    async fn admit_chain_run_profile(
-        store: &ObservationStore,
-        id: &str,
-        run_id: &str,
-        root_id: &str,
-        parent: Option<&str>,
-        now: i64,
-        debug_enabled: bool,
-        api_key_name: Option<&str>,
-        route_id: &str,
-        model_display_name: Option<&str>,
-    ) -> anyhow::Result<()> {
+            api_key_name,
+            route_id,
+            model_display_name,
+        } = profile;
         store
             .admit(Admission {
                 metadata: None,
@@ -2176,33 +2193,51 @@ mod tests {
     ) -> anyhow::Result<()> {
         confirm_tokens_profile(
             store,
-            id,
-            "route",
-            None,
-            "provider",
-            "provider",
-            input,
-            output,
-            cache_read,
-            cache_write,
-            at,
+            TokenProfile {
+                id,
+                route_id: "route",
+                model_display_name: None,
+                provider_id: "provider",
+                provider_name: "provider",
+                input,
+                output,
+                cache_read,
+                cache_write,
+                at,
+            },
         )
         .await
     }
 
-    async fn confirm_tokens_profile(
-        store: &ObservationStore,
-        id: &str,
-        route_id: &str,
-        model_display_name: Option<&str>,
-        provider_id: &str,
-        provider_name: &str,
+    struct TokenProfile<'a> {
+        id: &'a str,
+        route_id: &'a str,
+        model_display_name: Option<&'a str>,
+        provider_id: &'a str,
+        provider_name: &'a str,
         input: i64,
         output: i64,
         cache_read: i64,
         cache_write: i64,
         at: i64,
+    }
+
+    async fn confirm_tokens_profile(
+        store: &ObservationStore,
+        profile: TokenProfile<'_>,
     ) -> anyhow::Result<()> {
+        let TokenProfile {
+            id,
+            route_id,
+            model_display_name,
+            provider_id,
+            provider_name,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            at,
+        } = profile;
         let turn_id = format!("{id}-turn");
         let attempt_id = format!("{id}-attempt");
         store
@@ -3703,29 +3738,33 @@ mod tests {
     async fn combined_filter_scenario(store: &ObservationStore) -> anyhow::Result<()> {
         admit_chain_run_profile(
             store,
-            "combo-a",
-            "combo-a",
-            "combo",
-            None,
-            20_010,
-            false,
-            Some("alpha"),
-            "route-a",
-            Some("model-a"),
+            ChainRunProfile {
+                id: "combo-a",
+                run_id: "combo-a",
+                root_id: "combo",
+                parent: None,
+                now: 20_010,
+                debug_enabled: false,
+                api_key_name: Some("alpha"),
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-a",
-            "route-a",
-            Some("model-a"),
-            "provider-a",
-            "provider-a",
-            4_000,
-            0,
-            0,
-            0,
-            20_011,
+            TokenProfile {
+                id: "combo-a",
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+                provider_id: "provider-a",
+                provider_name: "provider-a",
+                input: 4_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_011,
+            },
         )
         .await?;
         store
@@ -3760,56 +3799,64 @@ mod tests {
             .await?;
         admit_chain_run_profile(
             store,
-            "combo-b",
-            "combo-b",
-            "combo",
-            None,
-            20_020,
-            false,
-            Some("beta"),
-            "route-b",
-            Some("model-b"),
+            ChainRunProfile {
+                id: "combo-b",
+                run_id: "combo-b",
+                root_id: "combo",
+                parent: None,
+                now: 20_020,
+                debug_enabled: false,
+                api_key_name: Some("beta"),
+                route_id: "route-b",
+                model_display_name: Some("model-b"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-b",
-            "route-b",
-            Some("model-b"),
-            "provider-b",
-            "provider-b",
-            6_000,
-            0,
-            0,
-            0,
-            20_021,
+            TokenProfile {
+                id: "combo-b",
+                route_id: "route-b",
+                model_display_name: Some("model-b"),
+                provider_id: "provider-b",
+                provider_name: "provider-b",
+                input: 6_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_021,
+            },
         )
         .await?;
         admit_chain_run_profile(
             store,
-            "combo-2-a",
-            "combo-2-a",
-            "combo-2",
-            None,
-            20_030,
-            false,
-            Some("alpha"),
-            "route-a",
-            Some("model-a"),
+            ChainRunProfile {
+                id: "combo-2-a",
+                run_id: "combo-2-a",
+                root_id: "combo-2",
+                parent: None,
+                now: 20_030,
+                debug_enabled: false,
+                api_key_name: Some("alpha"),
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-2-a",
-            "route-a",
-            Some("model-a"),
-            "provider-a",
-            "provider-a",
-            15_000,
-            0,
-            0,
-            0,
-            20_031,
+            TokenProfile {
+                id: "combo-2-a",
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+                provider_id: "provider-a",
+                provider_name: "provider-a",
+                input: 15_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_031,
+            },
         )
         .await?;
 

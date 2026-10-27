@@ -560,7 +560,8 @@ describe('selection races', () => {
 describe('selected detail catch-up', () => {
   test('a notification beyond the detail snapshot still catches up from that snapshot', async () => {
     const h = harness({
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     await h.controller.selectInteraction(summary('i1'))
@@ -574,7 +575,8 @@ describe('selected detail catch-up', () => {
     const detail = deferred<InteractionDetail>()
     const h = harness({
       interaction: () => detail.promise,
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     const selection = h.controller.selectInteraction(summary('i1'))
@@ -589,7 +591,8 @@ describe('selected detail catch-up', () => {
     const detail = deferred<InteractionDetail>()
     const h = harness({
       interaction: () => detail.promise,
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     const selection = h.controller.deepLinkInteraction('i1')

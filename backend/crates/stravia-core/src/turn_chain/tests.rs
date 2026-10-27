@@ -297,10 +297,10 @@ async fn sqlite_content_gc_rechecks_references_added_after_candidate_read() {
         let resume_rx = std::sync::Mutex::new(resume_rx);
         // 候选 SELECT 判定若干行后暂停，让测试在 DELETE 前提交新引用。
         handle.set_progress_handler(1000, move || {
-            if let Some(started) = started_tx.lock().expect("progress sender").take() {
-                if started.send(()).is_ok() {
-                    let _ = resume_rx.lock().expect("progress resume").recv();
-                }
+            if let Some(started) = started_tx.lock().expect("progress sender").take()
+                && started.send(()).is_ok()
+            {
+                let _ = resume_rx.lock().expect("progress resume").recv();
             }
             true
         });

@@ -75,8 +75,7 @@ let {
   onfollow,
 }: Props = $props()
 
-const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } =
-  useSvelteFlow<FlowInteractionNode, Edge>()
+const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
 const nodeTypes = { interaction: InteractionNode }
 const interactionNodeHandles: NodeHandle[] = [
   { type: 'target', position: Position.Top, x: interactionNodeWidth / 2 - 0.5, y: -0.5, width: 1, height: 1 },

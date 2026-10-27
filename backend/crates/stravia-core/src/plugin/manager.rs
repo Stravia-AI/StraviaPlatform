@@ -192,6 +192,7 @@ impl VendorPlugins {
         }))
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn bundled(&self) -> &BundledPlugins {
         &self.bundled
     }
