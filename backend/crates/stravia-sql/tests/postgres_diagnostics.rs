@@ -13,6 +13,9 @@ async fn postgres_write_leases_preserve_database_lock_concurrency()
     let Ok(url) = std::env::var("STRAVIA_TEST_POSTGRES_URL") else {
         return Ok(());
     };
+    // 同一进程的并发测试须使用一致的 SQL interest，避免首次注册缓存为 never。
+    let captured = Captured::default();
+    let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = PgPool::connect(&url).await?;
     let key = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
     let mut first = pool.acquire_write().await?;

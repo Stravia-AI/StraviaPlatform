@@ -340,6 +340,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();

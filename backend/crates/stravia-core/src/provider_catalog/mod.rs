@@ -416,26 +416,6 @@ impl ProviderCatalog {
         })
     }
 
-    pub fn model_source(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-        scope: CatalogProviderScope,
-    ) -> anyhow::Result<CatalogModelSource> {
-        let model_id = model_id.trim();
-        scope
-            .models
-            .into_iter()
-            .find(|source| source.metadata.get("id").and_then(Value::as_str) == Some(model_id))
-            .ok_or_else(|| {
-                CatalogError::EntryNotFound {
-                    provider_id: provider_id.to_string(),
-                    model_id: model_id.to_string(),
-                }
-                .into()
-            })
-    }
-
     /// Catalog logo for one stable provider identity (`catalog_id` or
     /// `provider_id`, never a connection UUID). The id does not have to be a
     /// current catalog member — dedicated profiles map onto catalog assets the

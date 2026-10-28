@@ -401,12 +401,19 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
                     model_id: model_id.to_owned(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: if edited {
-                        SnapshotState::Edited {
-                            source: Some(source),
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::from([
+                                stravia_core::provider_models::ProviderModelField::ReasoningEfforts,
+                            ]),
                         }
                     } else {
-                        SnapshotState::Imported { source }
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::new(),
+                        }
                     },
+                    source_metadata: None,
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -425,13 +432,15 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
         stravia_core::thinking::visible_levels(&model.thinking_level_map),
         [ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
     );
-    assert!(model.can_reimport);
+    assert!(model.pinned_fields.is_empty());
+    assert!(model.restorable_fields.is_empty());
     assert_eq!(
         model.snapshot_state,
         SnapshotState::Imported {
             source: SourceStamp::ProviderCatalog {
                 provider_id: "zhipuai-coding-plan".to_owned()
-            }
+            },
+            pinned: std::collections::BTreeSet::new(),
         }
     );
     let edited = gw
@@ -447,7 +456,7 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
 }
 
 #[tokio::test]
-async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source()
+async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_restore_source()
 -> anyhow::Result<()> {
     let catalog = reasoning_catalog().await?;
     {
@@ -511,12 +520,19 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
                     model_id: model_id.to_owned(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: if edited {
-                        SnapshotState::Edited {
-                            source: Some(source),
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::from([
+                                stravia_core::provider_models::ProviderModelField::ReasoningEfforts,
+                            ]),
                         }
                     } else {
-                        SnapshotState::Imported { source }
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::new(),
+                        }
                     },
+                    source_metadata: None,
                     metadata_source_provider_id: Some("zhipuai-coding-plan".to_owned()),
                     presence: ProviderModelPresence::Missing,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -552,7 +568,10 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
         assert_eq!(after.metadata.cost, before.metadata.cost);
         assert_eq!(after.metadata.status.as_deref(), Some("deprecated"));
         assert!(!after.available);
-        assert!(after.can_reimport);
+        assert!(matches!(
+            after.snapshot_state,
+            SnapshotState::Imported { .. }
+        ));
     }
     assert!(
         gw.admin()
@@ -573,7 +592,10 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
             .get_provider_model(&provider.id, model_id)
             .await?;
         assert!(model.available);
-        assert!(model.can_reimport);
+        assert!(matches!(
+            model.snapshot_state,
+            SnapshotState::Imported { .. }
+        ));
     }
     gw.shutdown().await;
     Ok(())
@@ -969,8 +991,11 @@ async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Re
         index
     };
     catalog.set_index("rev-1", zen_index(None)).await;
+    let mut scoped = scope_body();
+    scoped["zen-1"]["cost"] =
+        serde_json::from_str(r#"{"input":1e-7,"output":0.123456789012345678}"#)?;
     for id in ["zen-a", "zen-b", "zen-c"] {
-        catalog.set_scope(id, 200, scope_body()).await;
+        catalog.set_scope(id, 200, scoped.clone()).await;
     }
 
     let directory = tempfile::tempdir()?;
@@ -979,7 +1004,19 @@ async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Re
     assert_eq!(catalog.index_requests().await, 1);
 
     // 同一 revision 下，多个 Provider 的 scope 缺失与定时刷新都只复用已落盘的索引。
-    gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    let first = gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    let cached = gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    assert_eq!(first, cached);
+    let encoded = serde_json::to_value(&cached)?;
+    assert!(encoded["models"][0]["cost"]["input"].is_number());
+    assert_eq!(
+        encoded["models"][0]["cost"]["input"].to_string(),
+        "0.0000001"
+    );
+    assert_eq!(
+        encoded["models"][0]["cost"]["output"].to_string(),
+        "0.123456789012345678"
+    );
     gw.catalog_sync.catalog_models("zen-b", "default").await?;
     let unchanged = gw.catalog_sync.refresh().await?;
     assert_eq!(unchanged.revision, "rev-1");

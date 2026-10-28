@@ -10,6 +10,7 @@ struct RouteRow {
     display_name: Option<String>,
     output_modality: Option<RouteOutputModality>,
     default_thinking_level: Option<String>,
+    billing_json: Option<sqlx::types::Json<crate::pricing::BillingConfig>>,
     balance: String,
     is_enabled: bool,
     created_at: String,
@@ -24,6 +25,7 @@ impl RouteRow {
             output_modality: self.output_modality,
             image_generation_bound: false,
             default_thinking_level: self.default_thinking_level,
+            billing: self.billing_json.map(|billing| billing.0),
             balance: self.balance,
             is_enabled: self.is_enabled,
             created_at: self.created_at,
@@ -98,8 +100,8 @@ pub(super) async fn load_routes(
 ) -> anyhow::Result<Vec<RouteConfig>> {
     let where_clause = if active_only { " WHERE is_enabled" } else { "" };
     let sql = format!(
-        "SELECT id, model_id, display_name, output_modality, default_thinking_level, balance, \
-         is_enabled, \
+        "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+         billing_json, balance, is_enabled, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
          FROM models{where_clause} ORDER BY created_at DESC"
     );
@@ -134,8 +136,8 @@ pub(super) async fn load_route(
     route_id: &str,
 ) -> anyhow::Result<Option<RouteConfig>> {
     let route = sqlx::query_as::<_, RouteRow>(
-        "SELECT id, model_id, display_name, output_modality, default_thinking_level, balance, \
-         is_enabled, \
+        "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+         billing_json, balance, is_enabled, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
          FROM models WHERE model_id = $1",
     )
@@ -159,7 +161,7 @@ pub(super) async fn refresh_generated_target_maps(
     provider_model_id: &str,
     metadata: &crate::provider_models::ProviderModelMetadata,
     generated: &[crate::thinking::ThinkingLevelMapping],
-    validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+    validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
 ) -> anyhow::Result<()> {
     let targets = sqlx::query_as::<_, (
         String,
@@ -174,7 +176,7 @@ pub(super) async fn refresh_generated_target_maps(
     for (id, map) in targets {
         let mut map = map.0;
         let changed = crate::thinking::refresh_generated_thinking_level_map(&mut map, generated)?;
-        validate_map(metadata, &map)?;
+        validate_map(provider_model_id, metadata, &map)?;
         if changed {
             sqlx::query("UPDATE model_backends SET thinking_level_map = $1 WHERE id = $2")
                 .bind(sqlx::types::Json(&map))
@@ -217,6 +219,11 @@ impl RouteStore for PostgresRouteStore {
             .as_ref()
             .map(|id| id.as_str().to_owned())
             .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+        let billing_present = route.billing.is_some();
+        let billing_json = route
+            .billing
+            .clone()
+            .map(|billing| billing.map(sqlx::types::Json));
         let mut tx = self.pool.begin().await?;
         let conflict = sqlx::query_scalar::<_, String>(
             "SELECT id FROM models WHERE model_id = $1 AND id != $2 LIMIT 1",
@@ -234,7 +241,7 @@ impl RouteStore for PostgresRouteStore {
 
         if route.id.is_some() {
             let updated = sqlx::query(
-                "UPDATE models SET model_id = $1, display_name = $2, balance = $3, is_enabled = $4, default_thinking_level = $5, output_modality = $6 WHERE id = $7",
+                "UPDATE models SET model_id = $1, display_name = $2, balance = $3, is_enabled = $4, default_thinking_level = $5, output_modality = $6, billing_json = CASE WHEN $7 THEN $8 ELSE billing_json END WHERE id = $9",
             )
             .bind(route.model_id.as_str().trim())
             .bind(route.display_name.as_deref())
@@ -242,6 +249,8 @@ impl RouteStore for PostgresRouteStore {
             .bind(route.is_enabled)
             .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
             .bind(route.output_modality.map(RouteOutputModality::as_str))
+            .bind(billing_present)
+            .bind(billing_json)
             .bind(&route_storage_id)
             .execute(&mut *tx)
             .await?;
@@ -250,7 +259,7 @@ impl RouteStore for PostgresRouteStore {
             }
         } else {
             sqlx::query(
-                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, output_modality) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, output_modality, billing_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(&route_storage_id)
             .bind(route.model_id.as_str().trim())
@@ -259,6 +268,7 @@ impl RouteStore for PostgresRouteStore {
             .bind(route.is_enabled)
             .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
             .bind(route.output_modality.map(RouteOutputModality::as_str))
+            .bind(billing_json.flatten())
             .execute(&mut *tx)
             .await?;
         }

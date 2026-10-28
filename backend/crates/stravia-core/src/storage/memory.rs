@@ -11,18 +11,21 @@ use crate::db::models::{
     TargetConfig, UpdateProvider, UpsertOAuthCredential,
 };
 use crate::plugin::PluginStore;
+use crate::pricing::{CostBasis, CustomCurrency};
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord,
-    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelReimport,
+    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
     ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelSyncState,
-    ProviderModelSyncSummary, ReimportProviderModel, SnapshotState, SourceStamp,
+    ProviderModelSyncSummary, RestoreProviderModel, SnapshotState,
 };
 
 use super::traits::{
-    ApiKeyStore, AuthAccessStore, OAuthCredentialStore, ProviderConnectionCheckWrite,
-    ProviderModelStore, ProviderStore, RouteStore, SettingsStore, Storage, StorageBackend,
-    StorageBootstrap, StorageHealth, UsageStatsStore,
+    ApiKeySpend, ApiKeyStore, AuthAccessStore, MoneyStore, NewProviderCostPlan,
+    OAuthCredentialStore, ProviderConnectionCheckWrite, ProviderCostPlan, ProviderModelStore,
+    ProviderStore, RouteStore, SettingsStore, Storage, StorageBackend, StorageBootstrap,
+    StorageHealth, UsageStatsStore,
 };
+use crate::storage::money;
 
 use std::sync::Arc;
 
@@ -39,6 +42,8 @@ pub struct MemoryStorage {
         Arc<RwLock<std::collections::HashMap<String, std::collections::BTreeMap<String, String>>>>,
     allowance_suspensions:
         Arc<RwLock<std::collections::HashMap<String, crate::db::models::AllowanceSuspensionState>>>,
+    provider_cost_plans: Arc<RwLock<Vec<ProviderCostPlan>>>,
+    api_key_spends: Arc<RwLock<std::collections::HashMap<String, ApiKeySpend>>>,
     plugin_store: PluginStore,
 }
 
@@ -80,6 +85,8 @@ impl MemoryStorage {
             oauth_credentials,
             allowance_guards: Arc::new(RwLock::new(std::collections::HashMap::new())),
             allowance_suspensions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            provider_cost_plans: Arc::new(RwLock::new(Vec::new())),
+            api_key_spends: Arc::new(RwLock::new(std::collections::HashMap::new())),
             plugin_store,
         }
     }
@@ -106,6 +113,9 @@ impl Storage for MemoryStorage {
     fn settings(&self) -> &dyn SettingsStore {
         self
     }
+    fn money(&self) -> &dyn MoneyStore {
+        self
+    }
     fn api_keys(&self) -> Option<&dyn ApiKeyStore> {
         None
     }
@@ -126,17 +136,25 @@ impl Storage for MemoryStorage {
 #[async_trait]
 impl ProviderStore for MemoryStorage {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
-        Ok(self.providers.read().await.clone())
+        let mut providers = self.providers.read().await.clone();
+        for provider in &mut providers {
+            self.apply_cost_basis(provider).await;
+        }
+        Ok(providers)
     }
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
-        Ok(self
+        let mut provider = self
             .providers
             .read()
             .await
             .iter()
             .find(|p| p.id == id)
-            .cloned())
+            .cloned();
+        if let Some(provider) = provider.as_mut() {
+            self.apply_cost_basis(provider).await;
+        }
+        Ok(provider)
     }
 
     async fn create(&self, input: CreateProviderRecord) -> anyhow::Result<Provider> {
@@ -156,6 +174,7 @@ impl ProviderStore for MemoryStorage {
             vendor_options: input.vendor_options,
             auth_mode: input.auth_mode,
             use_proxy: input.use_proxy,
+            cost_basis: CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,
             is_enabled: true,
@@ -235,6 +254,37 @@ impl ProviderStore for MemoryStorage {
         let mut provider_models = self.provider_models.write().await;
         let mut oauth_credentials = self.oauth_credentials.credentials.write().await;
         self.plugin_store.remove_memory_provider_data(id).await;
+        {
+            let mut plans = self.provider_cost_plans.write().await;
+            let latest = plans
+                .iter()
+                .filter(|plan| plan.provider_id == id)
+                .max_by(|left, right| left.effective_from.cmp(&right.effective_from))
+                .map(|plan| plan.basis);
+            if latest == Some(CostBasis::Subscription) {
+                let previous = plans
+                    .iter()
+                    .filter(|plan| plan.provider_id == id)
+                    .map(|plan| plan.effective_from)
+                    .max()
+                    .unwrap_or(0);
+                let effective_from = chrono::Utc::now().timestamp_millis().max(
+                    previous
+                        .checked_add(1)
+                        .context("cost plan timestamp overflow")?,
+                );
+                plans.push(ProviderCostPlan {
+                    id: stravia_runtime_contract::identifier::new_id(),
+                    provider_id: id.to_string(),
+                    effective_from,
+                    basis: CostBasis::Usage,
+                    period: None,
+                    price: None,
+                    price_currency: None,
+                    created_at: now_rfc3339(),
+                });
+            }
+        }
         providers.retain(|provider| provider.id != id);
         self.model_sync_states.write().await.remove(id);
         provider_models.retain(|model| model.provider_id != id);
@@ -511,6 +561,12 @@ impl RouteStore for MemoryStorage {
             .as_ref()
             .map(|id| id.as_str().to_owned())
             .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+        let billing = input.billing.clone().unwrap_or_else(|| {
+            routes
+                .iter()
+                .find(|route| route.id == storage_id)
+                .and_then(|route| route.billing.clone())
+        });
         anyhow::ensure!(
             !routes
                 .iter()
@@ -532,6 +588,7 @@ impl RouteStore for MemoryStorage {
             route.default_thinking_level = input
                 .default_thinking_level
                 .map(|level| level.as_str().to_owned());
+            route.billing = billing;
             return Ok(route.clone());
         }
         let created_at = routes
@@ -595,6 +652,7 @@ impl RouteStore for MemoryStorage {
             default_thinking_level: input
                 .default_thinking_level
                 .map(|level| level.as_str().to_string()),
+            billing,
             supported_thinking_levels: Vec::new(),
             context_window: None,
             supports_image_input: false,
@@ -756,7 +814,12 @@ impl ProviderModelStore for MemoryStorage {
         &self,
         provider_id: &str,
         reconciliation: ProviderModelReconciliation,
+        validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()> {
+        let refresh_maps = reconciliation
+            .updates
+            .iter()
+            .any(|update| update.generated_thinking_level_map.is_some());
         let now = now_rfc3339();
         let providers = self.providers.read().await;
         if let Some(expected) = &reconciliation.expected_provider {
@@ -766,6 +829,12 @@ impl ProviderModelStore for MemoryStorage {
                 "Provider changed while synchronizing discovered models"
             );
         }
+        // 锁次序与 restore、Provider 删除一致：routes → provider_models。
+        let mut routes = if refresh_maps {
+            Some(self.models.write().await)
+        } else {
+            None
+        };
         let mut items = self.provider_models.write().await;
         let mut states = self.model_sync_states.write().await;
         let mut changes = self.model_changes.write().await;
@@ -809,6 +878,7 @@ impl ProviderModelStore for MemoryStorage {
                 let changed = item.presence != update.presence
                     || item.metadata.status != update.lifecycle_status
                     || update.metadata.is_some()
+                    || update.source_metadata.is_some()
                     || update.snapshot_state.is_some()
                     || item.metadata_source_provider_id != update.metadata_source_provider_id;
                 if changed {
@@ -816,6 +886,9 @@ impl ProviderModelStore for MemoryStorage {
                     item.metadata_source_provider_id = update.metadata_source_provider_id;
                     if let Some(snapshot_state) = update.snapshot_state {
                         item.snapshot_state = snapshot_state;
+                    }
+                    if let Some(source_metadata) = update.source_metadata {
+                        item.source_metadata = Some(source_metadata);
                     }
                     if let Some(metadata) = update.metadata {
                         item.metadata = metadata;
@@ -825,6 +898,33 @@ impl ProviderModelStore for MemoryStorage {
                     }
                     item.revision += 1;
                     item.updated_at = now.clone();
+                }
+                if let Some(generated) = update.generated_thinking_level_map.as_deref() {
+                    let routes = routes
+                        .as_mut()
+                        .context("Provider Model thinking map update has no Route lock")?;
+                    for route in routes.iter_mut() {
+                        let mut route_changed = false;
+                        for target in route.targets.iter_mut() {
+                            if target.provider_id().as_str() != provider_id
+                                || target.model().as_str() != update.model_id
+                            {
+                                continue;
+                            }
+                            let mut map = target.thinking_level_map.clone();
+                            let changed = crate::thinking::refresh_generated_thinking_level_map(
+                                &mut map, generated,
+                            )?;
+                            validate_map(&update.model_id, &item.metadata, &map)?;
+                            if changed {
+                                target.thinking_level_map = map;
+                                route_changed = true;
+                            }
+                        }
+                        if route_changed {
+                            route.refresh_supported_thinking_levels();
+                        }
+                    }
                 }
             }
         }
@@ -896,14 +996,14 @@ impl ProviderModelStore for MemoryStorage {
         Ok(ProviderModelMutation::Applied(Box::new(item.clone())))
     }
 
-    async fn reimport(
+    async fn restore(
         &self,
         provider_id: &str,
         model_id: &str,
-        input: ReimportProviderModel,
-        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        input: RestoreProviderModel,
+        validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
         before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
-    ) -> anyhow::Result<ProviderModelReimport> {
+    ) -> anyhow::Result<ProviderModelRestore> {
         // 锁次序与既有路径一致：Provider 删除与插件内存后端都按
         // providers → routes → provider_models → oauth → plugin data 加锁；
         // settings 只被本路径与 SettingsStore 单独使用，永远最后获取。
@@ -915,22 +1015,17 @@ impl ProviderModelStore for MemoryStorage {
             .iter()
             .position(|item| item.provider_id == provider_id && item.model_id == model_id)
         else {
-            return Ok(ProviderModelReimport::NotFound);
+            return Ok(ProviderModelRestore::NotFound);
         };
         if provider_models[index].revision != input.expected_revision {
-            return Ok(ProviderModelReimport::Conflict);
+            return Ok(ProviderModelRestore::Conflict);
         }
 
         // 全部变更先在克隆上准备好；任何失败都不留下半提交状态。
         let mut model = provider_models[index].clone();
         model.metadata = input.metadata;
-        model.snapshot_state = SnapshotState::Imported {
-            source: SourceStamp::ProviderCatalog {
-                provider_id: input.source_provider_id,
-            },
-        };
-        // metadata_source_provider_id 与 SQL 契约一致保持不变——目录来源
-        // 只记录在 snapshot_state 的 ProviderCatalog stamp 里。
+        model.snapshot_state = input.snapshot_state;
+        // metadata_source_provider_id 与来源规格保持同步路径写入的值。
         model.cost_rules = model.metadata.cost_rules();
         model.revision = model
             .revision
@@ -942,21 +1037,21 @@ impl ProviderModelStore for MemoryStorage {
         // Target/Route 同样刷新。仅替换仍属 Generated 的行，Overridden
         // 与无关字段保留；未变化的 map 不进入提交集。
         let mut prepared = Vec::new();
-        for (route_index, route) in routes.iter().enumerate() {
-            for (target_index, target) in route.targets.iter().enumerate() {
-                if target.provider_id().as_str() != provider_id
-                    || target.model().as_str() != model_id
-                {
-                    continue;
-                }
-                let mut map = target.thinking_level_map.clone();
-                let changed = crate::thinking::refresh_generated_thinking_level_map(
-                    &mut map,
-                    &input.generated_thinking_level_map,
-                )?;
-                validate_map(&model.metadata, &map)?;
-                if changed {
-                    prepared.push((route_index, target_index, map));
+        if let Some(generated) = input.generated_thinking_level_map.as_deref() {
+            for (route_index, route) in routes.iter().enumerate() {
+                for (target_index, target) in route.targets.iter().enumerate() {
+                    if target.provider_id().as_str() != provider_id
+                        || target.model().as_str() != model_id
+                    {
+                        continue;
+                    }
+                    let mut map = target.thinking_level_map.clone();
+                    let changed =
+                        crate::thinking::refresh_generated_thinking_level_map(&mut map, generated)?;
+                    validate_map(model_id, &model.metadata, &map)?;
+                    if changed {
+                        prepared.push((route_index, target_index, map));
+                    }
                 }
             }
         }
@@ -1002,7 +1097,7 @@ impl ProviderModelStore for MemoryStorage {
             .filter(|route| route.is_enabled)
             .cloned()
             .collect();
-        Ok(ProviderModelReimport::Applied {
+        Ok(ProviderModelRestore::Applied {
             model: Box::new(model),
             active_routes,
         })
@@ -1164,6 +1259,7 @@ fn memory_provider_model(input: NewProviderModelRecord, now: String) -> Provider
         model_id: input.model_id,
         source_kind: input.source_kind,
         snapshot_state: input.snapshot_state,
+        source_metadata: input.source_metadata,
         metadata_source_provider_id: input.metadata_source_provider_id,
         presence: input.presence,
         selection_policy: input.selection_policy,
@@ -1356,10 +1452,177 @@ impl OAuthCredentialStore for MemoryOAuthCredentialStore {
     }
 }
 
+#[async_trait]
+impl MoneyStore for MemoryStorage {
+    async fn custom_currency(&self) -> anyhow::Result<Option<CustomCurrency>> {
+        SettingsStore::get(self, money::CUSTOM_CURRENCY_SETTING_KEY)
+            .await?
+            .map(|value| money::parse_custom_currency(&value))
+            .transpose()
+    }
+
+    async fn save_custom_currency(
+        &self,
+        symbol: &str,
+        usd_rate: rust_decimal::Decimal,
+    ) -> anyhow::Result<CustomCurrency> {
+        let currency = match self.custom_currency().await? {
+            Some(mut currency) => {
+                currency.symbol = symbol.trim().to_string();
+                currency.usd_rate = usd_rate;
+                currency.validate()?;
+                currency
+            }
+            None => {
+                let currency = CustomCurrency {
+                    symbol: symbol.trim().to_string(),
+                    usd_rate,
+                    first_rate: usd_rate,
+                    configured_at: now_rfc3339(),
+                };
+                currency.validate()?;
+                currency
+            }
+        };
+        self.set(
+            money::CUSTOM_CURRENCY_SETTING_KEY,
+            &money::encode_custom_currency(&currency)?,
+        )
+        .await?;
+        Ok(currency)
+    }
+
+    async fn provider_cost_plans(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<Vec<ProviderCostPlan>> {
+        let mut plans = self
+            .provider_cost_plans
+            .read()
+            .await
+            .iter()
+            .filter(|plan| plan.provider_id == provider_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        plans.sort_by(|left, right| {
+            right
+                .effective_from
+                .cmp(&left.effective_from)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(plans)
+    }
+
+    async fn all_provider_cost_plans(&self) -> anyhow::Result<Vec<ProviderCostPlan>> {
+        let mut plans = self.provider_cost_plans.read().await.clone();
+        plans.sort_by(|left, right| {
+            left.provider_id
+                .cmp(&right.provider_id)
+                .then_with(|| left.effective_from.cmp(&right.effective_from))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(plans)
+    }
+
+    async fn append_provider_cost_plan(
+        &self,
+        provider_id: &str,
+        input: NewProviderCostPlan,
+    ) -> anyhow::Result<ProviderCostPlan> {
+        money::validate_new_cost_plan(&input)?;
+        anyhow::ensure!(
+            self.providers
+                .read()
+                .await
+                .iter()
+                .any(|provider| provider.id == provider_id),
+            "provider not found: {provider_id}"
+        );
+        let custom = self.custom_currency().await?;
+        let (period, price, currency) = match input.basis {
+            CostBasis::Usage => (None, None, None),
+            CostBasis::Subscription => {
+                let period = input.period.context("subscription requires a period")?;
+                let amount = input.price.context("subscription requires a price")?;
+                let currency = input
+                    .currency
+                    .context("subscription requires a price currency")?;
+                let frozen = crate::pricing::freeze_amount(amount, currency, custom.as_ref())
+                    .context("subscription price could not be frozen")?;
+                (Some(period), Some(frozen), Some(currency))
+            }
+        };
+        let mut plans = self.provider_cost_plans.write().await;
+        let previous = plans
+            .iter()
+            .filter(|plan| plan.provider_id == provider_id)
+            .map(|plan| plan.effective_from)
+            .max()
+            .unwrap_or(0);
+        let effective_from = chrono::Utc::now().timestamp_millis().max(
+            previous
+                .checked_add(1)
+                .context("cost plan timestamp overflow")?,
+        );
+        let plan = ProviderCostPlan {
+            id: stravia_runtime_contract::identifier::new_id(),
+            provider_id: provider_id.to_string(),
+            effective_from,
+            basis: input.basis,
+            period,
+            price,
+            price_currency: currency,
+            created_at: now_rfc3339(),
+        };
+        plans.push(plan.clone());
+        Ok(plan)
+    }
+
+    async fn api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
+        Ok(self
+            .api_key_spends
+            .read()
+            .await
+            .get(api_key_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn reset_api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
+        let spend = ApiKeySpend {
+            spent_custom_nanos: 0,
+            spent_usd_unconverted_nanos: 0,
+            reset_at: Some(now_rfc3339()),
+        };
+        self.api_key_spends
+            .write()
+            .await
+            .insert(api_key_id.to_string(), spend.clone());
+        Ok(spend)
+    }
+}
+
+impl MemoryStorage {
+    async fn apply_cost_basis(&self, provider: &mut Provider) {
+        let plans = self.provider_cost_plans.read().await;
+        provider.cost_basis = plans
+            .iter()
+            .filter(|plan| plan.provider_id == provider.id)
+            .max_by(|left, right| {
+                left.effective_from
+                    .cmp(&right.effective_from)
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+            .map(|plan| plan.basis)
+            .unwrap_or_default();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider_models::ProviderModelPresence;
+    use crate::provider_models::SourceStamp;
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
 
     fn provider(id: &str) -> Provider {
@@ -1378,6 +1641,7 @@ mod tests {
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
+            cost_basis: CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,
             is_enabled: true,
@@ -1415,6 +1679,7 @@ mod tests {
                 is_enabled: true,
                 targets: Some(vec![target("p1", "m1"), target("p2", "m2")]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put Route");
@@ -1451,6 +1716,7 @@ mod tests {
                 is_enabled: route.is_enabled,
                 targets: None,
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("metadata-only update");
@@ -1468,6 +1734,7 @@ mod tests {
                 is_enabled: true,
                 targets: Some(vec![target("p2", "m2")]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("replace Route aggregate");
@@ -1491,6 +1758,7 @@ mod tests {
                 is_enabled: true,
                 targets: Some(vec![target("p1", "m1")]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put disposable Route");
@@ -1510,6 +1778,7 @@ mod tests {
                     },
                 ]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put durable Route");
@@ -1706,6 +1975,7 @@ mod tests {
             model_id: model_id.into(),
             source_kind: ProviderModelSourceKind::Discovered,
             snapshot_state: SnapshotState::Unregistered,
+            source_metadata: None,
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1732,7 +2002,7 @@ mod tests {
                     name: Some("Manual correction".into()),
                     ..second.metadata
                 },
-                SnapshotState::Edited { source: None },
+                SnapshotState::Local,
                 second.revision,
             )
             .await
@@ -1747,6 +2017,7 @@ mod tests {
                     expected_revision: 1,
                     snapshot_state: Some(SnapshotState::Imported {
                         source: crate::provider_models::SourceStamp::Discovery,
+                        pinned: std::collections::BTreeSet::new(),
                     }),
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Missing,
@@ -1754,6 +2025,8 @@ mod tests {
                     metadata: Some(crate::provider_models::ProviderModelMetadata::bare(
                         model_id,
                     )),
+                    source_metadata: None,
+                    generated_thinking_level_map: None,
                 },
             )
             .collect();
@@ -1765,7 +2038,8 @@ mod tests {
                         inserts: vec![],
                         updates,
                         ..Default::default()
-                    }
+                    },
+                    &|_, _, _| Ok(()),
                 )
                 .await
                 .is_err()
@@ -1776,10 +2050,7 @@ mod tests {
         assert_eq!(first.presence, ProviderModelPresence::Present);
         assert_eq!(first.snapshot_state, SnapshotState::Unregistered);
         assert_eq!(second.metadata.name.as_deref(), Some("Manual correction"));
-        assert_eq!(
-            second.snapshot_state,
-            SnapshotState::Edited { source: None }
-        );
+        assert_eq!(second.snapshot_state, SnapshotState::Local);
     }
 
     #[tokio::test]
@@ -2140,7 +2411,7 @@ mod tests {
         assert!(recovered.credential_invalid_at.is_none());
     }
 
-    // ── Provider Model reimport：快照 + 关联 Target Generated Mapping +
+    // ── Provider Model restore：快照 + 关联 Target Generated Mapping +
     // config_epoch 必须同一提交，失败不得留下半写状态。
 
     fn discovered_provider_model(model_id: &str) -> NewProviderModelRecord {
@@ -2152,7 +2423,11 @@ mod tests {
                 source: SourceStamp::ProviderCatalog {
                     provider_id: "catalog".into(),
                 },
+                pinned: std::collections::BTreeSet::new(),
             },
+            source_metadata: Some(crate::provider_models::ProviderModelMetadata::bare(
+                model_id,
+            )),
             metadata_source_provider_id: Some("catalog".into()),
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -2160,7 +2435,7 @@ mod tests {
         }
     }
 
-    /// 生成行 + 一条 Overridden 人工行，代表 reimport 前刚完成的手工 Mapping。
+    /// 生成行 + 一条 Overridden 人工行，代表 restore 前刚完成的手工 Mapping。
     fn seeded_thinking_map() -> Vec<crate::thinking::ThinkingLevelMapping> {
         let mut map = crate::thinking::generate_thinking_level_map(
             &crate::provider_models::ProviderModelMetadata::bare("m1"),
@@ -2176,7 +2451,7 @@ mod tests {
         map
     }
 
-    fn reimport_metadata() -> crate::provider_models::ProviderModelMetadata {
+    fn restore_metadata() -> crate::provider_models::ProviderModelMetadata {
         crate::provider_models::ProviderModelMetadata {
             reasoning_efforts: Some(vec!["minimal".into(), "high".into()]),
             cost: Some(crate::provider_models::ModelCost {
@@ -2190,20 +2465,27 @@ mod tests {
         }
     }
 
-    fn reimport_input(
+    fn restore_input(
         metadata: crate::provider_models::ProviderModelMetadata,
         expected_revision: i64,
-    ) -> ReimportProviderModel {
-        ReimportProviderModel {
-            generated_thinking_level_map: crate::thinking::generate_thinking_level_map(&metadata),
+    ) -> RestoreProviderModel {
+        RestoreProviderModel {
+            generated_thinking_level_map: Some(crate::thinking::generate_thinking_level_map(
+                &metadata,
+            )),
             metadata,
-            source_provider_id: "catalog".into(),
+            snapshot_state: SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into(),
+                },
+                pinned: std::collections::BTreeSet::new(),
+            },
             expected_revision,
         }
     }
 
     #[tokio::test]
-    async fn reimport_commits_model_targets_and_epoch_atomically() {
+    async fn restore_commits_model_targets_and_epoch_atomically() {
         let storage = MemoryStorage::new(
             vec![provider("provider"), provider("other")],
             Vec::new(),
@@ -2242,6 +2524,7 @@ mod tests {
                     },
                 ]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put enabled Route");
@@ -2260,27 +2543,28 @@ mod tests {
                     ..target("provider", "m1")
                 }]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put disabled Route");
 
-        let metadata = reimport_metadata();
+        let metadata = restore_metadata();
         let outcome = models
-            .reimport(
+            .restore(
                 "provider",
                 "m1",
-                reimport_input(metadata.clone(), 1),
-                &|_, _| Ok(()),
+                restore_input(metadata.clone(), 1),
+                &|_, _, _| Ok(()),
                 &|| -> anyhow::Result<()> { Ok(()) },
             )
             .await
-            .expect("reimport");
-        let ProviderModelReimport::Applied {
+            .expect("restore");
+        let ProviderModelRestore::Applied {
             model,
             active_routes,
         } = outcome
         else {
-            panic!("reimport must apply");
+            panic!("restore must apply");
         };
 
         assert_eq!(model.revision, 2);
@@ -2290,7 +2574,8 @@ mod tests {
             SnapshotState::Imported {
                 source: SourceStamp::ProviderCatalog {
                     provider_id: "catalog".into()
-                }
+                },
+                pinned: std::collections::BTreeSet::new(),
             }
         );
         assert_eq!(
@@ -2350,7 +2635,7 @@ mod tests {
             Some(&TargetThinkingControl::Effort {
                 value: "manual".into()
             }),
-            "Overridden row survives reimport"
+            "Overridden row survives restore"
         );
         let medium = crate::thinking::mapping_control(
             &active.targets[0].thinking_level_map,
@@ -2420,7 +2705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_before_commit_failure_leaves_no_partial_write() {
+    async fn restore_before_commit_failure_leaves_no_partial_write() {
         let storage = MemoryStorage::new(
             vec![provider("provider")],
             Vec::new(),
@@ -2444,22 +2729,23 @@ mod tests {
                     ..target("provider", "m1")
                 }]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put Route");
 
-        let metadata = reimport_metadata();
+        let metadata = restore_metadata();
         let result = models
-            .reimport(
+            .restore(
                 "provider",
                 "m1",
-                reimport_input(metadata.clone(), 1),
-                &|_, _| Ok(()),
+                restore_input(metadata.clone(), 1),
+                &|_, _, _| Ok(()),
                 &|| -> anyhow::Result<()> { anyhow::bail!("vendor write permit revoked") },
             )
             .await;
         assert_eq!(
-            result.expect_err("reimport must fail").to_string(),
+            result.expect_err("restore must fail").to_string(),
             "vendor write permit revoked"
         );
 
@@ -2479,7 +2765,8 @@ mod tests {
             SnapshotState::Imported {
                 source: SourceStamp::ProviderCatalog {
                     provider_id: "catalog".into()
-                }
+                },
+                pinned: std::collections::BTreeSet::new(),
             }
         );
         let route = RouteStore::get(&storage, "r1")
@@ -2499,20 +2786,20 @@ mod tests {
 
         // 失败不消耗 revision：重试仍可提交。
         let retry = models
-            .reimport(
+            .restore(
                 "provider",
                 "m1",
-                reimport_input(metadata, 1),
-                &|_, _| Ok(()),
+                restore_input(metadata, 1),
+                &|_, _, _| Ok(()),
                 &|| -> anyhow::Result<()> { Ok(()) },
             )
             .await
             .expect("retry");
-        assert!(matches!(retry, ProviderModelReimport::Applied { .. }));
+        assert!(matches!(retry, ProviderModelRestore::Applied { .. }));
     }
 
     #[tokio::test]
-    async fn reimport_rejects_stale_revision_and_missing_model_without_writes() {
+    async fn restore_rejects_stale_revision_and_missing_model_without_writes() {
         let storage = MemoryStorage::new(vec![provider("provider")], Vec::new(), Vec::new());
         let models = storage.provider_models();
         models
@@ -2532,6 +2819,7 @@ mod tests {
                     ..target("provider", "m1")
                 }]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("put Route");
@@ -2544,27 +2832,27 @@ mod tests {
         };
 
         let conflict = models
-            .reimport(
+            .restore(
                 "provider",
                 "m1",
-                reimport_input(reimport_metadata(), 99),
-                &|_, _| Ok(()),
+                restore_input(restore_metadata(), 99),
+                &|_, _, _| Ok(()),
                 &guard,
             )
             .await
             .expect("conflict result");
-        assert!(matches!(conflict, ProviderModelReimport::Conflict));
+        assert!(matches!(conflict, ProviderModelRestore::Conflict));
         let missing = models
-            .reimport(
+            .restore(
                 "provider",
                 "absent",
-                reimport_input(reimport_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(restore_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &guard,
             )
             .await
             .expect("missing result");
-        assert!(matches!(missing, ProviderModelReimport::NotFound));
+        assert!(matches!(missing, ProviderModelRestore::NotFound));
         assert!(
             !called.load(std::sync::atomic::Ordering::SeqCst),
             "before_commit must not run when the write is rejected"
@@ -2587,7 +2875,7 @@ mod tests {
                 .await
                 .expect("epoch")
                 .is_none(),
-            "rejected reimport must not touch config_epoch"
+            "rejected restore must not touch config_epoch"
         );
     }
 }

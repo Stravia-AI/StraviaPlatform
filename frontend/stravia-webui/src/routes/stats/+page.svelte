@@ -32,11 +32,14 @@ import {
   buildActivityGrid,
   buildAvailabilityChart,
   buildAvailabilitySummary,
+  buildCostChart,
   buildLatencyChart,
   planActivityGrid,
 } from '#lib/stats-chart.js'
+import { formatMoney, formatMoneyCoverage, moneyCoverage, moneyCoverageDetail } from '#lib/money.js'
 import { STATS_TOP_N, sortStatsRows, visibleStatsRows } from '#lib/stats-table.js'
-import type { ApiKeyStats, ProviderStats } from '#lib/types.js'
+import type { ApiKeyStats, ModelStats, ProviderStats } from '#lib/types.js'
+import CostChart from '#lib/components/cost-chart.svelte'
 import MetricStrip from '#lib/components/metric-strip.svelte'
 import AvailabilityChart from '#lib/components/availability-chart.svelte'
 import AvailabilitySummary from '#lib/components/availability-summary.svelte'
@@ -165,6 +168,7 @@ const overview = $derived(overviewQuery.data)
 const hasTraffic = $derived((overview?.total_requests ?? 0) > 0)
 const providerStats = $derived(providersQuery.data ?? [])
 const apiKeyStats = $derived(apiKeysQuery.data ?? [])
+const modelStats = $derived(modelsQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
 
 function providerLabel(provider: ProviderStats): string {
@@ -177,8 +181,14 @@ function apiKeyLabel(apiKey: ApiKeyStats): string {
 // 排序作用于完整集合，再取前 N 项；表格只展示结果，不自行排序。
 let providerSorting = $state.raw<SortingState>([])
 let apiKeySorting = $state.raw<SortingState>([])
+let modelSorting = $state.raw<SortingState>([])
 let showAllProviders = $state(false)
 let showAllApiKeys = $state(false)
+let showAllModels = $state(false)
+
+function modelStatsLabel(model: ModelStats): string {
+  return `${model.model || model.model_id || '—'}${model.deleted ? ` · ${m.stats_deleted_resource()}` : ''}`
+}
 // 上游错误率按该供应商自身的尝试计；没有上游请求时保持未知（“—”），不补成 0%。
 function providerErrorRate(provider: ProviderStats): number | null {
   return provider.upstream_request_count > 0 ? provider.upstream_error_count / provider.upstream_request_count : null
@@ -196,6 +206,9 @@ const providerRows = $derived(
     upstream_error_count: (provider) => provider.upstream_error_count,
     errorRate: providerErrorRate,
     avg_output_tps: (provider) => provider.avg_output_tps,
+    actual_cost: (provider) => (provider.actual_cost ? Number(provider.actual_cost.amount) : null),
+    usage_equivalent_cost: (provider) =>
+      provider.usage_equivalent_cost == null ? null : Number(provider.usage_equivalent_cost.amount),
   }),
 )
 const apiKeyRows = $derived(
@@ -207,10 +220,23 @@ const apiKeyRows = $derived(
     cache_read_tokens: (apiKey) => apiKey.cache_read_tokens,
     cache_write_tokens: (apiKey) => apiKey.cache_write_tokens,
     last_used_at: (apiKey) => apiKey.last_used_at,
+    cost: (apiKey) => (apiKey.cost ? Number(apiKey.cost.amount) : null),
+    billing: (apiKey) => (apiKey.billing ? Number(apiKey.billing.amount) : null),
+    coverage: (apiKey) => moneyCoverage(apiKey.cost),
+  }),
+)
+const modelRows = $derived(
+  sortStatsRows(modelStats, modelSorting, {
+    model: modelStatsLabel,
+    request_count: (model) => model.request_count,
+    cost: (model) => (model.cost ? Number(model.cost.amount) : null),
+    billing: (model) => (model.billing ? Number(model.billing.amount) : null),
+    coverage: (model) => moneyCoverage(model.cost),
   }),
 )
 const visibleProviders = $derived(visibleStatsRows(providerRows, showAllProviders))
 const visibleApiKeys = $derived(visibleStatsRows(apiKeyRows, showAllApiKeys))
+const visibleModels = $derived(visibleStatsRows(modelRows, showAllModels))
 
 // 零个上游错误保持中性色；只有真实错误才使用 destructive。
 function providerCellClass(cell: DataTableCell<ProviderStats>): string | undefined {
@@ -245,6 +271,22 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
     cell: (context) => formatTps(context.getValue()),
     meta: { label: () => m.stats_output_speed(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
+  providerStatsColumnHelper.accessor((provider) => formatMoney(provider.actual_cost, provider.currency), {
+    id: 'actual_cost',
+    header: () => m.cost_actual(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_actual(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  providerStatsColumnHelper.accessor(
+    (provider) =>
+      provider.usage_equivalent_cost == null ? '—' : formatMoney(provider.usage_equivalent_cost, provider.currency),
+    {
+      id: 'usage_equivalent_cost',
+      header: () => m.cost_usage_equivalent(),
+      cell: (context) => context.getValue(),
+      meta: { label: () => m.cost_usage_equivalent(), align: 'end', cellClass: 'font-technical tabular-nums' },
+    },
+  ),
 ])
 const apiKeyStatsColumnHelper = createDataTableColumnHelper<ApiKeyStats>()
 const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
@@ -283,9 +325,65 @@ const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
     cell: (context) => formatLogTime(context.getValue()),
     meta: { label: () => m.stats_last_used(), align: 'end', cellClass: 'font-technical text-xs text-muted-foreground' },
   }),
+  apiKeyStatsColumnHelper.accessor((apiKey) => formatMoney(apiKey.cost, apiKey.currency), {
+    id: 'cost',
+    header: () => m.cost_usage_cost(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_usage_cost(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  apiKeyStatsColumnHelper.accessor((apiKey) => formatMoney(apiKey.billing, apiKey.currency), {
+    id: 'billing',
+    header: () => m.billing_billed_amount(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.billing_billed_amount(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  apiKeyStatsColumnHelper.accessor((apiKey) => formatMoneyCoverage(apiKey.cost), {
+    id: 'coverage',
+    header: () => m.cost_coverage(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_coverage(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
 ])
-const modelStats = $derived(modelsQuery.data ?? [])
+const modelStatsColumnHelper = createDataTableColumnHelper<ModelStats>()
+const modelStatsColumns = modelStatsColumnHelper.columns([
+  modelStatsColumnHelper.accessor(modelStatsLabel, {
+    id: 'model',
+    header: () => m.common_models(),
+    meta: { label: () => m.common_models(), headerClass: 'w-full', cellClass: 'font-medium' },
+  }),
+  modelStatsColumnHelper.accessor('request_count', {
+    header: () => m.common_request_count_label(),
+    cell: (context) => formatCompactCount(context.getValue()),
+    meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  modelStatsColumnHelper.accessor((model) => formatMoney(model.cost, model.currency), {
+    id: 'cost',
+    header: () => m.cost_usage_cost(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_usage_cost(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  modelStatsColumnHelper.accessor((model) => formatMoney(model.billing, model.currency), {
+    id: 'billing',
+    header: () => m.billing_billed_amount(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.billing_billed_amount(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  modelStatsColumnHelper.accessor((model) => formatMoneyCoverage(model.cost), {
+    id: 'coverage',
+    header: () => m.cost_coverage(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_coverage(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+])
 const seriesStats = $derived(seriesQuery.data ?? [])
+const displayCurrency = $derived(
+  overview?.currency ??
+    modelStats[0]?.currency ??
+    apiKeyStats[0]?.currency ??
+    providerStats[0]?.currency ?? { kind: 'usd' as const, symbol: '$' },
+)
+const costChart = $derived(buildCostChart(seriesStats, seriesStats[0]?.bucket_ms ?? seriesBucketSeconds * 1_000))
+const hasCostSeries = $derived(costChart.some((point) => point.cost != null))
 const activityGrid = $derived(
   buildActivityGrid(activityQuery.data ?? [], {
     startMs: activityPlan.startMs,
@@ -342,6 +440,11 @@ const tokenPie = $derived.by((): { slices: PieSlice[]; total: number } | null =>
 })
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests) },
+  {
+    label: m.cost_actual(),
+    value: formatMoney(overview?.actual_cost, overview?.currency ?? displayCurrency),
+    detail: moneyCoverageDetail(overview?.actual_cost),
+  },
   { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens) },
   { label: m.stats_output_tokens(), value: formatCompactCount(overview?.total_output_tokens) },
   { label: m.stats_cache_read_tokens(), value: formatCompactCount(overview?.total_cache_read_tokens) },
@@ -486,7 +589,7 @@ function retryAll(): void {
 <div class="route-page">
   <PageHeader title={m.stats_usage_statistics()} meta={liveMeta} actions={rangeAction} />
   {#if analyticsPending}
-    <MetricStrip loading loadingLabel={m.stats_loading_analytics_metrics()} placeholderCount={6} />
+    <MetricStrip loading loadingLabel={m.stats_loading_analytics_metrics()} placeholderCount={7} />
     <div class="grid gap-6 @min-[80rem]/route-page:grid-cols-12">
       <Skeleton class="h-52 @min-[80rem]/route-page:col-span-7" />
       <Skeleton class="h-52 @min-[80rem]/route-page:col-span-5" />
@@ -556,6 +659,21 @@ function retryAll(): void {
           </div>{:else}{@render stateLine(m.stats_no_latency_speed_data())}{/if}
       </section>
     </div>
+
+    <section class="route-section" aria-labelledby="cost-series-title">
+      <div class="route-section-header">
+        <div class="flex min-w-0 items-center gap-2">
+          <h2 id="cost-series-title" class="route-section-title">{m.cost_series()}</h2>
+          <Field.Help hint={m.cost_series_help()} />
+        </div>
+      </div>
+      {#if seriesQuery.error && seriesQuery.data === undefined}
+        {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
+      {:else if seriesQuery.isPending}<Skeleton class="h-40" />
+      {:else if hasCostSeries}<div class="h-40 min-w-0">
+          <CostChart points={costChart} currency={displayCurrency} {formatBucket} />
+        </div>{:else}{@render stateLine(m.cost_series_empty())}{/if}
+    </section>
 
     <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给可用率趋势。 -->
     <div
@@ -652,9 +770,49 @@ function retryAll(): void {
       </section>
     </div>
 
-    <!-- 七列密钥表只有在并排后仍可读（工作区 ≥ 96rem 时约 56rem）才与供应商并排，否则纵排。 -->
-    <div
-      class="grid gap-8 @min-[96rem]/route-page:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] @min-[96rem]/route-page:gap-x-6">
+    <section class="route-section" aria-labelledby="analytics-model-cost-title">
+      <div class="route-section-header">
+        <div class="flex min-w-0 items-center gap-2">
+          <h2 id="analytics-model-cost-title" class="route-section-title">{m.cost_route_costs()}</h2>
+          <Field.Help hint={m.cost_route_costs_help()} />
+        </div>
+        {@render topRange(modelStats.length, showAllModels, () => (showAllModels = !showAllModels))}
+      </div>
+      {#if modelsQuery.error && modelsQuery.data === undefined}
+        {@render queryFailure(modelsQuery.error, modelsQuery.refetch, modelsQuery.isFetching)}
+      {:else if modelStats.length === 0}
+        {@render stateLine(m.stats_no_model_traffic())}
+      {:else}
+        <div class="route-desktop-table">
+          <DataTable
+            data={visibleModels}
+            columns={modelStatsColumns}
+            labels={tableLabels}
+            getRowId={(model: ModelStats) => model.model_id ?? model.model}
+            ariaLabel={m.cost_route_costs()}
+            manualSorting
+            bind:sorting={modelSorting}
+            stripedRows />
+        </div>
+        <div class="route-mobile-list">
+          {#each visibleModels as model (model.model_id ?? model.model)}
+            <div class="route-mobile-row">
+              <div class="min-w-0">
+                <p class="truncate font-medium">{modelStatsLabel(model)}</p>
+                <p class="font-technical mt-1 text-xs text-muted-foreground">
+                  {m.cost_usage_cost()}: {formatMoney(model.cost, model.currency)} · {m.billing_billed_amount()}:
+                  {formatMoney(model.billing, model.currency)} · {m.cost_coverage()}:
+                  {formatMoneyCoverage(model.cost)}
+                </p>
+              </div>
+              <p class="font-technical tabular-nums">{formatCompactCount(model.request_count)}</p>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <div class="grid gap-8">
       <section class="route-section" aria-labelledby="analytics-provider-title">
         <div class="route-section-header">
           <h2 id="analytics-provider-title" class="route-section-title">{m.common_model_services()}</h2>
@@ -682,6 +840,13 @@ function retryAll(): void {
                 class="route-mobile-row">
                 <div class="min-w-0">
                   <p class="truncate font-medium">{providerLabel(provider)}</p>
+                  <p class="font-technical mt-1 text-xs text-muted-foreground">
+                    {m.cost_actual()}: {formatMoney(provider.actual_cost, provider.currency)}
+                    {#if provider.usage_equivalent_cost}
+                      · {m.cost_usage_equivalent()}:
+                      {formatMoney(provider.usage_equivalent_cost, provider.currency)}
+                    {/if}
+                  </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatTps(provider.avg_output_tps)} ·
                     <span class={provider.upstream_error_count > 0 ? 'text-destructive' : undefined}
@@ -727,6 +892,11 @@ function retryAll(): void {
                     {m.observation_usage_cache_read()}
                     {formatCompactCount(apiKey.cache_read_tokens)} · {m.observation_usage_cache_write()}
                     {formatCompactCount(apiKey.cache_write_tokens)}
+                  </p>
+                  <p class="font-technical mt-1 text-xs text-muted-foreground">
+                    {m.cost_usage_cost()}: {formatMoney(apiKey.cost, apiKey.currency)} · {m.billing_billed_amount()}:
+                    {formatMoney(apiKey.billing, apiKey.currency)} · {m.cost_coverage()}:
+                    {formatMoneyCoverage(apiKey.cost)}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatLogTime(apiKey.last_used_at)}

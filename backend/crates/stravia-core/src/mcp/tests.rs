@@ -301,6 +301,7 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -340,6 +341,7 @@ async fn set_rpm_limit(app: &TestApp, limit: i32) {
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await
@@ -433,6 +435,7 @@ async fn media_test_app_with_answer(
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -509,6 +512,7 @@ async fn media_test_app_with_answer(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Media Model");
@@ -1126,6 +1130,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("other API key");
@@ -1171,6 +1176,7 @@ async fn media_tool_requires_mcp_access_independently_from_transparent_injection
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await
@@ -1200,6 +1206,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await
@@ -1238,6 +1245,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await
@@ -1308,6 +1316,7 @@ async fn mcp_transport_preserves_bearer_only_authentication_mappings() {
                 expires_at: None,
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await
@@ -1379,6 +1388,7 @@ async fn expired_mcp_credential_uses_canonical_unauthorized_status() {
                 expires_at: Some("2000-01-01T00:00:00Z".into()),
                 model_ids: None,
                 inject_media_understanding: None,
+                spend_limit: None,
             },
         )
         .await

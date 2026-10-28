@@ -12,6 +12,7 @@ import { getAuthState } from '#lib/auth.js'
 import AdminCredentialsSettings from '#lib/components/settings/admin-credentials-settings.svelte'
 import AppearanceSettings from '#lib/components/settings/appearance-settings.svelte'
 import ArtifactSettings from '#lib/components/settings/artifact-settings.svelte'
+import CurrencySettings from '#lib/components/settings/currency-settings.svelte'
 import DesktopServiceSettings from '#lib/components/settings/desktop-service-settings.svelte'
 import DesktopStartupSettings from '#lib/components/settings/desktop-startup-settings.svelte'
 import DiagnosticsSettings from '#lib/components/settings/diagnostics-settings.svelte'
@@ -62,6 +63,7 @@ $effect(() => {
     <div class="settings-column">
       {#if group === 'general'}
         <AppearanceSettings />
+        <CurrencySettings />
         {#if isTauri}<DesktopStartupSettings />{/if}
         <ProductUpdateSettings />
       {:else if group === 'network'}

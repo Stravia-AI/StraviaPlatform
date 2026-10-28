@@ -1,7 +1,8 @@
 import { modelIdFromCatalogId } from './catalog-model-id'
+import type { ProviderModelSubmission } from './components/price-form'
 import type { PreparedProviderModel, ProviderModelDetail, ProviderModelSelectionPolicy } from './types'
 
-export type ProviderModelEditingOperation = 'save' | 'selection' | 'reimport' | 'delete'
+export type ProviderModelEditingOperation = 'save' | 'selection' | 'restore' | 'delete'
 export interface ProviderModelEditingApi {
   model(providerId: string, modelId: string): Promise<ProviderModelDetail>
   prepareModel(providerId: string, modelId: string, templateId?: string): Promise<PreparedProviderModel>
@@ -11,14 +12,24 @@ export interface ProviderModelEditingApi {
     metadataJson: string,
     templateId?: string,
   ): Promise<ProviderModelDetail>
-  updateModel(providerId: string, modelId: string, metadataJson: string, revision: number): Promise<ProviderModelDetail>
+  updateModel(
+    providerId: string,
+    modelId: string,
+    changes: Record<string, unknown>,
+    revision: number,
+  ): Promise<ProviderModelDetail>
   updateModelSelection(
     providerId: string,
     modelId: string,
     policy: ProviderModelSelectionPolicy,
     revision: number,
   ): Promise<ProviderModelDetail>
-  reimportModel(providerId: string, modelId: string, revision: number): Promise<ProviderModelDetail>
+  restoreModelSync(
+    providerId: string,
+    modelId: string,
+    fields: string[],
+    revision: number,
+  ): Promise<ProviderModelDetail>
   deleteManualModel(providerId: string, modelId: string): Promise<void>
 }
 export interface ProviderModelEditingSnapshot {
@@ -34,6 +45,7 @@ export interface ProviderModelEditingSnapshot {
   discardOpen: boolean
   deleteOpen: boolean
   readError: unknown
+  writeError: unknown
   refreshError: unknown
 }
 export interface ProviderModelEditingDeps {
@@ -60,6 +72,7 @@ export class ProviderModelEditingController {
     discardOpen: false,
     deleteOpen: false,
     readError: undefined,
+    writeError: undefined,
     refreshError: undefined,
   }
   #epoch = 0
@@ -100,6 +113,7 @@ export class ProviderModelEditingController {
       discardOpen: false,
       deleteOpen: false,
       readError: undefined,
+      writeError: undefined,
       refreshError: undefined,
     })
   }
@@ -138,6 +152,7 @@ export class ProviderModelEditingController {
     this.#patch({
       dirty: false,
       discardOpen: false,
+      writeError: undefined,
       detail: detail ? { ...detail, metadata: structuredClone(detail.metadata) } : undefined,
     })
     try {
@@ -223,7 +238,8 @@ export class ProviderModelEditingController {
             },
             available: true,
             source_kind: 'manual',
-            can_reimport: false,
+            pinned_fields: [],
+            restorable_fields: [],
             route_output_modalities: [],
             selection_policy: 'auto',
             revision: 0,
@@ -275,13 +291,16 @@ export class ProviderModelEditingController {
     const { providerId, detail, draft } = this.#state
     const epoch = this.#epoch
     this.#pending = undefined
-    this.#patch({ busy: true, discardOpen: false })
+    this.#patch({ busy: true, discardOpen: false, writeError: undefined })
     try {
       let saved: ProviderModelDetail | void
       try {
         saved = await write(providerId, detail)
       } catch (error) {
-        if (this.#current(epoch)) this.#deps.onError(error, 'write')
+        if (this.#current(epoch)) {
+          if (operation !== 'delete') this.#patch({ writeError: error })
+          this.#deps.onError(error, 'write')
+        }
         return
       }
       if (!this.#current(epoch)) return
@@ -307,13 +326,14 @@ export class ProviderModelEditingController {
       this.#patch({ busy: false })
     }
   }
-  save(metadataJson: string): Promise<void> {
-    const draft = this.#state.draft
+  save(submission: ProviderModelSubmission): Promise<void> {
     const templateId = this.#templateId
     return this.#write('save', (providerId, detail) =>
-      draft
-        ? this.#deps.api.createManualModel(providerId, detail.id, metadataJson, templateId)
-        : this.#deps.api.updateModel(providerId, detail.id, metadataJson, detail.revision),
+      submission.kind === 'create'
+        ? this.#deps.api.createManualModel(providerId, detail.id, submission.metadataJson, templateId)
+        : Object.keys(submission.changes).length === 0
+          ? Promise.resolve(detail)
+          : this.#deps.api.updateModel(providerId, detail.id, submission.changes, detail.revision),
     )
   }
   changeSelection(policy: ProviderModelSelectionPolicy): Promise<void> {
@@ -322,10 +342,11 @@ export class ProviderModelEditingController {
       this.#deps.api.updateModelSelection(providerId, detail.id, policy, detail.revision),
     )
   }
-  requestReimport(): void {
+  restore(fields: string[]): void {
+    if (this.#state.draft || fields.length === 0) return
     this.requestLeave(() =>
-      this.#write('reimport', (providerId, detail) =>
-        this.#deps.api.reimportModel(providerId, detail.id, detail.revision),
+      this.#write('restore', (providerId, detail) =>
+        this.#deps.api.restoreModelSync(providerId, detail.id, fields, detail.revision),
       ),
     )
   }

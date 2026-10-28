@@ -447,6 +447,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -462,6 +463,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             inject_media_generation: false,
             model_ids: vec![route.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();
@@ -733,6 +735,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -750,6 +753,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 inject_media_generation: false,
                 model_ids: vec![route.id.clone().into()],
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await
             .unwrap();

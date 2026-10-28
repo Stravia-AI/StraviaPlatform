@@ -65,6 +65,9 @@ impl Storage for ControlledStorage {
     fn settings(&self) -> &dyn SettingsStore {
         self
     }
+    fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
+        self.source.money()
+    }
     fn usage_stats(&self) -> &dyn UsageStatsStore {
         self.source.usage_stats()
     }

@@ -724,6 +724,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: Some(model_ids),
+                    spend_limit: None,
                 },
             )
             .await
@@ -740,6 +741,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                 inject_media_generation: false,
                 model_ids,
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await
             .expect("create test API key"),
@@ -772,6 +774,7 @@ async fn set_rpm_limit(gateway: &Gateway, limit: i32) {
                 inject_media_understanding: None,
                 expires_at: None,
                 model_ids: None,
+                spend_limit: None,
             },
         )
         .await
@@ -1415,6 +1418,7 @@ async fn configure_route_with_protocol(
             balance: Some("traffic_equalization".into()),
             targets,
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("create route")
@@ -1882,6 +1886,7 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
                     expires_at: None,
                     model_ids,
                     inject_media_understanding: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -2054,6 +2059,7 @@ async fn assert_hidden_round_rechecks_access(
             inject_media_generation: false,
             model_ids: vec![model_id],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

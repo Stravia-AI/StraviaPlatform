@@ -1,3 +1,5 @@
+use crate::storage::money::parse_spend_limit;
+
 use super::*;
 
 #[derive(Clone)]
@@ -11,10 +13,14 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let rows = sqlx::query_as::<_, ApiKey>(sqlx::AssertSqlSafe(api_key_select(None)))
             .fetch_all(&self.pool)
             .await?;
+        let mut model_ids = load_all_api_key_model_ids(&self.pool).await?;
+        let mut spends = load_all_api_key_spends(&self.pool).await?;
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            let model_ids = list_api_key_model_ids(&self.pool, &row.id).await?;
-            items.push(api_key_with_bindings(row, model_ids));
+            let key_model_ids = model_ids.remove(&row.id).unwrap_or_default();
+            let mut item = api_key_with_bindings(row, key_model_ids);
+            item.spend = spends.remove(&item.id).unwrap_or_default();
+            items.push(item);
         }
         Ok(items)
     }
@@ -29,7 +35,9 @@ impl ApiKeyStore for PostgresApiKeyStore {
             return Ok(None);
         };
         let model_ids = list_api_key_model_ids(&self.pool, id).await?;
-        Ok(Some(api_key_with_bindings(row, model_ids)))
+        let mut item = api_key_with_bindings(row, model_ids);
+        item.spend = load_api_key_spend(&self.pool, id).await?;
+        Ok(Some(item))
     }
 
     async fn create(&self, input: CreateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
@@ -37,13 +45,15 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let key = input
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
+        let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
         sqlx::query(
-    "INSERT INTO api_keys (id, token, name, rpm_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::timestamptz)",
+    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, '')::timestamptz)",
             )
             .bind(&id)
             .bind(&key)
             .bind(input.name.trim())
             .bind(input.rpm_limit)
+            .bind(spend_limit_nanos)
             .bind(input.mcp_access_enabled)
             .bind(input.transparent_injection_enabled)
             .bind(input.inject_media_understanding)
@@ -81,13 +91,18 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .inject_media_generation
             .unwrap_or(current.inject_media_generation);
         let expires_at = input.expires_at.or(current.expires_at);
+        let spend_limit_nanos = match input.spend_limit {
+            Some(value) => parse_spend_limit(value.as_deref())?,
+            None => current.spend_limit_nanos,
+        };
 
         sqlx::query(
-    "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, is_enabled=$4, mcp_access_enabled=$5, transparent_injection_enabled=$6, inject_media_understanding=$7, inject_web_search=$8, inject_media_generation=$9, expires_at=NULLIF($10, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$11",
+    "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, spend_limit_nanos=$4, is_enabled=$5, mcp_access_enabled=$6, transparent_injection_enabled=$7, inject_media_understanding=$8, inject_web_search=$9, inject_media_generation=$10, expires_at=NULLIF($11, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$12",
             )
             .bind(key)
             .bind(name.trim())
             .bind(rpm_limit)
+            .bind(spend_limit_nanos)
             .bind(is_enabled)
             .bind(mcp_access_enabled)
             .bind(transparent_injection_enabled)
@@ -168,12 +183,13 @@ impl AuthAccessStore for PostgresAuthAccessStore {
         bool,
         Option<String>,
         Option<i32>,
+        Option<i64>,
         bool,
         bool,
         bool,
         bool,
             ),
-            >("SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1")
+            >("SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1")
             .bind(raw_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -185,6 +201,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -195,6 +212,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -212,13 +230,14 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 bool,
                 Option<String>,
                 Option<i32>,
+                Option<i64>,
                 bool,
                 bool,
                 bool,
                 bool,
             ),
         >(
-            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -230,6 +249,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -240,6 +260,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -306,4 +327,73 @@ pub(super) async fn replace_api_key_models(
 
     tx.commit().await?;
     Ok(())
+}
+
+async fn load_api_key_spend(
+    pool: &Pool<Postgres>,
+    id: &str,
+) -> anyhow::Result<crate::storage::traits::ApiKeySpend> {
+    let row: Option<(i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT spent_custom_nanos, spent_usd_unconverted_nanos, reset_at \
+         FROM api_key_spend WHERE api_key_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .map(
+            |(spent_custom_nanos, spent_usd_unconverted_nanos, reset_at)| {
+                crate::storage::traits::ApiKeySpend {
+                    spent_custom_nanos,
+                    spent_usd_unconverted_nanos,
+                    reset_at,
+                }
+            },
+        )
+        .unwrap_or_default())
+}
+
+async fn load_all_api_key_model_ids(
+    pool: &Pool<Postgres>,
+) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT api_key_id, model_id FROM api_key_models \
+         ORDER BY api_key_id ASC, model_id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut by_key = std::collections::HashMap::new();
+    for (api_key_id, model_id) in rows {
+        by_key
+            .entry(api_key_id)
+            .or_insert_with(Vec::new)
+            .push(model_id);
+    }
+    Ok(by_key)
+}
+
+async fn load_all_api_key_spends(
+    pool: &Pool<Postgres>,
+) -> anyhow::Result<std::collections::HashMap<String, crate::storage::traits::ApiKeySpend>> {
+    let rows: Vec<(String, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT api_key_id, spent_custom_nanos, spent_usd_unconverted_nanos, reset_at \
+         FROM api_key_spend",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(api_key_id, spent_custom_nanos, spent_usd_unconverted_nanos, reset_at)| {
+                (
+                    api_key_id,
+                    crate::storage::traits::ApiKeySpend {
+                        spent_custom_nanos,
+                        spent_usd_unconverted_nanos,
+                        reset_at,
+                    },
+                )
+            },
+        )
+        .collect())
 }

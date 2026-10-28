@@ -731,6 +731,7 @@ async fn antigravity_independent_image_recovery_case(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let key = gateway
@@ -746,6 +747,7 @@ async fn antigravity_independent_image_recovery_case(
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: Vec::new(),
+            spend_limit: None,
         })
         .await?;
     // Exercise the real independent-capability consumer and installed Wasm
@@ -1379,6 +1381,9 @@ impl crate::storage::Storage for PeerRefreshObservedStorage {
     }
     fn settings(&self) -> &dyn crate::storage::SettingsStore {
         self.inner.settings()
+    }
+    fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
+        self.inner.money()
     }
     fn api_keys(&self) -> Option<&dyn crate::storage::ApiKeyStore> {
         self.inner.api_keys()

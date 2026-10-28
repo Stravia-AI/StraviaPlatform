@@ -402,6 +402,7 @@ async fn create_route(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
 }
@@ -420,6 +421,7 @@ async fn api_key(gateway: &Gateway, route_id: &str) -> anyhow::Result<String> {
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![route_id.into()],
+            spend_limit: None,
         })
         .await?
         .token)
@@ -1372,6 +1374,7 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
                 })
                 .collect(),
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let token = api_key(&gateway, &route.id).await?;
@@ -2408,6 +2411,7 @@ async fn inference_oauth_refresh_outage_preserves_credentials_and_recovers_on_ne
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let token = api_key(&gateway, &route.id).await?;

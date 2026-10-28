@@ -49,6 +49,114 @@ def _answer(text: str) -> dict[str, Any]:
     return {"role": "assistant", "content": text}
 
 
+# A Responses reasoning item with opaque state is a protected carrier. Chat
+# ingress receives only a marker projection and must restore this exact state
+# when the client replays it.
+_PROJECTED_REASONING_TEXT = "Consider the user's question before describing the available coding tools."
+_PROJECTED_REASONING_SIGNATURE = "opaque-projected-reasoning-state"
+_PROJECTED_SOURCE_TEXT = _text("public coding assistant answer")
+_PROJECTED_REPLAY_TEXT = _text("current environment answer")
+_PROJECTED_STALE_SYSTEM_TEXT = "You are powered by model A."
+_PROJECTED_CHANGED_SYSTEM_TEXT = "You are powered by model B."
+_PROJECTED_QUESTION_TEXT = "你好，你是什么模型"
+_PROJECTED_FOLLOW_UP_TEXT = "我当前是什么电脑"
+
+
+def _responses_message_text(item: dict[str, Any]) -> str | None:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    return None
+
+
+def _responses_reasoning_item() -> dict[str, Any]:
+    return {
+        "type": "reasoning",
+        "id": "rs-projected-reasoning",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": _PROJECTED_REASONING_TEXT}],
+        "encrypted_content": _PROJECTED_REASONING_SIGNATURE,
+    }
+
+
+def _responses_message(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "id": "msg-projected-reasoning",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _responses_result(output: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "id": "resp-projected-reasoning",
+        "object": "response",
+        "created_at": 1_783_000_000,
+        "status": "completed",
+        "model": "gpt-4o-mini",
+        "output": output,
+        "usage": {
+            "input_tokens": 31, "output_tokens": 17, "total_tokens": 48,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        },
+        "completed_at": 1_783_000_001,
+        "incomplete_details": None,
+        "previous_response_id": None,
+        "instructions": None,
+        "error": None,
+        "tools": [],
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "parallel_tool_calls": True,
+        "text": {"format": {"type": "text"}},
+        "top_p": None,
+        "presence_penalty": None,
+        "frequency_penalty": None,
+        "top_logprobs": None,
+        "temperature": None,
+        "reasoning": None,
+        "max_output_tokens": None,
+        "max_tool_calls": None,
+        "store": False,
+        "background": False,
+        "service_tier": "default",
+        "metadata": {},
+        "safety_identifier": None,
+        "prompt_cache_key": None,
+    }
+
+
+def _responses_stream_events(result: dict[str, Any]) -> list[dict[str, Any]]:
+    events = [{
+        "type": "response.created",
+        "response": {**result, "status": "in_progress", "output": [], "usage": None},
+    }]
+    for index, item in enumerate(result["output"]):
+        events.append({"type": "response.output_item.added", "output_index": index, "item": item})
+        if item["type"] == "message":
+            part = item["content"][0]
+            events.extend([
+                {"type": "response.content_part.added", "output_index": index, "content_index": 0, "item_id": item["id"], "part": {**part, "text": ""}},
+                {"type": "response.output_text.delta", "output_index": index, "content_index": 0, "item_id": item["id"], "delta": part["text"]},
+                {"type": "response.output_text.done", "output_index": index, "content_index": 0, "item_id": item["id"], "text": part["text"]},
+                {"type": "response.content_part.done", "output_index": index, "content_index": 0, "item_id": item["id"], "part": part},
+            ])
+        events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    events.append({"type": "response.completed", "response": result})
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence
+    return events
+
+
 def _media_data_url(name: str, media_type: str) -> str:
     path = (
         Path(__file__).parents[3]
@@ -95,11 +203,14 @@ def _all_interactions(env: dict[str, Any], route_id: str) -> list[dict[str, Any]
 
 
 class _LocalConversation:
-    def __init__(self, env: dict[str, Any], name: str, accepted: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self, env: dict[str, Any], name: str, accepted: dict[str, dict[str, Any]],
+        *, protocol: str = "openai-compatible",
+    ) -> None:
         self.env = env
         self.name = name
         self.accepted = accepted
-        self.route_id, self.key = _create_route(env, name)
+        self.route_id, self.key = _create_route(env, name, protocol=protocol)
 
     def send(
         self, messages: list[dict[str, Any]], *, answer: dict[str, Any] | None = None,
@@ -149,8 +260,85 @@ def diagnostic_provider(admin_env: dict[str, Any]):
     accepted: dict[str, dict[str, Any]] = {}
 
     class Provider(server.RequestHandlerClass):
+        def _write_open_responses(self, body: dict[str, Any]) -> None:
+            items = body.get("input")
+            if not isinstance(items, list):
+                items = []
+            reasoning_items = [
+                item for item in items
+                if isinstance(item, dict) and item.get("type") == "reasoning"
+            ]
+            replayed = reasoning_items[0] if reasoning_items else None
+            if replayed is None:
+                serialized = json.dumps(body)
+                if (
+                    _PROJECTED_CHANGED_SYSTEM_TEXT in serialized
+                    or _PROJECTED_FOLLOW_UP_TEXT in serialized
+                ):
+                    self._write_json(422, {"error": {"type": "invalid_context", "message": "replayed protected reasoning state is missing"}})
+                    return
+            if replayed is not None:
+                if len(reasoning_items) != 1:
+                    self._write_json(422, {"error": {"type": "invalid_context", "message": "replayed reasoning state is ambiguous"}})
+                    return
+                if replayed.get("encrypted_content") != _PROJECTED_REASONING_SIGNATURE:
+                    self._write_json(422, {"error": {"type": "invalid_context", "message": "protected reasoning state was not restored"}})
+                    return
+                if "<!--sh:" in json.dumps(body):
+                    self._write_json(422, {"error": {"type": "invalid_context", "message": "public reasoning projection was forwarded"}})
+                    return
+                expected_messages = [
+                    ("system", _PROJECTED_CHANGED_SYSTEM_TEXT),
+                    ("user", _PROJECTED_QUESTION_TEXT),
+                    ("assistant", _PROJECTED_REASONING_TEXT),
+                    ("assistant", _PROJECTED_SOURCE_TEXT),
+                    ("user", _PROJECTED_FOLLOW_UP_TEXT),
+                ]
+                messages = [
+                    (item.get("role"), _responses_message_text(item))
+                    for item in items
+                    if isinstance(item, dict) and item.get("type") == "message"
+                ]
+                extra_items = [
+                    item for item in items
+                    if not isinstance(item, dict)
+                    or item.get("type") not in {"message", "reasoning"}
+                ]
+                if (
+                    messages != expected_messages
+                    or extra_items
+                    or body.get("previous_response_id") is not None
+                    or _PROJECTED_STALE_SYSTEM_TEXT in json.dumps(body)
+                ):
+                    self._write_json(422, {"error": {"type": "invalid_context", "message": "replayed conversation does not match the changed current window"}})
+                    return
+                result = _responses_result([_responses_message(_PROJECTED_REPLAY_TEXT)])
+            else:
+                result = _responses_result([
+                    _responses_reasoning_item(),
+                    _responses_message(_PROJECTED_SOURCE_TEXT),
+                ])
+            if not body.get("stream"):
+                self._write_json(200, result)
+                return
+            data = b"".join(
+                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+                for event in _responses_stream_events(result)
+            )
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(data)))
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+
         def do_POST(self) -> None:
             body = self._read_body()
+            path = self.path.split("?", 1)[0]
+            if path.endswith("/responses"):
+                self._write_open_responses(body)
+                return
             expected = accepted.get(_semantic(body.get("messages", [])))
             # A restored prefix, dropped item, reordered tool exchange or upstream
             # continuation shortcut is an invalid conversation, not a mock echo.
@@ -195,7 +383,9 @@ def diagnostic_provider(admin_env: dict[str, Any]):
     server.RequestHandlerClass = Provider
     env = {**admin_env, "mock": f"http://127.0.0.1:{port}"}
     try:
-        yield lambda label: _LocalConversation(env, "tail-" + label + "-" + uuid4().hex[:8], accepted)
+        yield lambda label, protocol="openai-compatible": _LocalConversation(
+            env, "tail-" + label + "-" + uuid4().hex[:8], accepted, protocol=protocol,
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -314,14 +504,9 @@ def test_retained_interaction_anywhere_is_only_diagnostic_and_new_user_stays_new
 @pytest.mark.admin
 @pytest.mark.parametrize("stream", [False, True])
 def test_projected_reasoning_links_diagnostics_after_model_instruction_change(diagnostic_provider, stream: bool) -> None:
-    conversation = diagnostic_provider("projected-reasoning")
-    question = _user("你好，你是什么模型")
-    original = [{"role": "system", "content": "You are powered by model A."}, question]
-    upstream_answer = {
-        **_answer(_text("public coding assistant answer")),
-        "reasoning_content": "Consider the user's question before describing the available coding tools.",
-    }
-    conversation.accepted[_semantic(original)] = upstream_answer
+    conversation = diagnostic_provider("projected-reasoning", protocol="open-responses")
+    question = _user(_PROJECTED_QUESTION_TEXT)
+    original = [{"role": "system", "content": _PROJECTED_STALE_SYSTEM_TEXT}, question]
     status, body = _proxy(
         conversation.env, conversation.key, conversation.name, original,
         body_extra={"stream": stream},
@@ -348,25 +533,14 @@ def test_projected_reasoning_links_diagnostics_after_model_instruction_change(di
         return None
 
     source = _wait_for("projected reasoning delivery", source_finished)
-    changed_system = {"role": "system", "content": "You are powered by model B."}
-    follow_up = _user("我当前是什么电脑")
+    changed_system = {"role": "system", "content": _PROJECTED_CHANGED_SYSTEM_TEXT}
+    follow_up = _user(_PROJECTED_FOLLOW_UP_TEXT)
     replay = [changed_system, question, returned, follow_up]
-    final_answer = _answer(_text("current environment answer"))
-    # The provider must receive the restored reasoning, not the public projection
-    # or the previous system instructions. The chat-completions wire folds a
-    # standalone reasoning item into the following assistant message's
-    # `reasoning_content` (strict upstreams reject content-less messages).
-    restored = [
-        changed_system,
-        question,
-        {
-            "role": "assistant",
-            "content": upstream_answer["content"],
-            "reasoning_content": upstream_answer["reasoning_content"],
-        },
-        follow_up,
-    ]
-    conversation.accepted[_semantic(restored)] = final_answer
+    final_answer = _answer(_PROJECTED_REPLAY_TEXT)
+    # The Responses Provider emits an opaque reasoning item. Chat ingress receives
+    # only the protected marker, and replaying that marker must restore the same
+    # encrypted_content to the Provider rather than forwarding the marker or the
+    # previous system instructions.
     _, detail = conversation.send(replay, answer=final_answer)
     event = _diagnostic(conversation, detail, "inferred")
     assert event["source_run_id"] == source["runs"][0]["id"]
@@ -437,8 +611,7 @@ def test_tool_correlations_and_media_are_part_of_exact_retained_evidence(diagnos
             model = route["data"]["target_model"]
             status, record = http_request("GET", f"{conversation.env['admin']}/api/v1/providers/{provider_id}/model?model={model}", headers=conversation.env["auth"])
             assert status == 200, record
-            metadata = {**record["data"]["metadata"], "modalities": {"input": ["text", "image"], "output": ["text"]}}
-            status, updated = http_request("PUT", f"{conversation.env['admin']}/api/v1/providers/{provider_id}/model", headers=conversation.env["auth"], payload={"model_id": model, "metadata": metadata, "revision": record["data"]["revision"]})
+            status, updated = http_request("PUT", f"{conversation.env['admin']}/api/v1/providers/{provider_id}/model", headers=conversation.env["auth"], payload={"model_id": model, "revision": record["data"]["revision"], "changes": {"modalities.input": ["text", "image"], "modalities.output": ["text"]}})
             assert status == 200, updated
             media = {"role": "user", "content": [{"type": "text", "text": _text("visual question")}, {"type": "image_url", "image_url": {"url": _media_data_url("transparent.png", "image/png")}}]}
         kept = [media] if mutation == "media" else [_user(_text("tool question")), call, result]

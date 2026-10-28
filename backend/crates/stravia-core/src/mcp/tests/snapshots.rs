@@ -247,6 +247,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();

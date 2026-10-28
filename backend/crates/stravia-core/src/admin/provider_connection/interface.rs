@@ -806,6 +806,7 @@ mod tests {
                     },
                 ],
                 default_thinking_level: None,
+                billing: None,
             })
             .await?;
 

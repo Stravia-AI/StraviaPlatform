@@ -28,6 +28,7 @@ fn rewrite(route: &RouteConfig, output_modality: Option<RouteOutputModality>) ->
         default_thinking_level: route.default_thinking_level.as_deref().map(|level| {
             serde_json::from_value(json!(level)).expect("valid historical Thinking Level")
         }),
+        billing: None,
     }
 }
 

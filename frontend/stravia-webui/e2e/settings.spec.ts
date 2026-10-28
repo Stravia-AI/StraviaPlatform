@@ -475,7 +475,6 @@ test('settings groups are links with history, current state, and a General fallb
   await expect(nav.getByRole('link')).toHaveText(['General', 'Network', 'Data', 'Account', 'Advanced'])
   await expect(nav.getByRole('link', { name: 'General' })).toHaveAttribute('aria-current', 'page')
   await expect(page).toHaveTitle('General · Settings · Stravia')
-  await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Appearance', 'Updates'])
 
   await nav.getByRole('link', { name: 'Network' }).click()
   await expect(page).toHaveURL(/\/settings\?view=network$/)

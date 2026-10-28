@@ -2331,6 +2331,7 @@ mod tests {
                     upstream_model: "model".into(),
                     protocol: "responses".into(),
                     upstream_url: "http://localhost".into(),
+                    cost_basis: None,
                 },
                 at,
                 i64::MAX,
@@ -2503,6 +2504,7 @@ mod tests {
                 upstream_model: "model".into(),
                 protocol: "responses".into(),
                 upstream_url: "http://localhost".into(),
+                cost_basis: None,
             },
         ] {
             store
@@ -2527,6 +2529,7 @@ mod tests {
                         output_tokens: Some(896),
                         ..Default::default()
                     }),
+                    amounts: None,
                 },
                 3,
                 i64::MAX,
@@ -2747,6 +2750,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     5,
                     i64::MAX,

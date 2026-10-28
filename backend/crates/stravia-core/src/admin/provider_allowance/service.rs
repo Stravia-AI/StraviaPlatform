@@ -1492,6 +1492,7 @@ mod tests {
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
+            cost_basis: crate::pricing::CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,
             is_enabled: true,

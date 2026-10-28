@@ -96,6 +96,23 @@ def usage_upstream():
                 usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
                          "prompt_tokens_details": {"cached_tokens": 0},
                          "completion_tokens_details": {"reasoning_tokens": 0}}
+            answer = "ok"
+            if isinstance(content, list):
+                sources = []
+                for part in content:
+                    if part.get("type") != "text":
+                        continue
+                    try:
+                        envelope = json.loads(part["text"])
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(envelope, dict):
+                        sources.extend(source["path"] for source in envelope.get("media", []))
+                if sources:
+                    answer = json.dumps({
+                        "answer": "A single pixel. " + " ".join(f"[{path}]" for path in sources),
+                        "artifacts": [{"path": path} for path in sources], "limitations": [],
+                    })
             if scenario in ("tool-call", "tool-call-recovered"):
                 # 客户端工具交接：运行以 waiting_client 收口，而不是 completed。
                 body = json.dumps({
@@ -118,7 +135,7 @@ def usage_upstream():
                 frames = []
                 for report in ([usage, usage, {"completion_tokens": 0}, {"prompt_tokens": None}] if scenario == "revised" else [usage]):
                     frames.append({"id": "local-usage", "object": "chat.completion.chunk", "model": request["model"],
-                                   "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+                                   "choices": [{"index": 0, "delta": {"content": answer}, "finish_reason": None}],
                                    **({"usage": report} if report is not None else {})})
                 frames.append({"id": "local-usage", "object": "chat.completion.chunk", "model": request["model"],
                                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
@@ -126,7 +143,7 @@ def usage_upstream():
                 content_type = "text/event-stream"
             else:
                 body = json.dumps({"id": "local-usage", "object": "chat.completion", "model": request["model"],
-                                   "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                                   "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
                                    **({"usage": usage} if usage is not None else {})}).encode()
                 content_type = "application/json"
             self.send_response(200)

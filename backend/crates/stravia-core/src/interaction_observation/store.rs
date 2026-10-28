@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::types::{
     ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome, RunStart,
 };
+use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
 
 /// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
 pub(super) const TURN_SEPARATOR: &str = "\n\n";
@@ -1704,6 +1705,7 @@ impl ObservationStore {
                         duration_ms: finished_at.saturating_sub(attempt.try_get("started_at")?),
                         first_token_ms: attempt.try_get("first_token_ms")?,
                         usage,
+                        amounts: None,
                     };
                     let mut terminal_payload = serde_json::to_value(terminal)?;
                     terminal_payload["finished_at"] = Value::from(finished_at);
@@ -1779,6 +1781,7 @@ impl ObservationStore {
                         duration_ms: finished_at.saturating_sub(attempt.try_get("started_at")?),
                         first_token_ms: attempt.try_get("first_token_ms")?,
                         usage,
+                        amounts: None,
                     };
                     let mut terminal_payload = serde_json::to_value(terminal)?;
                     terminal_payload["finished_at"] = Value::from(finished_at);
@@ -2478,6 +2481,46 @@ async fn insert_event_postgres(
     Ok(())
 }
 
+fn cost_basis_column(basis: Option<CostBasis>) -> Option<&'static str> {
+    basis.map(|basis| match basis {
+        CostBasis::Usage => "usage",
+        CostBasis::Subscription => "subscription",
+    })
+}
+
+type AttemptAmountColumns = (
+    Option<&'static str>,
+    Option<i64>,
+    Option<i64>,
+    Option<&'static str>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// Recovery terminals preserve the start-time basis without fabricating amounts.
+fn attempt_amount_columns(amounts: &AttemptAmounts) -> AttemptAmountColumns {
+    let basis = cost_basis_column(Some(amounts.cost_basis));
+    let (cost_usd, cost_custom) = match &amounts.cost {
+        Some(amount) => (Some(amount.usd_nanos), amount.custom_nanos),
+        None => (None, None),
+    };
+    let (billing_state, billing_usd, billing_custom) = match &amounts.billing {
+        Some(BillingOutcome::Charged(amount)) => {
+            (Some("charged"), Some(amount.usd_nanos), amount.custom_nanos)
+        }
+        Some(BillingOutcome::Unknown) => (Some("unknown"), None, None),
+        None => (None, None, None),
+    };
+    (
+        basis,
+        cost_usd,
+        cost_custom,
+        billing_state,
+        billing_usd,
+        billing_custom,
+    )
+}
+
 async fn apply_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     iid: &str,
@@ -2530,9 +2573,10 @@ async fn apply_sqlite(
             provider_name,
             upstream_model,
             protocol,
+            cost_basis,
             ..
         } => {
-            sqlx::query("INSERT OR IGNORE INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,?,?,'running',?,?)").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT OR IGNORE INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,cost_basis,status,started_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?)").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(cost_basis_column(*cost_basis)).bind(now).bind(seq).execute(&mut **tx).await?;
         }
         RunEvent::TargetAttemptFinished {
             attempt_id,
@@ -2543,9 +2587,40 @@ async fn apply_sqlite(
             duration_ms,
             first_token_ms,
             usage,
+            amounts,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(error.as_ref().and_then(|error| error.source.as_deref())).bind(error.as_ref().and_then(|error| error.message.as_deref())).bind(error.as_ref().and_then(|error| error.upstream_code.as_deref())).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
+            let sql = if amounts.is_some() {
+                "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,cost_basis=?,cost_usd_nanos=?,cost_custom_nanos=?,billing_state=?,billing_usd_nanos=?,billing_custom_nanos=?,last_event_sequence=? WHERE id=?"
+            } else {
+                "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?"
+            };
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(status)
+                .bind(status_code.map(i64::from))
+                .bind(error_code)
+                .bind(error.as_ref().and_then(|error| error.source.as_deref()))
+                .bind(error.as_ref().and_then(|error| error.message.as_deref()))
+                .bind(
+                    error
+                        .as_ref()
+                        .and_then(|error| error.upstream_code.as_deref()),
+                )
+                .bind(now)
+                .bind(duration_ms)
+                .bind(first_token_ms);
+            if let Some(amounts) = amounts {
+                let (cost_basis, cost_usd, cost_custom, billing_state, billing_usd, billing_custom) =
+                    attempt_amount_columns(amounts);
+                query = query
+                    .bind(cost_basis)
+                    .bind(cost_usd)
+                    .bind(cost_custom)
+                    .bind(billing_state)
+                    .bind(billing_usd)
+                    .bind(billing_custom);
+            }
+            query.bind(seq).bind(attempt_id).execute(&mut **tx).await?;
             if let Some(usage) = usage {
                 usage_sqlite(tx, iid, attempt_id, usage, seq).await?;
             }
@@ -2628,9 +2703,10 @@ async fn apply_postgres(
             provider_name,
             upstream_model,
             protocol,
+            cost_basis,
             ..
         } => {
-            sqlx::query("INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'running',$10,$11) ON CONFLICT (id) DO NOTHING").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,cost_basis,status,started_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12) ON CONFLICT (id) DO NOTHING").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(cost_basis_column(*cost_basis)).bind(now).bind(seq).execute(&mut **tx).await?;
         }
         RunEvent::TargetAttemptFinished {
             attempt_id,
@@ -2641,9 +2717,40 @@ async fn apply_postgres(
             duration_ms,
             first_token_ms,
             usage,
+            amounts,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,last_event_sequence=$10 WHERE id=$11").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(error.as_ref().and_then(|error| error.source.as_deref())).bind(error.as_ref().and_then(|error| error.message.as_deref())).bind(error.as_ref().and_then(|error| error.upstream_code.as_deref())).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
+            let sql = if amounts.is_some() {
+                "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,cost_basis=$10,cost_usd_nanos=$11,cost_custom_nanos=$12,billing_state=$13,billing_usd_nanos=$14,billing_custom_nanos=$15,last_event_sequence=$16 WHERE id=$17"
+            } else {
+                "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,last_event_sequence=$10 WHERE id=$11"
+            };
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(status)
+                .bind(status_code.map(i64::from))
+                .bind(error_code)
+                .bind(error.as_ref().and_then(|error| error.source.as_deref()))
+                .bind(error.as_ref().and_then(|error| error.message.as_deref()))
+                .bind(
+                    error
+                        .as_ref()
+                        .and_then(|error| error.upstream_code.as_deref()),
+                )
+                .bind(now)
+                .bind(duration_ms)
+                .bind(first_token_ms);
+            if let Some(amounts) = amounts {
+                let (cost_basis, cost_usd, cost_custom, billing_state, billing_usd, billing_custom) =
+                    attempt_amount_columns(amounts);
+                query = query
+                    .bind(cost_basis)
+                    .bind(cost_usd)
+                    .bind(cost_custom)
+                    .bind(billing_state)
+                    .bind(billing_usd)
+                    .bind(billing_custom);
+            }
+            query.bind(seq).bind(attempt_id).execute(&mut **tx).await?;
             if let Some(usage) = usage {
                 usage_postgres(tx, iid, attempt_id, usage, seq).await?;
             }
@@ -2962,6 +3069,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     3,
                     i64::MAX,
@@ -3063,6 +3171,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     3,
                     i64::MAX,
@@ -3125,6 +3234,7 @@ mod tests {
                         duration_ms: 10,
                         first_token_ms: None,
                         usage: None,
+                        amounts: None,
                     },
                     6,
                     i64::MAX,

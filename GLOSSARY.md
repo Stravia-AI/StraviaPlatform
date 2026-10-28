@@ -118,7 +118,7 @@ _避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
 
 ## 用量统计汇总（Stats Usage）
 
-用量统计汇总是独立于对话历史与请求诊断记录、长期保留的 Token 用量、请求数、失败的请求数、上游请求与上游错误数及性能指标统计，其中 Token 用量以 Confirmed Upstream Usage 为依据。它不保留可逐对话查询的计量明细，不因历史手动删除或到期回收而减少；归属的 API Key、模型或 Provider 删除后仍保留各自的历史统计身份，同名重建不合并身份。
+用量统计汇总是独立于对话历史与请求诊断记录、长期保留的 Token 用量、按量成本、计费金额、请求数、失败的请求数、上游请求与上游错误数及性能指标统计，其中 Token 用量以 Confirmed Upstream Usage 为依据。它不保留可逐对话查询的计量明细，不因历史手动删除或到期回收而减少；归属的 API Key、模型或 Provider 删除后仍保留各自的历史统计身份，同名重建不合并身份。
 _避免使用_：对话历史、逐对话账单、Provider Allowance、上游额度快照
 
 ## Net Input Tokens
@@ -130,6 +130,31 @@ _避免使用_：总输入 Token（当指管理面输入）、Estimated Input To
 
 Total Input Tokens 是上游明确报告、包含缓存输入的原始输入 Token 数，用于原始用量记录、协议响应与计价，不是管理面的输入指标。净输入展示不改变该原始事实。
 _避免使用_：净输入 Token（当指原始上游输入）
+
+## 估算成本（Estimated Cost）
+
+估算成本是 Stravia 依据本地登记的上游价格或订阅费，对本实例应向上游 Provider 支付金额的估计。它不是上游账单，也不向 API Key 收取；上游实际扣费以上游为准。
+_避免使用_：计费、账单、实际费用
+
+## 计费（Billing）
+
+计费是 Stravia 按 Route（逻辑模型）的计费价格，对 API Key 发起的模型调用记取并累计消费的内部记账，可用于限制该 Key 的继续使用。它由管理员定价，不是上游账单，也不是估算成本。
+_避免使用_：成本（当指此义）、额度（当指 API Key 的可用消费）、Provider Allowance
+
+## 消费上限（Spend Limit）
+
+消费上限是管理员为一个 API Key 设定的计费累计上限，设有自定义币种时以自定义币种计，否则以美元计。该 Key 的已消费达到上限后新请求被拒绝，但 Key 不被禁用；调高上限或清零已消费后立即恢复。
+_避免使用_：额度、余额、配额、预算
+
+## 自定义币种（Custom Currency）
+
+自定义币种是管理员在美元之外定义的唯一一种显示币种，由显示符号与兑美元汇率组成，用于输入价格、设定消费上限和展示用量分析。每笔成本与计费在发生时同时冻结美元金额与按当时汇率折算的自定义币种金额；更换符号只改变显示，不换算任何金额，修改汇率只影响此后的记录。
+_避免使用_：结算币种、本位币、币种代码
+
+## 按量成本（Usage-Based Cost）
+
+按量成本是一次上游尝试按其 Provider Model 当时的价格（含上下文分档与峰谷定价）与 Confirmed Upstream Usage 得出的估算成本，发生时冻结。对订阅制 Provider，它只表示等价按量金额，不是该 Provider 的实际成本。
+_避免使用_：实际费用、账单金额
 
 ## Connect Client Apply
 
@@ -498,13 +523,18 @@ _避免使用_：Provider Connection Draft、持久化模型快照、跨模型�
 
 ## Model Snapshot State
 
-Model Snapshot State 表达 Provider Model 规格快照的来源与编辑状态：尚未登记、已从明确来源导入、或已经管理员编辑。未知规格保持未知；普通同步可以补齐尚未登记的规格，并让已导入、未被管理员编辑的规格跟随来源更新；人工编辑后由管理员接管整条模型规格，而非仅保护被编辑的字段。
-_避免使用_：模型可用性、占位默认规格、从字段值推断人工修改
+Model Snapshot State 表达 Provider Model 规格快照的来源与逐字段编辑状态：尚未登记或已从明确来源导入，并记录哪些字段已由管理员固定。未知规格保持未知；普通同步补齐尚未登记的规格，并让未固定的字段跟随来源更新；管理员修改过的字段被固定，不再随同步改变，直到对该字段恢复同步。
+_避免使用_：模型可用性、占位默认规格、从字段值推断人工修改、整条规格接管
 
 ## Model Specification
 
 Model Specification（模型规格）是模型记录中已登记的上下文、输入输出模态、明确的推理强度支持值及结构化价格；对 Provider Model，以已保存且可人工编辑的快照为准。未登记模态时，有效规格默认文本输入、文本输出；显式模态列表（包括空列表）优先，回退不改变原始快照的登记状态。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；其他信息缺失不等于不支持。
 _避免使用_：实测能力、实际可用能力、把未登记称为不支持
+
+## 峰谷定价（Peak Pricing）
+
+峰谷定价是附加在一份价格上的本地时段倍率：在其指定时区的星期与时段内，该价格各项单价（含按上下文分档后的单价）乘以同一倍率，其余时间按原价。它不同于按上下文长度划分的价格分档。
+_避免使用_：分组定价、分时折扣、空闲折扣
 
 ## Selection Policy
 
@@ -667,7 +697,7 @@ _避免使用_：reasoningEffortMap、Reasoning Options Map、Route Thinking Map
 
 ## Generated Mapping
 
-Generated Mapping 是 Thinking Level Map 中仍由 Provider Model 快照明确登记的 Effort 值推导、可在该快照显式 re-import 时重算的一行。未登记 Effort 时，不推测可用档位。
+Generated Mapping 是 Thinking Level Map 中仍由 Provider Model 快照明确登记的 Effort 值推导、在该快照的 Effort 列表随同步或恢复同步改变时重算的一行。未登记 Effort 时，不推测可用档位。
 _避免使用_：Synced Mapping、Catalog Mapping
 
 ## Overridden Mapping

@@ -224,6 +224,18 @@ pub async fn run_sqlite_migrator(
         )
         .await?;
     }
+    if runner.version_exists(30) {
+        runner
+            .run_direct(Some(30), &mut *pinned.connection, false)
+            .await?;
+        report(
+            "model_pinning",
+            "Converting edited Provider Model snapshots",
+            0,
+            None,
+        );
+        crate::provider_models::pinning_migration::run_sqlite(&mut pinned.connection).await?;
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -352,6 +364,16 @@ pub async fn run_postgres_migrator(
             &mut connection,
         )
         .await?;
+    }
+    if runner.version_exists(30) {
+        runner.run_direct(Some(30), &mut *connection, false).await?;
+        report(
+            "model_pinning",
+            "Converting edited Provider Model snapshots",
+            0,
+            None,
+        );
+        crate::provider_models::pinning_migration::run_postgres(&mut connection).await?;
     }
     report(
         "schema_migrations",

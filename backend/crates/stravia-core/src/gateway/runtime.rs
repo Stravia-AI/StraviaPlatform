@@ -514,6 +514,7 @@ impl Gateway {
         let catalog_base_url = config.catalog_base_url.clone();
         let (browser_preferences, browser_path) =
             admin::browser::BrowserPreferences::load(&config.data_dir);
+        let custom_currency = storage.money().custom_currency().await?;
         let mut gw = Self {
             config,
             storage,
@@ -540,6 +541,7 @@ impl Gateway {
             model_cache,
             cache_affinity: router::cache_affinity::CacheAffinity::new(runtime_cache.clone()),
             route_policy_state: router::RoutePolicyState::new(runtime_cache),
+            custom_currency: Arc::new(parking_lot::RwLock::new(custom_currency.map(Arc::new))),
             observation,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
@@ -756,6 +758,9 @@ impl Gateway {
                                 let _reload = crate::rpm::CONFIG_WRITE.lock().await;
                                 let value = gw_poll.storage.settings().get(crate::rpm::SETTINGS_KEY).await?;
                                 let config = crate::rpm::RpmConfig::from_setting(value.as_deref())?;
+                                let custom_currency =
+                                    gw_poll.storage.money().custom_currency().await?;
+                                gw_poll.apply_custom_currency(custom_currency);
                                 gw_poll
                                     .model_cache
                                     .write()
@@ -853,6 +858,63 @@ impl Gateway {
 
     pub fn admin(&self) -> admin::AdminService {
         admin::AdminService::new(self.clone())
+    }
+
+    /// Replace the in-memory currency snapshot after the management write has
+    /// committed. Pricing snapshots already captured by in-flight attempts are
+    /// not rewritten.
+    pub(crate) fn apply_custom_currency(&self, currency: Option<crate::pricing::CustomCurrency>) {
+        *self.custom_currency.write() = currency.map(Arc::new);
+    }
+
+    pub(crate) fn custom_currency_snapshot(&self) -> Option<Arc<crate::pricing::CustomCurrency>> {
+        self.custom_currency.read().clone()
+    }
+
+    /// Root API Key spend admission. Reads one cumulative row and never writes.
+    /// A configured limit fails closed when the row cannot be read; an
+    /// unlimited Key skips the read entirely.
+    pub(crate) async fn check_api_key_spend_limit(
+        &self,
+        api_key_id: &str,
+        spend_limit_nanos: Option<i64>,
+    ) -> Result<(), crate::error::GatewayError> {
+        let Some(limit) = spend_limit_nanos else {
+            return Ok(());
+        };
+        let spend = self
+            .storage
+            .money()
+            .api_key_spend(api_key_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    api_key_id,
+                    %error,
+                    "API key spend could not be read; rejecting the root request"
+                );
+                crate::error::GatewayError::internal(anyhow::anyhow!(
+                    "API key spend could not be read"
+                ))
+            })?;
+        let spent = crate::pricing::display_nanos(
+            spend.spent_custom_nanos,
+            spend.spent_usd_unconverted_nanos,
+            self.custom_currency_snapshot().as_deref(),
+        )
+        .ok_or_else(|| {
+            tracing::warn!(
+                api_key_id,
+                "API key spend display amount overflowed; rejecting the root request"
+            );
+            crate::error::GatewayError::internal(anyhow::anyhow!(
+                "API key spend could not be represented"
+            ))
+        })?;
+        if spent >= limit {
+            return Err(crate::error::GatewayError::ApiKeySpendLimitReached);
+        }
+        Ok(())
     }
 
     /// Change the browser path for this Gateway and its clones; active runs retain their snapshot.

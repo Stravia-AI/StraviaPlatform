@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 
+use crate::pricing::{AttemptAmounts, CostBasis};
+
 pub type BundleStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 pub type ObservationStream = Pin<Box<dyn Stream<Item = ObservationUpdate> + Send>>;
 
@@ -557,6 +559,10 @@ pub(crate) enum RunEvent {
         upstream_model: String,
         protocol: String,
         upstream_url: String,
+        /// Cost basis frozen when the attempt starts; recovery keeps it so an
+        /// interrupted terminal records an unknown cost instead of dropping it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_basis: Option<CostBasis>,
     },
     TargetAttemptFinished {
         model_turn_id: String,
@@ -570,6 +576,8 @@ pub(crate) enum RunEvent {
         first_token_ms: Option<i64>,
         #[serde(default)]
         usage: Option<ConfirmedUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amounts: Option<AttemptAmounts>,
     },
     UsageConfirmed {
         model_turn_id: String,

@@ -2,6 +2,9 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { prepareApp } from './prepare-app'
 
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const knownMoney = { amount: '0.01', known_count: 1, unknown_count: 0 }
+
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -262,6 +265,8 @@ for (const routePath of ['/stats']) {
         avg_duration_ms: 5_000 + (hour % 5) * 1_000,
         avg_first_token_ms: 1_000 + (hour % 3) * 500,
         avg_output_tps: 10_000 + (hour % 5) * 2_000,
+        currency: CURRENCY,
+        actual_cost: knownMoney,
       })).filter((_, hour) => ![7, 13, 14].includes(hour))
       await route.fulfill({ json: { data } })
     })
@@ -807,6 +812,8 @@ function latencyOverview(firstToken: number | null, tps: number | null) {
     avg_duration_ms: 120,
     avg_first_token_ms: firstToken,
     avg_output_tps: tps,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
   }
 }
 
@@ -827,6 +834,8 @@ function latencyBucket(start: number, hour: number, firstToken: number | null, t
     avg_duration_ms: 2000,
     avg_first_token_ms: firstToken,
     avg_output_tps: tps,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
   }
 }
 
@@ -978,6 +987,8 @@ async function stubTraffic(
           avg_duration_ms: 120,
           avg_first_token_ms: 40,
           avg_output_tps: 25,
+          currency: CURRENCY,
+          actual_cost: knownMoney,
         },
       },
     })
@@ -1004,6 +1015,8 @@ async function stubTraffic(
             avg_duration_ms: 120,
             avg_first_token_ms: 40,
             avg_output_tps: 25,
+            currency: CURRENCY,
+            actual_cost: knownMoney,
           },
         ],
       },
@@ -1022,6 +1035,9 @@ async function stubTraffic(
             total_output_tokens: 86,
             total_reasoning_tokens: 44,
             avg_duration_ms: 120,
+            currency: CURRENCY,
+            cost: knownMoney,
+            billing: knownMoney,
           },
         ],
       },
@@ -1042,6 +1058,9 @@ async function stubTraffic(
             cache_write_tokens: 12,
             reasoning_tokens: 44,
             last_used_at: Date.UTC(2026, 7, 26),
+            currency: CURRENCY,
+            cost: knownMoney,
+            billing: knownMoney,
           },
         ],
       },

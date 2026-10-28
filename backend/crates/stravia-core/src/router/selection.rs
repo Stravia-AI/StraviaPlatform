@@ -46,6 +46,9 @@ pub(crate) struct RouteSelector {
     cache_affinity: CacheAffinity,
     continuation: Arc<dyn ContinuationLookup>,
     policy_state: RoutePolicyState,
+    /// Live currency snapshot shared with the Gateway; custom-currency price
+    /// fields are converted into USD at this rate before deriving weights.
+    custom_currency: Arc<parking_lot::RwLock<Option<Arc<crate::pricing::CustomCurrency>>>>,
 }
 
 impl RouteSelector {
@@ -54,12 +57,14 @@ impl RouteSelector {
         cache_affinity: CacheAffinity,
         continuation: Arc<dyn ContinuationLookup>,
         policy_state: RoutePolicyState,
+        custom_currency: Arc<parking_lot::RwLock<Option<Arc<crate::pricing::CustomCurrency>>>>,
     ) -> Self {
         Self {
             storage,
             cache_affinity,
             continuation,
             policy_state,
+            custom_currency,
         }
     }
 
@@ -331,19 +336,10 @@ impl RouteSelector {
                         .await?
                         .and_then(|record| record.metadata.cost)
                         .map(|cost| TargetPricing {
-                            cost_input: cost.prices.input.and_then(|value| value.to_f64()),
-                            cost_output: cost.prices.output.and_then(|value| value.to_f64()),
-                            cost_cache_read: cost
-                                .prices
-                                .cache_read
-                                .and_then(|value| value.to_f64()),
-                            cost_cache_write: cost
-                                .prices
-                                .cache_write
-                                .and_then(|value| value.to_f64()),
+                            cost: Some(Arc::new(cost)),
                         });
                     self.policy_state
-                        .store_pricing(generation, provider_id, model, loaded)
+                        .store_pricing(generation, provider_id, model, loaded.clone())
                         .await;
                     loaded
                 }
@@ -351,11 +347,23 @@ impl RouteSelector {
             let Some(pricing) = pricing else {
                 continue;
             };
+            let Some(cost) = pricing.cost else {
+                continue;
+            };
+            // Custom-currency fields enter the USD ratio at the current rate;
+            // the cached price itself stays as entered.
+            let currency = self.custom_currency.read().clone();
+            let currency = currency.as_deref();
+            let usd = |field| {
+                cost.base_price_in_usd(field, currency)
+                    .and_then(|value| value.to_f64())
+            };
             let target_snapshot = &mut snapshot.targets[index];
-            target_snapshot.cost_input = pricing.cost_input;
-            target_snapshot.cost_output = pricing.cost_output;
-            target_snapshot.cost_cache_read = pricing.cost_cache_read;
-            target_snapshot.cost_cache_write = pricing.cost_cache_write;
+            target_snapshot.cost_input = usd(crate::pricing::PriceField::Input);
+            target_snapshot.cost_output = usd(crate::pricing::PriceField::Output);
+            target_snapshot.cost_cache_read = usd(crate::pricing::PriceField::CacheRead);
+            target_snapshot.cost_cache_write = usd(crate::pricing::PriceField::CacheWrite);
+            target_snapshot.pricing = Some(cost);
         }
         Ok(snapshot)
     }
@@ -453,6 +461,7 @@ mod tests {
             supports_image_input: false,
             targets,
             default_thinking_level: None,
+            billing: None,
         }
     }
 
@@ -517,6 +526,7 @@ mod tests {
                 cache_affinity.clone(),
                 continuation,
                 policy_state.clone(),
+                Default::default(),
             ),
             policy_state,
             cache_affinity,
@@ -544,7 +554,8 @@ mod tests {
                         provider_id: target.provider_id().clone().into(),
                         model_id: target.model().clone().into(),
                         source_kind: ProviderModelSourceKind::Manual,
-                        snapshot_state: SnapshotState::Edited { source: None },
+                        snapshot_state: SnapshotState::Local,
+                        source_metadata: None,
                         metadata_source_provider_id: None,
                         presence: ProviderModelPresence::Present,
                         selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -699,9 +710,10 @@ mod tests {
             &self,
             provider_id: &str,
             reconciliation: ProviderModelReconciliation,
+            validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
         ) -> anyhow::Result<()> {
             self.delegate
-                .apply_reconciliation(provider_id, reconciliation)
+                .apply_reconciliation(provider_id, reconciliation, validate_map)
                 .await
         }
 
@@ -732,15 +744,15 @@ mod tests {
             .await
         }
 
-        async fn reimport(
+        async fn restore(
             &self,
             provider_id: &str,
             model_id: &str,
-            input: crate::provider_models::ReimportProviderModel,
-            validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+            input: crate::provider_models::RestoreProviderModel,
+            validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
             before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
-        ) -> anyhow::Result<crate::provider_models::ProviderModelReimport> {
-            ProviderModelStore::reimport(
+        ) -> anyhow::Result<crate::provider_models::ProviderModelRestore> {
+            ProviderModelStore::restore(
                 &self.delegate,
                 provider_id,
                 model_id,
@@ -842,6 +854,10 @@ mod tests {
 
         fn settings(&self) -> &dyn SettingsStore {
             self.delegate.settings()
+        }
+
+        fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
+            self.delegate.money()
         }
 
         fn api_keys(&self) -> Option<&dyn ApiKeyStore> {
@@ -1728,7 +1744,9 @@ mod tests {
                         source_kind: ProviderModelSourceKind::Discovered,
                         snapshot_state: SnapshotState::Imported {
                             source: crate::provider_models::SourceStamp::Discovery,
+                            pinned: std::collections::BTreeSet::new(),
                         },
+                        source_metadata: None,
                         metadata_source_provider_id: None,
                         presence: ProviderModelPresence::Present,
                         selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1775,7 +1793,8 @@ mod tests {
             provider_id: provider_id.into(),
             model_id: "model".into(),
             source_kind: ProviderModelSourceKind::Manual,
-            snapshot_state: SnapshotState::Edited { source: None },
+            snapshot_state: SnapshotState::Local,
+            source_metadata: None,
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1909,6 +1928,7 @@ mod tests {
             CacheAffinity::default(),
             no_continuation(),
             gateway.route_policy_state.clone(),
+            gateway.custom_currency.clone(),
         );
         let route = route(vec![target(&provider.id, 0)]);
         let key = format!("{}:model", provider.id);
@@ -1959,10 +1979,16 @@ mod tests {
                 &provider.id,
                 "model",
                 UpdateProviderModel {
-                    metadata: serde_json::json!({
-                        "id": "model",
-                        "cost": { "input": 4.0, "output": 8.0 }
-                    }),
+                    changes: std::collections::BTreeMap::from([
+                        (
+                            "cost.input".to_string(),
+                            serde_json::json!({"amount": "4.0", "currency": "usd"}),
+                        ),
+                        (
+                            "cost.output".to_string(),
+                            serde_json::json!({"amount": "8.0", "currency": "usd"}),
+                        ),
+                    ]),
                     revision: detail.revision,
                 },
             )

@@ -1,9 +1,11 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { createQuery } from '@tanstack/svelte-query'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { formatNumber } from '#lib/format.js'
-import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelPrices } from '#lib/types.js'
+import { priceFieldCurrencySymbol } from '#lib/components/price-form.js'
+import type { PriceFieldName, ProviderModelDetail, ProviderModelMetadata, ProviderModelPrices } from '#lib/types.js'
 import ModelSpecification from '#lib/components/model-specification.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
@@ -28,24 +30,44 @@ let open = $state(false)
 let detail = $state<ProviderModelDetail>()
 let loading = $state(false)
 let error = $state('')
+const currencyQuery = createQuery(() => ({
+  queryKey: ['currency'],
+  queryFn: () => admin.currency.get(),
+  enabled: open,
+}))
 
 const metadata = $derived<ProviderModelMetadata>(detail?.metadata ?? {})
 const priceGroups = $derived.by(() => {
   const cost = metadata.cost
   if (!cost) return []
-  const schedules = [
+  const customFields = new Set<PriceFieldName>(cost.custom_currency_fields ?? [])
+  const customSymbol = currencyQuery.data?.symbol
+  const currencySymbol = (field: PriceFieldName): string => priceFieldCurrencySymbol(field, customFields, customSymbol)
+  const schedules: Array<{ label: string; prices: ProviderModelPrices; currencyField?: PriceFieldName }> = [
     { label: m.model_specification_base_prices(), prices: cost },
     ...(cost.context_over_200k
-      ? [{ label: m.model_specification_extended_context_prices(), prices: cost.context_over_200k }]
+      ? [
+          {
+            label: m.model_specification_extended_context_prices(),
+            prices: cost.context_over_200k,
+            currencyField: 'tiers' as const,
+          },
+        ]
       : []),
-    ...cost.tiers.map((tier) => ({ label: `${tier.tier.type} · ${formatNumber(tier.tier.size)}`, prices: tier })),
+    ...(cost.tiers ?? []).map((tier) => ({
+      label: `${tier.tier.type} · ${formatNumber(tier.tier.size)}`,
+      prices: tier,
+      currencyField: 'tiers' as const,
+    })),
   ]
   return schedules
     .map((schedule) => ({
       label: schedule.label,
       prices: priceFields.flatMap(({ key, label }) => {
         const value = schedule.prices[key]
-        return value == null ? [] : [{ key, label: label(), value }]
+        return value == null
+          ? []
+          : [{ key, label: label(), value: String(value), symbol: currencySymbol(schedule.currencyField ?? key) }]
       }),
     }))
     .filter((schedule) => schedule.prices.length > 0)
@@ -129,7 +151,7 @@ async function loadDetails(): Promise<void> {
                   {#each group.prices as price (price.key)}
                     <div class="flex items-center justify-between gap-3 border-b py-2">
                       <dt class="text-sm text-muted-foreground">{price.label}</dt>
-                      <dd class="font-technical text-sm">${price.value}</dd>
+                      <dd class="font-technical text-sm">{price.symbol}{price.value}</dd>
                     </div>
                   {/each}
                 </dl>

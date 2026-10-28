@@ -1216,25 +1216,30 @@ async fn execute_observed(
     }
     .execute()
     .await;
-    let response = if let Some(diagnostic) = response
+    let response = if let Some(body) = response
         .extensions()
         .get::<crate::interaction_observation::FailureDiagnostic>()
-        .filter(|diagnostic| diagnostic.code.as_deref() == Some("allowance_suspended"))
-    {
-        use stravia_runtime_contract::protocol::ids::Protocol;
-        let message = diagnostic.message.as_deref().unwrap_or_default();
-        let body = match ingress.protocol {
-            Protocol::AnthropicMessages => serde_json::json!({
-                "type": "error",
-                "error": {"type": "rate_limit_error", "message": message}
-            }),
-            Protocol::GoogleGemini => serde_json::json!({
-                "error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": message}
-            }),
-            _ => serde_json::json!({
-                "error": {"type": "insufficient_quota", "code": "allowance_suspended", "message": message}
-            }),
-        };
+        .and_then(|diagnostic| {
+            use stravia_runtime_contract::protocol::ids::Protocol;
+            let message = diagnostic.message.as_deref().unwrap_or_default();
+            let code = match diagnostic.code.as_deref() {
+                Some("allowance_suspended") => "allowance_suspended",
+                Some("STRAVIA_SPEND_LIMIT" | "spend_limit") => "api_key_spend_limit_reached",
+                _ => return None,
+            };
+            Some(match ingress.protocol {
+                Protocol::AnthropicMessages => serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": message}
+                }),
+                Protocol::GoogleGemini => serde_json::json!({
+                    "error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": message}
+                }),
+                _ => serde_json::json!({
+                    "error": {"type": "insufficient_quota", "code": code, "message": message}
+                }),
+            })
+        }) {
         let (mut parts, _) = response.into_parts();
         parts.headers.remove(axum::http::header::RETRY_AFTER);
         parts.headers.remove(axum::http::header::CONTENT_LENGTH);

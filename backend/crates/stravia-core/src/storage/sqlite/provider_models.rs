@@ -12,9 +12,9 @@ use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord, PriceComponents,
     ProviderModelCostRule, ProviderModelCostRuleKind, ProviderModelMetadata, ProviderModelMutation,
     ProviderModelPresence, ProviderModelPresenceUpdate, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelReimport, ProviderModelSelectionPolicy,
+    ProviderModelRecord, ProviderModelRestore, ProviderModelSelectionPolicy,
     ProviderModelSourceKind, ProviderModelSyncState, ProviderModelSyncSummary,
-    ReimportProviderModel, SnapshotState, SourceStamp,
+    RestoreProviderModel, SnapshotState,
 };
 use crate::storage::CONFIG_EPOCH_KEY;
 use crate::storage::traits::ProviderModelStore;
@@ -25,6 +25,7 @@ struct ProviderModelRow {
     model_id: String,
     source_kind: String,
     snapshot_state: String,
+    source_metadata_json: Option<String>,
     metadata_source_provider_id: Option<String>,
     presence: String,
     selection_policy: String,
@@ -55,7 +56,7 @@ impl ProviderModelStore for SqliteStorage {
     ) -> anyhow::Result<Vec<ProviderModelRecord>> {
         let mut connection = self.pool.acquire().await?;
         let rows = sqlx::query_as::<_, ProviderModelRow>(
-    r#"SELECT provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
+    r#"SELECT provider_id, model_id, source_kind, snapshot_state, source_metadata_json, metadata_source_provider_id,
               presence, selection_policy, metadata_json, revision,
               created_at, updated_at
        FROM provider_models
@@ -87,6 +88,7 @@ impl ProviderModelStore for SqliteStorage {
         &self,
         provider_id: &str,
         reconciliation: ProviderModelReconciliation,
+        validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()> {
         let mut connection = self.pool.acquire_write().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -145,41 +147,22 @@ impl ProviderModelStore for SqliteStorage {
             );
         }
         for update in reconciliation.updates {
-            if update.metadata.is_some() {
-                apply_discovered_metadata_update(&mut tx, provider_id, &update).await?;
-                continue;
+            apply_discovered_metadata_update(&mut tx, provider_id, &update).await?;
+            if let Some(generated) = update.generated_thinking_level_map.as_deref() {
+                let metadata = update
+                    .metadata
+                    .as_ref()
+                    .context("Provider Model thinking map update is missing metadata")?;
+                SqliteRouteStore::refresh_generated_thinking_maps(
+                    &mut tx,
+                    provider_id,
+                    &update.model_id,
+                    metadata,
+                    generated,
+                    validate_map,
+                )
+                .await?;
             }
-            let metadata_json = sqlx::query_scalar::<_, String>(
-        "SELECT metadata_json FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'",
-                    )
-                    .bind(provider_id)
-                    .bind(&update.model_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let metadata_json =
-                metadata_json.context("Provider Model disappeared during reconciliation")?;
-            let mut metadata: ProviderModelMetadata = serde_json::from_str(&metadata_json)
-                .context("decode Provider Model metadata during reconciliation")?;
-            metadata.status = update.lifecycle_status.clone();
-            let result = sqlx::query(
-        r#"UPDATE provider_models
-           SET presence = ?, lifecycle_status = ?, metadata_source_provider_id = ?, metadata_json = ?,
-               revision = revision + 1, updated_at = datetime('now')
-           WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
-                    )
-                    .bind(update.presence.as_str())
-                    .bind(update.lifecycle_status)
-                    .bind(update.metadata_source_provider_id)
-                    .bind(serde_json::to_string(&metadata)?)
-                    .bind(provider_id)
-                    .bind(&update.model_id)
-                    .bind(update.expected_revision)
-                    .execute(&mut *tx)
-                    .await?;
-            anyhow::ensure!(
-                result.rows_affected() == 1,
-                "Provider Model has changed while synchronizing discovered models"
-            );
         }
         for input in reconciliation.inserts {
             insert_record(&mut tx, input).await?;
@@ -275,27 +258,22 @@ impl ProviderModelStore for SqliteStorage {
         Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
-    async fn reimport(
+    async fn restore(
         &self,
         provider_id: &str,
         model_id: &str,
-        input: ReimportProviderModel,
-        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        input: RestoreProviderModel,
+        validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
         before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
-    ) -> anyhow::Result<ProviderModelReimport> {
+    ) -> anyhow::Result<ProviderModelRestore> {
         let mut connection = self.pool.acquire_write().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        let snapshot_state = SnapshotState::Imported {
-            source: SourceStamp::ProviderCatalog {
-                provider_id: input.source_provider_id,
-            },
-        };
         let updated = update_record_metadata(
             &mut tx,
             provider_id,
             model_id,
             &input.metadata,
-            &snapshot_state,
+            &input.snapshot_state,
             input.expected_revision,
         )
         .await?;
@@ -304,30 +282,32 @@ impl ProviderModelStore for SqliteStorage {
             tx.rollback().await?;
             connection.finish().await?;
             return Ok(if exists {
-                ProviderModelReimport::Conflict
+                ProviderModelRestore::Conflict
             } else {
-                ProviderModelReimport::NotFound
+                ProviderModelRestore::NotFound
             });
         }
         replace_cost_rules(&mut tx, provider_id, model_id, &input.metadata.cost_rules()).await?;
-        SqliteRouteStore::refresh_generated_thinking_maps(
-            &mut tx,
-            provider_id,
-            model_id,
-            &input.metadata,
-            &input.generated_thinking_level_map,
-            validate_map,
-        )
-        .await?;
+        if let Some(generated) = input.generated_thinking_level_map.as_deref() {
+            SqliteRouteStore::refresh_generated_thinking_maps(
+                &mut tx,
+                provider_id,
+                model_id,
+                &input.metadata,
+                generated,
+                validate_map,
+            )
+            .await?;
+        }
         bump_config_epoch(&mut tx).await?;
         let model = get_record(&mut tx, provider_id, model_id)
             .await?
-            .context("reimported Provider Model not found")?;
+            .context("restored Provider Model not found")?;
         let active_routes = SqliteRouteStore::load_routes(&mut tx, true).await?;
         before_commit()?;
         tx.commit().await?;
         connection.finish().await?;
-        Ok(ProviderModelReimport::Applied {
+        Ok(ProviderModelRestore::Applied {
             model: Box::new(model),
             active_routes,
         })
@@ -606,7 +586,7 @@ async fn get_record(
     model_id: &str,
 ) -> anyhow::Result<Option<ProviderModelRecord>> {
     let row = sqlx::query_as::<_, ProviderModelRow>(
-        r#"SELECT provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
+        r#"SELECT provider_id, model_id, source_kind, snapshot_state, source_metadata_json, metadata_source_provider_id,
                   presence, selection_policy, metadata_json, revision,
                   created_at, updated_at
            FROM provider_models
@@ -678,6 +658,12 @@ fn decode_record(
         source_kind: ProviderModelSourceKind::from_str(&row.source_kind)?,
         snapshot_state: serde_json::from_str(&row.snapshot_state)
             .context("decode Provider Model snapshot state")?,
+        source_metadata: row
+            .source_metadata_json
+            .map(|json| {
+                serde_json::from_str(&json).context("decode Provider Model source metadata")
+            })
+            .transpose()?,
         metadata_source_provider_id: row.metadata_source_provider_id,
         presence: ProviderModelPresence::from_str(&row.presence)?,
         selection_policy: ProviderModelSelectionPolicy::from_str(&row.selection_policy)?,
@@ -711,15 +697,36 @@ async fn apply_discovered_metadata_update(
     provider_id: &str,
     update: &ProviderModelPresenceUpdate,
 ) -> anyhow::Result<()> {
-    let Some(metadata) = update.metadata.as_ref() else {
-        return Ok(());
+    let (metadata_json, source_metadata_json, snapshot_state) =
+        sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT metadata_json, source_metadata_json, snapshot_state FROM provider_models \
+             WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'",
+        )
+        .bind(provider_id)
+        .bind(&update.model_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .context("Provider Model disappeared during reconciliation")?;
+    let mut metadata = match &update.metadata {
+        Some(updated) => updated.clone(),
+        None => serde_json::from_str(&metadata_json)
+            .context("decode Provider Model metadata during reconciliation")?,
+    };
+    metadata.status = update.lifecycle_status.clone();
+    let source_metadata_json = match &update.source_metadata {
+        Some(source) => Some(serde_json::to_string(source)?),
+        None => source_metadata_json,
+    };
+    let snapshot_state = match &update.snapshot_state {
+        Some(state) => serde_json::to_string(state)?,
+        None => snapshot_state,
     };
     let limit = metadata.limit.as_ref();
     let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
     let result = sqlx::query(
         r#"UPDATE provider_models SET
                presence = ?, lifecycle_status = ?, name = ?, family = ?, open_weights = ?, limit_context = ?, cost_input = ?, cost_output = ?, cost_cache_read = ?,
-               cost_cache_write = ?, metadata_json = ?, snapshot_state = COALESCE(?, snapshot_state), metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
+               cost_cache_write = ?, metadata_json = ?, source_metadata_json = ?, snapshot_state = ?, metadata_source_provider_id = ?, revision = revision + 1, updated_at = datetime('now')
            WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered' AND revision = ?"#,
     )
     .bind(update.presence.as_str())
@@ -732,8 +739,9 @@ async fn apply_discovered_metadata_update(
     .bind(decimal_text(prices.and_then(|prices| prices.output)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_read)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_write)))
-    .bind(serde_json::to_string(metadata)?)
-    .bind(update.snapshot_state.as_ref().map(serde_json::to_string).transpose()?)
+    .bind(serde_json::to_string(&metadata)?)
+    .bind(source_metadata_json)
+    .bind(snapshot_state)
     .bind(&update.metadata_source_provider_id)
     .bind(provider_id)
     .bind(&update.model_id)
@@ -756,16 +764,23 @@ async fn insert_record(
     let prices = input.metadata.cost.as_ref().map(|cost| &cost.prices);
     sqlx::query(
         r#"INSERT INTO provider_models (
-               provider_id, model_id, source_kind, snapshot_state, metadata_source_provider_id,
+               provider_id, model_id, source_kind, snapshot_state, source_metadata_json, metadata_source_provider_id,
                presence, lifecycle_status, selection_policy, name, family,
                open_weights, limit_context, cost_input, cost_output, cost_cache_read, cost_cache_write,
                metadata_json
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&input.provider_id)
     .bind(&input.model_id)
     .bind(input.source_kind.as_str())
     .bind(serde_json::to_string(&input.snapshot_state)?)
+    .bind(
+        input
+            .source_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
     .bind(&input.metadata_source_provider_id)
     .bind(input.presence.as_str())
     .bind(&input.metadata.status)
@@ -1119,7 +1134,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::provider_models::ModelCost;
+    use crate::provider_models::{ModelCost, SourceStamp};
     use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
 
     #[tokio::test]
@@ -1145,6 +1160,7 @@ mod tests {
                         model_id: model_id.into(),
                         source_kind: ProviderModelSourceKind::Discovered,
                         snapshot_state: SnapshotState::Unregistered,
+                        source_metadata: None,
                         metadata_source_provider_id: None,
                         presence: ProviderModelPresence::Present,
                         selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1164,7 +1180,7 @@ mod tests {
                     name: Some("Admin correction".into()),
                     ..second.metadata
                 },
-                SnapshotState::Edited { source: None },
+                SnapshotState::Local,
                 second.revision,
             )
             .await
@@ -1176,11 +1192,14 @@ mod tests {
                 expected_revision: 1,
                 snapshot_state: Some(SnapshotState::Imported {
                     source: crate::provider_models::SourceStamp::Discovery,
+                    pinned: std::collections::BTreeSet::new(),
                 }),
                 metadata_source_provider_id: None,
                 presence: ProviderModelPresence::Missing,
                 lifecycle_status: None,
                 metadata: Some(ProviderModelMetadata::bare(model_id)),
+                source_metadata: None,
+                generated_thinking_level_map: None,
             })
             .collect();
         assert!(
@@ -1191,7 +1210,8 @@ mod tests {
                         inserts: vec![],
                         updates,
                         ..Default::default()
-                    }
+                    },
+                    &|_, _, _| Ok(()),
                 )
                 .await
                 .is_err()
@@ -1202,10 +1222,7 @@ mod tests {
         assert_eq!(first.presence, ProviderModelPresence::Present);
         assert_eq!(first.snapshot_state, SnapshotState::Unregistered);
         assert_eq!(second.metadata.name.as_deref(), Some("Admin correction"));
-        assert_eq!(
-            second.snapshot_state,
-            SnapshotState::Edited { source: None }
-        );
+        assert_eq!(second.snapshot_state, SnapshotState::Local);
     }
 
     #[tokio::test]
@@ -1240,7 +1257,8 @@ mod tests {
                         provider_id: "provider".into(),
                         model_id: "model".into(),
                         source_kind: ProviderModelSourceKind::Manual,
-                        snapshot_state: SnapshotState::Edited { source: None },
+                        snapshot_state: SnapshotState::Local,
+                        source_metadata: None,
                         metadata_source_provider_id: None,
                         presence: ProviderModelPresence::Present,
                         selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1271,7 +1289,7 @@ mod tests {
         assert!(matches!(mutation, ProviderModelMutation::Applied(_)));
     }
 
-    async fn reimport_fixture() -> (tempfile::TempDir, SqliteStorage) {
+    async fn restore_fixture() -> (tempfile::TempDir, SqliteStorage) {
         let data_dir = tempfile::tempdir().unwrap();
         let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
         crate::migrations::migrate_sqlite(&pool, None)
@@ -1292,6 +1310,7 @@ mod tests {
                     model_id: "model".into(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: SnapshotState::Unregistered,
+                    source_metadata: None,
                     metadata_source_provider_id: Some("catalog".into()),
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1324,15 +1343,22 @@ mod tests {
         }
     }
 
-    fn reimport_input(
+    fn restore_input(
         metadata: &ProviderModelMetadata,
         expected_revision: i64,
-    ) -> ReimportProviderModel {
-        ReimportProviderModel {
+    ) -> RestoreProviderModel {
+        RestoreProviderModel {
             metadata: metadata.clone(),
-            source_provider_id: "catalog".into(),
+            snapshot_state: SnapshotState::Imported {
+                source: SourceStamp::ProviderCatalog {
+                    provider_id: "catalog".into(),
+                },
+                pinned: std::collections::BTreeSet::new(),
+            },
             expected_revision,
-            generated_thinking_level_map: crate::thinking::generate_thinking_level_map(metadata),
+            generated_thinking_level_map: Some(crate::thinking::generate_thinking_level_map(
+                metadata,
+            )),
         }
     }
 
@@ -1406,8 +1432,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_commits_model_targets_routes_and_epoch_atomically() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_commits_model_targets_routes_and_epoch_atomically() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1443,9 +1469,9 @@ mod tests {
         .await;
 
         let metadata = refreshed_metadata();
-        let input = reimport_input(&metadata, 1);
+        let input = restore_input(&metadata, 1);
 
-        // A manual override committed after the reimport input was prepared —
+        // A manual override committed after the restore input was prepared —
         // the transaction must read this latest map and keep the row.
         let mut overridden_map = all_hidden_map();
         *overridden_map
@@ -1469,15 +1495,15 @@ mod tests {
         let target_c_map_before = target_map(pool, "target-c").await;
 
         let result = storage
-            .reimport("provider", "model", input, &|_, _| Ok(()), &|| Ok(()))
+            .restore("provider", "model", input, &|_, _, _| Ok(()), &|| Ok(()))
             .await
             .unwrap();
-        let ProviderModelReimport::Applied {
+        let ProviderModelRestore::Applied {
             model,
             active_routes,
         } = result
         else {
-            panic!("reimport must apply")
+            panic!("restore must apply")
         };
 
         assert_eq!(model.revision, 2);
@@ -1488,6 +1514,7 @@ mod tests {
                 source: SourceStamp::ProviderCatalog {
                     provider_id: "catalog".into(),
                 },
+                pinned: std::collections::BTreeSet::new(),
             }
         );
         assert_eq!(model.cost_rules.len(), 1);
@@ -1500,7 +1527,7 @@ mod tests {
             epoch_before + 1
         );
 
-        // Generated rows follow the reimported map; the Overridden row survives.
+        // Generated rows follow the restoreed map; the Overridden row survives.
         let map_a = target_map(pool, "target-a").await;
         let at = |level| map_a.iter().find(|row| row.level == level).unwrap();
         assert_eq!(
@@ -1567,8 +1594,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_rolls_back_everything_when_a_target_update_fails() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_rolls_back_everything_when_a_target_update_fails() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1619,11 +1646,11 @@ mod tests {
         let map_b_before = target_map(pool, "target-b").await;
 
         let result = storage
-            .reimport(
+            .restore(
                 "provider",
                 "model",
-                reimport_input(&refreshed_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &|| Ok(()),
             )
             .await;
@@ -1639,8 +1666,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_rolls_back_when_the_epoch_write_fails() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_rolls_back_when_the_epoch_write_fails() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1670,11 +1697,11 @@ mod tests {
         let epoch_before = config_epoch(pool).await;
 
         let result = storage
-            .reimport(
+            .restore(
                 "provider",
                 "model",
-                reimport_input(&refreshed_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &|| Ok(()),
             )
             .await;
@@ -1689,8 +1716,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_rolls_back_when_the_final_permit_check_fails() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_rolls_back_when_the_final_permit_check_fails() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1712,11 +1739,11 @@ mod tests {
         let epoch_before = config_epoch(pool).await;
 
         let result = storage
-            .reimport(
+            .restore(
                 "provider",
                 "model",
-                reimport_input(&refreshed_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &|| anyhow::bail!("vendor write permit revoked"),
             )
             .await;
@@ -1731,8 +1758,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_conflict_and_not_found_write_nothing() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_conflict_and_not_found_write_nothing() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1750,27 +1777,27 @@ mod tests {
         let epoch_before = config_epoch(pool).await;
 
         let stale = storage
-            .reimport(
+            .restore(
                 "provider",
                 "model",
-                reimport_input(&refreshed_metadata(), 99),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 99),
+                &|_, _, _| Ok(()),
                 &|| Ok(()),
             )
             .await
             .unwrap();
-        assert!(matches!(stale, ProviderModelReimport::Conflict));
+        assert!(matches!(stale, ProviderModelRestore::Conflict));
         let missing = storage
-            .reimport(
+            .restore(
                 "provider",
                 "absent",
-                reimport_input(&refreshed_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &|| Ok(()),
             )
             .await
             .unwrap();
-        assert!(matches!(missing, ProviderModelReimport::NotFound));
+        assert!(matches!(missing, ProviderModelRestore::NotFound));
 
         assert_eq!(
             storage.get("provider", "model").await.unwrap().unwrap(),
@@ -1781,8 +1808,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_rolls_back_when_the_generated_map_is_incomplete() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_rolls_back_when_the_generated_map_is_incomplete() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         add_route_target(
             pool,
@@ -1799,12 +1826,14 @@ mod tests {
         let map_before = target_map(pool, "target-a").await;
         let epoch_before = config_epoch(pool).await;
 
-        let mut input = reimport_input(&refreshed_metadata(), 1);
+        let mut input = restore_input(&refreshed_metadata(), 1);
         input
             .generated_thinking_level_map
+            .as_mut()
+            .expect("restore fixture has a generated map")
             .retain(|row| row.level != ThinkingLevel::Low);
         let result = storage
-            .reimport("provider", "model", input, &|_, _| Ok(()), &|| Ok(()))
+            .restore("provider", "model", input, &|_, _, _| Ok(()), &|| Ok(()))
             .await;
         assert!(result.is_err());
 
@@ -1817,8 +1846,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reimport_treats_an_invalid_epoch_as_zero() {
-        let (_data_dir, storage) = reimport_fixture().await;
+    async fn restore_treats_an_invalid_epoch_as_zero() {
+        let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
         sqlx::query(
             "INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', 'bogus')",
@@ -1828,16 +1857,16 @@ mod tests {
         .unwrap();
 
         let result = storage
-            .reimport(
+            .restore(
                 "provider",
                 "model",
-                reimport_input(&refreshed_metadata(), 1),
-                &|_, _| Ok(()),
+                restore_input(&refreshed_metadata(), 1),
+                &|_, _, _| Ok(()),
                 &|| Ok(()),
             )
             .await
             .unwrap();
-        assert!(matches!(result, ProviderModelReimport::Applied { .. }));
+        assert!(matches!(result, ProviderModelRestore::Applied { .. }));
         assert_eq!(config_epoch(pool).await.as_deref(), Some("1"));
     }
 }

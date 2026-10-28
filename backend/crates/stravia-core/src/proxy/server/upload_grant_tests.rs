@@ -25,6 +25,7 @@ async fn create_key(gateway: &Gateway) -> crate::db::models::ApiKeyWithBindings 
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![],
+            spend_limit: None,
         })
         .await
         .expect("API key")

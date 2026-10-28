@@ -159,7 +159,7 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 - 插件将 `context_length` 和 `inputModalities` 转为统一上下文与模态规格，将 `reasoningEfforts` 转为 `reasoning_efforts`。目录的 `off` 在统一规格中表示为 `none`，供 Core 生成规范的 `off` 档映射；私有 codec 发送时再还原为 CLI 原生的 `reasoning_effort: "off"`。显式无 effort 声明保持为空列表，缺失声明保持未知，不硬编码具体型号的档位。
 - `static_models` 只能进一步缩小当前订阅允许的目录集合，不能添加未知或更高套餐的型号，也不绕过账号查询。显式 `models_source` 仍指定目录地址，但响应必须包含客户端目录所需的订阅要求；插件不把仅含 ID 的列表当作订阅权限证明。
 
-升级后重新构建并导入独立插件，再同步模型。来源托管的规格按既有同步规则更新；管理员已编辑的规格仍需显式 re-import，不自动覆盖，也不删除已有 Route 或 Target。
+升级后重新构建并导入独立插件，再同步模型。未固定的规格字段跟随来源更新；管理员修改的字段保持固定，可逐字段恢复同步，不自动覆盖固定值，也不删除已有 Route 或 Target。
 
 ### OpenCode Zen Free 准入限制
 
@@ -247,7 +247,7 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 推理清单只采用 `agentModelSorts[].groups[].modelIds` 引用的 Agent 选项，不把完整 `models` 目录或搜索等其他用途清单当作可推理模型。解析真实 `deprecatedModelIds` 重定向并排除 disabled 后，按官方显示 slug 的家族与明确档位合并：例如 Gemini 3.1 Pro 登记为 `gemini-3.1-pro`，支持 `low`、`high`，默认实际 selector 为 `gemini-pro-agent`。同名或同 enum 不构成合并依据，Thinking 标签不自动生成离散档位。筛选和映射证据见 [模型映射调研](../research/antigravity-model-mapping.md)。
 
-模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；来源托管规格随同步刷新，人工编辑规格保持不变。生图复用原 OAuth、project 与连接，走原生 SSE，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；新增链路通过本地上游验证，不代表所有真实账号都有生图权限或额度。
+模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，走原生 SSE，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；新增链路通过本地上游验证，不代表所有真实账号都有生图权限或额度。
 
 合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。Effort 通过 envelope 的模型 ID 实现，不同时转换为 Gemini thinking budget；独立的原生 Budget 等控制保持既有行为。
 
@@ -283,7 +283,7 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 - base 启动时优先使用本地最后一次成功供应商清单，没有缓存则使用插件内嵌供应商清单，随后尝试远端更新。首次离线仍可选择内嵌供应商，已有安装断网时仍可使用缓存供应商；内嵌清单只用于 bootstrap，不限制远端动态新增。缓存、内嵌和远端条目都必须按当前 base 已实现的协议与认证能力校验后才能注册。
 - 供应商模型目录属于对应 Provider Profile，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 是供应商接入身份，不是已保存连接 UUID。内嵌供应商清单不包含全部 provider-scoped 模型数据。Core 保留 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
 - 目录关联与缺省模型来源由已选 Profile 和 channel 决定，不由管理请求的 `catalog` / `custom` 创建分支决定。新建连接保存 Profile 的 `catalog_id`；模型来源优先使用显式配置，否则仅在 channel 声明消费目录且目录中存在对应供应商时使用 Catalog，其余沿用 channel 声明的默认来源。显式静态列表仍优先决定模型集合，账号级发现渠道不会被目录清单替换。
-- 已保存连接未记录目录关联或模型来源时，发现与同步使用本次执行锁定的 Profile 声明解析缺省值，无需改写连接或执行数据库迁移。同步补齐未手改模型的供应商规格时，同时更新快照来源；人工编辑的规格保持不变。已有 Target 的手改映射不受影响，Generated Mapping 仍通过显式 Provider Model re-import 重算。
+- 已保存连接未记录目录关联或模型来源时，发现与同步使用本次执行锁定的 Profile 声明解析缺省值，无需改写连接。同步更新未固定的规格字段及最后有效来源快照，保留人工固定字段；恢复同步只使用此来源快照，不重新读取目录。`reasoning_efforts` 因同步、编辑或恢复而改变时，同一事务重算 Generated Mapping，已有 Target 的手改映射不受影响。
 - 模型集合已经由上游发现或管理员添加，但供应商模型目录元数据获取超时、返回 HTTP 500 等失败时，允许用 Core Canonical Model 补充元数据。必须明确报告目录获取失败，不得把本次目录刷新标为成功，不得覆盖已有有效数据，也不得扩大模型集合。真正的上游账号级模型发现失败不适用该回退，不能用全局目录冒充成功。
 - base 的供应商目录与 Core 的全局 Canonical Model 目录独立刷新，不再跨模块等待或原子切换到同一 revision。base 新增兼容供应商不受 Core 下载失败阻塞，Core 刷新也不等待 base；接受两边短时 revision 不同。两边分别校验各自下载的一致性，失败不得标记成功，并保留已有有效数据。
 - 除上述已确认变更外，目录迁移遵循 [ADR-0073 定义的插件化迁移前原生基线](../adr/0073-register-runtime-catalog-profiles-through-base-vendor.md#迁移基线)，不得从插件化后的当前实现或 `ProviderDescriptor` 反推继承行为。继承的刷新节奏是启动后立即后台刷新、之后每小时刷新；失败明确记录并保留当前有效快照。

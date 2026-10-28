@@ -25,8 +25,7 @@ use super::manager::VendorPlugins;
 use super::network::VendorNetwork;
 use super::permissions::{NetworkOrigin, NetworkPolicy};
 use crate::provider_catalog::{
-    CatalogError, CatalogModelList, CatalogModelSource, CatalogProviderScope,
-    CatalogRefreshSummary, ProviderCatalog,
+    CatalogError, CatalogModelList, CatalogProviderScope, CatalogRefreshSummary, ProviderCatalog,
 };
 
 /// Sync does up to four sequential catalog fetches under one deadline.
@@ -151,16 +150,6 @@ impl VendorCatalogSync {
     ) -> anyhow::Result<CatalogModelList> {
         let scope = self.provider_scope(provider_id).await?;
         self.catalog.models(provider_id, channel_id, scope).await
-    }
-
-    /// Raw metadata for one Provider Catalog Entry, used by reimport.
-    pub(crate) async fn catalog_model_source(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> anyhow::Result<CatalogModelSource> {
-        let scope = self.provider_scope(provider_id).await?;
-        self.catalog.model_source(provider_id, model_id, scope)
     }
 
     /// Full remote sync: the guest refreshes the index, the host persists it

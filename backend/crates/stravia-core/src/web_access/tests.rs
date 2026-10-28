@@ -296,6 +296,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -653,6 +654,7 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();
@@ -735,6 +737,7 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -912,6 +915,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

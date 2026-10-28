@@ -316,6 +316,7 @@ async fn connection(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     Ok(Connection {
@@ -339,6 +340,7 @@ async fn api_key(gateway: &Gateway, routes: &[&str]) -> anyhow::Result<String> {
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: routes.iter().map(|route| (*route).into()).collect(),
+            spend_limit: None,
         })
         .await?
         .token)

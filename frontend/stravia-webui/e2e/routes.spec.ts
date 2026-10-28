@@ -43,6 +43,13 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
       image_generation_bound: false,
       is_enabled: true,
       supported_thinking_levels: [],
+      billing: {
+        mode: 'per_token',
+        price: {
+          input: '1',
+          peak: { timezone: 'UTC', weekdays: [1], ranges: [{ start: '09:00', end: '10:00' }], multiplier: '1' },
+        },
+      },
       created_at: '',
       targets: [target('dual', true), target('text-only', false)],
     }
@@ -107,11 +114,19 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     // A disabled incompatible destination still blocks switching; remove it explicitly.
     await page.getByRole('button', { name: zh ? '移除请求目标 2' : 'Remove destination 2', exact: true }).click()
     await page.locator('#route-display-name').fill('Retained failure draft')
+    const timezone = page.locator('[data-price-editor] input[id$="-peak-timezone"]')
+    const multiplier = page.locator('[data-price-editor] input[id$="-peak-multiplier"]')
+    await timezone.fill('Invalid/Timezone')
+    await multiplier.fill('0')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Configuration changed')
     await expect(modelType).toHaveText(zh ? '图片' : 'Image')
     await expect(page.locator('#route-display-name')).toHaveValue('Retained failure draft')
     await expect(page.locator('[data-slot="target-card"]')).toHaveCount(1)
+    await expect(timezone).toHaveValue('Invalid/Timezone')
+    await expect(multiplier).toHaveValue('0')
+    await timezone.fill('UTC')
+    await multiplier.fill('1')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect.poll(() => attempts).toBe(2)
     expect(body?.output_modality).toBe('image')
@@ -982,7 +997,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     name: 'GPT Available',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     route_output_modalities: ['text'],
     specification: {
@@ -1615,7 +1630,8 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   const footer = page.locator('[data-slot="model-editor-footer"]')
   const enabledCards = page.locator('[data-slot="target-lane"] [data-slot="target-card"]')
   await expect(enabledCards).toHaveCount(3)
-  expect(await main.evaluate((element) => element.scrollTop)).toBe(0)
+  await enabledCards.first().scrollIntoViewIfNeeded()
+  const initialScroll = await main.evaluate((element) => element.scrollTop)
   // 停用区一开始被页面底部挡在视口外。
   expect((await dock.boundingBox())!.y).toBeGreaterThan(560)
 
@@ -1627,6 +1643,8 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   // 指针停在底部固定操作栏上，页面持续向下滚动。
   const footerBox = (await footer.boundingBox())!
   await page.mouse.move(footerBox.x + footerBox.width / 2, footerBox.y + footerBox.height / 2, { steps: 5 })
+  // Playwright 手动拖拽进入新区域后需再移动一次，才能可靠触发 dragover。
+  await page.mouse.move(footerBox.x + footerBox.width / 2, footerBox.y + footerBox.height / 2)
   await expect
     .poll(async () => {
       const dockBox = (await dock.boundingBox())!
@@ -1634,11 +1652,12 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
       return dockBox.y + dockBox.height <= footerTop
     })
     .toBe(true)
-  expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(initialScroll)
 
   // 指针回到停用区后滚动停止，松手即可停用目标。
   const dockBox = (await dock.boundingBox())!
   await page.mouse.move(dockBox.x + dockBox.width / 2, dockBox.y + dockBox.height / 2, { steps: 5 })
+  await page.mouse.move(dockBox.x + dockBox.width / 2, dockBox.y + dockBox.height / 2)
   const settledScroll = await main.evaluate((element) => element.scrollTop)
   await page.waitForTimeout(200)
   expect(await main.evaluate((element) => element.scrollTop)).toBe(settledScroll)

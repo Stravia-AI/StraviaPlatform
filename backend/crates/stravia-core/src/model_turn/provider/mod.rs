@@ -125,6 +125,30 @@ fn retain_diagnostic_metadata(item: &mut serde_json::Value) {
     }
 }
 
+/// Frozen facts used to price one Target attempt. Everything is captured when
+/// the attempt starts; later price, billing, or exchange-rate changes never
+/// rewrite it.
+pub(crate) struct AttemptCostContext {
+    pub(crate) pricing: Option<Arc<crate::provider_models::ModelCost>>,
+    pub(crate) cost_basis: crate::pricing::CostBasis,
+    pub(crate) billing: Option<crate::pricing::BillingConfig>,
+    /// Root Principal's API Key; `None` never bills.
+    pub(crate) api_key_id: Option<String>,
+    pub(crate) currency: Option<Arc<crate::pricing::CustomCurrency>>,
+}
+
+impl Default for AttemptCostContext {
+    fn default() -> Self {
+        Self {
+            pricing: None,
+            cost_basis: crate::pricing::CostBasis::Usage,
+            billing: None,
+            api_key_id: None,
+            currency: None,
+        }
+    }
+}
+
 /// Observation state for one Wasm Vendor operation.
 ///
 /// Wire capture belongs to the controlled host transport. Model Turn observes
@@ -134,6 +158,9 @@ pub(crate) struct AttemptObservation {
     pub(crate) id: String,
     model_turn_id: String,
     started_at: Instant,
+    /// Wall clock at attempt start; peak-pricing evaluates against it.
+    started_wall: chrono::DateTime<chrono::Utc>,
+    cost: AttemptCostContext,
     duration_span: Mutex<Option<tracing::Span>>,
     first_token_span: Mutex<Option<tracing::Span>>,
     finished: AtomicBool,
@@ -161,6 +188,7 @@ impl AttemptObservation {
         protocol: String,
         upstream_base_url: String,
         first_token_timed_out: Option<Arc<AtomicBool>>,
+        cost: AttemptCostContext,
     ) -> Self {
         let id = observer
             .as_ref()
@@ -176,6 +204,7 @@ impl AttemptObservation {
                 upstream_model: actual_model,
                 protocol,
                 upstream_url: upstream_base_url,
+                cost_basis: Some(cost.cost_basis),
             });
         }
         let observed = observer.is_some();
@@ -190,6 +219,8 @@ impl AttemptObservation {
                 String::new()
             },
             started_at: Instant::now(),
+            started_wall: chrono::Utc::now(),
+            cost,
             duration_span: Mutex::new(Some(duration_span)),
             first_token_span: Mutex::new(Some(first_token_span)),
             finished: AtomicBool::new(false),
@@ -421,6 +452,29 @@ impl AttemptObservation {
             }
         }
         if let Some(observer) = &self.observer {
+            let usage = self.confirmed_usage.lock().clone();
+            let currency = self.cost.currency.as_deref();
+            // Every finished attempt carries a cost basis; a missing price or
+            // unknown usage records unknown rather than zero. Billing exists
+            // only for completed attempts of an API-Key-scoped Principal.
+            let cost = match (self.cost.pricing.as_deref(), usage.as_ref()) {
+                (Some(pricing), Some(usage)) => {
+                    crate::pricing::estimate_cost(pricing, usage, self.started_wall, currency)
+                }
+                _ => None,
+            };
+            let billing = if status == "completed" && self.cost.api_key_id.is_some() {
+                self.cost.billing.as_ref().map(|billing| {
+                    crate::pricing::bill(billing, usage.as_ref(), self.started_wall, currency)
+                })
+            } else {
+                None
+            };
+            let amounts = crate::pricing::AttemptAmounts {
+                cost_basis: self.cost.cost_basis,
+                cost,
+                billing,
+            };
             let error = diagnostic.map(|diagnostic| FailureDiagnostic {
                 source: diagnostic.source.clone(),
                 code: error_code.clone(),
@@ -437,7 +491,8 @@ impl AttemptObservation {
                 error,
                 duration_ms: self.started_at.elapsed().as_millis() as i64,
                 first_token_ms,
-                usage: self.confirmed_usage.lock().clone(),
+                usage,
+                amounts: Some(amounts),
             });
         }
     }
@@ -620,6 +675,7 @@ mod diagnostic_tests {
                 "responses".into(),
                 "http://localhost".into(),
                 None,
+                super::AttemptCostContext::default(),
             );
             for usage in deltas {
                 attempt.observe_delta(&AiStreamDelta::Usage(usage));

@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use super::{McpContext, McpTool, SUBSCRIPTION_POLL_INTERVAL};
 use crate::Gateway;
 use crate::error::{AuthFailure, GatewayError};
+use crate::interaction_observation::{IngressStart, RejectedOutcome};
 use crate::proxy::security::{ClientCredential, Security};
 
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
@@ -332,16 +333,41 @@ async fn authenticate_request(
             id: authenticated.principal.api_key_id().to_owned(),
         });
         let request = Request::from_parts(parts, Body::from(body));
-        let admission = is_tool_call
-            .then(|| {
-                gateway
+        // Spend admission precedes RPM for `tools/call`, so a rejected call
+        // never consumes an RPM window. Other MCP methods are not model calls.
+        let admission = if is_tool_call {
+            match gateway
+                .check_api_key_spend_limit(
+                    authenticated.principal.api_key_id(),
+                    authenticated.spend_limit_nanos,
+                )
+                .await
+            {
+                Ok(()) => gateway
                     .principal_admission
-                    .acquire(&authenticated.principal, authenticated.rpm_limit)
-            })
-            .transpose();
+                    .acquire(&authenticated.principal, authenticated.rpm_limit),
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        };
         return match admission {
             Ok(_) => next.run(request).await,
-            Err(error) => error.render(None),
+            Err(error) => {
+                let spend_rejected = matches!(&error, GatewayError::ApiKeySpendLimitReached);
+                let response = error.render(None);
+                if spend_rejected {
+                    record_spend_rejection(
+                        &gateway,
+                        authenticated.principal.api_key_id(),
+                        &authenticated.api_key_name,
+                        request.method(),
+                        request.uri().path(),
+                        &response,
+                    );
+                }
+                response
+            }
         };
     }
 
@@ -349,6 +375,39 @@ async fn authenticate_request(
         id: authenticated.principal.api_key_id().to_owned(),
     });
     next.run(Request::from_parts(parts, body)).await
+}
+
+/// MCP admission rejections take the same observation path as proxy ingress:
+/// one rejected row, with the stable reason code rather than the wire code.
+fn record_spend_rejection(
+    gateway: &Gateway,
+    api_key_id: &str,
+    api_key_name: &str,
+    method: &Method,
+    path: &str,
+    response: &Response,
+) {
+    let mut observer = gateway.observation.observe_ingress(IngressStart {
+        id: stravia_runtime_contract::identifier::new_id(),
+        method: method.as_str().to_owned(),
+        path: path.to_owned(),
+        protocol: "mcp".into(),
+    });
+    observer.set_authenticated_source(api_key_id, api_key_name);
+    let failure = response
+        .extensions()
+        .get::<crate::interaction_observation::FailureDiagnostic>()
+        .cloned()
+        .map(|mut diagnostic| {
+            diagnostic.code = Some("spend_limit".into());
+            diagnostic
+        });
+    observer.reject(RejectedOutcome {
+        stage: "admission".into(),
+        code: "spend_limit".into(),
+        status_code: response.status().as_u16(),
+        failure,
+    });
 }
 
 async fn authenticate(

@@ -365,6 +365,10 @@ export async function prepareApp(page: Page): Promise<void> {
       await route.fulfill({ json: { data: [] } })
       return
     }
+    if (path === '/currency') {
+      await route.fulfill({ json: { data: { custom: null } } })
+      return
+    }
 
     if (/^\/providers\/[^/]+\/models\/sync-state$/.test(path)) {
       await route.fulfill({

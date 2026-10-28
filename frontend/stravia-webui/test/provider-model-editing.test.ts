@@ -14,7 +14,8 @@ function detail(id = 'A', revision = 1): ProviderModelDetail {
     revision,
     available: true,
     source_kind: 'manual',
-    can_reimport: true,
+    pinned_fields: [],
+    restorable_fields: [],
     snapshot_state: { type: 'edited', source: null },
     selection_policy: 'auto',
     metadata: { id, name: `confirmed ${id}` },
@@ -37,7 +38,7 @@ function harness(overrides: Partial<ProviderModelEditingDeps> = {}, api: Partial
           id,
           metadata: { name: 'prepared' },
           extensions: {},
-          snapshot_state: { type: 'imported', source: { type: 'canonical', model_id: 'vendor/template' } },
+          snapshot_state: { type: 'imported', source: { type: 'canonical', model_id: 'vendor/template' }, pinned: [] },
         }),
       createManualModel: (...args) => {
         writes.push(args)
@@ -51,9 +52,9 @@ function harness(overrides: Partial<ProviderModelEditingDeps> = {}, api: Partial
         writes.push(args)
         return Promise.resolve({ ...detail(args[1], args[3] + 1), available: false, selection_policy: args[2] })
       },
-      reimportModel: (...args) => {
+      restoreModelSync: (...args) => {
         writes.push(args)
-        return Promise.resolve(detail(args[1], args[2] + 1))
+        return Promise.resolve(detail(args[1], args[3] + 1))
       },
       deleteManualModel: (...args) => {
         writes.push(args)
@@ -203,8 +204,8 @@ describe('provider model editing', () => {
     )
     await controller.select('provider', 'A')
     controller.markDirty(true)
-    const saving = controller.save('{"name":"changed"}')
-    await controller.save('{}')
+    const saving = controller.save({ kind: 'update', changes: { name: 'changed' } })
+    await controller.save({ kind: 'update', changes: { name: 'changed' } })
     await controller.changeSelection('force_disabled')
     await controller.select('provider', 'B')
     controller.close()
@@ -239,8 +240,8 @@ describe('provider model editing', () => {
     expect(controller.snapshot.dirty).toBe(true)
     expect(controller.snapshot.detail?.selection_policy).toBe('force_disabled')
     expect(controller.snapshot.detail?.available).toBe(false)
-    await controller.save('{"name":"unsaved specification"}')
-    expect(writes[1]).toEqual(['provider', 'A', '{"name":"unsaved specification"}', 2])
+    await controller.save({ kind: 'update', changes: { name: 'unsaved specification' } })
+    expect(writes[1]).toEqual(['provider', 'A', { name: 'unsaved specification' }, 2])
   })
 
   test('write failure retains confirmed detail and dirty state', async () => {
@@ -249,7 +250,7 @@ describe('provider model editing', () => {
     await controller.select('provider', 'A')
     const confirmed = controller.snapshot.detail
     controller.markDirty(true)
-    await controller.save('{}')
+    await controller.save({ kind: 'update', changes: { name: 'changed' } })
     expect(controller.snapshot.detail).toBe(confirmed)
     expect(controller.snapshot.dirty).toBe(true)
     expect(controller.snapshot.busy).toBe(false)
@@ -257,20 +258,30 @@ describe('provider model editing', () => {
     expect(errors).toEqual([{ error: failure, phase: 'write' }])
   })
 
-  test('reimport waits for discard then writes the current confirmed revision', async () => {
+  test('restore waits for discard then writes the current confirmed revision', async () => {
     const { controller, writes, successes } = harness()
     await controller.select('provider', 'A')
     controller.markDirty(true)
-    controller.requestReimport()
+    controller.restore(['cost.input'])
     expect(writes).toEqual([])
     controller.keepEditing()
     expect(controller.snapshot.dirty).toBe(true)
-    controller.requestReimport()
+    controller.restore(['cost.input'])
     await controller.confirmDiscard()
-    expect(writes).toEqual([['provider', 'A', 1]])
+    expect(writes).toEqual([['provider', 'A', ['cost.input'], 1]])
     expect(controller.snapshot.detail?.revision).toBe(2)
     expect(controller.snapshot.dirty).toBe(false)
-    expect(successes).toEqual(['reimport'])
+    expect(successes).toEqual(['restore'])
+  })
+
+  test('restore is a no-op without pinned fields or before a manual model is created', async () => {
+    const { controller, writes } = harness()
+    await controller.select('provider', 'A')
+    controller.restore([])
+    expect(writes).toEqual([])
+    expect(await controller.prepareManual('provider', 'vendor/template', [])).toBe(true)
+    controller.restore(['cost.input'])
+    expect(writes).toEqual([])
   })
 
   test('refresh failure is partial success and retry never repeats the write', async () => {
@@ -284,14 +295,14 @@ describe('provider model editing', () => {
     })
     await controller.select('provider', 'A')
     controller.markDirty(true)
-    await controller.save('{}')
+    await controller.save({ kind: 'update', changes: { name: 'changed' } })
     expect(controller.snapshot.detail?.revision).toBe(2)
     expect(controller.snapshot.dirty).toBe(false)
     expect(controller.snapshot.refreshError).toBe(failure)
     expect(successes).toEqual(['save'])
     expect(errors).toEqual([{ error: failure, phase: 'refresh' }])
     await controller.refresh()
-    expect(writes).toEqual([['provider', 'A', '{}', 1]])
+    expect(writes).toEqual([['provider', 'A', { name: 'changed' }, 1]])
     expect(refreshCount).toBe(2)
     expect(controller.snapshot.refreshError).toBeUndefined()
   })
@@ -303,7 +314,7 @@ describe('provider model editing', () => {
     expect(controller.snapshot.draft).toBe(true)
     expect(controller.snapshot.drawerOpen).toBe(true)
     controller.markDirty(true)
-    await controller.save('{"name":"manual"}')
+    await controller.save({ kind: 'create', metadataJson: '{"name":"manual"}' })
     expect(writes).toEqual([['provider', 'template', '{"name":"manual"}', 'vendor/template']])
     expect(controller.snapshot.draft).toBe(false)
     expect(controller.snapshot.drawerOpen).toBe(false)
@@ -330,8 +341,8 @@ describe('provider model editing', () => {
     expect(controller.snapshot.detail?.metadata).toBe(existing.metadata)
     expect(controller.snapshot.detail?.metadata.name).toBe('Saved specification')
     expect(controller.snapshot.detail?.revision).toBe(17)
-    await controller.save('{"name":"Explicit edit"}')
-    expect(writes).toEqual([['provider', 'template', '{"name":"Explicit edit"}', 17]])
+    await controller.save({ kind: 'update', changes: { name: 'Explicit edit' } })
+    expect(writes).toEqual([['provider', 'template', { name: 'Explicit edit' }, 17]])
   })
 
   test('failed preparation keeps inventory selected and a corrected template can create a new draft', async () => {

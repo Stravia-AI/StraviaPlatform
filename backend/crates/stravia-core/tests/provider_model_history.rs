@@ -393,13 +393,12 @@ async fn sqlite_upgrade_keeps_existing_services_without_inventing_history() -> a
             .collect(),
     );
     prefix.run(pool.migration_pool()).await?;
-    let storage: DynStorage = Arc::new(SqliteStorage::from_pool(pool.clone()));
-    let existing = storage
-        .providers()
-        .create(provider_input("Existing service"))
+    sqlx::query("INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('existing-service', 'Existing service', 'openai-compatible', 'http://127.0.0.1:1', '')")
+        .execute(&pool)
         .await?;
+    let storage: DynStorage = Arc::new(SqliteStorage::from_pool(pool.clone()));
     stravia_core::migrations::migrate_sqlite(&pool, None).await?;
-    upgrade_contract(storage, &existing.id).await?;
+    upgrade_contract(storage, "existing-service").await?;
     pool.close().await;
     Ok(())
 }
@@ -468,6 +467,9 @@ async fn postgres_admin_history_preserves_batches_and_retention() -> anyhow::Res
                 .collect(),
         );
         prefix.run(pool.migration_pool()).await?;
+        sqlx::query("INSERT INTO providers (id, name, protocol, base_url, api_key) VALUES ('existing-service', 'Existing service', 'openai-compatible', 'http://127.0.0.1:1', '')")
+            .execute(&pool)
+            .await?;
         let mut storage_url = url::Url::parse(&url)?;
         storage_url
             .query_pairs_mut()
@@ -475,12 +477,8 @@ async fn postgres_admin_history_preserves_batches_and_retention() -> anyhow::Res
         let postgres =
             PostgresStorage::connect(SqlBackendConfig::with_url(storage_url.to_string())).await?;
         let storage: DynStorage = Arc::new(postgres.clone());
-        let existing = storage
-            .providers()
-            .create(provider_input("Existing service"))
-            .await?;
         stravia_core::migrations::migrate_postgres(&pool, None).await?;
-        upgrade_contract(storage.clone(), &existing.id).await?;
+        upgrade_contract(storage.clone(), "existing-service").await?;
         let result = history_contract(storage).await;
         postgres.pool().close().await;
         result

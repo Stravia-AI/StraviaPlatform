@@ -184,9 +184,14 @@ INSERT INTO rejected_request_observations(id,occurred_at,method,path,ingress_pro
 
 async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
     ensure!(
-        matches!(fixture, "retained" | "empty"),
+        matches!(fixture, "retained" | "empty" | "cost-and-billing"),
         "invalid upgrade fixture"
     );
+    let last_migration = if fixture == "cost-and-billing" {
+        29
+    } else {
+        17
+    };
     let backend = env::var("STRAVIA_STORAGE_BACKEND").context("STRAVIA_STORAGE_BACKEND")?;
     match backend.as_str() {
         "sqlite" => {
@@ -204,7 +209,7 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
             let prefix = sqlx::migrate::Migrator::with_migrations(
                 migrations
                     .iter()
-                    .filter(|m| m.version <= 17)
+                    .filter(|m| m.version <= last_migration)
                     .cloned()
                     .collect(),
             );
@@ -224,7 +229,7 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
             let prefix = sqlx::migrate::Migrator::with_migrations(
                 migrations
                     .iter()
-                    .filter(|m| m.version <= 17)
+                    .filter(|m| m.version <= last_migration)
                     .cloned()
                     .collect(),
             );
@@ -585,6 +590,7 @@ async fn main() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -600,6 +606,7 @@ async fn main() -> anyhow::Result<()> {
             inject_media_generation: false,
             expires_at: None,
             model_ids: vec![route.id.clone().into()],
+            spend_limit: None,
         })
         .await?;
 
@@ -721,6 +728,7 @@ async fn main() -> anyhow::Result<()> {
                 target_cooldown_ms: Some(120_000),
                 thinking_level_map: vec![],
             }]),
+            billing: None,
         })
         .await;
     ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");

@@ -210,6 +210,7 @@ async fn protected_responses_router_with_base_url(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model Route");
@@ -225,6 +226,7 @@ async fn protected_responses_router_with_base_url(
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -244,6 +246,7 @@ async fn protected_responses_router_with_base_url(
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -761,6 +764,7 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -852,6 +856,7 @@ async fn artifact_create_upload_response_hides_the_artifact_identity() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -911,6 +916,7 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

@@ -437,6 +437,7 @@ fn event_bytes(event: &RunEvent) -> usize {
             upstream_model,
             protocol,
             upstream_url,
+            ..
         } => [
             model_turn_id,
             attempt_id,

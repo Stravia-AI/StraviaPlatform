@@ -85,6 +85,7 @@ impl TestHarness {
                 inject_media_generation: false,
                 model_ids: Vec::new(),
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -128,6 +129,7 @@ impl TestHarness {
                 inject_media_generation: false,
                 model_ids: Vec::new(),
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await?;
         Ok((key.id, key.token))
@@ -582,6 +584,7 @@ async fn create_route(
                 })
                 .collect(),
             default_thinking_level: None,
+            billing: None,
         })
         .await
 }
@@ -973,6 +976,7 @@ async fn external_search_half_open_probe_sends_once_and_recovers_the_target() ->
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     configure_external_search(&harness.gateway, &route.model_id).await?;
@@ -1494,11 +1498,10 @@ async fn image_route_filters_reference_inputs_before_priority_and_failover() -> 
             "image-to-image",
             stravia_core::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata: json!({
-                    "attachment": true,
-                    "capabilities": ["media_image", "image_input"],
-                    "modalities": {"input": ["text"], "output": ["image"]}
-                }),
+                changes: std::collections::BTreeMap::from([
+                    ("modalities.input".to_string(), json!(["text"])),
+                    ("modalities.output".to_string(), json!(["image"])),
+                ]),
             },
         )
         .await?;
@@ -1742,10 +1745,11 @@ async fn model_turn_guest_input_error(
                 model,
                 stravia_core::provider_models::UpdateProviderModel {
                     revision: detail.revision,
-                    metadata: json!({
-                        "modalities": {"input":["text"],"output":["text"]},
-                        "reasoning_efforts": efforts,
-                    }),
+                    changes: std::collections::BTreeMap::from([
+                        ("modalities.input".to_string(), json!(["text"])),
+                        ("modalities.output".to_string(), json!(["text"])),
+                        ("reasoning_efforts".to_string(), json!(efforts)),
+                    ]),
                 },
             )
             .await?;
@@ -1980,8 +1984,6 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
         .admin()
         .get_provider_model(&provider.id, "image-output-only")
         .await?;
-    let mut metadata = serde_json::to_value(&detail.metadata)?;
-    metadata["modalities"]["output"] = json!(["image"]);
     harness
         .gateway
         .admin()
@@ -1989,7 +1991,10 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
             &provider.id,
             "image-output-only",
             stravia_core::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["image"]),
+                )]),
                 revision: detail.revision,
             },
         )
@@ -3010,6 +3015,7 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
             inject_media_generation: false,
             model_ids: vec![image_route.id.clone().into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await?;
 
@@ -3215,6 +3221,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![inference_route.id.clone().into()],
+            spend_limit: None,
         })
         .await?;
 
@@ -3402,6 +3409,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![openai_route.id.clone().into()],
+            spend_limit: None,
         })
         .await?;
     upstream

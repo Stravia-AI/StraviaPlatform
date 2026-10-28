@@ -79,6 +79,9 @@ pub struct Gateway {
     pub model_cache: Arc<tokio::sync::RwLock<router::RouteCache>>,
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
     pub(crate) route_policy_state: router::RoutePolicyState,
+    /// Current custom-currency snapshot; replaced after a committed admin write.
+    pub(crate) custom_currency:
+        Arc<parking_lot::RwLock<Option<Arc<crate::pricing::CustomCurrency>>>>,
     pub(crate) observation: interaction_observation::InteractionObservation,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
@@ -139,6 +142,7 @@ impl Gateway {
             model_cache: Arc::clone(&self.model_cache),
             cache_affinity: self.cache_affinity.clone(),
             route_policy_state: self.route_policy_state.clone(),
+            custom_currency: Arc::clone(&self.custom_currency),
             observation: self.observation.clone(),
             auth_sessions: Arc::clone(&self.auth_sessions),
             agent_definitions: self.agent_definitions.clone(),

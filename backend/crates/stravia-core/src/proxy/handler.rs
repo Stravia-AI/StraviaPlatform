@@ -165,6 +165,7 @@ mod tests {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         };
         let unbound = gateway
             .admin()
@@ -194,6 +195,7 @@ mod tests {
                 inject_media_generation: false,
                 model_ids: vec![bound.id.clone().into()],
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await
             .expect("API key");
@@ -252,6 +254,7 @@ mod tests {
                     expires_at: None,
                     model_ids: Some(Vec::new()),
                     inject_media_understanding: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -327,6 +330,7 @@ mod tests {
                     expires_at: None,
                     model_ids: None,
                     inject_media_understanding: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -350,6 +354,7 @@ mod tests {
                     expires_at: Some("2000-01-01T00:00:00Z".into()),
                     model_ids: None,
                     inject_media_understanding: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -377,6 +382,7 @@ mod tests {
                 supports_image_input: false,
                 targets: Vec::new(),
                 default_thinking_level: None,
+                billing: None,
             }],
             Vec::new(),
         ));

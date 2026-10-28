@@ -1987,6 +1987,7 @@ mod snapshot_tests {
                 upstream_model: "model".into(),
                 protocol: "responses".into(),
                 upstream_url: "http://localhost".into(),
+                cost_basis: None,
             });
             run.record(RunEvent::TargetAttemptFinished {
                 model_turn_id: "async-turn".into(),
@@ -2005,6 +2006,7 @@ mod snapshot_tests {
                     reasoning_tokens: None,
                     coverage: None,
                 }),
+                amounts: None,
             });
             observation.flush().await?;
             sqlx::raw_sql("UPDATE inference_run_observations SET status='completed',finished_at=started_at+100 WHERE id='async-summary'; UPDATE model_turn_observations SET status='completed',finished_at=started_at+100 WHERE id='async-turn'; UPDATE interaction_observations SET status='completed' WHERE root_run_id='async-summary';")
@@ -2074,6 +2076,7 @@ mod snapshot_tests {
                 upstream_model: "model".into(),
                 protocol: "responses".into(),
                 upstream_url: "http://localhost".into(),
+                cost_basis: None,
             });
             run.record(RunEvent::TargetAttemptFinished {
                 model_turn_id: "mixed-turn".into(),
@@ -2092,6 +2095,7 @@ mod snapshot_tests {
                     reasoning_tokens: None,
                     coverage: None,
                 }),
+                amounts: None,
             });
             observation.flush().await?;
             sqlx::raw_sql("CREATE TRIGGER mixed_diagnostic_fault BEFORE INSERT ON observation_events WHEN NEW.kind='credential_mappings_created' BEGIN SELECT RAISE(ABORT,'diagnostic unavailable'); END;")
@@ -2408,6 +2412,7 @@ mod snapshot_tests {
             upstream_model: "model".into(),
             protocol: "responses".into(),
             upstream_url: "http://upstream.invalid".into(),
+            cost_basis: None,
         });
         run.record(RunEvent::TargetAttemptFinished {
             model_turn_id: "lost-turn".into(),
@@ -2423,6 +2428,7 @@ mod snapshot_tests {
                 output_tokens: Some(3),
                 ..Default::default()
             }),
+            amounts: None,
         });
         let guard = run.publication_guard().expect("live publication");
         run.observe_client_completion(&[], &[], writer::now(), false);
@@ -2507,6 +2513,7 @@ mod snapshot_tests {
             upstream_model: "model".into(),
             protocol: "responses".into(),
             upstream_url: "http://upstream.invalid".into(),
+            cost_basis: None,
         });
         run.record(RunEvent::TargetAttemptFinished {
             model_turn_id: "turn".into(),
@@ -2518,6 +2525,7 @@ mod snapshot_tests {
             duration_ms: 1,
             first_token_ms: None,
             usage: None,
+            amounts: None,
         });
         run.record(RunEvent::DeliveryFinished {
             status: "delivered".into(),
@@ -3066,6 +3074,7 @@ mod snapshot_tests {
             upstream_model: "model".into(),
             protocol: "responses".into(),
             upstream_url: "http://localhost".into(),
+            cost_basis: None,
         });
         run.record(RunEvent::PlatformToolStarted {
             model_turn_id: "turn".into(),
@@ -3189,6 +3198,7 @@ mod snapshot_tests {
             upstream_model: "model".into(),
             protocol: "responses".into(),
             upstream_url: "http://localhost".into(),
+            cost_basis: None,
         });
         observation.flush().await?;
         let before_usage = observation.inner.store.max_sequence().await?;

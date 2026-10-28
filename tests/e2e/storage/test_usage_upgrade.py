@@ -25,10 +25,21 @@ WINDOW = {"start_at": 900000, "end_at": 3600000}
 VIEWS = ("overview", "series", "models", "providers", "api-keys")
 
 
+def historical_money(view):
+    # 升级前没有冻结金额，不能由新价格补算，也不计入已知或未知覆盖率。
+    amount = {"amount": "0", "known_count": 0, "unknown_count": 0}
+    currency = {"kind": "usd", "symbol": "$"}
+    if view in ("models", "api-keys"):
+        return {"cost": amount, "billing": amount, "currency": currency}
+    return {"actual_cost": amount, "currency": currency,
+            **({"usage_equivalent_cost": None} if view == "providers" else {})}
+
+
 def overview(requests=0, terminal=0, failed=0, upstream=0, upstream_errors=0,
              input_tokens=None, output_tokens=None, cache_read=None,
              cache_write=None, reasoning=None, duration=None, tps=None):
     return {
+        **historical_money("overview"),
         "total_requests": requests,
         "terminal_request_count": terminal, "failed_request_count": failed,
         "upstream_request_count": upstream, "upstream_error_count": upstream_errors,
@@ -66,16 +77,19 @@ def assert_retained_contract(env, actual):
         series_bucket(2700000, upstream=1, duration=200),
     ]
     assert actual["models"] == [{
+        **historical_money("models"),
         "model_id": "deleted-model", "deleted": True, "model": "Old Model",
         "request_count": 2, "total_input_tokens": 8, "total_output_tokens": 0,
         "total_reasoning_tokens": None, "avg_duration_ms": 200,
     }]
     assert actual["providers"] == [{
+        **historical_money("providers"),
         "provider_id": "deleted-provider", "deleted": True, "provider": "Old Provider",
         "upstream_request_count": 2, "upstream_error_count": 0, "avg_duration_ms": 100,
         "avg_output_tps": None,
     }]
     assert actual["api-keys"] == [{
+        **historical_money("api-keys"),
         "api_key_id": "deleted-key", "deleted": True, "api_key_name": "Old Key",
         "request_count": 2, "total_input_tokens": 8, "total_output_tokens": 0,
         "cache_read_tokens": 2, "cache_write_tokens": None, "reasoning_tokens": None,
@@ -311,16 +325,19 @@ def assert_classification_contract(env, actual):
                       upstream_errors=1, duration=100),
     ]
     assert actual["models"] == [{
+        **historical_money("models"),
         "model_id": "route-x", "deleted": True, "model": "Model X",
         "request_count": 3, "total_input_tokens": 8, "total_output_tokens": 4,
         "total_reasoning_tokens": 0, "avg_duration_ms": 100,
     }]
     assert actual["providers"] == [{
+        **historical_money("providers"),
         "provider_id": "provider-1", "deleted": True, "provider": "Provider One",
         "upstream_request_count": 2, "upstream_error_count": 1,
         "avg_duration_ms": 100, "avg_output_tps": 40,
     }]
     assert actual["api-keys"] == [{
+        **historical_money("api-keys"),
         "api_key_id": "key-1", "deleted": True, "api_key_name": "Key One",
         "request_count": 3, "total_input_tokens": 8, "total_output_tokens": 4,
         "cache_read_tokens": 2, "cache_write_tokens": 1, "reasoning_tokens": 0,
@@ -334,16 +351,19 @@ def assert_classification_contract(env, actual):
                       cache_read=1, duration=300, tps=10),
     ]
     assert stats(env, "models", start_at=4500000, end_at=5400000) == [{
+        **historical_money("models"),
         "model_id": "route-x", "deleted": True, "model": "Model X",
         "request_count": 1, "total_input_tokens": 6, "total_output_tokens": 3,
         "total_reasoning_tokens": None, "avg_duration_ms": 300,
     }]
     assert stats(env, "providers", start_at=4500000, end_at=5400000) == [{
+        **historical_money("providers"),
         "provider_id": "provider-1", "deleted": True, "provider": "Provider One",
         "upstream_request_count": 0, "upstream_error_count": 0,
         "avg_duration_ms": 300, "avg_output_tps": 10,
     }]
     assert stats(env, "api-keys", start_at=4500000, end_at=5400000) == [{
+        **historical_money("api-keys"),
         "api_key_id": "key-1", "deleted": True, "api_key_name": "Key One",
         "request_count": 1, "total_input_tokens": 6, "total_output_tokens": 3,
         "cache_read_tokens": 1, "cache_write_tokens": None, "reasoning_tokens": None,
