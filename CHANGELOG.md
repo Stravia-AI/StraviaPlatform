@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- Chat history converted to Responses now keeps assistant text before its associated tool calls and results, even without a Thinking History Marker. Mixed assistant blocks also retain text between tool calls without copying a call's native identity onto the text message. Rebuild and re-import affected standalone vendor plugins; updating the host alone does not replace installed plugins.
+- A delayed authoritative Thinking completion can no longer let following text or tool calls overtake its History Marker. Pre-text Thinking and its Marker stay in `reasoning_content`, before the answer; Post-Text Thinking keeps the existing ordered `content` projection. Following output waits for the specific Thinking block to close, and missing completion fails explicitly instead of releasing an incomplete history.
 - Release builds no longer compile a bundled-plugin accessor used only by debug-mode development reconciliation, fixing warnings-as-errors failures without disabling the development path. Desktop smoke coverage now handles both responsive observation inspectors, scopes inline settings actions correctly, and opens General settings before exercising updates. WebUI formatting is also normalized for CI.
 - Rust regression fixtures use named observation profiles and equivalent progress-handler control flow to satisfy Clippy without suppressing warnings or changing production behavior.
 - Devin now replays unsigned thinking in its native reasoning field instead of turning it into assistant text. This preserves the reasoning/text boundary across Responses tool continuations, matching the official CLI and OMP integration. Rebuild and re-import the standalone Devin plugin; updating the host alone does not replace installed plugins.

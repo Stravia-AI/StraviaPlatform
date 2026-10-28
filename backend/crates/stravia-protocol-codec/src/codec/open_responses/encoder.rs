@@ -112,22 +112,6 @@ impl ResponsesEncoder {
                 continue;
             }
 
-            if let Some(tool_calls) = item.tool_calls.take() {
-                let single_call = tool_calls.len() == 1;
-                for tool_call in tool_calls {
-                    let mut call = serde_json::json!({
-                        "type": "function_call",
-                    });
-                    call["call_id"] = Value::String(tool_call.id.into_string());
-                    call["name"] = Value::String(tool_call.name);
-                    call["arguments"] = Value::String(tool_call.arguments);
-                    if single_call {
-                        insert_owned_item_metadata(&mut call, &mut item, true);
-                    }
-                    input.push(call);
-                }
-            }
-
             let content = if let Some(refusal) = item.refusal_ref() {
                 Some(vec![serde_json::json!({
                     "type": "refusal",
@@ -152,7 +136,10 @@ impl ResponsesEncoder {
                     "role": role,
                 });
                 message["content"] = Value::Array(content);
-                insert_owned_item_metadata(&mut message, &mut item, true);
+                // 工具调用的原生身份仍归调用所有，拆出的前置正文不能继承它。
+                if item.tool_calls.as_ref().is_none_or(Vec::is_empty) {
+                    insert_owned_item_metadata(&mut message, &mut item, true);
+                }
                 if let Some(phase) = item
                     .meta
                     .as_mut()
@@ -161,6 +148,22 @@ impl ResponsesEncoder {
                     message["phase"] = phase;
                 }
                 input.push(message);
+            }
+
+            if let Some(tool_calls) = item.tool_calls.take() {
+                let single_call = tool_calls.len() == 1;
+                for tool_call in tool_calls {
+                    let mut call = serde_json::json!({
+                        "type": "function_call",
+                    });
+                    call["call_id"] = Value::String(tool_call.id.into_string());
+                    call["name"] = Value::String(tool_call.name);
+                    call["arguments"] = Value::String(tool_call.arguments);
+                    if single_call {
+                        insert_owned_item_metadata(&mut call, &mut item, true);
+                    }
+                    input.push(call);
+                }
             }
         }
 
@@ -721,6 +724,7 @@ fn encode_mixed_assistant_items(
                 ContentBlock::Thinking { .. }
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::RedactedThinking { .. }
+                    | ContentBlock::ToolUse { .. }
             )
         })
     {
