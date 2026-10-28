@@ -86,6 +86,11 @@ pub struct GatewayConfig {
     pub cache: GatewayCacheConfig,
     /// Whether this process has a trusted Desktop updater bridge.
     pub product_update_download_supported: bool,
+    /// Public HTTPS update distribution URL override (`STRAVIA_UPDATER_URL`).
+    /// `None` uses the built-in production service. An explicitly empty or invalid
+    /// value fails update checks with `UPDATE_SOURCE_INVALID`, never falling back
+    /// or blocking startup and unrelated application functionality.
+    pub update_source_url: Option<String>,
     /// How often to poll the shared DB for a config epoch change and reload
     /// `model_cache` when a change is detected. Set to `Duration::ZERO` to
     /// disable (default for desktop / single-process deployments).
@@ -109,6 +114,7 @@ impl Default for GatewayConfig {
             storage: GatewayStorageConfig::default(),
             cache: GatewayCacheConfig::default(),
             product_update_download_supported: false,
+            update_source_url: None,
             config_poll_interval: Duration::ZERO,
             catalog_base_url: None,
             catalog_background_refresh: false,

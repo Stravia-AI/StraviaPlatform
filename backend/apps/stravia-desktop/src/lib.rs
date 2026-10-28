@@ -475,6 +475,8 @@ async fn initialize_desktop(
                 Gateway::new(GatewayConfig {
                     data_dir: data_dir.clone(),
                     product_update_download_supported: true,
+                    // 未覆盖时由 Core 选择内置生产更新源，避免打包与运行环境各维护一份默认值。
+                    update_source_url: std::env::var("STRAVIA_UPDATER_URL").ok(),
                     // 桌面冒烟只使用本地快照，避免测试启动直接访问生产 Catalog。
                     catalog_base_url: (!cfg!(feature = "desktop-e2e")).then(|| {
                         stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned()
@@ -501,7 +503,7 @@ async fn initialize_desktop(
                     "version": "9.9.9",
                     "published_at": "2026-09-04T00:00:00Z",
                     "release_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v9.9.9",
-                    "manifest_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/download/v9.9.9/stravia-updater.json",
+                    "manifest_url": "https://updates.example.com/api/v1/releases/v9.9.9/manifest.json",
                     "download_available": true,
                     "download_error": null
                 }

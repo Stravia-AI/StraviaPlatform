@@ -98,6 +98,15 @@ struct Args {
     config: Option<String>,
 
     #[arg(
+        long = "updater-url",
+        env = "STRAVIA_UPDATER_URL",
+        help = "Public HTTPS update distribution URL (defaults to the built-in production service)",
+        help_heading = "Server",
+        global = true
+    )]
+    updater_url: Option<String>,
+
+    #[arg(
         long,
         default_value_t = 3,
         env = "STRAVIA_CONFIG_POLL_INTERVAL",
@@ -235,6 +244,7 @@ fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
     GatewayConfig {
         data_dir,
         cache,
+        update_source_url: args.updater_url.clone(),
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
         catalog_background_refresh: catalog_base_url.is_some(),
         catalog_base_url,

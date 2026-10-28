@@ -1,10 +1,20 @@
 # 发布带签名的 Desktop 更新
 
-Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 是更新发现和下载的唯一来源；发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64 四个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
+Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 仍是更新产物、清单与签名的权威来源；应用更新发现默认通过内置的生产更新分发服务进行，也可用 `STRAVIA_UPDATER_URL` 覆盖，该服务提供 GitHub 兼容的 Release 列表与重写后的清单，`release_url` 仍指向官方 GitHub Release。发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64 四个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
 
 Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像。
 
 容器 WebUI 依赖安装层必须同时复制 workspace manifests、`bun.lock` 和 `patches/`，再运行锁定安装；补丁变化必须使该层缓存失效。不得因补丁仅用于桌面测试而从容器安装输入或 `patchedDependencies` 中移除它。Rust 编译层还必须保留 `frontend/stravia-webui/src/assets/icons/` 的原始 SVG（供 Vendor Plugins 编译时内嵌品牌图标）和 `frontend/stravia-webui/static/stravia-logo.svg`（供 Gateway 与插件管理器内嵌）；WebUI 的 `dist` 不能替代这些源文件。
+
+## 更新分发服务配置
+
+Server 与 Desktop 内置生产更新分发服务 `https://updater.stravia.cn`，发布包无需额外设置环境变量即可使用。可用进程环境变量 `STRAVIA_UPDATER_URL` 覆盖；Server 的 `--updater-url` 优先于该环境变量。覆盖值必须为公开 HTTPS 基址，可带路径前缀，末尾斜杠会被规范化。两端由 Core 统一选择默认地址，不依赖 CI 注入或运行机器的环境配置。
+
+- 更新检查请求 `<base>/api/v1/releases?per_page=100&page=N`，清单来自服务返回的 `stravia-updater.json` asset URL。客户端最多检查 10 页，超过视为错误。应用不再直接查询 GitHub Releases API，也没有旧入口后备。
+- 未配置覆盖值时使用内置生产地址；显式空值、空白或非法地址只在检查时产生 `UPDATE_SOURCE_INVALID`，不会静默回退或阻止 Server/Desktop 启动及其他功能；debug 构建仍默认禁用生产更新检查。
+- 发布通道、跳过版本、常规成功/失败检查 TTL、出站代理偏好、HTTPS 校验和 Tauri 签名校验保持不变。
+- 历史缓存的 manifest 下载入口必须匹配当前生效的更新源，包括未覆盖时的内置生产源。旧 GitHub 地址、其他服务地址或非法覆盖配置下，仍展示历史版本信息但禁用下载并报告错误；不匹配来源的缓存不会阻止自动检查重新发现清单，也不会通过猜测 tag 改写旧地址。
+- 服务返回的 `release_notes_url`/`html_url` 必须是官方 GitHub Release URL；清单平台 URL 由服务改写，但签名仍由现有 Tauri 公钥验证。
 
 ## 首次生成和托管密钥
 
@@ -33,7 +43,7 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:web`，不直接以生产 `target/release/stravia-server` 替代测试服务。Admin 先串行准备 `build:test:development` 与 `build:test:services`；Chromium 先串行准备 `build:test:release` 与 `build:test:services`。`target/test-artifacts/services/` 保留带 `test-harness` 的独立服务副本，支持 loopback catalog 等测试参数；生产副本与开发模式副本独立保存，后续不同 feature graph 的构建不能覆盖正在验证的测试服务。
 
-`stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。
+`stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。更新分发服务读取该清单后仅把平台下载 URL 重写为自己的下载端点；版本、平台键、签名和下载字节保持不变。
 
 ### 同一提交的 CI 复用
 
@@ -63,4 +73,4 @@ CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:we
 - Linux x86_64 AppImage：确认应用内安装进度、原地替换和 relaunch。
 - Linux ARM64 AppImage：确认应用内安装进度、原地替换和 relaunch。
 
-同时验证签名损坏、平台条目缺失、只读 AppImage 和网络失败都 fail closed。没有对应架构设备时，在发布记录中明确写明未验证的平台、原因和风险，不能把另一架构的结果当作替代。
+Smoke 环境必须把 `STRAVIA_UPDATER_URL` 指向受控更新分发服务，避免未覆盖时访问生产源；显式空值或非法覆盖必须明确失败而不是静默回退。同时验证签名损坏、平台条目缺失、只读 AppImage 和网络失败都 fail closed。没有对应架构设备时，在发布记录中明确写明未验证的平台、原因和风险，不能把另一架构的结果当作替代。

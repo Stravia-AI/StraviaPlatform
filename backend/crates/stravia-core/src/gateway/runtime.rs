@@ -497,9 +497,10 @@ impl Gateway {
         allowance_samples
             .cleanup_at(chrono::Utc::now().timestamp_millis())
             .await?;
-        let update_service = Arc::new(admin::updates::UpdateService::github(
+        let update_service = Arc::new(admin::updates::UpdateService::updater(
             Arc::clone(&storage),
             config.product_update_download_supported,
+            config.update_source_url.clone(),
         )?);
         let vendor_plugins = crate::plugin::manager::VendorPlugins::open(
             storage.vendor_plugins().clone(),

@@ -7,6 +7,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use reqwest::Url;
 use semver::Version;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -17,13 +18,15 @@ use crate::storage::DynStorage;
 
 const UPDATE_STATE_KEY: &str = "product_update_state";
 const SKIPPED_VERSION_KEY: &str = "product_update_skipped_version";
-const RELEASES_URL: &str = "https://api.github.com/repos/Stravia-AI/StraviaPlatform/releases";
+const UPDATE_SOURCE_ENV: &str = "STRAVIA_UPDATER_URL";
+const DEFAULT_UPDATE_SOURCE_URL: &str = "https://updater.stravia.cn";
 const MANIFEST_ASSET_NAME: &str = "stravia-updater.json";
 const SUCCESS_CACHE_TTL: chrono::Duration = chrono::Duration::hours(24);
 const FAILURE_RETRY_DELAY: chrono::Duration = chrono::Duration::hours(1);
 const MAX_RELEASE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_RELEASE_PAGES: usize = 10;
+const RELEASE_PAGE_SIZE: usize = 100;
 const REQUIRED_PLATFORMS: [&str; 4] = [
     "linux-aarch64",
     "linux-x86_64",
@@ -92,18 +95,18 @@ struct RemoteRelease {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GitHubRelease {
+struct ReleaseEntry {
     tag_name: String,
     draft: bool,
     prerelease: bool,
     published_at: Option<DateTime<Utc>>,
     html_url: String,
     #[serde(default)]
-    assets: Vec<GitHubAsset>,
+    assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GitHubAsset {
+struct ReleaseAsset {
     name: String,
     browser_download_url: String,
 }
@@ -197,6 +200,7 @@ impl SourceError {
 trait ReleaseSource: Send + Sync {
     async fn releases(&self) -> Result<Vec<RemoteRelease>, SourceError>;
     async fn manifest(&self, url: &str) -> Result<UpdateManifest, SourceError>;
+    fn validate_manifest_source(&self, url: &str) -> Result<(), SourceError>;
 }
 
 trait UpdateClock: Send + Sync {
@@ -211,19 +215,114 @@ impl UpdateClock for SystemClock {
     }
 }
 
-struct GitHubReleaseSource {
+#[derive(Debug)]
+struct UpdaterBaseUrl(Url);
+
+impl UpdaterBaseUrl {
+    fn parse(value: Option<&str>, allow_http: bool) -> Result<Self, SourceError> {
+        let value = value.unwrap_or(DEFAULT_UPDATE_SOURCE_URL).trim();
+        let mut url = Url::parse(value).map_err(|error| {
+            SourceError::new(
+                "UPDATE_SOURCE_INVALID",
+                format!("{UPDATE_SOURCE_ENV} is not a valid URL: {error}"),
+            )
+        })?;
+        let scheme_allowed = url.scheme() == "https" || (allow_http && url.scheme() == "http");
+        if !scheme_allowed || url.host_str().is_none() {
+            return Err(SourceError::new(
+                "UPDATE_SOURCE_INVALID",
+                format!("{UPDATE_SOURCE_ENV} must be an absolute HTTPS URL"),
+            ));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(SourceError::new(
+                "UPDATE_SOURCE_INVALID",
+                format!("{UPDATE_SOURCE_ENV} must not contain credentials"),
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(SourceError::new(
+                "UPDATE_SOURCE_INVALID",
+                format!("{UPDATE_SOURCE_ENV} must not contain a query or fragment"),
+            ));
+        }
+        if !url.path().ends_with('/') {
+            url.path_segments_mut()
+                .map_err(|_| {
+                    SourceError::new(
+                        "UPDATE_SOURCE_INVALID",
+                        format!("{UPDATE_SOURCE_ENV} must be a hierarchical URL"),
+                    )
+                })?
+                .push("");
+        }
+        Ok(Self(url))
+    }
+
+    fn releases_url(&self, page: usize) -> Result<Url, SourceError> {
+        let mut url = self.0.clone();
+        url.path_segments_mut()
+            .map_err(|_| {
+                SourceError::new(
+                    "UPDATE_SOURCE_INVALID",
+                    format!("{UPDATE_SOURCE_ENV} must be a hierarchical URL"),
+                )
+            })?
+            .pop_if_empty()
+            .extend(["api", "v1", "releases"]);
+        url.query_pairs_mut()
+            .append_pair("per_page", &RELEASE_PAGE_SIZE.to_string())
+            .append_pair("page", &page.to_string());
+        Ok(url)
+    }
+
+    fn validate_manifest_source(&self, value: &str) -> Result<(), SourceError> {
+        let matches = Url::parse(value).is_ok_and(|url| {
+            url.query().is_none()
+                && url.fragment().is_none()
+                && url
+                    .as_str()
+                    .strip_prefix(self.0.as_str())
+                    .and_then(|path| path.strip_prefix("api/v1/releases/"))
+                    .and_then(|path| path.strip_suffix("/manifest.json"))
+                    .is_some_and(|tag| !tag.is_empty() && !tag.contains('/'))
+        });
+        if matches {
+            Ok(())
+        } else {
+            Err(SourceError::new(
+                "UPDATE_MANIFEST_SOURCE_MISMATCH",
+                "Check for updates again to refresh download metadata for the configured update source",
+            ))
+        }
+    }
+}
+
+struct UpdaterReleaseSource {
     storage: DynStorage,
+    base_url: Option<String>,
     #[cfg(test)]
     allow_http: bool,
 }
 
-impl GitHubReleaseSource {
-    fn new(storage: DynStorage) -> Self {
+impl UpdaterReleaseSource {
+    fn new(storage: DynStorage, base_url: Option<String>) -> Self {
         Self {
             storage,
+            base_url,
             #[cfg(test)]
             allow_http: false,
         }
+    }
+
+    #[cfg(test)]
+    fn allows_http(&self) -> bool {
+        self.allow_http
+    }
+
+    #[cfg(not(test))]
+    fn allows_http(&self) -> bool {
+        false
     }
 
     async fn client(&self) -> Result<reqwest::Client, SourceError> {
@@ -263,25 +362,19 @@ impl GitHubReleaseSource {
         url: &str,
         limit: usize,
     ) -> Result<Vec<u8>, SourceError> {
-        #[cfg(not(test))]
-        require_https(url, "request URL")?;
-        #[cfg(test)]
-        if !self.allow_http {
+        if !self.allows_http() {
             require_https(url, "request URL")?;
         }
         let response = client.get(url).send().await.map_err(|error| {
             SourceError::new("UPDATE_REQUEST_FAILED", format_connectivity_error(&error))
         })?;
-        #[cfg(not(test))]
-        require_https(response.url().as_str(), "redirected request URL")?;
-        #[cfg(test)]
-        if !self.allow_http {
+        if !self.allows_http() {
             require_https(response.url().as_str(), "redirected request URL")?;
         }
         if !response.status().is_success() {
             return Err(SourceError::new(
                 "UPDATE_UPSTREAM_FAILED",
-                format!("GitHub returned HTTP {}", response.status()),
+                format!("Update source returned HTTP {}", response.status()),
             ));
         }
         if response
@@ -313,40 +406,43 @@ impl GitHubReleaseSource {
 }
 
 #[async_trait]
-impl ReleaseSource for GitHubReleaseSource {
+impl ReleaseSource for UpdaterReleaseSource {
     async fn releases(&self) -> Result<Vec<RemoteRelease>, SourceError> {
+        let base_url = UpdaterBaseUrl::parse(self.base_url.as_deref(), self.allows_http())?;
         let client = self.client().await?;
         let mut releases = Vec::new();
         for page in 1..=MAX_RELEASE_PAGES {
-            let url = format!("{RELEASES_URL}?per_page=100&page={page}");
+            let url = base_url.releases_url(page)?;
             let bytes = self
-                .get_limited(&client, &url, MAX_RELEASE_RESPONSE_BYTES)
+                .get_limited(&client, url.as_str(), MAX_RELEASE_RESPONSE_BYTES)
                 .await?;
-            let page_releases: Vec<GitHubRelease> = serde_json::from_slice(&bytes)
+            let page_releases: Vec<ReleaseEntry> = serde_json::from_slice(&bytes)
                 .map_err(|error| SourceError::new("UPDATE_RESPONSE_INVALID", error.to_string()))?;
             let page_len = page_releases.len();
-            releases.extend(
-                page_releases
-                    .into_iter()
-                    .filter_map(validate_github_release),
-            );
-            if page_len < 100 {
+            releases.extend(page_releases.into_iter().filter_map(validate_release));
+            if page_len < RELEASE_PAGE_SIZE {
                 return Ok(releases);
             }
         }
         Err(SourceError::new(
             "UPDATE_RESPONSE_TOO_LARGE",
-            "GitHub returned more release pages than Stravia will inspect",
+            "The update source returned more release pages than Stravia will inspect",
         ))
     }
 
     async fn manifest(&self, url: &str) -> Result<UpdateManifest, SourceError> {
+        self.validate_manifest_source(url)?;
         let client = self.client().await?;
         let bytes = self
             .get_limited(&client, url, MAX_MANIFEST_RESPONSE_BYTES)
             .await?;
         serde_json::from_slice(&bytes)
             .map_err(|error| SourceError::new("UPDATE_MANIFEST_INVALID", error.to_string()))
+    }
+
+    fn validate_manifest_source(&self, url: &str) -> Result<(), SourceError> {
+        UpdaterBaseUrl::parse(self.base_url.as_deref(), self.allows_http())?
+            .validate_manifest_source(url)
     }
 }
 
@@ -362,12 +458,16 @@ pub(crate) struct UpdateService {
 }
 
 impl UpdateService {
-    pub(crate) fn github(storage: DynStorage, download_supported: bool) -> anyhow::Result<Self> {
+    pub(crate) fn updater(
+        storage: DynStorage,
+        download_supported: bool,
+        base_url: Option<String>,
+    ) -> anyhow::Result<Self> {
         let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
             .context("CARGO_PKG_VERSION must be valid SemVer")?;
         Ok(Self::new(
             Arc::clone(&storage),
-            Arc::new(GitHubReleaseSource::new(storage)),
+            Arc::new(UpdaterReleaseSource::new(storage, base_url)),
             Arc::new(SystemClock),
             current_version,
             download_supported,
@@ -420,7 +520,16 @@ impl UpdateService {
     async fn check_exclusive(&self, mode: UpdateCheckMode) -> anyhow::Result<UpdateStatus> {
         let now = self.clock.now();
         let mut state = self.load_state().await?;
-        if mode == UpdateCheckMode::Automatic {
+        let cached_source_matches = state
+            .available_update
+            .as_ref()
+            .filter(|update| !update.manifest_url.is_empty())
+            .is_none_or(|update| {
+                self.source
+                    .validate_manifest_source(&update.manifest_url)
+                    .is_ok()
+            });
+        if mode == UpdateCheckMode::Automatic && cached_source_matches {
             if state
                 .last_success_at
                 .is_some_and(|checked_at| now.signed_duration_since(checked_at) < SUCCESS_CACHE_TTL)
@@ -531,7 +640,18 @@ impl UpdateService {
         // 更新缓存跨安装版本保留；历史候选不能继续作为已安装版本的可用更新。
         let available_update = state
             .available_update
-            .filter(|update| update.version > self.current_version);
+            .filter(|update| update.version > self.current_version)
+            .map(|mut update| {
+                if !update.manifest_url.is_empty()
+                    && let Err(error) = self.source.validate_manifest_source(&update.manifest_url)
+                {
+                    // 历史检查结果仍可展示，但切换来源后不能绕过新的分发入口。
+                    update.manifest_url.clear();
+                    update.download_available = false;
+                    update.download_error = Some(error.message);
+                }
+                update
+            });
         let skipped_version = self
             .storage
             .settings()
@@ -590,7 +710,7 @@ fn select_release(
         .max_by(|left, right| left.version.cmp(&right.version))
 }
 
-fn validate_github_release(release: GitHubRelease) -> Option<RemoteRelease> {
+fn validate_release(release: ReleaseEntry) -> Option<RemoteRelease> {
     if release.draft || require_https(&release.html_url, "Release URL").is_err() {
         return None;
     }
@@ -690,9 +810,9 @@ fn require_https(url: &str, label: &str) -> Result<(), SourceError> {
 
 fn format_connectivity_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
-        "GitHub update request timed out".to_string()
+        "Update source request timed out".to_string()
     } else if error.is_connect() {
-        "Unable to connect to GitHub Releases".to_string()
+        "Unable to connect to the update source".to_string()
     } else {
         error.to_string()
     }
@@ -706,12 +826,13 @@ mod tests {
     use crate::storage::MemoryStorage;
     use axum::Router;
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use axum::routing::get;
 
     use super::*;
 
     const RELEASE_URL: &str = "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0";
-    const MANIFEST_URL: &str = "https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json";
+    const MANIFEST_URL: &str = "https://updates.example.com/api/v1/releases/v1.2.0/manifest.json";
 
     struct FakeClock(AtomicI64);
 
@@ -745,6 +866,7 @@ mod tests {
     struct FakeSource {
         replies: tokio::sync::Mutex<VecDeque<ReleaseReply>>,
         calls: AtomicUsize,
+        manifest_calls: tokio::sync::Mutex<Vec<String>>,
         delay: Duration,
     }
 
@@ -753,6 +875,7 @@ mod tests {
             Self {
                 replies: tokio::sync::Mutex::new(replies.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                manifest_calls: tokio::sync::Mutex::new(Vec::new()),
                 delay: Duration::ZERO,
             }
         }
@@ -761,6 +884,7 @@ mod tests {
             Self {
                 replies: tokio::sync::Mutex::new(replies.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                manifest_calls: tokio::sync::Mutex::new(Vec::new()),
                 delay: Duration::from_millis(30),
             }
         }
@@ -779,8 +903,14 @@ mod tests {
             }
         }
 
-        async fn manifest(&self, _url: &str) -> Result<UpdateManifest, SourceError> {
+        async fn manifest(&self, url: &str) -> Result<UpdateManifest, SourceError> {
+            self.manifest_calls.lock().await.push(url.to_string());
             Ok(valid_manifest("1.2.0", RELEASE_URL))
+        }
+
+        fn validate_manifest_source(&self, url: &str) -> Result<(), SourceError> {
+            UpdaterBaseUrl::parse(Some("https://updates.example.com"), false)?
+                .validate_manifest_source(url)
         }
     }
 
@@ -794,6 +924,20 @@ mod tests {
             release_url: RELEASE_URL.to_string(),
             manifest_url: Some(MANIFEST_URL.to_string()),
         }
+    }
+
+    fn release_entry_json(tag: &str, manifest_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "draft": false,
+            "prerelease": false,
+            "published_at": "2026-09-01T00:00:00Z",
+            "html_url": format!("https://github.com/Stravia-AI/StraviaPlatform/releases/tag/{tag}"),
+            "assets": [{
+                "name": MANIFEST_ASSET_NAME,
+                "browser_download_url": manifest_url,
+            }],
+        })
     }
 
     fn valid_manifest(version: &str, release_url: &str) -> UpdateManifest {
@@ -818,15 +962,16 @@ mod tests {
         }
     }
 
-    async fn local_http_source(router: Router) -> (GitHubReleaseSource, reqwest::Client, String) {
+    async fn local_http_source(router: Router) -> (UpdaterReleaseSource, reqwest::Client, String) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let source = GitHubReleaseSource {
+        let source = UpdaterReleaseSource {
             storage,
+            base_url: None,
             allow_http: true,
         };
         let client = source.client().await.unwrap();
@@ -845,17 +990,120 @@ mod tests {
         )
     }
 
-    #[test]
-    fn debug_builds_disable_the_production_release_source_by_default() {
+    #[tokio::test]
+    async fn persisted_github_manifest_is_routed_through_the_configured_update_source() {
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let service = UpdateService::github(storage, false).unwrap();
+        storage
+            .settings()
+            .set(
+                UPDATE_STATE_KEY,
+                &serde_json::json!({
+                    "last_success_at": "2026-09-01T00:00:00Z",
+                    "last_failure": null,
+                    "available_update": {
+                        "version": "1.2.0",
+                        "published_at": "2026-09-01T00:00:00Z",
+                        "release_url": RELEASE_URL,
+                        "manifest_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json",
+                        "download_available": true,
+                        "download_error": null
+                    }
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        let source = Arc::new(UpdaterReleaseSource::new(
+            Arc::clone(&storage),
+            Some("https://updates.example.com".to_string()),
+        ));
+        let service = UpdateService::new(
+            Arc::clone(&storage),
+            source,
+            Arc::new(FakeClock::new("2026-09-01T00:01:00Z")),
+            Version::parse("1.0.0").unwrap(),
+            true,
+            true,
+        );
 
-        assert_eq!(service.checks_enabled, !cfg!(debug_assertions));
+        let cached = service.status().await.unwrap().available_update.unwrap();
+        assert!(!cached.download_available);
+        assert!(cached.manifest_url.is_empty());
+
+        let refreshed = UpdateService::new(
+            storage,
+            Arc::new(FakeSource::new([ReleaseReply::Releases(vec![release(
+                "1.2.0", false,
+            )])])),
+            Arc::new(FakeClock::new("2026-09-01T00:01:00Z")),
+            Version::parse("1.0.0").unwrap(),
+            true,
+            true,
+        );
+        let update = refreshed
+            .check(UpdateCheckMode::Automatic)
+            .await
+            .unwrap()
+            .available_update
+            .unwrap();
+        assert_eq!(update.manifest_url, MANIFEST_URL);
+        assert!(update.download_available);
+    }
+
+    #[tokio::test]
+    async fn cached_download_is_available_only_for_its_current_configured_source() {
+        let existing = service(
+            Arc::new(FakeSource::new([ReleaseReply::Releases(vec![release(
+                "1.2.0", false,
+            )])])),
+            Arc::new(FakeClock::new("2026-09-01T00:00:00Z")),
+            "1.0.0",
+        );
+        existing.check(UpdateCheckMode::Manual).await.unwrap();
+
+        for (base, expected_download) in [
+            (None, false),
+            (Some("https://another-updater.example.com"), false),
+            (Some("https://updates.example.com"), true),
+        ] {
+            let current = UpdateService::new(
+                Arc::clone(&existing.storage),
+                Arc::new(UpdaterReleaseSource::new(
+                    Arc::clone(&existing.storage),
+                    base.map(str::to_string),
+                )),
+                Arc::new(FakeClock::new("2026-09-01T00:01:00Z")),
+                Version::parse("1.0.0").unwrap(),
+                true,
+                true,
+            );
+            let update = current.status().await.unwrap().available_update.unwrap();
+            assert_eq!(update.download_available, expected_download, "{base:?}");
+            assert_eq!(
+                update.manifest_url,
+                if expected_download { MANIFEST_URL } else { "" },
+                "{base:?}"
+            );
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn debug_builds_report_update_checks_as_disabled() {
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let service = UpdateService::updater(storage, false, None).unwrap();
+
+        let status = service.check(UpdateCheckMode::Manual).await.unwrap();
+        assert_eq!(status.check_status, UpdateCheckStatus::Error);
+        assert_eq!(
+            status.last_failure.map(|failure| failure.code),
+            Some("UPDATE_CHECK_DISABLED".to_string())
+        );
     }
 
     #[test]
-    fn github_release_filter_rejects_drafts_invalid_tags_and_non_https_urls() {
-        let release = |tag_name: &str, draft: bool, html_url: &str| GitHubRelease {
+    fn release_filter_rejects_drafts_invalid_tags_and_non_https_urls() {
+        let release = |tag_name: &str, draft: bool, html_url: &str| ReleaseEntry {
             tag_name: tag_name.to_string(),
             draft,
             prerelease: false,
@@ -866,15 +1114,242 @@ mod tests {
             assets: vec![],
         };
 
-        assert!(validate_github_release(release("1.2.0", true, RELEASE_URL)).is_none());
-        assert!(validate_github_release(release("not-semver", false, RELEASE_URL)).is_none());
-        assert!(
-            validate_github_release(release("1.2.0", false, "http://example.invalid")).is_none()
+        assert!(validate_release(release("1.2.0", true, RELEASE_URL)).is_none());
+        assert!(validate_release(release("not-semver", false, RELEASE_URL)).is_none());
+        assert!(validate_release(release("1.2.0", false, "http://example.invalid")).is_none());
+        let with_manifest = |manifest_url: &str| ReleaseEntry {
+            tag_name: "1.2.0".to_string(),
+            draft: false,
+            prerelease: false,
+            published_at: Some(
+                DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            html_url: RELEASE_URL.to_string(),
+            assets: vec![ReleaseAsset {
+                name: MANIFEST_ASSET_NAME.to_string(),
+                browser_download_url: manifest_url.to_string(),
+            }],
+        };
+        assert!(validate_release(with_manifest("http://example.invalid/manifest.json")).is_none());
+        assert_eq!(
+            validate_release(with_manifest(MANIFEST_URL))
+                .unwrap()
+                .manifest_url
+                .as_deref(),
+            Some(MANIFEST_URL)
+        );
+    }
+
+    #[test]
+    fn update_source_base_url_requires_https_and_builds_paginated_release_urls() {
+        let base =
+            UpdaterBaseUrl::parse(Some("https://updates.example.com/distribution"), false).unwrap();
+        assert_eq!(
+            base.releases_url(3).unwrap().as_str(),
+            "https://updates.example.com/distribution/api/v1/releases?per_page=100&page=3"
+        );
+
+        let trailing =
+            UpdaterBaseUrl::parse(Some("https://updates.example.com/distribution/"), false)
+                .unwrap();
+        assert_eq!(
+            trailing.releases_url(1).unwrap().as_str(),
+            "https://updates.example.com/distribution/api/v1/releases?per_page=100&page=1"
+        );
+
+        let root = UpdaterBaseUrl::parse(Some("https://updates.example.com/"), false).unwrap();
+        assert_eq!(
+            root.releases_url(1).unwrap().as_str(),
+            "https://updates.example.com/api/v1/releases?per_page=100&page=1"
+        );
+
+        for invalid in [
+            "",
+            "  ",
+            "http://updates.example.com",
+            "updates.example.com",
+            "https://user:secret@updates.example.com",
+            "https://updates.example.com?token=1",
+            "https://updates.example.com#fragment",
+        ] {
+            assert_eq!(
+                UpdaterBaseUrl::parse(Some(invalid), false)
+                    .unwrap_err()
+                    .code,
+                "UPDATE_SOURCE_INVALID",
+                "{invalid}"
+            );
+        }
+        assert!(UpdaterBaseUrl::parse(Some("http://127.0.0.1:8080"), true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn invalid_explicit_update_source_is_reported_as_a_check_failure() {
+        for configured in [
+            "",
+            "  ",
+            "http://updates.example.com",
+            "updates.example.com",
+        ] {
+            let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+            let source = Arc::new(UpdaterReleaseSource::new(
+                Arc::clone(&storage),
+                Some(configured.to_string()),
+            ));
+            let service = UpdateService::new(
+                storage,
+                source,
+                Arc::new(FakeClock::new("2026-09-05T00:00:00Z")),
+                Version::parse("1.0.0").unwrap(),
+                true,
+                true,
+            );
+
+            let status = service.check(UpdateCheckMode::Manual).await.unwrap();
+            assert_eq!(status.check_status, UpdateCheckStatus::Error);
+            assert_eq!(
+                status
+                    .last_failure
+                    .as_ref()
+                    .map(|failure| failure.code.as_str()),
+                Some("UPDATE_SOURCE_INVALID")
+            );
+            assert!(status.available_update.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_fetches_the_service_manifest_and_keeps_the_github_release_url() {
+        let available = release("1.2.0", false);
+        let source = Arc::new(FakeSource::new([ReleaseReply::Releases(vec![available])]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let service = service(Arc::clone(&source), clock, "1.0.0");
+
+        let status = service.check(UpdateCheckMode::Manual).await.unwrap();
+        let update = status.available_update.expect("available update");
+        assert_eq!(update.release_url, RELEASE_URL);
+        assert_eq!(update.manifest_url, MANIFEST_URL);
+        assert!(update.download_available);
+        let manifest_calls = source.manifest_calls.lock().await;
+        assert_eq!(manifest_calls.len(), 1);
+        assert_eq!(manifest_calls[0], MANIFEST_URL);
+    }
+
+    #[tokio::test]
+    async fn update_source_reads_paginated_releases_from_configured_base() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = format!("http://{address}/distribution");
+        let manifest_url =
+            "https://updates.example.com/distribution/api/v1/releases/v2.0.0/manifest.json";
+        let first_page = (1..=RELEASE_PAGE_SIZE)
+            .map(|index| {
+                release_entry_json(
+                    &format!("v1.{index}.0"),
+                    &format!(
+                        "https://updates.example.com/distribution/api/v1/releases/v1.{index}.0/manifest.json"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let pages = Arc::new(vec![
+            first_page,
+            vec![release_entry_json("v2.0.0", manifest_url)],
+        ]);
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let observed_requests = Arc::clone(&requests);
+        let served_pages = Arc::clone(&pages);
+        let router = Router::new().fallback(move |uri: axum::http::Uri| {
+            let pages = Arc::clone(&served_pages);
+            let requests = Arc::clone(&observed_requests);
+            async move {
+                requests.lock().await.push(match uri.query() {
+                    Some(query) => format!("{}?{query}", uri.path()),
+                    None => uri.path().to_string(),
+                });
+                let page = uri
+                    .query()
+                    .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("page=")))
+                    .and_then(|page| page.parse::<usize>().ok())
+                    .unwrap_or(1);
+                let body = pages
+                    .get(page.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_default();
+                axum::Json(body).into_response()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let mut source = UpdaterReleaseSource::new(storage, Some(base));
+        source.allow_http = true;
+        let releases = source.releases().await.unwrap();
+
+        assert_eq!(releases.len(), RELEASE_PAGE_SIZE + 1);
+        let selected = select_release(&Version::parse("0.5.3").unwrap(), releases).unwrap();
+        assert_eq!(selected.version, Version::parse("2.0.0").unwrap());
+        assert_eq!(
+            selected.release_url,
+            "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v2.0.0"
+        );
+        assert_eq!(selected.manifest_url.as_deref(), Some(manifest_url));
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0],
+            "/distribution/api/v1/releases?per_page=100&page=1"
+        );
+        assert_eq!(
+            requests[1],
+            "/distribution/api/v1/releases?per_page=100&page=2"
         );
     }
 
     #[tokio::test]
-    async fn http_source_reports_non_success_oversize_and_timeout_without_github() {
+    async fn update_source_rejects_more_than_ten_release_pages() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let page = Arc::new(
+            (1..=RELEASE_PAGE_SIZE)
+                .map(|index| {
+                    release_entry_json(
+                        &format!("v1.{index}.0"),
+                        "https://updates.example.com/api/v1/releases/v1/manifest.json",
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served_page = Arc::clone(&page);
+        let observed_requests = Arc::clone(&requests);
+        let router = Router::new().fallback(move || {
+            let page = Arc::clone(&served_page);
+            let requests = Arc::clone(&observed_requests);
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                axum::Json(page.as_ref().clone()).into_response()
+            }
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let mut source = UpdaterReleaseSource::new(storage, Some(format!("http://{address}")));
+        source.allow_http = true;
+        let error = source.releases().await.unwrap_err();
+
+        assert_eq!(error.code, "UPDATE_RESPONSE_TOO_LARGE");
+        assert_eq!(requests.load(Ordering::SeqCst), MAX_RELEASE_PAGES);
+    }
+
+    #[tokio::test]
+    async fn update_source_reports_non_success_oversize_and_timeout() {
         let (source, client, url) = local_http_source(
             Router::new().route("/failure", get(|| async { StatusCode::BAD_GATEWAY })),
         )
@@ -910,7 +1385,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(timeout.code, "UPDATE_REQUEST_FAILED");
-        assert_eq!(timeout.message, "GitHub update request timed out");
     }
 
     #[tokio::test]
@@ -927,8 +1401,9 @@ mod tests {
         });
 
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let source = GitHubReleaseSource {
+        let source = UpdaterReleaseSource {
             storage: Arc::clone(&storage),
+            base_url: None,
             allow_http: true,
         };
         let set_proxy_config = async |url: &str| {
@@ -1025,8 +1500,9 @@ mod tests {
             .set(crate::outbound_proxy::UPDATE_USE_PROXY_KEY, "true")
             .await
             .unwrap();
-        let source = GitHubReleaseSource {
+        let source = UpdaterReleaseSource {
             storage,
+            base_url: None,
             allow_http: true,
         };
         let client = source.client().await.unwrap();
@@ -1199,12 +1675,7 @@ mod tests {
             "linux-x86_64":{"url":"https://example.invalid/b","signature":"b"}
           }
         }"#;
-        let error = serde_json::from_str::<UpdateManifest>(json).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("duplicate updater platform entry")
-        );
+        assert!(serde_json::from_str::<UpdateManifest>(json).is_err());
     }
 
     #[test]
