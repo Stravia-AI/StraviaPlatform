@@ -2,6 +2,8 @@
 
 Status: accepted
 
+> “编辑即接管整条规格”与“显式重新导入整条 Provider Catalog Entry”已由 [ADR-0084](0084-pin-provider-model-fields-individually.md) 取代：人工修改按字段固定，可逐字段恢复同步，整条重新导入已删除。其余约定继续有效。
+
 Stravia persists each Provider Model as the Provider instance’s editable metadata snapshot. Its explicit state distinguishes `unregistered`, `imported` with a source stamp, and `edited` with any known previous source. An ID-only discovery does not invent capabilities, modalities, or context limits. A later discovery may supply the first real specification while the snapshot remains unregistered; subsequent reconciliation keeps imported specifications current with their source. Editing transfers ownership of the complete specification to the administrator, not just the edited fields; normal reconciliation preserves that specification. Administrators can explicitly re-import one complete Provider Catalog Entry when they want current catalog values.
 
 Missing modalities are the effective-value exception: administration, manual-model preparation, capability queries, and runtime consumers default to text input and text output. Explicit modality lists, including empty lists, take precedence. This fallback does not write a declaration into an existing stored snapshot or make ID-only discovery count as an imported specification; context, reasoning efforts, and pricing remain unknown.
