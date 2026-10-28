@@ -504,7 +504,10 @@ impl Gateway {
         let vendor_plugins = crate::plugin::manager::VendorPlugins::open(
             storage.vendor_plugins().clone(),
             paths.plugins(),
-            Some(paths.wasmtime_cache()),
+            Some(crate::plugin::CompileCache {
+                wasmtime: paths.wasmtime_cache(),
+                admissions: paths.plugin_admissions(),
+            }),
         )
         .await?;
         let catalog_base_url = config.catalog_base_url.clone();

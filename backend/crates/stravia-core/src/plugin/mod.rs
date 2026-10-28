@@ -18,6 +18,7 @@ mod store;
 pub mod test_support;
 mod types;
 
+pub(crate) use builtin::CompileCache;
 pub(crate) use execution::{
     VendorCallContext, VendorEvent, VendorExecution, VendorRequest, VendorSessionScope,
 };

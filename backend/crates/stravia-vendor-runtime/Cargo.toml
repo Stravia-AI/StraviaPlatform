@@ -17,7 +17,7 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 stravia-runtime-contract = { workspace = true }
 stravia-vendor-sdk = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 
@@ -30,6 +30,6 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 stravia-runtime-contract = { workspace = true }
 stravia-vendor-sdk = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 wasmprinter = { workspace = true }
 wat = { workspace = true }
