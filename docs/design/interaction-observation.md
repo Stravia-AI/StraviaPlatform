@@ -477,9 +477,9 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 
 清理不再依赖数据库 manifest 或 tombstone：按 manifest 的 `expires_at` 回收目录；删除先 rename 为 `.deleting-*`，随后幂等删除，启动补完中断的删除并回收无 manifest 的孤儿目录。关系数据清理后另删 owner 已不存在的 Trace 目录。
 
-周期到期回收在 SQLite 与 PostgreSQL 上均按 `(expires_at, id)` 分批：每批最多删除 100 条过期 Rejected Request 和 100 条过期、非 `running` 的 Interaction，子记录仍由外键级联回收。每批使用独立事务；SQLite 的共享写协调器仅覆盖单批，不跨批持有。迁移 `0020_observation_retention_indexes` 补齐自引用及子表外键索引，并使到期索引覆盖批次排序，避免删除每条父记录时全表扫描或每批重复排序同期限记录。批次数量不构成固定耗时保证，单个 Interaction 的级联规模仍影响该批耗时。
+周期到期回收在 SQLite 与 PostgreSQL 上均按 `(expires_at, id)` 分批：每批最多删除 100 条过期 Rejected Request 和一个过期、非 `running` 的 Interaction，避免把多个大交互的删除工作并入同一事务。Interaction 在同一事务内先按交互身份集合删除事件、待回传工具、尾部来源、Target attempt、Model Turn 和 Run，再删除父记录，减少逐 Run 重复触发的多层外键查找。外键约束与统计来源 DELETE 触发器保持启用，子记录删除或父记录删除失败均回滚当前批次，不暴露半个交互。SQLite 的共享写协调器只覆盖该事务及连接归还屏障；PostgreSQL 先通过 `SELECT ... FOR UPDATE` 锁住合格父记录，等待锁后重新核验资格，防止删除已被续接恢复为 `running` 的交互。迁移 `0020_observation_retention_indexes` 提供的到期排序、自引用及子表外键索引继续复用，无 schema 变更。单个超大 Interaction 仍原子删除，批次边界不构成固定耗时保证。
 
-writer 在每批提交后立即失效对应的实时状态和归属索引；后续批次失败时明确返回错误，已提交批次不回滚，下一次清理继续处理剩余记录，不自动重试。全部批次成功后统一移除 owner 已不存在的 manifest，避免每批扫描全部 owner。清理前的用量持久化屏障、长期统计不随详情删除的语义，以及手动清除的事务边界保持不变。
+writer 每次 Purge 命令只处理一个批次，提交后立即失效对应的实时状态和归属索引，并返回是否需要继续；调用方通过同一有界 FIFO 队列提交下一批，不在 writer 内循环清完整个过期窗口。已排队的准入、用量和终态事件因此可以在批次之间执行，续批重新检查清理所需的用量完整性。后续批次失败时明确返回错误，已提交批次不回滚，下一次清理继续处理剩余记录，不自动重试。全部批次成功后统一移除 owner 已不存在的 manifest，避免每批扫描全部 owner。清理前的用量持久化屏障、长期统计不随详情删除的语义，以及手动清除的事务边界保持不变。
 
 “清除历史记录”只删除非活动 Interaction 与 Rejected Request；`running` 和 `waiting_client` 保留，并在结果中报告跳过数量。清理不取消 Inference Run。
 

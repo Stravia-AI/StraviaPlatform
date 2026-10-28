@@ -87,6 +87,18 @@ fn window(start: i64, end: i64) -> StatsWindow {
     }
 }
 
+async fn purge_expired(observation: &ObservationStore, cutoff: i64) -> anyhow::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for _ in 0..1024 {
+        let batch = observation.purge_expired_batch(cutoff).await?;
+        removed.extend(batch.removed_interactions);
+        if !batch.has_more {
+            return Ok(removed);
+        }
+    }
+    anyhow::bail!("retention did not finish the bounded fixture")
+}
+
 async fn cross_quarter_and_weighted_metrics(
     db: &Database,
     stats: &dyn UsageStatsStore,
@@ -213,9 +225,7 @@ async fn retention_and_failed_clear(
         .await?;
     assert!(batch.removed_interactions.is_empty());
     assert!(!batch.has_more);
-    let batch = observation.purge_expired_batch(cutoff).await?;
-    assert!(!batch.has_more);
-    let mut removed = batch.removed_interactions;
+    let mut removed = purge_expired(observation, cutoff).await?;
     removed.sort();
     assert_eq!(removed, vec!["cross", "short"]);
     assert_eq!(
@@ -322,7 +332,7 @@ async fn retention_across_batches(
     stats: &dyn UsageStatsStore,
     observation: &ObservationStore,
 ) -> anyhow::Result<()> {
-    // 同时覆盖两种批次上限，以及 interaction 耗尽后仅剩 rejection 的续批。
+    // 两类 owner 均须清完，不能把任一类的耗尽误当作整个清理结束。
     for index in 0..205 {
         db.seed(&format!("batch-{index:04}"), START, START, 1000, 2, 0)
             .await?;
@@ -343,25 +353,26 @@ UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
     }
     let before = stats.stats_overview(StatsWindow::default()).await?;
     let mut removed = Vec::new();
-    for (expected_removed, expected_more, expected_rejected) in [
-        (100, true, 205),
-        (100, true, 105),
-        (6, true, 5),
-        (0, false, 0),
-    ] {
+    let mut finished = false;
+    for _ in 0..1024 {
         let batch = observation.purge_expired_batch(1).await?;
-        assert_eq!(batch.removed_interactions.len(), expected_removed);
-        assert_eq!(batch.has_more, expected_more);
         removed.extend(batch.removed_interactions);
-        assert_eq!(
-            db.scalar("SELECT COUNT(*) FROM rejected_request_observations WHERE id LIKE 'batch-rejected-%'")
-                .await?,
-            expected_rejected
-        );
         let after = stats.stats_overview(StatsWindow::default()).await?;
         assert_eq!(after.total_requests, before.total_requests);
         assert_eq!(after.total_output_tokens, before.total_output_tokens);
+        if !batch.has_more {
+            finished = true;
+            break;
+        }
     }
+    assert!(finished, "retention did not finish the bounded fixture");
+    assert_eq!(
+        db.scalar(
+            "SELECT COUNT(*) FROM rejected_request_observations WHERE id LIKE 'batch-rejected-%'"
+        )
+        .await?,
+        0
+    );
     removed.sort();
     let mut expected: Vec<_> = (0..205).map(|index| format!("batch-{index:04}")).collect();
     expected.push("batch-waiting".to_owned());
@@ -386,6 +397,66 @@ UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
     Ok(())
 }
 
+async fn failed_parent_delete_restores_children_and_usage(
+    db: &Database,
+    stats: &dyn UsageStatsStore,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    db.seed("atomic-retention", START, START, 1000, 11, 0)
+        .await?;
+    let payload = match db {
+        Database::Sqlite(_) => "X'7b7d'",
+        Database::Postgres(_) => "decode('7b7d','hex')",
+    };
+    db.execute(format!(
+        "UPDATE interaction_observations SET expires_at=0 WHERE id='atomic-retention';
+INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (900000,0,'atomic-retention','atomic-retention','fixture',{payload},0);
+INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES ('owner','atomic-tool','atomic-retention','atomic-retention',0);
+INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ('atomic-retention','atomic-retention','owner','fixture',0);"
+    ))
+    .await?;
+    let before = stats.stats_overview(StatsWindow::default()).await?;
+    // 父记录删除失败时，前面显式删除的叶子和统计 checkpoint 必须一起回滚。
+    db.install_fault("interaction_observations", "DELETE")
+        .await?;
+    assert!(observation.purge_expired_batch(1).await.is_err());
+    for sql in [
+        "SELECT COUNT(*) FROM interaction_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM inference_run_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM model_turn_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM target_attempt_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_events WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_pending_tools WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_tail_sources WHERE interaction_id='atomic-retention'",
+    ] {
+        assert_eq!(db.scalar(sql).await?, 1);
+    }
+    assert_eq!(
+        stats
+            .stats_overview(StatsWindow::default())
+            .await?
+            .total_output_tokens,
+        before.total_output_tokens
+    );
+    db.remove_fault("interaction_observations").await?;
+    assert_eq!(
+        purge_expired(observation, 1).await?,
+        vec!["atomic-retention"]
+    );
+    for sql in [
+        "SELECT COUNT(*) FROM observation_events WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_pending_tools WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_tail_sources WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM stats_usage_checkpoints WHERE source_id='atomic-retention'",
+    ] {
+        assert_eq!(db.scalar(sql).await?, 0);
+    }
+    let after = stats.stats_overview(StatsWindow::default()).await?;
+    assert_eq!(after.total_requests, before.total_requests);
+    assert_eq!(after.total_output_tokens, before.total_output_tokens);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -396,7 +467,9 @@ async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let result = async {
         cross_quarter_and_weighted_metrics(&db, storage.usage_stats()).await?;
         retention_and_failed_clear(&db, storage.usage_stats(), &observation).await?;
-        retention_across_batches(&db, storage.usage_stats(), &observation).await
+        retention_across_batches(&db, storage.usage_stats(), &observation).await?;
+        failed_parent_delete_restores_children_and_usage(&db, storage.usage_stats(), &observation)
+            .await
     }
     .await;
     pool.close().await;
@@ -447,7 +520,13 @@ async fn postgres_durable_usage_hard_cases() -> anyhow::Result<()> {
             let observation = db.observation(directory.path())?;
             cross_quarter_and_weighted_metrics(&db, storage.usage_stats()).await?;
             retention_and_failed_clear(&db, storage.usage_stats(), &observation).await?;
-            retention_across_batches(&db, storage.usage_stats(), &observation).await
+            retention_across_batches(&db, storage.usage_stats(), &observation).await?;
+            failed_parent_delete_restores_children_and_usage(
+                &db,
+                storage.usage_stats(),
+                &observation,
+            )
+            .await
         }
         .await;
         pool.close().await;
