@@ -21,9 +21,11 @@ Supersede ADR-0030 and adopt immediate Text delivery as the primary invariant.
 - Before that transition, OpenAI-compatible Thinking previews and History Markers remain in `reasoning_content`.
 - After that transition, Platform Markers and Thinking Markers use `content` as raw HTML comments.
 - Public Post-Text Thinking is streamed in `content` as a Markdown blockquote inside the existing Projection Delimiter `preview` mode.
-- Every canonical OpenAI-compatible Thinking block has one authoritative Thinking History Marker, including public unsigned Thinking before Text. Without native block identity, one maximal continuous Thinking delta run is one block.
-- Independent Thinking blocks and non-empty summary/content parts have Markdown paragraph boundaries. Deltas within the same part are appended without inserted whitespace; part boundaries do not create additional authoritative blocks or Markers.
-- The Marker reference is reserved in memory when the block starts. At block close, Stravia atomically stores the complete authoritative Thinking under that reference, delivers and publishes the Marker, then permits later Text.
+- Native Thinking is preferred when the carrier can round-trip it losslessly. A known unsigned scalar carrier uses native client fields across protocols without Preview Delimiters or a Thinking History Marker. Its original whitespace is preserved, and client edits remain authoritative on replay. Same-protocol non-Chat carriers retain their existing native protected-payload behavior.
+- Chat has only one scalar reasoning field: its first independent pre-Text native Thinking block can use that field directly; later independent blocks require projection to retain their boundaries. Post-Text Thinking remains projected. Without native block identity, one maximal continuous Thinking delta run is one block.
+- Carrier facts, not a retrospective inspection of the final payload, govern uncertain foreign carriers. Indexed parts or potentially late signatures/ciphertext keep their existing projection even if the eventual block is unsigned. This preserves immediate output and streaming/non-streaming parity; Stravia does not buffer an entire Model Leg just to remove unnecessary-looking Markers after it finishes.
+- Projected independent Thinking blocks and non-empty summary/content parts have Markdown paragraph boundaries. Deltas within the same part are appended without inserted whitespace; part boundaries do not create additional authoritative blocks or Markers.
+- For a projected block, the Marker reference is reserved in memory when the block starts. At block close, Stravia atomically stores the complete authoritative Thinking under that reference, delivers and publishes the Marker, then permits later Text. Native blocks do not perform this Marker persistence/publication sequence.
 - Both reasoning-carried and quoted Previews are presentation only. Replay discards them when their Markers are present and restores each authoritative Thinking block with its original text, whitespace, part structure and protected payload. If the Marker is deleted, the remaining Preview stays client-edited content in its carrier; a remaining quote is ordinary Text.
 - Only already-public Thinking bytes may be previewed. Protected payloads remain in the History Marker Store; without a public summary, the client receives only the Marker.
 - Projection-generated whitespace, blockquote prefixes and escaping remain within the Preview Delimiter span and are removed during replay.
@@ -48,7 +50,7 @@ The removal is narrow. Protocol framing, UTF-8 completion, partial private synta
 ### Negative
 
 - Plain-text clients may display raw HTML Marker comments carried in `reasoning_content` or `content`.
-- Public unsigned Thinking also requires per-block Marker persistence so presentation spacing can be removed without guessing the original text.
+- Public unsigned Thinking still requires per-block Marker persistence when ordering, independent block boundaries, or uncertain foreign carrier capabilities require projection. Lossless native scalar Thinking avoids that extra storage dependency.
 - Post-Text public Thinking is presented as quoted content rather than through a dedicated reasoning field.
 - The streaming projector needs stateful Markdown framing and bounded cross-delta syntax detection.
 - A storage or publish failure can occur after a Preview has already been delivered, requiring an explicit terminal error and leaving the client with a visibly partial failed response.

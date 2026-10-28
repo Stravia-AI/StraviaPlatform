@@ -1464,36 +1464,11 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
                 "{ingress}: {body}"
             );
             let first_thinking = &runs[0].1;
+            assert_eq!(
+                first_thinking, "R1",
+                "lossless Thinking stays native: {body}"
+            );
             if ingress == OPEN_RESPONSES_2026_04_24 {
-                let references = crate::history_marker::history_marker_references(&[
-                    stravia_runtime_contract::protocol::ir::AiItem::thinking(first_thinking, None),
-                ]);
-                assert_eq!(
-                    references.len(),
-                    1,
-                    "one authoritative marker for R1: {body}"
-                );
-                let reference = &references[0];
-                let preview = first_thinking
-                    .strip_suffix(&crate::history_marker::render_history_marker_reference(
-                        reference,
-                    ))
-                    .expect("preview is followed by its authoritative marker");
-                let public = preview
-                    .strip_prefix(&crate::history_marker::render_preview_projection_start(
-                        reference, 0,
-                    ))
-                    .and_then(|preview| {
-                        preview.strip_suffix(&crate::history_marker::render_preview_projection_end(
-                            reference, 0,
-                        ))
-                    })
-                    .expect("one paired native public preview for the same reference");
-                assert_eq!(
-                    public.trim_matches('\n'),
-                    "R1",
-                    "public preview contains exactly the original readable thought: {body}"
-                );
                 let terminal = body
                     .lines()
                     .filter_map(|line| line.strip_prefix("data: "))
