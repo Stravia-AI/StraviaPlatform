@@ -15,6 +15,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
+import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
 import { formatList } from '#lib/format.js'
 import { specificationModality } from '#lib/model-specification.js'
 import { inputValue } from '#lib/utils.js'
@@ -159,6 +160,11 @@ const availableProviders = $derived(providers)
 const targetLanes = $derived(priorityLanes(targets))
 const disabledTargets = $derived(targets.filter((target) => !target.enabled))
 const isDraggingTarget = $derived(Boolean(draggedTargetKey))
+
+// 目标卡片拖到视口外的层或停用区时，页面需随指针滚动；浏览器自带的边缘滚动圈太窄，且被底部固定操作栏盖住。
+$effect(() => {
+  if (isDraggingTarget) return startDragAutoscroll()
+})
 
 const canonicalModelsQuery = createQuery(() => ({
   queryKey: ['catalog', 'canonical-models'],

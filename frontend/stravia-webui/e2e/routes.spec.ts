@@ -1571,3 +1571,78 @@ test('Model editor keeps lanes, disabled area and footer on the form column at e
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
 })
+
+test('Dragging a destination toward the page edge scrolls the page so it can reach the disabled area', async ({
+  page,
+}) => {
+  const target = (id: string, priority: number, enabled: boolean) => ({
+    id,
+    model_id: 'scroll-route',
+    provider_id: 'geo',
+    model: `upstream-${id}`,
+    route_output_modalities: ['text'],
+    enabled,
+    priority,
+    first_token_timeout_ms: 60_000,
+    target_retry_budget: 5,
+    target_cooldown_ms: 120_000,
+    created_at: '2026-08-17T00:00:00Z',
+    thinking_level_map: [],
+  })
+  const saved = {
+    id: 'scroll-route',
+    model_id: 'scroll-route',
+    display_name: 'Scroll route',
+    balance: 'traffic_equalization',
+    output_modality: 'text',
+    image_generation_bound: false,
+    is_enabled: true,
+    supported_thinking_levels: [],
+    created_at: '2026-08-17T00:00:00Z',
+    targets: [target('a', 3, true), target('b', 2, true), target('c', 1, true), target('d', 0, false)],
+  }
+  await page.route('**/api/v1/providers', (route) =>
+    route.fulfill({ json: { data: [geometryProvider('geo', 'Geo service')] } }),
+  )
+  await page.route('**/api/v1/providers/geo/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
+  await page.route('**/api/v1/models/scroll-route', (route) => route.fulfill({ json: { data: saved } }))
+  await page.route('**/api/v1/models/scroll-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
+
+  await page.setViewportSize({ width: 1440, height: 560 })
+  await page.goto('/models/scroll-route')
+  const main = page.getByRole('main')
+  const dock = page.locator('[data-slot="target-dock"]')
+  const footer = page.locator('[data-slot="model-editor-footer"]')
+  const enabledCards = page.locator('[data-slot="target-lane"] [data-slot="target-card"]')
+  await expect(enabledCards).toHaveCount(3)
+  expect(await main.evaluate((element) => element.scrollTop)).toBe(0)
+  // 停用区一开始被页面底部挡在视口外。
+  expect((await dock.boundingBox())!.y).toBeGreaterThan(560)
+
+  const source = (await enabledCards.first().boundingBox())!
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2 + 40, { steps: 5 })
+
+  // 指针停在底部固定操作栏上，页面持续向下滚动。
+  const footerBox = (await footer.boundingBox())!
+  await page.mouse.move(footerBox.x + footerBox.width / 2, footerBox.y + footerBox.height / 2, { steps: 5 })
+  await expect
+    .poll(async () => {
+      const dockBox = (await dock.boundingBox())!
+      const footerTop = (await footer.boundingBox())!.y
+      return dockBox.y + dockBox.height <= footerTop
+    })
+    .toBe(true)
+  expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+
+  // 指针回到停用区后滚动停止，松手即可停用目标。
+  const dockBox = (await dock.boundingBox())!
+  await page.mouse.move(dockBox.x + dockBox.width / 2, dockBox.y + dockBox.height / 2, { steps: 5 })
+  const settledScroll = await main.evaluate((element) => element.scrollTop)
+  await page.waitForTimeout(200)
+  expect(await main.evaluate((element) => element.scrollTop)).toBe(settledScroll)
+  await page.mouse.up()
+  await expect(enabledCards).toHaveCount(2)
+  await expect(dock.locator('[data-slot="target-card"]')).toHaveCount(2)
+})
