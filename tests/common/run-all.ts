@@ -200,6 +200,14 @@ const localIgnored: Record<string, true> = {
   http_compaction_remains_unary_and_preserves_error: true,
   real_base_executes_with_stable_wasi_patches_and_mixed_imports: true,
   "runtime::compilation_cache_tests::in_memory_compilation_reuses_live_components_and_recompiles_after_release": true,
+  "runtime::residency_tests::idle_plugin_is_released_and_restored_from_the_persistent_cache": true,
+  "runtime::residency_tests::leased_plugin_is_kept_and_its_idle_period_restarts_when_returned": true,
+  "runtime::residency_tests::concurrent_first_use_restores_once": true,
+  "runtime::residency_tests::a_source_cannot_swap_in_different_code_for_an_admitted_plugin": true,
+  "runtime::residency_tests::plugins_without_a_persistent_cache_stay_resident": true,
+  "runtime::residency_tests::admitted_plugin_is_restored_without_loading_and_verified_on_first_use": true,
+  "runtime::residency_tests::missing_foreign_or_unusable_records_do_not_restore": true,
+  "runtime::residency_tests::a_record_that_disagrees_with_the_component_fails_first_use_and_is_dropped": true,
   "runtime_cache::tests::redis_expiry_eviction_remove_budget_and_namespace": true,
 };
 

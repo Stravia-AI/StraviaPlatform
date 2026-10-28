@@ -14,7 +14,7 @@ fn component_bytes() -> Vec<u8> {
     .expect("valid component")
 }
 
-fn base_component() -> Vec<u8> {
+pub(super) fn base_component() -> Vec<u8> {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .join("target/vendor-plugins");
@@ -43,7 +43,7 @@ async fn load_error(runtime: &VendorRuntime) -> LoadError {
     }
 }
 
-fn metrics(runtime: &VendorRuntime) -> (usize, usize) {
+pub(super) fn metrics(runtime: &VendorRuntime) -> (usize, usize) {
     runtime
         .cache
         .as_ref()

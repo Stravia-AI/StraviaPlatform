@@ -77,6 +77,12 @@ impl<'a> DataPaths<'a> {
         self.catalog_root().join("wasmtime")
     }
 
+    /// 插件准入记录目录，与 Wasmtime 缓存并列而不放在其内：缓存清理会删除其
+    /// 目录内不认识的文件。内容是可重建的派生数据，删除后下次启动重新校验。
+    pub fn plugin_admissions(&self) -> PathBuf {
+        self.catalog_root().join("plugin-admissions")
+    }
+
     pub fn desktop_port(&self) -> PathBuf {
         self.root.join("state/desktop-port.json")
     }

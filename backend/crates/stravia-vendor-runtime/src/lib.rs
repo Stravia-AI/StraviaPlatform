@@ -8,4 +8,6 @@ pub use host::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LogLevel,
     RuntimeEvent, WebSocketMessage, WsRequest,
 };
-pub use runtime::{LoadedPlugin, OperationScope, VendorRuntime};
+pub use runtime::{
+    ComponentBytes, ComponentSource, LoadedPlugin, OperationScope, SourceError, VendorRuntime,
+};
