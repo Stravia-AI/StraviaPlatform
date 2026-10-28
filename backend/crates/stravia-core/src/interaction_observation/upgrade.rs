@@ -884,6 +884,133 @@ pub(crate) async fn convert_event_storage_postgres(
     Ok(())
 }
 
+/// 尝试行的错误来源/消息/上游错误码只存在于事件载荷中；迁移新增列后按载荷回填。
+/// 只有保留期内的失败尝试可恢复，且仅在来源仍未知时写入，重复启动保持幂等。
+type AttemptErrorDetails = (String, Option<String>, Option<String>);
+
+fn decode_attempt_finished_payload(payload: Vec<u8>) -> anyhow::Result<Value> {
+    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+        &payload,
+    )?)?)
+}
+
+fn record_attempt_error(
+    latest: &mut std::collections::HashMap<String, AttemptErrorDetails>,
+    payload: &Value,
+) {
+    let Some(attempt_id) = payload["attempt_id"].as_str() else {
+        return;
+    };
+    let error = &payload["error"];
+    let Some(source) = error["source"].as_str().filter(|source| !source.is_empty()) else {
+        // 终态修订可能撤销先前的错误诊断；以最后一条载荷为准。
+        latest.remove(attempt_id);
+        return;
+    };
+    latest.insert(
+        attempt_id.to_owned(),
+        (
+            source.to_owned(),
+            error["message"].as_str().map(str::to_owned),
+            error["upstream_code"].as_str().map(str::to_owned),
+        ),
+    );
+}
+
+pub(crate) async fn backfill_attempt_error_details_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+) -> anyhow::Result<()> {
+    let now = super::writer::now();
+    let mut latest = std::collections::HashMap::new();
+    let mut after = i64::MIN;
+    loop {
+        let rows = sqlx::query(
+            "SELECT e.sequence,e.payload FROM target_attempt_observations a
+             JOIN inference_run_observations r ON r.id=a.run_id
+             JOIN observation_events e ON e.run_id=a.run_id AND e.kind='target_attempt_finished'
+             WHERE a.status='failed' AND a.error_source IS NULL AND r.expires_at>?1 AND e.expires_at>?1 AND e.sequence>?2
+             ORDER BY e.sequence LIMIT 500",
+        )
+        .bind(now)
+        .bind(after)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row in &rows {
+            after = row.try_get("sequence")?;
+            payloads.push(row.try_get::<Vec<u8>, _>("payload")?);
+        }
+        for payload in blocking_chunks(payloads, decode_attempt_finished_payload).await? {
+            record_attempt_error(&mut latest, &payload);
+        }
+    }
+    if latest.is_empty() {
+        return Ok(());
+    }
+    let mut tx = connection.begin().await?;
+    for (attempt_id, (source, message, upstream_code)) in latest {
+        sqlx::query("UPDATE target_attempt_observations SET error_source=?1,error_message=?2,upstream_error_code=?3 WHERE id=?4 AND status='failed' AND error_source IS NULL")
+            .bind(source)
+            .bind(message)
+            .bind(upstream_code)
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn backfill_attempt_error_details_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+) -> anyhow::Result<()> {
+    let now = super::writer::now();
+    let mut latest = std::collections::HashMap::new();
+    let mut after = i64::MIN;
+    loop {
+        let rows = sqlx::query(
+            "SELECT e.sequence,e.payload FROM target_attempt_observations a
+             JOIN inference_run_observations r ON r.id=a.run_id
+             JOIN observation_events e ON e.run_id=a.run_id AND e.kind='target_attempt_finished'
+             WHERE a.status='failed' AND a.error_source IS NULL AND r.expires_at>$1 AND e.expires_at>$1 AND e.sequence>$2
+             ORDER BY e.sequence LIMIT 500",
+        )
+        .bind(now)
+        .bind(after)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row in &rows {
+            after = row.try_get("sequence")?;
+            payloads.push(row.try_get::<Vec<u8>, _>("payload")?);
+        }
+        for payload in blocking_chunks(payloads, decode_attempt_finished_payload).await? {
+            record_attempt_error(&mut latest, &payload);
+        }
+    }
+    if latest.is_empty() {
+        return Ok(());
+    }
+    let mut tx = connection.begin().await?;
+    for (attempt_id, (source, message, upstream_code)) in latest {
+        sqlx::query("UPDATE target_attempt_observations SET error_source=$1,error_message=$2,upstream_error_code=$3 WHERE id=$4 AND status='failed' AND error_source IS NULL")
+            .bind(source)
+            .bind(message)
+            .bind(upstream_code)
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -107,13 +107,14 @@ async fn cross_quarter_and_weighted_metrics(
         .stats_by_provider(window(START, START + QUARTER))
         .await?;
     assert_eq!(provider_request.len(), 1);
-    assert_eq!(provider_request[0].request_count, 1);
+    assert_eq!(provider_request[0].upstream_request_count, 0);
     assert_eq!(provider_request[0].avg_output_tps, None);
     let provider_turn = stats
         .stats_by_provider(window(START + QUARTER, START + 2 * QUARTER))
         .await?;
     assert_eq!(provider_turn.len(), 1);
-    assert_eq!(provider_turn[0].request_count, 0);
+    // 上游尝试按所属 Model Turn 起点入桶，运行来源不贡献上游计数。
+    assert_eq!(provider_turn[0].upstream_request_count, 1);
     assert_eq!(provider_turn[0].avg_output_tps, Some(20.0));
     assert!(
         stats
@@ -245,7 +246,10 @@ async fn retention_and_failed_clear(
         stats.stats_by_api_key(selected).await?[0].total_output_tokens,
         Some(60)
     );
-    assert_eq!(stats.stats_by_provider(selected).await?[0].request_count, 3);
+    assert_eq!(
+        stats.stats_by_provider(selected).await?[0].upstream_request_count,
+        3
+    );
     let batch = observation.purge_expired_batch(cutoff).await?;
     assert!(batch.removed_interactions.is_empty());
     assert!(!batch.has_more);

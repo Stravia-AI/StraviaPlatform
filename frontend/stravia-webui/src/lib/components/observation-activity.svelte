@@ -21,6 +21,7 @@ let {
   minimumHeadingLevel = 1,
   resultOnly = false,
   virtualized = false,
+  revealed = false,
 }: {
   activity: ObservationActivity
   liveActive?: boolean
@@ -32,6 +33,8 @@ let {
   resultOnly?: boolean
   /** Observation conversation bodies can release offscreen Markdown while keeping disclosure controls mounted. */
   virtualized?: boolean
+  /** 外部要求展开（如凭据命中高亮）：只改本次会话的展开状态，不写入本地偏好。 */
+  revealed?: boolean
 } = $props()
 const contentId = $props.id()
 const storageKey = $derived(`stravia:observation-activity:${activity.id}`)
@@ -112,6 +115,10 @@ $effect(() => {
     }
     wasFollowed = after
   })
+})
+
+$effect(() => {
+  if (revealed) untrack(() => (open = true))
 })
 
 function changeOpen(next: boolean): void {

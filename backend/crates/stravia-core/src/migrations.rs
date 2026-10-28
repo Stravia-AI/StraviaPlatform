@@ -202,6 +202,28 @@ pub async fn run_sqlite_migrator(
         )
         .await?;
     }
+    if runner.version_exists(26) {
+        report(
+            "usage_backfill",
+            "Preparing request classification counters",
+            0,
+            None,
+        );
+        // 0026 先建立新列、视图与触发器；尝试错误详情必须在其后、计数回填 0027 之前写入。
+        runner
+            .run_direct(Some(26), &mut *pinned.connection, false)
+            .await?;
+        report(
+            "usage_backfill",
+            "Backfilling attempt error details",
+            0,
+            None,
+        );
+        crate::interaction_observation::upgrade::backfill_attempt_error_details_sqlite(
+            &mut pinned.connection,
+        )
+        .await?;
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -310,6 +332,26 @@ pub async fn run_postgres_migrator(
         );
         crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
             .await?;
+    }
+    if runner.version_exists(26) {
+        report(
+            "usage_backfill",
+            "Preparing request classification counters",
+            0,
+            None,
+        );
+        // 0026 先建立新列、视图与触发器；尝试错误详情必须在其后、计数回填 0027 之前写入。
+        runner.run_direct(Some(26), &mut *connection, false).await?;
+        report(
+            "usage_backfill",
+            "Backfilling attempt error details",
+            0,
+            None,
+        );
+        crate::interaction_observation::upgrade::backfill_attempt_error_details_postgres(
+            &mut connection,
+        )
+        .await?;
     }
     report(
         "schema_migrations",

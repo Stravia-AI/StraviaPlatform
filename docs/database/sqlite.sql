@@ -153,7 +153,7 @@ CREATE TABLE inference_run_observations (
     finished_at INTEGER,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL
-, failure_json TEXT, request_model TEXT, delivery_completed_at INTEGER);
+, failure_json TEXT, request_model TEXT, delivery_completed_at INTEGER, rejected_before_target INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE interaction_observations (
     id TEXT PRIMARY KEY,
@@ -479,7 +479,8 @@ CREATE TABLE reversible_redaction_mappings (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
-);
+, rule_ids TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(rule_ids) AND json_type(rule_ids) = 'array'));
 
 CREATE TABLE settings (
     name       TEXT PRIMARY KEY,
@@ -514,7 +515,7 @@ CREATE TABLE stats_usage_buckets (
     successful_duration_known_count INTEGER NOT NULL DEFAULT 0,
     successful_output_sum INTEGER NOT NULL DEFAULT 0,
     successful_duration_sum INTEGER NOT NULL DEFAULT 0,
-    last_used_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL, terminal_request_count INTEGER NOT NULL DEFAULT 0, failed_request_count INTEGER NOT NULL DEFAULT 0, upstream_request_count INTEGER NOT NULL DEFAULT 0, upstream_error_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (scope, identity, bucket_start)
 );
 
@@ -547,7 +548,7 @@ CREATE TABLE stats_usage_checkpoints (
     successful_duration_known_count INTEGER NOT NULL DEFAULT 0,
     successful_output_sum INTEGER NOT NULL DEFAULT 0,
     successful_duration_sum INTEGER NOT NULL DEFAULT 0,
-    last_used_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL, terminal_request_count INTEGER NOT NULL DEFAULT 0, failed_request_count INTEGER NOT NULL DEFAULT 0, upstream_request_count INTEGER NOT NULL DEFAULT 0, upstream_error_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (source_kind, source_id, scope, identity, bucket_start)
 );
 
@@ -564,7 +565,7 @@ CREATE TABLE target_attempt_observations (
     cache_write_tokens INTEGER, reasoning_tokens INTEGER,
     usage_recorded INTEGER NOT NULL DEFAULT 0,
     last_event_sequence INTEGER NOT NULL
-);
+, error_source TEXT, error_message TEXT, upstream_error_code TEXT);
 
 CREATE TABLE turn_chain_contents (
  id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, content_key TEXT NOT NULL, content BLOB NOT NULL,
@@ -759,8 +760,8 @@ CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
 
 CREATE INDEX observation_events_credential_discovery_idx
-    ON observation_events(interaction_id, occurred_at DESC, expires_at)
-    WHERE kind = 'credential_mappings_created';
+    ON observation_events(kind, interaction_id, occurred_at DESC, expires_at)
+    WHERE kind IN ('credential_mappings_created','credential_mappings_reused');
 
 CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id,sequence);
 
@@ -811,6 +812,10 @@ CREATE INDEX target_attempts_run_status_idx ON target_attempt_observations(run_i
 
 CREATE INDEX target_attempts_turn_idx ON target_attempt_observations(model_turn_id, started_at, id);
 
+CREATE INDEX target_attempts_upstream_error_window_idx
+    ON target_attempt_observations (started_at DESC, id)
+    WHERE status='failed' AND error_source='upstream';
+
 CREATE VIEW stats_usage_attempt_source AS
 SELECT
     'attempt' AS source_kind,
@@ -822,6 +827,10 @@ SELECT
     '' AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    CASE WHEN a.status='completed' OR (a.status='failed' AND a.error_source='upstream') THEN 1 ELSE 0 END AS upstream_request_count,
+    CASE WHEN a.status='failed' AND a.error_source='upstream' THEN 1 ELSE 0 END AS upstream_error_count,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END ELSE 0 END AS input_tokens_sum,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 ELSE 0 END AS input_tokens_known,
     CASE WHEN a.status='completed' AND a.output_tokens IS NOT NULL THEN a.output_tokens ELSE 0 END AS output_tokens_sum,
@@ -854,6 +863,10 @@ SELECT
     COALESCE(NULLIF(t.model_display_name,''),t.route_id) AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END ELSE 0 END AS input_tokens_sum,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 ELSE 0 END AS input_tokens_known,
     CASE WHEN a.status='completed' AND a.output_tokens IS NOT NULL THEN a.output_tokens ELSE 0 END AS output_tokens_sum,
@@ -886,6 +899,10 @@ SELECT
     COALESCE(NULLIF(t.api_key_name,''),t.api_key_id,'Unknown API Key') AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END ELSE 0 END AS input_tokens_sum,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 ELSE 0 END AS input_tokens_known,
     CASE WHEN a.status='completed' AND a.output_tokens IS NOT NULL THEN a.output_tokens ELSE 0 END AS output_tokens_sum,
@@ -918,6 +935,10 @@ SELECT
     COALESCE(NULLIF(a.provider_name,''),a.provider_id) AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    CASE WHEN a.status='completed' OR (a.status='failed' AND a.error_source='upstream') THEN 1 ELSE 0 END AS upstream_request_count,
+    CASE WHEN a.status='failed' AND a.error_source='upstream' THEN 1 ELSE 0 END AS upstream_error_count,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END ELSE 0 END AS input_tokens_sum,
     CASE WHEN a.status='completed' AND a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1 ELSE 0 END AS input_tokens_known,
     CASE WHEN a.status='completed' AND a.output_tokens IS NOT NULL THEN a.output_tokens ELSE 0 END AS output_tokens_sum,
@@ -951,6 +972,10 @@ SELECT
     '' AS label,
     1 AS request_count,
     CASE WHEN r.status_code<>499 AND r.code NOT IN ('request_aborted','cancelled','client_disconnected') THEN 1 ELSE 0 END AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -984,6 +1009,10 @@ SELECT
     '' AS label,
     1 AS request_count,
     CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) THEN 1 ELSE 0 END AS error_count,
+    CASE WHEN r.status IN ('completed','failed','waiting_client','superseded') AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) AND r.rejected_before_target=0 THEN 1 ELSE 0 END AS terminal_request_count,
+    CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) AND r.rejected_before_target=0 THEN 1 ELSE 0 END AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -1016,6 +1045,10 @@ SELECT
     COALESCE(NULLIF(p.provider_name,''),p.provider_id) AS label,
     1 AS request_count,
     CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) THEN 1 ELSE 0 END AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -1049,6 +1082,10 @@ SELECT
     '' AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -1081,6 +1118,10 @@ SELECT
     COALESCE(NULLIF(t.model_display_name,''),t.route_id) AS label,
     1 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -1113,6 +1154,10 @@ SELECT
     COALESCE(NULLIF(t.api_key_name,''),t.api_key_id,'Unknown API Key') AS label,
     1 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -1144,12 +1189,12 @@ WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (t
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER inference_run_observations_boolean_insert BEFORE INSERT ON inference_run_observations
-WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1))
-BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1)) OR (typeof(NEW.rejected_before_target) <> 'integer' OR NEW.rejected_before_target NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean'); END;
 
 CREATE TRIGGER inference_run_observations_boolean_update BEFORE UPDATE ON inference_run_observations
-WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1))
-BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1)) OR (typeof(NEW.rejected_before_target) <> 'integer' OR NEW.rejected_before_target NOT IN (0, 1))
+BEGIN SELECT RAISE(ABORT, 'invalid boolean'); END;
 
 CREATE TRIGGER inference_runs_contract_insert BEFORE INSERT ON inference_run_observations
 WHEN typeof(NEW.background_active) <> 'integer' OR NEW.background_active < 0
@@ -1238,12 +1283,17 @@ BEGIN
     WHERE marker_reference = NEW.reference AND retention_started_at IS NULL;
 END;
 
-CREATE TRIGGER stats_usage_attempt_insert AFTER INSERT ON target_attempt_observations
+CREATE TRIGGER stats_usage_attempt_insert
+AFTER INSERT ON target_attempt_observations
 BEGIN
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -1281,6 +1331,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -1312,6 +1366,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1342,6 +1400,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1368,6 +1430,10 @@ WHERE source_id = NEW.id;
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -1405,6 +1471,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -1436,6 +1506,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1466,6 +1540,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1497,13 +1575,14 @@ BEGIN
 END;
 
 CREATE TRIGGER stats_usage_attempt_update
-AFTER UPDATE OF id, model_turn_id, run_id, provider_id, provider_name, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, first_token_ms, duration_ms ON target_attempt_observations
+AFTER UPDATE OF id, model_turn_id, run_id, provider_id, provider_name, status, error_source, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, first_token_ms, duration_ms ON target_attempt_observations
 WHEN OLD.id IS NOT NEW.id
     OR OLD.model_turn_id IS NOT NEW.model_turn_id
     OR OLD.run_id IS NOT NEW.run_id
     OR OLD.provider_id IS NOT NEW.provider_id
     OR OLD.provider_name IS NOT NEW.provider_name
     OR OLD.status IS NOT NEW.status
+    OR OLD.error_source IS NOT NEW.error_source
     OR OLD.input_tokens IS NOT NEW.input_tokens
     OR OLD.output_tokens IS NOT NEW.output_tokens
     OR OLD.cache_read_tokens IS NOT NEW.cache_read_tokens
@@ -1516,6 +1595,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -1553,6 +1636,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -1584,6 +1671,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1614,6 +1705,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1640,6 +1735,10 @@ WHERE source_id = NEW.id;
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -1677,6 +1776,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -1708,6 +1811,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1738,6 +1845,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1772,6 +1883,10 @@ INSERT INTO stats_usage_buckets (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1800,6 +1915,10 @@ INSERT INTO stats_usage_buckets (
     NEW.label,
     NEW.request_count,
     NEW.error_count,
+    NEW.terminal_request_count,
+    NEW.failed_request_count,
+    NEW.upstream_request_count,
+    NEW.upstream_error_count,
     NEW.input_tokens_sum,
     NEW.input_tokens_known,
     NEW.output_tokens_sum,
@@ -1823,6 +1942,10 @@ INSERT INTO stats_usage_buckets (
 ) ON CONFLICT (scope, identity, bucket_start) DO UPDATE SET
     request_count = stats_usage_buckets.request_count + excluded.request_count,
     error_count = stats_usage_buckets.error_count + excluded.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count + excluded.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count + excluded.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count + excluded.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count + excluded.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum + excluded.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known + excluded.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum + excluded.output_tokens_sum,
@@ -1846,12 +1969,17 @@ INSERT INTO stats_usage_buckets (
     last_used_at = MAX(stats_usage_buckets.last_used_at, excluded.last_used_at);
 END;
 
-CREATE TRIGGER stats_usage_rejection_insert AFTER INSERT ON rejected_request_observations
+CREATE TRIGGER stats_usage_rejection_insert
+AFTER INSERT ON rejected_request_observations
 BEGIN
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -1889,6 +2017,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -1920,6 +2052,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1950,6 +2086,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -1992,6 +2132,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -2029,6 +2173,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -2060,6 +2208,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2090,6 +2242,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2114,12 +2270,17 @@ FROM stats_usage_rejection_source
 WHERE source_id = NEW.id;
 END;
 
-CREATE TRIGGER stats_usage_run_insert AFTER INSERT ON inference_run_observations
+CREATE TRIGGER stats_usage_run_insert
+AFTER INSERT ON inference_run_observations
 BEGIN
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -2157,6 +2318,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -2188,6 +2353,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2218,6 +2387,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2249,18 +2422,23 @@ BEGIN
 END;
 
 CREATE TRIGGER stats_usage_run_update
-AFTER UPDATE OF id, started_at, status, finished_at, failure_json, terminal_reason ON inference_run_observations
+AFTER UPDATE OF id, started_at, status, finished_at, failure_json, terminal_reason, rejected_before_target ON inference_run_observations
 WHEN OLD.id IS NOT NEW.id
     OR OLD.started_at IS NOT NEW.started_at
     OR OLD.status IS NOT NEW.status
     OR OLD.finished_at IS NOT NEW.finished_at
     OR OLD.failure_json IS NOT NEW.failure_json
     OR OLD.terminal_reason IS NOT NEW.terminal_reason
+    OR OLD.rejected_before_target IS NOT NEW.rejected_before_target
 BEGIN
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -2298,6 +2476,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -2329,6 +2511,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2359,6 +2545,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2383,12 +2573,17 @@ FROM stats_usage_run_source
 WHERE source_id = NEW.id;
 END;
 
-CREATE TRIGGER stats_usage_turn_insert AFTER INSERT ON model_turn_observations
+CREATE TRIGGER stats_usage_turn_insert
+AFTER INSERT ON model_turn_observations
 BEGIN
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -2426,6 +2621,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -2457,6 +2656,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2487,6 +2690,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2531,6 +2738,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -2568,6 +2779,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -2599,6 +2814,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -2629,6 +2848,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,

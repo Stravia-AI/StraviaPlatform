@@ -1002,7 +1002,7 @@ async fn protocol_selection_errors_preserve_diagnostics_but_protect_client_error
     assert!(live.contains(LICENSE));
     let admin = gateway.admin();
     admin.observation_flush().await?;
-    let failures = admin.failed_requests(Default::default()).await?;
+    let failures = admin.client_errors(Default::default()).await?;
     let persisted = serde_json::to_string(&failures)?;
     assert!(
         failures.items.iter().any(|failure| {

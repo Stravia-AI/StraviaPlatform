@@ -531,7 +531,7 @@ impl AgentRunner {
                                         stravia_runtime_contract::Deadline::fixed(turn_deadline),
                                     );
                             if let Some(observer) = observation.as_ref() {
-                                turn_input = turn_input.with_observer(observer.clone());
+                                turn_input = turn_input.with_observer(observer.for_agent_turn());
                             }
                             turn_input.root_request = crate::rpm::current_root_request();
                             if capability_authorization.is_some() {

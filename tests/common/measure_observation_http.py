@@ -359,7 +359,7 @@ def main() -> None:
                         time.sleep(0.01)
                         final = meter.request(forest_path)["data"]
                     if scenario == "failure-page":
-                        meter.request("/api/v1/observations/failed-requests?" + urlencode(filters))
+                        meter.request("/api/v1/observations/client-errors?" + urlencode(filters))
                     if args.optimized:
                         known = members(initial)
                         roots = [{"root_id": root, "after_sequence": initial["snapshot_sequence"],

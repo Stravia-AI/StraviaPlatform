@@ -149,9 +149,18 @@ def test_credential_evidence_accepts_real_preservation_boundary():
     assert checks["upstream_body_protected"]
 
 
+def test_credential_evidence_accepts_placeholder_markers_from_debug_runs():
+    args = credential_fixture()
+    args[2]["debug_enabled"] = True
+    for discovery, reference in zip(args[2]["events"][0]["payload"]["discoveries"], args[3]["references"], strict=True):
+        discovery["marker"] = reference
+    assert _credential_proof(*args)["failures"] == []
+
+
 @pytest.mark.parametrize("mutation", [
     "leak", "reference_discovery_leak", "disabled", "missing_expectations", "missing_wire", "partial_mask",
     "discovery_absent", "discovery_count", "discovery_source", "discovery_rule",
+    "marker_without_debug", "marker_unknown",
     "missing_storage", "partial_storage", "principal",
 ])
 def test_credential_proof_fails_closed_without_exposing_sensitive_values(mutation):
@@ -168,6 +177,12 @@ def test_credential_proof_fails_closed_without_exposing_sensitive_values(mutatio
         args[4] = {}
     elif mutation == "partial_mask":
         args[4]["credential_checks"]["nonce"]["client_authorization_masked"] = False
+    elif mutation == "marker_without_debug":
+        for discovery, reference in zip(args[2]["events"][0]["payload"]["discoveries"], args[3]["references"], strict=True):
+            discovery["marker"] = reference
+    elif mutation == "marker_unknown":
+        args[2]["debug_enabled"] = True
+        args[2]["events"][0]["payload"]["discoveries"][0]["marker"] = "<!--sr:" + "c" * 28 + "-->"
     elif mutation.startswith("discovery"):
         discoveries = args[2]["events"][0]["payload"]["discoveries"]
         if mutation == "discovery_absent":

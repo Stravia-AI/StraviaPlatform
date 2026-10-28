@@ -254,7 +254,7 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             unknown = "<!--sr:aaaaaaaaaaaaaaaaaaaaaaaaaaaa-->"
             assert send(first_key, unknown) == unknown
             for key_name in [f"{model}-key", "isolated-second-key"]:
-                rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name))
+                rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name, kind="created"))
                 assert len(rows) == 1
                 assert rows[0]["new_credential_count"] == 1
                 assert secret not in json.dumps(rows)

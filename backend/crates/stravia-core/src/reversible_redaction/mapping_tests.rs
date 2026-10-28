@@ -1,5 +1,5 @@
 use std::time::Duration;
-use stravia_credential_protection::store::{MappingStore, SqlMappingStore};
+use stravia_credential_protection::store::{DetectedSecret, MappingStore, SqlMappingStore};
 use stravia_runtime_contract::Principal;
 
 const PUBLISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -37,7 +37,7 @@ async fn assert_batch_retention_contract(store: &SqlMappingStore) {
     let owner = Principal::new("mapping-batch-owner");
     let other = Principal::new("mapping-batch-other");
     let secrets: Vec<_> = (0..407)
-        .map(|index| format!("batch-secret-{index}"))
+        .map(|index| DetectedSecret::from(format!("batch-secret-{index}").as_str()))
         .collect();
     let mappings = store.intern(&owner, &secrets).await.unwrap().mappings;
     let references: Vec<_> = mappings
@@ -130,11 +130,12 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
     let owner = Principal::new("mapping-owner");
     let other = Principal::new("mapping-other");
     // Large, incompressible-enough plaintext also exercises PostgreSQL's index-size boundary.
-    let secrets = vec![
-        (0..200)
+    let secrets = vec![DetectedSecret {
+        secret: (0..200)
             .map(|_| uuid::Uuid::new_v4().to_string())
             .collect::<String>(),
-    ];
+        rule_ids: vec!["github-pat".into(), "custom_rule".into()],
+    }];
     let second = store.clone();
     let (left, right) = tokio::join!(
         store.intern(&owner, &secrets),
@@ -161,8 +162,22 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
     assert!(stravia_credential_protection::marker::valid_reference(
         &first.reference
     ));
-    assert_eq!(first.secret, secrets[0]);
+    assert_eq!(first.secret, secrets[0].secret);
     assert_eq!(first.expires_at, concurrent.expires_at);
+    // 规则随映射创建写入并持久化；之后被别的规则再次检测到也不改写归因。
+    assert_eq!(first.rule_ids.as_slice(), secrets[0].rule_ids);
+    assert_eq!(concurrent.rule_ids.as_slice(), secrets[0].rule_ids);
+    let redetected = [DetectedSecret {
+        secret: secrets[0].secret.clone(),
+        rule_ids: vec!["another-rule".into()],
+    }];
+    let again = store.intern(&owner, &redetected).await.unwrap();
+    assert!(again.created.is_empty());
+    assert_eq!(again.mappings[0].rule_ids.as_slice(), secrets[0].rule_ids);
+    assert_eq!(
+        store.active(&owner).await.unwrap()[0].rule_ids.as_slice(),
+        secrets[0].rule_ids
+    );
     assert!(store.active(&other).await.unwrap().is_empty());
     let mut foreign = store.intern(&other, &secrets).await.unwrap();
     assert_eq!(foreign.created.len(), 1);
@@ -228,7 +243,7 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
     );
     let replacement = replacement.mappings.remove(0);
     assert_ne!(replacement.reference, first.reference);
-    assert_eq!(replacement.secret, secrets[0]);
+    assert_eq!(replacement.secret, secrets[0].secret);
     assert_eq!(store.cleanup_expired().await.unwrap(), 1);
     assert_eq!(
         store.active(&owner).await.unwrap()[0].reference,

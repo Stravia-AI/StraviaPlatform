@@ -1,10 +1,16 @@
 use std::collections::HashSet;
-pub(super) mod failed;
+pub(super) mod client_errors;
+pub(super) mod upstream;
 
 use futures::TryStreamExt;
 use sqlx::{FromRow, QueryBuilder, Row};
 
 use super::{store::ObservationStore, types::*};
+
+/// 取消类终止原因：既不是失败的请求也不是错误的请求；客户端错误据此排除，
+/// 上游错误据此把所属运行判为“请求已中断”。
+pub(super) const CANCELLED_TERMINAL_REASONS: &str =
+    "'cancelled','client_disconnected','websocket_delivery_dropped','request_aborted'";
 
 pub(super) struct BundleRunRecord {
     pub id: String,
@@ -447,19 +453,12 @@ struct RejectionRow {
 }
 
 impl super::InteractionObservation {
-    /// 读取已落库的发现记录；排队中的新发现可能暂不可见，不等待无关观测写入或 Debug 刷盘。
+    /// 读取已落库的命中记录；排队中的命中可能暂不可见，不等待无关观测写入或 Debug 刷盘。
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
-        let mut page = self.inner.store.credential_discoveries(query).await?;
-        page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
-            chrono::Utc::now().timestamp_millis(),
-            self.inner
-                .retention_days
-                .load(std::sync::atomic::Ordering::Acquire),
-        );
-        Ok(page)
+        self.inner.store.credential_discoveries(query).await
     }
 }
 
@@ -472,22 +471,71 @@ struct DiscoveryRow {
     observation_gap: bool,
 }
 
-const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind='credential_mappings_created' AND i.expires_at>";
-
-#[derive(Default)]
-struct DiscoveryAggregate {
-    count: i64,
-    rule_ids: std::collections::BTreeSet<String>,
-    source_types: std::collections::BTreeSet<String>,
+#[derive(serde::Deserialize)]
+struct DiscoveryPayload {
+    discoveries: Vec<CredentialDiscovery>,
+    #[serde(default)]
+    omitted_discoveries: usize,
 }
+
+/// 一个 Interaction 在筛选范围内的全部命中，新增与复用各自按「规则 ← 来源」去重。
+#[derive(Default)]
+struct DiscoveryHits {
+    observed: bool,
+    new_credential_count: i64,
+    created: std::collections::BTreeSet<CredentialHit>,
+    reused: std::collections::BTreeSet<CredentialHit>,
+}
+
+impl DiscoveryHits {
+    fn add(&mut self, created: bool, payload: DiscoveryPayload) {
+        self.observed = true;
+        if created {
+            self.new_credential_count +=
+                (payload.discoveries.len() + payload.omitted_discoveries) as i64;
+        }
+        let side = if created {
+            &mut self.created
+        } else {
+            &mut self.reused
+        };
+        for discovery in payload.discoveries {
+            if discovery.locators.is_empty() {
+                // 升级前的事件只有规则集合与来源集合；对单个映射，二者的组合是对原位置的最佳还原。
+                for rule_id in &discovery.rule_ids {
+                    for source_type in &discovery.source_types {
+                        side.insert(CredentialHit {
+                            rule_id: rule_id.clone(),
+                            source_type: source_type.clone(),
+                            latest_input: None,
+                        });
+                    }
+                }
+            }
+            for locator in discovery.locators {
+                side.insert(CredentialHit {
+                    rule_id: locator.rule_id,
+                    source_type: locator.source_type,
+                    latest_input: locator.latest_input,
+                });
+            }
+        }
+    }
+}
+
+// 发现列表只扫描两类命中事件。部分索引以 kind 为前导；SQLite 不能从
+// IN(所选一种) 推出 IN(两种)，因此显式保留与索引谓词一致的全集条件，
+// 再叠加所选筛选，created/reused 才能同样命中索引。
+const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind IN (";
 
 macro_rules! discovery_payload_reader {
     ($name:ident, $db:ty, $pool:ty) => {
         async fn $name(
             pool: &$pool,
             rows: &[DiscoveryRow],
+            kinds: &'static str,
             now: i64,
-        ) -> anyhow::Result<Vec<DiscoveryAggregate>> {
+        ) -> anyhow::Result<Vec<DiscoveryHits>> {
             if rows.is_empty() {
                 return Ok(Vec::new());
             }
@@ -499,30 +547,27 @@ macro_rules! discovery_payload_reader {
                     .push_bind(discovery.interaction_id.as_str())
                     .push_bind(discovery.discovered_at);
             });
-            builder.push(") SELECT page.ordinal,e.payload FROM page JOIN observation_events e ON e.interaction_id=page.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+            // 与选页查询相同：先匹配部分索引的全集谓词，再按所选命中类型过滤。
+            builder
+                .push(") SELECT page.ordinal,e.kind='credential_mappings_created' AS created,e.payload FROM page JOIN observation_events e ON e.interaction_id=page.interaction_id WHERE e.kind IN (")
+                .push(CredentialHitKind::All.event_kinds())
+                .push(") AND e.kind IN (")
+                .push(kinds)
+                .push(") AND e.expires_at>")
                 .push_bind(now)
                 .push(" AND e.occurred_at<=page.discovered_at");
-            let query = builder.build_query_as::<(i64, Vec<u8>)>();
+            let query = builder.build_query_as::<(i64, bool, Vec<u8>)>();
             let mut payloads = query.fetch(pool);
-            let mut aggregates: Vec<DiscoveryAggregate> =
-                (0..rows.len()).map(|_| DiscoveryAggregate::default()).collect();
+            let mut hits: Vec<DiscoveryHits> =
+                (0..rows.len()).map(|_| DiscoveryHits::default()).collect();
             // 仅解码当前页的安全元数据；逐事件归并，避免一次保留整页原始 payload。
             // 沿用选页时的发现时间上界，排除发现时间更晚的事件。
-            while let Some((ordinal, payload)) = payloads.try_next().await? {
-                #[derive(serde::Deserialize)]
-                struct Payload {
-                    discoveries: Vec<CredentialDiscovery>,
-                }
-                let payload: Payload =
+            while let Some((ordinal, created, payload)) = payloads.try_next().await? {
+                let payload: DiscoveryPayload =
                     serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                let aggregate = &mut aggregates[ordinal as usize];
-                aggregate.count += payload.discoveries.len() as i64;
-                for discovery in payload.discoveries {
-                    aggregate.rule_ids.extend(discovery.rule_ids);
-                    aggregate.source_types.extend(discovery.source_types);
-                }
+                hits[ordinal as usize].add(created, payload);
             }
-            Ok(aggregates)
+            Ok(hits)
         }
     };
 }
@@ -550,27 +595,6 @@ impl ObservationStore {
         })
     }
 
-    pub(super) async fn contains_gap_run(&self, run_id: &str) -> anyhow::Result<bool> {
-        Ok(match self {
-            Self::Sqlite(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=?)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-            Self::Postgres(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=$1)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-        })
-    }
-
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
@@ -579,18 +603,21 @@ impl ObservationStore {
             .cursor
             .as_deref()
             .map(|cursor| {
-                anyhow::ensure!(cursor.len() <= 512, "凭据发现游标过长");
-                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("凭据发现游标无效"))
+                anyhow::ensure!(cursor.len() <= 512, "命中记录游标过长");
+                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("命中记录游标无效"))
             })
             .transpose()?;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
-        let (mut rows, observation_gap): (Vec<DiscoveryRow>, bool) = match self {
+        let kinds = query.kind.event_kinds();
+        let mut rows: Vec<DiscoveryRow> = match self {
             Self::Sqlite(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=1 AND expires_at>?)")
-                    .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DISCOVERY_SELECT);
                 builder
+                    .push(CredentialHitKind::All.event_kinds())
+                    .push(") AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND i.expires_at>")
                     .push_bind(now)
                     .push(" AND e.expires_at>")
                     .push_bind(now)
@@ -606,13 +633,15 @@ impl ObservationStore {
                 builder
                     .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
                     .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
+                builder.build_query_as().fetch_all(pool).await?
             }
             Self::Postgres(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=TRUE AND expires_at>$1)")
-                    .bind(now).fetch_one(pool).await?;
                 let mut builder = QueryBuilder::<sqlx::Postgres>::new(DISCOVERY_SELECT);
                 builder
+                    .push(CredentialHitKind::All.event_kinds())
+                    .push(") AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND i.expires_at>")
                     .push_bind(now)
                     .push(" AND e.expires_at>")
                     .push_bind(now)
@@ -628,7 +657,7 @@ impl ObservationStore {
                 builder
                     .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
                     .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
+                builder.build_query_as().fetch_all(pool).await?
             }
         };
         let next_cursor = if rows.len() > limit {
@@ -641,30 +670,26 @@ impl ObservationStore {
             None
         };
         rows.truncate(limit);
-        let aggregates = match self {
-            Self::Sqlite(pool, _) => discovery_payloads_sqlite(pool, &rows, now).await?,
-            Self::Postgres(pool, _) => discovery_payloads_postgres(pool, &rows, now).await?,
+        let hits = match self {
+            Self::Sqlite(pool, _) => discovery_payloads_sqlite(pool, &rows, kinds, now).await?,
+            Self::Postgres(pool, _) => discovery_payloads_postgres(pool, &rows, kinds, now).await?,
         };
         let mut items = Vec::with_capacity(rows.len());
-        for (row, aggregate) in rows.into_iter().zip(aggregates) {
-            if aggregate.count > 0 {
+        for (row, hits) in rows.into_iter().zip(hits) {
+            if hits.observed {
                 items.push(CredentialDiscoverySummary {
                     interaction_id: row.interaction_id,
                     api_key_name: row.api_key_name,
                     discovered_at: row.discovered_at,
-                    new_credential_count: aggregate.count,
-                    rule_ids: aggregate.rule_ids.into_iter().collect(),
-                    source_types: aggregate.source_types.into_iter().collect(),
+                    new_credential_count: hits.new_credential_count,
+                    created: hits.created.into_iter().collect(),
+                    reused: hits.reused.into_iter().collect(),
                     status: row.status,
                     observation_gap: row.observation_gap,
                 });
             }
         }
-        Ok(CredentialDiscoveryPage {
-            items,
-            next_cursor,
-            observation_gap,
-        })
+        Ok(CredentialDiscoveryPage { items, next_cursor })
     }
 
     pub async fn query_root_changes(
@@ -1883,7 +1908,7 @@ mod tests {
     use crate::interaction_observation::store::Admission;
 
     #[tokio::test]
-    async fn failed_requests_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
+    async fn client_errors_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
         use crate::interaction_observation::store::{Admission, Rejection};
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1945,6 +1970,7 @@ mod tests {
                     },
                     at + 20,
                     i64::MAX,
+                    false,
                 )
                 .await?;
             store
@@ -1974,7 +2000,7 @@ mod tests {
         let mut seen = Vec::new();
         loop {
             let page = store
-                .failed_requests(FailedRequestQuery {
+                .client_errors(ClientErrorQuery {
                     start_at: Some(at),
                     end_at: Some(at + 1),
                     cursor,
@@ -2098,6 +2124,7 @@ mod tests {
                     },
                     at + 10,
                     i64::MAX,
+                    false,
                 )
                 .await?;
         }
@@ -2843,6 +2870,7 @@ mod tests {
                 },
                 2,
                 i64::MAX,
+                false,
             )
             .await?;
         let filters = ForestQuery {
@@ -3258,6 +3286,7 @@ mod tests {
                 },
                 150,
                 i64::MAX,
+                false,
             )
             .await?;
         let historical = store
@@ -3603,6 +3632,7 @@ mod tests {
                 },
                 13,
                 i64::MAX,
+                false,
             )
             .await?;
         store.mark_clear_tombstones().await?;
@@ -3831,6 +3861,7 @@ mod tests {
                 },
                 20_012,
                 i64::MAX,
+                false,
             )
             .await?;
         admit_chain_run_profile(

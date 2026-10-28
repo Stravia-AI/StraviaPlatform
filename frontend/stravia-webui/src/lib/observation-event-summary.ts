@@ -34,6 +34,7 @@ const TITLES: Record<string, () => string> = {
   client_visible_content: m.observation_event_client_visible_content,
   input_preview_recorded: m.observation_event_input_preview_recorded,
   credential_mappings_created: m.observation_event_credential_mappings_created,
+  credential_mappings_reused: m.observation_event_credential_mappings_reused,
   checkpoint: m.observation_event_checkpoint,
   wire: m.observation_event_wire,
 }
@@ -253,10 +254,21 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
       add(m.observation_event_reason(), payload.reason)
       break
     case 'credential_mappings_created':
-      if (Array.isArray(payload.discoveries) && payload.discoveries.length > 0) {
-        add(m.observation_event_credentials(), formatNumber(payload.discoveries.length))
+    case 'credential_mappings_reused': {
+      // 超出单事件上限的映射只留计数，仍属于这次命中。
+      const mappings =
+        (Array.isArray(payload.discoveries) ? payload.discoveries.length : 0) +
+        (count(payload.omitted_discoveries) ? payload.omitted_discoveries : 0)
+      if (mappings > 0) {
+        add(
+          event.kind === 'credential_mappings_created'
+            ? m.observation_event_credentials()
+            : m.observation_event_credentials_reused(),
+          formatNumber(mappings),
+        )
       }
       break
+    }
     case 'checkpoint':
       add(m.observation_event_stage(), payload.stage)
       break

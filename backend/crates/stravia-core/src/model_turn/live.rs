@@ -177,7 +177,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     };
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
-                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone(), observer.as_ref());
                     let thinking_source = turn.target.thinking_source();
                     {
                         use futures::StreamExt;
@@ -988,6 +988,12 @@ const UPSTREAM_LOCAL_WORK: u8 = 4;
 const UPSTREAM_LOCAL_DEADLINE: u8 = 8;
 const UPSTREAM_FAILURE_MASK: u8 =
     UPSTREAM_STARTED | UPSTREAM_FINISHED | UPSTREAM_LOCAL_WORK | UPSTREAM_LOCAL_DEADLINE;
+
+/// 首 token 超时的 Drop 收尾没有 AttemptFailure 可带；用传输状态位判断
+/// 上游请求是否真的发出过，避免把本地准备超时计成上游错误。
+pub(super) fn upstream_request_started(state: &AtomicU8) -> bool {
+    state.load(Ordering::Acquire) & UPSTREAM_STARTED == UPSTREAM_STARTED
+}
 
 struct UpstreamLocalWork<'a> {
     state: &'a AtomicU8,
@@ -2048,6 +2054,7 @@ async fn drive_vendor_attempt(
             prepared.egress_base_url.clone(),
             prepared.first_token_timed_out.clone(),
         )
+        .with_upstream_state(prepared.upstream_state.clone())
         .with_usage_ledger(prepared.root_request.confirmed_usage.clone());
         // 每次派发都从实际请求重建事实；恢复、续传回退与凭据恢复不能沿用旧声明。
         update_protected_reasoning_metadata(

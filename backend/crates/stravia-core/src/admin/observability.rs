@@ -3,19 +3,30 @@ use super::*;
 impl AdminService {
     // ── Interaction Observation ──
 
-    pub async fn failed_requests(
-        &self,
-        query: FailedRequestQuery,
-    ) -> anyhow::Result<FailedRequestPage> {
-        self.gw.observation.failed_requests(query).await
+    pub async fn client_errors(&self, query: ClientErrorQuery) -> anyhow::Result<ClientErrorPage> {
+        self.gw.observation.client_errors(query).await
     }
 
-    pub async fn failed_request_detail(
+    pub async fn client_error_detail(
         &self,
         kind: &str,
         id: &str,
-    ) -> anyhow::Result<Option<FailedRequestDetail>> {
-        self.gw.observation.failed_request_detail(kind, id).await
+    ) -> anyhow::Result<Option<ClientErrorDetail>> {
+        self.gw.observation.client_error_detail(kind, id).await
+    }
+
+    pub async fn upstream_errors(
+        &self,
+        query: UpstreamErrorQuery,
+    ) -> anyhow::Result<UpstreamErrorPage> {
+        self.gw.observation.upstream_errors(query).await
+    }
+
+    pub async fn upstream_error_detail(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<UpstreamErrorDetail>> {
+        self.gw.observation.upstream_error_detail(id).await
     }
 
     pub async fn observation_forest(&self, query: ForestQuery) -> anyhow::Result<ForestPage> {

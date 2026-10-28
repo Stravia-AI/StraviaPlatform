@@ -24,7 +24,10 @@ async function stubStats(page: Page) {
         json: {
           data: {
             total_requests: 128,
-            error_count: 2,
+            terminal_request_count: 128,
+            failed_request_count: 2,
+            upstream_request_count: 128,
+            upstream_error_count: 2,
             total_input_tokens: 600,
             total_output_tokens: 86,
             total_cache_read_tokens: 320,
@@ -56,7 +59,10 @@ async function stubStats(page: Page) {
           bucket_start: at,
           bucket_ms: bucket,
           request_count: 1,
-          error_count: 0,
+          terminal_request_count: 1,
+          failed_request_count: 0,
+          upstream_request_count: 1,
+          upstream_error_count: 0,
           total_input_tokens: known ? tokens : null,
           total_output_tokens: known ? 0 : null,
           total_cache_read_tokens: 80,
@@ -265,6 +271,10 @@ for (const scenario of [
         json: {
           data: {
             total_requests: 1,
+            terminal_request_count: 1,
+            failed_request_count: 0,
+            upstream_request_count: 1,
+            upstream_error_count: 0,
             total_input_tokens: scenario.input,
             total_output_tokens: scenario.output,
             total_cache_read_tokens: scenario.read,
@@ -273,7 +283,6 @@ for (const scenario of [
             avg_duration_ms: 1000,
             avg_first_token_ms: 500,
             avg_output_tps: 20,
-            error_count: 0,
           },
         },
       })
@@ -302,8 +311,8 @@ async function populateResources(page: Page, total = 12) {
           provider_id: `provider-${index + 1}`,
           provider: `Service ${String(index + 1).padStart(2, '0')}`,
           deleted: false,
-          request_count: (total - index) * 100,
-          error_count: index === 0 ? 3 : 0,
+          upstream_request_count: (total - index) * 100,
+          upstream_error_count: index === 0 ? 3 : 0,
           avg_duration_ms: 100,
           avg_output_tps: 10 + index,
         })),
@@ -354,7 +363,7 @@ async function usageBoxes(page: Page) {
     page: (await page.locator('.route-page').boundingBox())!,
     activity: await box('Token activity'),
     latency: await box('Latency and speed'),
-    errors: await box('Errors'),
+    availability: await box('Availability'),
     breakdown: await box('Token breakdown'),
     models: await box('Models'),
     providers: await box('Providers'),
@@ -393,7 +402,7 @@ test.describe('usage workspace layout', () => {
       .evaluate((el) => el.getBoundingClientRect().width)
     expect(cellSize).toBeLessThanOrEqual(16)
 
-    // Breakdown donuts stay 10-12rem; the error trend takes the width instead.
+    // Breakdown donuts stay 10-12rem; the availability trend takes the width instead.
     for (const [name, label] of [
       ['Token breakdown', 'Token breakdown'],
       ['Models', 'Share of all requests.'],
@@ -404,7 +413,10 @@ test.describe('usage workspace layout', () => {
       expect(donutBox.width).toBeLessThanOrEqual(12 * rem + 1)
       expect(Math.abs(donutBox.width - donutBox.height)).toBeLessThanOrEqual(1)
     }
-    expect(boxes.errors.width).toBeGreaterThan(boxes.breakdown.width * 2)
+    const availabilityChart = page.getByLabel('Availability chart', { exact: true })
+    await expect(availabilityChart).toBeVisible()
+    expect(Math.abs((await availabilityChart.boundingBox())!.height - 10 * rem)).toBeLessThanOrEqual(1)
+    expect(boxes.availability.width).toBeGreaterThan(boxes.breakdown.width * 2)
     expect(boxes.breakdown.width).toBeLessThanOrEqual(24 * rem)
     expect(boxes.models.width).toBeLessThanOrEqual(24 * rem)
 
@@ -464,7 +476,7 @@ test.describe('usage workspace layout', () => {
         width: boxes.page.width,
         paired: Math.abs(boxes.activity.y - boxes.latency.y) <= 1 && boxes.latency.x > boxes.activity.x,
         breakdownRow:
-          Math.abs(boxes.errors.y - boxes.breakdown.y) <= 1 && Math.abs(boxes.breakdown.y - boxes.models.y) <= 1,
+          Math.abs(boxes.availability.y - boxes.breakdown.y) <= 1 && Math.abs(boxes.breakdown.y - boxes.models.y) <= 1,
       }
     }
     await expect(page.locator('[data-activity-start]').locator('.token-activity-cell').first()).toBeVisible()
@@ -509,7 +521,9 @@ test.describe('usage workspace layout', () => {
         await expect(page.locator('html')).toHaveAttribute('lang', locale)
         const wrapper = page.locator('[data-activity-start]')
         await expect(wrapper.locator('.token-activity-cell').first()).toBeVisible()
-        const latency = page.locator('[role="slider"]').filter({ has: page.locator('path[aria-label]') })
+        const latency = page
+          .getByRole('region', { name: locale === 'zh-CN' ? '延迟与速度' : 'Latency and speed', exact: true })
+          .getByRole('slider')
         await expect(latency).toBeVisible()
         await expect(async () => {
           const activityBox = (await wrapper.boundingBox())!

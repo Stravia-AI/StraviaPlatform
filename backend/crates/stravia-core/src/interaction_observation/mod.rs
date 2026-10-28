@@ -81,7 +81,10 @@ impl ClientConnectionObservation {
             return;
         }
         let writer = self.observation.inner.writer.clone();
-        let command = WriterCommand::ClientDisconnected { runs };
+        let command = WriterCommand::ClientDisconnected {
+            runs,
+            occurred_at: writer::now(),
+        };
         let perf_context = crate::performance::current_context();
         if let Err(error) = writer.try_send(command) {
             // 断线不阻塞传输清理；队列繁忙时仍按写者顺序提交状态更新。
@@ -102,6 +105,11 @@ impl ClientConnectionObservation {
 /// client_wait_expired 转 disconnected。窗口必须覆盖合法的长时客户端工具执行。
 const WAITING_CLIENT_IDLE_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// 单个凭据命中事件最多记录的映射数。
+const MAX_EVENT_DISCOVERIES: usize = 50;
+/// 单个映射最多记录的位置数。
+const MAX_DISCOVERY_LOCATORS: usize = 50;
+
 struct Inner {
     store: ObservationStore,
     writer: writer::WriterSender,
@@ -117,42 +125,8 @@ struct Inner {
     bundles: BundleExport,
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
-    unpersisted_gaps: Arc<Mutex<UnpersistedGaps>>,
     ephemeral_root: Option<PathBuf>,
     stopped: AtomicBool,
-}
-
-#[derive(Default)]
-struct UnpersistedGaps {
-    generation: u64,
-    runs: HashMap<String, (i64, u64)>,
-}
-
-impl UnpersistedGaps {
-    fn record(&mut self, run_id: &str, occurred_at: i64) {
-        self.generation += 1;
-        self.runs
-            .insert(run_id.to_owned(), (occurred_at, self.generation));
-    }
-
-    fn visible(&self, now: i64, retention_days: u32) -> bool {
-        self.runs
-            .values()
-            .any(|(at, _)| writer::expires(*at, retention_days) > now)
-    }
-
-    fn expire(&mut self, now: i64, retention_days: u32) {
-        self.runs
-            .retain(|_, (at, _)| writer::expires(*at, retention_days) > now);
-    }
-
-    fn clear_removed(&mut self, covered: &HashMap<String, (i64, u64)>, removed: &[String]) {
-        for run_id in removed {
-            if self.runs.get(run_id) == covered.get(run_id) {
-                self.runs.remove(run_id);
-            }
-        }
-    }
 }
 
 impl InteractionObservation {
@@ -220,7 +194,6 @@ impl InteractionObservation {
         let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
         let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
-        let unpersisted_gaps = Arc::new(Mutex::new(UnpersistedGaps::default()));
         let (writer, task) = writer::spawn(writer::WriterDeps {
             store: store.clone(),
             debug_trace_index: Arc::clone(&debug_trace_index),
@@ -230,7 +203,6 @@ impl InteractionObservation {
             traces: traces.clone(),
             active_traces: Arc::clone(&active_traces),
             partial_trace_count: Arc::clone(&partial_trace_count),
-            unpersisted_gaps: Arc::clone(&unpersisted_gaps),
             live: Arc::clone(&live_content),
             generation_chains,
         });
@@ -261,7 +233,6 @@ impl InteractionObservation {
                 bundles,
                 active_traces,
                 partial_trace_count,
-                unpersisted_gaps,
                 ephemeral_root,
                 stopped: AtomicBool::new(false),
             }),
@@ -373,17 +344,10 @@ impl InteractionObservation {
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
-        let covered = self.inner.unpersisted_gaps.lock().runs.clone();
         if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
             tracing::debug!(%error, "observation writer unavailable during history clear");
         }
         self.flush().await?;
-        let mut known_runs = Vec::new();
-        for run_id in covered.keys() {
-            if self.inner.store.contains_gap_run(run_id).await? {
-                known_runs.push(run_id.clone());
-            }
-        }
         let result = self.inner.store.mark_clear_tombstones().await?;
         let (_, tomb) = self.inner.store.manifest_ids().await?;
         let mut deleted = Vec::new();
@@ -395,17 +359,6 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         self.purge_history(None).await?;
-        let mut removed = Vec::new();
-        for run_id in known_runs {
-            if !self.inner.store.contains_gap_run(&run_id).await? {
-                removed.push(run_id);
-            }
-        }
-        // Missing admission ownership is not proof that cleanup covered the loss.
-        self.inner
-            .unpersisted_gaps
-            .lock()
-            .clear_removed(&covered, &removed);
         let (_, partial) = self
             .inner
             .store
@@ -448,10 +401,6 @@ impl InteractionObservation {
                 .fetch_max(event.sequence, Ordering::AcqRel);
             let _ = self.inner.updates.send(ObservationUpdate::Event(event));
         }
-        self.inner
-            .unpersisted_gaps
-            .lock()
-            .expire(now, self.inner.retention_days.load(Ordering::Acquire));
         let (_, partial) = self
             .inner
             .store
@@ -852,6 +801,7 @@ impl IngressObserver {
     /// One admission carries everything Run Attribution needs; there is no
     /// separate input-registration call to get out of order.
     pub(crate) fn admit(mut self, start: RunStart, facts: AdmissionFacts) -> RunObserver {
+        let occurred_at = writer::now();
         let ingress = self.start.take();
         let debug_enabled = self.observation.inner.debug.load(Ordering::Acquire);
         let discarded_trace = if !debug_enabled {
@@ -883,6 +833,8 @@ impl IngressObserver {
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
             client_output_committed: AtomicBool::new(false),
+            rejected_before_target: AtomicBool::new(false),
+            target_attempted: AtomicBool::new(false),
             admission_queued: false,
             event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
@@ -933,6 +885,7 @@ impl IngressObserver {
                     start,
                     facts,
                     received_at: self.received_at,
+                    occurred_at,
                     metadata: std::mem::take(&mut self.metadata),
                     debug_enabled,
                     trace: inner.trace.clone(),
@@ -950,22 +903,19 @@ impl IngressObserver {
                 inner.finalization.lock().take();
             }
             inner.gap.store(true, Ordering::Release);
-            self.observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&inner.run_id, writer::now());
         }
         drop(ingress);
         RunObserver {
             inner: Arc::new(inner),
             retention_detached: false,
+            client_input: true,
         }
     }
     pub(crate) fn reject(mut self, outcome: RejectedOutcome) {
         self.reject_inner(outcome);
     }
     fn reject_inner(&mut self, outcome: RejectedOutcome) {
+        let occurred_at = writer::now();
         if let Some(start) = self.start.take() {
             if self
                 .observation
@@ -977,7 +927,8 @@ impl IngressObserver {
                     metadata: std::mem::take(&mut self.metadata),
                     debug_enabled: self.debug_enabled,
                     started_at: self.received_at,
-                    duration_ms: writer::now().saturating_sub(self.received_at),
+                    duration_ms: occurred_at.saturating_sub(self.received_at),
+                    occurred_at,
                 })
                 .is_err()
             {
@@ -1004,6 +955,7 @@ impl Drop for IngressObserver {
                 trace: self.trace.take(),
                 pending_finish: None,
                 gap: false,
+                occurred_at: writer::now(),
             });
         }
     }
@@ -1013,12 +965,16 @@ impl Drop for IngressObserver {
 pub(crate) struct RunObserver {
     inner: Arc<RunObserverInner>,
     retention_detached: bool,
+    /// 句柄观察的 Model Turn 请求是否就是客户端的请求。内部 Agent 轮次共用客户端 Run，
+    /// 但它的最后一条用户条目是平台构造的，不是客户端的本次输入。
+    client_input: bool,
 }
 
 /// A committed asynchronous publication may outlive the request future that
 /// started it. Holding the shared observer keeps finalization behind that publication.
 pub(crate) struct RunPublicationGuard {
     inner: Arc<RunObserverInner>,
+    client_input: bool,
 }
 
 struct RunObserverInner {
@@ -1029,6 +985,10 @@ struct RunObserverInner {
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
     client_output_committed: AtomicBool,
+    /// 请求阶段 Hook 拒绝发生在 Target 选择之前：这类 Run 是拒绝请求，不是失败请求。
+    rejected_before_target: AtomicBool,
+    /// 已发出过 Target 尝试：此后的模型不可用或访问禁止属于失败的请求，不能再按错误码归为错误的请求。
+    target_attempted: AtomicBool,
     admission_queued: bool,
     event_boundary: Mutex<()>,
     gap: AtomicBool,
@@ -1052,6 +1012,16 @@ impl RunObserver {
         Self {
             inner: self.inner.clone(),
             retention_detached: true,
+            client_input: self.client_input,
+        }
+    }
+
+    /// 内部 Agent 轮次使用：凭据命中不再把平台构造的用户条目当作客户端的本次输入。
+    pub(crate) fn for_agent_turn(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            retention_detached: self.retention_detached,
+            client_input: false,
         }
     }
 
@@ -1128,8 +1098,9 @@ impl RunObserver {
         if !self.inner.admission_queued {
             return;
         }
+        let occurred_at = writer::now();
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
-        self.send_tool_results(tool_results);
+        self.send_tool_results(tool_results, occurred_at);
         let Some(preview) = self.inner.pending_preview.lock().take() else {
             return;
         };
@@ -1142,16 +1113,11 @@ impl RunObserver {
             .try_send(WriterCommand::InputPreview {
                 run_id: self.inner.run_id.clone(),
                 preview,
+                occurred_at,
             })
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
 
@@ -1186,12 +1152,6 @@ impl RunObserver {
         });
         if writer.is_closed() {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
@@ -1204,10 +1164,18 @@ impl RunObserver {
         let _boundary = self.inner.event_boundary.lock();
         (!self.inner.terminal.load(Ordering::Acquire)).then(|| RunPublicationGuard {
             inner: self.inner.clone(),
+            client_input: self.client_input,
         })
     }
     pub(crate) fn record_failure(&self, error: FailureDiagnostic) {
         self.record(RunEvent::RequestFailed { error });
+    }
+
+    /// 请求阶段的 Hook 拒绝：拒绝码由 Hook 自定，不能按码推断，必须显式标记。
+    pub(crate) fn mark_rejected_before_target(&self) {
+        self.inner
+            .rejected_before_target
+            .store(true, Ordering::Release);
     }
 
     pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
@@ -1227,6 +1195,9 @@ impl RunObserver {
     pub(crate) fn record(&self, mut event: RunEvent) {
         if !self.inner.admission_queued {
             return;
+        }
+        if matches!(event, RunEvent::TargetAttemptStarted { .. }) {
+            self.inner.target_attempted.store(true, Ordering::Release);
         }
         match &mut event {
             RunEvent::ModelTurnStarted {
@@ -1327,7 +1298,7 @@ impl RunObserver {
             }
         }
     }
-    fn send_tool_results(&self, events: Vec<RunEvent>) {
+    fn send_tool_results(&self, events: Vec<RunEvent>, occurred_at: i64) {
         if !self.inner.admission_queued {
             return;
         }
@@ -1343,22 +1314,18 @@ impl RunObserver {
             .try_send(WriterCommand::ClientToolResults {
                 run_id: self.inner.run_id.clone(),
                 events,
+                occurred_at,
             })
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     fn send_event(&self, mut event: RunEvent) {
         if !self.inner.admission_queued {
             return;
         }
+        let occurred_at = writer::now();
         // Keep concurrently produced activity ordered with Finish without rejecting
         // meaningful background events that arrive after client delivery.
         let _boundary = self.inner.event_boundary.lock();
@@ -1369,7 +1336,7 @@ impl RunObserver {
                 .store(true, Ordering::Release);
         }
         if matches!(event, RunEvent::ClientToolResult { .. }) {
-            self.send_tool_results(vec![event]);
+            self.send_tool_results(vec![event], occurred_at);
             return;
         }
         if matches!(event, RunEvent::Wire { .. }) {
@@ -1412,6 +1379,7 @@ impl RunObserver {
                     event: RunEvent::ObservationGap {
                         reason: "writer_overflow".into(),
                     },
+                    occurred_at,
                 })
                 .is_err()
             {
@@ -1450,15 +1418,9 @@ impl RunObserver {
             else {
                 *queued = None;
                 self.inner.gap.store(true, Ordering::Release);
-                self.inner
-                    .observation
-                    .inner
-                    .unpersisted_gaps
-                    .lock()
-                    .record(&self.inner.run_id, writer::now());
                 return;
             };
-            let pending = Arc::new(Mutex::new(writer::QueuedText::new(event)));
+            let pending = Arc::new(Mutex::new(writer::QueuedText::new(event, occurred_at)));
             *queued = Some(Arc::clone(&pending));
             WriterCommand::Text {
                 run_id: self.inner.run_id.clone(),
@@ -1470,6 +1432,7 @@ impl RunObserver {
             WriterCommand::Event {
                 run_id: self.inner.run_id.clone(),
                 event,
+                occurred_at,
             }
         };
         if let Err(error) = self.inner.observation.inner.writer.try_send(command) {
@@ -1483,18 +1446,21 @@ impl RunObserver {
             let _ = error;
             *queued = None;
             self.inner.gap.store(true, Ordering::Release);
-            let observation = &self.inner.observation.inner;
-            observation
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         let finished_at = writer::now();
+        let mut rejected_before_target = self.inner.rejected_before_target.load(Ordering::Acquire);
         if let Some(error) = self.inner.failure.lock().as_ref() {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
+            // 未进入 Target 选择的固定失败：模型不可用与禁止访问模型；
+            // 已发出过尝试后再出现同码（如隐藏轮次路由被删）则属于失败的请求。
+            rejected_before_target |= !self.inner.target_attempted.load(Ordering::Acquire)
+                && error
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| matches!(code, "model_not_found" | "STRAVIA_FORBIDDEN"));
         }
         self.finish_thinking();
         self.inner.queued_text.lock().take();
@@ -1507,6 +1473,7 @@ impl RunObserver {
                 run_id: self.inner.run_id.clone(),
                 outcome,
                 finished_at,
+                rejected_before_target,
             };
             // 收据与 Finish 分别保留槽位；不能等待最后一个后台发布句柄 Drop 才落终态。
             if self.inner.admission_queued {
@@ -1520,12 +1487,6 @@ impl RunObserver {
                 // 保留槽只保证容量；接收端退出时 send 不返回错误，仍须留下缺口。
                 if sender.is_closed() {
                     self.inner.gap.store(true, Ordering::Release);
-                    self.inner
-                        .observation
-                        .inner
-                        .unpersisted_gaps
-                        .lock()
-                        .record(&self.inner.run_id, finished_at);
                 }
             }
             // Preserve Finish/Admit FIFO ordering without waiting for observation
@@ -1543,11 +1504,44 @@ impl RunPublicationGuard {
     }
 
     pub(crate) fn credential_mappings_created(&self, discoveries: Vec<CredentialDiscovery>) {
+        self.credential_hits(discoveries, |discoveries, omitted_discoveries| {
+            RunEvent::CredentialMappingsCreated {
+                discoveries,
+                omitted_discoveries,
+            }
+        });
+    }
+
+    pub(crate) fn credential_mappings_reused(&self, discoveries: Vec<CredentialDiscovery>) {
+        self.credential_hits(discoveries, |discoveries, omitted_discoveries| {
+            RunEvent::CredentialMappingsReused {
+                discoveries,
+                omitted_discoveries,
+            }
+        });
+    }
+
+    /// 命中事件的载荷上限在这里统一执行：长会话重放会让每个 Model Turn 都命中大量历史秘密，
+    /// 不能让它们占满观察写入队列。凭据标记只对 Debug 开启的 Run 保留。
+    fn credential_hits(
+        &self,
+        mut discoveries: Vec<CredentialDiscovery>,
+        event: impl FnOnce(Vec<CredentialDiscovery>, usize) -> RunEvent,
+    ) {
         if !self.inner.admission_queued {
             return;
         }
+        let omitted_discoveries = discoveries.len().saturating_sub(MAX_EVENT_DISCOVERIES);
+        discoveries.truncate(MAX_EVENT_DISCOVERIES);
+        for discovery in &mut discoveries {
+            bound_locators(discovery, self.client_input);
+            if !self.inner.debug_enabled {
+                discovery.marker = None;
+            }
+        }
+        let occurred_at = writer::now();
         let _boundary = self.inner.event_boundary.lock();
-        let event = RunEvent::CredentialMappingsCreated { discoveries };
+        let event = event(discoveries, omitted_discoveries);
         if self
             .inner
             .observation
@@ -1556,22 +1550,59 @@ impl RunPublicationGuard {
             .try_send(WriterCommand::Event {
                 run_id: self.inner.run_id.clone(),
                 event,
+                occurred_at,
             })
             .is_err()
         {
             self.inner.gap.store(true, Ordering::Release);
-            self.inner
-                .observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .record(&self.inner.run_id, writer::now());
         }
     }
 }
 
+/// 按上限裁剪一个映射的位置。位置按规则、来源、工具 ID 排序，直接截断会先丢掉排在后面的
+/// `tool_result` 与 `user_message`，所以每种（规则，来源，是否最新输入）先各留第一项，再按顺序补满。
+fn bound_locators(discovery: &mut CredentialDiscovery, client_input: bool) {
+    if !client_input {
+        for locator in &mut discovery.locators {
+            if locator.source_type == "user_message" {
+                locator.latest_input = Some(false);
+            }
+        }
+        discovery.locators.sort_by(|a, b| {
+            (&a.rule_id, &a.source_type, &a.tool_id, a.latest_input).cmp(&(
+                &b.rule_id,
+                &b.source_type,
+                &b.tool_id,
+                b.latest_input,
+            ))
+        });
+        discovery.locators.dedup_by(|a, b| {
+            (&a.rule_id, &a.source_type, &a.tool_id, a.latest_input)
+                == (&b.rule_id, &b.source_type, &b.tool_id, b.latest_input)
+        });
+    }
+    if discovery.locators.len() <= MAX_DISCOVERY_LOCATORS {
+        return;
+    }
+    let mut kinds = std::collections::BTreeSet::new();
+    let (mut kept, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut discovery.locators)
+        .into_iter()
+        .partition(|locator| {
+            kinds.insert((
+                locator.rule_id.clone(),
+                locator.source_type.clone(),
+                locator.latest_input,
+            ))
+        });
+    kept.extend(rest);
+    discovery.omitted_locators = kept.len().saturating_sub(MAX_DISCOVERY_LOCATORS);
+    kept.truncate(MAX_DISCOVERY_LOCATORS);
+    discovery.locators = kept;
+}
+
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
+        let occurred_at = writer::now();
         if !self.admission_queued {
             // 拒绝观测准入不是一个可持久化 Run；只清理已捕获的 Trace，绝不发送孤儿事件。
             self.observation
@@ -1586,6 +1617,7 @@ impl Drop for RunObserverInner {
                     trace: self.trace.take(),
                     pending_finish: None,
                     gap: true,
+                    occurred_at,
                 });
             }
             return;
@@ -1602,6 +1634,7 @@ impl Drop for RunObserverInner {
                             model_turn_id: model_turn_id.clone(),
                             attempt_id,
                         },
+                        occurred_at,
                     })
                     .is_err()
                 {
@@ -1622,6 +1655,7 @@ impl Drop for RunObserverInner {
                     generation_root_id: None,
                 },
                 writer::now(),
+                false,
             ));
         }
         let command = WriterCommand::Finalize {
@@ -1630,6 +1664,7 @@ impl Drop for RunObserverInner {
             trace: self.trace.take(),
             pending_finish,
             gap: *self.gap.get_mut(),
+            occurred_at,
         };
         if let Some(permit) = self.finalization.get_mut().take() {
             permit.send(command);
@@ -2060,7 +2095,9 @@ mod snapshot_tests {
                 discoveries: vec![CredentialDiscovery {
                     rule_ids: vec!["rule".into()],
                     source_types: vec!["user_message".into()],
+                    ..Default::default()
                 }],
+                omitted_discoveries: 0,
             };
             let usage = RunEvent::UsageConfirmed {
                 model_turn_id: "mixed-turn".into(),
@@ -2384,6 +2421,213 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn backlogged_lifecycle_events_keep_capture_times_across_batches_and_deferred_commands()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let blocker = test_run(&observation, "backlog-blocker", facts(Vec::new()));
+        let run = test_run(&observation, "backlog-lifecycle", facts(Vec::new()));
+        observation.flush().await?;
+
+        // 单独持有唯一连接：写者会阻塞在 blocker 的持久化上，后续目标事件只能在
+        // 释放后出队。若时间在出队时采样，必然晚于这里记录的交付时刻。
+        let mut lock = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *lock).await?;
+        blocker.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "blocker-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // 非 Event 命令夹在批处理边界之间，强制走 deferred 路径。
+        run.record(RunEvent::ClientToolResult {
+            tool_id: "deferred-tool".into(),
+            content: serde_json::json!("done"),
+            is_error: false,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://upstream.invalid".into(),
+        });
+        run.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 1,
+            first_token_ms: None,
+            usage: None,
+        });
+        run.record(RunEvent::DeliveryFinished {
+            status: "delivered".into(),
+            reason: None,
+        });
+        let delivered_at = writer::now();
+        while writer::now() <= delivered_at {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sqlx::query("ROLLBACK").execute(&mut *lock).await?;
+        drop(lock);
+
+        run.observe_client_completion(&[], &[], delivered_at, false);
+        run.finish(RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(delivered_at),
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let events: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT kind,occurred_at FROM observation_events WHERE run_id='backlog-lifecycle' AND kind IN ('model_turn_started','client_tool_result','target_attempt_started','target_attempt_finished') ORDER BY sequence",
+        ).fetch_all(&pool).await?;
+        for (kind, occurred_at) in &events {
+            assert!(
+                *occurred_at <= delivered_at,
+                "{kind} sampled {occurred_at} after client delivery {delivered_at}"
+            );
+        }
+        let at = |kind: &str| -> i64 {
+            events
+                .iter()
+                .find(|(event_kind, _)| event_kind.as_str() == kind)
+                .map(|(_, occurred_at)| *occurred_at)
+                .unwrap_or_else(|| panic!("missing {kind} event"))
+        };
+        let turn_at = at("model_turn_started");
+        let tool_at = at("client_tool_result");
+        let attempt_at = at("target_attempt_started");
+        assert!(
+            tool_at - turn_at >= 5,
+            "batched and deferred commands must keep their own source times: turn={turn_at} tool={tool_at}"
+        );
+        assert!(
+            attempt_at - tool_at >= 5,
+            "batched commands must keep their own source times: tool={tool_at} attempt={attempt_at}"
+        );
+
+        let started: (i64, i64) = sqlx::query_as(
+            "SELECT m.started_at,a.started_at FROM model_turn_observations m JOIN target_attempt_observations a ON a.model_turn_id=m.id WHERE m.id='turn' AND a.id='attempt'",
+        ).fetch_one(&pool).await?;
+        assert_eq!(started, (turn_at, attempt_at));
+
+        let finish_payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='backlog-lifecycle' AND kind='run_finished'",
+        ).fetch_one(&pool).await?;
+        let finish_payload = stored_payload(&finish_payload)?;
+        assert_eq!(
+            finish_payload["delivery"]["status"].as_str(),
+            Some("delivered")
+        );
+        let delivered_completed_at = finish_payload["delivery"]["completed_at"]
+            .as_i64()
+            .expect("delivery completion time");
+        assert!(
+            delivered_completed_at <= delivered_at,
+            "DeliveryFinished was resampled at writer dequeue: {delivered_completed_at} > {delivered_at}"
+        );
+        drop(run);
+        drop(blocker);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backlogged_text_and_deferred_tool_result_keep_first_receive_times()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let blocker = test_run(&observation, "backlog-text-blocker", facts(Vec::new()));
+        let run = test_run(&observation, "backlog-text", facts(Vec::new()));
+        observation.flush().await?;
+
+        let mut lock = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *lock).await?;
+        blocker.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "blocker-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record_visible_delta(0, (false, 0), "hello");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record_visible_delta(0, (false, 0), " world");
+        run.record(RunEvent::ClientToolResult {
+            tool_id: "text-tool".into(),
+            content: serde_json::json!("done"),
+            is_error: false,
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        run.record(RunEvent::ClientVisibleContent {
+            text: "hello world".into(),
+            parts: vec![serde_json::json!({"type":"text","text":"hello world"})],
+            block_id: canonical_item_block_id("backlog-text", 0),
+            item: serde_json::json!({"id":"message","role":"assistant","content":"hello world"}),
+            complete: true,
+        });
+        let delivered_at = writer::now();
+        while writer::now() <= delivered_at {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        sqlx::query("ROLLBACK").execute(&mut *lock).await?;
+        drop(lock);
+        observation.flush().await?;
+
+        let text_payload: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE run_id='backlog-text' AND kind='client_visible_content' ORDER BY sequence DESC LIMIT 1",
+        ).fetch_one(&pool).await?;
+        let text_payload = stored_payload(&text_payload)?;
+        let first_received_at = text_payload["first_received_at"]
+            .as_i64()
+            .expect("first received time");
+        assert!(
+            first_received_at <= delivered_at,
+            "first text receive was sampled at writer dequeue: {first_received_at} > {delivered_at}"
+        );
+        let tool_at: i64 = sqlx::query_scalar(
+            "SELECT occurred_at FROM observation_events WHERE run_id='backlog-text' AND kind='client_tool_result'",
+        ).fetch_one(&pool).await?;
+        assert!(
+            tool_at <= delivered_at,
+            "deferred client tool result was sampled at writer dequeue: {tool_at} > {delivered_at}"
+        );
+        assert!(
+            tool_at - first_received_at >= 5,
+            "merged text must retain its first receive time: text={first_received_at} tool={tool_at}"
+        );
+        drop(run);
+        drop(blocker);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn receipt_and_finish_survive_full_queue_before_publication_guard_drops()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -2440,14 +2684,6 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(missing, 0);
-        assert!(
-            observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .runs
-                .contains_key("no-receipt-slot")
-        );
         Ok(())
     }
 
@@ -3828,6 +4064,101 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn credential_hit_events_bound_locators_without_losing_a_rule_source_pair()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "credential-hit-bounds", facts(Vec::new()));
+        let locator =
+            |source: &str, tool: Option<String>, latest: Option<bool>| CredentialLocator {
+                rule_id: "github-pat".into(),
+                source_type: source.into(),
+                tool_id: tool,
+                latest_input: latest,
+            };
+        let hit = |locators| CredentialDiscovery {
+            rule_ids: vec!["github-pat".into()],
+            source_types: vec![
+                "tool_arguments".into(),
+                "tool_result".into(),
+                "user_message".into(),
+            ],
+            locators,
+            omitted_locators: 0,
+            marker: Some("<!--sr:abcdefghijklmnopqrstuvwxyzab-->".into()),
+        };
+        // 引擎按规则、来源、工具 ID 排序；上限截断不能先丢掉排在最后的来源。
+        let mut replay: Vec<_> = (0..120)
+            .map(|n| locator("tool_arguments", Some(format!("call-{n:03}")), None))
+            .collect();
+        replay.push(locator("tool_result", Some("call-000".into()), None));
+        replay.push(locator("user_message", None, Some(true)));
+        run.publication_guard()
+            .expect("live run")
+            .credential_mappings_reused(vec![hit(replay)]);
+        // 内部 Agent 轮次的最后一条用户条目是平台构造的，不能被当作客户端的本次输入。
+        run.for_agent_turn()
+            .publication_guard()
+            .expect("live run")
+            .credential_mappings_created(vec![hit(vec![
+                locator("user_message", None, Some(false)),
+                locator("user_message", None, Some(true)),
+            ])]);
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+
+        let payload = |kind: &str| {
+            let pool = pool.clone();
+            let kind = kind.to_owned();
+            async move {
+                let bytes: Vec<u8> = sqlx::query_scalar(
+                    "SELECT payload FROM observation_events WHERE run_id='credential-hit-bounds' AND kind=?",
+                )
+                .bind(kind)
+                .fetch_one(&pool)
+                .await?;
+                stored_payload(&bytes)
+            }
+        };
+        let reused = payload("credential_mappings_reused").await?;
+        let discovery = &reused["discoveries"][0];
+        let locators = discovery["locators"].as_array().unwrap();
+        assert_eq!(locators.len(), MAX_DISCOVERY_LOCATORS);
+        assert_eq!(discovery["omitted_locators"], 122 - MAX_DISCOVERY_LOCATORS);
+        assert!(
+            locators
+                .iter()
+                .any(|item| item["source_type"] == "tool_result")
+        );
+        assert!(
+            locators
+                .iter()
+                .any(|item| item["source_type"] == "user_message" && item["latest_input"] == true)
+        );
+        assert!(
+            discovery.get("marker").is_none(),
+            "Debug 关闭的 Run 不记录占位符"
+        );
+
+        let created = payload("credential_mappings_created").await?;
+        let locators = created["discoveries"][0]["locators"].as_array().unwrap();
+        assert_eq!(locators.len(), 1);
+        assert_eq!(locators[0]["latest_input"], false);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn verified_parent_historical_user_preview_is_not_republished() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
 
@@ -4129,6 +4460,8 @@ mod snapshot_tests {
             ("first", "failed", now + 100, false, live_until),
             ("second", "interrupted", now + 200, false, live_until),
             ("tied", "completed", now + 300, false, live_until),
+            // 只有复用事件的交互新增数为零，仍保留在默认列表中并带逐行 gap。
+            ("reused-only", "completed", now + 250, true, live_until),
             ("expired-newer", "completed", now + 400, false, live_until),
             // 已过期交互的载荷即使无法解码也不能进入当前页。
             ("expired-owner", "completed", now + 500, false, 0),
@@ -4151,13 +4484,14 @@ mod snapshot_tests {
                 &["tool_result"],
                 live_until,
             ),
-            // 同一交互的重复规则与来源只聚合一次。
+            // 升级前的事件没有逐项位置；同一映射的规则与来源组合是原位置的最佳还原，
+            // 重复来源只聚合一次。
             (
                 3,
                 Some("first"),
                 now - 10,
                 &["rule-a", "rule-c"],
-                &["tool_result", "user_message", "tool_result"],
+                &["tool_result", "tool_result"],
                 live_until,
             ),
             // 未归属交互的发现不进入列表。
@@ -4169,7 +4503,7 @@ mod snapshot_tests {
                 &["system_history"],
                 live_until,
             ),
-            // 同一最新毫秒按交互 ID 降序稳定排序。
+            // 同一最新毫秒按交互 ID 降序稳定排序；tied 与 reused-only 共享该时间。
             (
                 5,
                 Some("tied"),
@@ -4202,10 +4536,43 @@ mod snapshot_tests {
                 .as_bytes()
                 .into(),
         )?;
-        // 过期事件若被送去解码会使整页失败；过期交互同理。事件 10 的
+        // 过期事件若被送去解码会使整页失败；过期交互同理。事件 12 的
         // occurred_at 落在 first 的发现时间上界内，只有到期过滤能排除它。
         let undecodable =
             crate::storage_codec::encode(b"not a credential discovery payload".as_slice().into())?;
+        // 升级后的复用事件带逐项位置，规则与来源不能被跨项误配对。
+        let reused = crate::storage_codec::encode(
+            serde_json::json!({
+                "kind": "credential_mappings_reused",
+                "discoveries": [{
+                    "rule_ids": ["rule-a", "rule-d"],
+                    "source_types": ["user_message", "tool_result"],
+                    "locators": [
+                        {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false},
+                        {"rule_id": "rule-d", "source_type": "tool_result", "tool_id": "call-1"},
+                    ],
+                }]
+            })
+            .to_string()
+            .as_bytes()
+            .into(),
+        )?;
+        // 只有复用事件的交互：新增数为零，但仍是真实命中。
+        let reused_only = crate::storage_codec::encode(
+            serde_json::json!({
+                "kind": "credential_mappings_reused",
+                "discoveries": [{
+                    "rule_ids": ["rule-e"],
+                    "source_types": ["user_message"],
+                    "locators": [
+                        {"rule_id": "rule-e", "source_type": "user_message", "latest_input": true},
+                    ],
+                }]
+            })
+            .to_string()
+            .as_bytes()
+            .into(),
+        )?;
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
                 for (id, status, last_active, gap, expires_at) in interactions {
@@ -4220,14 +4587,21 @@ mod snapshot_tests {
                         .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
                         .execute(pool).await?;
                 }
+                // 复用只增加命中时间与复用配对，不增加新增计数。
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,?,'first','credential_mappings_reused',?,?)")
+                    .bind(now - 5).bind(reused).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,?,'reused-only','credential_mappings_reused',?,?)")
+                    .bind(now - 10).bind(reused_only).bind(live_until)
+                    .execute(pool).await?;
                 // 非发现事件既不参与最新发现时间，也不贡献规则或来源。
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,?,'first','run_admitted',?,?)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,?,'first','run_admitted',?,?)")
                     .bind(now - 5).bind(unrelated).bind(live_until)
                     .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,?,'expired-owner','credential_mappings_created',?,?)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (11,?,'expired-owner','credential_mappings_created',?,?)")
                     .bind(now - 1).bind(undecodable.clone()).bind(live_until)
                     .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,?,'first','credential_mappings_created',?,0)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (12,?,'first','credential_mappings_created',?,0)")
                     .bind(now - 20).bind(undecodable)
                     .execute(pool).await?;
             }
@@ -4244,13 +4618,20 @@ mod snapshot_tests {
                         .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
                         .execute(pool).await?;
                 }
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,$1,'first','run_admitted',$2,$3)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,$1,'first','credential_mappings_reused',$2,$3)")
+                    .bind(now - 5).bind(reused).bind(live_until)
+                    .execute(pool).await?;
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,$1,'reused-only','credential_mappings_reused',$2,$3)")
+                    .bind(now - 10).bind(reused_only).bind(live_until)
+                    .execute(pool).await?;
+                // 非发现事件既不参与最新发现时间，也不贡献规则或来源。
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,$1,'first','run_admitted',$2,$3)")
                     .bind(now - 5).bind(unrelated).bind(live_until)
                     .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,$1,'expired-owner','credential_mappings_created',$2,$3)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (11,$1,'expired-owner','credential_mappings_created',$2,$3)")
                     .bind(now - 1).bind(undecodable.clone()).bind(live_until)
                     .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,$1,'first','credential_mappings_created',$2,0)")
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (12,$1,'first','credential_mappings_created',$2,0)")
                     .bind(now - 20).bind(undecodable)
                     .execute(pool).await?;
             }
@@ -4262,96 +4643,158 @@ mod snapshot_tests {
         store: &store::ObservationStore,
         now: i64,
     ) -> anyhow::Result<()> {
+        let hit = |rule_id: &str, source_type: &str, latest_input| CredentialHit {
+            rule_id: rule_id.into(),
+            source_type: source_type.into(),
+            latest_input,
+        };
         let all = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: None,
                 limit: Some(10),
+                ..Default::default()
             })
             .await?;
-        assert!(all.observation_gap);
         assert!(all.next_cursor.is_none());
         let ids: Vec<_> = all
             .items
             .iter()
             .map(|item| item.interaction_id.as_str())
             .collect();
-        assert_eq!(ids, ["tied", "first", "second", "expired-newer"]);
+        assert_eq!(
+            ids,
+            ["first", "tied", "reused-only", "second", "expired-newer"]
+        );
 
-        let tied = &all.items[0];
-        assert_eq!(tied.discovered_at, now - 10);
-        assert_eq!(tied.new_credential_count, 1);
-        assert_eq!(tied.rule_ids, ["rule-tie"]);
-        assert_eq!(tied.source_types, ["system_or_history"]);
-        assert_eq!(tied.status, "completed");
-        assert!(!tied.observation_gap);
-
-        let first = &all.items[1];
-        assert_eq!(first.discovered_at, now - 10);
+        let first = &all.items[0];
+        // 默认筛选包含复用：行时间是最近一次命中，不是最近一次新增。
+        assert_eq!(first.discovered_at, now - 5);
         assert_eq!(first.new_credential_count, 2);
-        assert_eq!(first.rule_ids, ["rule-a", "rule-c"]);
-        assert_eq!(first.source_types, ["tool_result", "user_message"]);
+        // 升级前的事件没有逐项位置，按单个映射的规则集合与来源集合组合还原。
+        assert_eq!(
+            first.created,
+            [
+                hit("rule-a", "tool_result", None),
+                hit("rule-a", "user_message", None),
+                hit("rule-c", "tool_result", None),
+            ]
+        );
+        assert_eq!(
+            first.reused,
+            [
+                hit("rule-a", "user_message", Some(false)),
+                hit("rule-d", "tool_result", None),
+            ]
+        );
         assert_eq!(first.status, "failed");
         assert!(!first.observation_gap);
 
-        let second = &all.items[2];
+        let tied = &all.items[1];
+        assert_eq!(tied.discovered_at, now - 10);
+        assert_eq!(tied.new_credential_count, 1);
+        assert_eq!(tied.created, [hit("rule-tie", "system_or_history", None)]);
+        assert!(tied.reused.is_empty());
+        assert_eq!(tied.status, "completed");
+        assert!(!tied.observation_gap);
+
+        // 只有复用事件的交互新增数为零，仍保留在默认列表并保留逐行 gap。
+        let reused_only = &all.items[2];
+        assert_eq!(reused_only.discovered_at, now - 10);
+        assert_eq!(reused_only.new_credential_count, 0);
+        assert!(reused_only.created.is_empty());
+        assert_eq!(
+            reused_only.reused,
+            [hit("rule-e", "user_message", Some(true))]
+        );
+        assert!(reused_only.observation_gap);
+
+        let second = &all.items[3];
         assert_eq!(second.discovered_at, now - 20);
         assert_eq!(second.new_credential_count, 1);
-        assert_eq!(second.rule_ids, ["rule-b"]);
-        assert_eq!(second.source_types, ["tool_result"]);
+        assert_eq!(second.created, [hit("rule-b", "tool_result", None)]);
+        assert!(second.reused.is_empty());
         assert_eq!(second.status, "interrupted");
 
-        let expired_newer = &all.items[3];
+        let expired_newer = &all.items[4];
         assert_eq!(expired_newer.discovered_at, now - 40);
         assert_eq!(expired_newer.new_credential_count, 1);
-        assert_eq!(expired_newer.rule_ids, ["rule-live"]);
-        assert_eq!(expired_newer.source_types, ["user_message"]);
+        assert_eq!(
+            expired_newer.created,
+            [hit("rule-live", "user_message", None)]
+        );
+        assert!(expired_newer.reused.is_empty());
 
         // 游标切在同一毫秒的两条发现之间，仍不能重复或遗漏交互。
-        let first_page = store
+        let mut cursor: Option<String> = None;
+        for expected in ["first", "tied", "reused-only", "second", "expired-newer"] {
+            let page = store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    cursor: cursor.take(),
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .await?;
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].interaction_id, expected);
+            cursor = page.next_cursor;
+        }
+        assert!(cursor.is_none());
+
+        let created = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: None,
-                limit: Some(1),
+                kind: CredentialHitKind::Created,
+                limit: Some(10),
+                ..Default::default()
             })
             .await?;
-        let first_ids: Vec<_> = first_page
+        let ids: Vec<_> = created
             .items
             .iter()
             .map(|item| item.interaction_id.as_str())
             .collect();
-        assert_eq!(first_ids, ["tied"]);
-        let first_cursor = first_page.next_cursor.expect("more discoveries after tied");
-        let second_page = store
+        assert_eq!(ids, ["tied", "first", "second", "expired-newer"]);
+        // 仅新增时不看复用事件的时间，也不返回复用配对。
+        let item = &created.items[1];
+        assert_eq!(item.interaction_id, "first");
+        assert_eq!(item.discovered_at, now - 10);
+        assert_eq!(item.new_credential_count, 2);
+        assert_eq!(item.created.len(), 3);
+        assert!(item.reused.is_empty());
+
+        let reused = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: Some(first_cursor),
-                limit: Some(1),
+                kind: CredentialHitKind::Reused,
+                limit: Some(10),
+                ..Default::default()
             })
             .await?;
-        let second_ids: Vec<_> = second_page
+        let ids: Vec<_> = reused
             .items
             .iter()
             .map(|item| item.interaction_id.as_str())
             .collect();
-        assert_eq!(second_ids, ["first"]);
-        let second_cursor = second_page.next_cursor.expect("older discoveries remain");
-        let last_page = store
-            .credential_discoveries(CredentialDiscoveryQuery {
-                cursor: Some(second_cursor),
-                limit: Some(2),
-            })
-            .await?;
-        let last_ids: Vec<_> = last_page
-            .items
-            .iter()
-            .map(|item| item.interaction_id.as_str())
-            .collect();
-        assert_eq!(last_ids, ["second", "expired-newer"]);
-        assert!(last_page.next_cursor.is_none());
+        assert_eq!(ids, ["first", "reused-only"]);
+        let item = &reused.items[0];
+        assert_eq!(item.discovered_at, now - 5);
+        assert_eq!(item.new_credential_count, 0);
+        assert!(item.created.is_empty());
+        assert_eq!(
+            item.reused,
+            [
+                hit("rule-a", "user_message", Some(false)),
+                hit("rule-d", "tool_result", None),
+            ]
+        );
+        let item = &reused.items[1];
+        assert_eq!(item.new_credential_count, 0);
+        assert!(item.created.is_empty());
+        assert_eq!(item.reused.len(), 1);
+        assert!(item.observation_gap);
 
         assert!(
             store
                 .credential_discoveries(CredentialDiscoveryQuery {
                     cursor: Some("invalid".into()),
-                    limit: None,
+                    ..Default::default()
                 })
                 .await
                 .is_err()
@@ -4372,7 +4815,6 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
         assert!(empty.items.is_empty());
-        assert!(empty.observation_gap);
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
                 sqlx::query("UPDATE interaction_observations SET expires_at=0")
@@ -4389,7 +4831,6 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
         assert!(expired.items.is_empty());
-        assert!(!expired.observation_gap);
         Ok(())
     }
 
@@ -4696,33 +5137,8 @@ mod snapshot_tests {
         Ok(())
     }
 
-    #[test]
-    fn undurable_gaps_follow_current_retention_and_clear_generations() {
-        let day = 86_400_000;
-        let mut gaps = UnpersistedGaps::default();
-        gaps.record("completed", day);
-        assert!(!gaps.visible(3 * day, 1));
-        assert!(gaps.visible(3 * day, 7));
-        assert!(!gaps.visible(3 * day, 0));
-
-        let covered = gaps.runs.clone();
-        // Even a loss in the same millisecond must survive the in-flight clear.
-        gaps.record("completed", day);
-        gaps.clear_removed(&covered, &["completed".into()]);
-        assert!(gaps.visible(day, 1));
-        let covered = gaps.runs.clone();
-        gaps.clear_removed(&covered, &["completed".into()]);
-        assert!(!gaps.visible(day, 1));
-
-        let covered = gaps.runs.clone();
-        gaps.record("new-admission", day);
-        gaps.clear_removed(&covered, &[]);
-        assert!(gaps.visible(day, 1));
-    }
-
     #[tokio::test]
-    async fn clearing_gaps_preserves_active_discoveries_and_unknown_admissions()
-    -> anyhow::Result<()> {
+    async fn clearing_history_preserves_active_interaction_discoveries() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), true).await;
@@ -4749,11 +5165,22 @@ mod snapshot_tests {
         };
         let active = make_run("active");
         let completed = make_run("completed");
+        let discovery = |rule: &str| CredentialDiscovery {
+            rule_ids: vec![rule.into()],
+            source_types: vec!["user_message".into()],
+            ..Default::default()
+        };
         active.record(RunEvent::CredentialMappingsCreated {
-            discoveries: vec![CredentialDiscovery {
-                rule_ids: vec!["rule".into()],
-                source_types: vec!["user_message".into()],
-            }],
+            discoveries: vec![discovery("created")],
+            omitted_discoveries: 0,
+        });
+        active.record(RunEvent::CredentialMappingsReused {
+            discoveries: vec![discovery("reused")],
+            omitted_discoveries: 0,
+        });
+        completed.record(RunEvent::CredentialMappingsCreated {
+            discoveries: vec![discovery("completed")],
+            omitted_discoveries: 0,
         });
         completed.finish(RunOutcome {
             client_output_committed: false,
@@ -4765,31 +5192,15 @@ mod snapshot_tests {
             generation_root_id: None,
         });
         observation.flush().await?;
-        {
-            let mut gaps = observation.inner.unpersisted_gaps.lock();
-            gaps.record("completed", writer::now());
-        }
         observation.clear_history().await?;
         let page = observation
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
-        assert!(!page.observation_gap);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].status, "running");
         assert_eq!(page.items[0].new_credential_count, 1);
-        let active_interaction = page.items[0].interaction_id.clone();
-        observation
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .record("active", writer::now());
-        observation.clear_history().await?;
-        let page = observation
-            .credential_discoveries(CredentialDiscoveryQuery::default())
-            .await?;
-        assert!(page.observation_gap);
-        assert_eq!(page.items[0].interaction_id, active_interaction);
-        assert_eq!(page.items[0].new_credential_count, 1);
+        assert_eq!(page.items[0].created.len(), 1);
+        assert_eq!(page.items[0].reused.len(), 1);
 
         active.finish(RunOutcome {
             client_output_committed: false,
@@ -4802,39 +5213,11 @@ mod snapshot_tests {
         });
         observation.clear_history().await?;
         assert!(
-            !observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
-        );
-        let mut clearing = Box::pin(observation.clear_history());
-        // The single-threaded runtime cannot consume the writer barrier in this poll.
-        assert!(futures::poll!(clearing.as_mut()).is_pending());
-        observation
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .record("lost-admission", writer::now());
-        clearing.await?;
-        assert!(
             observation
                 .credential_discoveries(CredentialDiscoveryQuery::default())
                 .await?
-                .observation_gap
-        );
-        observation.clear_history().await?;
-        assert!(
-            observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
-        );
-        observation.set_retention_days(0).await?;
-        assert!(
-            !observation
-                .credential_discoveries(CredentialDiscoveryQuery::default())
-                .await?
-                .observation_gap
+                .items
+                .is_empty()
         );
         drop(active);
         drop(completed);

@@ -1,26 +1,45 @@
 <script lang="ts">
-import type { Snippet } from 'svelte'
+import { tick, type Snippet } from 'svelte'
 import * as m from '#lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
+import type { CredentialHitHighlight } from '#lib/credential-hit-highlights.js'
 import { formatDuration, formatLogTime, formatNumber, formatTps } from '#lib/format.js'
 import ObservationConversation from '#lib/components/observation-conversation.svelte'
 import ObservationLogViewport from '#lib/components/observation-log-viewport.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
-import { failureOriginLabel, observationDebugStatusLabel, observationStatusLabel } from '#lib/observation-labels.js'
+import {
+  clientErrorTitle,
+  clientErrorTypeLabel,
+  clientErrorTypeTone,
+  failureOriginLabel,
+  observationDebugStatusLabel,
+  observationStatusLabel,
+  upstreamErrorOutcomeLabel,
+  upstreamErrorOutcomeTone,
+} from '#lib/observation-labels.js'
 import { interactionDisplayStatus } from '#lib/observation-chain-visibility.js'
 import { observationEventSummary, observationStatusTone } from '#lib/observation-event-summary.js'
-import { deriveTimeline, itemEvents, itemKey, processGroup, type StreamItem } from '#lib/observation-timeline.js'
+import {
+  deriveEventItems,
+  deriveTimeline,
+  itemEvents,
+  itemKey,
+  processGroup,
+  type StreamItem,
+} from '#lib/observation-timeline.js'
 import type {
+  ClientErrorDetail,
   InteractionDetail,
   LiveContentBlock,
   ObservationEvent,
   RunDetail,
-  FailedRequestDetail,
+  UpstreamErrorDetail,
 } from '#lib/types.js'
+import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
@@ -29,7 +48,8 @@ import * as Collapsible from '#lib/components/ui/collapsible/index.js'
 
 interface Props {
   interaction?: InteractionDetail
-  failure?: FailedRequestDetail
+  clientError?: ClientErrorDetail
+  upstreamError?: UpstreamErrorDetail
   error?: string
   onretry?: () => void
   oninteraction?: () => void
@@ -40,6 +60,7 @@ interface Props {
   liveCapacity?: boolean
   olderLoading?: boolean
   onolder?: () => Promise<void>
+  credentialHits?: CredentialHitHighlight
   loading?: boolean
   activeTab: string
   onclose: () => void
@@ -49,7 +70,8 @@ interface Props {
 
 let {
   interaction,
-  failure,
+  clientError,
+  upstreamError,
   error,
   onretry,
   oninteraction,
@@ -60,6 +82,7 @@ let {
   liveCapacity = false,
   olderLoading = false,
   onolder,
+  credentialHits,
   loading = false,
   activeTab = $bindable(),
   onclose,
@@ -67,7 +90,13 @@ let {
   onlatest,
 }: Props = $props()
 
-const timeline = $derived(deriveTimeline(interaction, failure))
+const timeline = $derived(deriveTimeline(interaction, clientError))
+const upstreamItems = $derived(upstreamError ? deriveEventItems(upstreamError.events) : [])
+const title = $derived(
+  upstreamError
+    ? (upstreamError.error.error.code ?? upstreamError.error.error.message ?? m.observation_upstream_errors())
+    : timeline.title,
+)
 
 let flashRun = $state<string | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | undefined
@@ -79,6 +108,12 @@ function jumpToRun(runId: string | null) {
   flashTimer = setTimeout(() => {
     if (flashRun === runId) flashRun = null
   }, 1600)
+}
+
+async function showRunInDiagnostics(runId: string) {
+  activeTab = 'diagnostics'
+  await tick()
+  jumpToRun(runId)
 }
 </script>
 
@@ -303,7 +338,7 @@ function jumpToRun(runId: string | null) {
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
   <div class="min-w-0">
-    <h2 class="font-structural truncate text-lg font-semibold">{timeline.title}</h2>
+    <h2 class="font-structural truncate text-lg font-semibold">{title}</h2>
   </div>
   <Button variant="ghost" size="icon" aria-label={m.common_close()} onclick={onclose}><XIcon /></Button>
 </header>
@@ -323,52 +358,185 @@ function jumpToRun(runId: string | null) {
   <Alert.Root variant="destructive"><Alert.Title>{m.observation_live_save_failed()}</Alert.Title></Alert.Root>
 {/if}
 
-{#if error && (interaction || failure)}
+{#if error && (interaction || clientError || upstreamError)}
   <RequestFailure message={error} retry={onretry} />
 {/if}
-{#if loading && !interaction && !failure}
+{#if loading && !interaction && !clientError && !upstreamError}
   <div class="grid flex-1 place-items-center">
     <p class="text-sm text-muted-foreground">{m.observation_loading_details()}</p>
   </div>
-{:else if error && !interaction && !failure}
+{:else if error && !interaction && !clientError && !upstreamError}
   <RequestFailure message={error} retry={onretry} />
-{:else if failure}
+{:else if upstreamError}
   <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
     <Alert.Root variant="destructive" class="max-w-(--reading-max-width)">
-      <Alert.Title>{failure.request.error.code ?? m.observation_request_failed()}</Alert.Title>
+      <Alert.Title>{upstreamError.error.error.code ?? m.observation_upstream_errors()}</Alert.Title>
       <Alert.Description>
         <p class="whitespace-pre-wrap break-words">
-          {failure.request.error.message ?? m.observation_failure_diagnostic_missing()}
+          {upstreamError.error.error.message ?? m.observation_failure_diagnostic_missing()}
         </p>
-        {#if failure.request.error.status_code !== null}<p>HTTP {failure.request.error.status_code}</p>{/if}
+        <div class="flex flex-wrap items-center gap-2">
+          <Badge variant={upstreamErrorOutcomeTone(upstreamError.error.outcome)}>
+            {upstreamErrorOutcomeLabel(upstreamError.error.outcome)}
+          </Badge>
+          {#if upstreamError.error.error.status_code !== null}
+            <span class="font-technical text-xs">HTTP {upstreamError.error.error.status_code}</span>
+          {/if}
+          {#if upstreamError.error.error.upstream_code}
+            <span class="font-technical text-xs">
+              {m.observation_upstream_error_code()}: {upstreamError.error.error.upstream_code}
+            </span>
+          {/if}
+        </div>
+      </Alert.Description>
+    </Alert.Root>
+    <dl class="detail-grid failure-facts">
+      <div>
+        <dt>{m.observation_upstream_attempt_id()}</dt>
+        <dd><TechnicalValue value={upstreamError.error.id} copyable /></dd>
+      </div>
+      <div>
+        <dt>{m.observation_upstream_provider()}</dt>
+        <dd>{upstreamError.error.provider_name}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_upstream_model()}</dt>
+        <dd>{upstreamError.error.upstream_model ?? '—'}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_upstream_route_model()}</dt>
+        <dd>{upstreamError.error.model_display_name ?? upstreamError.error.model ?? '—'}</dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_client()}</dt>
+        <dd>{upstreamError.error.api_key_name ?? upstreamError.error.client ?? '—'}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_http_status()}</dt>
+        <dd class="font-technical">
+          {upstreamError.error.error.status_code === null ? '—' : upstreamError.error.error.status_code}
+        </dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_origin()}</dt>
+        <dd>{failureOriginLabel(upstreamError.error.error.source) ?? '—'}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_error_code()}</dt>
+        <dd><TechnicalValue value={upstreamError.error.error.code ?? '—'} /></dd>
+      </div>
+      <div>
+        <dt>{m.observation_upstream_error_code()}</dt>
+        <dd><TechnicalValue value={upstreamError.error.error.upstream_code ?? '—'} /></dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_time()}</dt>
+        <dd>{formatLogTime(upstreamError.error.started_at)}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_duration()}</dt>
+        <dd>{upstreamError.error.duration_ms === null ? '—' : formatDuration(upstreamError.error.duration_ms)}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_debug()}</dt>
+        <dd>{observationDebugStatusLabel(upstreamError.error.debug_status)}</dd>
+      </div>
+    </dl>
+    {#if upstreamError.error.observation_gap}
+      <p role="status">{m.observation_failure_diagnostic_missing()}</p>
+    {/if}
+    {#each upstreamError.trace?.reasons ?? [] as reason (reason)}
+      <p class="max-w-(--reading-max-width) whitespace-pre-wrap break-words">{reason}</p>
+    {/each}
+    <div class="flex flex-wrap gap-3">
+      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>{m.observation_open_interaction()}</Button
+        >{/if}
+      <Button variant="outline" onclick={onbundle}
+        ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
+    </div>
+    <h3 class="font-structural font-semibold">{m.observation_upstream_attempts()}</h3>
+    {#if upstreamError.attempts.length === 0}
+      <p class="text-sm text-muted-foreground">{m.observation_details_unavailable()}</p>
+    {:else}
+      <ol class="attempt-list">
+        {#each upstreamError.attempts as attempt, index (attempt.id)}
+          <li class="attempt" data-current={attempt.id === upstreamError.error.id || undefined}>
+            <div class="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+              <span class="font-medium">{m.observation_upstream_attempt({ index: index + 1 })}</span>
+              <span class="font-technical text-xs tabular-nums text-muted-foreground"
+                >{formatLogTime(attempt.started_at)} · {attempt.duration_ms === null
+                  ? '—'
+                  : formatDuration(attempt.duration_ms)}</span>
+            </div>
+            <div class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+              <span class="min-w-0 break-words">{attempt.upstream_model ?? '—'}</span>
+              <span class="text-muted-foreground">{attempt.provider_name}</span>
+              <span class="font-technical text-xs tabular-nums">
+                {[
+                  attempt.status_code === null ? null : `HTTP ${attempt.status_code}`,
+                  attempt.error_code,
+                  failureOriginLabel(attempt.error_source),
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
+            </div>
+          </li>
+        {/each}
+      </ol>
+    {/if}
+    <h3 class="font-structural font-semibold">{m.observation_diagnostics()}</h3>
+    <ol class="stream">
+      {#each upstreamItems as item (itemKey(item))}
+        {@render streamItem(item)}
+      {/each}
+    </ol>
+  </div>
+{:else if clientError}
+  <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+    <Alert.Root variant="destructive" class="max-w-(--reading-max-width)">
+      <Alert.Title>{clientError.request.error.code ?? clientErrorTitle(clientError.request.type)}</Alert.Title>
+      <Alert.Description>
+        <p class="whitespace-pre-wrap break-words">
+          {clientError.request.error.message ?? m.observation_failure_diagnostic_missing()}
+        </p>
+        {#if clientError.request.error.status_code !== null}<p>HTTP {clientError.request.error.status_code}</p>{/if}
       </Alert.Description>
     </Alert.Root>
     <dl class="detail-grid failure-facts">
       <div>
         <dt>{m.failed_request_request_id()}</dt>
-        <dd>{failure.request.request_id}</dd>
+        <dd>{clientError.request.request_id}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_client_error_type()}</dt>
+        <dd>
+          <Badge variant={clientErrorTypeTone(clientError.request.type)}>
+            {clientErrorTypeLabel(clientError.request.type)}
+          </Badge>
+        </dd>
       </div>
       <div>
         <dt>{m.failed_request_origin()}</dt>
-        <dd>{failureOriginLabel(failure.request.error.source) ?? '—'}</dd>
+        <dd>{failureOriginLabel(clientError.request.error.source) ?? '—'}</dd>
       </div>
       <div>
         <dt>{m.failed_request_time()}</dt>
-        <dd>{formatLogTime(failure.request.started_at)}</dd>
+        <dd>{formatLogTime(clientError.request.started_at)}</dd>
       </div>
       <div>
         <dt>{m.observation_duration()}</dt>
-        <dd>{failure.request.duration_ms === null ? '—' : formatDuration(failure.request.duration_ms)}</dd>
+        <dd>{clientError.request.duration_ms === null ? '—' : formatDuration(clientError.request.duration_ms)}</dd>
       </div>
       <div>
         <dt>{m.observation_debug()}</dt>
-        <dd>{observationDebugStatusLabel(failure.request.debug_status)}</dd>
+        <dd>{observationDebugStatusLabel(clientError.request.debug_status)}</dd>
       </div>
     </dl>
-    {#if failure.request.observation_gap}
+    {#if clientError.request.observation_gap}
       <p role="status">{m.observation_failure_diagnostic_missing()}</p>
     {/if}
-    {#each failure.trace?.reasons ?? [] as reason (reason)}
+    {#each clientError.trace?.reasons ?? [] as reason (reason)}
       <p class="max-w-(--reading-max-width) whitespace-pre-wrap break-words">{reason}</p>
     {/each}
     <div class="flex flex-wrap gap-3">
@@ -406,7 +574,9 @@ function jumpToRun(runId: string | null) {
             {liveActive}
             {liveContentEpoch}
             {olderLoading}
-            {onolder} />
+            {onolder}
+            {credentialHits}
+            onjumprun={(runId: string) => void showRunInDiagnostics(runId)} />
         {/key}
       {/if}
     </Tabs.Content>
@@ -759,6 +929,28 @@ button.run-parent:focus-visible {
 }
 .failure-facts {
   font-size: 0.8rem;
+}
+.attempt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.attempt {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.5rem 0.6rem;
+  font-size: 0.8rem;
+}
+.attempt[data-current] {
+  border-color: var(--destructive);
+  background: color-mix(in oklab, var(--destructive) 6%, var(--background));
 }
 :global(.stream-alert) {
   width: auto;

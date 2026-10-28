@@ -1314,7 +1314,7 @@ async fn suspended_allowance_returns_native_quota_errors_without_dispatch_or_ret
             .allowance_suspended
     );
     gateway.admin().observation_flush().await?;
-    let failed = gateway.admin().failed_requests(Default::default()).await?;
+    let failed = gateway.admin().client_errors(Default::default()).await?;
     assert!(
         failed
             .items

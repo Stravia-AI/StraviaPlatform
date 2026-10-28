@@ -817,9 +817,17 @@
     url = "https://registry.npmjs.org/@tanstack/svelte-table/-/svelte-table-9.3.1.tgz";
     hash = "sha512-4GenQN3ymVTJvsoRTzK64IlponjX17Db9FL2A+07kjdZBvHqhZiOFspsRqwN4QBmI1+yycnBH5k9w73z8ocUrg==";
   };
+  "@tanstack/svelte-virtual@3.13.49" = fetchurl {
+    url = "https://registry.npmjs.org/@tanstack/svelte-virtual/-/svelte-virtual-3.13.49.tgz";
+    hash = "sha512-0P4dw7IF0ItwP3E/sye1rHfMkRPtJnX73VUjVaO6iGJmYVfXyVHnZ21SsWaY5OdTBYnBxZnJdBptuVgSI5zTKQ==";
+  };
   "@tanstack/table-core@9.3.1" = fetchurl {
     url = "https://registry.npmjs.org/@tanstack/table-core/-/table-core-9.3.1.tgz";
     hash = "sha512-zQvlxSNi2qGM3L4jh85Z6hqMfdIR5qOfD9KHOU32nuKFJGN0RlJ7UvV1lsPb1fPVhpFYI0VP3jJGxLdLDpTKjQ==";
+  };
+  "@tanstack/virtual-core@3.19.8" = fetchurl {
+    url = "https://registry.npmjs.org/@tanstack/virtual-core/-/virtual-core-3.19.8.tgz";
+    hash = "sha512-Oz/SYBo/aVPyQkwtOw7Q23myITUgFIof2glQqydYJAPL6mH2SkJDkvDKZTklB+7gv5jGLZQhyTcd7SO1A1EODQ==";
   };
   "@tauri-apps/api@2.12.4" = fetchurl {
     url = "https://registry.npmjs.org/@tauri-apps/api/-/api-2.12.4.tgz";

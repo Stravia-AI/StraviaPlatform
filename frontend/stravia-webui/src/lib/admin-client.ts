@@ -34,10 +34,13 @@ import type {
   ForestQuery,
   RootChangesQuery,
   RootChangesPage,
-  FailedRequestQuery,
-  FailedRequestPage,
-  FailedRequestDetail,
-  FailedRequestSummary,
+  ClientErrorQuery,
+  ClientErrorPage,
+  ClientErrorDetail,
+  ClientErrorSummary,
+  UpstreamErrorQuery,
+  UpstreamErrorPage,
+  UpstreamErrorDetail,
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
@@ -330,13 +333,17 @@ export const admin = {
     delete: (id: string) => request<void>('DELETE', `/api-keys/${id}`),
   },
   observations: {
-    failures: (query: FailedRequestQuery) =>
-      request<FailedRequestPage>('GET', `/observations/failed-requests${queryString(query)}`),
-    failure: (kind: FailedRequestSummary['kind'], id: string) =>
-      request<FailedRequestDetail>(
+    clientErrors: (query: ClientErrorQuery) =>
+      request<ClientErrorPage>('GET', `/observations/client-errors${queryString(query)}`),
+    clientError: (kind: ClientErrorSummary['kind'], id: string) =>
+      request<ClientErrorDetail>(
         'GET',
-        `/observations/failed-requests/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
+        `/observations/client-errors/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
       ),
+    upstreamErrors: (query: UpstreamErrorQuery) =>
+      request<UpstreamErrorPage>('GET', `/observations/upstream-errors${queryString(query)}`),
+    upstreamError: (attemptId: string) =>
+      request<UpstreamErrorDetail>('GET', `/observations/upstream-errors/${encodeURIComponent(attemptId)}`),
     forest: (query: ForestQuery) => request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
     changes: (query: RootChangesQuery) => request<RootChangesPage>('POST', '/observations/interactions/changes', query),
     interaction: (id: string, query: ForestQuery = {}) =>

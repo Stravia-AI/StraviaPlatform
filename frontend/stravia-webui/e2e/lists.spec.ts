@@ -39,7 +39,7 @@ async function mockRedaction(page: Page) {
     }),
   )
   await page.route('**/api/v1/reversible-redaction/discoveries?**', (route) =>
-    route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+    route.fulfill({ json: { data: { items: [], next_cursor: null } } }),
   )
   await page.route('**/api/v1/reversible-redaction/custom-rules', (route) =>
     route.fulfill({ json: { data: [customRule] } }),

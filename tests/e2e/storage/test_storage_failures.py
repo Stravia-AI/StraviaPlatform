@@ -8,6 +8,8 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -188,6 +190,68 @@ def streaming_upstream():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.mark.parametrize('backend', ['sqlite', 'postgres'])
+def test_observation_queue_preserves_model_event_times(
+    backend, stravia_binary, storage_runtime, tmp_path,
+):
+    hold_port = find_free_port()
+    controls = {'STRAVIA_TEST_OBSERVATION_QUEUE_HOLD_ADDR': f'127.0.0.1:{hold_port}'}
+    with isolated_host('server', backend, stravia_binary, storage_runtime, tmp_path, controls) as (env, _, log):
+        with streaming_upstream() as (upstream, entered, release, _):
+            env['mock'] = f'http://127.0.0.1:{upstream.server_port}'
+            model = 'queued-observation-event-times'
+            route, key = _create_route(env, model, retry_budget=0)
+            hold = socket.create_connection(('127.0.0.1', hold_port), timeout=20)
+            try:
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_HELD')
+                with ThreadPoolExecutor(max_workers=1) as clients:
+                    response = clients.submit(
+                        http_request, 'POST', env['proxy'] + '/v1/chat/completions',
+                        {'model': model, 'stream': True,
+                         'messages': [{'role': 'user', 'content': 'Report the synthetic result.'}]},
+                        {'Authorization': f'Bearer {key}'},
+                    )
+                    try:
+                        assert entered.wait(20), 'model request did not reach the local upstream'
+                        started_by = time.time_ns() // 1_000_000
+                        release.set()
+                        status, body = response.result(timeout=20)
+                        delivered_by = time.time_ns() // 1_000_000
+                        assert status == 200 and '[DONE]' in body, body
+                    finally:
+                        release.set()
+            finally:
+                hold.close()
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_RELEASED')
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_DRAINED')
+
+            interaction = _wait_for(
+                'completed request observed after releasing the queue',
+                lambda: next(iter(_route_interactions(env, route)), None),
+            )
+            detail = _wait_for(
+                'queued lifecycle events persisted',
+                lambda: _finished_detail(env, interaction['id']),
+            )
+            assert len(detail['runs']) == 1, detail
+            run = detail['runs'][0]
+            assert run['status'] == 'completed', run
+            assert not detail['interaction']['observation_gap'], detail
+            assert run['delivery_completed_at'] <= delivered_by
+            for kind, upper_bound in [
+                ('model_turn_started', started_by),
+                ('target_attempt_started', started_by),
+                ('target_attempt_finished', delivered_by),
+                ('model_turn_finished', delivered_by),
+            ]:
+                matching = [event for event in run['events'] if event['kind'] == kind]
+                assert len(matching) == 1, (kind, matching)
+                # 模型与交付已在 writer 阻塞期间完成，出队不能重新定义发生时间。
+                assert run['started_at'] <= matching[0]['occurred_at'] <= upper_bound, (
+                    kind, matching[0]['occurred_at'], upper_bound,
+                )
 
 
 @pytest.mark.parametrize('host,backend', HOST_DATABASES)
