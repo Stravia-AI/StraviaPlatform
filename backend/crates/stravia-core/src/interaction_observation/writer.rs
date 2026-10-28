@@ -285,7 +285,7 @@ pub(super) enum WriterCommand {
     },
     Purge {
         expired_before: Option<i64>,
-        done: oneshot::Sender<anyhow::Result<()>>,
+        done: oneshot::Sender<anyhow::Result<bool>>,
     },
     ClientCompletion {
         run_id: String,
@@ -957,38 +957,33 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     }
                     let result = async {
-                        loop {
-                            let (removed, has_more) = match expired_before {
-                                Some(at) => {
-                                    let batch = store.purge_expired_batch(at).await?;
-                                    (batch.removed_interactions, batch.has_more)
-                                }
-                                None => (store.purge_clear_rows().await?, false),
-                            };
-                            // 每批提交后立即失效；后批失败不能遗失已提交批次的内存进度。
-                            live.invalidate(&removed);
-                            if !removed.is_empty() || expired_before.is_none() {
-                                let _ = updates.send(ObservationUpdate::ResetRequired {
-                                    snapshot_sequence: trace_sequence.load(Ordering::Acquire),
-                                });
+                        let (removed, has_more) = match expired_before {
+                            Some(at) => {
+                                let batch = store.purge_expired_batch(at).await?;
+                                (batch.removed_interactions, batch.has_more)
                             }
-                            attribution.forget_interactions(&removed);
-                            pending_gaps.retain(|interaction, _| !removed.contains(interaction));
-                            pending_text
-                                .retain(|run| attribution.interaction_for_run(run).is_some());
-                            persisted_manifests
-                                .retain(|run, _| attribution.interaction_for_run(run).is_some());
-                            if expired_before.is_none() {
-                                attribution.clear_tail();
-                            }
-                            if !has_more {
-                                break;
-                            }
+                            None => (store.purge_clear_rows().await?, false),
+                        };
+                        // 每批提交后立即失效；续批由调用方重新排队，不能独占 writer。
+                        live.invalidate(&removed);
+                        if !removed.is_empty() || expired_before.is_none() {
+                            let _ = updates.send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: trace_sequence.load(Ordering::Acquire),
+                            });
                         }
-                        if expired_before.is_some() {
+                        attribution.forget_interactions(&removed);
+                        pending_gaps.retain(|interaction, _| !removed.contains(interaction));
+                        pending_text
+                            .retain(|run| attribution.interaction_for_run(run).is_some());
+                        persisted_manifests
+                            .retain(|run, _| attribution.interaction_for_run(run).is_some());
+                        if expired_before.is_none() {
+                            attribution.clear_tail();
+                        }
+                        if !has_more && expired_before.is_some() {
                             store.remove_orphan_manifests().await?;
                         }
-                        Ok::<_, anyhow::Error>(())
+                        Ok::<_, anyhow::Error>(has_more)
                     }
                     .await;
                     let _ = done.send(result);

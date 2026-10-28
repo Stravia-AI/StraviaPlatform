@@ -552,18 +552,23 @@ impl InteractionObservation {
             .map_err(anyhow::Error::new)
     }
     async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<()> {
-        let (done, receiver) = oneshot::channel();
-        self.inner
-            .writer
-            .send(WriterCommand::Purge {
-                expired_before,
-                done,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
-        receiver
-            .await
-            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?
+        loop {
+            let (done, receiver) = oneshot::channel();
+            self.inner
+                .writer
+                .send(WriterCommand::Purge {
+                    expired_before,
+                    done,
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+            let has_more = receiver
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))??;
+            if !has_more {
+                return Ok(());
+            }
+        }
     }
 
     pub(crate) async fn flush(&self) -> anyhow::Result<()> {
@@ -2255,6 +2260,43 @@ mod snapshot_tests {
             "SELECT status,delivery_completed_at,terminal_reason FROM inference_run_observations WHERE id='failed-receipt'",
         ).fetch_one(&pool).await?;
         assert_eq!(row, ("failed".into(), None, Some("terminal_fault".into())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_yields_to_admission_before_finishing_the_expired_window()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        for index in 0..205 {
+            let id = format!("expired-{index:04}");
+            sqlx::query("INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES (?,'owner',?,?,'route','completed',0,0,1)")
+                .bind(&id).bind(&id).bind(&id).execute(&pool).await?;
+        }
+        // 用存储屏障检验实际写入先后，不依赖机器速度或调度延迟。
+        sqlx::raw_sql("CREATE TRIGGER require_admission_progress BEFORE DELETE ON interaction_observations WHEN OLD.id='expired-0204' AND NOT EXISTS (SELECT 1 FROM inference_run_observations WHERE id='during-retention') BEGIN SELECT RAISE(ABORT,'retention starved admission'); END;")
+            .execute(&pool).await?;
+        let purge = observation.purge_history(Some(1));
+        tokio::pin!(purge);
+        assert!(futures::poll!(&mut purge).is_pending());
+        let run = test_run(&observation, "during-retention", facts(Vec::new()));
+        observation.flush().await?;
+        purge.await?;
+        let retained: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM interaction_observations WHERE expires_at<=1")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(retained, 0);
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM inference_run_observations WHERE id='during-retention'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(status, "running");
+        drop(run);
+        observation.shutdown().await;
+        pool.close().await;
         Ok(())
     }
 
