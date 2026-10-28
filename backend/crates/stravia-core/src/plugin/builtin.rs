@@ -24,10 +24,9 @@ impl ComponentSource for EmbeddedSource {
 /// 持久实例的编译产物目录。两者都只是可重建的派生数据，删除后下次启动重新生成。
 #[derive(Clone)]
 pub(crate) struct CompileCache {
-    /// Wasmtime 官方编译缓存。
+    /// 不可变的文件映射编译镜像。
     pub(crate) wasmtime: PathBuf,
-    /// 已通过完整校验的组件记录，让启动跳过对这些组件的实例化。须与 Wasmtime
-    /// 缓存分开：后者的清理会删除不认识的文件。
+    /// 已通过完整校验的组件记录，让启动跳过对这些组件的实例化；独立于镜像淘汰。
     pub(crate) admissions: PathBuf,
 }
 
