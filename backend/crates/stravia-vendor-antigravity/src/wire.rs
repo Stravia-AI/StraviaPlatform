@@ -58,7 +58,7 @@ pub(crate) fn infer(
         && (request.reasoning.mode.is_some()
             || request.reasoning.level.is_some()
             || request.reasoning.budget_tokens.is_some());
-    let selector_budget = if let Some(table) = provider
+    let selector_thinking = if let Some(table) = provider
         .model_metadata
         .as_ref()
         .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
@@ -70,12 +70,12 @@ pub(crate) fn infer(
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
         );
         if effort {
-            // CLI 同时选择真实 ID 与该档位的目录预算；不再生成第二个 level 控制。
+            // 真实 ID 与强度都来自所选档位；不能让通用 codec 再按 Effort 生成另一种控制。
             request.reasoning.target_control = None;
             request.reasoning.level = None;
             request.reasoning.budget_tokens = None;
         }
-        selection.thinking_budget
+        selection.thinking
     } else {
         if let Some(selector) = provider
             .model_metadata
@@ -111,14 +111,26 @@ pub(crate) fn infer(
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("Gemini request must be an object"))?;
-    if let Some(thinking) = object
-        .get_mut("generationConfig")
-        .and_then(|config| config.get_mut("thinkingConfig"))
-        .and_then(Value::as_object_mut)
-        && let Some(budget) = selector_budget.filter(|_| !has_explicit_thinking_control)
-    {
-        thinking.remove("thinkingLevel");
-        thinking.insert("thinkingBudget".into(), json!(budget));
+    if let Some(control) = selector_thinking.filter(|_| !has_explicit_thinking_control) {
+        let thinking = object
+            .entry("generationConfig")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| invalid("generationConfig must be an object"))?
+            .entry("thinkingConfig")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| invalid("thinkingConfig must be an object"))?;
+        let (field, other, value) = match control {
+            crate::selector::ThinkingControl::Level(level) => {
+                ("thinkingLevel", "thinkingBudget", level)
+            }
+            crate::selector::ThinkingControl::Budget(budget) => {
+                ("thinkingBudget", "thinkingLevel", budget)
+            }
+        };
+        thinking.remove(other);
+        thinking.insert(field.into(), json!(value));
     }
     // 同协议 raw tools 保留原始 function response 与内置工具，再统一投影。
     if let Some(tools) = tools.filter(|tools| !tools.is_empty())

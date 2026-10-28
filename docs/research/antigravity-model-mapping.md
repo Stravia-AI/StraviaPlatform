@@ -254,7 +254,9 @@ gpt-oss-120b-medium
 
 家族记录用现有 `DiscoveredModel.family`、`selector`、`metadata.reasoning_efforts` 表达。`metadata.antigravity` 保存默认请求 ID 与 `variants`，每档保留实际 ID、显示 slug、effort 和规格。家族上下文采用所有已知档位的最小值，任一档未知则不登记；输入模态取交集。Thinking 保留在名称中，不伪造 Effort。没有新增公共 API、数据库 schema、前端供应商分支或依赖。
 
-推理根据 Target 的 Effort 从选择表取真实 ID 和该 variant metadata 的 `thinkingBudget`；缺省使用该家族的默认 selector 与已知预算，显式 Target 非 Effort 控制或合法原始强度字段优先于目录缺省预算。未登记 Effort 或对应预算缺失/无效在 HTTP 前返回明确错误，不生成假想 ID、硬编码预算或静默改档。已消费的 Effort 不再重复编码为 `thinkingLevel`。CLI 1.3.2 已核对 Gemini 3.8 Flash Medium 的目录预算为 `4000`，High 为 `-1`；请求应同时保留档位 ID 和真实预算，摘要开关独立。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity-cli-接入)。
+推理根据 Target 的 Effort 从选择表取真实 ID 和该 variant metadata 的强度控制：优先使用存在且合法的 `thinkingLevel`，只有未声明 level 时才读取 `thinkingBudget`，不同时发送两者。缺省使用该家族的默认 selector 与目录强度，显式 Target 非 Effort 控制或合法原始强度字段优先于目录缺省强度。未登记 Effort、对应的两种控制均缺失或所选控制无效时，在 HTTP 前返回明确错误；非法 level 不回退到 budget，也不从 `minThinkingBudget` 猜预算。已消费的 Effort 不再让通用 codec 生成额外强度字段，摘要开关独立。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity-cli-接入)。
+
+CLI 1.3.2 曾记录 Gemini 3.8 Flash Medium/High 的目录预算 `4000`/`-1`，但当前目录已可仅声明 `thinkingLevel`。2026-10-28 的真实 Wasm + loopback HTTP 回归以 Flash 的 level-only 三档和 Pro 的 budget 目录（缺省/Low/High 请求）覆盖两种目录形态，并校验默认 ID、显式控制优先级、独立摘要、level/budget 互斥及非法元数据在 HTTP 前拒绝；未调用真实上游。
 
 实际验证：
 

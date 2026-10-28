@@ -148,7 +148,9 @@ Schema 依据实际 `openapi.proto` 投影 type/format/title/description/nullabl
 
 CLI 1.3.2（1.2.16 亦已核对）master 的 `thinkingLevel` 是 enum，不是 int32：`UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`。投影接受这些符号或对应数字，非法显式值返回错误，不静默删除或猜测映射。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
 
-family selector 用 Target Effort 选择实际请求 ID，同时使用该 variant metadata 的 `thinkingBudget`，不再把 Effort 重复编码为 `thinkingLevel`。CLI 1.3.2 已核对的 Gemini 3.8 Flash 主请求：Medium 为对应 ID 加目录预算 `4000`，High 为对应 ID 加目录预算 `-1`。预算来自目录而非按模型硬编码；显式 Effort 对应预算缺失或无效时，在 HTTP 前明确要求重新同步。显式 Target Budget/Enabled/Disabled 仍优先于目录预算；无 Target 控制时，合法原始 level/budget 优先于缺省目录预算。
+family selector 用 Target Effort 选择实际请求 ID 和该 variant metadata 的强度控制：存在 `thinkingLevel` 时校验并使用目录中的数字 enum（`0..=6`），否则使用合法的 `thinkingBudget`。两者同时存在时优先 level；非法 level 不回退到 budget，请求只携带一种强度控制。显式 Effort 对应的两种控制均缺失或所选值无效时，在 HTTP 前返回错误；不从 `minThinkingBudget` 或 Effort 名称猜测预算。显式 Target Budget/Enabled/Disabled 仍优先于目录强度；无 Target 控制时，合法原始 level/budget 优先于缺省目录强度，默认请求 ID 仍取目录默认 selector。
+
+CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`/`-1`；2026-10-28 核对的本地账号目录快照则只有 High/Medium/Low 的 `thinkingLevel=3/2/1` 和 `minThinkingBudget=32`，没有 `thinkingBudget`。历史预算不能作为所有档位必须带预算的契约。[公开 Gemini 3.8 迁移指南](https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.8)要求使用 level，[CLI 1.3.4 发布说明](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.3.4)也记录了 ADC 路径同时发送 budget 与 level 的冲突修复；这些公开资料不等同于私有接口对旧预算的接受保证。
 
 `includeThoughts` 是独立的摘要意图，仍由现有 codec 编码进入内层 `generationConfig.thinkingConfig`，显式关闭摘要得到 `false`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。private descriptor 另有 `includeRawThoughts`、`enableThinking`，此次不新增控制 API、不默认打开，也不扩展现有投影范围。
 

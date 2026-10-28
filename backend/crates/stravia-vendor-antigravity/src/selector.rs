@@ -22,9 +22,15 @@ pub(crate) struct SelectorTable {
     pub variants: Vec<Variant>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ThinkingControl {
+    Level(i32),
+    Budget(i32),
+}
+
 pub(crate) struct Selection<'a> {
     pub id: &'a str,
-    pub thinking_budget: Option<i32>,
+    pub thinking: Option<ThinkingControl>,
 }
 
 pub(crate) fn user_facing_slug(id: &str) -> &str {
@@ -95,36 +101,40 @@ pub(crate) fn resolve<'a>(
     } else {
         (default, default_variant.ok_or_else(invalid_table)?)
     };
-    // 显式非 Effort 控制优先于目录预算；不能让陈旧元数据覆盖它。
-    let use_budget =
+    // 显式非 Effort 控制优先于目录强度；不能让陈旧元数据覆盖它。
+    let use_metadata =
         control.is_none() || matches!(control, Some(TargetThinkingControl::Effort { .. }));
-    let thinking_budget = if use_budget {
-        let value = variant
-            .get("metadata")
-            .and_then(|metadata| metadata.get("thinkingBudget"));
-        match value {
-            Some(value) => Some(
-                value
+    let thinking = if use_metadata {
+        let metadata = variant.get("metadata");
+        // 新目录以 level 表达档位；不能同时发送预算，也不能用预算掩盖非法 level。
+        if let Some(level) = metadata.and_then(|metadata| metadata.get("thinkingLevel")) {
+            Some(ThinkingControl::Level(
+                level
                     .as_i64()
-                    .and_then(|value| i32::try_from(value).ok())
-                    .filter(|value| *value >= -1)
+                    .and_then(|level| i32::try_from(level).ok())
+                    .filter(|level| (0..=6).contains(level))
                     .ok_or_else(invalid_table)?,
-            ),
-            None if control.is_some() => {
-                return Err(plugin_error(
-                    ErrorKind::Invalid,
-                    "The selected Antigravity reasoning effort has no thinking budget; sync models again",
-                ));
-            }
-            None => None,
+            ))
+        } else if let Some(budget) = metadata.and_then(|metadata| metadata.get("thinkingBudget")) {
+            Some(ThinkingControl::Budget(
+                budget
+                    .as_i64()
+                    .and_then(|budget| i32::try_from(budget).ok())
+                    .filter(|budget| *budget >= -1)
+                    .ok_or_else(invalid_table)?,
+            ))
+        } else if control.is_some() {
+            return Err(plugin_error(
+                ErrorKind::Invalid,
+                "The selected Antigravity reasoning effort has no thinking level or budget; sync models again",
+            ));
+        } else {
+            None
         }
     } else {
         None
     };
-    Ok(Selection {
-        id,
-        thinking_budget,
-    })
+    Ok(Selection { id, thinking })
 }
 
 #[cfg(test)]
@@ -147,7 +157,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(selection.id, id);
-            assert_eq!(selection.thinking_budget, Some(budget));
+            assert_eq!(selection.thinking, Some(ThinkingControl::Budget(budget)));
         }
         for budget in [json!(null), json!("4000"), json!(-2), json!(2147483648_i64)] {
             let mut invalid_table = table.clone();
@@ -172,16 +182,13 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(resolve(&missing, None).unwrap().thinking_budget, None);
+        assert_eq!(resolve(&missing, None).unwrap().thinking, None);
         for control in [
             TargetThinkingControl::Budget { value: 2048 },
             TargetThinkingControl::Disabled,
             TargetThinkingControl::Enabled,
         ] {
-            assert_eq!(
-                resolve(&table, Some(&control)).unwrap().thinking_budget,
-                None
-            );
+            assert_eq!(resolve(&table, Some(&control)).unwrap().thinking, None);
         }
     }
 
