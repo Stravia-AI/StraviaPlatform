@@ -42,7 +42,7 @@ sqlx-core = { version = "=0.9.0", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation", "cache"] }
+wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation"] }
 wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p2"] }
 wasmprinter = "=0.258.3"
 wat = "=1.258.3"

@@ -12,7 +12,7 @@ use stravia_vendor_sdk::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Cache, CacheConfig, Config, Engine, Store};
+use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
@@ -24,9 +24,11 @@ use crate::host::{
 };
 
 mod admission;
+mod compilation_cache;
 mod residency;
 
 use admission::AdmissionRecords;
+use compilation_cache::CompilationCache;
 pub use residency::{ComponentBytes, ComponentSource, SourceError};
 use residency::{IDLE_UNLOAD, Residency, Resident};
 
@@ -114,8 +116,7 @@ pub struct VendorRuntime {
     idle_unload: Option<Duration>,
     /// 已通过准入校验的组件记录，让启动可以跳过对这些组件的实例化校验。
     admissions: Option<Arc<AdmissionRecords>>,
-    #[cfg(test)]
-    cache: Option<Cache>,
+    cache: Option<Arc<CompilationCache>>,
 }
 
 struct CompiledEntry {
@@ -131,9 +132,10 @@ impl VendorRuntime {
         Self::build(None)
     }
 
-    /// 使用 Wasmtime 官方持久编译缓存（版本、目标 CPU、编译特性与组件内容
-    /// 的失效由 Wasmtime 负责）。目录必须为绝对路径；目录及其上层按需创建，
-    /// Unix 上权限收紧为 0700，真实路径的祖先不得受不可信用户控制，且必须可写。
+    /// 使用不可变的文件映射编译缓存。Wasmtime 提供引擎兼容身份，组件以完整
+    /// 内容摘要区分；损坏产物从源字节重建。目录必须是可写绝对路径；Unix 上
+    /// 权限收紧为 0700，真实路径的祖先不得受不可信用户控制。不要与旧版
+    /// Wasmtime 压缩缓存共用目录，旧清理器不认识此格式。
     pub fn with_cache(directory: impl Into<PathBuf>) -> Result<Self, LoadError> {
         Self::build(Some(directory.into()))
     }
@@ -150,32 +152,17 @@ impl VendorRuntime {
         engine_config.wasm_component_model_async_stackful(false);
         engine_config.wasm_component_model_threading(false);
         engine_config.consume_fuel(true);
-        let cache = match cache_directory {
-            Some(directory) => {
-                let directory = prepare_cache_directory(&directory)?;
-                let mut cache_config = CacheConfig::new();
-                cache_config.with_directory(directory);
-                let cache = Cache::new(cache_config).map_err(|error| {
-                    LoadError::CompilationCache(format!(
-                        "initialize persistent compilation cache: {error}"
-                    ))
-                })?;
-                Some(cache)
-            }
-            None => None,
-        };
-        #[cfg(test)]
-        let measured_cache = cache.clone();
-        engine_config.cache(cache);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
+        let cache = cache_directory
+            .map(|directory| CompilationCache::new(&directory, &engine).map(Arc::new))
+            .transpose()?;
         Ok(Self {
             engine,
             compiled: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMPILED_ENTRIES))),
             idle_unload,
             admissions: None,
-            #[cfg(test)]
-            cache: measured_cache,
+            cache,
         })
     }
 
@@ -234,8 +221,17 @@ impl VendorRuntime {
         Ok(component)
     }
 
-    fn compile_component(&self, bytes: &[u8]) -> Result<Arc<Component>, LoadError> {
-        Self::compile_with(&self.engine, bytes)
+    fn compile_component(
+        &self,
+        bytes: &[u8],
+        digest: &[u8; 32],
+    ) -> Result<Arc<Component>, LoadError> {
+        match &self.cache {
+            Some(cache) => cache.load(&self.engine, bytes, digest),
+            None => Component::from_binary(&self.engine, bytes)
+                .map_err(|error| LoadError::InvalidComponent(error.to_string())),
+        }
+        .map(Arc::new)
     }
 
     /// Compile (or reuse a live Engine-local compilation), import-check,
@@ -248,7 +244,7 @@ impl VendorRuntime {
         let digest = stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes);
         let identity = stravia_runtime_contract::identifier::encode_digest(&digest);
         let component = self
-            .compiled_component(&digest, || async { self.compile_component(bytes) })
+            .compiled_component(&digest, || async { self.compile_component(bytes, &digest) })
             .await?;
         self.validate_imports(&component)?;
         let prepared = Self::prepare(&component)?;
@@ -1344,7 +1340,7 @@ fn ensure_format(format: u32) -> Result<(), HostFailure> {
     }
 }
 
-/// 创建并验证官方编译缓存目录。只接受绝对路径，拒绝末级符号链接/非目录，
+/// 创建并验证编译缓存目录。只接受绝对路径，拒绝末级符号链接/非目录，
 /// Unix 上收紧到仅属主可访问，并用写入探针尽早暴露只读或空间错误。
 fn prepare_cache_directory(directory: &Path) -> Result<PathBuf, LoadError> {
     if directory.as_os_str().is_empty() || !directory.is_absolute() {

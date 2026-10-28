@@ -95,7 +95,7 @@ impl VendorPlugins {
         compile_cache: Option<CompileCache>,
     ) -> anyhow::Result<Arc<Self>> {
         // 内置组件跨实例共享；内存存储共享无缓存运行时，持久存储的本地插件
-        // 则各自使用 data_dir 下的官方编译缓存，不写入其他实例的目录。
+        // 则各自使用 data_dir 下的文件映射编译缓存，不写入其他实例的目录。
         let compile_cache = compile_cache.filter(|_| store.is_persistent());
         let (bundled, runtime) = match BundledPlugins::load(compile_cache.as_ref()).await {
             Ok(loaded) => loaded,

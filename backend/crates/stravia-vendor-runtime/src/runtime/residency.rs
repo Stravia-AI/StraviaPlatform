@@ -2,7 +2,7 @@
 //!
 //! 一个 `LoadedPlugin` 由两部分组成：随时可读的元数据（descriptor、身份）和
 //! 占用内存的编译产物（`Resident`：机器码与预解析 blueprint）。后者只在有
-//! 操作执行时才需要，因此可以在空闲后释放，并在下次使用时从 Wasmtime 持久
+//! 操作执行时才需要，因此可以在空闲后释放，并在下次使用时从不可变文件映射
 //! 编译缓存快速恢复；`LoadedPlugin` 句柄本身保持廉价，可被会话、路由等长期
 //! 持有而不阻止释放。
 
@@ -260,9 +260,9 @@ impl Residency {
             .read()
             .await
             .map_err(|error| format!("read component source: {error}"))?;
-        let engine = self.runtime.engine.clone();
+        let runtime = self.runtime.clone();
         let digest = self.digest;
-        // 持久缓存命中时仍要散列、反序列化数十 MiB 字节；未命中则是完整编译。
+        // 持久缓存命中仍要核对源与镜像摘要并创建映射；未命中则是完整编译。
         // 都不应占用异步工作线程。
         let compile = move || async move {
             tokio::task::spawn_blocking(move || {
@@ -272,7 +272,7 @@ impl Residency {
                         "component source returned different bytes".into(),
                     ));
                 }
-                VendorRuntime::compile_with(&engine, bytes)
+                runtime.compile_component(bytes, &digest)
             })
             .await
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?
@@ -402,18 +402,9 @@ pub(super) async fn lease(
 }
 
 impl VendorRuntime {
-    pub(super) fn compile_with(
-        engine: &wasmtime::Engine,
-        bytes: &[u8],
-    ) -> Result<Arc<Component>, LoadError> {
-        Component::from_binary(engine, bytes)
-            .map(Arc::new)
-            .map_err(|error| LoadError::InvalidComponent(error.to_string()))
-    }
-
     /// 在 `directory` 保存并读取准入记录，使 [`restore`](Self::restore) 能在重启后
     /// 跳过对已校验组件的实例化。只对带持久编译缓存的运行时有意义；目录不属于
-    /// Wasmtime 缓存（其清理会删除不认识的文件）。无法识别当前宿主构建时不启用。
+    /// 可淘汰的编译镜像缓存。无法识别当前宿主构建时不启用。
     #[must_use]
     pub fn with_admission_records(mut self, directory: impl Into<PathBuf>) -> Self {
         self.admissions = super::admission::AdmissionRecords::new(directory.into()).map(Arc::new);
