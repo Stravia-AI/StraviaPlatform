@@ -93,6 +93,10 @@ pub enum GatewayError {
     /// Principal 的严格滑动窗口已满，客户端应等待后重新提交根请求。
     PrincipalRpmExceeded { retry_after_secs: u64 },
 
+    /// 根 API Key 的已消费已达到消费上限；不会自动恢复，因此不提供
+    /// `Retry-After`。Key 本身不被禁用。
+    ApiKeySpendLimitReached,
+
     /// No model matched the requested model / path.
     ModelNotFound { model: String },
 
@@ -135,7 +139,9 @@ impl GatewayError {
             GatewayError::BadRequest { .. } => StatusCode::BAD_REQUEST,
             GatewayError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             GatewayError::Forbidden { .. } => StatusCode::FORBIDDEN,
-            GatewayError::PrincipalRpmExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
+            GatewayError::PrincipalRpmExceeded { .. } | GatewayError::ApiKeySpendLimitReached => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             GatewayError::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             GatewayError::ProtocolUnsupported { .. } => StatusCode::BAD_REQUEST,
             GatewayError::ProtocolLossyRejected { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -159,6 +165,7 @@ impl GatewayError {
             GatewayError::Unauthorized { .. } => "STRAVIA_AUTH_ERROR",
             GatewayError::Forbidden { .. } => "STRAVIA_FORBIDDEN",
             GatewayError::PrincipalRpmExceeded { .. } => "STRAVIA_RPM_LIMIT",
+            GatewayError::ApiKeySpendLimitReached => "STRAVIA_SPEND_LIMIT",
             GatewayError::ModelNotFound { .. } => "STRAVIA_NOT_FOUND",
             GatewayError::ProtocolUnsupported { .. } => "STRAVIA_PROTOCOL_UNSUPPORTED",
             GatewayError::ProtocolLossyRejected { .. } => "STRAVIA_PROTOCOL_LOSSY_REJECTED",
@@ -184,6 +191,7 @@ impl GatewayError {
                 AccessDenial::Custom(msg) => msg.clone(),
             },
             GatewayError::PrincipalRpmExceeded { .. } => "Principal RPM limit exceeded.".into(),
+            GatewayError::ApiKeySpendLimitReached => "API key spend limit reached.".into(),
             GatewayError::ModelNotFound { model } => {
                 format!("no model found for model: {model}")
             }

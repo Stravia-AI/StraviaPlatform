@@ -375,6 +375,7 @@ async fn generation_http_fixture_with_usage(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("image generation Route");
@@ -402,6 +403,7 @@ async fn generation_http_fixture_with_usage(
             inject_media_generation,
             model_ids: vec![parent_route_id],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("Media Generation HTTP API key");
@@ -464,6 +466,7 @@ async fn set_generation_injection(
                 inject_media_understanding: None,
                 expires_at: None,
                 model_ids: None,
+                spend_limit: None,
             },
         )
         .await

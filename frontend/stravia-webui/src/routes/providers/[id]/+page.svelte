@@ -17,6 +17,7 @@ import type { Provider, ProviderModelSyncSummary } from '#lib/types.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import ProviderConnectionView from '#lib/components/provider-connection-view.svelte'
+import ProviderCostPlan from '#lib/components/provider-cost-plan.svelte'
 import ProviderMark from '#lib/components/provider-mark.svelte'
 import ProviderModelCatalog from '#lib/components/provider-model-catalog.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
@@ -184,6 +185,7 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
 
     {#if view === 'connection' || (view === 'models' && !usesProviderModels)}
       <ProviderConnectionView {provider} onSaved={(saved: Provider) => (savedProvider = saved)} />
+      <ProviderCostPlan {provider} />
     {:else if view === 'models'}
       {#if syncProviderId === providerId && (syncStatus === 'syncing' || syncStatus === 'error')}
         <section class="rounded-xl border p-4" aria-live="polite">

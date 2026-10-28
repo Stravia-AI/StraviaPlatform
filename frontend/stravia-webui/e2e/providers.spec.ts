@@ -635,7 +635,7 @@ test('editing a Provider keeps saved credentials write-only', async ({ page }) =
                 name: 'GPT Test',
                 available: true,
                 source_kind: 'discovered',
-                snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+                snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
                 selection_policy: 'auto',
                 specification: { limit: { context: 128000 }, modalities: null },
                 revision: 1,
@@ -1055,7 +1055,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     name: 'Precision Model',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: {
       limit: { context: 1050000 },
@@ -1198,7 +1198,7 @@ test('Model specification filters combine all conditions and compose with catalo
     snapshot_state:
       overrides.source_kind === 'manual'
         ? { type: 'edited', source: null }
-        : { type: 'imported', source: { type: 'discovery' } },
+        : { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification,
     revision: 1,
@@ -1386,7 +1386,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
@@ -1463,7 +1463,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
           data: {
             id: body.model_id,
             snapshot_state: body.template_id
-              ? { type: 'imported', source: { type: 'canonical', model_id: body.template_id } }
+              ? { type: 'imported', source: { type: 'canonical', model_id: body.template_id }, pinned: [] }
               : { type: 'unregistered' },
             available: true,
             source_kind: 'manual',
@@ -1507,7 +1507,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const extensionPreview = extensionFields.locator('..').locator('pre')
   await expect(extensionPreview).toContainText('"vendor_extension"')
   await expect(extensionPreview).toContainText('"private"')
-  await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
+  await expect(page.locator('#provider-model-cost-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities.getByRole('listitem')).toHaveText(['Text', 'Image', 'binary'])
   await inputModalities.click()
@@ -1541,23 +1541,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await page.getByRole('button', { name: 'Save model' }).click()
 
   await expect.poll(() => updateBody).toContain('0.123456789012345678')
-  expect(updateBody).toContain('"vendor_extension":{"mode":"private"}')
-  expect(updateBody).toContain('"family":"gpt"')
-  expect(updateBody).toContain('"knowledge":"2025-01"')
-  expect(updateBody).toContain('"release_date":"2026-01-01"')
-  expect(updateBody).toContain('"last_updated":"2026-02-01"')
-  const savedMetadata = JSON.parse(updateBody).metadata
-  expect(savedMetadata.open_weights).toBe(true)
-  expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
-  expect(savedMetadata.cost).toEqual({
-    input: Number('0.123456789012345678'),
-    output: 1,
-    cache_read: 0.025,
-    cache_write: 0.5,
-    context_over_200k: detail.metadata.cost.context_over_200k,
-    tiers: detail.metadata.cost.tiers,
+  const savedChanges = JSON.parse(updateBody).changes
+  expect(savedChanges).toEqual({
+    'modalities.input': ['text', 'image', 'audio', 'binary'],
+    'modalities.output': ['text', 'image'],
+    reasoning_efforts: ['none', 'low', 'medium', 'high', 'future', 'custom-effort'],
+    'cost.input': { amount: '0.123456789012345678', currency: 'usd' },
   })
-  expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future', 'custom-effort'])
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
@@ -1965,7 +1955,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
@@ -1980,7 +1970,8 @@ test('Provider detail separates connection, inventory, references, and guarded m
   }
   const detail = {
     ...available,
-    can_reimport: true,
+    pinned_fields: ['name'],
+    restorable_fields: ['name'],
     metadata: {
       id: available.id,
       name: available.name,
@@ -2014,6 +2005,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     ],
   }
   let selectionBody: Record<string, unknown> | undefined
+  let restoreBody: Record<string, unknown> | undefined
   let routeQueryFails = false
 
   await page.route('**/api/v1/providers**', async (route) => {
@@ -2038,7 +2030,8 @@ test('Provider detail separates connection, inventory, references, and guarded m
             source_kind: modelId === unavailable.id ? unavailable.source_kind : detail.source_kind,
             snapshot_state: modelId === unavailable.id ? unavailable.snapshot_state : detail.snapshot_state,
             available: modelId === unavailable.id ? unavailable.available : detail.available,
-            can_reimport: modelId === unavailable.id ? false : detail.can_reimport,
+            pinned_fields: modelId === unavailable.id ? [] : detail.pinned_fields,
+            restorable_fields: modelId === unavailable.id ? [] : detail.restorable_fields,
             metadata: {
               ...detail.metadata,
               id: modelId,
@@ -2059,14 +2052,9 @@ test('Provider detail separates connection, inventory, references, and guarded m
       })
       return
     }
-    if (path === `/providers/${provider.id}/model/reimport` && request.method() === 'POST') {
-      await route.fulfill({
-        status: 404,
-        json: {
-          code: 'CATALOG_ENTRY_NOT_FOUND',
-          error: 'Provider Catalog Entry was not found in the active catalog revision.',
-        },
-      })
+    if (path === `/providers/${provider.id}/model/restore-sync` && request.method() === 'POST') {
+      restoreBody = request.postDataJSON()
+      await route.fulfill({ json: { data: { ...detail, revision: 2 } } })
       return
     }
     if (path === `/providers/${provider.id}/model/selection` && request.method() === 'PUT') {
@@ -2130,15 +2118,12 @@ test('Provider detail separates connection, inventory, references, and guarded m
     .filter({ hasText: /GPT Test.*openai\/gpt-test/ })
     .click()
   await expect(page).toHaveURL(/view=models&model=openai%2Fgpt-test/)
-  await page.getByRole('button', { name: 'Model actions' }).click()
-  await page.getByRole('menuitem', { name: 'Restore details from provider…' }).click()
-  await expect(
-    page.getByText(
-      'This catalog entry is no longer available. Your saved model is unchanged. Refresh the catalog or update it manually.',
-    ),
-  ).toBeVisible()
-  await expect(page.getByText('openai/gpt-test', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter')
+  await expect(page.getByText('Pinned', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Restore sync Name', exact: true }).click()
+  await expect(page.getByText('Field restored to its synced value.')).toBeVisible()
+  expect(restoreBody).toMatchObject({ model_id: 'openai/gpt-test', revision: 1, fields: ['name'] })
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(modelTable).toBeVisible()
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   let availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
   await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
@@ -2462,7 +2447,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT Existing',
       available: true,
       source_kind: 'discovered',
-      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+      snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
       selection_policy: 'auto',
       specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
@@ -2472,7 +2457,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT New',
       available: true,
       source_kind: 'discovered',
-      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+      snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
       selection_policy: 'auto',
       specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
@@ -3092,7 +3077,7 @@ test('Provider upstream model table fills the 120rem container at 2560', async (
         name: 'Wide Model',
         available: true,
         source_kind: 'discovered',
-        snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+        snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
         selection_policy: 'auto',
         specification: { limit: { context: 128000 }, modalities: null },
         revision: 1,
@@ -3116,7 +3101,7 @@ const compactModel = (id: string, name: string, specification: Record<string, un
   name,
   available: true,
   source_kind: 'discovered',
-  snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+  snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
   selection_policy: 'auto',
   specification,
   revision: 1,

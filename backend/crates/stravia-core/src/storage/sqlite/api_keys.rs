@@ -1,3 +1,5 @@
+use crate::storage::money::parse_spend_limit;
+
 use super::*;
 
 #[derive(Clone)]
@@ -9,19 +11,24 @@ pub(super) struct SqliteApiKeyStore {
 impl ApiKeyStore for SqliteApiKeyStore {
     async fn list(&self) -> anyhow::Result<Vec<ApiKeyWithBindings>> {
         let rows = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
             .await?;
 
+        let mut model_ids = load_all_api_key_model_ids(&self.pool).await?;
+        let mut spends = load_all_api_key_spends(&self.pool).await?;
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            let model_ids = list_api_key_model_ids(&self.pool, &row.id).await?;
+            let key_model_ids = model_ids.remove(&row.id).unwrap_or_default();
+            let spend = spends.remove(&row.id).unwrap_or_default();
             items.push(ApiKeyWithBindings {
                 id: row.id,
                 token: row.token,
                 name: row.name,
                 rpm_limit: row.rpm_limit,
+                spend_limit_nanos: row.spend_limit_nanos,
+                spend,
                 is_enabled: row.is_enabled,
                 mcp_access_enabled: row.mcp_access_enabled,
                 transparent_injection_enabled: row.transparent_injection_enabled,
@@ -31,7 +38,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
                 expires_at: row.expires_at,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
-                model_ids,
+                model_ids: key_model_ids,
             });
         }
         Ok(items)
@@ -39,7 +46,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<ApiKeyWithBindings>> {
         let row = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -49,11 +56,14 @@ impl ApiKeyStore for SqliteApiKeyStore {
             return Ok(None);
         };
         let model_ids = list_api_key_model_ids(&self.pool, id).await?;
+        let spend = load_api_key_spend(&self.pool, id).await?;
         Ok(Some(ApiKeyWithBindings {
             id: row.id,
             token: row.token,
             name: row.name,
             rpm_limit: row.rpm_limit,
+            spend_limit_nanos: row.spend_limit_nanos,
+            spend,
             is_enabled: row.is_enabled,
             mcp_access_enabled: row.mcp_access_enabled,
             transparent_injection_enabled: row.transparent_injection_enabled,
@@ -72,14 +82,16 @@ impl ApiKeyStore for SqliteApiKeyStore {
         let key = input
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
+        let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
         let mut connection = self.pool.acquire_write().await?;
         sqlx::query(
-    "INSERT INTO api_keys (id, token, name, rpm_limit, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&key)
             .bind(input.name.trim())
             .bind(input.rpm_limit)
+            .bind(spend_limit_nanos)
             .bind(input.mcp_access_enabled)
             .bind(input.transparent_injection_enabled)
             .bind(input.inject_media_understanding)
@@ -96,7 +108,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
         let current = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -121,14 +133,19 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .inject_media_generation
             .unwrap_or(current.inject_media_generation);
         let expires_at = input.expires_at.or(current.expires_at);
+        let spend_limit_nanos = match input.spend_limit {
+            Some(value) => parse_spend_limit(value.as_deref())?,
+            None => current.spend_limit_nanos,
+        };
 
         let mut connection = self.pool.acquire_write().await?;
         sqlx::query(
-    "UPDATE api_keys SET token=?, name=?, rpm_limit=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
+    "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
             )
             .bind(key)
             .bind(name.trim())
             .bind(rpm_limit)
+            .bind(spend_limit_nanos)
             .bind(is_enabled)
             .bind(mcp_access_enabled)
             .bind(transparent_injection_enabled)
@@ -215,12 +232,13 @@ impl AuthAccessStore for SqliteAuthAccessStore {
         bool,
         Option<String>,
         Option<i32>,
+        Option<i64>,
         bool,
         bool,
         bool,
         bool,
     ),
-            >("SELECT id, name, is_enabled, expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
+            >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
             .bind(raw_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -232,6 +250,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -242,6 +261,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -259,12 +279,13 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 bool,
                 Option<String>,
                 Option<i32>,
+                Option<i64>,
                 bool,
                 bool,
                 bool,
                 bool,
             ),
-        >("SELECT id, name, is_enabled, expires_at, rpm_limit, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
+        >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -275,6 +296,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -285,6 +307,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 is_enabled,
                 expires_at,
                 rpm_limit,
+                spend_limit_nanos,
                 transparent_injection_enabled,
                 inject_media_understanding,
                 inject_web_search,
@@ -353,4 +376,73 @@ pub(super) async fn replace_api_key_models(
     tx.commit().await?;
     connection.finish().await?;
     Ok(())
+}
+
+async fn load_api_key_spend(
+    pool: &SqlitePool,
+    id: &str,
+) -> anyhow::Result<crate::storage::traits::ApiKeySpend> {
+    let row: Option<(i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT spent_custom_nanos, spent_usd_unconverted_nanos, reset_at \
+         FROM api_key_spend WHERE api_key_id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .map(
+            |(spent_custom_nanos, spent_usd_unconverted_nanos, reset_at)| {
+                crate::storage::traits::ApiKeySpend {
+                    spent_custom_nanos,
+                    spent_usd_unconverted_nanos,
+                    reset_at,
+                }
+            },
+        )
+        .unwrap_or_default())
+}
+
+async fn load_all_api_key_model_ids(
+    pool: &SqlitePool,
+) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT api_key_id, model_id FROM api_key_models \
+         ORDER BY api_key_id ASC, model_id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut by_key = std::collections::HashMap::new();
+    for (api_key_id, model_id) in rows {
+        by_key
+            .entry(api_key_id)
+            .or_insert_with(Vec::new)
+            .push(model_id);
+    }
+    Ok(by_key)
+}
+
+async fn load_all_api_key_spends(
+    pool: &SqlitePool,
+) -> anyhow::Result<std::collections::HashMap<String, crate::storage::traits::ApiKeySpend>> {
+    let rows: Vec<(String, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT api_key_id, spent_custom_nanos, spent_usd_unconverted_nanos, reset_at \
+         FROM api_key_spend",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(api_key_id, spent_custom_nanos, spent_usd_unconverted_nanos, reset_at)| {
+                (
+                    api_key_id,
+                    crate::storage::traits::ApiKeySpend {
+                        spent_custom_nanos,
+                        spent_usd_unconverted_nanos,
+                        reset_at,
+                    },
+                )
+            },
+        )
+        .collect())
 }

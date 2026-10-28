@@ -6,6 +6,8 @@ const HOUR = 3_600_000
 const NOW = Date.UTC(2026, 9, 11, 12, 7)
 const LIVE_END = Date.UTC(2026, 9, 11, 12, 15)
 const START = LIVE_END - 24 * HOUR
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const knownMoney = { amount: '0.01', known_count: 1, unknown_count: 0 }
 
 /**
  * 每桶计数：序列求和为客户端 95% / 上游 90%。
@@ -33,6 +35,8 @@ const overview = {
   avg_duration_ms: 120,
   avg_first_token_ms: 40,
   avg_output_tps: 25,
+  currency: CURRENCY,
+  actual_cost: knownMoney,
 }
 
 const providerRows = [
@@ -44,6 +48,9 @@ const providerRows = [
     upstream_error_count: 12,
     avg_duration_ms: 100,
     avg_output_tps: 10,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
+    usage_equivalent_cost: null,
   },
 ]
 
@@ -66,6 +73,8 @@ function seriesRow(start: number, counts: Counts) {
     avg_duration_ms: 120,
     avg_first_token_ms: 40,
     avg_output_tps: 25,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
   }
 }
 

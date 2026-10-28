@@ -372,6 +372,23 @@ def test_storage_failure_preserves_active_and_following_inference(
                     if b'first' in line:
                         break
                 assert process.poll() is None
+                if source == 'observation':
+                    # The first SSE text is emitted by the upstream, not by the
+                    # observation writer. On a slower backend the admission and
+                    # its retained-tail diagnostic can still be queued here; a
+                    # fault armed now would be consumed by that diagnostic (which
+                    # is best-effort) instead of a Run event. Wait for the public
+                    # diagnostic event before arming so the next write is a Run
+                    # event and its failure must leave a durable Interaction gap.
+                    _wait_for(
+                        'active inference admission persisted before fault',
+                        lambda: any(
+                            event['kind'] == 'retained_tail_associated'
+                            for interaction in _route_interactions(env, route_id)
+                            for run in _detail(env, interaction['id'])['runs']
+                            for event in run['events']
+                        ),
+                    )
                 arm.touch()
                 if source == 'observation':
                     # Fail a Run event write, not the separate best-effort

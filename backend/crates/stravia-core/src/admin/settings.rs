@@ -18,6 +18,9 @@ impl AdminService {
         if key == "artifact_upload_signing_key" {
             anyhow::bail!("reserved internal setting");
         }
+        if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
+            anyhow::bail!("custom_currency is managed through the currency API");
+        }
         reject_removed_proxy_setting(key)?;
         if key == crate::outbound_proxy::SETTINGS_KEY {
             let config =
@@ -53,6 +56,9 @@ impl AdminService {
     pub async fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
         if key == "artifact_upload_signing_key" {
             anyhow::bail!("reserved internal setting");
+        }
+        if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
+            anyhow::bail!("custom_currency is managed through the currency API");
         }
         reject_removed_proxy_setting(key)?;
         if key == crate::outbound_proxy::SETTINGS_KEY {

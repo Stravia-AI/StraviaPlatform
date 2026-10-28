@@ -41,6 +41,7 @@ import {
 } from '#lib/model-specification-filter.js'
 import ModelSpecificationFilter from '#lib/components/model-specification-filter.svelte'
 import type { Route, ProviderModelSelectionPolicy, ProviderModelSummary, ProviderModelSyncSummary } from '#lib/types.js'
+import type { ProviderModelSubmission } from '#lib/components/price-form.js'
 import ProviderModelEditor from '#lib/components/provider-model-editor.svelte'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -119,6 +120,8 @@ const syncStateQuery = createQuery(() => ({
   queryFn: () => admin.providers.syncState(providerId),
   refetchInterval: 5_000,
 }))
+const currencyQuery = createQuery(() => ({ queryKey: ['currency'], queryFn: () => admin.currency.get() }))
+const customCurrency = $derived(currencyQuery.data ? { symbol: currencyQuery.data.symbol } : null)
 async function saveAutomaticSync(enabled: boolean): Promise<void> {
   const id = providerId
   const epoch = ++preferenceEpoch
@@ -154,7 +157,7 @@ const editing = new ProviderModelEditing({
   settleEditor: tick,
   onSuccess: (operation: ProviderModelEditingOperation) => {
     if (operation === 'save') toast.success(m.provider_model_catalog_model_details_saved())
-    else if (operation === 'reimport') toast.success(m.provider_model_catalog_model_details_restored_service())
+    else if (operation === 'restore') toast.success(m.provider_model_catalog_sync_restored())
     else if (operation === 'delete') toast.success(m.provider_model_catalog_manually_added_model_removed())
   },
   onError: (error: unknown, phase: string) => {
@@ -429,10 +432,10 @@ async function updateModelQuery(modelId?: string): Promise<void> {
 }
 
 async function refreshModelData(operation: ProviderModelEditingOperation): Promise<void> {
-  const requests: Array<Promise<unknown>> = [modelsQuery.refetch({ throwOnError: true })]
-  if (operation !== 'reimport') {
-    requests.push(queryClient.invalidateQueries({ queryKey: ['models'] }, { throwOnError: true }))
-  }
+  const requests: Array<Promise<unknown>> = [
+    modelsQuery.refetch({ throwOnError: true }),
+    queryClient.invalidateQueries({ queryKey: ['models'] }, { throwOnError: true }),
+  ]
   if (operation === 'save') {
     requests.push(queryClient.invalidateQueries({ queryKey: ['providers'] }, { throwOnError: true }))
   }
@@ -727,10 +730,7 @@ function clearManualTemplate(): void {
                     ),
                   )}>{m.provider_model_catalog_use_new_model()}</DropdownMenu.Item>
 
-              {#if modelEditing.detail.can_reimport}
-                <DropdownMenu.Item onSelect={() => editing.requestReimport()}
-                  >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
-              {:else}
+              {#if modelEditing.detail.source_kind === 'manual'}
                 <DropdownMenu.Separator />
                 <DropdownMenu.Item variant="destructive" onSelect={() => editing.requestDelete()}
                   >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
@@ -744,8 +744,11 @@ function clearManualTemplate(): void {
         detail={modelEditing.detail}
         draft={modelEditing.draft}
         disabled={modelEditing.busy}
-        onSave={(metadataJson: string) => void editing.save(metadataJson)}
+        {customCurrency}
+        onSave={(submission: ProviderModelSubmission) => void editing.save(submission)}
         onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
+        onRestore={(fields: string[]) => editing.restore(fields)}
+        saveError={modelEditing.writeError ? localizeBackendErrorMessage(modelEditing.writeError) : ''}
         onDirtyChange={(value: boolean) => {
           specificationDirty = value
           editing.markDirty(value || rpmDirty)
@@ -1018,9 +1021,12 @@ function clearManualTemplate(): void {
   saving={modelEditing.busy}
   onOpenChange={(open: boolean) => editing.setDrawerOpen(open)}
   onClose={() => editing.close()}
-  onSave={(metadataJson: string) => void editing.save(metadataJson)}
+  {customCurrency}
+  onSave={(submission: ProviderModelSubmission) => void editing.save(submission)}
   onSelectionChange={(policy: ProviderModelSelectionPolicy) => void editing.changeSelection(policy)}
-  onDirtyChange={(value: boolean) => editing.markDirty(value)} />
+  onRestore={(fields: string[]) => editing.restore(fields)}
+  onDirtyChange={(value: boolean) => editing.markDirty(value)}
+  saveError={modelEditing.writeError ? localizeBackendErrorMessage(modelEditing.writeError) : ''} />
 
 <CatalogConfirmations
   discardOpen={modelEditing.discardOpen}

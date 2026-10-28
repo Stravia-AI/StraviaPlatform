@@ -1,4 +1,5 @@
 import { computeTps, formatDuration, formatNumber, formatTps, type TpsInput } from '#lib/format.js'
+import { formatAmount } from '#lib/money.js'
 import { failureOriginLabel, observationContextStatusLabel, observationStatusLabel } from '#lib/observation-labels.js'
 import { payloadCount, payloadRecord } from '#lib/observation-payload.js'
 import * as m from '#lib/paraglide/messages.js'
@@ -44,6 +45,15 @@ const count = payloadCount
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+/** Attempt amounts arrive already converted to the display currency; the UI only formats them. */
+function displayMoney(value: unknown): string | undefined {
+  const amount = record(value)
+  const decimal = text(amount?.amount)
+  if (!decimal) return undefined
+  const currency = record(amount?.currency)
+  return formatAmount(decimal, text(currency?.symbol) ?? '$')
 }
 
 function observationGapNote(reason: string | undefined): string {
@@ -169,6 +179,23 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
           if (count(usage[key])) add(label(), formatNumber(usage[key]))
         }
         add(m.logs_token_speed(), formatTps(computeTps(attemptTpsInput(payload))))
+        // Amounts are frozen at attempt end; subscription costs are equivalent usage cost, not actual cost.
+        const costBasis = text(payload.cost_basis)
+        if (costBasis) {
+          add(
+            costBasis === 'subscription' ? m.cost_usage_equivalent() : m.cost_attempt_cost(),
+            displayMoney(payload.cost) ?? m.billing_unknown(),
+          )
+          const billingState = text(payload.billing_state)
+          add(
+            m.billing_billed_amount(),
+            billingState === 'charged'
+              ? (displayMoney(payload.billing) ?? m.billing_unknown())
+              : billingState === 'unknown'
+                ? m.billing_unknown()
+                : m.billing_not_billed(),
+          )
+        }
       }
       if (event.kind === 'platform_tool_finished') {
         duration('duration_ms', m.observation_duration())

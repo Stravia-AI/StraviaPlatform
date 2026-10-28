@@ -74,6 +74,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                 })
                 .collect(),
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -89,6 +90,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -167,6 +169,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -182,6 +185,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -293,6 +297,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                 })
                 .collect(),
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -308,6 +313,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

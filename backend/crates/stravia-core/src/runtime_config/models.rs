@@ -101,12 +101,13 @@ impl ProviderModelStore for RuntimeConfig {
         &self,
         provider_id: &str,
         reconciliation: ProviderModelReconciliation,
+        validate_map: &ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()> {
         let mutation = self.projection.begin();
         let result = self
             .source
             .provider_models()
-            .apply_reconciliation(provider_id, reconciliation)
+            .apply_reconciliation(provider_id, reconciliation, validate_map)
             .await;
         mutation.finish();
         result
@@ -151,19 +152,19 @@ impl ProviderModelStore for RuntimeConfig {
         result
     }
 
-    async fn reimport(
+    async fn restore(
         &self,
         provider_id: &str,
         model_id: &str,
-        input: ReimportProviderModel,
-        validate_map: &ReimportThinkingMapValidator<'_>,
+        input: RestoreProviderModel,
+        validate_map: &ProviderModelThinkingMapValidator<'_>,
         before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
-    ) -> anyhow::Result<ProviderModelReimport> {
+    ) -> anyhow::Result<ProviderModelRestore> {
         let mutation = self.projection.begin();
         let result = self
             .source
             .provider_models()
-            .reimport(provider_id, model_id, input, validate_map, before_commit)
+            .restore(provider_id, model_id, input, validate_map, before_commit)
             .await;
         mutation.finish();
         result
@@ -255,6 +256,7 @@ mod tests {
             model_id: model_id.into(),
             source_kind: ProviderModelSourceKind::Manual,
             snapshot_state: SnapshotState::Unregistered,
+            source_metadata: None,
             metadata_source_provider_id: None,
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::Auto,

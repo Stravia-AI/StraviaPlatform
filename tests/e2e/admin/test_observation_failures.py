@@ -1458,7 +1458,7 @@ def test_client_errors_exclude_recovered_and_cancelled_requests(
     assert status == 200
 
     cancelled_model = "observation-client-cancelled"
-    _, cancelled_key = _create_route(admin_env, cancelled_model, retry_budget=0)
+    cancelled_route, cancelled_key = _create_route(admin_env, cancelled_model, retry_budget=0)
     admin_env["mock_server"].stream_error_release.clear()
     request = Request(
         f"{admin_env['proxy']}/v1/chat/completions",
@@ -1485,6 +1485,16 @@ def test_client_errors_exclude_recovered_and_cancelled_requests(
                         for choice in event.get("choices", [])
                     ):
                         break
+        # 关闭客户端不代表服务端已经处理断开；先观察取消终态，再释放上游失败。
+        interaction = _wait_for(
+            "cancelled streaming Interaction",
+            lambda: _route_interactions(admin_env, cancelled_route),
+        )[0]
+        detail = _wait_for(
+            "cancelled Run finalization",
+            lambda: _finished_detail(admin_env, interaction["id"]),
+        )
+        assert detail["runs"][0]["status"] in ("cancelled", "interrupted")
     finally:
         admin_env["mock_server"].stream_error_release.set()
 

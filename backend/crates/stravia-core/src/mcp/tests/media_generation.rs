@@ -199,6 +199,7 @@ async fn generation_app() -> GenerationApp {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -909,14 +910,15 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         .get_provider_model(provider_id, "gpt-5.4")
         .await
         .unwrap();
-    let mut metadata = serde_json::to_value(model.metadata).unwrap();
-    metadata["modalities"]["output"] = json!(["text"]);
     admin
         .update_provider_model(
             provider_id,
             "gpt-5.4",
             crate::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text"]),
+                )]),
                 revision: model.revision,
             },
         )
@@ -938,14 +940,15 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         .get_provider_model(provider_id, "gpt-5.3-codex")
         .await
         .unwrap();
-    let mut metadata = serde_json::to_value(model.metadata).unwrap();
-    metadata["modalities"]["output"] = json!(["text"]);
     admin
         .update_provider_model(
             provider_id,
             "gpt-5.3-codex",
             crate::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text"]),
+                )]),
                 revision: model.revision,
             },
         )
@@ -974,14 +977,15 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         .get_provider_model(provider_id, "gpt-5.4")
         .await
         .unwrap();
-    let mut metadata = serde_json::to_value(model.metadata).unwrap();
-    metadata["modalities"]["output"] = json!(["text", "image"]);
     admin
         .update_provider_model(
             provider_id,
             "gpt-5.4",
             crate::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text", "image"]),
+                )]),
                 revision: model.revision,
             },
         )

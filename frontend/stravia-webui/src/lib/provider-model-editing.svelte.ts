@@ -1,5 +1,6 @@
 import { ProviderModelEditingController } from './provider-model-editing'
 import type { ProviderModelEditingDeps, ProviderModelEditingSnapshot } from './provider-model-editing'
+import type { ProviderModelSubmission } from './components/price-form'
 import type { ProviderModelSelectionPolicy } from './types'
 
 export { ProviderModelEditingController } from './provider-model-editing'
@@ -36,9 +37,9 @@ export class ProviderModelEditing {
   setDrawerOpen = (open: boolean): void => this.#controller.setDrawerOpen(open)
   prepareManual = (providerId: string, templateId: string, existingModelIds: readonly string[]): Promise<boolean> =>
     this.#controller.prepareManual(providerId, templateId, existingModelIds)
-  save = (metadataJson: string): Promise<void> => this.#controller.save(metadataJson)
+  save = (submission: ProviderModelSubmission): Promise<void> => this.#controller.save(submission)
   changeSelection = (policy: ProviderModelSelectionPolicy): Promise<void> => this.#controller.changeSelection(policy)
-  requestReimport = (): void => this.#controller.requestReimport()
+  restore = (fields: string[]): void => this.#controller.restore(fields)
   requestDelete = (): void => this.#controller.requestDelete()
   setDeleteOpen = (open: boolean): void => this.#controller.setDeleteOpen(open)
   delete = (): Promise<void> => this.#controller.delete()

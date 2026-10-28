@@ -1,10 +1,13 @@
 pub mod maintenance;
 pub mod memory;
 mod model_changes;
+pub mod money;
 pub mod postgres;
 pub mod sql;
 pub mod sqlite;
 pub mod traits;
+
+pub use money::CUSTOM_CURRENCY_SETTING_KEY;
 
 /// 供运行实例发现已提交配置变化的存储键。
 pub const CONFIG_EPOCH_KEY: &str = "config_epoch";
@@ -26,8 +29,8 @@ pub use memory::MemoryStorage;
 pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeyStore,
-    AuthAccessStore, DynStorage, NewAdminIdentity, NewAdminSession, ProviderModelStore,
-    ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage, StorageBootstrap,
-    UsageStatsStore,
+    AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeySpend,
+    ApiKeyStore, AuthAccessStore, DynStorage, MoneyStore, NewAdminIdentity, NewAdminSession,
+    NewProviderCostPlan, ProviderCostPlan, ProviderModelStore, ProviderStore, RouteSchedulingUsage,
+    RouteStore, SettingsStore, Storage, StorageBootstrap, UsageStatsStore,
 };

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,12 +11,14 @@ use crate::db::models::{
     RouteConfig, StatsOverview, StatsSeries, StatsWindow, UpdateApiKey, UpdateProvider,
     UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings, WebProvider,
 };
+use crate::pricing::{Amount, CostBasis, CurrencyKind, CustomCurrency, SubscriptionPeriod};
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord,
-    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelReimport,
+    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
     ProviderModelSelectionPolicy, ProviderModelSyncState, ProviderModelSyncSummary,
-    ReimportProviderModel, model_id_match_key,
+    ProviderModelThinkingMapValidator, RestoreProviderModel, model_id_match_key,
 };
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
 pub struct ProviderTestResult {
@@ -40,6 +42,8 @@ pub struct ApiKeyAccessRecord {
     pub is_enabled: bool,
     pub expires_at: Option<String>,
     pub rpm_limit: Option<i32>,
+    /// Display-currency nanos; `None` means unlimited.
+    pub spend_limit_nanos: Option<i64>,
     pub transparent_injection_enabled: bool,
     pub inject_media_understanding: bool,
     pub inject_web_search: bool,
@@ -526,6 +530,7 @@ pub trait ProviderModelStore: Send + Sync {
         &self,
         provider_id: &str,
         reconciliation: ProviderModelReconciliation,
+        validate_map: &ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()>;
     async fn create(
         &self,
@@ -540,18 +545,18 @@ pub trait ProviderModelStore: Send + Sync {
         snapshot_state: crate::provider_models::SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation>;
-    /// 原子写入快照、最新 Target 的 Generated Mapping 与配置变更通知。
+    /// 原子写回来源字段、取消固定、最新 Target 的 Generated Mapping 与配置变更通知。
     /// 返回同一事务内准备好的完整运行时快照，提交后不再执行可失败的读取。
     /// `validate_map` 使用新规格校验每个关联 Target，包括未变化的手工映射。
     /// `before_commit` 在最终提交前复检 Vendor 许可；失败则全部回滚。
-    async fn reimport(
+    async fn restore(
         &self,
         provider_id: &str,
         model_id: &str,
-        input: ReimportProviderModel,
-        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        input: RestoreProviderModel,
+        validate_map: &ProviderModelThinkingMapValidator<'_>,
         before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
-    ) -> anyhow::Result<ProviderModelReimport>;
+    ) -> anyhow::Result<ProviderModelRestore>;
     async fn update_selection_policy(
         &self,
         provider_id: &str,
@@ -582,6 +587,126 @@ pub trait ProviderModelStore: Send + Sync {
 pub trait SettingsStore: Send + Sync {
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>>;
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+}
+
+/// Durable cumulative spend for one API Key. A missing row is zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiKeySpend {
+    pub spent_custom_nanos: i64,
+    pub spent_usd_unconverted_nanos: i64,
+    pub reset_at: Option<String>,
+}
+
+/// One append-only Provider cost-plan effective record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderCostPlan {
+    pub id: String,
+    pub provider_id: String,
+    /// UTC epoch milliseconds; equals the write time.
+    pub effective_from: i64,
+    pub basis: CostBasis,
+    pub period: Option<SubscriptionPeriod>,
+    /// Frozen dual amount; `None` for usage-based plans.
+    pub price: Option<Amount>,
+    pub price_currency: Option<CurrencyKind>,
+    pub created_at: String,
+}
+
+/// Admin input before freezing the dual amount and write timestamp.
+#[derive(Debug, Clone)]
+pub struct NewProviderCostPlan {
+    pub basis: CostBasis,
+    pub period: Option<SubscriptionPeriod>,
+    pub price: Option<Decimal>,
+    pub currency: Option<CurrencyKind>,
+}
+
+#[async_trait]
+pub trait MoneyStore: Send + Sync {
+    async fn custom_currency(&self) -> anyhow::Result<Option<CustomCurrency>>;
+    /// First setup converts every non-null spend limit by `first_rate` in the
+    /// same transaction; later saves keep `first_rate`/`configured_at`.
+    async fn save_custom_currency(
+        &self,
+        symbol: &str,
+        usd_rate: Decimal,
+    ) -> anyhow::Result<CustomCurrency>;
+    async fn provider_cost_plans(&self, provider_id: &str)
+    -> anyhow::Result<Vec<ProviderCostPlan>>;
+    /// Includes plans whose Provider was deleted, ordered by provider then time.
+    async fn all_provider_cost_plans(&self) -> anyhow::Result<Vec<ProviderCostPlan>>;
+    async fn append_provider_cost_plan(
+        &self,
+        provider_id: &str,
+        input: NewProviderCostPlan,
+    ) -> anyhow::Result<ProviderCostPlan>;
+    async fn current_provider_cost_plan(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<Option<ProviderCostPlan>> {
+        Ok(super::money::current_provider_cost_plan(
+            self.provider_cost_plans(provider_id).await?,
+        ))
+    }
+    /// The plan in effect per Provider, selected with the same rule as
+    /// [`MoneyStore::current_provider_cost_plan`].
+    async fn current_provider_cost_plans(
+        &self,
+    ) -> anyhow::Result<HashMap<String, ProviderCostPlan>> {
+        Ok(super::money::current_provider_cost_plans(
+            self.all_provider_cost_plans().await?,
+        ))
+    }
+    /// A missing row returns zero, never an error.
+    async fn api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend>;
+    /// Resets the cumulative columns only; details and stats stay untouched.
+    async fn reset_api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend>;
+}
+
+struct UnsupportedMoneyStore;
+
+static UNSUPPORTED_MONEY: UnsupportedMoneyStore = UnsupportedMoneyStore;
+
+#[async_trait]
+impl MoneyStore for UnsupportedMoneyStore {
+    async fn custom_currency(&self) -> anyhow::Result<Option<CustomCurrency>> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn save_custom_currency(
+        &self,
+        _symbol: &str,
+        _usd_rate: Decimal,
+    ) -> anyhow::Result<CustomCurrency> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn provider_cost_plans(
+        &self,
+        _provider_id: &str,
+    ) -> anyhow::Result<Vec<ProviderCostPlan>> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn all_provider_cost_plans(&self) -> anyhow::Result<Vec<ProviderCostPlan>> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn append_provider_cost_plan(
+        &self,
+        _provider_id: &str,
+        _input: NewProviderCostPlan,
+    ) -> anyhow::Result<ProviderCostPlan> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn api_key_spend(&self, _api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
+
+    async fn reset_api_key_spend(&self, _api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
+        anyhow::bail!("selected storage backend does not support money configuration")
+    }
 }
 
 #[async_trait]
@@ -736,6 +861,9 @@ pub trait Storage: Send + Sync {
     fn routes(&self) -> &dyn RouteStore;
     fn provider_models(&self) -> &dyn ProviderModelStore;
     fn settings(&self) -> &dyn SettingsStore;
+    fn money(&self) -> &dyn MoneyStore {
+        &UNSUPPORTED_MONEY
+    }
     fn api_keys(&self) -> Option<&dyn ApiKeyStore> {
         None
     }

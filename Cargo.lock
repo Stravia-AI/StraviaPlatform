@@ -7796,6 +7796,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "chrono-tz",
  "crc32fast",
  "dashmap",
  "dirs 6.0.0",

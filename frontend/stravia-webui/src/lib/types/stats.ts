@@ -1,3 +1,5 @@
+import type { DisplayCurrency, MoneyAmount } from './money'
+
 export interface StatsWindow {
   /** Paired UTC epoch milliseconds, covering [start_at, end_at). */
   start_at: number
@@ -28,6 +30,8 @@ export interface StatsOverview {
   avg_first_token_ms: number | null
   /** 成功 Target attempts 的总输出 / 总完整耗时（tok/s）；任一样本缺输出或耗时为 null。 */
   avg_output_tps: number | null
+  currency: DisplayCurrency
+  actual_cost: MoneyAmount
 }
 
 export interface StatsSeries {
@@ -49,6 +53,8 @@ export interface StatsSeries {
   avg_first_token_ms: number | null
   /** 与 overview 相同的完整覆盖口径，仅统计该时间桶的成功 Target attempts。 */
   avg_output_tps: number | null
+  currency: DisplayCurrency
+  actual_cost: MoneyAmount
 }
 
 export interface ModelStats {
@@ -60,6 +66,9 @@ export interface ModelStats {
   total_output_tokens: number | null
   total_reasoning_tokens: number | null
   avg_duration_ms: number | null
+  currency: DisplayCurrency
+  cost: MoneyAmount
+  billing: MoneyAmount
 }
 
 export interface ProviderStats {
@@ -73,6 +82,10 @@ export interface ProviderStats {
   avg_duration_ms: number | null
   /** 已完成请求的输出 Token 总速（tok/s）；未完整报告输出或耗时为 null。 */
   avg_output_tps: number | null
+  currency: DisplayCurrency
+  actual_cost: MoneyAmount
+  /** Subscription-only equivalent usage cost; null for usage-based providers. */
+  usage_equivalent_cost: MoneyAmount | null
 }
 
 export interface ApiKeyStats {
@@ -86,4 +99,7 @@ export interface ApiKeyStats {
   cache_write_tokens: number | null
   reasoning_tokens: number | null
   last_used_at: number
+  currency: DisplayCurrency
+  cost: MoneyAmount
+  billing: MoneyAmount
 }

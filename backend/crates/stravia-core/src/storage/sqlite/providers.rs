@@ -8,20 +8,29 @@ pub(super) struct SqliteProviderStore {
 #[async_trait]
 impl ProviderStore for SqliteProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
-        Ok(sqlx::query_as::<_, Provider>(
+        let mut providers = sqlx::query_as::<_, Provider>(
     "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
-            .await?)
+            .await?;
+        let bases = load_cost_bases(&self.pool).await?;
+        for provider in &mut providers {
+            provider.cost_basis = bases.get(&provider.id).copied().unwrap_or_default();
+        }
+        Ok(providers)
     }
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
-        Ok(sqlx::query_as::<_, Provider>(
+        let mut provider = sqlx::query_as::<_, Provider>(
     "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
-            .await?)
+            .await?;
+        if let Some(provider) = provider.as_mut() {
+            load_cost_basis(&self.pool, provider).await?;
+        }
+        Ok(provider)
     }
 
     async fn create(&self, input: CreateProviderRecord) -> anyhow::Result<Provider> {
@@ -140,7 +149,7 @@ impl ProviderStore for SqliteProviderStore {
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
         let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
 
         sqlx::query(
             "DELETE FROM model_backends
@@ -158,6 +167,42 @@ impl ProviderStore for SqliteProviderStore {
         )
         .execute(&mut *tx)
         .await?;
+
+        // A deleted subscription Provider keeps its history; close the current
+        // segment with a usage record in the same transaction.
+        let latest_basis: Option<String> = sqlx::query_scalar(
+            "SELECT basis FROM provider_cost_plans WHERE provider_id = ? \
+             ORDER BY effective_from DESC, id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if latest_basis.as_deref() == Some("subscription") {
+            let now = chrono::Utc::now();
+            let previous: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(effective_from), 0) FROM provider_cost_plans \
+                 WHERE provider_id = ?",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let effective_from = now.timestamp_millis().max(
+                previous
+                    .checked_add(1)
+                    .context("cost plan timestamp overflow")?,
+            );
+            sqlx::query(
+                "INSERT INTO provider_cost_plans (id, provider_id, effective_from, basis, period, \
+                 price_usd_nanos, price_custom_nanos, price_currency, created_at) \
+                 VALUES (?, ?, ?, 'usage', NULL, NULL, NULL, NULL, ?)",
+            )
+            .bind(stravia_runtime_contract::identifier::new_id())
+            .bind(id)
+            .bind(effective_from)
+            .bind(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .execute(&mut *tx)
+            .await?;
+        }
 
         sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
@@ -384,6 +429,46 @@ pub(super) fn normalize_provider_vendor(vendor: Option<&str>) -> Option<String> 
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(|v| v.to_lowercase())
+}
+
+async fn load_cost_basis(pool: &SqlitePool, provider: &mut Provider) -> anyhow::Result<()> {
+    let basis: Option<String> = sqlx::query_scalar(
+        "SELECT basis FROM provider_cost_plans WHERE provider_id = ? \
+         ORDER BY effective_from DESC, id DESC LIMIT 1",
+    )
+    .bind(&provider.id)
+    .fetch_optional(pool)
+    .await?;
+    provider.cost_basis = basis
+        .as_deref()
+        .map(crate::storage::money::parse_cost_basis)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(())
+}
+
+async fn load_cost_bases(
+    pool: &SqlitePool,
+) -> anyhow::Result<std::collections::HashMap<String, crate::pricing::CostBasis>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT provider_id, basis FROM (\
+           SELECT provider_id, basis, \
+                  ROW_NUMBER() OVER (\
+                    PARTITION BY provider_id ORDER BY effective_from DESC, id DESC\
+                  ) AS row_number \
+           FROM provider_cost_plans\
+         ) WHERE row_number = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|(provider_id, basis)| {
+            Ok((
+                provider_id,
+                crate::storage::money::parse_cost_basis(&basis)?,
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]

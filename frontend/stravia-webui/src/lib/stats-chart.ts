@@ -1,4 +1,6 @@
 import type { StatsOverview, StatsSeries } from '#lib/types.js'
+import type { MoneyAmount } from '#lib/types/money.js'
+import { isMoneyUnknown } from '#lib/money.js'
 
 type LatencyStats = Pick<StatsSeries, 'bucket_start' | 'avg_first_token_ms' | 'avg_output_tps'>
 type TokenStats = Pick<
@@ -274,4 +276,41 @@ export function buildActivityGrid(
         : (Math.min(4, Math.ceil((cell.tokens / max) * 4)) as 1 | 2 | 3 | 4),
   }))
   return { cells, colStarts, colCount: colStarts.length, rowCount, bucketMs }
+}
+
+type CostStats = Pick<StatsSeries, 'bucket_start' | 'actual_cost'>
+
+export interface CostChartPoint {
+  bucket: Date
+  /** Display-currency amount; null means no cost records in the bucket and breaks the line. */
+  amount: number | null
+  amountLabel: string
+  cost: MoneyAmount | null
+}
+
+/** Cost series uses the same missing-bucket gaps as the other time series; no interpolation. */
+export function buildCostChart(rows: readonly CostStats[], bucketMs: number): CostChartPoint[] {
+  const points: CostChartPoint[] = []
+  let previousStart: number | undefined
+
+  for (const row of rows) {
+    const start = row.bucket_start
+    if (previousStart != null && Number.isFinite(start)) {
+      for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
+        points.push({ bucket: new Date(missing), amount: null, amountLabel: '—', cost: null })
+      }
+    }
+    // Unknown attempts do not contribute a plotted amount; the tooltip reports Unknown.
+    const known = !isMoneyUnknown(row.actual_cost)
+    const amount = known ? Number(row.actual_cost.amount) : null
+    points.push({
+      bucket: new Date(start),
+      amount: amount != null && Number.isFinite(amount) ? amount : null,
+      amountLabel: known ? row.actual_cost.amount : '—',
+      cost: row.actual_cost,
+    })
+    previousStart = Number.isFinite(start) ? start : undefined
+  }
+
+  return points
 }

@@ -258,6 +258,7 @@ async fn provider_route_and_key(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let key = gateway
@@ -273,6 +274,7 @@ async fn provider_route_and_key(
             inject_web_search: false,
             inject_media_generation: false,
             model_ids: vec![route.id.into()],
+            spend_limit: None,
         })
         .await?;
     Ok((route.model_id.into(), key.token))
@@ -3067,6 +3069,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let key = gateway
@@ -3082,6 +3085,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             inject_web_search: false,
             inject_media_generation: false,
             model_ids: vec![route.id.into()],
+            spend_limit: None,
         })
         .await?;
     let request = json!({

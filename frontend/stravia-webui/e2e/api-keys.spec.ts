@@ -452,13 +452,18 @@ test('API Key Sheet keeps switch rows readable at 390px', async ({ page }) => {
     'api-key-transparent-injection',
     'api-key-inject-web-search',
   ]
-  const rects = []
-  for (const id of ids) {
-    await page.locator(`#${id}`).scrollIntoViewIfNeeded()
-    const rect = await page.locator(`#${id}`).boundingBox()
-    if (!rect) throw new Error(`${id} is not visible`)
-    rects.push(rect)
-  }
+  // Read every row in one layout pass. Scrolling each control into view between
+  // measurements changes the viewport origin and invalidates earlier y values.
+  const rects = await sheet.evaluate(
+    (root, controlIds) =>
+      controlIds.map((id) => {
+        const element = root.querySelector(`[id="${id}"]`)
+        if (!(element instanceof HTMLElement)) throw new Error(`${id} is not rendered`)
+        const rect = element.getBoundingClientRect()
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+      }),
+    ids,
+  )
   const sheetBox = await sheet.boundingBox()
   if (!sheetBox) throw new Error('Sheet is not visible')
   for (const [index, rect] of rects.entries()) {

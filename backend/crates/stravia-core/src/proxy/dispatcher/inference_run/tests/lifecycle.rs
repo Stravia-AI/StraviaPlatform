@@ -1482,6 +1482,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("create model route");
@@ -1707,6 +1708,7 @@ async fn unrepresentable_thinking_mapping_uses_nearest_protocol_supported_level(
                 thinking_level_map: map,
             }]),
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("inject legacy unrepresentable map");

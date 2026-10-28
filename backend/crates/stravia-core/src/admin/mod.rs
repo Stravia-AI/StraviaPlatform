@@ -22,6 +22,7 @@ pub mod identity;
 mod media;
 mod media_generation;
 mod model_data;
+mod money;
 mod oauth;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
@@ -45,6 +46,7 @@ pub use crate::interaction_observation::{
     UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
+pub use money::{ProviderCostPlanInput, provider_cost_plan_value};
 pub use provider_connection::{
     ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderConnectionCheckInput,
     ProviderNetworkPermission,

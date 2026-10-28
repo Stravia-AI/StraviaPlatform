@@ -2,26 +2,25 @@
 import * as m from '#lib/paraglide/messages.js'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import PlusIcon from '@lucide/svelte/icons/plus'
-import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack, type Snippet } from 'svelte'
 
 import FormSection from '#lib/components/form-section.svelte'
 import ModalitySelect from '#lib/components/modality-select.svelte'
+import PriceEditor from '#lib/components/price-editor.svelte'
 import ReasoningEffortSelect from '#lib/components/reasoning-effort-select.svelte'
 import { localeState } from '#lib/localization.svelte.js'
 import { providerModelSelectionPolicyLabel } from '#lib/provider-model-labels.js'
 import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelSelectionPolicy } from '#lib/types.js'
 import {
   buildProviderModelMetadataJson,
-  emptyProviderModelCost,
-  emptyProviderModelPrices,
   normalizeProviderModelEfforts,
-  providerModelCostFromMetadata,
   providerModelFormFingerprint,
-  type ProviderModelCostForm,
-  type ProviderModelPriceForm,
+  type PriceForm,
+  type ProviderModelSubmission,
 } from './provider-model-form.js'
+import { buildProviderModelChanges, emptyPriceForm, priceFormFromCost, validatePriceForm } from './price-form.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import { Badge } from '#lib/components/ui/badge/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import * as Collapsible from '#lib/components/ui/collapsible/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -34,15 +33,18 @@ interface Props {
   detail: ProviderModelDetail
   draft?: boolean
   disabled?: boolean
-  onSave: (metadataJson: string) => void
+  customCurrency?: { symbol: string } | null
+  onSave: (submission: ProviderModelSubmission) => void
   onSelectionChange: (policy: ProviderModelSelectionPolicy) => void
+  onRestore?: (fields: string[]) => void
   onDirtyChange?: (dirty: boolean) => void
+  /** Localized failure from the last save attempt; cleared when the next write starts. */
+  saveError?: string
   /** 上游模型的 RPM 限额；只有已存在的模型才有，由使用方提供并随页面一起保存。 */
   rpm?: Snippet
 }
 
 type StringField = 'name' | 'description'
-type PriceField = keyof ProviderModelPriceForm
 const modalityTargets = ['input', 'output'] as const
 
 // 宽布局下的“添加可选字段”按钮贴设置列右缘，与控件右边缘对齐。
@@ -50,30 +52,38 @@ const alignedActions = 'flex flex-wrap gap-2 empty:hidden'
 // 设置列够宽时短字段两列并排；窄时退回单列。
 const pairGrid =
   'grid gap-x-6 gap-y-4 grid-cols-[repeat(auto-fill,minmax(max(min(100%,20rem),calc((100%-1.5rem)/2)),1fr))]'
-const priceGrid = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]'
 const stringFields: Array<{ key: StringField; label: () => string; multiline?: boolean }> = [
   { key: 'name', label: m.provider_model_field_name },
   { key: 'description', label: m.provider_model_field_description, multiline: true },
 ]
-const priceFields: Array<{ key: PriceField; label: () => string }> = [
-  { key: 'input', label: m.provider_model_field_input },
-  { key: 'output', label: m.provider_model_field_output },
-  { key: 'cache_read', label: m.provider_model_field_cache_read },
-  { key: 'cache_write', label: m.provider_model_field_cache_write },
-]
-let { detail, draft = false, disabled = false, onSave, onSelectionChange, onDirtyChange, rpm }: Props = $props()
+let {
+  detail,
+  draft = false,
+  disabled = false,
+  customCurrency = null,
+  onSave,
+  onSelectionChange,
+  onRestore,
+  onDirtyChange,
+  saveError = '',
+  rpm,
+}: Props = $props()
 let metadata = $state<ProviderModelMetadata>({})
-let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
+let cost = $state<PriceForm>(emptyPriceForm())
+let touched = $state<string[]>([])
 let structuralErrors = $state<string[]>([])
 let extensionsOpen = $state(false)
-let errorAlert = $state<HTMLDivElement>()
+let errorAlert = $state<HTMLDivElement | null>(null)
 let initialFingerprint = $state('')
 let editorRoot = $state<HTMLFieldSetElement>()
 
 const extensionEntries = $derived(Object.entries(detail.extensions ?? {}))
 const confirmedMetadata = $derived(detail.metadata)
+const pinnedFields = $derived(new Set(detail.pinned_fields ?? []))
+const restorableFields = $derived(new Set(detail.restorable_fields ?? []))
+const hasUnrestorablePinnedFields = $derived((detail.pinned_fields ?? []).some((field) => !restorableFields.has(field)))
 const currentFingerprint = $derived(fingerprint())
-const dirty = $derived(Boolean(initialFingerprint) && currentFingerprint !== initialFingerprint)
+const dirty = $derived(touched.length > 0 || (Boolean(initialFingerprint) && currentFingerprint !== initialFingerprint))
 
 $effect(() => {
   onDirtyChange?.(dirty)
@@ -97,18 +107,23 @@ $effect(() => {
     nextMetadata.reasoning_efforts = normalizeProviderModelEfforts(nextMetadata.reasoning_efforts)
   }
   metadata = nextMetadata
-  cost = providerModelCostFromMetadata(snapshot)
+  cost = priceFormFromCost(snapshot.cost)
+  touched = []
   structuralErrors = []
   initialFingerprint = untrack(fingerprint)
 })
 $effect(() => {
-  if (structuralErrors.length > 0) {
+  if (saveError || structuralErrors.length > 0) {
     void tick().then(() => errorAlert?.focus())
   }
 })
 
 function fingerprint(): string {
   return providerModelFormFingerprint($state.snapshot(metadata), $state.snapshot(cost))
+}
+
+function touch(key: string): void {
+  if (!touched.includes(key)) touched = [...touched, key]
 }
 
 function hasField(key: keyof ProviderModelMetadata): boolean {
@@ -133,50 +148,86 @@ function addModalities(): void {
 
 function addCost(): void {
   metadata.cost = { tiers: [] }
+  cost = emptyPriceForm()
   void focusControl('provider-model-cost-input')
 }
 
-function removeField(key: keyof ProviderModelMetadata): void {
-  delete metadata[key]
-  if (key === 'cost') cost = emptyProviderModelCost()
+function removeCost(): void {
+  // 移除定价是显式清空：所有定价键都提交 null，避免同步重新带回旧值。
+  for (const field of ['input', 'output', 'cache_read', 'cache_write'] as const) touch(`cost.${field}`)
+  touch('cost.tiers')
+  touch('cost.peak')
+  delete metadata.cost
+  cost = emptyPriceForm()
 }
 
 function setStringField(key: StringField, value: string): void {
   metadata[key] = value
+  touch(key)
 }
 
 function setModalityValues(target: 'input' | 'output', values: string[]): void {
   metadata.modalities ??= { input: [], output: [] }
   metadata.modalities[target] = values
+  touch(`modalities.${target}`)
 }
 
 function setLimit(value: string): void {
   metadata.limit = { context: value === '' ? null : Number(value) }
+  touch('limit.context')
 }
 
-function addTier(): void {
-  cost.tiers.push({ ...emptyProviderModelPrices(), threshold: '' })
-  metadata.cost ??= { tiers: [] }
-  void focusControl(`provider-model-tier-${cost.tiers.length - 1}`)
-}
-
-function removeTier(index: number): void {
-  cost.tiers.splice(index, 1)
+function setEfforts(values: string[]): void {
+  metadata.reasoning_efforts = values
+  touch('reasoning_efforts')
 }
 
 export function submit(): void {
   if (disabled) return
-  const result = buildProviderModelMetadataJson(detail.id, $state.snapshot(metadata), $state.snapshot(cost))
-  structuralErrors = result.errors
-  const { json } = result
-  if (json) onSave(json)
+  if (draft) {
+    const result = buildProviderModelMetadataJson(detail.id, $state.snapshot(metadata), $state.snapshot(cost))
+    structuralErrors = result.errors
+    if (result.json) onSave({ kind: 'create', metadataJson: result.json })
+    return
+  }
+  const costErrors = validatePriceForm($state.snapshot(cost))
+  const result = buildProviderModelChanges(
+    $state.snapshot(confirmedMetadata),
+    $state.snapshot(metadata),
+    priceFormFromCost(confirmedMetadata.cost),
+    $state.snapshot(cost),
+    new Set(touched),
+  )
+  structuralErrors = [...costErrors, ...result.errors]
+  if (structuralErrors.length > 0 || Object.keys(result.changes).length === 0) return
+  onSave({ kind: 'update', changes: result.changes })
 }
 </script>
+
+{#snippet pinnedControl(field: string, label: string)}
+  {#if pinnedFields.has(field)}
+    <span class="flex shrink-0 items-center gap-1">
+      <Badge variant="outline" class="px-1.5 py-0 text-[0.6875rem]">{m.provider_model_editor_pinned()}</Badge>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        class="h-6 px-1.5 text-xs"
+        disabled={disabled || !restorableFields.has(field)}
+        title={restorableFields.has(field) ? undefined : m.provider_model_editor_restore_unavailable()}
+        aria-label={`${m.provider_model_editor_restore_sync()} ${label}`}
+        onclick={() => onRestore?.([field])}>{m.provider_model_editor_restore_sync()}</Button>
+    </span>
+  {/if}
+{/snippet}
 
 {#snippet stringControl(field: (typeof stringFields)[number])}
   {#if hasField(field.key)}
     <Field.Field class={field.multiline ? 'col-span-full' : undefined}>
-      <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+      <div class="flex min-h-6 flex-wrap items-center justify-between gap-1">
+        <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+        {@render pinnedControl(field.key, field.label())}
+      </div>
       {#if field.multiline}
         <Textarea
           id={`provider-model-${field.key}`}
@@ -194,6 +245,10 @@ export function submit(): void {
 {/snippet}
 
 <fieldset bind:this={editorRoot} {disabled} class="@container/model-editor flex min-w-0 flex-col gap-6">
+  {#if hasUnrestorablePinnedFields}
+    <p class="text-sm text-muted-foreground">{m.provider_model_editor_restore_unavailable_hint()}</p>
+  {/if}
+
   <FormSection title={m.provider_model_editor_model_information()}>
     <!-- 设置列够宽时短字段两列并排；描述是多行文本，独占一行。 -->
     <Field.Group class={`${pairGrid} empty:hidden`}>
@@ -241,7 +296,10 @@ export function submit(): void {
   <FormSection title={m.provider_model_editor_capabilities()}>
     <Field.Group class={pairGrid}>
       <Field.Field>
-        <Field.Label for="provider-model-limit-context">{m.provider_model_editor_context()}</Field.Label>
+        <div class="flex min-h-6 flex-wrap items-center justify-between gap-1">
+          <Field.Label for="provider-model-limit-context">{m.provider_model_editor_context()}</Field.Label>
+          {@render pinnedControl('limit.context', m.provider_model_editor_context())}
+        </div>
         <Input
           id="provider-model-limit-context"
           type="number"
@@ -253,24 +311,28 @@ export function submit(): void {
           oninput={(event: Event) => setLimit(inputValue(event))} />
       </Field.Field>
       <Field.Field>
-        <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
-          >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
+        <div class="flex min-h-6 flex-wrap items-center justify-between gap-1">
+          <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
+            >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
+          {@render pinnedControl('reasoning_efforts', m.provider_model_editor_reasoning_efforts())}
+        </div>
         <ReasoningEffortSelect
           id="provider-model-reasoning-efforts"
           {disabled}
           registered={detail.metadata.reasoning_efforts}
-          bind:value={
-            () => metadata.reasoning_efforts ?? [], (values: string[]) => (metadata.reasoning_efforts = values)
-          } />
+          bind:value={() => metadata.reasoning_efforts ?? [], setEfforts} />
       </Field.Field>
       {#if hasField('modalities') && metadata.modalities}
         {#each modalityTargets as target (target)}
+          {@const label =
+            target === 'input'
+              ? m.provider_model_editor_accepted_input_types()
+              : m.provider_model_editor_generated_output_types()}
           <Field.Field>
-            <Field.Label for={`provider-model-${target}-modalities`}>
-              {target === 'input'
-                ? m.provider_model_editor_accepted_input_types()
-                : m.provider_model_editor_generated_output_types()}
-            </Field.Label>
+            <div class="flex min-h-6 flex-wrap items-center justify-between gap-1">
+              <Field.Label for={`provider-model-${target}-modalities`}>{label}</Field.Label>
+              {@render pinnedControl(`modalities.${target}`, label)}
+            </div>
             <ModalitySelect
               id={`provider-model-${target}-modalities`}
               registered={detail.metadata.modalities?.[target]}
@@ -297,68 +359,16 @@ export function submit(): void {
         <div class={pairGrid}>{@render rpm()}</div>
       {/if}
       {#if hasField('cost')}
-        <div class="flex flex-col gap-3">
-          <div class="flex items-center justify-between gap-3">
-            <p class="flex items-center gap-2 text-sm font-medium">
-              {m.provider_model_editor_base_pricing()}
-              <Field.Help hint={m.provider_model_editor_pricing_unit_help()} />
-            </p>
-            <Button type="button" variant="ghost" size="sm" onclick={() => removeField('cost')}
-              ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
-          </div>
-          <div class={priceGrid}>
-            {#each priceFields as field (field.key)}
-              <Field.Field orientation="vertical">
-                <Field.Label for={`provider-model-cost-${field.key}`}>{field.label()}</Field.Label>
-                <Input
-                  id={`provider-model-cost-${field.key}`}
-                  class="font-technical"
-                  inputmode="decimal"
-                  bind:value={cost.base[field.key]}
-                  placeholder="0.00" />
-              </Field.Field>
-            {/each}
-          </div>
-          {#each cost.tiers as tier, index (tier)}
-            <div class="flex flex-col gap-3 border-t border-dashed pt-4">
-              <div class="flex items-end justify-between gap-3">
-                <Field.Field orientation="vertical" class="max-w-64">
-                  <Field.Label for={`provider-model-tier-${index}`}
-                    >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
-                  <Input
-                    id={`provider-model-tier-${index}`}
-                    type="number"
-                    min="0"
-                    step="1"
-                    class="font-technical"
-                    bind:value={tier.threshold} />
-                </Field.Field>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="shrink-0"
-                  aria-label={m.provider_model_editor_remove_tier()}
-                  onclick={() => removeTier(index)}><Trash2Icon /></Button>
-              </div>
-              <div class={priceGrid}>
-                {#each priceFields as field (field.key)}
-                  <Field.Field orientation="vertical">
-                    <Field.Label for={`provider-model-tier-${index}-${field.key}`}>{field.label()}</Field.Label>
-                    <Input
-                      id={`provider-model-tier-${index}-${field.key}`}
-                      class="font-technical"
-                      inputmode="decimal"
-                      bind:value={tier[field.key]}
-                      placeholder="0.00" />
-                  </Field.Field>
-                {/each}
-              </div>
-            </div>
-          {/each}
-          <Button type="button" variant="outline" size="sm" class="self-start" onclick={addTier}
-            ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
-        </div>
+        <PriceEditor
+          bind:value={cost}
+          {customCurrency}
+          {disabled}
+          idPrefix="provider-model-cost"
+          {pinnedFields}
+          {restorableFields}
+          onRestore={(field: string) => onRestore?.([field])}
+          onFieldTouch={(field) => touch(`cost.${field}`)}
+          onRemove={removeCost} />
       {:else}
         <Button type="button" variant="outline" size="sm" class="self-start" onclick={addCost}
           ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
@@ -385,11 +395,12 @@ export function submit(): void {
     </Collapsible.Root>
   {/if}
 
-  {#if structuralErrors.length > 0}
+  {#if saveError || structuralErrors.length > 0}
     <Alert.Root bind:ref={errorAlert} tabindex={-1} variant="destructive" role="alert">
       <Alert.Title>{m.provider_model_editor_cannot_save()}</Alert.Title>
       <Alert.Description
         ><ul class="list-disc pl-5">
+          {#if saveError}<li>{saveError}</li>{/if}
           {#each structuralErrors as error (error)}<li>{error}</li>{/each}
         </ul></Alert.Description>
     </Alert.Root>

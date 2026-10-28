@@ -106,16 +106,18 @@ impl ExternalSearchHost for SearchHost {
             .ok_or_else(|| {
                 external_error("route_unavailable", "External Search Route is unavailable")
             })?;
+        let mut context = crate::plugin::VendorCallContext::new(
+            cancellation.clone(),
+            stravia_runtime_contract::Deadline::fixed(deadline),
+        );
+        context.observer = crate::interaction_observation::scope::current();
         let execution = self
             .0
             .execute_vendor_route(
                 principal,
                 &route,
                 crate::plugin::VendorRequest::Search(request),
-                crate::plugin::VendorCallContext::new(
-                    cancellation.clone(),
-                    stravia_runtime_contract::Deadline::fixed(deadline),
-                ),
+                context,
             )
             .await
             .map_err(external_execution_error)?;

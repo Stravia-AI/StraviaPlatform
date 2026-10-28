@@ -22,6 +22,7 @@ pub(crate) mod model_turn;
 pub mod outbound_proxy;
 pub mod performance;
 pub mod plugin;
+pub mod pricing;
 pub mod protocol;
 pub mod provider_catalog;
 pub mod provider_models;

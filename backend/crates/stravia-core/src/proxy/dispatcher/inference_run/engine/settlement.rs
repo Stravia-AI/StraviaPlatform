@@ -517,7 +517,13 @@ mod tests {
         })
     }
 
-    const SENT_AT: i64 = 1_700_000_000_000;
+    /// Delivery timestamps seed observation retention and tail attribution.
+    /// They must be real receipt times; a fixed past instant expires the tail
+    /// before a continuation can be attributed to it.
+    fn sent_at() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
     const VENDOR: &str = "settlement-vendor";
 
     async fn vendor_settlement(
@@ -809,16 +815,17 @@ mod tests {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
         let caller = stravia_runtime_contract::CancellationToken::new();
+        let sent_at = sent_at();
         let (mut settlement, response, generation_id, publication, marker) =
             vendor_settlement(&gateway, &mut session, &ledger, &tracker, caller.clone()).await;
         settlement.prepare(&ledger, &observer).await;
-        ledger.terminal.publish_prepared_client_completion(SENT_AT);
-        assert_eq!(ledger.terminal.delivery_completed_at(), Some(SENT_AT));
+        ledger.terminal.publish_prepared_client_completion(sent_at);
+        assert_eq!(ledger.terminal.delivery_completed_at(), Some(sent_at));
         caller.cancel();
         assert!(publication.ensure_current().is_err());
         assert!(publication.ensure_generation_current().is_ok());
         let outcome = settlement
-            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .finish_sent(&gateway, &mut session, &ledger, &observer, sent_at)
             .await;
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         assert_eq!(outcome.published_platform_executions, vec![marker]);
@@ -832,7 +839,7 @@ mod tests {
         observer.finish(crate::interaction_observation::RunOutcome {
             client_output_committed: true,
             delivery: None,
-            delivery_completed_at: Some(SENT_AT),
+            delivery_completed_at: Some(sent_at),
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: Some(generation_id.clone()),
@@ -847,6 +854,7 @@ mod tests {
     async fn confirmed_sent_settlement_rejects_vendor_revocation_while_guards_are_held() {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
+        let sent_at = sent_at();
         let (mut settlement, response, generation_id, publication, _) = vendor_settlement(
             &gateway,
             &mut session,
@@ -856,8 +864,8 @@ mod tests {
         )
         .await;
         settlement.prepare(&ledger, &observer).await;
-        ledger.terminal.publish_prepared_client_completion(SENT_AT);
-        assert_eq!(ledger.terminal.delivery_completed_at(), Some(SENT_AT));
+        ledger.terminal.publish_prepared_client_completion(sent_at);
+        assert_eq!(ledger.terminal.delivery_completed_at(), Some(sent_at));
         // Poll the actual drain once. It advances the epoch and cancels the
         // publication token synchronously, then blocks on our prepared read locks.
         let drain = tracker.cancel_and_drain_for_test(VENDOR);
@@ -868,7 +876,7 @@ mod tests {
         ));
         assert!(publication.ensure_generation_current().is_err());
         let outcome = settlement
-            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .finish_sent(&gateway, &mut session, &ledger, &observer, sent_at)
             .await;
         assert!(matches!(
             outcome.failures.as_slice(),
@@ -896,16 +904,17 @@ mod tests {
         let (_directory, mut session, ledger, observer, gateway, observation) = fixture().await;
         let tracker = crate::plugin::VendorOperationTracker::default();
         let caller = stravia_runtime_contract::CancellationToken::new();
+        let sent_at = sent_at();
         let (mut settlement, response, generation_id, _, _) =
             vendor_settlement(&gateway, &mut session, &ledger, &tracker, caller.clone()).await;
         settlement.prepare(&ledger, &observer).await;
         caller.cancel();
         // The real synchronous callback must not issue a Sent certificate when
         // strict validation fails, even though read guards were acquired earlier.
-        ledger.terminal.publish_prepared_client_completion(SENT_AT);
+        ledger.terminal.publish_prepared_client_completion(sent_at);
         assert_eq!(ledger.terminal.delivery_completed_at(), None);
         let outcome = settlement
-            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .finish_sent(&gateway, &mut session, &ledger, &observer, sent_at)
             .await;
         assert!(matches!(
             outcome.failures.as_slice(),
@@ -928,6 +937,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_response_publishes_markers_with_delivery_timestamp() {
         let (_directory, mut session, ledger, observer, gateway, _observation) = fixture().await;
+        let sent_at = sent_at();
         let principal = ledger.terminal.principal.clone();
         let marker = gateway
             .history_markers
@@ -957,9 +967,9 @@ mod tests {
         let mut settlement =
             CompletionSettlement::buffered(batch, None, MarkerExecutions::default());
         settlement.prepare(&ledger, &observer).await;
-        ledger.terminal.publish_prepared_client_completion(SENT_AT);
+        ledger.terminal.publish_prepared_client_completion(sent_at);
         let outcome = settlement
-            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .finish_sent(&gateway, &mut session, &ledger, &observer, sent_at)
             .await;
 
         assert!(
@@ -976,15 +986,13 @@ mod tests {
             ledger.published_executions(),
             vec![marker.reference.clone()]
         );
-        assert_eq!(
-            ledger.terminal.delivery_completed_at(),
-            Some(1_700_000_000_000)
-        );
+        assert_eq!(ledger.terminal.delivery_completed_at(), Some(sent_at));
     }
 
     #[tokio::test]
     async fn settle_enumerates_failures_and_still_runs_later_steps() {
         let (_directory, mut session, ledger, observer, gateway, _observation) = fixture().await;
+        let sent_at = sent_at();
         // A Marker that was never persisted makes publication fail.
         let batch = staged_platform_batch(&mut session, "abcdefghijklmnopqrstuvwxyzab");
         // A write that was never staged makes the commit persist fail.
@@ -1010,9 +1018,9 @@ mod tests {
             MarkerExecutions::default(),
         );
         settlement.prepare(&ledger, &observer).await;
-        ledger.terminal.publish_prepared_client_completion(SENT_AT);
+        ledger.terminal.publish_prepared_client_completion(sent_at);
         let outcome = settlement
-            .finish_sent(&gateway, &mut session, &ledger, &observer, SENT_AT)
+            .finish_sent(&gateway, &mut session, &ledger, &observer, sent_at)
             .await;
 
         assert_eq!(outcome.failures.len(), 2);
@@ -1025,10 +1033,7 @@ mod tests {
             SettlementFailure::GenerationCommit(_)
         ));
         // The tail still ran to completion despite both failures.
-        assert_eq!(
-            ledger.terminal.delivery_completed_at(),
-            Some(1_700_000_000_000)
-        );
+        assert_eq!(ledger.terminal.delivery_completed_at(), Some(sent_at));
         assert!(
             !ledger
                 .terminal

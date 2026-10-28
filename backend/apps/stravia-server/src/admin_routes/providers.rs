@@ -6,6 +6,20 @@ pub(super) async fn provider_value(
     gw: &Gateway,
     provider: Provider,
 ) -> anyhow::Result<serde_json::Value> {
+    let cost_plan = gw
+        .admin()
+        .current_provider_cost_plan(&provider.id)
+        .await?
+        .map(|plan| stravia_core::admin::provider_cost_plan_value(&plan))
+        .transpose()?;
+    provider_value_with_plan(gw, provider, cost_plan).await
+}
+
+async fn provider_value_with_plan(
+    gw: &Gateway,
+    provider: Provider,
+    cost_plan: Option<serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
     let configured_credential_fields = gw
         .admin()
         .configured_provider_credential_fields(&provider)
@@ -26,15 +40,30 @@ pub(super) async fn provider_value(
         "allowance_suspension".into(),
         serde_json::to_value(allowance_suspension)?,
     );
+    fields.insert(
+        "cost_plan".into(),
+        cost_plan.unwrap_or(serde_json::Value::Null),
+    );
     Ok(value)
 }
 
 pub(super) async fn list_providers(State(gw): State<Gateway>) -> impl IntoResponse {
     match gw.admin().list_providers().await {
         Ok(providers) => {
+            let mut current_plans = match gw.admin().current_provider_cost_plans().await {
+                Ok(plans) => plans,
+                Err(error) => return err(error),
+            };
             let mut data = Vec::with_capacity(providers.len());
             for provider in providers {
-                match provider_value(&gw, provider).await {
+                let cost_plan = match current_plans.remove(&provider.id) {
+                    Some(plan) => match stravia_core::admin::provider_cost_plan_value(&plan) {
+                        Ok(value) => Some(value),
+                        Err(error) => return err(error),
+                    },
+                    None => None,
+                };
+                match provider_value_with_plan(&gw, provider, cost_plan).await {
                     Ok(provider) => data.push(provider),
                     Err(error) => return err(error),
                 }
@@ -83,14 +112,17 @@ pub(super) async fn catalog_models_handler(
             )
                 .into_response()
         }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "code": "CATALOG_ENTRY_NOT_FOUND",
-                "error": "Catalog provider or channel was not found."
-            })),
-        )
-            .into_response(),
+        Err(error) => match error.downcast_ref::<CatalogError>() {
+            Some(error) => catalog_error_response(error),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "code": "CATALOG_PROVIDER_NOT_FOUND",
+                    "error": "Catalog provider or channel was not found."
+                })),
+            )
+                .into_response(),
+        },
     }
 }
 
@@ -418,8 +450,8 @@ pub(super) async fn update_provider_model_handler(
             &id,
             &input.model_id,
             UpdateProviderModel {
-                metadata: input.metadata,
                 revision: input.revision,
+                changes: input.changes,
             },
         )
         .await
@@ -451,14 +483,21 @@ pub(super) async fn update_provider_model_selection_handler(
     }
 }
 
-pub(super) async fn reimport_provider_model_handler(
+pub(super) async fn restore_provider_model_sync_handler(
     State(gw): State<Gateway>,
     Path(id): Path<String>,
-    Json(input): Json<ProviderModelRevisionRequest>,
+    Json(input): Json<RestoreProviderModelSyncRequest>,
 ) -> axum::response::Response {
     match gw
         .admin()
-        .reimport_provider_model(&id, &input.model_id, input.revision)
+        .restore_provider_model_sync(
+            &id,
+            &input.model_id,
+            RestoreProviderModelSync {
+                revision: input.revision,
+                fields: input.fields,
+            },
+        )
         .await
     {
         Ok(model) => Json(serde_json::json!({ "data": model })).into_response(),
@@ -503,8 +542,9 @@ pub(super) struct CreateProviderModelRequest {
 #[derive(Deserialize)]
 pub(super) struct UpdateProviderModelRequest {
     model_id: String,
-    metadata: serde_json::Value,
     revision: i64,
+    #[serde(default)]
+    changes: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -515,9 +555,11 @@ pub(super) struct UpdateProviderModelSelectionRequest {
 }
 
 #[derive(Deserialize)]
-pub(super) struct ProviderModelRevisionRequest {
+pub(super) struct RestoreProviderModelSyncRequest {
     model_id: String,
     revision: i64,
+    #[serde(default)]
+    fields: Vec<String>,
 }
 
 pub(super) async fn provider_model_capabilities_handler(

@@ -8,10 +8,12 @@ const END = Date.UTC(2026, 8, 17, 8, 15)
 const PEAK = END - 9 * HOUR
 const UNKNOWN = END - 2 * QUARTER
 const MISSING = END - 3 * QUARTER
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const emptyMoney = { amount: '0', known_count: 0, unknown_count: 0 }
 
 test.use({ timezoneId: 'UTC' })
 
-async function stubStats(page: Page) {
+async function stubStats(page: Page, actualCost?: { amount: string; known_count: number; unknown_count: number }) {
   await page.clock.setFixedTime(END - 8 * 60_000)
   const requests: URL[] = []
   await page.route('**/api/v1/stats/**', async (route) => {
@@ -36,6 +38,8 @@ async function stubStats(page: Page) {
             avg_duration_ms: 120,
             avg_first_token_ms: 40,
             avg_output_tps: 25,
+            currency: CURRENCY,
+            actual_cost: actualCost ?? { amount: '1.28', known_count: 128, unknown_count: 0 },
           },
         },
       })
@@ -71,6 +75,12 @@ async function stubStats(page: Page) {
           avg_duration_ms: 120,
           avg_first_token_ms: 40,
           avg_output_tps: 25,
+          currency: CURRENCY,
+          actual_cost: actualCost ?? {
+            amount: known ? '0.01' : '0',
+            known_count: known ? 1 : 0,
+            unknown_count: known ? 0 : 1,
+          },
         })
       }
       await route.fulfill({ json: { data } })
@@ -79,6 +89,33 @@ async function stubStats(page: Page) {
     }
   })
   return requests
+}
+
+for (const scenario of [
+  {
+    name: 'subscription without attempts',
+    cost: { amount: '12.5', known_count: 0, unknown_count: 0 },
+    shown: '$12.50',
+  },
+  {
+    name: 'subscription plus unknown usage',
+    cost: { amount: '12.5', known_count: 0, unknown_count: 1 },
+    shown: '$12.50',
+  },
+  { name: 'entirely unknown usage', cost: { amount: '0', known_count: 0, unknown_count: 1 }, shown: 'Unknown' },
+]) {
+  test(`cost summary and timeline preserve ${scenario.name}`, async ({ page }) => {
+    await prepareApp(page)
+    await stubStats(page, scenario.cost)
+    await page.goto('/stats')
+    const metric = page
+      .locator('.route-metric-strip__item')
+      .filter({ has: page.getByText('Actual cost', { exact: true }) })
+    await expect(metric.locator('p').nth(1)).toHaveText(scenario.shown)
+    const chart = page.getByRole('slider', { name: 'Cost trend chart' })
+    await expect(chart).toBeVisible()
+    await expect(chart).toHaveAttribute('aria-valuetext', new RegExp(scenario.shown.replace('$', '\\$')))
+  })
 }
 
 async function expectCoverage(page: Page, selectedStart: number, end: number, requests: URL[]) {
@@ -283,6 +320,8 @@ for (const scenario of [
             avg_duration_ms: 1000,
             avg_first_token_ms: 500,
             avg_output_tps: 20,
+            currency: CURRENCY,
+            actual_cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
           },
         },
       })
@@ -315,6 +354,9 @@ async function populateResources(page: Page, total = 12) {
           upstream_error_count: index === 0 ? 3 : 0,
           avg_duration_ms: 100,
           avg_output_tps: 10 + index,
+          currency: CURRENCY,
+          actual_cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
+          usage_equivalent_cost: index === 0 ? emptyMoney : null,
         })),
       },
     })
@@ -333,6 +375,9 @@ async function populateResources(page: Page, total = 12) {
           cache_write_tokens: 4_321,
           reasoning_tokens: null,
           last_used_at: END - index * HOUR,
+          currency: CURRENCY,
+          cost: { amount: '0.02', known_count: 1, unknown_count: 0 },
+          billing: emptyMoney,
         })),
       },
     })
@@ -349,6 +394,9 @@ async function populateResources(page: Page, total = 12) {
           total_output_tokens: 10,
           total_reasoning_tokens: null,
           avg_duration_ms: 100,
+          currency: CURRENCY,
+          cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
+          billing: emptyMoney,
         })),
       },
     })
@@ -420,17 +468,12 @@ test.describe('usage workspace layout', () => {
     expect(boxes.breakdown.width).toBeLessThanOrEqual(24 * rem)
     expect(boxes.models.width).toBeLessThanOrEqual(24 * rem)
 
-    // Provider and key tables sit side by side only because the 7-column key table stays readable.
-    expect(Math.abs(boxes.providers.y - boxes.keys.y)).toBeLessThanOrEqual(1)
-    expect(boxes.keys.x).toBeGreaterThan(boxes.providers.x + boxes.providers.width - 1)
-    expect(boxes.keys.width).toBeGreaterThanOrEqual(46 * rem)
     await expect(async () => {
       const headers = await keyTable
         .getByRole('columnheader')
         .evaluateAll((els) =>
           els.map((el) => ({ text: el.textContent?.trim(), clipped: el.scrollWidth > el.clientWidth + 1 })),
         )
-      expect(headers).toHaveLength(7)
       expect(headers.filter((header) => header.clipped)).toEqual([])
       const scrolls = await keyTable.evaluate((table) => {
         for (let el = table.parentElement; el; el = el.parentElement) {
@@ -447,7 +490,7 @@ test.describe('usage workspace layout', () => {
     expect(nameColumn.width).toBeGreaterThan(requestColumn.width * 1.5)
   })
 
-  test('1440 stacks the provider and key tables instead of squeezing the 7-column table', async ({ page }) => {
+  test('1440 keeps resource tables and analyses readable in one column', async ({ page }) => {
     await prepareApp(page)
     await stubStats(page)
     await populateResources(page)

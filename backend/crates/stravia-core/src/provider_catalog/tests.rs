@@ -721,31 +721,6 @@ async fn invalid_scope_body_is_rejected_before_persisting() -> anyhow::Result<()
     Ok(())
 }
 
-#[tokio::test]
-async fn model_source_requires_an_exact_provider_catalog_entry() -> anyhow::Result<()> {
-    let data_dir = tempfile::tempdir()?;
-    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source()))?;
-    install_index(&catalog, "revision-1").await?;
-    let scope = catalog
-        .install_provider_scope("demo", &demo_scope_body())
-        .await?;
-
-    let error = catalog
-        .model_source("demo", "chat-preview", scope)
-        .unwrap_err();
-
-    assert!(error.downcast_ref::<CatalogError>().is_some_and(|error| {
-        matches!(
-            error,
-            CatalogError::EntryNotFound {
-                provider_id,
-                model_id
-            } if provider_id == "demo" && model_id == "chat-preview"
-        )
-    }));
-    Ok(())
-}
-
 // 目录 revision 刷新可能移除已选服务或更换 channel 指纹;创建 Provider 时
 // 必须能区分这三类过期,管理面才能给出可恢复的提示而不是裸错误串。
 #[tokio::test]

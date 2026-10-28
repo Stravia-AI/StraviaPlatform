@@ -37,6 +37,7 @@ impl AdminService {
                 inject_media_generation: input.inject_media_generation,
                 expires_at,
                 model_ids: input.model_ids,
+                spend_limit: input.spend_limit,
             })
             .await?;
         self.gw.principal_admission.set_limit(&result.id, rpm_limit);
@@ -105,6 +106,7 @@ impl AdminService {
                     inject_media_generation: Some(inject_media_generation),
                     expires_at,
                     model_ids: input.model_ids,
+                    spend_limit: input.spend_limit,
                 },
             )
             .await?;
@@ -153,7 +155,9 @@ impl AdminService {
         }
         Ok(())
     }
-    fn api_keys_store(&self) -> anyhow::Result<&dyn crate::storage::traits::ApiKeyStore> {
+    pub(super) fn api_keys_store(
+        &self,
+    ) -> anyhow::Result<&dyn crate::storage::traits::ApiKeyStore> {
         self.gw
             .storage
             .api_keys()
@@ -236,6 +240,7 @@ mod expiry_tests {
                 inject_media_generation: false,
                 inject_media_understanding: false,
                 model_ids: Vec::new(),
+                spend_limit: None,
             })
             .await
             .expect("API key");
@@ -256,6 +261,7 @@ mod expiry_tests {
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -277,6 +283,7 @@ mod expiry_tests {
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -298,6 +305,7 @@ mod expiry_tests {
                     inject_media_understanding: None,
                     expires_at: None,
                     model_ids: None,
+                    spend_limit: None,
                 },
             )
             .await
@@ -321,6 +329,7 @@ mod expiry_tests {
                         inject_web_search: false,
                         inject_media_generation: false,
                         model_ids: Vec::new(),
+                        spend_limit: None,
                     })
                     .await
                     .is_err()

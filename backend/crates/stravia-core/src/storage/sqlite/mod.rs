@@ -98,6 +98,10 @@ impl Storage for SqliteStorage {
         self.settings_store.as_ref()
     }
 
+    fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
+        self
+    }
+
     fn provider_models(&self) -> &dyn ProviderModelStore {
         self
     }
@@ -129,6 +133,7 @@ impl Storage for SqliteStorage {
 
 mod api_keys;
 mod bootstrap;
+mod money;
 mod oauth;
 mod providers;
 mod routes;

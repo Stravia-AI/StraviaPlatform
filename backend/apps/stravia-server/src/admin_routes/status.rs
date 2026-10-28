@@ -25,15 +25,6 @@ pub(super) fn catalog_error_response(error: &CatalogError) -> axum::response::Re
             "Canonical Model was not found in the active catalog revision.",
             serde_json::json!({ "model_id": id }),
         ),
-        CatalogError::EntryNotFound {
-            provider_id,
-            model_id,
-        } => (
-            StatusCode::NOT_FOUND,
-            "CATALOG_ENTRY_NOT_FOUND",
-            "Provider Catalog Entry was not found in the active catalog revision.",
-            serde_json::json!({ "provider_id": provider_id, "model_id": model_id }),
-        ),
         CatalogError::ProviderNotFound { provider_id } => (
             StatusCode::NOT_FOUND,
             "CATALOG_PROVIDER_NOT_FOUND",
@@ -95,7 +86,7 @@ pub(super) fn provider_model_err(error: anyhow::Error) -> axum::response::Respon
     {
         let status = match code {
             "PROVIDER_MODEL_NOT_FOUND" => StatusCode::NOT_FOUND,
-            "PROVIDER_MODEL_CONFLICT" => StatusCode::CONFLICT,
+            "PROVIDER_MODEL_CONFLICT" | "PROVIDER_MODEL_SOURCE_UNAVAILABLE" => StatusCode::CONFLICT,
             _ => StatusCode::BAD_REQUEST,
         };
         let mut body = serde_json::json!({

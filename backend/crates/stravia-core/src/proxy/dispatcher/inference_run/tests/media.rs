@@ -30,6 +30,7 @@ async fn master_only_injection_can_download_owned_artifacts_without_media_or_net
                 inject_media_generation: false,
                 inject_media_understanding: false,
                 model_ids: vec![],
+                spend_limit: None,
             })
             .await
             .expect("API key");
@@ -164,6 +165,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("parent Model");
@@ -222,6 +224,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             inject_media_generation: false,
             inject_media_understanding: true,
             model_ids: vec![parent.id.into()],
+            spend_limit: None,
         })
         .await
         .expect("media-only API key");
@@ -318,6 +321,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("parent Model");
@@ -372,6 +376,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Media Model");
@@ -398,6 +403,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             inject_media_generation: false,
             model_ids: vec![parent_model.id.into()],
             inject_media_understanding: true,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -688,6 +694,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
                 },
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("mixed Media Model");
@@ -709,6 +716,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("unsupported Media Model");
@@ -746,6 +754,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("independent Media Understanding Route");
@@ -774,6 +783,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
             inject_media_generation: false,
             model_ids: vec![mixed_model.id.into(), unsupported_model.id.into()],
             inject_media_understanding: true,
+            spend_limit: None,
         })
         .await
         .expect("Media API key");
@@ -839,12 +849,16 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
             "native",
             crate::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata: serde_json::json!({
-                    "id": "native",
-                    "attachment": true,
-                    "tool_call": false,
-                    "modalities": {"input": ["text", "image"], "output": ["image"]}
-                }),
+                changes: std::collections::BTreeMap::from([
+                    (
+                        "modalities.input".to_string(),
+                        serde_json::json!(["text", "image"]),
+                    ),
+                    (
+                        "modalities.output".to_string(),
+                        serde_json::json!(["image"]),
+                    ),
+                ]),
             },
         )
         .await
@@ -968,6 +982,7 @@ async fn historical_route_with_image_input_requires_reconfiguration_before_media
                     .collect(),
             ),
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("seed historical unconfigured Route");

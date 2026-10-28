@@ -14,6 +14,19 @@ pub(super) struct SqliteUsageStatsStore {
 
 const BASE_BUCKET_MS: i64 = 900_000;
 
+const MONEY_TOTALS_COLUMNS: &str = "COALESCE(SUM(cost_custom_nanos), 0) AS cost_custom_nanos,
+       COALESCE(SUM(cost_usd_unconverted_nanos), 0) AS cost_usd_unconverted_nanos,
+       COALESCE(SUM(cost_known_count), 0) AS cost_known_count,
+       COALESCE(SUM(cost_unknown_count), 0) AS cost_unknown_count,
+       COALESCE(SUM(payg_cost_custom_nanos), 0) AS payg_cost_custom_nanos,
+       COALESCE(SUM(payg_cost_usd_unconverted_nanos), 0) AS payg_cost_usd_unconverted_nanos,
+       COALESCE(SUM(payg_cost_known_count), 0) AS payg_cost_known_count,
+       COALESCE(SUM(payg_cost_unknown_count), 0) AS payg_cost_unknown_count,
+       COALESCE(SUM(billing_custom_nanos), 0) AS billing_custom_nanos,
+       COALESCE(SUM(billing_usd_unconverted_nanos), 0) AS billing_usd_unconverted_nanos,
+       COALESCE(SUM(billing_charged_count), 0) AS billing_charged_count,
+       COALESCE(SUM(billing_unknown_count), 0) AS billing_unknown_count";
+
 // 调度只消费最近一小时：用量 SUM 逐维度忽略未知，全未知才为 NULL；
 // 派生 uncached 仅以 input 是否已知为门槛，cache_read 未知时按 0 抵扣，不回写原始 SUM；
 // 状态完整性仍用 FILTER 限定在成功样本上。只设下界，不排除本机时钟偏差导致的未来记录。
@@ -81,7 +94,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
 
     async fn stats_overview(&self, window: StatsWindow) -> anyhow::Result<StatsOverview> {
         window.validate()?;
-        Ok(sqlx::query_as::<_, StatsOverview>(
+        Ok(sqlx::query_as::<_, StatsOverview>(sqlx::AssertSqlSafe(format!(
             "SELECT COALESCE(SUM(request_count), 0) AS total_requests,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
        COALESCE(SUM(failed_request_count), 0) AS failed_request_count,
@@ -94,7 +107,8 @@ impl UsageStatsStore for SqliteUsageStatsStore {
        CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
        SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
        SUM(first_token_ms_sum) * 1.0 / NULLIF(SUM(first_token_ms_count), 0) AS avg_first_token_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807)",
+       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps,
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807)")),
         )
         .bind(window.start_at)
         .bind(window.end_at)
@@ -126,7 +140,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             }
         };
         let bucket_ms = display_bucket_ms(start, end, bucket_ms);
-        Ok(sqlx::query_as::<_, StatsSeries>(
+        Ok(sqlx::query_as::<_, StatsSeries>(sqlx::AssertSqlSafe(format!(
             "SELECT (bucket_start - ?4) / ?3 * ?3 + ?4 AS bucket_start, ?3 AS bucket_ms, COALESCE(SUM(request_count), 0) AS request_count,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
        COALESCE(SUM(failed_request_count), 0) AS failed_request_count,
@@ -139,7 +153,8 @@ impl UsageStatsStore for SqliteUsageStatsStore {
        CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
        SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
        SUM(first_token_ms_sum) * 1.0 / NULLIF(SUM(first_token_ms_count), 0) AS avg_first_token_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY (bucket_start - ?4) / ?3 * ?3 + ?4 ORDER BY bucket_start",
+       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps,
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY (bucket_start - ?4) / ?3 * ?3 + ?4 ORDER BY bucket_start")),
         )
         .bind(start)
         .bind(end)
@@ -151,12 +166,13 @@ impl UsageStatsStore for SqliteUsageStatsStore {
 
     async fn stats_by_model(&self, window: StatsWindow) -> anyhow::Result<Vec<ModelStats>> {
         window.validate()?;
-        Ok(sqlx::query_as::<_, ModelStats>(
+        Ok(sqlx::query_as::<_, ModelStats>(sqlx::AssertSqlSafe(format!(
             "SELECT entity_id AS model_id, MAX(label) AS model, NOT EXISTS (SELECT 1 FROM models live WHERE live.id = b.entity_id) AS deleted, COALESCE(SUM(request_count), 0) AS request_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
        CASE WHEN SUM(output_tokens_known) > 0 THEN SUM(output_tokens_sum) END AS total_output_tokens,
        CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
-       SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms FROM stats_usage_buckets b WHERE scope = 'model' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY request_count DESC, identity",
+       SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets b WHERE scope = 'model' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY request_count DESC, identity")),
         )
         .bind(window.start_at)
         .bind(window.end_at)
@@ -166,11 +182,12 @@ impl UsageStatsStore for SqliteUsageStatsStore {
 
     async fn stats_by_provider(&self, window: StatsWindow) -> anyhow::Result<Vec<ProviderStats>> {
         window.validate()?;
-        Ok(sqlx::query_as::<_, ProviderStats>(
+        Ok(sqlx::query_as::<_, ProviderStats>(sqlx::AssertSqlSafe(format!(
             "SELECT entity_id AS provider_id, MAX(label) AS provider, NOT EXISTS (SELECT 1 FROM providers live WHERE live.id = b.entity_id) AS deleted, COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
        COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count,
        SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps FROM stats_usage_buckets b WHERE scope = 'provider' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY upstream_request_count DESC, identity",
+       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps,
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets b WHERE scope = 'provider' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY upstream_request_count DESC, identity")),
         )
         .bind(window.start_at)
         .bind(window.end_at)
@@ -180,14 +197,15 @@ impl UsageStatsStore for SqliteUsageStatsStore {
 
     async fn stats_by_api_key(&self, window: StatsWindow) -> anyhow::Result<Vec<ApiKeyStats>> {
         window.validate()?;
-        Ok(sqlx::query_as::<_, ApiKeyStats>(
+        Ok(sqlx::query_as::<_, ApiKeyStats>(sqlx::AssertSqlSafe(format!(
             "SELECT COALESCE(entity_id, '') AS api_key_id, MAX(label) AS api_key_name, NOT EXISTS (SELECT 1 FROM api_keys live WHERE live.id = b.entity_id) AS deleted, COALESCE(SUM(request_count), 0) AS request_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
        CASE WHEN SUM(output_tokens_known) > 0 THEN SUM(output_tokens_sum) END AS total_output_tokens,
        CASE WHEN SUM(cache_read_tokens_known) > 0 THEN SUM(cache_read_tokens_sum) END AS cache_read_tokens,
        CASE WHEN SUM(cache_write_tokens_known) > 0 THEN SUM(cache_write_tokens_sum) END AS cache_write_tokens,
        CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS reasoning_tokens,
-       MAX(last_used_at) AS last_used_at FROM stats_usage_buckets b WHERE scope = 'api_key' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY request_count DESC, identity",
+       MAX(last_used_at) AS last_used_at,
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets b WHERE scope = 'api_key' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY identity, entity_id ORDER BY request_count DESC, identity")),
         )
         .bind(window.start_at)
         .bind(window.end_at)

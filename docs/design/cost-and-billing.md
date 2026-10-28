@@ -1,6 +1,6 @@
 # 成本与计费设计
 
-> 状态：设计已确认，尚未实施。
+> 状态：已实施。
 > 更新：2026-10-28
 > 相关决策：[ADR-0084](../adr/0084-pin-provider-model-fields-individually.md)、[ADR-0085](../adr/0085-record-cost-and-billing-with-interaction-observation.md)、[ADR-0086](../adr/0086-freeze-dual-currency-amounts-and-derive-history-from-first-rate.md)
 
@@ -36,7 +36,7 @@ Provider Model 价格是成本的唯一输入，因此同时把规格的人工�
 
 计价在 Rust 中用 `rust_decimal::Decimal` 完成，每笔总额最后四舍五入（远离零）到纳单位一次，不逐项取整。溢出 `i64` 时该笔金额记为未知并写 `tracing::warn!`，不截断。
 
-管理 API 以十进制字符串收发金额；纳单位只存在于存储与 Core 内部。
+本功能的金额配置与统计管理 API 以十进制字符串收发金额；纳单位只存在于存储与 Core 内部。目录来源价格保留原有的 JSON 数字形状，但解析与序列化使用 `Decimal`，不经过 `f64`；标准化缓存中的十进制字符串和来源中的科学计数法数字都可读取。
 
 ### 3.2 自定义币种
 
@@ -94,7 +94,7 @@ $$
 
 ### 4.1 价格结构
 
-Provider Model 价格与 Route 的按 Token 计费价格复用同一个类型 `ModelCost`（`backend/crates/stravia-core/src/provider_models.rs:369-482`），新增两个本地字段：
+Provider Model 价格与 Route 的按 Token 计费价格复用同一个类型 `ModelCost`（`backend/crates/stravia-core/src/provider_models.rs`），新增两个本地字段：
 
 ```json
 {
@@ -122,7 +122,7 @@ Provider Model 价格与 Route 的按 Token 计费价格复用同一个类型 `M
 - `peak` 至多一条：IANA 时区、ISO 星期（1 = 周一）、同一天内的时段列表（`HH:MM`，含起点不含终点，终点可为 `24:00`，不跨午夜、不重叠）和一个大于 0 的倍率。
 - 两个新字段只来自管理写入。目录导入与模型发现得到的价格一律去除这两个字段，来源价格总是美元。
 
-`metadata_json` 已保存完整的 `ModelCost`（`backend/crates/stravia-core/src/storage/sqlite/provider_models.rs:754-781`），新字段随之保存，不新增列。`cost_input` 等投影列与 `provider_model_cost_rules` 继续保存填写值，不用于金额计算。
+`metadata_json` 已保存完整的 `ModelCost`（`backend/crates/stravia-core/src/storage/sqlite/provider_models.rs`），新字段随之保存，不新增列。`cost_input` 等投影列与 `provider_model_cost_rules` 继续保存填写值，不用于金额计算。
 
 ### 4.2 计价函数
 
@@ -172,16 +172,16 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 
 实施 [ADR-0084](../adr/0084-pin-provider-model-fields-individually.md)：
 
-- `SnapshotState`（`backend/crates/stravia-core/src/provider_models.rs:48-54`）改为 `Unregistered`、`Imported { source, pinned }` 与 `Local`。`pinned` 是已固定的规格字段集合；`Local` 是没有同步来源的手动规格，JSON 沿用现有的 `{"type":"edited","source":null}`。现有 CHECK 本来就允许额外的 `pinned` 键，因此不重建 `provider_models` 表；Rust 读取到带来源的 `edited` 视为存储不变量破坏并报错。
-- 新列 `provider_models.source_metadata_json`（可空）保存最近一次同步得到的来源规格。每次成功同步都更新它，不论字段是否固定；同步只把未固定字段写入生效规格。手动模型只有创建时的模板作为来源值，不参与 discovery 对账。
-- 字段标识与编辑器控件一一对应：`name`、`limit.context`、`limit.output`、`modalities.input`、`modalities.output`、`reasoning_efforts`、各能力开关（与 `ProviderModelMetadata` 字段同名），以及 `cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.tiers`。`custom_currency_fields` 中对应的标记随所属价格字段一起写入、固定和恢复。`cost.peak` 是纯本地字段，不参与固定。
+- `SnapshotState`（`backend/crates/stravia-core/src/provider_models.rs`）改为 `Unregistered`、`Imported { source, pinned }` 与 `Local`。`pinned` 是已固定的规格字段集合；`Local` 是没有同步来源的手动规格，JSON 沿用现有的 `{"type":"edited","source":null}`。现有 CHECK 本来就允许额外的 `pinned` 键，因此不重建 `provider_models` 表；Rust 读取到带来源的 `edited` 视为存储不变量破坏并报错。
+- 新列 `provider_models.source_metadata_json`（可空）保存最近一次同步得到的来源规格。每次成功同步都更新它，不论字段是否固定；同步只把未固定字段写入生效规格。手动模型仅在创建时复制模板内容，之后没有同步来源，不参与 discovery 对账。
+- 字段标识与编辑器控件一一对应：`name`、`description`、`limit.context`、`modalities.input`、`modalities.output`、`reasoning_efforts`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write`、`cost.tiers`。`custom_currency_fields` 中对应的标记随所属价格字段一起写入、固定和恢复。`cost.peak` 是纯本地字段，不参与固定。
 - 管理写入只提交改动过的字段，提交的字段即被固定，即使值与来源相同。
-- 恢复同步把来源值写回该字段并取消固定，不发起上游或目录请求；来源中没有该字段时恢复为未登记。恢复改变 `reasoning_efforts` 时，在同一事务内重算关联 Target 的 Generated Mapping，沿用 re-import 现有的事务与锁顺序（`docs/design/architecture.md` §9.2）。
-- 删除 `POST /api/v1/providers/{id}/model/reimport`、`AdminService::reimport_provider_model` 及 `RouteModule::reimport_provider_model`（`backend/crates/stravia-core/src/admin/routes/provider_model_records.rs:93-102, 455-544`），以及 WebUI 的 `reimportModel`、`requestReimport` 与 `can_reimport`，不保留别名。
+- 恢复同步把来源值写回该字段并取消固定，不发起上游或目录请求；来源中没有该字段时恢复为未登记。恢复改变 `reasoning_efforts` 时，在同一事务内重算关联 Target 的 Generated Mapping，事务与锁顺序见 `docs/design/architecture.md` §9.2。
+- 删除 `POST /api/v1/providers/{id}/model/reimport`、`AdminService::reimport_provider_model` 及 `RouteModule::reimport_provider_model`（`backend/crates/stravia-core/src/admin/routes/provider_model_records.rs`），以及 WebUI 的 `reimportModel`、`requestReimport` 与 `can_reimport`，不保留别名。
 
 ### 5.3 尝试成本的计算与写入
 
-`AttemptObservation`（`backend/crates/stravia-core/src/model_turn/provider/mod.rs:133`）创建时额外持有：
+`AttemptObservation`（`backend/crates/stravia-core/src/model_turn/provider/mod.rs`）创建时额外持有：
 
 - 尝试开始的墙钟时间 `DateTime<Utc>`，用于峰谷判定；
 - 该 Target 的 Provider Model 价格 `Option<Arc<ModelCost>>`；
@@ -189,9 +189,9 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 - 本次 Route 的计费设置，以及根 Principal 的 `api_key_id`（无 API Key 的 Principal 不计费）；
 - 当前币种快照。
 
-Provider Model 价格来自 `RoutePolicyState` 现有的定价派生缓存（`backend/crates/stravia-core/src/router/selection.rs:331-360`）。该缓存改为保存完整 `ModelCost`，路由流量权重从中派生 `f64`，以自定义币种填写的字段按当前汇率换算为美元后再求比值；不另建第二份价格缓存，失效代次与 TTL 不变。
+Provider Model 价格来自 `RoutePolicyState` 现有的定价派生缓存（`backend/crates/stravia-core/src/router/selection.rs`）。该缓存改为保存完整 `ModelCost`，路由流量权重从中派生 `f64`，以自定义币种填写的字段按当前汇率换算为美元后再求比值；不另建第二份价格缓存，失效代次与 TTL 不变。
 
-`finish`（`provider/mod.rs:364-442`）在发出事件前，用已确认用量调用计价函数，并在 `RunEvent::TargetAttemptFinished`（`backend/crates/stravia-core/src/interaction_observation/types.rs:561-573`）中新增：
+`AttemptObservation::finish` 在发出事件前，用已确认用量调用计价函数，并在 `RunEvent::TargetAttemptFinished`（`backend/crates/stravia-core/src/interaction_observation/types.rs`）中新增：
 
 ```rust
 pub struct AttemptAmounts {
@@ -202,9 +202,9 @@ pub struct AttemptAmounts {
 pub enum BillingOutcome { Charged(Amount), Unknown }
 ```
 
-每次尝试至多确认一次用量，且在 `finish` 之前或之中完成，因此金额在 `finish` 一次算定。所有尝试都计成本：重试、故障切换、隐藏轮次与平台内部调用。成本未知的原因包括：用量未知、所需分项无价、找不到 Provider Model。崩溃恢复时补写的 `interrupted` 终态（`backend/crates/stravia-core/src/interaction_observation/store.rs:1696, 1771`）不带金额，记为成本未知。
+每次尝试至多确认一次用量，且在 `finish` 之前或之中完成，因此金额在 `finish` 一次算定。所有尝试都计成本：重试、故障切换、隐藏轮次与平台内部调用。成本未知的原因包括：用量未知、所需分项无价、找不到 Provider Model。新尝试通过 `RunEvent::TargetAttemptStarted` 保存 `cost_basis`；崩溃恢复时补写的 `interrupted` 终态不带金额但保留该成本方式，记为成本未知。运行中的尝试，以及没有 `cost_basis` 的历史尝试，不计入未知成本次数。
 
-观测写入（`store.rs:2537` SQLite、`store.rs:2635` PostgreSQL）把金额写入 `target_attempt_observations` 的新列（§7.1），触发器负责累计。没有观测作用域的模型调用不产生任何金额；实现时须确认所有归属 API Key 的路径（代理请求、Agent 循环 `backend/crates/stravia-core/src/agent/runner/loop.rs:533`、MCP `tools/call` 调用的平台工具）都运行在观测作用域内。
+观测写入（`backend/crates/stravia-core/src/interaction_observation/store.rs`）把金额写入 SQLite 与 PostgreSQL 的 `target_attempt_observations` 新列（§7.1），触发器负责累计。没有观测作用域的模型调用不产生任何金额；所有归属 API Key 的路径（代理请求、Agent 循环、MCP `tools/call` 调用的平台工具，包括外部搜索）都运行在观测作用域内。
 
 ### 5.4 实际成本与订阅摊销
 
@@ -218,7 +218,7 @@ $$
   段止为下一条记录的 `effective_from`，最新一段止于当前时刻。订阅 Provider 的尝试成本仍按价格计算，展示为等价按量成本，不计入实际成本。
 - **全局实际成本** = 全部按量尝试成本 + 全部订阅摊销（包括已删除 Provider 的历史段）。
 
-摊销在查询时由 Core 从 `provider_cost_plans` 计算；记录数很少，不进入统计桶。订阅价格按 §3.3 的双金额规则展示。
+摊销在查询时由 Core 从 `provider_cost_plans` 计算；记录数很少，不进入统计桶。订阅价格按 §3.3 的双金额规则展示。记录的生效时间无法表示时，统计查询返回错误，不跳过该记录生成不完整的已知金额。
 
 ## 6. 计费
 
@@ -249,9 +249,9 @@ $$
 ### 6.3 消费上限与准入
 
 - `api_keys` 新增可空列 `spend_limit_nanos`（大于 0），单位为当前展示币种（§3.3）；`NULL` 表示不限。
-- 检查发生在根请求准入：代理路径在 `gw.principal_admission.acquire` 之前（`backend/crates/stravia-core/src/proxy/dispatcher/inference_run/engine/mod.rs:616`），MCP 在 `tools/call` 的 RPM 准入之前（`backend/crates/stravia-core/src/mcp/server.rs:335-341`）。先查上限，使被拒的请求不占用 RPM 窗口。
+- 检查发生在根请求准入：代理路径在 `gw.principal_admission.acquire` 之前（`backend/crates/stravia-core/src/proxy/dispatcher/inference_run/engine/mod.rs`），MCP 在 `tools/call` 的 RPM 准入之前（`backend/crates/stravia-core/src/mcp/server.rs`）。先查上限，使被拒的请求不占用 RPM 窗口。
 - 检查只读取该 Key 的一行 `api_key_spend`（没有行即已消费为 0），按 §3.3 得到展示币种的已消费，与上限比较，不产生写入。读取失败时返回内部错误，不放行。
-- 已消费 ≥ 上限时拒绝：HTTP 429，新增 `GatewayError::ApiKeySpendLimitReached`，稳定码 `STRAVIA_SPEND_LIMIT`，消息 `API key spend limit reached.`，不带 `Retry-After`。各协议错误体沿用额度暂停的形状（`backend/crates/stravia-core/src/proxy/dispatcher/inference_run.rs:1221-1244`）：OpenAI 兼容与 Open Responses 为 `{"error":{"type":"insufficient_quota","code":"api_key_spend_limit_reached",...}}`，Anthropic 为 `rate_limit_error`，Gemini 为 `RESOURCE_EXHAUSTED`。
+- 已消费 ≥ 上限时拒绝：HTTP 429，新增 `GatewayError::ApiKeySpendLimitReached`，稳定码 `STRAVIA_SPEND_LIMIT`，消息 `API key spend limit reached.`，不带 `Retry-After`。各协议错误体沿用额度暂停的形状（`backend/crates/stravia-core/src/proxy/dispatcher/inference_run.rs`）：OpenAI 兼容与 Open Responses 为 `{"error":{"type":"insufficient_quota","code":"api_key_spend_limit_reached",...}}`，Anthropic 为 `rate_limit_error`，Gemini 为 `RESOURCE_EXHAUSTED`。
 - 拒绝按现有准入拒绝路径记录（代理为 `reject_before_admission(..., "admission", "spend_limit", ...)`），计入错误的请求。
 - 只在根请求准入检查。已准入请求内的后续轮次、工具调用与故障切换继续执行，异步写入也有延迟，因此允许超出上限。
 - 达到上限不改变 `is_enabled`；调高上限或清零后下一次准入即恢复。
@@ -280,14 +280,14 @@ $$
 
 ### 7.1 `0030_cost_and_billing.sql`
 
-- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。`cost_basis` 非空而 `cost_usd_nanos` 为空即成本未知；历史行全部为空，不计入任何覆盖率。
+- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。尝试开始时即保存 `cost_basis`；只有进入终态后，`cost_basis` 非空而 `cost_usd_nanos` 为空才计为成本未知，因此崩溃恢复不会漏计，仍在运行的尝试也不会提前计入未知数。历史行全部为空，不计入任何覆盖率。
 - `stats_usage_buckets` 与 `stats_usage_checkpoints` 各新增 12 列，均为 `INTEGER NOT NULL DEFAULT 0`：
   - 全部尝试成本：`cost_custom_nanos`、`cost_usd_unconverted_nanos`、`cost_known_count`、`cost_unknown_count`；
   - 按量尝试成本：`payg_cost_custom_nanos`、`payg_cost_usd_unconverted_nanos`、`payg_cost_known_count`、`payg_cost_unknown_count`；
   - 计费：`billing_custom_nanos`、`billing_usd_unconverted_nanos`、`billing_charged_count`、`billing_unknown_count`。
 - `api_keys` 新增 `spend_limit_nanos INTEGER CHECK (spend_limit_nanos IS NULL OR spend_limit_nanos > 0)`；配置表很小，CHECK 的一次校验可以接受。
-- `models` 新增 `billing_json TEXT CHECK (billing_json IS NULL OR json_valid(billing_json))`，PostgreSQL 使用 `jsonb`，与现有 JSON 列的约定一致。
-- `provider_models` 新增 `source_metadata_json TEXT`。
+- `models` 新增可空的 `billing_json`；SQLite 使用 `TEXT` 并约束为合法 JSON 对象，PostgreSQL 使用 `jsonb` 并施加同样的对象约束。
+- `provider_models` 新增可空的 `source_metadata_json`，同样只允许 JSON 对象或 SQL `NULL`。
 - 新建 `provider_cost_plans`（§5.1）与 `api_key_spend`（§6.4）。
 
 ### 7.2 Rust 数据阶段：固定已编辑快照
@@ -333,7 +333,7 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 金额字段统一为 `{amount: "12.34", known_count, unknown_count}`，另附 `currency: {kind: "usd" | "custom", symbol}`：
 
 - `overview`、`series` 与 `providers`：`actual_cost`；订阅 Provider 另有 `usage_equivalent_cost`。
-- `models`（Route）与 `api-keys`：`cost`（按量成本）与 `billing`。
+- `models`（Route）与 `api-keys`：`cost`（所有尝试的按量估价，包括订阅 Provider 的等价按量成本）与 `billing`；不把 Provider 订阅摊销分配到 Route 或 API Key。
 
 ## 9. WebUI
 
@@ -342,7 +342,7 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |位置|文件|变化|
 |---|---|---|
 |设置|`frontend/stravia-webui/src/routes/settings/+page.svelte`|「自定义币种」：符号与「1 USD = X」；首次保存前确认，说明设定后不能删除、现有消费上限会按此汇率换算|
-|共享价格编辑器|从 `provider-model-editor.svelte` 价格区（292-364 行）抽出|四项价格、上下文分档、每项的币种切换（仅在设有自定义币种时出现）、「添加峰谷定价」；供 Provider Model 与 Route 共用|
+|共享价格编辑器|`price-editor.svelte`、`price-form.ts`|四项价格、上下文分档、每项的币种切换（仅在设有自定义币种时出现）、「添加峰谷定价」；供 Provider Model 与 Route 共用|
 |Provider Model 编辑|`provider-model-editor.svelte`、`provider-model-form.ts`、`provider-model-editing.ts`|字段标签旁显示已固定状态与「恢复同步」；只提交改动字段；删除重新导入菜单与相关文案|
 |Provider|`provider-editor.svelte`、`routes/providers/[id]/+page.svelte`|成本方式：按量／订阅（月付或年付、价格、币种），显示当前生效记录与变更历史|
 |Route|`model-editor.svelte`|计费：不计费／按次（金额与币种）／按 Token（共享价格编辑器）|
@@ -350,12 +350,16 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |用量统计|`routes/stats/+page.svelte`|全局与 Provider：实际成本，订阅 Provider 另列等价按量成本；Route 与 API Key：按量成本、计费金额与已知覆盖率|
 |请求详情|`observation-inspector-content.svelte`|每个尝试显示成本（订阅 Provider 标注为等价按量）与计费；未知显示「未知」|
 
+价格编辑器负责必填项与数字、时间的输入语法；时区、星期、时段顺序与重叠、倍率有效性由 Core 统一校验。保存失败时显示 Core 错误并保留草稿，取消编辑或切换模型后清除对应错误。
+
 覆盖率 = `known_count / (known_count + unknown_count)`，没有任何记录时不显示。
+
+订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示，并单独呈现覆盖率；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。金额卡片与成本趋势使用同一规则，未知尝试不能被画成已知零成本。
 
 ## 10. 验证计划
 
 - **计价函数单元测试**：选档边界（等于阈值不进档）、零 Token 分项不需要价格、缺价未知、缓存未知按 0、峰谷时段起止边界、跨夏令时的时区、混合币种两侧精确与取整、溢出变未知。
-- **存储测试（SQLite 与 PostgreSQL）**：尝试结束后桶的金额与计数；有无自定义金额分列；`api_key_spend` 累加、清零、已删除 Key 跳过；观测明细删除不回退统计；`provider_cost_plans` 追加与 Provider 删除时补终点。
+- **存储行为的 HTTP E2E（SQLite 与 PostgreSQL）**：尝试结束后桶的金额与计数；有无自定义金额分列；`api_key_spend` 累加、清零、已删除 Key 跳过；观测明细删除不回退统计；`provider_cost_plans` 追加与 Provider 删除时补终点。
 - **迁移测试**：`edited` 带来源→`imported` 全固定，`edited` 无来源不变，阶段中途失败后重入，`0031` 未应用时阶段会重跑。
 - **HTTP E2E**：达到上限后四种协议的 429 错误体，没有 `Retry-After`；调高上限与清零后恢复；MCP `tools/call` 被拒；被拒请求计入错误的请求；首次设定币种后上限换算。
 - **WebUI**：价格编辑器峰谷预填与校验、只提交改动字段、恢复同步、币种切换只在设有自定义币种时出现；用 Chromium 实际验证统计页与请求详情的金额展示。

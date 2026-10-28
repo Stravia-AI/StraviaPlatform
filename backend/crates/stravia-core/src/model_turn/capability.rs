@@ -16,7 +16,7 @@ use crate::router::{
     AttemptFailureDisposition, RouteSelector, SelectionError, selected_target_key,
 };
 
-use super::provider::AttemptObservation;
+use super::provider::{AttemptCostContext, AttemptObservation};
 
 pub(crate) struct VendorRouteExecution {
     pub(crate) output: OperationOutput,
@@ -229,6 +229,7 @@ impl Gateway {
             self.cache_affinity.clone(),
             self.generation_chains.continuation_lookup(),
             self.route_policy_state.clone(),
+            self.custom_currency.clone(),
         );
         let mut last_error: Option<RouteFailure> = None;
         let mut vendor_leases: BTreeMap<String, PreparedVendorExecution> = BTreeMap::new();
@@ -331,6 +332,13 @@ impl Gateway {
                         provider.protocol.clone(),
                         provider.base_url.clone(),
                         None,
+                        AttemptCostContext {
+                            pricing: target.pricing.clone(),
+                            cost_basis: provider.cost_basis,
+                            billing: route.billing.clone(),
+                            api_key_id: Some(principal.api_key_id().to_owned()),
+                            currency: self.custom_currency_snapshot(),
+                        },
                     )
                     .with_usage_ledger(context.root_request.confirmed_usage.clone())
                 };

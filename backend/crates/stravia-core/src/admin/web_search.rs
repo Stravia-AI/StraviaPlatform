@@ -101,6 +101,7 @@ mod tests {
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("Model route");

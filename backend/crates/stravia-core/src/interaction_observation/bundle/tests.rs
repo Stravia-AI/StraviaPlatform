@@ -213,6 +213,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
         upstream_model: "model".into(),
         protocol: "responses".into(),
         upstream_url: "http://127.0.0.1".into(),
+        cost_basis: None,
     });
     run.record(RunEvent::UsageConfirmed {
         model_turn_id: "turn".into(),
@@ -235,6 +236,7 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
         duration_ms: 100,
         first_token_ms: Some(10),
         usage: None,
+        amounts: None,
     });
     run.record(RunEvent::ModelTurnFinished {
         retention_detached: false,
@@ -333,6 +335,7 @@ async fn bundle_net_input_clamps_attempts_and_preserves_unknown_operands() -> an
             upstream_model: "model".into(),
             protocol: "responses".into(),
             upstream_url: "http://127.0.0.1".into(),
+            cost_basis: None,
         });
         run.record(RunEvent::TargetAttemptFinished {
             model_turn_id: "net-turn".into(),
@@ -349,6 +352,7 @@ async fn bundle_net_input_clamps_attempts_and_preserves_unknown_operands() -> an
                 cache_write_tokens: Some(100),
                 ..Default::default()
             }),
+            amounts: None,
         });
     }
     run.record(RunEvent::ModelTurnFinished {

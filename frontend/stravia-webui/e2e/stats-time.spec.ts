@@ -5,6 +5,9 @@ import { prepareApp } from './prepare-app'
 const HOUR = 3_600_000
 const NOW = Date.UTC(2026, 9, 11, 12, 7)
 const LIVE_END = Date.UTC(2026, 9, 11, 12, 15)
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const emptyMoney = { amount: '0', known_count: 0, unknown_count: 0 }
+const knownMoney = { amount: '0.01', known_count: 1, unknown_count: 0 }
 const overview = (requests = 12) => ({
   total_requests: requests,
   terminal_request_count: requests,
@@ -19,6 +22,8 @@ const overview = (requests = 12) => ({
   avg_duration_ms: 120,
   avg_first_token_ms: 40,
   avg_output_tps: 25,
+  currency: CURRENCY,
+  actual_cost: knownMoney,
 })
 
 type Window = { start: number; end: number }
@@ -54,6 +59,8 @@ async function fixture(page: Page, intercept?: (route: Route, url: URL) => Promi
               avg_duration_ms: 120,
               avg_first_token_ms: 40,
               avg_output_tps: 25,
+              currency: CURRENCY,
+              actual_cost: knownMoney,
             },
           ],
         },
@@ -291,6 +298,8 @@ test.describe('statistics absolute time windows', () => {
             avg_duration_ms: 1000,
             avg_first_token_ms: 500,
             avg_output_tps: 1,
+            currency: CURRENCY,
+            actual_cost: { amount: '0.01', known_count: tokens, unknown_count: 0 },
           })),
         },
       })
@@ -352,6 +361,9 @@ test.describe('statistics absolute time windows', () => {
           total_output_tokens: requests,
           total_reasoning_tokens: null,
           avg_duration_ms: 1000,
+          currency: CURRENCY,
+          cost: knownMoney,
+          billing: emptyMoney,
         }))
       } else if (endpoint === 'providers') {
         data = identities.map(({ suffix, deleted, requests }) => ({
@@ -361,6 +373,9 @@ test.describe('statistics absolute time windows', () => {
           upstream_request_count: requests,
           upstream_error_count: 0,
           avg_output_tps: 1,
+          currency: CURRENCY,
+          actual_cost: knownMoney,
+          usage_equivalent_cost: null,
         }))
       } else if (endpoint === 'api-keys') {
         data = identities.map(({ suffix, deleted, requests }) => ({
@@ -374,6 +389,9 @@ test.describe('statistics absolute time windows', () => {
           cache_write_tokens: 0,
           reasoning_tokens: null,
           last_used_at: NOW,
+          currency: CURRENCY,
+          cost: knownMoney,
+          billing: emptyMoney,
         }))
       } else return false
       await route.fulfill({ json: { data } })
@@ -538,6 +556,9 @@ const providerRows = Array.from({ length: resourceTotal }, (_, index) => ({
   upstream_error_count: index === 0 ? 3 : 0,
   avg_duration_ms: 100,
   avg_output_tps: 10 + index,
+  currency: CURRENCY,
+  actual_cost: knownMoney,
+  usage_equivalent_cost: null,
 }))
 const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
   api_key_id: `key-${index + 1}`,
@@ -550,6 +571,9 @@ const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
   cache_write_tokens: 5,
   reasoning_tokens: null,
   last_used_at: NOW - index * HOUR,
+  currency: CURRENCY,
+  cost: knownMoney,
+  billing: emptyMoney,
 }))
 
 async function resourceFixture(page: Page, intercept?: (route: Route, url: URL) => Promise<boolean>) {
@@ -655,6 +679,9 @@ test.describe('statistics resource breakdowns', () => {
               upstream_error_count: 3,
               avg_duration_ms: 100,
               avg_output_tps: 10,
+              currency: CURRENCY,
+              actual_cost: knownMoney,
+              usage_equivalent_cost: null,
             },
             {
               provider_id: 'p-healthy',
@@ -664,6 +691,9 @@ test.describe('statistics resource breakdowns', () => {
               upstream_error_count: 0,
               avg_duration_ms: 100,
               avg_output_tps: 11,
+              currency: CURRENCY,
+              actual_cost: knownMoney,
+              usage_equivalent_cost: null,
             },
             {
               provider_id: 'p-idle',
@@ -673,6 +703,9 @@ test.describe('statistics resource breakdowns', () => {
               upstream_error_count: 0,
               avg_duration_ms: null,
               avg_output_tps: null,
+              currency: CURRENCY,
+              actual_cost: emptyMoney,
+              usage_equivalent_cost: null,
             },
           ],
         },
@@ -735,6 +768,8 @@ test.describe('statistics report without traffic', () => {
     avg_duration_ms: null,
     avg_first_token_ms: null,
     avg_output_tps: null,
+    currency: CURRENCY,
+    actual_cost: emptyMoney,
   }
   const emptyReport = async (route: Route, url: URL) => {
     const endpoint = url.pathname.split('/').at(-1)

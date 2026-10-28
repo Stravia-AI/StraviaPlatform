@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import type { ProviderModelDetail, ProviderModelSelectionPolicy } from '#lib/types.js'
+import type { ProviderModelSubmission } from '#lib/components/price-form.js'
 
 import ProviderModelEditor from '#lib/components/provider-model-editor.svelte'
 import { Badge } from '#lib/components/ui/badge/index.js'
@@ -14,11 +15,14 @@ interface Props {
   draft: boolean
   loading: boolean
   saving: boolean
+  customCurrency: { symbol: string } | null
   onOpenChange: (open: boolean) => void
   onClose: () => void
-  onSave: (metadataJson: string) => void
+  onSave: (submission: ProviderModelSubmission) => void
   onSelectionChange: (policy: ProviderModelSelectionPolicy) => void
+  onRestore: (fields: string[]) => void
   onDirtyChange: (dirty: boolean) => void
+  saveError?: string
 }
 
 let {
@@ -27,11 +31,14 @@ let {
   draft,
   loading,
   saving,
+  customCurrency,
   onOpenChange,
   onClose,
   onSave,
   onSelectionChange,
+  onRestore,
   onDirtyChange,
+  saveError = '',
 }: Props = $props()
 
 let editor = $state<{ submit: () => void }>()
@@ -65,8 +72,11 @@ let editor = $state<{ submit: () => void }>()
             {detail}
             {draft}
             disabled={saving}
+            {customCurrency}
+            {saveError}
             {onSave}
             {onSelectionChange}
+            {onRestore}
             {onDirtyChange} />
         {/if}
       </div>

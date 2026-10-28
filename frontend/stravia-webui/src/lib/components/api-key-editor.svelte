@@ -1,21 +1,24 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { resolve } from '$app/paths'
-import { useQueryClient } from '@tanstack/svelte-query'
+import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
 import { toast } from 'svelte-sonner'
-import { admin } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
+import { formatLogTime } from '#lib/format.js'
 
 import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
 import type { CapabilityStatus } from '#lib/capability-status.js'
+import { displayCurrency, formatAmount } from '#lib/money.js'
 
 import type { ApiKey, Route } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
+import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import * as Command from '#lib/components/ui/command/index.js'
@@ -32,6 +35,7 @@ interface KeyForm {
   customKey: boolean
   name: string
   rpmLimit: string
+  spendLimit: string
   expiresAt: string
   enabled: boolean
   mcpAccessEnabled: boolean
@@ -65,8 +69,13 @@ let {
 }: Props = $props()
 
 const queryClient = useQueryClient()
+const currencyQuery = createQuery(() => currencyQueryOptions())
+const currency = $derived(currencyQuery.data ?? null)
+const display = $derived(displayCurrency(currency))
 let form = $state(keyForm())
 let saving = $state(false)
+let resettingSpend = $state(false)
+let resetConfirmOpen = $state(false)
 let createdSecret = $state<string>()
 const secretResetKey = $derived(`${open}:${apiKey?.id ?? 'new'}`)
 let modelPickerOpen = $state(false)
@@ -74,6 +83,11 @@ let modelPickerOpen = $state(false)
 const baseline = new DraftBaseline(() => form)
 const guard = new DraftGuard({ dirty: () => !createdSecret && baseline.dirty, busy: () => saving })
 const allowAllModels = $derived(form.modelIds.length === 0)
+const spendLimitIssue = $derived.by(() => {
+  const value = form.spendLimit.trim()
+  if (!value) return ''
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) && Number(value) > 0 ? '' : m.spend_limit_invalid()
+})
 const sortedModels = $derived(sortLogicalModels(models))
 const allowedModels = $derived(sortedModels.filter((model) => form.modelIds.includes(model.id)))
 const unallowedModels = $derived(sortedModels.filter((model) => !form.modelIds.includes(model.id)))
@@ -84,6 +98,7 @@ function keyForm(source: ApiKey | undefined = apiKey): KeyForm {
     customKey: source != null,
     name: source?.name ?? '',
     rpmLimit: source?.rpm_limit ? String(source.rpm_limit) : '',
+    spendLimit: source?.spend_limit == null ? '' : String(source.spend_limit),
     expiresAt: source?.expires_at ? toDateTimeLocal(source.expires_at) : '',
     enabled: source?.is_enabled ?? true,
     mcpAccessEnabled: source?.mcp_access_enabled ?? false,
@@ -137,6 +152,24 @@ async function copySecret(secret: string): Promise<void> {
   }
 }
 
+async function resetSpent(): Promise<void> {
+  if (!apiKey || resettingSpend) return
+  resettingSpend = true
+  try {
+    await admin.apiKeys.resetSpend(apiKey.id)
+    resetConfirmOpen = false
+    await queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    toast.success(m.spend_reset_done())
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    resettingSpend = false
+  }
+}
+
+const spentLabel = $derived(apiKey?.spend ? formatAmount(apiKey.spend.spent, display.symbol) : m.spend_not_recorded())
+const lastResetLabel = $derived(apiKey?.spend?.reset_at ? formatLogTime(apiKey.spend.reset_at) : m.spend_never_reset())
+
 async function saveKey(): Promise<void> {
   if (saving) return
   if (!form.name.trim()) {
@@ -147,6 +180,10 @@ async function saveKey(): Promise<void> {
     toast.error(m.api_key_editor_api_key_required())
     return
   }
+  if (spendLimitIssue) {
+    toast.error(spendLimitIssue)
+    return
+  }
 
   saving = true
   let savedExisting = false
@@ -155,6 +192,7 @@ async function saveKey(): Promise<void> {
       key: apiKey || form.customKey ? form.key.trim() : undefined,
       name: form.name.trim(),
       rpm_limit: form.rpmLimit === '' || form.rpmLimit == null ? null : Number(form.rpmLimit),
+      spend_limit: form.spendLimit.trim() || null,
       mcp_access_enabled: form.mcpAccessEnabled,
       transparent_injection_enabled: form.transparentInjectionEnabled,
       inject_web_search: form.injectWebSearch,
@@ -258,6 +296,25 @@ async function saveKey(): Promise<void> {
         </InputGroup.Addon>
       </InputGroup.Root>
     </Field.Field>
+    <Field.Field data-invalid={spendLimitIssue ? true : undefined}>
+      <Field.Label for="api-key-spend-limit" hint={m.spend_limit_help()}>{m.spend_limit()}</Field.Label>
+      <InputGroup.Root>
+        <InputGroup.Addon align="inline-start">
+          <InputGroup.Text class="font-technical">{display.symbol}</InputGroup.Text>
+        </InputGroup.Addon>
+        <InputGroup.Input
+          id="api-key-spend-limit"
+          bind:value={form.spendLimit}
+          inputmode="decimal"
+          class="font-technical"
+          placeholder={m.api_key_editor_unlimited()}
+          autocomplete="off" />
+      </InputGroup.Root>
+      <Field.Description>{m.spend_limit_admission_help()}</Field.Description>
+      {#if spendLimitIssue && form.spendLimit.length > 0}
+        <Field.FieldError>{spendLimitIssue}</Field.FieldError>
+      {/if}
+    </Field.Field>
     <Field.Field size="datetime">
       <Field.Label for="api-key-expires" hint={m.api_key_editor_never_expires_placeholder()}>
         {m.api_key_editor_expires()}
@@ -267,6 +324,21 @@ async function saveKey(): Promise<void> {
   </Field.Group>
   <div class="mt-2 flex flex-col">
     {#if apiKey}
+      <SettingRow title={m.spend_spent()} value={spentLabel} layout="inline" />
+      <SettingRow title={m.spend_last_reset()} value={lastResetLabel} layout="inline" />
+      <SettingRow title={m.spend_reset()} layout="inline">
+        {#snippet children({ titleId })}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            aria-describedby={titleId}
+            disabled={resettingSpend}
+            onclick={() => (resetConfirmOpen = true)}>
+            {#if resettingSpend}<Spinner data-icon="inline-start" />{/if}{m.spend_reset()}
+          </Button>
+        {/snippet}
+      </SettingRow>
       <SettingRow title={m.common_enabled_status()} layout="inline">
         {#snippet children({ titleId })}
           <Switch id="api-key-enabled" aria-labelledby={titleId} bind:checked={form.enabled} />
@@ -499,5 +571,22 @@ async function saveKey(): Promise<void> {
     </Sheet.Content>
   </Sheet.Root>
 {/if}
+
+<AlertDialog.Root bind:open={resetConfirmOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.spend_reset_title()}</AlertDialog.Title>
+      <AlertDialog.Description>
+        {m.spend_reset_confirm({ name: apiKey?.name.trim() || apiKey?.id || '' })}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel onclick={() => (resetConfirmOpen = false)}>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action disabled={resettingSpend} onclick={() => void resetSpent()}>
+        {m.spend_reset()}
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <DraftDiscardDialog {guard} />

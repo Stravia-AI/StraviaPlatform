@@ -1,8 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
+pub mod pinning_migration;
+
 use crate::db::models::RouteOutputModality;
+use crate::pricing::{CustomCurrency, PeakPricing, PriceField};
 use anyhow::Context;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -44,20 +47,167 @@ pub enum SourceStamp {
     Discovery,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// 可逐字段固定的 Provider Model 规格字段；标识与编辑器控件一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProviderModelField {
+    #[serde(rename = "name")]
+    Name,
+    #[serde(rename = "description")]
+    Description,
+    #[serde(rename = "limit.context")]
+    LimitContext,
+    #[serde(rename = "modalities.input")]
+    ModalitiesInput,
+    #[serde(rename = "modalities.output")]
+    ModalitiesOutput,
+    #[serde(rename = "reasoning_efforts")]
+    ReasoningEfforts,
+    #[serde(rename = "cost.input")]
+    CostInput,
+    #[serde(rename = "cost.output")]
+    CostOutput,
+    #[serde(rename = "cost.cache_read")]
+    CostCacheRead,
+    #[serde(rename = "cost.cache_write")]
+    CostCacheWrite,
+    #[serde(rename = "cost.tiers")]
+    CostTiers,
+}
+
+impl ProviderModelField {
+    pub const ALL: [Self; 11] = [
+        Self::Name,
+        Self::Description,
+        Self::LimitContext,
+        Self::ModalitiesInput,
+        Self::ModalitiesOutput,
+        Self::ReasoningEfforts,
+        Self::CostInput,
+        Self::CostOutput,
+        Self::CostCacheRead,
+        Self::CostCacheWrite,
+        Self::CostTiers,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Description => "description",
+            Self::LimitContext => "limit.context",
+            Self::ModalitiesInput => "modalities.input",
+            Self::ModalitiesOutput => "modalities.output",
+            Self::ReasoningEfforts => "reasoning_efforts",
+            Self::CostInput => "cost.input",
+            Self::CostOutput => "cost.output",
+            Self::CostCacheRead => "cost.cache_read",
+            Self::CostCacheWrite => "cost.cache_write",
+            Self::CostTiers => "cost.tiers",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|field| field.as_str() == value.trim())
+    }
+
+    fn cost_key(self) -> Option<&'static str> {
+        match self {
+            Self::CostInput => Some("input"),
+            Self::CostOutput => Some("output"),
+            Self::CostCacheRead => Some("cache_read"),
+            Self::CostCacheWrite => Some("cache_write"),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderModelField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotState {
+    /// 没有生效规格，也没有同步来源值。
     Unregistered,
-    Imported { source: SourceStamp },
-    Edited { source: Option<SourceStamp> },
+    /// 跟随同步来源的规格；`pinned` 中的人工修改字段不再随同步变化。
+    Imported {
+        source: SourceStamp,
+        pinned: BTreeSet<ProviderModelField>,
+    },
+    /// 没有同步来源的手动规格；JSON 沿用 `{"type":"edited","source":null}`。
+    Local,
 }
 
 impl SnapshotState {
     pub fn source(&self) -> Option<&SourceStamp> {
         match self {
-            Self::Unregistered => None,
-            Self::Imported { source } => Some(source),
-            Self::Edited { source } => source.as_ref(),
+            Self::Unregistered | Self::Local => None,
+            Self::Imported { source, .. } => Some(source),
+        }
+    }
+
+    pub fn pinned(&self) -> &BTreeSet<ProviderModelField> {
+        static EMPTY: LazyLock<BTreeSet<ProviderModelField>> = LazyLock::new(BTreeSet::new);
+        match self {
+            Self::Imported { pinned, .. } => pinned,
+            Self::Unregistered | Self::Local => &EMPTY,
+        }
+    }
+
+    pub fn pinned_fields(&self) -> Vec<ProviderModelField> {
+        self.pinned().iter().copied().collect()
+    }
+
+    pub fn is_imported(&self) -> bool {
+        matches!(self, Self::Imported { .. })
+    }
+}
+
+impl Serialize for SnapshotState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            Self::Unregistered => map.serialize_entry("type", "unregistered")?,
+            Self::Imported { source, pinned } => {
+                map.serialize_entry("type", "imported")?;
+                map.serialize_entry("source", source)?;
+                map.serialize_entry("pinned", pinned)?;
+            }
+            Self::Local => {
+                map.serialize_entry("type", "edited")?;
+                map.serialize_entry("source", &Option::<SourceStamp>::None)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Raw {
+            Unregistered,
+            Imported {
+                source: SourceStamp,
+                #[serde(default)]
+                pinned: BTreeSet<ProviderModelField>,
+            },
+            Edited {
+                source: Option<SourceStamp>,
+            },
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Unregistered => Ok(Self::Unregistered),
+            Raw::Imported { source, pinned } => Ok(Self::Imported { source, pinned }),
+            Raw::Edited { source: None } => Ok(Self::Local),
+            Raw::Edited { source: Some(_) } => Err(serde::de::Error::custom(
+                "Provider Model snapshot state 'edited' cannot carry a source; run the pinning migration",
+            )),
         }
     }
 }
@@ -224,7 +374,10 @@ impl ProviderModelMetadata {
                 }
             }
         }
-        Self::from_value(model_id, value)
+        let mut metadata = Self::from_value(model_id, value)?;
+        // 目录导入与模型发现得到的价格一律去掉只来自管理写入的本地字段。
+        crate::pricing::strip_source_local_cost_fields(&mut metadata.cost);
+        Ok(metadata)
     }
 
     /// Unknown specifications remain unknown until an authoritative source supplies them.
@@ -364,26 +517,80 @@ pub struct ModelLimit {
     pub context: Option<u64>,
 }
 
+/// 价格以十进制字符串对外序列化；读取仍接受来源目录中的 JSON 数字。
+mod decimal_string_option {
+    use std::str::FromStr;
+
+    use rust_decimal::Decimal;
+    use serde::de::{self, Visitor};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Decimal>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => serializer.serialize_str(&value.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Decimal>, D::Error> {
+        struct OptionalDecimalVisitor;
+
+        impl<'de> Visitor<'de> for OptionalDecimalVisitor {
+            type Value = Option<Decimal>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an optional decimal number or decimal string")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Self::Value, D2::Error> {
+                <Decimal as Deserialize>::deserialize(deserializer).map(Some)
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Decimal::from_str(value).map(Some).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_option(OptionalDecimalVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PriceComponents {
     #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
+        with = "decimal_string_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub input: Option<Decimal>,
     #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
+        with = "decimal_string_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub output: Option<Decimal>,
     #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
+        with = "decimal_string_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_read: Option<Decimal>,
     #[serde(
-        with = "rust_decimal::serde::arbitrary_precision_option",
+        with = "decimal_string_option",
         skip_serializing_if = "Option::is_none"
     )]
     pub cache_write: Option<Decimal>,
@@ -407,10 +614,16 @@ pub struct ModelCost {
     pub prices: PriceComponents,
     pub context_over_200k: Option<PriceComponents>,
     pub tiers: Vec<ModelCostTier>,
+    /// 以自定义币种填写的价格字段；只来自管理写入，目录来源恒为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_currency_fields: Vec<PriceField>,
+    /// 至多一条峰谷规则；只来自管理写入，目录来源恒为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak: Option<PeakPricing>,
 }
 
 impl ModelCost {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         self.prices.validate()?;
         if let Some(prices) = &self.context_over_200k {
             prices.validate()?;
@@ -423,9 +636,46 @@ impl ModelCost {
             if !thresholds.insert(tier.tier.size) {
                 anyhow::bail!("duplicate Provider Model cost tier threshold");
             }
-            tier.prices().validate()?;
+            tier.prices.validate()?;
+        }
+        let mut custom_fields = std::collections::BTreeSet::new();
+        for field in &self.custom_currency_fields {
+            if !custom_fields.insert(*field) {
+                anyhow::bail!("duplicate custom currency price field");
+            }
+        }
+        if let Some(peak) = &self.peak {
+            peak.validate()?;
         }
         Ok(())
+    }
+
+    /// 自定义币种价格字段只在实例已设定自定义币种时合法。
+    pub fn validate_currency(&self, currency: Option<&CustomCurrency>) -> anyhow::Result<()> {
+        if currency.is_none() && !self.custom_currency_fields.is_empty() {
+            anyhow::bail!("custom currency price fields require a configured custom currency");
+        }
+        Ok(())
+    }
+
+    /// 基础价格换算成美元；自定义币种价格在未设定币种时不可用。
+    pub fn base_price_in_usd(
+        &self,
+        field: PriceField,
+        currency: Option<&CustomCurrency>,
+    ) -> Option<Decimal> {
+        let value = match field {
+            PriceField::Input => self.prices.input,
+            PriceField::Output => self.prices.output,
+            PriceField::CacheRead => self.prices.cache_read,
+            PriceField::CacheWrite => self.prices.cache_write,
+            PriceField::Tiers => return None,
+        };
+        crate::pricing::usd_price(
+            value?,
+            self.custom_currency_fields.contains(&field),
+            currency,
+        )
     }
 }
 
@@ -491,6 +741,8 @@ pub struct ProviderModelRecord {
     pub model_id: String,
     pub source_kind: ProviderModelSourceKind,
     pub snapshot_state: SnapshotState,
+    /// 最近一次成功同步得到的来源规格；不参与生效规格的读取合并。
+    pub source_metadata: Option<ProviderModelMetadata>,
     pub metadata_source_provider_id: Option<String>,
     pub presence: ProviderModelPresence,
     pub selection_policy: ProviderModelSelectionPolicy,
@@ -532,22 +784,577 @@ pub enum ProviderModelMutation {
     Conflict,
 }
 
+fn ensure_json_object<'a>(
+    object: &'a mut Map<String, Value>,
+    key: &str,
+) -> &'a mut Map<String, Value> {
+    if !object.get(key).is_some_and(Value::is_object) {
+        object.insert(key.to_owned(), Value::Object(Map::new()));
+    }
+    object
+        .get_mut(key)
+        .and_then(Value::as_object_mut)
+        .expect("object inserted above")
+}
+
+fn prune_empty_object(object: &mut Map<String, Value>, key: &str) {
+    if object
+        .get(key)
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
+        object.remove(key);
+    }
+}
+
+fn copy_json_key(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
+    match source.get(key) {
+        Some(value) => {
+            target.insert(key.to_owned(), value.clone());
+        }
+        None => {
+            target.remove(key);
+        }
+    }
+}
+
+fn copy_nested_key(
+    target: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+    parent: &str,
+    key: &str,
+) {
+    let value = source
+        .get(parent)
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(key))
+        .cloned();
+    match value {
+        Some(value) => {
+            ensure_json_object(target, parent).insert(key.to_owned(), value);
+        }
+        None => {
+            if let Some(object) = target.get_mut(parent).and_then(Value::as_object_mut) {
+                object.remove(key);
+            }
+            prune_empty_object(target, parent);
+        }
+    }
+}
+
+fn custom_currency_marker(cost: Option<&Map<String, Value>>, field: &str) -> bool {
+    cost.and_then(|cost| cost.get("custom_currency_fields"))
+        .and_then(Value::as_array)
+        .is_some_and(|fields| fields.iter().any(|value| value.as_str() == Some(field)))
+}
+
+fn set_custom_currency_marker(cost: &mut Map<String, Value>, field: &str, custom: bool) {
+    let mut markers = cost
+        .get("custom_currency_fields")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if custom {
+        markers.insert(field.to_owned());
+    } else {
+        markers.remove(field);
+    }
+    if markers.is_empty() {
+        cost.remove("custom_currency_fields");
+    } else {
+        cost.insert(
+            "custom_currency_fields".to_owned(),
+            Value::Array(markers.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn cost_is_empty(cost: &Map<String, Value>) -> bool {
+    let prices_empty = ["input", "output", "cache_read", "cache_write"]
+        .iter()
+        .all(|key| cost.get(*key).is_none_or(Value::is_null));
+    let tiers_empty = cost.get("context_over_200k").is_none_or(Value::is_null)
+        && cost
+            .get("tiers")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty);
+    let peak_empty = cost.get("peak").is_none_or(Value::is_null);
+    let markers_empty = cost
+        .get("custom_currency_fields")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    prices_empty && tiers_empty && peak_empty && markers_empty
+}
+
+fn prune_cost(object: &mut Map<String, Value>) {
+    if object
+        .get("cost")
+        .and_then(Value::as_object)
+        .is_some_and(cost_is_empty)
+    {
+        object.remove("cost");
+    }
+}
+
+fn copy_pinned_field(
+    effective: &mut Map<String, Value>,
+    current: &Map<String, Value>,
+    field: ProviderModelField,
+) {
+    match field {
+        ProviderModelField::Name => copy_json_key(effective, current, "name"),
+        ProviderModelField::Description => copy_json_key(effective, current, "description"),
+        ProviderModelField::LimitContext => copy_nested_key(effective, current, "limit", "context"),
+        ProviderModelField::ModalitiesInput => {
+            copy_nested_key(effective, current, "modalities", "input")
+        }
+        ProviderModelField::ModalitiesOutput => {
+            copy_nested_key(effective, current, "modalities", "output")
+        }
+        ProviderModelField::ReasoningEfforts => {
+            copy_json_key(effective, current, "reasoning_efforts")
+        }
+        ProviderModelField::CostInput
+        | ProviderModelField::CostOutput
+        | ProviderModelField::CostCacheRead
+        | ProviderModelField::CostCacheWrite => {
+            copy_nested_key(
+                effective,
+                current,
+                "cost",
+                field.cost_key().expect("cost price field"),
+            );
+        }
+        ProviderModelField::CostTiers => {
+            for key in ["context_over_200k", "tiers"] {
+                copy_nested_key(effective, current, "cost", key);
+            }
+        }
+    }
+}
+
+fn local_cost_marker(
+    effective: &mut Map<String, Value>,
+    current: &Map<String, Value>,
+    field: ProviderModelField,
+) {
+    let current_cost = current.get("cost").and_then(Value::as_object);
+    let marker = field.cost_key().unwrap_or("tiers");
+    if custom_currency_marker(current_cost, marker) {
+        set_custom_currency_marker(ensure_json_object(effective, "cost"), marker, true);
+    }
+}
+
+/// 同步合并：来源规格决定未固定字段，已固定字段沿用生效规格。
+///
+/// 峰谷定价与币种标记是纯本地设置，来源永远不携带；峰谷始终保留，币种标记
+/// 只随仍被固定的价格字段保留。来源缺少已固定字段时该字段变为未登记。
+pub fn merge_source_specification(
+    current: &ProviderModelMetadata,
+    source: &ProviderModelMetadata,
+    pinned: &BTreeSet<ProviderModelField>,
+) -> anyhow::Result<ProviderModelMetadata> {
+    let current_value = current.to_value()?;
+    let source_value = source.to_value()?;
+    let current_object = current_value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+    let source_object = source_value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+    let mut effective = source_object.clone();
+    if let Some(peak) = current_object
+        .get("cost")
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("peak"))
+        .filter(|peak| !peak.is_null())
+    {
+        ensure_json_object(&mut effective, "cost").insert("peak".to_owned(), peak.clone());
+    }
+    for field in pinned {
+        copy_pinned_field(&mut effective, current_object, *field);
+        if matches!(
+            field,
+            ProviderModelField::CostInput
+                | ProviderModelField::CostOutput
+                | ProviderModelField::CostCacheRead
+                | ProviderModelField::CostCacheWrite
+                | ProviderModelField::CostTiers
+        ) {
+            local_cost_marker(&mut effective, current_object, *field);
+        }
+    }
+    if let Some(cost) = effective.get_mut("cost").and_then(Value::as_object_mut) {
+        // Rebuild the marker set from pinned fields only; unpinned prices follow
+        // the always-USD source.
+        let markers = pinned
+            .iter()
+            .filter_map(|field| match field {
+                ProviderModelField::CostInput
+                | ProviderModelField::CostOutput
+                | ProviderModelField::CostCacheRead
+                | ProviderModelField::CostCacheWrite => field.cost_key(),
+                ProviderModelField::CostTiers => Some("tiers"),
+                _ => None,
+            })
+            .filter(|marker| {
+                custom_currency_marker(
+                    current_object.get("cost").and_then(Value::as_object),
+                    marker,
+                )
+            })
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        if markers.is_empty() {
+            cost.remove("custom_currency_fields");
+        } else {
+            cost.insert(
+                "custom_currency_fields".to_owned(),
+                Value::Array(markers.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+    prune_cost(&mut effective);
+    let model_id = source
+        .id
+        .as_deref()
+        .or(current.id.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata is missing id"))?;
+    ProviderModelMetadata::from_value(model_id, Value::Object(effective))
+}
+
+/// 恢复同步：把来源值写回指定字段并取消固定；来源缺少该字段时恢复为未登记。
+pub fn restore_source_fields(
+    current: &ProviderModelMetadata,
+    source: &ProviderModelMetadata,
+    fields: &[ProviderModelField],
+) -> anyhow::Result<ProviderModelMetadata> {
+    let current_value = current.to_value()?;
+    let source_value = source.to_value()?;
+    let source_object = source_value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+    let mut effective = current_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+    for field in fields {
+        copy_pinned_field(&mut effective, source_object, *field);
+        let marker = match field {
+            ProviderModelField::CostInput
+            | ProviderModelField::CostOutput
+            | ProviderModelField::CostCacheRead
+            | ProviderModelField::CostCacheWrite => field.cost_key(),
+            ProviderModelField::CostTiers => Some("tiers"),
+            _ => None,
+        };
+        if let Some(marker) = marker
+            && let Some(cost) = effective.get_mut("cost").and_then(Value::as_object_mut)
+        {
+            // Source prices are always USD.
+            set_custom_currency_marker(cost, marker, false);
+        }
+    }
+    prune_cost(&mut effective);
+    let model_id = current
+        .id
+        .as_deref()
+        .or(source.id.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata is missing id"))?;
+    ProviderModelMetadata::from_value(model_id, Value::Object(effective))
+}
+
+/// 解析变更集键为可固定字段；`cost.peak` 是纯本地字段，不参与固定。
+pub fn change_fields(
+    changes: &BTreeMap<String, Value>,
+) -> anyhow::Result<BTreeSet<ProviderModelField>> {
+    let mut fields = BTreeSet::new();
+    for key in changes.keys() {
+        if key == "cost.peak" {
+            continue;
+        }
+        let field = ProviderModelField::parse(key)
+            .ok_or_else(|| anyhow::anyhow!("unsupported Provider Model field: {key}"))?;
+        fields.insert(field);
+    }
+    Ok(fields)
+}
+
+fn decimal_from_json(value: &Value, field: &str) -> anyhow::Result<Decimal> {
+    let text = match value {
+        Value::String(text) => text.trim(),
+        _ => anyhow::bail!("Provider Model {field} must be a decimal string"),
+    };
+    let decimal =
+        Decimal::from_str(text).with_context(|| format!("invalid Provider Model {field}"))?;
+    anyhow::ensure!(
+        !decimal.is_sign_negative(),
+        "Provider Model {field} must be non-negative"
+    );
+    Ok(decimal)
+}
+
+fn price_currency(value: &Value, field: &str) -> anyhow::Result<bool> {
+    match value.as_object().and_then(|object| object.get("currency")) {
+        Some(Value::String(currency)) if currency == "usd" => Ok(false),
+        Some(Value::String(currency)) if currency == "custom" => Ok(true),
+        Some(Value::String(_)) => {
+            anyhow::bail!("Provider Model {field} currency must be usd or custom")
+        }
+        _ => anyhow::bail!("Provider Model {field} currency is required"),
+    }
+}
+
+fn price_amount(value: &Value, field: &str) -> anyhow::Result<Decimal> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model {field} must be an object"))?;
+    for key in object.keys() {
+        anyhow::ensure!(
+            key == "amount" || key == "currency",
+            "unsupported Provider Model {field} property: {key}"
+        );
+    }
+    let amount = object
+        .get("amount")
+        .ok_or_else(|| anyhow::anyhow!("Provider Model {field} amount is required"))?;
+    decimal_from_json(amount, &format!("{field} amount"))
+}
+
+fn parse_price_components(value: &Value, field: &str) -> anyhow::Result<Map<String, Value>> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model {field} must be an object"))?;
+    let mut prices = Map::new();
+    for (key, item) in object {
+        anyhow::ensure!(
+            matches!(
+                key.as_str(),
+                "input" | "output" | "cache_read" | "cache_write"
+            ),
+            "unsupported Provider Model {field} property: {key}"
+        );
+        if item.is_null() {
+            continue;
+        }
+        let decimal = decimal_from_json(item, &format!("{field}.{key}"))?;
+        prices.insert(key.clone(), Value::String(decimal.to_string()));
+    }
+    Ok(prices)
+}
+
+fn apply_tiers_change(effective: &mut Map<String, Value>, value: &Value) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model cost.tiers must be an object"))?;
+    for key in object.keys() {
+        anyhow::ensure!(
+            matches!(key.as_str(), "currency" | "context_over_200k" | "tiers"),
+            "unsupported Provider Model cost.tiers property: {key}"
+        );
+    }
+    let custom = price_currency(value, "cost.tiers")?;
+    let mut replacement = Map::new();
+    if let Some(extended) = object
+        .get("context_over_200k")
+        .filter(|value| !value.is_null())
+    {
+        let prices = parse_price_components(extended, "cost.tiers.context_over_200k")?;
+        if !prices.is_empty() {
+            replacement.insert("context_over_200k".to_owned(), Value::Object(prices));
+        }
+    }
+    if let Some(tiers) = object.get("tiers").filter(|value| !value.is_null()) {
+        let tiers = tiers
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Provider Model cost.tiers.tiers must be an array"))?;
+        let mut parsed = Vec::new();
+        for tier in tiers {
+            let tier = tier
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("Provider Model cost tier must be an object"))?;
+            for key in tier.keys() {
+                anyhow::ensure!(
+                    key == "threshold" || key == "prices",
+                    "unsupported Provider Model cost tier property: {key}"
+                );
+            }
+            let threshold = tier
+                .get("threshold")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow::anyhow!("Provider Model cost tier threshold is required"))?;
+            let prices = parse_price_components(
+                tier.get("prices").ok_or_else(|| {
+                    anyhow::anyhow!("Provider Model cost tier prices are required")
+                })?,
+                "cost tier prices",
+            )?;
+            let mut entry = Map::new();
+            entry.insert(
+                "tier".to_owned(),
+                serde_json::json!({ "type": "context", "size": threshold }),
+            );
+            entry.extend(prices);
+            parsed.push(Value::Object(entry));
+        }
+        if !parsed.is_empty() {
+            replacement.insert("tiers".to_owned(), Value::Array(parsed));
+        }
+    }
+    let cost = ensure_json_object(effective, "cost");
+    cost.remove("context_over_200k");
+    cost.remove("tiers");
+    cost.extend(replacement);
+    set_custom_currency_marker(cost, "tiers", custom);
+    Ok(())
+}
+
+/// 把管理写入的字段变更集应用到现有生效规格；出现的字段即被固定。
+pub fn apply_provider_model_changes(
+    current: &ProviderModelMetadata,
+    changes: &BTreeMap<String, Value>,
+) -> anyhow::Result<ProviderModelMetadata> {
+    let current_value = current.to_value()?;
+    let mut effective = current_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata must be an object"))?;
+    for (key, value) in changes {
+        match key.as_str() {
+            "name" | "description" => {
+                if value.is_null() {
+                    effective.remove(key);
+                } else if let Some(text) = value.as_str() {
+                    effective.insert(key.clone(), Value::String(text.to_owned()));
+                } else {
+                    anyhow::bail!("Provider Model {key} must be a string or null");
+                }
+            }
+            "limit.context" => {
+                if value.is_null() {
+                    if let Some(limit) = effective.get_mut("limit").and_then(Value::as_object_mut) {
+                        limit.remove("context");
+                    }
+                    prune_empty_object(&mut effective, "limit");
+                } else {
+                    let context = value.as_u64().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Provider Model limit.context must be a non-negative integer"
+                        )
+                    })?;
+                    ensure_json_object(&mut effective, "limit")
+                        .insert("context".to_owned(), Value::from(context));
+                }
+            }
+            "modalities.input" | "modalities.output" => {
+                let direction = key.rsplit('.').next().expect("modality direction");
+                if value.is_null() {
+                    if let Some(modalities) = effective
+                        .get_mut("modalities")
+                        .and_then(Value::as_object_mut)
+                    {
+                        modalities.remove(direction);
+                    }
+                    prune_empty_object(&mut effective, "modalities");
+                } else {
+                    let values = value.as_array().ok_or_else(|| {
+                        anyhow::anyhow!("Provider Model {key} must be an array or null")
+                    })?;
+                    for item in values {
+                        anyhow::ensure!(
+                            item.is_string(),
+                            "Provider Model {key} values must be strings"
+                        );
+                    }
+                    ensure_json_object(&mut effective, "modalities")
+                        .insert(direction.to_owned(), value.clone());
+                }
+            }
+            "reasoning_efforts" => {
+                if value.is_null() {
+                    effective.remove("reasoning_efforts");
+                } else {
+                    let values = value.as_array().ok_or_else(|| {
+                        anyhow::anyhow!("Provider Model reasoning_efforts must be an array or null")
+                    })?;
+                    for item in values {
+                        anyhow::ensure!(
+                            item.is_string(),
+                            "Provider Model reasoning_efforts values must be strings"
+                        );
+                    }
+                    effective.insert("reasoning_efforts".to_owned(), value.clone());
+                }
+            }
+            "cost.input" | "cost.output" | "cost.cache_read" | "cost.cache_write" => {
+                let price_key = key.rsplit('.').next().expect("price field");
+                if value.is_null() {
+                    if let Some(cost) = effective.get_mut("cost").and_then(Value::as_object_mut) {
+                        cost.remove(price_key);
+                        set_custom_currency_marker(cost, price_key, false);
+                    }
+                } else {
+                    let amount = price_amount(value, key)?;
+                    let custom = price_currency(value, key)?;
+                    let cost = ensure_json_object(&mut effective, "cost");
+                    cost.insert(price_key.to_owned(), Value::String(amount.to_string()));
+                    set_custom_currency_marker(cost, price_key, custom);
+                }
+            }
+            "cost.tiers" => {
+                if value.is_null() {
+                    if let Some(cost) = effective.get_mut("cost").and_then(Value::as_object_mut) {
+                        cost.remove("context_over_200k");
+                        cost.remove("tiers");
+                        set_custom_currency_marker(cost, "tiers", false);
+                    }
+                } else {
+                    apply_tiers_change(&mut effective, value)?;
+                }
+            }
+            "cost.peak" => {
+                if value.is_null() {
+                    if let Some(cost) = effective.get_mut("cost").and_then(Value::as_object_mut) {
+                        cost.remove("peak");
+                    }
+                } else {
+                    ensure_json_object(&mut effective, "cost")
+                        .insert("peak".to_owned(), value.clone());
+                }
+            }
+            other => anyhow::bail!("unsupported Provider Model field: {other}"),
+        }
+    }
+    prune_cost(&mut effective);
+    let model_id = current
+        .id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Provider Model metadata is missing id"))?;
+    ProviderModelMetadata::from_value(model_id, Value::Object(effective))
+}
+
 #[derive(Debug, Clone)]
-pub struct ReimportProviderModel {
+pub struct RestoreProviderModel {
     pub metadata: ProviderModelMetadata,
-    pub source_provider_id: String,
+    pub snapshot_state: SnapshotState,
     pub expected_revision: i64,
-    pub generated_thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
+    pub generated_thinking_level_map: Option<Vec<crate::thinking::ThinkingLevelMapping>>,
 }
 
 /// 在原子写入内，依据新规格校验最新 Target 的合并结果；失败则整笔回滚。
-pub type ReimportThinkingMapValidator<'a> = dyn Fn(&ProviderModelMetadata, &[crate::thinking::ThinkingLevelMapping]) -> anyhow::Result<()>
+pub type ProviderModelThinkingMapValidator<'a> = dyn Fn(&str, &ProviderModelMetadata, &[crate::thinking::ThinkingLevelMapping]) -> anyhow::Result<()>
     + Send
     + Sync
     + 'a;
 
 #[derive(Debug, Clone)]
-pub enum ProviderModelReimport {
+pub enum ProviderModelRestore {
     Applied {
         model: Box<ProviderModelRecord>,
         active_routes: Vec<crate::db::models::RouteConfig>,
@@ -562,6 +1369,7 @@ pub struct NewProviderModelRecord {
     pub model_id: String,
     pub source_kind: ProviderModelSourceKind,
     pub snapshot_state: SnapshotState,
+    pub source_metadata: Option<ProviderModelMetadata>,
     pub metadata_source_provider_id: Option<String>,
     pub presence: ProviderModelPresence,
     pub selection_policy: ProviderModelSelectionPolicy,
@@ -577,6 +1385,10 @@ pub struct ProviderModelPresenceUpdate {
     pub presence: ProviderModelPresence,
     pub lifecycle_status: Option<String>,
     pub metadata: Option<ProviderModelMetadata>,
+    /// 本次同步得到的来源规格；`None` 表示保留现有来源值。
+    pub source_metadata: Option<ProviderModelMetadata>,
+    /// 推理强度列表变化时在同一事务内重算关联 Target 的 Generated Mapping。
+    pub generated_thinking_level_map: Option<Vec<crate::thinking::ThinkingLevelMapping>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -826,8 +1638,9 @@ pub struct ProviderModelDetail {
     pub available: bool,
     pub route_output_modalities: Vec<RouteOutputModality>,
     pub source_kind: ProviderModelSourceKind,
-    pub can_reimport: bool,
     pub snapshot_state: SnapshotState,
+    pub pinned_fields: Vec<ProviderModelField>,
+    pub restorable_fields: Vec<ProviderModelField>,
     pub selection_policy: ProviderModelSelectionPolicy,
     pub metadata: ProviderModelMetadata,
     pub thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
@@ -843,6 +1656,13 @@ impl From<ProviderModelRecord> for ProviderModelDetail {
         let available = record.effective_available();
         let route_output_modalities = record.route_output_modalities();
         let thinking_level_map = crate::thinking::generate_thinking_level_map(&record.metadata);
+        let pinned_fields = record.snapshot_state.pinned_fields();
+        let restorable_fields =
+            if record.snapshot_state.is_imported() && record.source_metadata.is_some() {
+                pinned_fields.clone()
+            } else {
+                Vec::new()
+            };
         record
             .metadata
             .modalities
@@ -852,9 +1672,9 @@ impl From<ProviderModelRecord> for ProviderModelDetail {
             available,
             route_output_modalities,
             source_kind: record.source_kind,
-            can_reimport: record.source_kind == ProviderModelSourceKind::Discovered
-                && record.metadata_source_provider_id.is_some(),
             snapshot_state: record.snapshot_state,
+            pinned_fields,
+            restorable_fields,
             selection_policy: record.selection_policy,
             metadata: record.metadata,
             thinking_level_map,
@@ -875,8 +1695,16 @@ pub struct CreateManualProviderModel {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateProviderModel {
-    pub metadata: Value,
     pub revision: i64,
+    #[serde(default)]
+    pub changes: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestoreProviderModelSync {
+    pub revision: i64,
+    #[serde(default)]
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -922,9 +1750,11 @@ fn validate_string_values(field: &str, values: &[String]) -> anyhow::Result<()> 
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::json;
 
-    use crate::provider_models::{SnapshotState, SourceStamp};
+    use crate::provider_models::{ProviderModelField, SnapshotState, SourceStamp};
 
     use super::{ProviderModelMetadata, model_id_match_key};
 
@@ -947,20 +1777,31 @@ mod tests {
         assert!(bare.modalities.is_none());
         assert!(bare.reasoning_efforts.is_none());
 
-        let state = SnapshotState::Edited {
-            source: Some(SourceStamp::Canonical {
+        assert!(matches!(
+            serde_json::from_value::<SnapshotState>(json!({"type":"edited","source":null}))
+                .unwrap(),
+            SnapshotState::Local
+        ));
+        assert!(
+            serde_json::from_value::<SnapshotState>(json!({
+                "type":"edited",
+                "source":{"type":"canonical","model_id":"template/model"}
+            }))
+            .is_err()
+        );
+        let imported = SnapshotState::Imported {
+            source: SourceStamp::Canonical {
                 model_id: "template/model".into(),
-            }),
+            },
+            pinned: BTreeSet::from([ProviderModelField::Name]),
         };
         assert_eq!(
-            serde_json::to_value(&state).unwrap(),
-            json!({"type":"edited","source":{"type":"canonical","model_id":"template/model"}})
-        );
-        assert_eq!(
-            serde_json::from_value::<SnapshotState>(json!({"type":"edited","source":null}))
-                .unwrap()
-                .source(),
-            None
+            serde_json::to_value(&imported).unwrap(),
+            json!({
+                "type":"imported",
+                "source":{"type":"canonical","model_id":"template/model"},
+                "pinned":["name"]
+            })
         );
     }
 

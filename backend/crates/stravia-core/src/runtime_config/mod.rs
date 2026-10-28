@@ -183,6 +183,9 @@ impl Storage for RuntimeConfig {
     fn settings(&self) -> &dyn SettingsStore {
         self
     }
+    fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
+        self.source.money()
+    }
     fn api_keys(&self) -> Option<&dyn ApiKeyStore> {
         self.source.api_keys()
     }

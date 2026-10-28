@@ -43,6 +43,13 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
       image_generation_bound: false,
       is_enabled: true,
       supported_thinking_levels: [],
+      billing: {
+        mode: 'per_token',
+        price: {
+          input: '1',
+          peak: { timezone: 'UTC', weekdays: [1], ranges: [{ start: '09:00', end: '10:00' }], multiplier: '1' },
+        },
+      },
       created_at: '',
       targets: [target('dual', true), target('text-only', false)],
     }
@@ -107,11 +114,19 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     // A disabled incompatible destination still blocks switching; remove it explicitly.
     await page.getByRole('button', { name: zh ? '移除请求目标 2' : 'Remove destination 2', exact: true }).click()
     await page.locator('#route-display-name').fill('Retained failure draft')
+    const timezone = page.locator('[data-price-editor] input[id$="-peak-timezone"]')
+    const multiplier = page.locator('[data-price-editor] input[id$="-peak-multiplier"]')
+    await timezone.fill('Invalid/Timezone')
+    await multiplier.fill('0')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Configuration changed')
     await expect(modelType).toHaveText(zh ? '图片' : 'Image')
     await expect(page.locator('#route-display-name')).toHaveValue('Retained failure draft')
     await expect(page.locator('[data-slot="target-card"]')).toHaveCount(1)
+    await expect(timezone).toHaveValue('Invalid/Timezone')
+    await expect(multiplier).toHaveValue('0')
+    await timezone.fill('UTC')
+    await multiplier.fill('1')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect.poll(() => attempts).toBe(2)
     expect(body?.output_modality).toBe('image')
@@ -982,7 +997,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     name: 'GPT Available',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     route_output_modalities: ['text'],
     specification: {
