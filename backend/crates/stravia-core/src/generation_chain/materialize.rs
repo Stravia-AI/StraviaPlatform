@@ -182,9 +182,10 @@ fn materialize_generation_replay<'a>(
             Cow::Owned(node) => effective_items.append(&mut node.effective_output.items),
             Cow::Borrowed(node) => effective_items.extend_from_slice(&node.effective_output.items),
         }
-        crate::model_turn::support::restore_chat_reasoning_field(
+        crate::model_turn::support::restore_response_history(
             &mut effective_items,
             output_start,
+            &id.to_string(),
             persisted
                 .effective_output
                 .vendor

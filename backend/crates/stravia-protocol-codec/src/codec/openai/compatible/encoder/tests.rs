@@ -1,6 +1,111 @@
 use super::*;
 
 #[test]
+fn canonical_response_groups_preserve_full_steps_and_parallel_results() {
+    use stravia_runtime_contract::protocol::ir::{AiResponse, response::mark_response_history};
+    let call = |id: &str, arguments: &str| AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new().into()),
+        tool_calls: Some(vec![ToolCall {
+            id: id.into(),
+            name: "lookup".into(),
+            arguments: arguments.into(),
+        }]),
+        tool_call_id: None,
+        meta: None,
+    };
+    let result = |id: &str, text: &str| AiItem {
+        role: Role::Tool,
+        content: MessageContent::Text(text.to_owned().into()),
+        tool_calls: None,
+        tool_call_id: Some(id.into()),
+        meta: None,
+    };
+    let mut first = AiResponse::new("first", "model");
+    first.items = vec![
+        AiItem::output_text("Checking both keys."),
+        AiItem::thinking(
+            "Look up both keys.",
+            Some("native-signature-not-plaintext".into()),
+        ),
+        AiItem::reasoning(
+            Vec::new(),
+            Vec::new(),
+            Some("native-ciphertext-not-plaintext".into()),
+        ),
+        call("a", "{\"key\": \"A\"}"),
+        AiItem::output_text(" Please wait."),
+        call("b", "{\"key\": \"B\"}"),
+    ];
+    mark_response_history(&mut first.items, "first-response");
+    let mut items = first.items;
+    items.extend([result("b", "2"), result("a", "1")]);
+    let mut second = AiResponse::new("second", "model");
+    second.items = vec![
+        AiItem::thinking("Add the returned values.", None),
+        AiItem::output_text("3"),
+    ];
+    mark_response_history(&mut second.items, "second-response");
+    items.extend(second.items);
+    // Distinct completed responses remain distinct even without a role change.
+    let mut third = AiResponse::new("third", "model");
+    third.items = vec![
+        AiItem::thinking("Check the answer.", None),
+        AiItem::output_text("Confirmed."),
+    ];
+    mark_response_history(&mut third.items, "third-response");
+    items.extend(third.items);
+    let (body, _) = OpenAIEncoder
+        .encode_request(AiRequest::new("model", items))
+        .unwrap();
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role":"assistant","content":"Checking both keys. Please wait.","reasoning_content":"Look up both keys.","tool_calls":[
+                {"id":"a","type":"function","function":{"name":"lookup","arguments":"{\"key\": \"A\"}"}},
+                {"id":"b","type":"function","function":{"name":"lookup","arguments":"{\"key\": \"B\"}"}}
+            ]},
+            {"role":"tool","tool_call_id":"b","content":"2"},
+            {"role":"tool","tool_call_id":"a","content":"1"},
+            {"role":"assistant","content":"3","reasoning_content":"Add the returned values."},
+            {"role":"assistant","content":"Confirmed.","reasoning_content":"Check the answer."}
+        ])
+    );
+}
+
+#[test]
+fn ungrouped_chat_messages_preserve_boundaries_and_parallel_calls() {
+    use crate::transform::ProtocolTransform;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    let messages = serde_json::json!([
+        {"role":"user","content":"Look up both keys."},
+        {"role":"assistant","content":"First.","reasoning_content":"First reasoning."},
+        {"role":"assistant","content":"","reasoning_content":"Separate reasoning."},
+        {"role":"assistant","content":" \n"},
+        {"role":"assistant","content":"Checking.","reasoning_content":"Call both tools.","tool_calls":[
+            {"id":"a","type":"function","function":{"name":"lookup","arguments":"{\"key\": \"A\"}"}},
+            {"id":"b","type":"function","function":{"name":"lookup","arguments":"{\"key\": \"B\"}"}}
+        ]},
+        {"role":"assistant","content":"Do not delete this message."},
+        {"role":"tool","tool_call_id":"b","content":"2"},
+        {"role":"tool","tool_call_id":"a","content":"1"}
+    ]);
+    let mut input = serde_json::json!({"model":"model","messages":messages});
+    for item in input["messages"].as_array_mut().unwrap() {
+        item[RESPONSE_HISTORY_GROUP_META] = "untrusted-group".into();
+    }
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let request = pair.decode_request(input).unwrap();
+    let (body, _) = OpenAIEncoder.encode_request(request).unwrap();
+    assert_eq!(body["messages"], messages);
+}
+
+#[test]
 fn chat_logprobs_merge_and_identifier_precedence_use_unified_intent() {
     use super::super::decoder::OpenAIDecoder;
     for (controls, expected) in [
@@ -750,12 +855,8 @@ fn tool_result_uses_first_block_hint_and_keeps_result_order() {
     assert_eq!(shared.as_str(), "first result");
 }
 
-/// Regression: Open Responses replays history as separate items — a standalone
-/// reasoning item, one item per function_call, then the outputs. The reasoning
-/// item must not be encoded as an assistant message with neither `content` nor
-/// `tool_calls`: DeepSeek (and strict chat-completions upstreams) reject it with
-/// 400 "Invalid assistant message: content or tool_calls must be set". Its
-/// reasoning text must merge onto the following assistant turn instead.
+/// 未知响应归属的独立推理项也必须使用有效 Chat 载体，不猜测它与相邻调用
+/// 属于同一个模型响应，更不能把签名或密文当作明文。
 #[test]
 fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
     let assistant_call = |id: &str, name: &str| AiItem {
@@ -846,7 +947,7 @@ fn assert_replayed_reasoning_is_valid(body: serde_json::Value) {
     }
     assert!(
         reasoning_merged,
-        "standalone reasoning text must survive on a following assistant message: {messages:?}"
+        "standalone reasoning text must survive without inventing a response boundary: {messages:?}"
     );
 }
 

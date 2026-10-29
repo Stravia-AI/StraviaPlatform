@@ -29,7 +29,12 @@ Thinking Replay 只按兼容性决定受保护载荷（签名、`encrypted_conte
 
 Gemini 原生 `functionCall.thoughtSignature` 必须回到同一个 functionCall part。既有空的签名 Thinking 载体只与紧邻调用配对，普通文本、其它 part 或角色边界阻止配对；同步请求、响应与跨批次流事件采用相同规则。无签名的可读 thought part 仍保持 Gemini 原生表示。
 
-Google 的 [thought signatures 文档](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)规定：Gemini 3 当前工具轮每一步的第一个 functionCall 必须带签名；迁移其它模型的工具历史时可使用 `skip_thought_signature_validator` 跳过这项校验。本平台仅在确认的官方 HTTPS `generativelanguage.googleapis.com:443`、`/v1beta/models/...:generateContent` 或 `:streamGenerateContent`、Gemini 3 / 数字次版本 3.x 模型请求中，对当前轮缺失、null 或空的首个调用签名使用此控制标记。并行其它调用、早先工具轮及真实非空签名不改写。它只存在于已编码的上游 REQUEST，不作为真实签名写入权威历史、来源或客户端输出，也不能恢复已丢失的私有推理。
+Google 的 [thought signatures 文档](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures)规定：Gemini 3 当前工具轮每一步的第一个 functionCall 必须带签名；迁移其它模型的工具历史时可使用 `skip_thought_signature_validator` 跳过这项校验。本平台在以下已确认的请求路径中，对 Gemini 3 / 数字次版本 3.x 当前轮缺失、null 或空的首个调用签名使用此控制标记：
+
+- 官方 HTTPS `generativelanguage.googleapis.com:443`，路径为 `/v1beta/models/...:generateContent` 或 `:streamGenerateContent`。
+- Antigravity 专用插件发往默认 `https://daily-cloudcode-pa.googleapis.com` 的原生 `v1internal:streamGenerateContent` 请求。`gemini-3.8-flash-high` 的无签名并行工具历史已实测可由此标记导入；模型代际按公开模型身份判断，不按可能是不透明别名的原生 selector 判断。
+
+两条路径共用同一转换。标记写在 `functionCall` 所在 part 的 `thoughtSignature`，并行其它调用、早先工具轮及真实非空签名不改写。它只存在于已编码的上游 REQUEST，不作为真实签名写入权威历史、来源或客户端输出，也不能恢复已丢失的私有推理。无签名工具项目前不具备可证明签发方的来源信息，因此缺签名历史按导入处理；如果原生历史因其它缺陷丢失签名，也会被此规则接受，而不是恢复原生推理状态。非空但无效的原生签名仍原样交给上游验证。
 
 不对 Vertex、改写 base URL 的自定义端点、未知 latest alias、其它模型代际或未确认的 API 路径推断支持此机制；这些端点保持原行为，仍可能拒绝当前轮无签名工具历史。Google 不建议手工注入 functionCall；上述例外仅用于必要的工具历史迁移，不改变工具执行权限或访问控制。
 

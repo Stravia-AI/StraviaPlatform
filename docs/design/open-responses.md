@@ -193,6 +193,8 @@ OpenAI-compatible 响应中的推理字段缺失、显式空字符串、`null` �
 
 发送 Chat 请求时，剥离另有字段承载的 assistant 推理和工具块后，单一文本块使用 `content` 字符串，保留原始空白；多文本块与多模态内容仍使用 parts 数组。该通用投影不要求仅支持文本字符串的兼容上游额外支持单元素 content 数组。
 
+输出 item 不等于独立模型响应。平台以完整 `AiResponse` 保存的响应事实恢复历史，并在 IR 中保留响应归属；Chat 编码器只据此把同一响应的思考、正文与并行调用重建为一条 assistant，不按 Responses 来源、相邻 item 或工具结果的即时邻接关系拼接。工具结果保持收到的顺序，不抽走调用、不复制思考，也不删除调用与结果之间的正文。原始 item graph 和受保护元数据不合并，Responses 出口仍编码各自的原生条目。
+
 ---
 
 ## 6. HTTP 与 response object

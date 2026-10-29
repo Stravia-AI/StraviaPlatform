@@ -604,8 +604,15 @@ impl AgentRunner {
                 },
             )
             .await?;
+            let output_start = transcript.len();
             transcript.extend(response.items.iter().cloned());
-            model_transcript.extend(response.items.iter().cloned());
+            crate::model_turn::support::restore_response_history(
+                &mut transcript,
+                output_start,
+                &format!("{turn_id}:{model_turns}"),
+                crate::model_turn::support::explicit_chat_reasoning_field(&response),
+            );
+            model_transcript.extend_from_slice(&transcript[output_start..]);
 
             let response_tool_calls = response.tool_calls().cloned().collect::<Vec<_>>();
             if !response_tool_calls.is_empty() {

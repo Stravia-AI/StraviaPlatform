@@ -38,6 +38,21 @@ pub(crate) fn encode(
     let mut encoded = crate::encode_inference_request(protocol, request)?;
     if let Some(body) = encoded.body.as_object_mut() {
         body.extend(sampling);
+        if provider.provider_id == "deepseek"
+            && endpoint
+                == Some(
+                    stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                )
+            && body.get("tool_choice").is_some_and(|choice| {
+                choice == "required"
+                    || choice.get("type").and_then(Value::as_str) == Some("function")
+            })
+        {
+            // DeepSeek defaults to thinking even without an effort. Forced tools
+            // take precedence after codec and vendor overrides have been applied.
+            body.remove("reasoning_effort");
+            body.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+        }
         if official
             && endpoint == Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24)
         {
@@ -209,6 +224,101 @@ mod tests {
             }),
             client_headers: Vec::new(),
             operation_metadata: BTreeMap::new(),
+        }
+    }
+
+    fn thinking_tool_request(choice: Value) -> AiRequest {
+        use stravia_protocol_codec::transform::ProtocolTransform;
+        use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+
+        ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .unwrap()
+            .decode_request(json!({
+                "model": "deepseek-flash",
+                "messages": [{"role": "user", "content": "Return the result using respond."}],
+                "tools": [{"type": "function", "function": {"name": "respond", "parameters": {"type": "object"}}}],
+                "tool_choice": choice,
+                "reasoning_effort": "high",
+                "thinking": {"type": "enabled"}
+            }))
+            .unwrap()
+    }
+
+    #[test]
+    fn deepseek_forced_tool_choice_disables_thinking_without_relaxing_choice() {
+        let mut target = provider();
+        target.provider_id = "deepseek".into();
+        target.model = Some("deepseek-flash".into());
+        for choice in [
+            json!({"type": "function", "function": {"name": "respond"}}),
+            json!("required"),
+        ] {
+            let mut request = thinking_tool_request(choice.clone());
+            // Target and raw wire overrides must not re-enable thinking at egress.
+            request
+                .meta
+                .vendor
+                .egress
+                .insert("thinking".into(), json!({"type": "enabled"}));
+            request
+                .meta
+                .vendor
+                .egress
+                .insert("reasoning_effort".into(), json!("max"));
+            let body = encode(&target, "openai-chat-completions", request)
+                .unwrap()
+                .body;
+            assert_eq!(body["tool_choice"], choice);
+            assert_eq!(body["tools"][0]["function"]["name"], "respond");
+            assert_eq!(body["thinking"], json!({"type": "disabled"}));
+            assert!(body.get("reasoning_effort").is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn forced_tool_thinking_override_is_limited_to_deepseek_chat() {
+        for (provider_id, protocol, choice, effort_pointer) in [
+            (
+                "deepseek",
+                "openai-chat-completions",
+                json!("auto"),
+                "/reasoning_effort",
+            ),
+            (
+                "deepseek",
+                "openai-chat-completions",
+                json!("none"),
+                "/reasoning_effort",
+            ),
+            (
+                "custom",
+                "openai-chat-completions",
+                json!("required"),
+                "/reasoning_effort",
+            ),
+            (
+                "deepseek",
+                "open-responses",
+                json!("required"),
+                "/reasoning/effort",
+            ),
+        ] {
+            let mut target = provider();
+            target.provider_id = provider_id.into();
+            let body = encode(&target, protocol, thinking_tool_request(choice.clone()))
+                .unwrap()
+                .body;
+            assert_eq!(body["tool_choice"], choice);
+            assert_eq!(body.pointer(effort_pointer), Some(&json!("high")), "{body}");
+            assert_ne!(
+                body.pointer("/thinking/type"),
+                Some(&json!("disabled")),
+                "{body}"
+            );
         }
     }
 

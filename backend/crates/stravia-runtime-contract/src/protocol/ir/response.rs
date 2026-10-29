@@ -8,6 +8,22 @@ use crate::protocol::ir::request::AiItem;
 use crate::protocol::ir::usage::Usage;
 use crate::protocol::ir::vendor_ext::VendorExtensions;
 
+/// Platform-owned association with one completed model response. This is not
+/// a client-provided item ID or a vendor field and must not reach wire payloads.
+pub const RESPONSE_HISTORY_GROUP_META: &str = "__stravia_response_history_group";
+
+/// Retain one completed response occurrence without collapsing its item graph.
+/// `group` must identify the platform response occurrence, not a provider ID
+/// or an item offset. The annotation is not prompt material.
+pub fn mark_response_history(items: &mut [AiItem], group: &str) {
+    for item in items {
+        item.meta
+            .get_or_insert_with(Default::default)
+            .insert_graph_extension(RESPONSE_HISTORY_GROUP_META, Value::String(group.to_owned()))
+            .expect("response grouping is internal metadata");
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum EmbeddingVector {

@@ -470,9 +470,10 @@ fn append_restored_platform_round(
 ) {
     let output_start = request.items.len();
     request.items.extend(response.items.iter().cloned());
-    crate::model_turn::support::restore_chat_reasoning_field(
+    crate::model_turn::support::restore_response_history(
         &mut request.items,
         output_start,
+        &stravia_runtime_contract::identifier::new_id(),
         response
             .vendor
             .ingress
