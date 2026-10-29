@@ -227,13 +227,24 @@ impl ProtocolPair {
     }
 
     pub fn decode_request(self, body: Value) -> Result<AiRequest, TransformError> {
-        adapter(self.ingress)?
+        let mut request = adapter(self.ingress)?
             .decode_request(body)
             .map_err(|source| TransformError::Wire {
                 endpoint: self.ingress,
                 direction: TransformDirection::ClientRequest.as_str(),
                 source,
-            })
+            })?;
+        // Response occurrence boundaries come from completed platform responses,
+        // never from arbitrary extension fields supplied by a client.
+        for item in &mut request.items {
+            if let Some(meta) = item.meta.as_mut() {
+                meta.remove_extension(
+                    stravia_runtime_contract::protocol::ir::response::RESPONSE_HISTORY_GROUP_META,
+                )
+                .expect("response grouping is internal metadata");
+            }
+        }
+        Ok(request)
     }
 
     pub fn encode_request(

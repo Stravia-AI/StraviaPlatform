@@ -13,6 +13,7 @@ use stravia_runtime_contract::protocol::ir::request::MessageContent;
 use stravia_runtime_contract::protocol::ir::request::Role;
 use stravia_runtime_contract::protocol::ir::request::ToolChoice;
 use stravia_runtime_contract::protocol::ir::request::ToolSpec;
+use stravia_runtime_contract::protocol::ir::response::RESPONSE_HISTORY_GROUP_META;
 
 pub struct OpenAIEncoder;
 
@@ -21,14 +22,37 @@ impl OpenAIEncoder {
         req.normalize_parameters();
         let tools = req.tools.as_deref().unwrap_or(&[]);
         let tools_opt: Option<&[ToolSpec]> = if tools.is_empty() { None } else { Some(tools) };
-
         let normalized_messages =
             normalize_messages_for_openai(req.items, req.instructions, tools_opt);
-        let mut messages = Vec::with_capacity(normalized_messages.len());
-        for message in normalized_messages {
-            if let Some(message) = encode_message(message)? {
-                messages.push(message);
+        let mut messages: Vec<Value> = Vec::with_capacity(normalized_messages.len());
+        let mut previous_group = None;
+        let mut omitted_fields = Vec::new();
+        for mut item in normalized_messages {
+            let group = item.meta.as_mut().and_then(|meta| {
+                meta.remove_extension(RESPONSE_HISTORY_GROUP_META)
+                    .expect("response grouping is internal metadata")
+            });
+            if let Some(mut message) = encode_message(item)? {
+                if group.is_some() {
+                    // Chat has no item-level phase; it remains on the source IR.
+                    message
+                        .as_object_mut()
+                        .expect("encoded message")
+                        .remove("phase");
+                }
+                if group.is_some()
+                    && group == previous_group
+                    && let Some(previous) = messages.last_mut()
+                    && previous.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message.get("role").and_then(Value::as_str) == Some("assistant")
+                {
+                    merge_response_assistant(previous, message, &mut omitted_fields);
+                } else {
+                    omitted_fields.clear();
+                    messages.push(message);
+                }
             }
+            previous_group = group;
         }
 
         let mut body = object([
@@ -246,6 +270,72 @@ fn tool_choice_to_value(tc: ToolChoice) -> Option<Value> {
     })
 }
 
+/// The caller has verified the platform response-group identity; item order,
+/// source protocol and phase are not used to guess message boundaries.
+fn merge_response_assistant(previous: &mut Value, next: Value, omitted_fields: &mut Vec<String>) {
+    let previous = previous.as_object_mut().expect("encoded assistant");
+    let Value::Object(fields) = next else {
+        unreachable!("encoded assistant")
+    };
+    for (key, value) in fields {
+        if omitted_fields.contains(&key) {
+            continue;
+        }
+        if key == "content" {
+            append_chat_content(previous.entry(key).or_insert(Value::Null), value);
+            continue;
+        }
+        let Some(existing) = previous.get_mut(&key) else {
+            previous.insert(key, value);
+            continue;
+        };
+        match (key.as_str(), existing, value) {
+            ("reasoning_content", _, Value::Null) => {}
+            ("reasoning_content", existing @ Value::Null, value) => *existing = value,
+            ("reasoning_content", Value::String(existing), Value::String(text)) => {
+                existing.push_str(&text)
+            }
+            ("tool_calls", Value::Array(existing), Value::Array(calls)) => existing.extend(calls),
+            (_, existing, value) if *existing == value => {}
+            _ => {
+                // A single Chat message cannot represent conflicting item-level
+                // extensions. Omit only that extension, never the response.
+                previous.remove(&key);
+                omitted_fields.push(key);
+            }
+        }
+    }
+}
+
+fn append_chat_content(existing: &mut Value, content: Value) {
+    match content {
+        Value::Null => {}
+        Value::String(text) if text.is_empty() => {}
+        Value::String(text) => match existing {
+            Value::String(current) => current.push_str(&text),
+            Value::Array(parts) => {
+                parts.push(object([("type", "text".into()), ("text", text.into())]))
+            }
+            _ => *existing = Value::String(text),
+        },
+        Value::Array(mut parts) => match existing {
+            Value::Array(current) => current.append(&mut parts),
+            Value::String(text) if !text.is_empty() => {
+                parts.insert(
+                    0,
+                    object([
+                        ("type", "text".into()),
+                        ("text", std::mem::take(text).into()),
+                    ]),
+                );
+                *existing = Value::Array(parts);
+            }
+            _ => *existing = Value::Array(parts),
+        },
+        _ => unreachable!("encoded Chat content is text, parts or null"),
+    }
+}
+
 fn normalize_messages_for_openai(
     messages: Vec<AiItem>,
     system: Option<String>,
@@ -270,9 +360,7 @@ fn normalize_messages_for_openai(
 
     for mut msg in preprocessed {
         if msg.role == Role::Assistant {
-            if !is_standalone_reasoning_item(&msg) {
-                promote_reasoning_meta(&mut msg);
-            }
+            promote_reasoning_meta(&mut msg);
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     if tc.id.trim().is_empty() {
@@ -325,45 +413,22 @@ fn normalize_messages_for_openai(
             final_id = next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids);
         }
 
-        let has_adjacent_matching_call = out
-            .last()
-            .is_some_and(|prev| assistant_has_tool_call_id(prev, &final_id));
-        if !has_adjacent_matching_call {
-            let extracted_call = take_matching_tool_call_from_history(&mut out, &final_id);
-            if let Some((tc, source_idx)) = extracted_call {
-                trim_trailing_assistant_text_after_index(&mut out, source_idx);
-                let source_meta = out[source_idx].meta.clone();
-                out.push(AiItem {
-                    role: Role::Assistant,
-                    content: MessageContent::Text(String::new().into()),
-                    tool_calls: Some(vec![tc]),
-                    tool_call_id: None,
-                    meta: source_meta,
-                });
-                seen_tool_call_ids.insert(final_id.clone());
-            } else if !make_matching_call_adjacent(&mut out, &final_id) {
-                if seen_tool_call_ids.contains(&final_id) {
-                    final_id =
-                        next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids);
-                }
-                let synth_name = hinted_id
-                    .as_deref()
-                    .filter(|v| !v.trim().is_empty())
-                    .map(|_| fallback_tool_name.clone())
-                    .unwrap_or_else(|| fallback_tool_name.clone());
-                out.push(AiItem {
-                    role: Role::Assistant,
-                    content: MessageContent::Text(String::new().into()),
-                    tool_calls: Some(vec![ToolCall {
-                        id: final_id.clone(),
-                        name: synth_name,
-                        arguments: "{}".to_string(),
-                    }]),
-                    tool_call_id: None,
-                    meta: None,
-                });
-                seen_tool_call_ids.insert(final_id.clone());
-            }
+        // Results refer to an earlier call, not necessarily the immediately
+        // preceding message. Moving calls here serializes parallel batches and
+        // can move their reasoning past an already-observed result.
+        if !seen_tool_call_ids.contains(&final_id) {
+            out.push(AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new().into()),
+                tool_calls: Some(vec![ToolCall {
+                    id: final_id.clone(),
+                    name: fallback_tool_name.clone(),
+                    arguments: "{}".to_string(),
+                }]),
+                tool_call_id: None,
+                meta: None,
+            });
+            seen_tool_call_ids.insert(final_id.clone());
         }
 
         msg.tool_call_id = Some(final_id.clone());
@@ -377,11 +442,11 @@ fn normalize_messages_for_openai(
         if msg.role != Role::Assistant {
             return true;
         }
-        let has_calls = msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
-        if has_calls {
+        if matches!(&msg.content, MessageContent::Text(_)) {
             return true;
         }
-        if is_explicit_chat_reasoning_carrier(msg) {
+        let has_calls = msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
+        if has_calls {
             return true;
         }
         // 只有明文 reasoning 才有可回放的载体：受保护载荷（signature /
@@ -399,167 +464,13 @@ fn normalize_messages_for_openai(
                     _ => false,
                 })
         );
-        has_reasoning || content_has_non_whitespace_text(&msg.content)
+        has_reasoning || matches!(&msg.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| !matches!(block,
+            ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
+            | ContentBlock::RedactedThinking { .. } | ContentBlock::ToolUse { .. }
+        )))
     });
 
-    fold_standalone_reasoning_items(&mut out);
-
     out
-}
-
-/// DeepSeek and other strict chat-completions upstreams reject assistant
-/// messages that have neither `content` nor `tool_calls`:
-/// 400 "Invalid assistant message: content or tool_calls must be set".
-/// Open Responses history gives native reasoning its own item ahead of the
-/// sibling function-call items, so after the tool-call split such an item
-/// sits right before the first assistant turn it belongs to. Fold its text
-/// into that turn's `reasoning_content` (chronologically first) and drop the
-/// carrier. Without a following assistant turn the text has no
-/// `reasoning_content` host (strict upstreams reject content-less assistant
-/// messages), so it falls back to the carrier's own `content`, like every
-/// codec does when no native carrier exists. Carriers with no plaintext at
-/// all (only signatures / ciphertext / redacted data) are dropped entirely.
-fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
-    for idx in (0..out.len()).rev() {
-        if !is_standalone_reasoning_item(&out[idx]) {
-            continue;
-        }
-        let mut carrier = out.remove(idx);
-        let text = standalone_reasoning_text(&mut carrier);
-        if out.get(idx).is_some_and(|next| {
-            next.role == Role::Assistant
-                && next
-                    .meta
-                    .as_ref()
-                    .is_none_or(|meta| meta.object_extensions().is_some())
-        }) {
-            let next_meta = out[idx].meta.get_or_insert_with(Default::default);
-            let existing = if next_meta
-                .get("reasoning_content")
-                .is_some_and(Value::is_string)
-            {
-                match next_meta
-                    .remove_extension("reasoning_content")
-                    .expect("reasoning content is not reserved")
-                {
-                    Some(Value::String(text)) => text,
-                    _ => unreachable!("string extension checked above"),
-                }
-            } else {
-                String::new()
-            };
-            let merged = match (text.is_empty(), existing.is_empty()) {
-                (true, _) => existing,
-                (false, true) => text,
-                (false, false) => {
-                    let mut text = text;
-                    text.push('\n');
-                    text.push_str(&existing);
-                    text
-                }
-            };
-            // 只含受保护载荷的 carrier 没有明文可合并，不应凭空写出空的
-            // `reasoning_content` 字段。
-            if !merged.is_empty() {
-                next_meta
-                    .insert_extension("reasoning_content", Value::String(merged))
-                    .expect("reasoning content is not reserved");
-            }
-        } else if !text.is_empty() {
-            // 明文降级为 content；清空 meta，避免来源侧扩展（如
-            // `__open_responses_item_fields` 或推理签名副本）泄漏到消息字段。
-            carrier.content = MessageContent::Text(text.into());
-            carrier.meta = None;
-            out.insert(idx, carrier);
-        }
-    }
-}
-
-/// An assistant item whose only payload is native reasoning: no tool calls,
-/// no tool-call id, and no textual or non-reasoning content blocks.
-fn is_standalone_reasoning_item(item: &AiItem) -> bool {
-    item.role == Role::Assistant
-        && !is_explicit_chat_reasoning_carrier(item)
-        && item
-            .tool_calls
-            .as_ref()
-            .is_none_or(|calls| calls.is_empty())
-        && item
-            .tool_call_id
-            .as_ref()
-            .is_none_or(|id| id.trim().is_empty())
-        && match &item.content {
-            MessageContent::Text(text) => text.trim().is_empty(),
-            MessageContent::Blocks(blocks) => blocks.iter().all(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Thinking { .. }
-                        | ContentBlock::Reasoning { .. }
-                        | ContentBlock::RedactedThinking { .. }
-                )
-            }),
-        }
-}
-
-fn is_explicit_chat_reasoning_carrier(item: &AiItem) -> bool {
-    // 明确为空的 Chat 字段属于原消息，即使正文为空也不能当作独立推理项删除。
-    matches!(&item.content, MessageContent::Text(_))
-        && item
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("reasoning_content"))
-            .is_some_and(|value| value.is_null() || value.as_str() == Some(""))
-}
-
-/// Reasoning text of a standalone carrier, in encode order. The blocks win:
-/// Blocks are the single authoritative source; standalone carriers skip
-/// metadata promotion so their plaintext can be consumed directly.
-/// `meta.reasoning_content` is the fallback for meta-only carriers.
-fn standalone_reasoning_text(item: &mut AiItem) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let MessageContent::Blocks(blocks) = &mut item.content {
-        let blocks = std::mem::take(blocks);
-        for block in blocks {
-            match block {
-                ContentBlock::Thinking { thinking, .. } => {
-                    if !thinking.trim().is_empty() {
-                        parts.push(thinking);
-                    }
-                }
-                ContentBlock::Reasoning {
-                    summary, content, ..
-                } => {
-                    parts.extend(
-                        summary
-                            .into_iter()
-                            .chain(content)
-                            .filter(|text| !text.trim().is_empty()),
-                    );
-                }
-                ContentBlock::RedactedThinking { .. } => {}
-                _ => {}
-            }
-        }
-    }
-    if parts.is_empty()
-        && let Some(reasoning) = item
-            .meta
-            .as_mut()
-            .and_then(|meta| meta.remove_extension("reasoning_content").ok().flatten())
-            .and_then(|value| match value {
-                Value::String(text) => Some(text),
-                _ => None,
-            })
-    {
-        return reasoning;
-    }
-    let mut parts = parts.into_iter();
-    let mut text = parts.next().unwrap_or_default();
-    for next in parts {
-        text.push('\n');
-        text.push_str(&next);
-    }
-    text
 }
 
 fn prune_orphan_assistant_tool_calls(mut messages: Vec<AiItem>) -> Vec<AiItem> {
@@ -570,16 +481,24 @@ fn prune_orphan_assistant_tool_calls(mut messages: Vec<AiItem>) -> Vec<AiItem> {
         .filter(|id| !id.trim().is_empty())
         .collect();
 
-    for msg in &mut messages {
+    messages.retain_mut(|msg| {
         if msg.role == Role::Assistant
             && let Some(calls) = msg.tool_calls.as_mut()
         {
             calls.retain(|tc| referenced_tool_ids.contains(&tc.id));
             if calls.is_empty() {
                 msg.tool_calls = None;
+                // Remove a shell created by orphan cleanup, not an originally
+                // empty assistant message supplied by the caller.
+                if msg.meta.is_none()
+                    && matches!(&msg.content, MessageContent::Text(text) if text.is_empty())
+                {
+                    return false;
+                }
             }
         }
-    }
+        true
+    });
     messages
 }
 
@@ -637,17 +556,6 @@ fn next_synthetic_tool_call_id(
             return id;
         }
     }
-}
-
-fn assistant_has_tool_call_id(msg: &AiItem, tool_call_id: &str) -> bool {
-    if msg.role != Role::Assistant {
-        return false;
-    }
-    msg.tool_calls.as_ref().is_some_and(|calls| {
-        calls
-            .iter()
-            .any(|tc| !tc.id.trim().is_empty() && tc.id == tool_call_id)
-    })
 }
 
 fn remap_duplicate_tool_call_ids(
@@ -726,80 +634,6 @@ fn remap_duplicate_tool_call_ids(
     messages
 }
 
-fn make_matching_call_adjacent(out: &mut Vec<AiItem>, tool_call_id: &str) -> bool {
-    if out.is_empty() {
-        return false;
-    }
-
-    loop {
-        let Some(last) = out.last() else {
-            return false;
-        };
-        if assistant_has_tool_call_id(last, tool_call_id) {
-            return true;
-        }
-
-        let drop_candidate = last.role == Role::Assistant
-            && last
-                .tool_calls
-                .as_ref()
-                .is_none_or(|calls| calls.is_empty())
-            && last
-                .tool_call_id
-                .as_ref()
-                .is_none_or(|id| id.trim().is_empty());
-        if drop_candidate {
-            let _ = out.pop();
-            continue;
-        }
-        return false;
-    }
-}
-
-fn take_matching_tool_call_from_history(
-    out: &mut [AiItem],
-    tool_call_id: &str,
-) -> Option<(ToolCall, usize)> {
-    for (idx, msg) in out.iter_mut().enumerate().rev() {
-        if msg.role != Role::Assistant {
-            continue;
-        }
-        let Some(calls) = msg.tool_calls.as_mut() else {
-            continue;
-        };
-        if let Some(pos) = calls.iter().position(|tc| tc.id == tool_call_id) {
-            let tc = calls.remove(pos);
-            if calls.is_empty() {
-                msg.tool_calls = None;
-            }
-            return Some((tc, idx));
-        }
-    }
-    None
-}
-
-fn trim_trailing_assistant_text_after_index(out: &mut Vec<AiItem>, source_idx: usize) {
-    while out.len() > source_idx + 1 {
-        let Some(last) = out.last() else {
-            break;
-        };
-        let drop_candidate = last.role == Role::Assistant
-            && last
-                .tool_calls
-                .as_ref()
-                .is_none_or(|calls| calls.is_empty())
-            && last
-                .tool_call_id
-                .as_ref()
-                .is_none_or(|id| id.trim().is_empty());
-        if drop_candidate {
-            let _ = out.pop();
-            continue;
-        }
-        break;
-    }
-}
-
 fn promote_reasoning_meta(message: &mut AiItem) {
     if message
         .meta
@@ -844,16 +678,6 @@ fn promote_reasoning_meta(message: &mut AiItem) {
         .get_or_insert_with(Default::default)
         .insert_extension("reasoning_content", Value::String(reasoning))
         .expect("reasoning content is not reserved");
-}
-
-fn content_has_non_whitespace_text(content: &MessageContent) -> bool {
-    match content {
-        MessageContent::Text(text) => !text.trim().is_empty(),
-        MessageContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(ContentBlock::as_text)
-            .any(|text| !text.trim().is_empty()),
-    }
 }
 
 fn tool_message_hint(msg: &AiItem) -> Option<stravia_runtime_contract::protocol::ir::ToolCallId> {

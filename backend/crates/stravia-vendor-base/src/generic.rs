@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use stravia_vendor_common::common;
 use stravia_vendor_common::connection_check as common_check;
+use stravia_vendor_common::gemini;
 use stravia_vendor_common::thinking;
 
 use serde_json::{Value, json};
@@ -228,29 +229,7 @@ fn prepare_custom_reasoning_history(
 /// Google's documented imported-history validator control, not a native signature.
 /// This is request-only and deliberately excludes Vertex and unverified proxies.
 fn prepare_gemini_imported_tool_history(protocol: &str, model: &str, url: &str, body: &mut Value) {
-    if protocol != GEMINI_PROTOCOL {
-        return;
-    }
-    let Some(version_suffix) = model
-        .strip_prefix("models/")
-        .unwrap_or(model)
-        .strip_prefix("gemini-3")
-    else {
-        return;
-    };
-    // Accept the major-only name and numeric minor versions, not aliases or
-    // a prefix match on a different major (e.g. gemini-30 or gemini-4).
-    let major_three = if let Some(name) = version_suffix.strip_prefix('-') {
-        !name.is_empty()
-    } else if let Some((minor, name)) = version_suffix
-        .strip_prefix('.')
-        .and_then(|suffix| suffix.split_once('-'))
-    {
-        !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit()) && !name.is_empty()
-    } else {
-        false
-    };
-    if !major_three {
+    if protocol != GEMINI_PROTOCOL || !gemini::supports_imported_tool_history(model) {
         return;
     }
     // Ordinary text requests need no endpoint parsing or allocations here.
@@ -290,56 +269,7 @@ fn prepare_gemini_imported_tool_history(protocol: &str, model: &str, url: &str, 
     {
         return;
     }
-    let Some(contents) = body.get_mut("contents").and_then(Value::as_array_mut) else {
-        return;
-    };
-    // Tool results use the user role too, but do not start a new user turn.
-    let start = contents
-        .iter()
-        .rposition(|content| {
-            content.get("role").and_then(Value::as_str) == Some("user")
-                && content
-                    .get("parts")
-                    .and_then(Value::as_array)
-                    .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            part.as_object().is_some_and(|fields| {
-                                fields.keys().any(|key| {
-                                    matches!(
-                                        key.as_str(),
-                                        "text" | "inlineData" | "fileData" | "videoMetadata"
-                                    )
-                                })
-                            })
-                        })
-                    })
-        })
-        .map_or(0, |index| index + 1);
-    for content in &mut contents[start..] {
-        if content.get("role").and_then(Value::as_str) != Some("model") {
-            continue;
-        }
-        let Some(parts) = content.get_mut("parts").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let Some(first_call) = parts
-            .iter_mut()
-            .find(|part| part.get("functionCall").is_some())
-        else {
-            continue;
-        };
-        let missing = match first_call.get("thoughtSignature") {
-            None | Some(Value::Null) => true,
-            Some(Value::String(signature)) => signature.is_empty(),
-            _ => false,
-        };
-        if missing && let Some(fields) = first_call.as_object_mut() {
-            fields.insert(
-                "thoughtSignature".into(),
-                Value::String("skip_thought_signature_validator".into()),
-            );
-        }
-    }
+    gemini::prepare_imported_tool_history(body);
 }
 
 fn classify_open_responses_error(value: &Value, saw_response_event: bool) -> Option<PluginError> {

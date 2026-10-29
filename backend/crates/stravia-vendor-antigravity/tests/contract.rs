@@ -86,6 +86,7 @@ struct Fixture {
     received: Mutex<Vec<(String, HeaderMap, Vec<u8>)>>,
     truncated: AtomicBool,
     error_stream: AtomicBool,
+    require_call_signature: AtomicBool,
     image_refusal: Mutex<Option<Value>>,
 }
 async fn upstream(
@@ -182,6 +183,25 @@ async fn upstream(
                     .into_response();
             }
             let request: Value = serde_json::from_slice(&body).unwrap();
+            if fixture.require_call_signature.load(Ordering::Relaxed) {
+                for content in request["request"]["contents"].as_array().unwrap() {
+                    if content["role"] != "model" {
+                        continue;
+                    }
+                    if let Some(call) = content["parts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|part| part.get("functionCall").is_some())
+                        && call["thoughtSignature"].as_str().is_none_or(str::is_empty)
+                    {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({"error":{"code":400,"message":"Function call is missing a thought_signature"}})),
+                        ).into_response();
+                    }
+                }
+            }
             if request.pointer("/request/generationConfig/responseModalities")
                 == Some(&json!(["IMAGE"]))
             {
@@ -233,7 +253,11 @@ impl HostServices for Services {
         let url = url::Url::parse(&request.url).unwrap();
         assert!(matches!(
             url.host_str(),
-            Some("daily-cloudcode-pa.googleapis.com" | "oauth2.googleapis.com")
+            Some(
+                "daily-cloudcode-pa.googleapis.com"
+                    | "oauth2.googleapis.com"
+                    | "unverified.example"
+            )
         ));
         let mut local = format!("{}{}", self.root, url.path());
         if let Some(query) = url.query() {
@@ -582,6 +606,94 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
         if kind.model_error_kind() == Some(AiErrorKind::RateLimitError))
     );
     assert_eq!(error.retry_after(), Some(Duration::from_secs(9)));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn imported_tool_history_continues_without_replacing_native_signatures() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new()
+        .fallback(upstream)
+        .with_state(Arc::clone(&fixture));
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    for (signature, unverified) in [
+        (None, false),
+        (Some("opaque-native+/=="), false),
+        (None, true),
+    ] {
+        fixture
+            .require_call_signature
+            .store(!unverified, Ordering::Relaxed);
+        let mut provider = provider();
+        provider.model = Some("gemini-3.8-flash".into());
+        if unverified {
+            provider.base_url = "https://unverified.example".into();
+        }
+        provider.credentials = BTreeMap::from([
+            ("access_token".into(), json!("test-token")),
+            ("project_id".into(), json!("test-project")),
+        ]);
+        let mut body = json!({
+            "model": "gemini-3.8-flash",
+            "contents": [
+                {"role":"user","parts":[{"text":"Add both lookup results."}]},
+                {"role":"model","parts":[
+                    {"functionCall":{"id":"a","name":"lookup","args":{"key":"A"}}},
+                    {"functionCall":{"id":"b","name":"lookup","args":{"key":"B"}}}
+                ]},
+                {"role":"user","parts":[
+                    {"functionResponse":{"id":"a","name":"lookup","response":{"value":1}}},
+                    {"functionResponse":{"id":"b","name":"lookup","response":{"value":2}}}
+                ]}
+            ],
+            "tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"OBJECT"}}]}]
+        });
+        if let Some(signature) = signature {
+            body["contents"][1]["parts"][0]["thoughtSignature"] = json!(signature);
+        }
+        let mut expected = body["contents"].clone();
+        if !unverified {
+            expected[1]["parts"][0]["thoughtSignature"] =
+                json!(signature.unwrap_or("skip_thought_signature_validator"));
+        }
+        let request = ProtocolTransform::global()
+            .bind(
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            )
+            .unwrap()
+            .decode_request(body)
+            .unwrap();
+        let result = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await;
+        let OperationOutput::Infer(output) = result.unwrap() else {
+            panic!("inference output")
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let envelope: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
+        assert_eq!(envelope["request"]["contents"], expected);
+    }
     server.abort();
 }
 

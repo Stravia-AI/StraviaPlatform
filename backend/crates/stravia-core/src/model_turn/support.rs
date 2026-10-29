@@ -8,7 +8,21 @@ pub(crate) fn explicit_chat_reasoning_field(resp: &AiResponse) -> Option<&serde_
         .filter(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
 }
 
-pub(crate) fn restore_chat_reasoning_field(
+pub(crate) fn restore_response_history(
+    items: &mut Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    output_start: usize,
+    response_group: &str,
+    field: Option<&serde_json::Value>,
+) {
+    restore_chat_reasoning_field(items, output_start, field);
+    // 调用方刚追加了一个完整响应；只记录这个事实，不从条目邻接关系推断。
+    stravia_runtime_contract::protocol::ir::response::mark_response_history(
+        &mut items[output_start..],
+        response_group,
+    );
+}
+
+fn restore_chat_reasoning_field(
     items: &mut Vec<stravia_runtime_contract::protocol::ir::AiItem>,
     output_start: usize,
     field: Option<&serde_json::Value>,
@@ -34,7 +48,7 @@ pub(crate) fn restore_chat_reasoning_field(
     }) {
         return;
     }
-    // 同一响应的正文与调用可被回放成多个 assistant，均须保留已知消息形状。
+    // 字段随响应的可回放项保留；最终消息形状由目标协议编码器投影。
     // 不制造 Thinking，也不能把字段附到随后会被丢弃的受保护推理项。
     let mut restored = false;
     for item in &mut items[output_start..] {

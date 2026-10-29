@@ -3,7 +3,7 @@ use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_protocol_codec::transform::{ProtocolTransform, StreamDecodeStage};
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest, AiResponse, ToolChoice};
-use stravia_vendor_common::common;
+use stravia_vendor_common::{common, gemini};
 use stravia_vendor_sdk::{ErrorKind, GuestHost, PluginError, ProviderSnapshot, read_http_body};
 
 use crate::client;
@@ -54,6 +54,9 @@ pub(crate) fn infer(
         .take()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| invalid("Antigravity requires an upstream model"))?;
+    // Model families are canonical here; native selectors may be opaque aliases.
+    let imported_tool_history = client::root(&provider) == crate::BASE_URL
+        && gemini::supports_imported_tool_history(&request.model);
     let has_explicit_thinking_control = request.reasoning.target_control.is_none()
         && (request.reasoning.mode.is_some()
             || request.reasoning.level.is_some()
@@ -221,6 +224,9 @@ pub(crate) fn infer(
         }
     }
     sanitize_request(&mut body)?;
+    if imported_tool_history {
+        gemini::prepare_imported_tool_history(&mut body);
+    }
     // 会话、项目和请求身份由宿主/本连接生成，不能由下游额外字段指定。
     if let Some(session) = common::session_affinity(&provider) {
         body.as_object_mut()
