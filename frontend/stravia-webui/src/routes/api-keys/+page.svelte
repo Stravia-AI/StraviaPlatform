@@ -7,12 +7,12 @@ import PlusIcon from '@lucide/svelte/icons/plus'
 import { toast } from 'svelte-sonner'
 import { onMount } from 'svelte'
 
-import { admin } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { getConnectSetup } from '#lib/connect-setup.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { formatLogTime } from '#lib/format.js'
-import { effectiveModelDisplayName } from '#lib/logical-model.js'
+import { displayCurrency, formatCostAmount } from '#lib/money.js'
 import type { ApiKey } from '#lib/types.js'
 import ApiKeyEditor from '#lib/components/api-key-editor.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
@@ -41,6 +41,8 @@ onMount(() => {
 })
 const apiKeysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
+const currencyQuery = createQuery(() => currencyQueryOptions())
+const display = $derived(displayCurrency(currencyQuery.data ?? null))
 const webSearchQuery = createQuery(() => ({ queryKey: ['web-search-config'], queryFn: admin.webSearch.config.get }))
 const mediaUnderstandingQuery = createQuery(() => ({
   queryKey: ['media-understanding-config'],
@@ -107,13 +109,20 @@ const apiKeyColumns = apiKeyColumnHelper.columns([
     },
     size: 190,
   }),
-  apiKeyColumnHelper.accessor((apiKey) => modelAccessLabel(apiKey), {
-    id: 'modelAccess',
-    header: () => m.api_keys_model_access(),
-    cell: (context) => renderSnippet(modelAccessCell, context),
-    meta: { label: () => m.api_keys_model_access(), width: 'fill' },
-    size: 220,
-  }),
+  apiKeyColumnHelper.accessor(
+    (apiKey) => (apiKey.spend_available == null ? Infinity : Number(apiKey.spend_available)),
+    {
+      id: 'availableBalance',
+      header: () => m.api_keys_available_balance(),
+      cell: (context) => balanceLabel(context.row.original),
+      meta: {
+        label: () => m.api_keys_available_balance(),
+        cellClass: 'font-technical whitespace-nowrap tabular-nums',
+        width: 'compact',
+      },
+      size: 140,
+    },
+  ),
   apiKeyColumnHelper.accessor('expires_at', {
     header: () => m.api_keys_expires(),
     cell: (context) => expirationLabel(context.getValue()),
@@ -158,15 +167,11 @@ function limitsLabel(apiKey: ApiKey): string {
   return m.api_keys_rpm_value({ limit: apiKey.rpm_limit ?? m.api_key_editor_unlimited() })
 }
 
-function modelAccessLabel(apiKey: ApiKey): string {
-  return apiKey.model_ids.length === 0
-    ? m.api_keys_all_permitted_models()
-    : apiKey.model_ids
-        .map((id) => {
-          const model = models.find((candidate) => candidate.id === id)
-          return model ? effectiveModelDisplayName(model) : id
-        })
-        .join(', ')
+// 可用余额 = 消费上限 − 已消费，由 Core 在展示币种下算好；没有上限的密钥不受余额约束。
+function balanceLabel(apiKey: ApiKey): string {
+  return apiKey.spend_available == null
+    ? m.api_key_editor_unlimited()
+    : formatCostAmount(apiKey.spend_available, display.symbol)
 }
 
 function openApiKey(apiKey: ApiKey, event: MouseEvent): void {
@@ -259,11 +264,6 @@ async function deleteKey(): Promise<void> {
   </span>
 {/snippet}
 
-{#snippet modelAccessCell(context: DataTableCellContext<ApiKey>)}
-  {@const value = modelAccessLabel(context.row.original)}
-  <p class="truncate" title={value}>{value}</p>
-{/snippet}
-
 {#snippet apiKeyStatusCell(context: DataTableCellContext<ApiKey>)}
   {@const apiKey = context.row.original}
   <StatusIndicator
@@ -325,7 +325,8 @@ async function deleteKey(): Promise<void> {
               <span class="block font-technical mt-1 text-xs text-muted-foreground">{maskedKey(apiKey.key)}</span>
               <span class="block font-technical mt-2 text-xs text-muted-foreground tabular-nums"
                 >{limitsLabel(apiKey)}</span>
-              <span class="block mt-1 truncate text-xs text-muted-foreground">{modelAccessLabel(apiKey)}</span>
+              <span class="block font-technical mt-1 text-xs text-muted-foreground tabular-nums"
+                >{m.api_keys_available_balance()}: {balanceLabel(apiKey)}</span>
               <span class="mt-1 flex flex-wrap items-center gap-x-3">
                 <StatusIndicator
                   compact

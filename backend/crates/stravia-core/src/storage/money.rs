@@ -47,6 +47,7 @@ pub fn encode_custom_currency(currency: &CustomCurrency) -> anyhow::Result<Strin
 
 pub fn cost_basis_str(basis: CostBasis) -> &'static str {
     match basis {
+        CostBasis::Untracked => "none",
         CostBasis::Usage => "usage",
         CostBasis::Subscription => "subscription",
     }
@@ -54,6 +55,7 @@ pub fn cost_basis_str(basis: CostBasis) -> &'static str {
 
 pub fn parse_cost_basis(value: &str) -> anyhow::Result<CostBasis> {
     match value {
+        "none" => Ok(CostBasis::Untracked),
         "usage" => Ok(CostBasis::Usage),
         "subscription" => Ok(CostBasis::Subscription),
         other => anyhow::bail!("invalid cost basis: {other}"),
@@ -142,6 +144,12 @@ pub fn validate_new_cost_plan(
     input: &crate::storage::traits::NewProviderCostPlan,
 ) -> anyhow::Result<()> {
     match input.basis {
+        CostBasis::Untracked => {
+            anyhow::ensure!(
+                input.period.is_none() && input.price.is_none() && input.currency.is_none(),
+                "a none cost plan cannot carry a subscription period or price"
+            );
+        }
         CostBasis::Usage => {
             anyhow::ensure!(
                 input.period.is_none() && input.price.is_none() && input.currency.is_none(),
@@ -166,4 +174,102 @@ pub fn validate_new_cost_plan(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::storage::traits::NewProviderCostPlan;
+
+    fn plan(
+        basis: CostBasis,
+        period: Option<SubscriptionPeriod>,
+        price: Option<&str>,
+        currency: Option<CurrencyKind>,
+    ) -> NewProviderCostPlan {
+        NewProviderCostPlan {
+            basis,
+            period,
+            price: price.map(|value| value.parse::<Decimal>().expect("decimal test price")),
+            currency,
+        }
+    }
+
+    #[test]
+    fn none_cost_plan_rejects_subscription_fields() {
+        assert!(validate_new_cost_plan(&plan(CostBasis::Untracked, None, None, None)).is_ok());
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Untracked,
+                Some(SubscriptionPeriod::Month),
+                None,
+                None
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Untracked,
+                None,
+                Some("10"),
+                Some(CurrencyKind::Usd)
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn subscription_plan_requires_positive_price_and_currency() {
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Subscription,
+                Some(SubscriptionPeriod::Month),
+                Some("10"),
+                Some(CurrencyKind::Usd)
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Subscription,
+                Some(SubscriptionPeriod::Month),
+                Some("0"),
+                Some(CurrencyKind::Usd)
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Subscription,
+                None,
+                Some("10"),
+                Some(CurrencyKind::Usd)
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_new_cost_plan(&plan(
+                CostBasis::Subscription,
+                Some(SubscriptionPeriod::Month),
+                Some("10"),
+                None
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cost_basis_round_trips_through_storage_strings() {
+        for basis in [
+            CostBasis::Untracked,
+            CostBasis::Usage,
+            CostBasis::Subscription,
+        ] {
+            assert_eq!(parse_cost_basis(cost_basis_str(basis)).unwrap(), basis);
+        }
+        assert!(parse_cost_basis("none").unwrap() == CostBasis::Untracked);
+        assert!(parse_cost_basis("unknown").is_err());
+    }
 }

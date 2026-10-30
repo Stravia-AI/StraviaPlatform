@@ -960,6 +960,18 @@ pub struct UsageMoneyTotals {
     pub billing_unknown_count: i64,
 }
 
+/// 订阅价值对比：窗口内的摊销订阅费用与同窗口的等价按量成本。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionValue {
+    /// 订阅费用：窗口内按生效段线性摊销，`known_count` / `unknown_count` 为 0；
+    /// 摊销溢出时 `unknown_count` 为 1。
+    pub cost: DisplayMoney,
+    /// 同窗口内按订阅基准完成的尝试的按量成本。
+    pub usage_equivalent_cost: DisplayMoney,
+    /// 等价按量成本 / 订阅费用，4 位小数；订阅费用为零或任一侧不可表示时为 null。
+    pub multiple: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, FromRow)]
 pub struct StatsOverview {
     /// 所选窗口内的客户端请求数，包括准入前拒绝；内部轮次和重试不重复计数。
@@ -989,6 +1001,9 @@ pub struct StatsOverview {
     /// 实际成本：按量尝试成本 + 订阅摊销（含已删除 Provider）。
     #[sqlx(skip)]
     pub actual_cost: DisplayMoney,
+    /// 订阅价值对比；窗口内没有订阅段重叠时为 null。
+    #[sqlx(skip)]
+    pub subscription: Option<SubscriptionValue>,
     #[sqlx(skip)]
     pub currency: DisplayCurrency,
 }
@@ -1068,12 +1083,13 @@ pub struct ProviderStats {
     #[sqlx(flatten)]
     #[serde(skip)]
     pub money: UsageMoneyTotals,
-    /// 实际成本：按量尝试成本 + 订阅摊销。
+    /// 窗口内该 Provider 全部受追踪尝试的成本：按量尝试为实际按量成本，
+    /// 订阅尝试为等价按量成本。既无受追踪尝试也无订阅段重叠时为 null。
     #[sqlx(skip)]
-    pub actual_cost: DisplayMoney,
-    /// 订阅 Provider 的尝试按量成本；纯按量 Provider 为 null。
+    pub cost: Option<DisplayMoney>,
+    /// 该 Provider 的订阅价值对比；窗口内没有订阅段重叠时为 null。
     #[sqlx(skip)]
-    pub usage_equivalent_cost: Option<DisplayMoney>,
+    pub subscription: Option<SubscriptionValue>,
     #[sqlx(skip)]
     pub currency: DisplayCurrency,
 }

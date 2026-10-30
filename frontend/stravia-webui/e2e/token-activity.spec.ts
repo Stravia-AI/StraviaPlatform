@@ -355,8 +355,8 @@ async function populateResources(page: Page, total = 12) {
           avg_duration_ms: 100,
           avg_output_tps: 10 + index,
           currency: CURRENCY,
-          actual_cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
-          usage_equivalent_cost: index === 0 ? emptyMoney : null,
+          cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
+          subscription: index === 0 ? { cost: emptyMoney, usage_equivalent_cost: emptyMoney, multiple: null } : null,
         })),
       },
     })

@@ -153,7 +153,7 @@ _避免使用_：结算币种、本位币、币种代码
 
 ## 按量成本（Usage-Based Cost）
 
-按量成本是一次上游尝试按其 Provider Model 当时的价格（含上下文分档与峰谷定价）与 Confirmed Upstream Usage 得出的估算成本，发生时冻结。对订阅制 Provider，它只表示等价按量金额，不是该 Provider 的实际成本。
+按量成本是一次上游尝试按其 Provider Model 当时的价格（含上下文分档与峰谷定价）与 Confirmed Upstream Usage 得出的估算成本，发生时冻结。对订阅制 Provider，它只表示等价按量金额，不是该 Provider 的实际成本；不计算成本（`none`）的 Provider 不产生按量成本，也不计入未知成本。
 _避免使用_：实际费用、账单金额
 
 ## Connect Client Apply

@@ -5,7 +5,8 @@ use rust_decimal::Decimal;
 
 use crate::pricing::{
     AttemptAmounts, BillingOutcome, CostBasis, CostPlanEntry, CustomCurrency, DisplayCurrency,
-    DisplayMoney, format_amount, subscription_amortization,
+    DisplayMoney, SubscriptionCost, format_amount, subscription_amortization,
+    subscription_value_multiple,
 };
 
 use super::*;
@@ -175,9 +176,14 @@ impl AdminService {
         let mut stats = self.gw.storage.usage_stats().stats_overview(window).await?;
         let currency = self.gw.custom_currency_snapshot();
         let plans = self.provider_cost_plan_entries().await?;
+        let now = Utc::now();
         let (start, end) = amortization_window(window);
-        let subscription = sum_subscription_costs(&plans, start, end, Utc::now());
+        let subscription = sum_subscription_costs(&plans, start, end, now);
         stats.actual_cost = actual_money(stats.money, subscription, currency.as_deref());
+        stats.subscription = plans
+            .values()
+            .any(|entries| has_subscription_overlap(entries, start, end, now))
+            .then(|| subscription_value(stats.money, subscription, currency.as_deref()));
         stats.currency = DisplayCurrency::from_snapshot(currency.as_deref());
         Ok(stats)
     }
@@ -240,7 +246,7 @@ impl AdminService {
             for row in &mut rows {
                 row.actual_cost = actual_money(
                     row.money,
-                    Some((Decimal::ZERO, Decimal::ZERO)),
+                    Some(SubscriptionCost::default()),
                     currency.as_deref(),
                 );
                 row.currency = DisplayCurrency::from_snapshot(currency.as_deref());
@@ -312,37 +318,25 @@ impl AdminService {
         for row in &mut rows {
             let money = row.money;
             let provider_id = row.provider_id.as_deref().unwrap_or_default();
-            let subscription = if failed_subscription.contains(provider_id) {
+            let subscription_cost = if failed_subscription.contains(provider_id) {
                 None
             } else {
                 Some(amortized.get(provider_id).copied().unwrap_or_default())
             };
-            row.actual_cost = actual_money(
-                money,
-                subscription.map(|cost| (cost.custom_nanos, cost.usd_unconverted_nanos)),
-                currency.as_deref(),
-            );
-            let equivalent_custom =
-                sub_nanos(money.cost_custom_nanos, money.payg_cost_custom_nanos);
-            let equivalent_usd = sub_nanos(
-                money.cost_usd_unconverted_nanos,
-                money.payg_cost_usd_unconverted_nanos,
-            );
-            let equivalent_known = sub_nanos(money.cost_known_count, money.payg_cost_known_count);
-            let equivalent_unknown =
-                sub_nanos(money.cost_unknown_count, money.payg_cost_unknown_count);
-            row.usage_equivalent_cost = (subscription_providers.contains(provider_id)
-                || equivalent_known.is_some_and(|count| count > 0)
-                || equivalent_unknown.is_some_and(|count| count > 0))
-            .then(|| {
+            let has_subscription = subscription_providers.contains(provider_id);
+            // 既无受追踪尝试也无订阅段重叠时不展示成本（不计算成本的 Provider）。
+            let tracked = money.cost_known_count > 0 || money.cost_unknown_count > 0;
+            row.cost = (tracked || has_subscription).then(|| {
                 display_money(
-                    equivalent_custom,
-                    equivalent_usd,
-                    equivalent_known.unwrap_or(0),
-                    equivalent_unknown.unwrap_or(0),
+                    Some(money.cost_custom_nanos),
+                    Some(money.cost_usd_unconverted_nanos),
+                    money.cost_known_count,
+                    money.cost_unknown_count,
                     currency.as_deref(),
                 )
             });
+            row.subscription = has_subscription
+                .then(|| subscription_value(money, subscription_cost, currency.as_deref()));
             row.currency = DisplayCurrency::from_snapshot(currency.as_deref());
         }
         let plan_only: std::collections::BTreeSet<String> = amortized
@@ -371,15 +365,10 @@ impl AdminService {
                 continue;
             }
             let provider_name = provider_names.get(&provider_id);
-            let subscription = amortized.get(&provider_id).copied();
-            let actual_cost = if failed_subscription.contains(&provider_id) {
-                unknown_amortization_money(0, 0)
+            let subscription_cost = if failed_subscription.contains(&provider_id) {
+                None
             } else {
-                actual_money(
-                    UsageMoneyTotals::default(),
-                    subscription.map(|cost| (cost.custom_nanos, cost.usd_unconverted_nanos)),
-                    currency.as_deref(),
-                )
+                Some(amortized.get(&provider_id).copied().unwrap_or_default())
             };
             rows.push(ProviderStats {
                 provider_id: Some(provider_id.clone()),
@@ -392,12 +381,11 @@ impl AdminService {
                 avg_duration_ms: None,
                 avg_output_tps: None,
                 money: UsageMoneyTotals::default(),
-                actual_cost,
-                usage_equivalent_cost: Some(display_money(
-                    Some(0),
-                    Some(0),
-                    0,
-                    0,
+                // 仅有摊销记录的 Provider 没有尝试成本，展示 0 而不是隐藏。
+                cost: Some(display_money(Some(0), Some(0), 0, 0, currency.as_deref())),
+                subscription: Some(subscription_value(
+                    UsageMoneyTotals::default(),
+                    subscription_cost,
                     currency.as_deref(),
                 )),
                 currency: DisplayCurrency::from_snapshot(currency.as_deref()),
@@ -487,17 +475,17 @@ fn display_money_decimal(
 
 fn actual_money(
     money: UsageMoneyTotals,
-    subscription: Option<(Decimal, Decimal)>,
+    subscription: Option<SubscriptionCost>,
     currency: Option<&CustomCurrency>,
 ) -> DisplayMoney {
-    let Some((subscription_custom, subscription_usd)) = subscription else {
+    let Some(subscription) = subscription else {
         return unknown_amortization_money(
             money.payg_cost_known_count,
             money.payg_cost_unknown_count,
         );
     };
     let Some(custom_nanos) =
-        Decimal::from(money.payg_cost_custom_nanos).checked_add(subscription_custom)
+        Decimal::from(money.payg_cost_custom_nanos).checked_add(subscription.custom_nanos)
     else {
         tracing::warn!("payg and subscription custom amounts overflowed");
         return unknown_amortization_money(
@@ -505,8 +493,8 @@ fn actual_money(
             money.payg_cost_unknown_count,
         );
     };
-    let Some(usd_unconverted_nanos) =
-        Decimal::from(money.payg_cost_usd_unconverted_nanos).checked_add(subscription_usd)
+    let Some(usd_unconverted_nanos) = Decimal::from(money.payg_cost_usd_unconverted_nanos)
+        .checked_add(subscription.usd_unconverted_nanos)
     else {
         tracing::warn!("payg and subscription USD amounts overflowed");
         return unknown_amortization_money(
@@ -528,6 +516,78 @@ fn unknown_money(known_count: i64, unknown_count: i64) -> DisplayMoney {
         amount: "0".into(),
         known_count: 0,
         unknown_count: (known_count.max(0) + unknown_count.max(0)) as u64,
+    }
+}
+
+/// 同窗口内按订阅基准完成的尝试的等价按量成本：全部成本桶减去按量桶。
+fn usage_equivalent_money(
+    money: UsageMoneyTotals,
+    currency: Option<&CustomCurrency>,
+) -> DisplayMoney {
+    let custom = sub_nanos(money.cost_custom_nanos, money.payg_cost_custom_nanos);
+    let usd = sub_nanos(
+        money.cost_usd_unconverted_nanos,
+        money.payg_cost_usd_unconverted_nanos,
+    );
+    let known = sub_nanos(money.cost_known_count, money.payg_cost_known_count);
+    let unknown = sub_nanos(money.cost_unknown_count, money.payg_cost_unknown_count);
+    display_money(
+        custom,
+        usd,
+        known.unwrap_or(0),
+        unknown.unwrap_or(0),
+        currency,
+    )
+}
+
+/// 价值倍数用展示币种的精确十进制计算；任一侧不可表示时返回 `None`。
+fn usage_equivalent_multiple(
+    money: UsageMoneyTotals,
+    subscription: Option<SubscriptionCost>,
+    currency: Option<&CustomCurrency>,
+) -> Option<String> {
+    let subscription = subscription?;
+    let equivalent_custom = Decimal::from(sub_nanos(
+        money.cost_custom_nanos,
+        money.payg_cost_custom_nanos,
+    )?);
+    let equivalent_usd = Decimal::from(sub_nanos(
+        money.cost_usd_unconverted_nanos,
+        money.payg_cost_usd_unconverted_nanos,
+    )?);
+    subscription_value_multiple(
+        equivalent_custom,
+        equivalent_usd,
+        subscription.custom_nanos,
+        subscription.usd_unconverted_nanos,
+        currency,
+    )
+}
+
+/// 订阅价值对比：摊销费用、同窗口等价按量成本与两者之比。
+/// 摊销溢出时费用记为未知，倍数为 null。
+fn subscription_value(
+    money: UsageMoneyTotals,
+    subscription: Option<SubscriptionCost>,
+    currency: Option<&CustomCurrency>,
+) -> SubscriptionValue {
+    let (cost, multiple) = match subscription {
+        Some(subscription) => (
+            display_money_decimal(
+                subscription.custom_nanos,
+                subscription.usd_unconverted_nanos,
+                0,
+                0,
+                currency,
+            ),
+            usage_equivalent_multiple(money, Some(subscription), currency),
+        ),
+        None => (unknown_amortization_money(0, 0), None),
+    };
+    SubscriptionValue {
+        cost,
+        usage_equivalent_cost: usage_equivalent_money(money, currency),
+        multiple,
     }
 }
 
@@ -664,26 +724,29 @@ fn sum_subscription_costs(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Option<(Decimal, Decimal)> {
-    let mut custom_nanos = Decimal::ZERO;
-    let mut usd_unconverted_nanos = Decimal::ZERO;
+) -> Option<SubscriptionCost> {
+    let mut total = SubscriptionCost::default();
     for entries in plans.values() {
         let Some(cost) = subscription_amortization(entries, start, end, now) else {
             tracing::warn!("subscription amortization exceeds representable range");
             return None;
         };
-        custom_nanos = custom_nanos.checked_add(cost.custom_nanos).or_else(|| {
-            tracing::warn!("subscription amortization total overflowed");
-            None
-        })?;
-        usd_unconverted_nanos = usd_unconverted_nanos
+        total.custom_nanos = total
+            .custom_nanos
+            .checked_add(cost.custom_nanos)
+            .or_else(|| {
+                tracing::warn!("subscription amortization total overflowed");
+                None
+            })?;
+        total.usd_unconverted_nanos = total
+            .usd_unconverted_nanos
             .checked_add(cost.usd_unconverted_nanos)
             .or_else(|| {
                 tracing::warn!("subscription amortization total overflowed");
                 None
             })?;
     }
-    Some((custom_nanos, usd_unconverted_nanos))
+    Some(total)
 }
 
 fn has_subscription_overlap(
@@ -748,12 +811,16 @@ fn project_attempt_amounts(events: &mut [ObservationEvent], currency: Option<&Cu
         });
         let (cost_basis, cost, billing, billing_state) = match amounts {
             Some(amounts) => {
-                let cost_basis = match serde_json::to_value(amounts.cost_basis) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to serialize attempt cost basis");
-                        None
-                    }
+                // 不计算成本的尝试没有成本基准，投影为 null。
+                let cost_basis = match amounts.cost_basis.attempt_basis() {
+                    Some(basis) => match serde_json::to_value(basis) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to serialize attempt cost basis");
+                            None
+                        }
+                    },
+                    None => None,
                 };
                 let cost = amounts.cost.and_then(|amount| {
                     amount.display(currency).map(|display| {

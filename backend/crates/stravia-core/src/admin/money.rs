@@ -183,7 +183,12 @@ impl AdminService {
         key: &crate::db::models::ApiKeyWithBindings,
         custom: Option<&CustomCurrency>,
     ) -> anyhow::Result<serde_json::Value> {
-        let spend = Self::api_key_spend_json_with_currency(&key.spend, custom)?;
+        let spent = crate::pricing::display_nanos(
+            key.spend.spent_custom_nanos,
+            key.spend.spent_usd_unconverted_nanos,
+            custom,
+        )
+        .context("spent amount exceeds the supported range")?;
         let mut value = serde_json::to_value(key)?;
         let object = value
             .as_object_mut()
@@ -196,7 +201,24 @@ impl AdminService {
                 })
                 .unwrap_or(serde_json::Value::Null),
         );
-        object.insert("spend".to_string(), spend);
+        object.insert(
+            "spend".to_string(),
+            serde_json::json!({
+                "spent": crate::pricing::nanos_to_decimal_string(spent),
+                "reset_at": key.spend.reset_at,
+            }),
+        );
+        // 可用余额：展示币种下 max(0, 限额 - 已用)；无限额时为 null。
+        object.insert(
+            "spend_available".to_string(),
+            key.spend_limit_nanos
+                .map(|limit| {
+                    serde_json::Value::String(crate::pricing::nanos_to_decimal_string(
+                        limit.saturating_sub(spent).max(0),
+                    ))
+                })
+                .unwrap_or(serde_json::Value::Null),
+        );
         Ok(value)
     }
 }

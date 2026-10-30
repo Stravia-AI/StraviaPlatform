@@ -49,8 +49,8 @@ const providerRows = [
     avg_duration_ms: 100,
     avg_output_tps: 10,
     currency: CURRENCY,
-    actual_cost: knownMoney,
-    usage_equivalent_cost: null,
+    cost: knownMoney,
+    subscription: null,
   },
 ]
 

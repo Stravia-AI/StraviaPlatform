@@ -2,7 +2,7 @@
 import { Axis, Chart, Path, Svg, Tooltip, type ChartState } from 'layerchart'
 
 import * as m from '#lib/paraglide/messages.js'
-import { formatAmount, formatMoneyCoverage } from '#lib/money.js'
+import { formatAmount, formatCostAmount, formatMoneyCoverage } from '#lib/money.js'
 import { formatTime } from '#lib/format.js'
 import type { DisplayCurrency } from '#lib/types.js'
 import type { CostChartPoint } from '#lib/stats-chart.js'
@@ -88,7 +88,7 @@ function onkeydown(event: KeyboardEvent) {
   aria-valuemax={Math.max(0, points.length - 1)}
   aria-valuenow={Math.min(keyboardIndex, Math.max(0, points.length - 1))}
   aria-valuetext={selectedPoint
-    ? `${formatBucket(selectedPoint.bucket)} · ${m.cost_actual()}: ${selectedPoint.amount == null ? m.billing_unknown() : formatAmount(selectedPoint.amountLabel, currency.symbol)} · ${m.cost_coverage()}: ${formatMoneyCoverage(selectedPoint.cost)}`
+    ? `${formatBucket(selectedPoint.bucket)} · ${m.cost_actual()}: ${selectedPoint.amount == null ? m.billing_unknown() : formatCostAmount(selectedPoint.amountLabel, currency.symbol)} · ${m.cost_coverage()}: ${formatMoneyCoverage(selectedPoint.cost)}`
     : undefined}
   onfocus={() => showBucket(0)}
   onblur={() => context?.tooltip.hide()}
@@ -142,7 +142,7 @@ function onkeydown(event: KeyboardEvent) {
             <dl class="grid grid-cols-[auto_auto] gap-x-3 gap-y-1">
               <dt>{m.cost_actual()}</dt>
               <dd class="text-right">
-                {point.amount == null ? m.billing_unknown() : formatAmount(point.amountLabel, currency.symbol)}
+                {point.amount == null ? m.billing_unknown() : formatCostAmount(point.amountLabel, currency.symbol)}
               </dd>
               <dt>{m.cost_coverage()}</dt>
               <dd class="text-right">{formatMoneyCoverage(point.cost)}</dd>
