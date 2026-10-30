@@ -239,6 +239,12 @@ def test_created_mappings_list_hits_detail_and_reuses(admin_env: dict[str, Any])
                 ("tool_arguments", None)
             ]
 
+            # 创建时间窗左闭右开：只给起点时结果与不筛选一致，极远起点或终点为 0 返回空页。
+            unfiltered = discoveries(env)
+            assert discoveries(env, start_at=0) == unfiltered
+            assert discoveries(env, start_at=9_999_999_999_999)["items"] == []
+            assert discoveries(env, end_at=0)["items"] == []
+
             status, invalid = http_request(
                 "GET", f"{env['admin']}{BASE}/discoveries?cursor=not-a-cursor", headers=env["auth"],
             )

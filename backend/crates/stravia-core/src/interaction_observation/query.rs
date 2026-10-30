@@ -604,24 +604,52 @@ fn encode_discovery_cursor(sequence: i64, index: usize) -> anyhow::Result<String
     Ok(serde_json::to_string(&(sequence, index))?)
 }
 
-fn discovery_event_sql(builder: &mut QueryBuilder<sqlx::Sqlite>, now: i64, upper: i64) {
+fn discovery_event_sql(
+    builder: &mut QueryBuilder<sqlx::Sqlite>,
+    now: i64,
+    upper: i64,
+    start_at: Option<i64>,
+    end_at: Option<i64>,
+) {
     builder
         .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
         .push_bind(now)
         .push(" AND i.expires_at>")
-        .push_bind(now)
+        .push_bind(now);
+    // 时间窗在 SQL 内过滤：左闭右开，两端各自可选。
+    if let Some(start) = start_at {
+        builder.push(" AND e.occurred_at>=").push_bind(start);
+    }
+    if let Some(end) = end_at {
+        builder.push(" AND e.occurred_at<").push_bind(end);
+    }
+    builder
         .push(" AND e.sequence<=")
         .push_bind(upper)
         .push(" ORDER BY e.sequence DESC LIMIT ")
         .push_bind(DISCOVERY_EVENT_BATCH);
 }
 
-fn discovery_event_sql_postgres(builder: &mut QueryBuilder<sqlx::Postgres>, now: i64, upper: i64) {
+fn discovery_event_sql_postgres(
+    builder: &mut QueryBuilder<sqlx::Postgres>,
+    now: i64,
+    upper: i64,
+    start_at: Option<i64>,
+    end_at: Option<i64>,
+) {
     builder
         .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
         .push_bind(now)
         .push(" AND i.expires_at>")
-        .push_bind(now)
+        .push_bind(now);
+    // 与 SQLite 版保持同一谓词。
+    if let Some(start) = start_at {
+        builder.push(" AND e.occurred_at>=").push_bind(start);
+    }
+    if let Some(end) = end_at {
+        builder.push(" AND e.occurred_at<").push_bind(end);
+    }
+    builder
         .push(" AND e.sequence<=")
         .push_bind(upper)
         .push(" ORDER BY e.sequence DESC LIMIT ")
@@ -655,6 +683,8 @@ impl ObservationStore {
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
         let cursor = parse_discovery_cursor(query.cursor.as_deref())?;
+        let start_at = query.start_at;
+        let end_at = query.end_at;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
         let mut items = Vec::with_capacity(limit + 1);
@@ -663,12 +693,12 @@ impl ObservationStore {
             let rows: Vec<DiscoveryEventRow> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-                    discovery_event_sql(&mut builder, now, upper);
+                    discovery_event_sql(&mut builder, now, upper, start_at, end_at);
                     builder.build_query_as().fetch_all(pool).await?
                 }
                 Self::Postgres(pool, _) => {
                     let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-                    discovery_event_sql_postgres(&mut builder, now, upper);
+                    discovery_event_sql_postgres(&mut builder, now, upper, start_at, end_at);
                     builder.build_query_as().fetch_all(pool).await?
                 }
             };

@@ -161,7 +161,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 命中记录一行对应 `credential_mappings_created` 事件 `discoveries[]` 的一个元素，即一次新增映射；创建映射只是绑定，行上没有请求状态，也没有 `kind` 筛选。行按事件 `sequence` 倒序、同一事件内按元素下标倒序排列，行标识 `id` 为 `{sequence}.{下标}`。复用不是行：它在行的详情里作为该映射的后续使用列出。该投影不要求 Debug，也不等待客户端交付或 Generation Chain 成功；清理观察不删除保护映射，清理后再次提交的已知凭据出现为复用，不会重新计为新增。
 
-`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询已持久化的创建事件，采用有界 `limit` 与不透明 `next_cursor`（`(sequence, 下标)`，长度有界，无效返回 400）翻页，只返回事件与所属 Interaction 都未过期的行。读取不等待全局 Observation writer 屏障，也不触发活动 Debug Trace 刷盘；尚在队列中的命中允许延迟可见，不保证写后立即可读。条目含 `id`、`created_at`、`interaction_id`、`run_id`、`api_key_name`、`rule_sets`（由规则 ID 前缀 `custom.` 推导为 `custom`，其余为 `builtin`）、创建规则 `rule_ids`、`{ rule_id, source_type, tool_id?, latest_input? }` 命中配对 `hits`、`omitted_hits` 与 `linkable`。每事件至多 50 个映射的写入上限不变，超出部分不产生行，也不再统计新增数。查询失败与空记录分别表达。「缺失记录不代表没有发现凭据」的限制说明在凭据保护页的「保护详情与限制」。
+`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询已持久化的创建事件，采用有界 `limit` 与不透明 `next_cursor`（`(sequence, 下标)`，长度有界，无效返回 400）翻页，只返回事件与所属 Interaction 都未过期的行。可选 `start_at` / `end_at` 以 Unix 毫秒按创建事件的 `occurred_at` 过滤，左闭右开：`start_at <= created_at < end_at`；两端各自可缺省，缺省即该侧不限，`end_at <= start_at` 返回空页而不报错。该时间窗在 SQL 内过滤而不是取页后再裁剪，有界游标翻页与排序不变，也不能当作 `kind` 筛选（行仍只来自创建事件）。读取不等待全局 Observation writer 屏障，也不触发活动 Debug Trace 刷盘；尚在队列中的命中允许延迟可见，不保证写后立即可读。条目含 `id`、`created_at`、`interaction_id`、`run_id`、`api_key_name`、`rule_sets`（由规则 ID 前缀 `custom.` 推导为 `custom`，其余为 `builtin`）、创建规则 `rule_ids`、`{ rule_id, source_type, tool_id?, latest_input? }` 命中配对 `hits`、`omitted_hits` 与 `linkable`。每事件至多 50 个映射的写入上限不变，超出部分不产生行，也不再统计新增数。查询失败与空记录分别表达。「缺失记录不代表没有发现凭据」的限制说明在凭据保护页的「保护详情与限制」。
 
 侧栏的两个只读端点同样经 `AdminService`，鉴权沿用管理入口：
 

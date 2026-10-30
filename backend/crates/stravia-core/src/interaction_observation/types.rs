@@ -415,6 +415,10 @@ impl CredentialDiscovery {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CredentialDiscoveryQuery {
+    /// 创建事件时间窗的左端（Unix 毫秒，含）；缺省不设下界。
+    pub start_at: Option<i64>,
+    /// 创建事件时间窗的右端（Unix 毫秒，不含）；缺省不设上界。
+    pub end_at: Option<i64>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
 }

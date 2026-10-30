@@ -88,6 +88,13 @@ describe('refreshHitRecords', () => {
     expect(ids(merged.items)).toEqual(['a'])
     expect(merged.nextCursor).toBe('next')
   })
+
+  test('drops loaded rows that slid out of a rolling window start but keeps the cursor', () => {
+    const loaded = loadedRows([record('c', 300), record('b', 200), record('a', 100)])
+    const merged = refreshHitRecords(loaded, page([record('d', 400), record('c', 300)], 'head'), 200)
+    expect(ids(merged.items)).toEqual(['d', 'c', 'b'])
+    expect(merged.nextCursor).toBe('tail')
+  })
 })
 
 describe('appendHitRecords', () => {

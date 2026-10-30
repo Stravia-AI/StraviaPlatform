@@ -68,6 +68,10 @@ export type CredentialRuleSet = 'builtin' | 'custom'
 export interface CredentialDiscoveryQuery {
   cursor?: string
   limit?: number
+  /** 创建时间下限（含），Unix 毫秒。 */
+  start_at?: number
+  /** 创建时间上限（不含），Unix 毫秒。 */
+  end_at?: number
 }
 
 /** 一次新建映射的命中位置；`latest_input` 仅用户消息有意义，`false` 表示客户端重放的历史。 */

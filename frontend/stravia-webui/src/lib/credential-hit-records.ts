@@ -34,10 +34,13 @@ export interface HitRecordsState {
  * 合并时不需要重新排序，只需去重并沿用已加载列表的游标。
  * 第一页本身就是全部记录，或与已加载的行毫无交集（两次刷新之间新增了整整一页以上）时，
  * 已加载的行与第一页之间可能缺了没人取过的行，游标也无从补上，此时以第一页和它的游标为准重新开始。
+ *
+ * 实时时间窗口的起点随时间滚动：`notBefore` 之前创建的已加载行已滑出窗口，合并时一并移除。
  */
 export function refreshHitRecords(
   loaded: HitRecordsState,
   head: { items: CredentialDiscoveryRecord[]; next_cursor: string | null },
+  notBefore = Number.NEGATIVE_INFINITY,
 ): HitRecordsState {
   if (head.next_cursor === null) return { items: head.items, nextCursor: null }
   if (!loaded.items.length) return { items: head.items, nextCursor: head.next_cursor }
@@ -47,7 +50,10 @@ export function refreshHitRecords(
   }
   const refreshed = new Set(head.items.map((record) => record.id))
   return {
-    items: [...head.items, ...loaded.items.filter((record) => !refreshed.has(record.id))],
+    items: [
+      ...head.items,
+      ...loaded.items.filter((record) => !refreshed.has(record.id) && record.created_at >= notBefore),
+    ],
     nextCursor: loaded.nextCursor,
   }
 }
