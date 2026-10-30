@@ -50,6 +50,7 @@
 
 ### Fixed
 
+- Windows desktop smoke now explicitly selects the update source used by its native fixture and checks download eligibility after switching the listener port. Production source validation is unchanged; the fixture no longer loses its Download update action when the default update service differs.
 - Protocol benchmark audits wait for final `run_finished` delivery evidence instead of treating delivery receipts and complete traces as settled history. Failed or missing delivery remains invalid; request execution, audit deadlines and full-chain verification are unchanged.
 - Generation-cache admission includes conservative map storage for item metadata with many small or null extension fields. The history benchmark exports and indexes performance traces once per repetition instead of repeatedly scanning an ever-growing timeline. Report schema 4 preserves request-identity, causal-chain and capture-loss validation by default, adds explicitly Debug-disabled controls with unknown rather than zero SQL/stage costs, and supports structured tool-history windows and whole-process Linux I/O counters. Resource sampling excludes diagnostic exports and offline attribution.
 - Dragging a destination in the model editor now scrolls the page when the pointer is within 72px of the top or bottom edge of the page, including over the fixed save bar, and speeds up toward the edge. Previously the page did not follow the drag, so a destination could not be dropped into the disabled area below the fold.

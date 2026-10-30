@@ -1010,6 +1010,10 @@ describe('Stravia desktop smoke', () => {
     await expectPortSwitch(previousTimeOrigin, replacementPort)
     await expectProtectedStatus(replacementPort, nativeSession.access_token)
 
+    expect(await adminRequest(replacementPort, '/updates')).toMatchObject({
+      download_supported: true,
+      available_update: { version: '9.9.9', download_available: true },
+    })
     await openSettingsGroup('general')
     await expect($('button=Download update')).toBeDisplayed()
     await $('button=Download update').click()
