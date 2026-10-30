@@ -186,7 +186,7 @@ stravia/
 │   ├── stravia-sql/              # SQLite/PostgreSQL 统一池、连接、事务与诊断执行边界
 │   ├── stravia-media/            # 完整媒体理解、预处理、bridge、Derivative、报告与配置策略
 │   ├── stravia-web-search/       # Runner、Backend、报告/证据、公开工具与配置策略
-│   ├── stravia-credential-protection/ # Betterleaks/Kingfisher 规则、检测、替换/还原与 SQL 映射实现
+│   ├── stravia-credential-protection/ # Betterleaks 规则、检测、替换/还原与 SQL 映射实现
 │   ├── stravia-web-access/       # 联网 Adapter、浏览器与静态地址策略
 │   ├── stravia-web-access-contract/ # search/fetch 契约、域名规范化与内部工具 ID
 │   └── stravia-devtools/
@@ -737,9 +737,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 `reversible_redaction_enabled` 是高级功能中的实例级持久化开关，默认关闭；开启后适用于全部有效 API Key，不依赖 Transparent Injection。`model_turn::execute` 在每个真实模型回合处理 Hook、历史恢复和工具循环产生的当前 canonical 请求，因而普通 Inference Run、隐藏回合和 Agent Runner 共用同一保护边界。Target 重试与 failover 复用已经替换的请求，不另设协议旁路。工具权限、连接认证、Client Output Commit、Delivery 与 Generation Chain 的所有权保持不变。
 
-管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、按 Interaction 聚合的命中记录查询及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
+管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、按新增映射逐条列出的命中记录查询（含条目详情与后续复用两个只读端点）及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
 
-映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时，`protect` 在替换完成后发送 `CredentialMappingsReused`：位置取自出站替换实际发生之处（含检测器认不出上下文的已知凭据），只限本次请求新提交的文本（最后一条 Assistant 之后的条目），客户端重放的历史不重复记录；模型响应里工具调用参数的引用被还原时，`restore_stream` 在完整响应处同样发送一次，来源为 `tool_arguments`，块标识是该调用 ID。新建事件记录该秘密出现过的全部位置，由检测器逐处标注规则；复用事件的规则取自映射的 `rule_ids`（创建时写入、不再改写，迁移前创建的映射为空，只受保护、不产生复用命中）。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；Run 起点 Debug 快照开启时另带不透明占位符 `marker`，由观察守卫统一裁决，不进入列表接口。复用只进入命中记录的复用侧，续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
+映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时，`protect` 在替换完成后发送 `CredentialMappingsReused`：位置取自出站替换实际发生之处（含检测器认不出上下文的已知凭据），只限本次请求新提交的文本（最后一条 Assistant 之后的条目），客户端重放的历史不重复记录；模型响应里工具调用参数的引用被还原时，`restore_stream` 在完整响应处同样发送一次，来源为 `tool_arguments`，块标识是该调用 ID。新建事件记录该秘密出现过的全部位置，由检测器逐处标注规则；复用事件的规则取自映射的 `rule_ids`（创建时写入、不再改写，迁移前创建的映射为空，只受保护、不产生复用命中）。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；所有 Run 另带不透明占位符 `marker`（= 映射 `reference`），用于把复用事件关联回创建它的命中记录，不进入列表接口；写入 `CredentialMappingsReused` 事件的同一事务同时按占位符与位置 upsert `credential_mapping_reuses`，命中记录侧栏的「后续复用」据此做索引查找而不扫描事件。复用不产生命中记录行，只作为创建行的后续使用列出；续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
 
 映射预留与发现投递共用一个独立任务，覆盖数据库提交与调用方收到确认之间的取消窗口。调用方取消后不等待该任务；任务只能完成已启动的预留及诊断投递，不调用 Provider、不执行替换或发布，预留仍按既有 pending 保留期过期。
 
@@ -747,11 +747,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 检测器内置 Betterleaks 提交 `95237cf8eb4d8e9f67409595b245e674832992cf` 的 462 条规则、上游词表及许可证。Rust 编译器启动检测时核对完整快照并编译本地正则、过滤表达式、熵与组合条件；token efficiency 使用内置 `cl100k_base`。模型文本没有受信文件路径，因此文件专属条件以空路径求值。`validate` 仅保留在原始快照中，不编译、不执行；运行时不下载规则或词表。先扫描全部可读文本、补齐新秘密映射，再统一执行最长优先的单次精确替换；工具 JSON 以解码后的字符串参加检测与替换，不改写协议标识、媒体或不透明载荷。
 
-补充的 Kingfisher v1.109.0 快照固定于提交 `9ffb8969c4ad5a5c6c24e686cb252c434bc8adce`，包含全部 1,013 条规则，其中 861 条可报告、152 条隐藏辅助规则。其正则使用上游 Rust 字节模式及注释清理，秘密选择优先级为命中的 `TOKEN` 命名组、首个命名组、组 1、完整匹配。字节 Shannon 熵必须严格大于规则阈值；字符数量、排除子串、18 条内置安全列表及 14 条规则的校验和均在本地执行。校验和模板被编译为封闭的类型化运算，不引入 Liquid 或网络执行器。隐藏规则只列入目录，不产生映射；置信度不阻断保护。Betterleaks 的全局过滤仅作用于自身规则，两组规则共享最终位置报告与秘密去重，但不相互抑制命中。
+上面的条数是完整来源快照，不是有效执行目录。编译规则正则前仅折叠经过审阅且解析后策略完全相同的身份：`bittrex-secret-key` → `bittrex-access-key`。规范身份保留上游首次出现的位置与扫描优先级；当前有效目录为 461 条。比较包括正则、路径、secret group、关键词、过滤、`validate` 来源、组件、skipReport、specificity 与 confidence。组件引用随被移除身份迁移，但同时依赖这对身份的父规则不自动折叠；任何策略差异都保留两条规则。不提供运行时别名、不重写历史事件。
 
-上面的条数是完整来源快照，不是有效执行目录。编译规则正则前仅折叠经过审阅且解析后策略完全相同的身份：`bittrex-secret-key` → `bittrex-access-key`、`kingfisher.jfrog.1` → `kingfisher.artifactory.2`、`kingfisher.plaid.3` → `kingfisher.plaid.2`。规范身份保留上游首次出现的位置与扫描优先级；当前有效目录为 Betterleaks 461 条、Kingfisher 1,011 条（860 条可报告、151 条隐藏），合计 1,472 条。原始资产、导入器及散列仍完整保留来源证据。比较包括缺省值、捕获模式、过滤、熵、requirements/checksum、可见性、specificity 与 confidence；Kingfisher 比较前采用同一注释清理。组件引用随被移除身份迁移，但同时依赖一对身份的父规则不自动折叠；任何策略差异都保留两条规则。不提供运行时别名、不重写历史事件。`kingfisher.brevo.1` 与 `kingfisher.sendinblue.1` 虽模式相同但 confidence 不同，继续保留；跨来源规则的 Unicode、全局过滤和安全列表策略不同，不作正则等价推断或跨源合并。
-
-Kingfisher 移植范围是模型文本的离线规则检测，不包含其文件发现、可选解码、Tree-sitter、数据库 URI 解析、用户安全列表、内联忽略指令或联网验证。字节正则产生的非 UTF-8 字符边界片段不作文本替换。离线快照不保留 `validation`、`revocation` 或用于联网验证的依赖绑定。开发期导入方式、来源逐文件散列和许可记录见 `backend/crates/stravia-credential-protection/tools/import_kingfisher.py` 与 `src/detection/UPSTREAM.kingfisher.json`；管理规则目录、匹配测试与正式保护使用同一个合并检测器。
+内置检测只使用 Betterleaks；不再内置 Kingfisher 补充规则。迁移 `0034_credential_hit_records` 与其启动升级从映射归因和命中事件中移除存量 `kingfisher.*` 规则 ID，界面没有「已移除规则集」的特殊分支。管理规则目录、匹配测试与正式保护使用同一个检测器。
 
 SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 

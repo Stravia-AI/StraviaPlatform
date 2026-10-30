@@ -92,6 +92,13 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
     ) -> Result<u64, stravia_runtime_contract::redaction::RedactionError> {
         self.inner.cleanup_expired().await
     }
+
+    async fn plaintext(
+        &self,
+        reference: &str,
+    ) -> Result<Option<String>, stravia_runtime_contract::redaction::RedactionError> {
+        self.inner.plaintext(reference).await
+    }
 }
 
 #[tokio::test]
@@ -200,11 +207,9 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].new_credential_count, 1);
-    assert_eq!(page.items[0].status, "interrupted");
-    assert_eq!(page.items[0].created.len(), 1);
-    assert_eq!(page.items[0].created[0].source_type, "system_or_history");
-    assert!(page.items[0].reused.is_empty());
+    assert!(page.items[0].linkable);
+    assert_eq!(page.items[0].hits.len(), 1);
+    assert_eq!(page.items[0].hits[0].source_type, "system_or_history");
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
     assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
@@ -221,28 +226,24 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         .credential_discoveries(Default::default())
         .await
         .unwrap();
-    // 复用发生在另一次请求里：它成为新的一行，而首次新增的那一行保持不变。
-    assert_eq!(reused.items.len(), 2);
-    assert_eq!(reused.items[0].new_credential_count, 0);
-    assert!(reused.items[0].created.is_empty());
-    assert_eq!(reused.items[0].reused.len(), 1);
-    assert_eq!(reused.items[0].reused[0].source_type, "system_or_history");
-    assert_eq!(reused.items[1].new_credential_count, 1);
-    assert_eq!(reused.items[1].status, "interrupted");
-    assert!(reused.items[1].reused.is_empty());
-    let created_only = gateway
+    // 复用不新增行；它只出现在该映射的后续复用列表里。
+    assert_eq!(reused.items.len(), 1);
+    assert_eq!(reused.items[0].id, page.items[0].id);
+    let (sequence, index) = reused.items[0].id.split_once('.').expect("discovery id");
+    let record = gateway
         .observation
-        .credential_discoveries(crate::interaction_observation::CredentialDiscoveryQuery {
-            kind: crate::interaction_observation::CredentialHitKind::Created,
-            ..Default::default()
-        })
+        .credential_discovery_record(sequence.parse().unwrap(), index.parse().unwrap())
+        .await
+        .unwrap()
+        .expect("created discovery");
+    let marker = record.discovery.marker.clone().expect("recorded marker");
+    let reuses = gateway
+        .observation
+        .credential_discovery_reuses(&record, &marker)
         .await
         .unwrap();
-    assert_eq!(created_only.items.len(), 1);
-    assert_eq!(
-        created_only.items[0].interaction_id,
-        reused.items[1].interaction_id
-    );
+    assert_eq!(reuses.items.len(), 1);
+    assert_eq!(reuses.items[0].source_type, "system_or_history");
     assert_eq!(store.starts.load(Ordering::SeqCst), 0);
 }
 
@@ -302,6 +303,27 @@ async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replaye
             .unwrap()
             .items
     };
+    let reuses = || async {
+        gateway.observation.flush().await.unwrap();
+        let page = gateway
+            .observation
+            .credential_discoveries(Default::default())
+            .await
+            .unwrap();
+        let (sequence, index) = page.items[0].id.split_once('.').expect("discovery id");
+        let record = gateway
+            .observation
+            .credential_discovery_record(sequence.parse().unwrap(), index.parse().unwrap())
+            .await
+            .unwrap()
+            .expect("created discovery");
+        let marker = record.discovery.marker.clone().expect("recorded marker");
+        gateway
+            .observation
+            .credential_discovery_reuses(&record, &marker)
+            .await
+            .unwrap()
+    };
 
     send(vec![user(known)]).await;
     assert_eq!(rows().await.len(), 1);
@@ -309,23 +331,30 @@ async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replaye
     // 客户端把同一段历史连同新问题再发一遍：凭据只出现在重放的历史里，不产生记录。
     send(vec![user(known), AiItem::output_text("ok"), user("thanks")]).await;
     assert_eq!(rows().await.len(), 1);
+    assert!(reuses().await.items.is_empty());
 
     // 本次提交的新用户消息再次带上同一凭据：这是一次真实的使用。
     send(vec![user(known), AiItem::output_text("ok"), user(known)]).await;
-    let after_user = rows().await;
-    assert_eq!(after_user.len(), 2);
-    assert_eq!(after_user[0].reused.len(), 1);
-    assert_eq!(after_user[0].reused[0].source_type, "user_message");
-    assert_eq!(after_user[0].reused[0].latest_input, Some(true));
+    assert_eq!(rows().await.len(), 1);
+    let after_user = reuses().await;
+    assert_eq!(after_user.items.len(), 1);
+    assert_eq!(after_user.items[0].source_type, "user_message");
+    assert_eq!(after_user.items[0].latest_input, Some(true));
 
     // 工具结果带回凭据：紧跟在最后一条 Assistant 之后的结果是本次提交的。
     let result = AiItem::function_call_output("call-1", serde_json::Value::String(known.into()));
     send(vec![user("read it"), call(), result.clone()]).await;
-    let after_tool = rows().await;
-    assert_eq!(after_tool.len(), 3);
-    assert_eq!(after_tool[0].reused[0].source_type, "tool_result");
+    assert_eq!(rows().await.len(), 1);
+    let after_tool = reuses().await;
+    assert_eq!(after_tool.items.len(), 2);
+    assert!(
+        after_tool
+            .items
+            .iter()
+            .any(|item| item.source_type == "tool_result")
+    );
 
-    // 下一轮把这条工具结果当历史重放。
+    // 下一轮把这条工具结果当历史重放：不新增复用位置。
     send(vec![
         user("read it"),
         call(),
@@ -334,10 +363,10 @@ async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replaye
         user("next"),
     ])
     .await;
-    assert_eq!(rows().await.len(), 3);
+    assert_eq!(rows().await.len(), 1);
+    assert_eq!(reuses().await.items.len(), 2);
 
-    // 已知凭据以裸值出现，没有检测器认得出的上下文：照样按实际发生的替换记录，
-    // 规则取自创建映射时的归因。
+    // 已知凭据以裸值出现，没有检测器认得出的上下文：照样按实际发生的替换记录。
     let bare = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
     assert!(
         gateway
@@ -353,23 +382,25 @@ async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replaye
         AiItem::function_call_output("call-1", serde_json::Value::String(bare.into())),
     ])
     .await;
-    let after_bare = rows().await;
-    assert_eq!(after_bare.len(), 4);
-    assert_eq!(after_bare[0].reused.len(), 1);
-    assert_eq!(after_bare[0].reused[0].source_type, "tool_result");
+    assert_eq!(rows().await.len(), 1);
+    let after_bare = reuses().await;
+    assert_eq!(after_bare.items.len(), 3, "{:?}", after_bare.items);
     assert_eq!(
-        after_bare[0].reused[0].rule_id,
-        after_bare[3].created[0].rule_id
+        after_bare
+            .items
+            .iter()
+            .filter(|item| item.source_type == "tool_result")
+            .count(),
+        2
     );
 
     // 全新的凭据出现在重放的历史里时，它从未被记录过，仍然是一次新增发现。
     send(vec![user(fresh), AiItem::output_text("ok"), user("go on")]).await;
     let after_fresh = rows().await;
-    assert_eq!(after_fresh.len(), 5);
-    assert_eq!(after_fresh[0].new_credential_count, 1);
-    assert_eq!(after_fresh[0].created[0].source_type, "user_message");
-    assert_eq!(after_fresh[0].created[0].latest_input, Some(false));
-    assert!(after_fresh[0].reused.is_empty());
+    assert_eq!(after_fresh.len(), 2);
+    assert_eq!(after_fresh[0].rule_ids.len(), 1);
+    assert_eq!(after_fresh[0].hits[0].source_type, "user_message");
+    assert_eq!(after_fresh[0].hits[0].latest_input, Some(false));
 }
 
 #[tokio::test]
@@ -432,8 +463,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].new_credential_count, 1);
-    assert_eq!(page.items[0].status, "interrupted");
+    assert_eq!(page.items[0].rule_ids.len(), 1);
     assert_eq!(store.inner.active(&principal).await.unwrap().len(), 1);
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
@@ -761,12 +791,11 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
         .await
         .unwrap();
     assert_eq!(discoveries.items.len(), 1);
-    assert_eq!(discoveries.items[0].new_credential_count, 1);
+    assert_eq!(discoveries.items[0].hits.len(), 1);
     assert_eq!(
-        discoveries.items[0].created[0].source_type,
+        discoveries.items[0].hits[0].source_type,
         "system_or_history"
     );
-    assert_ne!(discoveries.items[0].status, "completed");
 }
 
 #[tokio::test]
@@ -870,4 +899,132 @@ async fn observation_writer_failure_does_not_change_canonical_publication_succes
     ));
     assert!(turn.output.next().await.is_none());
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+}
+
+#[tokio::test]
+async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() {
+    use crate::interaction_observation::CredentialDiscoveryHitDetail;
+
+    let secret = "ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH";
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let expires = now + 86_400_000;
+    let encode = |value: serde_json::Value| {
+        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
+    };
+    let pool = gateway._sqlite_pool.as_ref().unwrap();
+    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0,?)")
+        .bind(now - 100)
+        .bind(now - 50)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?,?)")
+        .bind(now - 100)
+        .bind(now - 50)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,updated_at,expires_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,?,?,?,'[\"github-pat\"]')")
+        .bind(secret)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (sequence, kind, payload) in [
+        (
+            1,
+            "input_preview_recorded",
+            encode(serde_json::json!({
+                "kind": "input_preview_recorded",
+                "text": format!("please use {secret} now")
+            })),
+        ),
+        (
+            2,
+            "credential_mappings_created",
+            encode(serde_json::json!({
+                "kind": "credential_mappings_created",
+                "discoveries": [{
+                    "rule_ids": ["github-pat"],
+                    "source_types": ["user_message"],
+                    "locators": [{
+                        "rule_id": "github-pat",
+                        "source_type": "user_message",
+                        "latest_input": true
+                    }],
+                    "marker": "m-secret"
+                }]
+            })),
+        ),
+    ] {
+        sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,'hit-interaction','hit-run',?,?,?)")
+            .bind(sequence)
+            .bind(now - 10 + sequence)
+            .bind(kind)
+            .bind(payload)
+            .bind(expires)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    let detail = gateway
+        .admin()
+        .credential_protection_discovery_hit("2.0", "0")
+        .await
+        .unwrap();
+    match detail {
+        CredentialDiscoveryHitDetail::Available {
+            field,
+            text,
+            truncated,
+            hit_basis,
+            matches,
+        } => {
+            assert_eq!(field.source_type, "user_message");
+            assert_eq!(field.tool_id, None);
+            assert_eq!(field.tool_name, None);
+            assert!(!truncated);
+            assert!(text.contains(secret));
+            assert_eq!(hit_basis, "secret");
+            let hit = matches.iter().find(|item| item.hit).expect("secret match");
+            assert_eq!(hit.rule_id, "github-pat");
+        }
+        CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
+    }
+
+    sqlx::query("DELETE FROM reversible_redaction_mappings WHERE reference='m-secret'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let detail = gateway
+        .admin()
+        .credential_protection_discovery_hit("2.0", "0")
+        .await
+        .unwrap();
+    match detail {
+        CredentialDiscoveryHitDetail::Available {
+            hit_basis, matches, ..
+        } => {
+            assert_eq!(hit_basis, "rule");
+            assert!(
+                matches
+                    .iter()
+                    .any(|item| item.hit && item.rule_id == "github-pat")
+            );
+        }
+        CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
+    }
 }

@@ -55,7 +55,7 @@ fn observed(
                     )
                     .collect(),
                 omitted_locators: 0,
-                // 是否记录由 Run 的 Debug 快照裁决，见 RunPublicationGuard。
+                // 占位符对所有 Run 记录，命中记录据此关联后续复用。
                 marker: Some(discovery.marker),
             },
         )
@@ -112,6 +112,16 @@ impl ReversibleRedaction {
         text: String,
     ) -> Result<Vec<stravia_credential_protection::CredentialMatch>, RedactionError> {
         self.capability.test_text(text).await
+    }
+
+    pub(crate) async fn locate_text(
+        &self,
+        text: String,
+        secret: Option<&str>,
+    ) -> Result<Vec<stravia_credential_protection::CredentialTextMatch>, RedactionError> {
+        self.capability
+            .locate_text(text, secret.map(str::to_owned))
+            .await
     }
 
     pub(crate) async fn protect(

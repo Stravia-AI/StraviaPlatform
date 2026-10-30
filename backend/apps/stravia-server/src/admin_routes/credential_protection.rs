@@ -1,5 +1,5 @@
 use axum::response::Response;
-use stravia_core::admin::CredentialDiscoveryQuery;
+use stravia_core::admin::{CredentialDiscoveryError, CredentialDiscoveryQuery};
 use stravia_credential_protection::{CustomRuleError, CustomRuleInput};
 
 use super::*;
@@ -31,14 +31,36 @@ pub(super) async fn credential_discoveries(
     State(gateway): State<Gateway>,
     Query(query): Query<CredentialDiscoveryQuery>,
 ) -> Response {
-    match gateway
-        .admin()
-        .credential_protection_discoveries(query)
-        .await
-    {
-        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
-        Err(_) => unavailable("observation_unavailable"),
-    }
+    discovery_response(
+        gateway
+            .admin()
+            .credential_protection_discoveries(query)
+            .await,
+    )
+}
+
+pub(super) async fn credential_discovery_hit(
+    State(gateway): State<Gateway>,
+    Path((id, index)): Path<(String, String)>,
+) -> Response {
+    discovery_response(
+        gateway
+            .admin()
+            .credential_protection_discovery_hit(&id, &index)
+            .await,
+    )
+}
+
+pub(super) async fn credential_discovery_reuses(
+    State(gateway): State<Gateway>,
+    Path(id): Path<String>,
+) -> Response {
+    discovery_response(
+        gateway
+            .admin()
+            .credential_protection_discovery_reuses(&id)
+            .await,
+    )
 }
 
 pub(super) async fn list_custom_credential_rules(State(gateway): State<Gateway>) -> Response {
@@ -74,6 +96,37 @@ pub(super) async fn delete_custom_credential_rule(
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(error) => custom_rule_error(error),
     }
+}
+
+fn discovery_response<T: serde::Serialize>(result: anyhow::Result<T>) -> Response {
+    match result {
+        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
+        Err(error) => match error.downcast::<CredentialDiscoveryError>() {
+            Ok(error) => discovery_error(error),
+            Err(_) => unavailable("observation_unavailable"),
+        },
+    }
+}
+
+fn discovery_error(error: CredentialDiscoveryError) -> Response {
+    let (status, code) = match error {
+        CredentialDiscoveryError::InvalidCursor => (
+            StatusCode::BAD_REQUEST,
+            "credential_discovery_cursor_invalid",
+        ),
+        CredentialDiscoveryError::InvalidReference => (
+            StatusCode::BAD_REQUEST,
+            "credential_discovery_reference_invalid",
+        ),
+        CredentialDiscoveryError::NotFound => {
+            (StatusCode::NOT_FOUND, "credential_discovery_not_found")
+        }
+    };
+    (
+        status,
+        Json(serde_json::json!({ "code": code, "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 fn custom_rule_response<T: serde::Serialize>(result: Result<T, CustomRuleError>) -> Response {

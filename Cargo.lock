@@ -7833,7 +7833,6 @@ name = "stravia-credential-protection"
 version = "0.5.3"
 dependencies = [
  "async-trait",
- "base64 0.23.1",
  "chrono",
  "futures",
  "parking_lot",
@@ -7841,7 +7840,6 @@ dependencies = [
  "regex-automata",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "stravia-runtime-contract",
  "stravia-sql",
  "thiserror 2.0.21",

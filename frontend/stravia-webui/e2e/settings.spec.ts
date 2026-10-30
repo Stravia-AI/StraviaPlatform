@@ -2199,17 +2199,20 @@ for (const locale of ['en-US', 'zh-CN']) {
             data: {
               items: [
                 {
+                  id: cursor ? '200.0' : '100.0',
+                  created_at: 1_788_854_400_000,
                   interaction_id: cursor ? 'interaction-second' : 'interaction-atlas',
+                  run_id: 'run-atlas',
                   api_key_name: cursor ? 'Second fixture key' : 'Fixture key',
-                  discovered_at: 1_788_854_400_000,
-                  new_credential_count: 2,
-                  created: [
+                  rule_sets: ['builtin'],
+                  rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
+                  hits: [
                     { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
                     { rule_id: 'fixture-rule-0', source_type: 'tool_arguments' },
+                    { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
                   ],
-                  reused: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false }],
-                  status: 'failed',
-                  observation_gap: false,
+                  omitted_hits: 0,
+                  linkable: true,
                 },
               ],
               next_cursor: cursor ? null : 'next-fixture',
@@ -2256,22 +2259,26 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect.poll(() => tabBar.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true)
     const search = page.locator('#credential-rule-search')
     await expect(page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })).toHaveCount(0)
-    // 命中记录是第一个也是默认的页签：每条命中直接显示规则、位置与请求状态。
+    // 命中记录是第一个也是默认的页签：每行是一次新建映射，字段为时间、密钥、规则集、创建规则与命中。
     await expect(page.getByRole('tab').first()).toHaveText(zh ? /命中记录/ : /Hit records/)
     const record = page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Fixture key', exact: true }) })
     const chipRule = zh ? 'Fixture credential 0 出现在' : 'Fixture credential 0 found in'
-    await expect(record.getByRole('listitem')).toHaveCount(3)
-    await expect(record.getByRole('button', { name: `${chipRule} ${zh ? '用户消息' : 'User message'}` })).toBeVisible()
+    await expect(record.getByRole('cell').nth(2)).toContainText(zh ? '内置' : 'Built-in')
+    await expect(record.getByRole('cell').nth(3)).toContainText('Fixture credential 0')
+    await expect(record.getByRole('cell').nth(3)).toContainText('Fixture credential 1')
+    const hitsCell = record.getByRole('cell').nth(4)
+    await expect(hitsCell.getByRole('listitem')).toHaveCount(3)
     await expect(
-      record.getByRole('button', { name: `${chipRule} ${zh ? '工具参数' : 'Tool arguments'}` }),
+      hitsCell.getByRole('button', { name: `${chipRule} ${zh ? '用户消息' : 'User message'}` }),
     ).toBeVisible()
     await expect(
-      record.getByRole('button', { name: `${chipRule} ${zh ? '历史用户消息' : 'Earlier user message'}` }),
+      hitsCell.getByRole('button', { name: `${chipRule} ${zh ? '工具参数' : 'Tool arguments'}` }),
     ).toBeVisible()
-    await expect(record.getByRole('status')).toHaveText(zh ? '失败' : 'Failed')
     await expect(
-      record.getByRole('link', { name: zh ? '查看关联请求记录' : 'Open request observation' }),
-    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas&highlight=credential-hits')
+      hitsCell.getByRole('button', {
+        name: `Fixture credential 1 ${zh ? '出现在' : 'found in'} ${zh ? '工具结果' : 'Tool result'}`,
+      }),
+    ).toBeVisible()
     // 第二页随滚动自动加载，不再有「加载更多」按钮。
     await expect(page.getByRole('row').filter({ hasText: 'Second fixture key' })).toBeVisible()
     expect(cursors).toEqual([null, 'next-fixture'])
@@ -2426,9 +2433,9 @@ test('credential protection distinguishes failed saves, unavailable observations
   await expect(catalog.locator('#credential-rule-search')).toBeVisible()
   await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
   await expect(timeline.getByRole('alert')).toContainText('Hit records are unavailable.')
-  await expect(timeline.getByText('No credential hits in the available observations.')).toHaveCount(0)
+  await expect(timeline.getByText('No credential mappings have been created yet.')).toHaveCount(0)
   await timeline.getByRole('button', { name: 'Retry', exact: true }).click()
-  await expect(timeline.getByText('No credential hits in the available observations.')).toBeVisible()
+  await expect(timeline.getByText('No credential mappings have been created yet.')).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
   await page.getByRole('textbox', { name: 'Text to test', exact: true }).fill('test_credential')
@@ -2470,7 +2477,7 @@ test('credential protection separates setting load failure from empty rules and 
     page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
   ).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('switch')).toBeDisabled()
-  await expect(page.getByText('No credential hits in the available observations.', { exact: true })).toBeVisible()
+  await expect(page.getByText('No credential mappings have been created yet.', { exact: true })).toBeVisible()
   await page.getByRole('tab', { name: /Current rules/ }).click()
   await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
   settingsUnavailable = false

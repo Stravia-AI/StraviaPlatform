@@ -63,34 +63,74 @@ export interface CredentialMatch {
   end_column: number
 }
 
-export type CredentialHitKind = 'all' | 'created' | 'reused'
+export type CredentialRuleSet = 'builtin' | 'custom'
 
 export interface CredentialDiscoveryQuery {
   cursor?: string
   limit?: number
-  kind?: CredentialHitKind
 }
 
-/** 一个「规则 ← 来源」配对；`latest_input` 仅用户消息有意义，`false` 表示客户端重放的历史。 */
+/** 一次新建映射的命中位置；`latest_input` 仅用户消息有意义，`false` 表示客户端重放的历史。 */
 export interface CredentialHit {
   rule_id: string
   source_type: string
+  tool_id?: string
   latest_input?: boolean
 }
 
-export interface CredentialDiscoverySummary {
+export interface CredentialDiscoveryRecord {
+  /** `"{event.sequence}.{discovery index}"`，同一映射的稳定标识。 */
+  id: string
+  created_at: number
   interaction_id: string
+  run_id: string | null
   api_key_name: string | null
-  /** 当前筛选下该 Interaction 最近一次命中的时间。 */
-  discovered_at: number
-  new_credential_count: number
-  created: CredentialHit[]
-  reused: CredentialHit[]
-  status: string
-  observation_gap: boolean
+  rule_sets: CredentialRuleSet[]
+  rule_ids: string[]
+  hits: CredentialHit[]
+  omitted_hits: number
+  linkable: boolean
 }
 
 export interface CredentialDiscoveryPage {
-  items: CredentialDiscoverySummary[]
+  items: CredentialDiscoveryRecord[]
   next_cursor: string | null
+}
+
+export interface CredentialHitField {
+  source_type: string
+  tool_id?: string | null
+  tool_name?: string | null
+}
+
+export interface CredentialHitMatch extends CredentialMatch {
+  /** 该匹配是否就是本行映射对应的命中。 */
+  hit: boolean
+}
+
+export type CredentialHitDetail =
+  | {
+      state: 'available'
+      field: CredentialHitField
+      text: string
+      truncated: boolean
+      hit_basis: 'secret' | 'rule'
+      matches: CredentialHitMatch[]
+    }
+  | { state: 'unavailable'; field: CredentialHitField; reason: 'not_retained' | 'missing' }
+
+export interface CredentialHitReuse {
+  interaction_id: string
+  run_id: string | null
+  api_key_name: string | null
+  source_type: string
+  tool_id?: string | null
+  latest_input?: boolean | null
+  last_reused_at: number
+}
+
+export interface CredentialHitReuses {
+  linkable: boolean
+  items: CredentialHitReuse[]
+  truncated: boolean
 }

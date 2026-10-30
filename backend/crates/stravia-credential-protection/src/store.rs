@@ -86,6 +86,9 @@ pub trait MappingStore: Send + Sync {
         retention: Duration,
     ) -> Result<(), RedactionError>;
     async fn cleanup_expired(&self) -> Result<u64, RedactionError>;
+    /// 按占位符读取未过期映射的明文。占位符是映射的唯一标识，观察事件的 principal
+    /// 只保存 API Key ID，与映射表的 `api-key:<id>` 存储键并不相同。
+    async fn plaintext(&self, reference: &str) -> Result<Option<String>, RedactionError>;
 }
 
 #[derive(Clone)]
@@ -401,6 +404,29 @@ impl MappingStore for SqlMappingStore {
         retention: Duration,
     ) -> Result<(), RedactionError> {
         self.retain(principal, references, retention, false).await
+    }
+
+    async fn plaintext(&self, reference: &str) -> Result<Option<String>, RedactionError> {
+        match self {
+            Self::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT secret FROM reversible_redaction_mappings \
+                 WHERE reference = ? AND expires_at > ?",
+            )
+            .bind(reference)
+            .bind(now())
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| self.storage(error)),
+            Self::Postgres(pool) => sqlx::query_scalar(
+                "SELECT secret FROM reversible_redaction_mappings \
+                 WHERE reference = $1 AND expires_at > $2",
+            )
+            .bind(reference)
+            .bind(now())
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| self.storage(error)),
+        }
     }
 
     async fn cleanup_expired(&self) -> Result<u64, RedactionError> {

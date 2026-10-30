@@ -11,6 +11,7 @@ import type { CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib
 
 import PageHeader from '#lib/components/page-header.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
+import CredentialMatchItem from '#lib/components/credential-match-item.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -500,25 +501,7 @@ function selectMatch(match: CredentialMatch): void {
               </div>
               <ul class="flex flex-col gap-2">
                 {#each matches as match (`${match.rule_id}:${match.start}:${match.end}`)}
-                  <li>
-                    <Button
-                      variant="outline"
-                      class="h-auto w-full justify-start whitespace-normal py-3 text-left"
-                      onclick={() => selectMatch(match)}
-                      ><span class="flex min-w-0 flex-col gap-1"
-                        ><span class="break-all"
-                          >{ruleNames.get(match.rule_id) ?? match.rule_id}
-                          <span class="text-xs text-muted-foreground">({match.rule_id})</span></span
-                        ><span
-                          >{m.credential_protection_tester_position({
-                            startLine: match.start_line,
-                            startColumn: match.start_column,
-                            endLine: match.end_line,
-                            endColumn: match.end_column,
-                          })}</span
-                        ></span
-                      ></Button>
-                  </li>
+                  <CredentialMatchItem {match} {ruleNames} onselect={selectMatch} />
                 {/each}
               </ul>
             {/if}

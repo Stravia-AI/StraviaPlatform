@@ -36,14 +36,17 @@ mod web_search;
 
 pub use crate::interaction_observation::{
     BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ClientErrorDetail,
-    ClientErrorPage, ClientErrorQuery, ClientErrorSummary, ConfirmedUsage, CredentialDiscoveryPage,
-    CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState, DownloadTicket, ForestPage,
-    ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage, InteractionEventsQuery,
-    InteractionSnapshot, InteractionSummary, KnownInteraction, ObservationChange, ObservationEvent,
-    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage,
-    RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming, UpstreamErrorDetail,
-    UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
+    ClientErrorPage, ClientErrorQuery, ClientErrorSummary, ConfirmedUsage,
+    CredentialDiscoveryError, CredentialDiscoveryField, CredentialDiscoveryHit,
+    CredentialDiscoveryHitDetail, CredentialDiscoveryItem, CredentialDiscoveryPage,
+    CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuses, DebugState,
+    DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage,
+    InteractionEventsQuery, InteractionSnapshot, InteractionSummary, KnownInteraction,
+    ObservationChange, ObservationEvent, ObservationQueryError, ObservationStream,
+    ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery, RejectionSummary,
+    RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery, RunDetail, TraceManifest,
+    UpstreamAttemptTiming, UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorQuery,
+    UpstreamErrorSummary, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use money::{ProviderCostPlanInput, provider_cost_plan_value};

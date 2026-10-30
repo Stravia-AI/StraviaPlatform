@@ -114,6 +114,17 @@ CREATE TABLE credential_custom_rules (
     updated_at  INTEGER NOT NULL
 );
 
+CREATE TABLE credential_mapping_reuses (
+marker TEXT NOT NULL,
+interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+run_id TEXT,
+source_type TEXT NOT NULL,
+tool_id TEXT NOT NULL DEFAULT '',
+latest_input INTEGER NOT NULL DEFAULT 0,
+last_reused_at INTEGER NOT NULL,
+PRIMARY KEY (marker, interaction_id, source_type, tool_id, latest_input)
+);
+
 CREATE TABLE history_markers (
     reference TEXT PRIMARY KEY,
     principal TEXT NOT NULL,
@@ -716,6 +727,9 @@ CREATE TABLE web_providers (
     )
 );
 
+CREATE INDEX credential_mapping_reuses_interaction_idx
+    ON credential_mapping_reuses(interaction_id);
+
 CREATE INDEX idx_admin_sessions_expiry ON admin_sessions(expires_at);
 
 CREATE INDEX idx_agent_definition_revisions_slug
@@ -823,9 +837,9 @@ CREATE INDEX observation_events_context_kinds_idx
     ON observation_events(interaction_id, sequence)
     WHERE kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated');
 
-CREATE INDEX observation_events_credential_discovery_idx
-    ON observation_events(kind, interaction_id, occurred_at DESC, expires_at)
-    WHERE kind IN ('credential_mappings_created','credential_mappings_reused');
+CREATE INDEX observation_events_credential_hit_idx
+    ON observation_events(kind, sequence DESC)
+    WHERE kind = 'credential_mappings_created';
 
 CREATE INDEX observation_events_interaction_idx ON observation_events(interaction_id,sequence);
 

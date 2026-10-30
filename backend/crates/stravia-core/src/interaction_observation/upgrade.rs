@@ -1011,6 +1011,235 @@ pub(crate) async fn backfill_attempt_error_details_postgres(
     Ok(())
 }
 
+const CREDENTIAL_CLEANUP_BATCH: usize = 500;
+
+enum RetiredPayload {
+    Unchanged,
+    Rewritten(Vec<u8>),
+    Empty,
+}
+
+fn is_kingfisher_rule(rule: &str) -> bool {
+    rule.starts_with("kingfisher.")
+}
+
+/// 就地移除已下线规则的归因；返回是否改写，以及移除后是否已无规则与位置。
+fn retire_kingfisher_discovery(discovery: &mut Value) -> bool {
+    let Some(object) = discovery.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    if let Some(Value::Array(rule_ids)) = object.get_mut("rule_ids") {
+        let before = rule_ids.len();
+        rule_ids.retain(|rule| !rule.as_str().is_some_and(is_kingfisher_rule));
+        changed |= rule_ids.len() != before;
+    }
+    let locators_changed = if let Some(Value::Array(locators)) = object.get_mut("locators") {
+        let before = locators.len();
+        locators.retain(|locator| {
+            !locator
+                .get("rule_id")
+                .and_then(Value::as_str)
+                .is_some_and(is_kingfisher_rule)
+        });
+        let changed = locators.len() != before;
+        if changed {
+            let sources: std::collections::BTreeSet<String> = locators
+                .iter()
+                .filter_map(|locator| {
+                    locator
+                        .get("source_type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
+            object.insert(
+                "source_types".into(),
+                Value::Array(sources.into_iter().map(Value::String).collect()),
+            );
+        }
+        changed
+    } else {
+        false
+    };
+    changed || locators_changed
+}
+
+fn retire_kingfisher_payload(value: Value) -> anyhow::Result<RetiredPayload> {
+    let mut value = value;
+    let Some(discoveries) = value.get_mut("discoveries").and_then(Value::as_array_mut) else {
+        return Ok(RetiredPayload::Unchanged);
+    };
+    let mut changed = false;
+    let mut kept = Vec::with_capacity(discoveries.len());
+    for mut discovery in std::mem::take(discoveries) {
+        let discovery_changed = retire_kingfisher_discovery(&mut discovery);
+        let empty = discovery
+            .get("rule_ids")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+            && discovery
+                .get("locators")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty);
+        if discovery_changed && empty {
+            changed = true;
+            continue;
+        }
+        changed |= discovery_changed;
+        kept.push(discovery);
+    }
+    *discoveries = kept;
+    if !changed {
+        return Ok(RetiredPayload::Unchanged);
+    }
+    let empty = discoveries.is_empty();
+    if empty {
+        return Ok(RetiredPayload::Empty);
+    }
+    Ok(RetiredPayload::Rewritten(crate::storage_codec::encode(
+        serde_json::to_vec(&value)?.into(),
+    )?))
+}
+
+fn decode_stored_event(bytes: Vec<u8>) -> anyhow::Result<Value> {
+    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+        &bytes,
+    )?)?)
+}
+
+/// 分批清理 SQLite 中的下线规则；每批一个事务，事件删除后 sequence 游标不回退。
+pub(crate) async fn retire_kingfisher_discoveries_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+) -> anyhow::Result<()> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observation_events WHERE kind IN ('credential_mappings_created','credential_mappings_reused')",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let mut after = i64::MIN;
+    let mut cleaned = 0i64;
+    loop {
+        let mut tx = connection.begin().await?;
+        let rows = sqlx::query(
+            "SELECT sequence,payload FROM observation_events WHERE kind IN ('credential_mappings_created','credential_mappings_reused') AND sequence>? ORDER BY sequence LIMIT ?",
+        )
+        .bind(after)
+        .bind(CREDENTIAL_CLEANUP_BATCH as i64)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            break;
+        }
+        let mut sequences = Vec::with_capacity(rows.len());
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row in rows {
+            sequences.push(row.try_get::<i64, _>("sequence")?);
+            payloads.push(row.try_get::<Vec<u8>, _>("payload")?);
+        }
+        after = *sequences
+            .last()
+            .context("credential cleanup batch is empty")?;
+        let values = blocking_chunks(payloads, decode_stored_event).await?;
+        let retired = blocking_chunks(values, retire_kingfisher_payload).await?;
+        for (sequence, retired) in sequences.into_iter().zip(retired) {
+            match retired {
+                RetiredPayload::Unchanged => {}
+                RetiredPayload::Rewritten(payload) => {
+                    sqlx::query("UPDATE observation_events SET payload=? WHERE sequence=?")
+                        .bind(payload)
+                        .bind(sequence)
+                        .execute(&mut *tx)
+                        .await?;
+                    cleaned += 1;
+                }
+                RetiredPayload::Empty => {
+                    sqlx::query("DELETE FROM observation_events WHERE sequence=?")
+                        .bind(sequence)
+                        .execute(&mut *tx)
+                        .await?;
+                    cleaned += 1;
+                }
+            }
+        }
+        tx.commit().await?;
+        crate::startup_progress::report(
+            "credential_cleanup",
+            "Removing retired credential rules",
+            cleaned as u64,
+            Some(total.max(0) as u64),
+        );
+    }
+    Ok(())
+}
+
+/// 分批清理 PostgreSQL 中的下线规则；事务与游标语义同 SQLite。
+pub(crate) async fn retire_kingfisher_discoveries_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+) -> anyhow::Result<()> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observation_events WHERE kind IN ('credential_mappings_created','credential_mappings_reused')",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    let mut after = i64::MIN;
+    let mut cleaned = 0i64;
+    loop {
+        let mut tx = connection.begin().await?;
+        let rows = sqlx::query(
+            "SELECT sequence,payload FROM observation_events WHERE kind IN ('credential_mappings_created','credential_mappings_reused') AND sequence>$1 ORDER BY sequence LIMIT $2",
+        )
+        .bind(after)
+        .bind(CREDENTIAL_CLEANUP_BATCH as i64)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            break;
+        }
+        let mut sequences = Vec::with_capacity(rows.len());
+        let mut payloads = Vec::with_capacity(rows.len());
+        for row in rows {
+            sequences.push(row.try_get::<i64, _>("sequence")?);
+            payloads.push(row.try_get::<Vec<u8>, _>("payload")?);
+        }
+        after = *sequences
+            .last()
+            .context("credential cleanup batch is empty")?;
+        let values = blocking_chunks(payloads, decode_stored_event).await?;
+        let retired = blocking_chunks(values, retire_kingfisher_payload).await?;
+        for (sequence, retired) in sequences.into_iter().zip(retired) {
+            match retired {
+                RetiredPayload::Unchanged => {}
+                RetiredPayload::Rewritten(payload) => {
+                    sqlx::query("UPDATE observation_events SET payload=$1 WHERE sequence=$2")
+                        .bind(payload)
+                        .bind(sequence)
+                        .execute(&mut *tx)
+                        .await?;
+                    cleaned += 1;
+                }
+                RetiredPayload::Empty => {
+                    sqlx::query("DELETE FROM observation_events WHERE sequence=$1")
+                        .bind(sequence)
+                        .execute(&mut *tx)
+                        .await?;
+                    cleaned += 1;
+                }
+            }
+        }
+        tx.commit().await?;
+        crate::startup_progress::report(
+            "credential_cleanup",
+            "Removing retired credential rules",
+            cleaned as u64,
+            Some(total.max(0) as u64),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,5 +1584,265 @@ mod tests {
         export_debug_manifests_sqlite(&mut connection, Some(root.path())).await?;
         assert_eq!(std::fs::read(&path)?, original);
         Ok(())
+    }
+
+    fn retired_kingfisher_fixture() -> [(i64, &'static str, Vec<u8>); 7] {
+        let encode = |value: Value| {
+            crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
+        };
+        [
+            (
+                1,
+                "credential_mappings_created",
+                encode(json!({
+                    "kind": "credential_mappings_created",
+                    "discoveries": [
+                        {
+                            "rule_ids": ["kingfisher.aws", "github-pat"],
+                            "source_types": ["tool_result", "tool_arguments"],
+                            "locators": [
+                                {"rule_id": "kingfisher.aws", "source_type": "tool_result", "tool_id": "call-1"},
+                                {"rule_id": "github-pat", "source_type": "tool_arguments", "tool_id": "call-1"}
+                            ],
+                            "marker": "m-keep"
+                        },
+                        {
+                            "rule_ids": ["kingfisher.azure"],
+                            "source_types": ["tool_result"],
+                            "locators": [
+                                {"rule_id": "kingfisher.azure", "source_type": "tool_result", "tool_id": "call-2"}
+                            ],
+                            "marker": "m-drop"
+                        }
+                    ]
+                })),
+            ),
+            (
+                2,
+                "credential_mappings_reused",
+                encode(json!({
+                    "kind": "credential_mappings_reused",
+                    "discoveries": [{
+                        "rule_ids": ["kingfisher.gcp", "custom.rule"],
+                        "source_types": ["user_message", "tool_result"],
+                        "locators": [
+                            {"rule_id": "kingfisher.gcp", "source_type": "user_message", "latest_input": true},
+                            {"rule_id": "custom.rule", "source_type": "tool_result", "tool_id": "call-3"}
+                        ],
+                        "marker": "m-keep"
+                    }]
+                })),
+            ),
+            (
+                3,
+                "credential_mappings_created",
+                encode(json!({
+                    "kind": "credential_mappings_created",
+                    "discoveries": [{
+                        "rule_ids": ["github-pat"],
+                        "source_types": ["user_message"],
+                        "locators": [{"rule_id": "github-pat", "source_type": "user_message", "latest_input": true}],
+                        "marker": "m-untouched"
+                    }]
+                })),
+            ),
+            (
+                4,
+                "credential_mappings_created",
+                encode(json!({
+                    "kind": "credential_mappings_created",
+                    "discoveries": [{
+                        "rule_ids": ["kingfisher.only"],
+                        "source_types": ["system"],
+                        "locators": [{"rule_id": "kingfisher.only", "source_type": "system"}],
+                        "marker": "m-empty"
+                    }]
+                })),
+            ),
+            (
+                5,
+                "run_admitted",
+                encode(json!({"kind": "run_admitted", "status": "running"})),
+            ),
+            (
+                6,
+                "credential_mappings_created",
+                encode(json!({
+                    "kind": "credential_mappings_created",
+                    "discoveries": [{
+                        "rule_ids": ["kingfisher.aws", "github-pat"],
+                        "source_types": ["user_message"],
+                        "marker": "m-rules-only"
+                    }]
+                })),
+            ),
+            (
+                7,
+                "credential_mappings_created",
+                encode(json!({
+                    "kind": "credential_mappings_created",
+                    "discoveries": [{
+                        "rule_ids": ["kingfisher.aws"],
+                        "source_types": ["user_message"],
+                        "marker": "m-rules-empty"
+                    }]
+                })),
+            ),
+        ]
+    }
+
+    fn assert_retired_kingfisher_cleanup(
+        first: &[(i64, Vec<u8>)],
+        untouched: &[u8],
+    ) -> anyhow::Result<()> {
+        assert_eq!(
+            first
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 5, 6]
+        );
+        let decode = |payload: Vec<u8>| -> anyhow::Result<Value> {
+            Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                &payload,
+            )?)?)
+        };
+        let kept = decode(first[0].1.clone())?;
+        assert_eq!(kept["discoveries"].as_array().unwrap().len(), 1);
+        assert_eq!(kept["discoveries"][0]["rule_ids"], json!(["github-pat"]));
+        assert_eq!(
+            kept["discoveries"][0]["locators"],
+            json!([{"rule_id": "github-pat", "source_type": "tool_arguments", "tool_id": "call-1"}])
+        );
+        assert_eq!(
+            kept["discoveries"][0]["source_types"],
+            json!(["tool_arguments"])
+        );
+        let reused = decode(first[1].1.clone())?;
+        assert_eq!(reused["discoveries"][0]["rule_ids"], json!(["custom.rule"]));
+        assert_eq!(
+            reused["discoveries"][0]["source_types"],
+            json!(["tool_result"])
+        );
+        assert_eq!(first[2].1, untouched);
+        let admitted = decode(first[3].1.clone())?;
+        assert_eq!(admitted["status"], "running");
+        let rules_only = decode(first[4].1.clone())?;
+        assert_eq!(
+            rules_only["discoveries"][0]["rule_ids"],
+            json!(["github-pat"])
+        );
+        assert!(!serde_json::to_string(first)?.contains("kingfisher."));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retired_kingfisher_rules_are_removed_idempotently() -> anyhow::Result<()> {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await?;
+        sqlx::raw_sql(
+            "CREATE TABLE observation_events(sequence INTEGER PRIMARY KEY,occurred_at INTEGER NOT NULL,interaction_id TEXT,run_id TEXT,rejection_id TEXT,kind TEXT NOT NULL,payload BLOB NOT NULL,expires_at INTEGER NOT NULL,tool_id TEXT,operation_id TEXT)",
+        )
+        .execute(&mut connection)
+        .await?;
+        for (sequence, kind, payload) in retired_kingfisher_fixture() {
+            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,kind,payload,expires_at) VALUES (?,?,?,?,?)")
+                .bind(sequence)
+                .bind(sequence)
+                .bind(kind)
+                .bind(payload)
+                .bind(9999)
+                .execute(&mut connection)
+                .await?;
+        }
+        let untouched: Vec<u8> =
+            sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=3")
+                .fetch_one(&mut connection)
+                .await?;
+
+        retire_kingfisher_discoveries_sqlite(&mut connection).await?;
+        let first: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT sequence,payload FROM observation_events ORDER BY sequence")
+                .fetch_all(&mut connection)
+                .await?;
+        assert_retired_kingfisher_cleanup(&first, &untouched)?;
+
+        retire_kingfisher_discoveries_sqlite(&mut connection).await?;
+        let second: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT sequence,payload FROM observation_events ORDER BY sequence")
+                .fetch_all(&mut connection)
+                .await?;
+        assert_eq!(second, first);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+    async fn postgres_retired_kingfisher_rules_are_removed_idempotently() -> anyhow::Result<()> {
+        let url = std::env::var("STRAVIA_TEST_POSTGRES_URL")
+            .expect("set STRAVIA_TEST_POSTGRES_URL to run PostgreSQL cleanup contracts");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        let schema = format!("stravia_cleanup_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await?;
+        let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+        let scenario_options = options.options([("search_path", schema.as_str())]);
+        let scenario = tokio::spawn(async move {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(scenario_options)
+                .await?;
+            sqlx::raw_sql(
+                "CREATE TABLE observation_events(sequence bigint PRIMARY KEY,occurred_at bigint NOT NULL,interaction_id text,run_id text,rejection_id text,kind text NOT NULL,payload bytea NOT NULL,expires_at bigint NOT NULL,tool_id text,operation_id text)",
+            )
+            .execute(&pool)
+            .await?;
+            for (sequence, kind, payload) in retired_kingfisher_fixture() {
+                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5)")
+                    .bind(sequence)
+                    .bind(sequence)
+                    .bind(kind)
+                    .bind(payload)
+                    .bind(9999_i64)
+                    .execute(&pool)
+                    .await?;
+            }
+            let untouched: Vec<u8> =
+                sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=3")
+                    .fetch_one(&pool)
+                    .await?;
+
+            retire_kingfisher_discoveries_postgres(&mut *pool.acquire().await?).await?;
+            let first: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT sequence,payload FROM observation_events ORDER BY sequence")
+                    .fetch_all(&pool)
+                    .await?;
+            assert_retired_kingfisher_cleanup(&first, &untouched)?;
+
+            retire_kingfisher_discoveries_postgres(&mut *pool.acquire().await?).await?;
+            let second: Vec<(i64, Vec<u8>)> =
+                sqlx::query_as("SELECT sequence,payload FROM observation_events ORDER BY sequence")
+                    .fetch_all(&pool)
+                    .await?;
+            assert_eq!(second, first);
+            pool.close().await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+
+        // Keep cleanup outside the task so contract panics still drop the schema.
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        cleanup?;
+        match scenario {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(error.into()),
+        }
     }
 }

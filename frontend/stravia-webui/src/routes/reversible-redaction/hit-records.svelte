@@ -1,31 +1,28 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { onMount, untrack } from 'svelte'
-import { resolve } from '$app/paths'
 import { createVirtualizer } from '@tanstack/svelte-virtual'
 import { admin } from '#lib/admin-client.js'
 import {
-  HIT_HIGHLIGHT_QUERY,
-  HIT_HIGHLIGHT_VALUE,
   HIT_RECORDS_PAGE_SIZE,
   appendHitRecords,
+  credentialSourceLabel,
+  displayRuleSets,
   hitRecordsRefreshDelay,
   hitSourceKind,
+  previewHits,
   refreshHitRecords,
-  uniqueHits,
+  ruleSetLabel,
 } from '#lib/credential-hit-records.js'
 import { formatLogTime, formatNumber } from '#lib/format.js'
-import { observationStatusLabel } from '#lib/observation-labels.js'
-import { observationStatusTone } from '#lib/observation-event-summary.js'
 
-import type { CredentialDiscoverySummary, CredentialHit, CredentialHitKind } from '#lib/types.js'
+import type { CredentialDiscoveryRecord, CredentialHit, CredentialRuleSet } from '#lib/types.js'
 
-import StatusIndicator from '#lib/components/status-indicator.svelte'
+import HitRecordSheet from './hit-record-sheet.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
-import { badgeVariants } from '#lib/components/ui/badge/index.js'
+import { Badge, badgeVariants } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
-import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
@@ -42,12 +39,11 @@ interface Props {
 
 let { active, ruleNames, rulesPending, onOpenRule, onTest }: Props = $props()
 
-const ESTIMATED_ROW_HEIGHT = 84
+const ESTIMATED_ROW_HEIGHT = 92
 // 距列表末尾还剩这么多行时就预取下一页，避免滚动到底才开始等待。
 const LOAD_AHEAD_ROWS = 8
 
-let kind = $state<CredentialHitKind>('all')
-let items = $state.raw<CredentialDiscoverySummary[]>([])
+let items = $state.raw<CredentialDiscoveryRecord[]>([])
 let nextCursor = $state<string | null>(null)
 let headLoaded = $state(false)
 let loadingMore = $state(false)
@@ -59,16 +55,13 @@ let atTop = $state(true)
 let pageVisible = $state(true)
 let scroller = $state<HTMLDivElement | null>(null)
 let scrollbarWidth = $state(0)
-// 筛选变化后丢弃仍在途中的旧请求结果。
+// 重置列表后丢弃仍在途中的旧请求结果。
 let generation = 0
 
-const kindLabel = $derived(
-  kind === 'created'
-    ? m.credential_protection_hits_filter_created()
-    : kind === 'reused'
-      ? m.credential_protection_hits_filter_reused()
-      : m.credential_protection_hits_filter_all(),
-)
+let detailOpen = $state(false)
+let selectedRecord = $state.raw<CredentialDiscoveryRecord | null>(null)
+let selectedHitIndex = $state(0)
+
 const autoRefresh = $derived(active && pageVisible && atTop && headLoaded && !refreshing && failure !== 'head')
 
 const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
@@ -91,7 +84,7 @@ $effect(() => {
     $virtualizer.setOptions({
       count: snapshot.length,
       getScrollElement: () => element,
-      getItemKey: (index) => snapshot[index]?.interaction_id ?? index,
+      getItemKey: (index) => snapshot[index]?.id ?? index,
     }),
   )
 })
@@ -118,13 +111,12 @@ $effect(() => {
   return () => observer.disconnect()
 })
 
-function fetchPage(hitKind: CredentialHitKind, cursor?: string) {
-  return admin.credentialProtection.discoveries({ kind: hitKind, limit: HIT_RECORDS_PAGE_SIZE, cursor })
+function fetchPage(cursor?: string) {
+  return admin.credentialProtection.discoveries({ limit: HIT_RECORDS_PAGE_SIZE, cursor })
 }
 
 async function reset(): Promise<void> {
   const current = ++generation
-  const hitKind = kind
   items = []
   nextCursor = null
   headLoaded = false
@@ -135,7 +127,7 @@ async function reset(): Promise<void> {
   if (scroller) scroller.scrollTop = 0
   lastFetchAt = Date.now()
   try {
-    const page = await fetchPage(hitKind)
+    const page = await fetchPage()
     if (current !== generation) return
     items = page.items
     nextCursor = page.next_cursor
@@ -150,7 +142,7 @@ async function loadMore(): Promise<void> {
   const current = generation
   loadingMore = true
   try {
-    const page = await fetchPage(kind, nextCursor)
+    const page = await fetchPage(nextCursor)
     if (current !== generation) return
     items = appendHitRecords(items, page.items)
     nextCursor = page.next_cursor
@@ -168,7 +160,7 @@ async function refresh(): Promise<void> {
   refreshing = true
   lastFetchAt = Date.now()
   try {
-    const page = await fetchPage(kind)
+    const page = await fetchPage()
     if (current !== generation) return
     // 请求期间用户已离开顶部时丢弃结果：在读历史的人不该看到列表被顶下去；回到顶部后按上一次成功刷新的时间补刷。
     if (!atTop) {
@@ -194,16 +186,11 @@ function retry(): void {
   void loadMore()
 }
 
-function changeKind(value: string): void {
-  kind = value as CredentialHitKind
-  void reset()
-}
-
 function handleScroll(): void {
   atTop = (scroller?.scrollTop ?? 0) <= 1
 }
 
-// 行高随 chip 换行而变，交给虚拟化器实测；行内下标变化后需要重新登记。
+// 行高随标签换行而变，交给虚拟化器实测；行内下标变化后需要重新登记。
 function measureRow(node: HTMLDivElement, _index: number) {
   $virtualizer.measureElement(node)
   return {
@@ -213,42 +200,74 @@ function measureRow(node: HTMLDivElement, _index: number) {
   }
 }
 
-function sourceLabel(source: string): string {
-  switch (source) {
-    case 'user_message':
-      return m.credential_protection_source_user_message()
-    case 'history_user_message':
-      return m.credential_protection_source_history_user_message()
-    case 'system_or_history':
-      return m.credential_protection_source_system_or_history()
-    case 'tool_arguments':
-      return m.credential_protection_source_tool_arguments()
-    case 'tool_result':
-      return m.credential_protection_source_tool_result()
-    case 'other_text':
-      return m.credential_protection_source_other_text()
-    default:
-      return m.credential_protection_source_unknown()
-  }
+function openRecord(record: CredentialDiscoveryRecord): void {
+  selectedRecord = record
+  selectedHitIndex = 0
+  detailOpen = true
 }
 
-function statusTone(status: string): 'healthy' | 'warning' | 'error' | 'neutral' {
-  const tone = observationStatusTone(status)
-  return tone === 'success' ? 'healthy' : tone
+function handleRowKeydown(event: KeyboardEvent, record: CredentialDiscoveryRecord): void {
+  // 行内还有规则按钮；只在行本身获得焦点时响应 Enter / Space。
+  if (event.target !== event.currentTarget) return
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  openRecord(record)
 }
 
-function requestLogHref(record: CredentialDiscoverySummary): string {
-  return resolve(
-    `logs?interaction=${encodeURIComponent(record.interaction_id)}&${HIT_HIGHLIGHT_QUERY}=${HIT_HIGHLIGHT_VALUE}`,
-  )
+function openRuleFromChip(event: MouseEvent, ruleId: string): void {
+  event.stopPropagation()
+  onOpenRule(ruleId)
 }
 </script>
 
 <svelte:document onvisibilitychange={() => (pageVisible = document.visibilityState === 'visible')} />
 
-{#snippet hitChips(hits: CredentialHit[])}
+{#snippet ruleSetBadges(ruleSets: CredentialRuleSet[])}
+  {#if ruleSets.length}
+    <span class="flex flex-wrap items-center gap-1">
+      {#each displayRuleSets(ruleSets) as ruleSet (ruleSet)}
+        <Badge variant={ruleSet === 'builtin' ? 'outline' : 'secondary'}>{ruleSetLabel(ruleSet)}</Badge>
+      {/each}
+    </span>
+  {:else}
+    <span class="text-muted-foreground" aria-hidden="true">—</span>
+  {/if}
+{/snippet}
+
+{#snippet createdRules(ruleIds: string[])}
+  {#if ruleIds.length}
+    <ul class="flex min-w-0 flex-wrap items-center gap-1.5">
+      {#each ruleIds as ruleId (ruleId)}
+        <li class="min-w-0 max-w-full">
+          {#if ruleNames.get(ruleId)}
+            <button
+              type="button"
+              title={ruleId}
+              class={badgeVariants({
+                variant: 'outline',
+                class: 'h-auto max-w-full cursor-pointer py-1 text-left whitespace-normal hover:bg-accent',
+              })}
+              onclick={(event) => openRuleFromChip(event, ruleId)}>{ruleNames.get(ruleId)}</button>
+          {:else if rulesPending}
+            <Skeleton class="h-5 w-32" />
+          {:else}
+            <span
+              title={ruleId}
+              class={badgeVariants({ variant: 'outline', class: 'h-auto max-w-full py-1 font-technical' })}
+              >{ruleId}</span>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {:else}
+    <span class="text-muted-foreground" aria-hidden="true">—</span>
+  {/if}
+{/snippet}
+
+{#snippet hitChips(hits: CredentialHit[], omitted: number)}
+  {@const preview = previewHits(hits, omitted)}
   <ul class="flex min-w-0 flex-wrap items-center gap-1.5">
-    {#each uniqueHits(hits) as hit (`${hit.rule_id}:${hitSourceKind(hit)}`)}
+    {#each preview.hits as hit (`${hit.rule_id}:${hitSourceKind(hit)}`)}
       {@const name = ruleNames.get(hit.rule_id)}
       <li class="min-w-0 max-w-full">
         {#if name}
@@ -259,11 +278,11 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
               variant: 'secondary',
               class: 'h-auto max-w-full cursor-pointer gap-1 py-1 text-left whitespace-normal hover:bg-secondary/80',
             })}
-            onclick={() => onOpenRule(hit.rule_id)}>
+            onclick={(event) => openRuleFromChip(event, hit.rule_id)}>
             <span class="font-medium">{name}</span>
             <span aria-hidden="true" class="text-muted-foreground">←</span>
             <span class="sr-only">{m.credential_protection_hits_found_in()}</span>
-            <span class="text-muted-foreground">{sourceLabel(hitSourceKind(hit))}</span>
+            <span class="text-muted-foreground">{credentialSourceLabel(hitSourceKind(hit))}</span>
           </button>
         {:else if rulesPending}
           <Skeleton class="h-5 w-40" />
@@ -274,26 +293,19 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
             <span class="font-technical">{hit.rule_id}</span>
             <span aria-hidden="true" class="text-muted-foreground">←</span>
             <span class="sr-only">{m.credential_protection_hits_found_in()}</span>
-            <span class="text-muted-foreground">{sourceLabel(hitSourceKind(hit))}</span>
+            <span class="text-muted-foreground">{credentialSourceLabel(hitSourceKind(hit))}</span>
           </span>
         {/if}
       </li>
     {/each}
+    {#if preview.hidden > 0}
+      <li>
+        <span class={badgeVariants({ variant: 'outline', class: 'py-1 tabular-nums' })}
+          >{m.credential_protection_hit_records_more({ count: formatNumber(preview.hidden) })}</span>
+      </li>
+    {/if}
   </ul>
 {/snippet}
-
-<div class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
-  <Select.Root type="single" value={kind} onValueChange={changeKind}>
-    <Select.Trigger class="w-40" aria-label={m.credential_protection_hits_filter_label()}>{kindLabel}</Select.Trigger>
-    <Select.Content>
-      <Select.Group>
-        <Select.Item value="all">{m.credential_protection_hits_filter_all()}</Select.Item>
-        <Select.Item value="created">{m.credential_protection_hits_filter_created()}</Select.Item>
-        <Select.Item value="reused">{m.credential_protection_hits_filter_reused()}</Select.Item>
-      </Select.Group>
-    </Select.Content>
-  </Select.Root>
-</div>
 
 {#if failure === 'head'}
   <Alert.Root variant="destructive" class="shrink-0"
@@ -321,12 +333,11 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
   aria-label={m.credential_protection_discoveries_title()}
   aria-rowcount={nextCursor ? -1 : items.length + 1}>
   <div class="hit-header hit-grid" role="row" style:padding-right="{scrollbarWidth}px">
-    <div role="columnheader">{m.credential_protection_discoveries_time()}</div>
+    <div role="columnheader">{m.credential_protection_hit_records_created_at()}</div>
     <div role="columnheader">{m.credential_protection_discoveries_api_key()}</div>
-    <div role="columnheader">{m.credential_protection_hits_created()}</div>
-    <div role="columnheader">{m.credential_protection_hits_reused()}</div>
-    <div role="columnheader">{m.credential_protection_discoveries_status()}</div>
-    <div role="columnheader"><span class="sr-only">{m.common_actions()}</span></div>
+    <div role="columnheader">{m.credential_protection_hit_records_rule_sets()}</div>
+    <div role="columnheader">{m.credential_protection_hit_records_created_by()}</div>
+    <div role="columnheader">{m.credential_protection_hit_records_hits()}</div>
   </div>
   <div bind:this={scroller} class="hit-scroller" data-slot="hit-records-viewport" onscroll={handleScroll}>
     <div class="relative w-full" role="rowgroup" style:height="{$virtualizer.getTotalSize()}px">
@@ -337,53 +348,31 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
             class="hit-row hit-grid"
             role="row"
             aria-rowindex={row.index + 2}
+            tabindex="0"
             data-index={row.index}
             style:transform="translateY({row.start}px)"
-            use:measureRow={row.index}>
-            <div role="cell" class="hit-time">{formatLogTime(record.discovered_at)}</div>
+            use:measureRow={row.index}
+            onclick={() => openRecord(record)}
+            onkeydown={(event) => handleRowKeydown(event, record)}>
+            <div role="cell" class="hit-time">{formatLogTime(record.created_at)}</div>
             <div role="cell" class="hit-key">
               {record.api_key_name ?? m.credential_protection_discoveries_unknown_key()}
             </div>
-            <div role="cell" class={['hit-created', { 'hit-empty': !record.created.length }]}>
-              {#if record.created.length}
-                <p class="mb-1 text-xs text-muted-foreground">
-                  {m.credential_protection_discoveries_count({ count: formatNumber(record.new_credential_count) })}
-                </p>
-                {@render hitChips(record.created)}
+            <div role="cell" class="hit-rulesets">
+              <span class="hit-cell-label">{m.credential_protection_hit_records_rule_sets()}</span>
+              {@render ruleSetBadges(record.rule_sets)}
+            </div>
+            <div role="cell" class="hit-rules">
+              <span class="hit-cell-label">{m.credential_protection_hit_records_created_by()}</span>
+              {@render createdRules(record.rule_ids)}
+            </div>
+            <div role="cell" class="hit-hits">
+              <span class="hit-cell-label">{m.credential_protection_hit_records_hits()}</span>
+              {#if record.hits.length}
+                {@render hitChips(record.hits, record.omitted_hits)}
               {:else}
                 <span class="text-muted-foreground" aria-hidden="true">—</span>
               {/if}
-            </div>
-            <div role="cell" class={['hit-reused', { 'hit-empty': !record.reused.length }]}>
-              {#if record.reused.length}
-                <p class="hit-reused-label mb-1 text-xs text-muted-foreground">
-                  {m.credential_protection_hits_reused()}
-                </p>
-                {@render hitChips(record.reused)}
-              {:else}
-                <span class="text-muted-foreground" aria-hidden="true">—</span>
-              {/if}
-            </div>
-            <div role="cell" class="hit-status">
-              <div class="flex flex-col items-start gap-0.5">
-                <StatusIndicator
-                  compact
-                  label={observationStatusLabel(record.status)}
-                  tone={statusTone(record.status)} />
-                {#if record.observation_gap}
-                  <StatusIndicator compact tone="warning" label={m.observation_event_observation_gap()} />
-                {/if}
-              </div>
-            </div>
-            <div role="cell" class="hit-action">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                href={requestLogHref(record)}
-                aria-label={m.credential_protection_discoveries_open()}
-                title={m.credential_protection_discoveries_open()}>
-                <ArrowRightIcon />
-              </Button>
             </div>
           </div>
         {/if}
@@ -402,6 +391,8 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
     {/if}
   </div>
 </div>
+
+<HitRecordSheet bind:open={detailOpen} bind:hitIndex={selectedHitIndex} record={selectedRecord} {ruleNames} />
 
 <style>
 /* 记录较少时保持自然高度，较多时在滚动区内部滚动。 */
@@ -425,7 +416,7 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
 }
 .hit-grid {
   display: grid;
-  grid-template-columns: 9.5rem 8rem minmax(0, 1fr) minmax(0, 1fr) 7.5rem 2.5rem;
+  grid-template-columns: 9.5rem 8rem 6.5rem minmax(0, 1fr) minmax(0, 1.3fr);
   column-gap: 1rem;
   align-items: start;
   padding-inline: 0.75rem;
@@ -448,6 +439,14 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
   padding-block: 0.75rem;
   border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
   font-size: 0.875rem;
+  cursor: pointer;
+}
+.hit-row:hover {
+  background: var(--accent);
+}
+.hit-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 .hit-time {
   font-family: var(--font-technical);
@@ -458,11 +457,8 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
 .hit-key {
   overflow-wrap: anywhere;
 }
-.hit-reused-label {
+.hit-cell-label {
   display: none;
-}
-.hit-action {
-  justify-self: end;
 }
 .hit-footer {
   display: flex;
@@ -471,7 +467,7 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
   gap: 0.75rem;
   padding: 0.75rem;
 }
-/* 窄屏改成堆叠行：无命中的一侧直接省略，复用组靠自己的小标题区分。 */
+/* 窄屏改成堆叠行：表头隐藏，每个字段靠自己的小标题区分。 */
 @container route-page (max-width: 52rem) {
   .hit-header {
     display: none;
@@ -480,9 +476,9 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       'key time'
-      'created created'
-      'reused reused'
-      'status action';
+      'rulesets rulesets'
+      'rules rules'
+      'hits hits';
     row-gap: 0.5rem;
   }
   .hit-key {
@@ -492,23 +488,20 @@ function requestLogHref(record: CredentialDiscoverySummary): string {
   .hit-time {
     grid-area: time;
   }
-  .hit-created {
-    grid-area: created;
+  .hit-rulesets {
+    grid-area: rulesets;
   }
-  .hit-reused {
-    grid-area: reused;
+  .hit-rules {
+    grid-area: rules;
   }
-  .hit-status {
-    grid-area: status;
+  .hit-hits {
+    grid-area: hits;
   }
-  .hit-action {
-    grid-area: action;
-  }
-  .hit-empty {
-    display: none;
-  }
-  .hit-reused-label {
+  .hit-cell-label {
     display: block;
+    margin-bottom: 0.25rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
   }
 }
 </style>
