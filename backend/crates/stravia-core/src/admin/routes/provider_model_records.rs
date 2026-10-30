@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::provider_model_pricing::OfficialPriceResolver;
 use super::*;
 use crate::provider_models::{
     CreateManualProviderModel, ModelChangeItem, ModelChangeOutcome, ModelChangePage,
@@ -279,6 +280,13 @@ impl RouteModule<'_> {
                 ),
             },
         };
+        let canonical_id = match snapshot_state.source() {
+            Some(SourceStamp::Canonical { model_id }) => Some(model_id.as_str()),
+            _ => None,
+        };
+        OfficialPriceResolver::new(self.gw)
+            .enrich(&model_id, &mut metadata, canonical_id)
+            .await?;
         let extensions = metadata.extension_value();
         metadata
             .modalities
@@ -304,15 +312,18 @@ impl RouteModule<'_> {
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
         let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
-        let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
+        let mut metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
         self.ensure_cost_currency(&metadata).await?;
         // 模板选择仍须有效，但手动规格不保留可恢复的同步来源。
-        if let Some(template_id) = input.template_id {
+        if let Some(template_id) = input.template_id.as_deref() {
             self.gw
                 .provider_catalog
-                .canonical_model(&template_id)
+                .canonical_model(template_id)
                 .await?;
         }
+        OfficialPriceResolver::new(self.gw)
+            .enrich(&model_id, &mut metadata, input.template_id.as_deref())
+            .await?;
         let change = manual_record(
             &provider,
             change_item(
@@ -741,6 +752,17 @@ impl RouteModule<'_> {
                 let follows_upstream = !retain_catalog_specification
                     && (incoming_has_specification
                         || matches!(current.snapshot_state, SnapshotState::Unregistered));
+                if source.official_pricing_unavailable
+                    && !metadata
+                        .cost
+                        .as_ref()
+                        .is_some_and(crate::provider_catalog::has_model_prices)
+                {
+                    metadata.cost = current
+                        .source_metadata
+                        .as_ref()
+                        .and_then(|source| source.cost.clone());
+                }
                 let mut merged = if follows_upstream {
                     merge_source_specification(
                         &current.metadata,
@@ -976,10 +998,16 @@ impl RouteModule<'_> {
         let publication_guard = discovered.write_fence().await?;
         let mut catalog_sources = BTreeMap::new();
         let mut catalog_metadata_unavailable = false;
-        if let Some(catalog_provider_id) = provider
-            .preset_key
+        if let Some(catalog_provider_id) = discovered
+            .catalog_id
             .as_deref()
-            .or(discovered.catalog_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                provider
+                    .preset_key
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
         {
             let scope = match self
                 .gw
@@ -1028,6 +1056,7 @@ impl RouteModule<'_> {
         }
 
         let mut sources = BTreeMap::new();
+        let mut official_prices = OfficialPriceResolver::new(self.gw);
         for model in discovered.models {
             let model_id = normalize_model_id(&model.id)?;
             let discovery_declares_lifecycle = model.metadata.contains_key("status");
@@ -1060,7 +1089,14 @@ impl RouteModule<'_> {
                     None => (None, None, SourceStamp::Discovery),
                 },
             };
-            let metadata = metadata_from_discovered_model(&model_id, model, template)?;
+            let mut metadata = metadata_from_discovered_model(&model_id, model, template)?;
+            let canonical_id = match &stamp {
+                SourceStamp::Canonical { model_id } => Some(model_id.as_str()),
+                _ => None,
+            };
+            let official_pricing_unavailable = official_prices
+                .enrich(&model_id, &mut metadata, canonical_id)
+                .await?;
             let snapshot_state = if metadata.has_specification() {
                 SnapshotState::Imported {
                     source: stamp,
@@ -1077,6 +1113,7 @@ impl RouteModule<'_> {
                     snapshot_state,
                     catalog_metadata_unavailable,
                     discovery_declares_lifecycle,
+                    official_pricing_unavailable,
                 },
             );
         }
@@ -1090,6 +1127,7 @@ struct DiscoveredModelSource {
     snapshot_state: SnapshotState,
     catalog_metadata_unavailable: bool,
     discovery_declares_lifecycle: bool,
+    official_pricing_unavailable: bool,
 }
 
 fn canonical_template_id(template: &Value) -> anyhow::Result<String> {
@@ -1234,6 +1272,14 @@ fn metadata_from_discovered_model(
     mut model: stravia_vendor_sdk::DiscoveredModel,
     canonical: Option<Value>,
 ) -> anyhow::Result<ProviderModelMetadata> {
+    if let Some(value) = model.metadata.get("cost")
+        && (value.is_null()
+            || !crate::provider_catalog::has_model_prices(
+                &crate::provider_models::ModelCost::deserialize(value)?,
+            ))
+    {
+        model.metadata.remove("cost");
+    }
     let has_canonical = canonical.is_some();
     if has_canonical && model.display_name.trim() == model_id {
         model.metadata.remove("name");

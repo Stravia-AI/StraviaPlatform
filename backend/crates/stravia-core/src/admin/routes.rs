@@ -9,6 +9,7 @@ use stravia_runtime_contract::thinking::ThinkingLevel;
 
 mod model_discovery;
 mod model_records;
+mod provider_model_pricing;
 mod provider_model_records;
 mod thinking_map;
 use model_discovery::RouteModelDiscoveryError;
