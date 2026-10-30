@@ -1,4 +1,4 @@
-//! Bundled Betterleaks and Kingfisher offline credential detection.
+//! Bundled Betterleaks offline credential detection.
 //!
 //! Each model-text field is one virtual source with an empty trusted path. File
 //! rules and path filters are compiled and evaluated, never inferred from text.
@@ -9,8 +9,6 @@
 //! are evaluated but do not gate local protection.
 #[path = "detection/expression.rs"]
 mod expression;
-#[path = "detection/kingfisher.rs"]
-mod kingfisher;
 #[path = "detection/pattern.rs"]
 mod pattern;
 #[path = "detection/user_rules.rs"]
@@ -229,7 +227,7 @@ fn default_specificity() -> i64 {
 /// Only reviewed identities are candidates. Compare every parsed policy field,
 /// including defaults and validation provenance, before removing an identity.
 /// Keep the first upstream entry, preserving stable scan priority. This is not
-/// regex equivalence and deliberately never crosses the two source adapters.
+/// regex equivalence.
 fn canonicalize_betterleaks(snapshot: &mut Snapshot) {
     let duplicate = "bittrex-secret-key";
     let canonical = "bittrex-access-key";
@@ -281,7 +279,6 @@ struct Component {
     optional: bool,
 }
 struct Rule {
-    kingfisher: Option<kingfisher::Conditions>,
     regex: Option<Regex>,
     path: Option<Regex>,
     secret_group: usize,
@@ -301,7 +298,6 @@ pub(super) struct Detector {
     tokenizer: tiktoken_rs::CoreBPE,
     words: HashSet<&'static str>,
     word_lengths: Vec<usize>,
-    kingfisher_safe_list: Vec<regex::bytes::Regex>,
 }
 #[derive(Clone)]
 struct Finding<'a> {
@@ -380,7 +376,6 @@ impl Detector {
             // compiled: its network requests must not participate in local scanning.
             let _ = &source.validate;
             rules.push(Rule {
-                kingfisher: None,
                 regex,
                 path,
                 secret_group: source.secret_group,
@@ -403,7 +398,7 @@ impl Detector {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let mut detector = Self {
+        Ok(Self {
             rules,
             order,
             prefilter: Program::compile(&snapshot.prefilter)?,
@@ -411,7 +406,6 @@ impl Detector {
             tokenizer: tiktoken_rs::cl100k_base().map_err(|_| RedactionError::Detection)?,
             words,
             word_lengths,
-            kingfisher_safe_list: Vec::new(),
             catalog: CredentialRuleCatalog {
                 prefilter: snapshot.prefilter,
                 filter: snapshot.filter,
@@ -452,9 +446,7 @@ impl Detector {
                     })
                     .collect(),
             },
-        };
-        kingfisher::extend(&mut detector)?;
-        Ok(detector)
+        })
     }
 
     pub(super) fn detect(&self, texts: &[&str]) -> Result<Vec<DetectedCredential>> {
@@ -463,7 +455,9 @@ impl Detector {
         let mut secrets: Vec<DetectedCredential> = Vec::new();
         for (source_index, raw) in texts.iter().enumerate() {
             let empty = self.context(raw, "", "", 0, 0);
-            let skip_betterleaks = self.prefilter.evaluate(&empty)?;
+            if self.prefilter.evaluate(&empty)? {
+                continue;
+            }
             let lower = raw.to_lowercase();
             let references = reference_ranges(raw);
             let mut candidates: Vec<Option<Vec<Finding<'_>>>> =
@@ -472,7 +466,6 @@ impl Detector {
             for &index in &self.order {
                 let rule = &self.rules[index];
                 if rule.skip_report
-                    || (skip_betterleaks && rule.kingfisher.is_none())
                     || !rule.keywords.is_empty()
                         && !rule.keywords.iter().any(|key| lower.contains(key))
                 {
@@ -610,11 +603,7 @@ impl Detector {
         index: usize,
         references: &[std::ops::Range<usize>],
     ) -> Result<Vec<Finding<'a>>> {
-        let mut findings = if let Some(conditions) = &self.rules[index].kingfisher {
-            kingfisher::find(self, raw, index, conditions)?
-        } else {
-            self.find_betterleaks(raw, index)?
-        };
+        let mut findings = self.find_betterleaks(raw, index)?;
         findings.retain(|finding| {
             !references
                 .iter()
@@ -706,8 +695,6 @@ impl Detector {
                     .chain(&other.components)
                     .any(|candidate| {
                         candidate.rule != finding.rule
-                            && self.rules[candidate.rule].kingfisher.is_some()
-                                == self.rules[finding.rule].kingfisher.is_some()
                             && candidate.start_line == finding.start_line
                             && candidate.secret.contains(finding.secret)
                             && self.rules[candidate.rule].specificity

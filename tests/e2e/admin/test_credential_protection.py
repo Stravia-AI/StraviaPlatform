@@ -88,13 +88,9 @@ def test_catalog_tester_positions_and_read_only_boundary(admin_env: dict[str, An
     catalog = body["data"]
     actual = {rule["id"]: rule for rule in catalog["rules"]}
     assert len(actual) == len(catalog["rules"])
-    for canonical, obsolete in [
-        ("bittrex-access-key", "bittrex-secret-key"),
-        ("kingfisher.artifactory.2", "kingfisher.jfrog.1"),
-        ("kingfisher.plaid.2", "kingfisher.plaid.3"),
-    ]:
-        assert canonical in actual
-        assert obsolete not in actual
+    assert "bittrex-access-key" in actual
+    assert "bittrex-secret-key" not in actual
+    assert not [rule_id for rule_id in actual if rule_id.startswith("kingfisher.")]
     for rule in actual.values():
         assert all(component["id"] in actual for component in rule["components"])
         assert "validate" not in rule and "validation" not in rule
@@ -145,49 +141,6 @@ def test_catalog_tester_positions_and_read_only_boundary(admin_env: dict[str, An
                 assert status == 403
             status, invalid = http_request("POST", f"{env['admin']}{BASE}/test", payload={"text": []}, headers=env["auth"])
             assert status == 422, invalid
-        finally:
-            set_enabled(env, False)
-
-
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_bare_kingfisher_credentials_are_protected_and_restored(admin_env: dict[str, Any]) -> None:
-    # Synthetic fixtures: no production or user-supplied credentials in the repository.
-    first = "sk-m7q2b9v4x0k6n3r8s1t5w9y2z4c6d8f0g3h5j7l1p2a4e6u8"
-    second = "7b2d9f4a0c6e3a8b1d5f9c2e4a6b8d0f.Q7m2Z9v4K0r6T3x8"
-    text = f"中文😀 {first}\nAuthorization: Bearer {second}\n重复 {first}"
-    with echo_provider() as (url, received):
-        env = {**admin_env, "mock": url}
-        model = "kingfisher-bare-credentials"
-        _, key = _create_route(env, model)
-        set_enabled(env, True)
-        try:
-            before = mapping_sql(env, "SELECT COUNT(*) FROM reversible_redaction_mappings")[0][0]
-            matches = detect_text(env, text)
-            assert {"kingfisher.openai.1", "kingfisher.zhipu.1"} <= {item["rule_id"] for item in matches}
-            encoded = text.encode("utf-16-le")
-            for item in matches:
-                if item["rule_id"] in {"kingfisher.openai.1", "kingfisher.zhipu.1"}:
-                    value = encoded[item["start"] * 2:item["end"] * 2].decode("utf-16-le")
-                    assert value in {first, second}
-            assert mapping_sql(env, "SELECT COUNT(*) FROM reversible_redaction_mappings")[0][0] == before
-            assert received == []
-            status, response = _proxy(env, key, model, [{"role": "user", "content": text}])
-            assert status == 200, response
-            assert response["choices"][0]["message"]["content"] == text
-            outbound = received[0]["body"]["messages"][-1]["content"]
-            assert first not in outbound and second not in outbound
-            references = REFERENCE.findall(outbound)
-            assert len(references) == 3 and len(set(references)) == 2
-            assert mapping_sql(env, "SELECT COUNT(*) FROM reversible_redaction_mappings")[0][0] == before + 2
-            rows = _wait_for("Kingfisher discoveries", lambda: key_discoveries(env, f"{model}-key"))
-            assert rows[0]["new_credential_count"] == 2
-            assert {
-                ("kingfisher.openai.1", "user_message", True),
-                ("kingfisher.zhipu.1", "user_message", True),
-            } <= pairs(rows[0]["created"])
-            assert rows[0]["reused"] == []
-            assert all(first not in line and second not in line for line in env["logs"])
         finally:
             set_enabled(env, False)
 
