@@ -68,6 +68,8 @@ metadata 的扩展对象同样复用 JSON map 的保守条目估重，而不只�
 
 移除不服务当前查询的 `model_turns_analytics_idx`、`interaction_observations_generation_idx`，收窄 inference-run generation 索引。拒绝请求的 Client Errors 查询使用 `COALESCE(started_at,occurred_at)`；以相同过滤谓词的 partial expression index 替换无效 started_at 索引，保留普通 occurred_at/expiry 用途。SQLite/PG 合成 SQL 计划和结果已核对，但不把单条 SQL 探针倍率称为 HTTP 提速。
 
+`0034_observation_context_events_index` 在 SQLite 与 PostgreSQL 为 `observation_events(interaction_id, sequence)` 增加部分索引，只包含 `compaction_operation`、`native_compaction_associated` 与 `retained_tail_associated`，与观测树上下文查询的过滤谓词一致。快照水位、事件顺序、kind/payload 和保留期不变；原完整事件索引继续服务详情与回放，不由部分索引替代。首次升级需扫描已有事件来建立索引，大库可能延长启动时间。普通事件虽不进入新索引，写入仍需判断谓词；该优化不消除存储 I/O 长尾，不改变 SQLite 提交耐久性或写协调，也不捆绑 Attempt 覆盖索引。
+
 完整价格、字段级 pinning、来源模型快照、USD/custom 冻结金额、known/unknown/not-billed、spend 清零与长期 stats 均不变。没有替换 stats 触发器、重放历史收费或合并不同所有权域的 TTL。
 
 ## 5. 升级、已取得证据与限制

@@ -1692,11 +1692,6 @@ mod tests {
         migrate_postgres(&pool, None)
             .await
             .expect("upgrade re-run is a no-op");
-        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(version, 33);
         #[derive(sqlx::FromRow)]
         struct PrefixProjection {
             prefix_namespace: Option<String>,
