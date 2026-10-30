@@ -2861,7 +2861,23 @@ test('Add provider draft asks before every close path', async ({ page }) => {
 
 const detailTimestamp = '2026-01-01T00:00:00Z'
 
-function detailProvider(id: string, overrides: Record<string, unknown> = {}) {
+interface DetailProvider {
+  id: string
+  name: string
+  vendor: string
+  channel: string
+  protocol: string
+  base_url: string
+  use_proxy: boolean
+  vendor_options: Record<string, unknown>
+  configured_credential_fields: string[]
+  is_enabled: boolean
+  created_at: string
+  updated_at: string
+  [key: string]: unknown
+}
+
+function detailProvider(id: string, overrides: Record<string, unknown> = {}): DetailProvider {
   return {
     id,
     name: `Provider ${id}`,
@@ -2881,8 +2897,15 @@ function detailProvider(id: string, overrides: Record<string, unknown> = {}) {
 
 async function mockProviderDetail(
   page: Page,
-  providers: Array<ReturnType<typeof detailProvider>>,
-  options: { updates?: unknown[]; models?: unknown[]; routes?: unknown[]; syncState?: unknown } = {},
+  providers: DetailProvider[],
+  options: {
+    updates?: unknown[]
+    models?: unknown[]
+    routes?: unknown[]
+    syncState?: unknown
+    costPlans?: unknown[]
+    costPlanPosts?: unknown[]
+  } = {},
 ) {
   await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: options.routes ?? [] } }))
   await page.route('**/api/v1/providers**', async (route) => {
@@ -2895,9 +2918,30 @@ async function mockProviderDetail(
     } else if (path.endsWith('/models/sync-state') && request.method() === 'GET') {
       if (options.syncState) await route.fulfill({ json: { data: options.syncState } })
       else await route.fulfill({ status: 404, json: { error: 'not found' } })
+    } else if (/^\/providers\/[^/]+\/cost-plans$/.test(path) && request.method() === 'GET') {
+      await route.fulfill({ json: { data: options.costPlans ?? [] } })
+    } else if (/^\/providers\/[^/]+\/cost-plans$/.test(path) && request.method() === 'POST') {
+      const body = request.postDataJSON() as {
+        basis: string
+        period?: string | null
+        price?: { amount: string; currency: string } | null
+      }
+      const created = {
+        id: `plan-${(options.costPlanPosts?.length ?? 0) + 1}`,
+        provider_id: path.split('/')[2],
+        effective_from: Date.now(),
+        basis: body.basis,
+        period: body.period ?? null,
+        price: body.price ?? null,
+        created_at: detailTimestamp,
+      }
+      options.costPlanPosts?.push(body)
+      options.costPlans = [created, ...(options.costPlans ?? [])]
+      await route.fulfill({ json: { data: created } })
     } else if (/^\/providers\/[^/]+$/.test(path) && request.method() === 'PUT') {
       options.updates?.push(request.postDataJSON())
-      await route.fulfill({ json: { data: providers.find((item) => path.endsWith(item.id)) } })
+      const saved = providers.find((item) => path.endsWith(item.id))
+      await route.fulfill({ json: { data: { ...saved, cost_plan: options.costPlans?.[0] ?? null } } })
     } else {
       await route.fallback()
     }
@@ -3121,6 +3165,117 @@ test('Provider connection form fills a centered 48rem column and shows the side 
   await page.goto('/providers/clean-provider?view=connection')
   await expect(page.getByRole('button', { name: 'Save connection' })).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Connection status' })).toHaveCount(0)
+})
+
+test('Provider cost basis is the last connection form section and offers three modes', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-section-provider')
+  await mockProviderDetail(page, [provider])
+  await page.goto('/providers/cost-section-provider?view=connection')
+
+  const form = page.locator('form').filter({ has: page.getByRole('button', { name: 'Save connection' }) })
+  const sections = form.locator(':scope > section')
+  await expect(sections).toHaveCount(3)
+  await expect(sections.nth(1)).toContainText('Use proxy')
+  const costSection = sections.last()
+  await expect(costSection.getByRole('heading', { name: 'Cost basis' })).toBeVisible()
+  const networkBox = (await sections.nth(1).boundingBox())!
+  const costBox = (await costSection.boundingBox())!
+  expect(costBox.y).toBeGreaterThan(networkBox.y + networkBox.height)
+
+  const basis = page.getByRole('button', { name: 'Mode', exact: true })
+  await expect(basis).toContainText('Usage-based')
+  await expect(page.getByText('Calculated from model prices and recorded usage.')).toBeVisible()
+  await basis.click()
+  await expect(page.getByRole('option')).toHaveCount(3)
+  await expect(page.getByRole('option', { name: 'Not tracked' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'Usage-based' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'Subscription-based' })).toBeVisible()
+  await page.keyboard.press('Escape')
+})
+
+test('Provider cost draft saves one subscription plan without resubmitting the connection', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-save-provider')
+  const updates: unknown[] = []
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { updates, costPlanPosts })
+  await page.goto('/providers/cost-save-provider?view=connection')
+
+  const save = page.getByRole('button', { name: 'Save connection' })
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  await expect(page.getByRole('button', { name: 'Billing period' })).toBeVisible()
+  const price = page.getByLabel('Subscription price')
+  await expect(price).toBeVisible()
+  await page.getByRole('button', { name: 'Billing period' }).click()
+  await page.getByRole('option', { name: 'Yearly' }).click()
+  await price.fill('120.50')
+
+  await save.click()
+  await expect.poll(() => costPlanPosts.length).toBe(1)
+  expect(costPlanPosts[0]).toEqual({
+    basis: 'subscription',
+    period: 'year',
+    price: { amount: '120.50', currency: 'usd' },
+  })
+  // 只改成本时不重发连接 PUT。
+  expect(updates).toEqual([])
+  await expect(page.getByText('Cost basis saved')).toBeVisible()
+
+  // 已保存且未变化：再次保存不会追加第二条记录。
+  await save.click()
+  await expect.poll(() => updates.length).toBe(1)
+  expect(costPlanPosts).toHaveLength(1)
+})
+
+test('Provider cost draft blocks saving an invalid subscription price', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-invalid-provider')
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { costPlanPosts })
+  await page.goto('/providers/cost-invalid-provider?view=connection')
+
+  const save = page.getByRole('button', { name: 'Save connection' })
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  const price = page.getByLabel('Subscription price')
+  await price.fill('abc')
+  await expect(save).toBeDisabled()
+  await expect(page.getByText('Enter a non-negative decimal amount.')).toBeVisible()
+  await price.fill('10')
+  await expect(save).toBeEnabled()
+  expect(costPlanPosts).toEqual([])
+})
+
+test('Provider cost append failure keeps the cost draft and reports it after the connection is saved', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-failure-provider')
+  const updates: unknown[] = []
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { updates, costPlanPosts })
+  await page.route('**/api/v1/providers/cost-failure-provider/cost-plans', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    costPlanPosts.push(route.request().postDataJSON())
+    await route.fulfill({ status: 500, json: { error: 'cost plan write failed' } })
+  })
+  await page.goto('/providers/cost-failure-provider?view=connection')
+
+  await page.getByLabel('Connection name').fill('Saved with cost failure')
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  await page.getByLabel('Subscription price').fill('9.99')
+  await page.getByRole('button', { name: 'Save connection' }).click()
+
+  await expect.poll(() => updates.length).toBe(1)
+  await expect.poll(() => costPlanPosts.length).toBe(1)
+  await expect(page.getByRole('alert').filter({ hasText: 'cost plan write failed' })).toBeVisible()
+  // 连接已保存、成本未保存：成本草稿保持，可继续重试。
+  await expect(page.getByRole('button', { name: 'Mode', exact: true })).toContainText('Subscription-based')
+  await expect(page.getByLabel('Subscription price')).toHaveValue('9.99')
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
 })
 
 test('Provider upstream model table fills the 120rem container at 2560', async ({ page }) => {

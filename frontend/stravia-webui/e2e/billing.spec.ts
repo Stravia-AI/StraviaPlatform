@@ -121,3 +121,73 @@ test('API Key spend limit, spent amount, and reset use the display currency', as
   await expect(page).toHaveURL(/\/api-keys$/)
   expect(savedInput?.spend_limit).toBe('50')
 })
+
+test('API Key list shows the available balance in the display currency and Unlimited without a spend limit', async ({
+  page,
+}) => {
+  const base = {
+    rpm_limit: null,
+    is_enabled: true,
+    mcp_access_enabled: false,
+    transparent_injection_enabled: false,
+    inject_web_search: false,
+    inject_media_understanding: false,
+    inject_media_generation: false,
+    expires_at: null,
+    created_at: '2026-10-01T00:00:00Z',
+    updated_at: '2026-10-01T00:00:00Z',
+    model_ids: [],
+  }
+  const apiKeys = [
+    {
+      ...base,
+      id: 'key-capped',
+      key: 'sk-capped',
+      name: 'Capped client',
+      spend_limit: '36',
+      spend: { spent: '12.499', reset_at: null },
+      spend_available: '23.501',
+    },
+    {
+      ...base,
+      id: 'key-exhausted',
+      key: 'sk-exhausted',
+      name: 'Exhausted client',
+      spend_limit: '10',
+      spend: { spent: '12', reset_at: null },
+      spend_available: '0',
+    },
+    {
+      ...base,
+      id: 'key-unlimited',
+      key: 'sk-unlimited',
+      name: 'Unlimited client',
+      spend_limit: null,
+      spend: { spent: '3', reset_at: null },
+      spend_available: null,
+    },
+  ]
+
+  await page.route('**/api/v1/currency', async (route) => {
+    await route.fulfill({
+      json: {
+        data: { custom: { symbol: '¥', usd_rate: '8', first_rate: '8', configured_at: '2026-10-28T08:00:00Z' } },
+      },
+    })
+  })
+  await page.route('**/api/v1/api-keys', async (route) => {
+    await route.fulfill({ json: { data: apiKeys } })
+  })
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  await page.setViewportSize({ width: 1279, height: 900 })
+  await page.goto('/api-keys')
+  await expect(page.getByRole('columnheader', { name: 'Available balance' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Model access' })).toHaveCount(0)
+  const row = (name: string) => page.getByRole('row').filter({ hasText: name })
+  await expect(row('Capped client')).toContainText('¥23.50')
+  await expect(row('Exhausted client')).toContainText('¥0.00')
+  await expect(row('Unlimited client')).toContainText('Unlimited')
+})

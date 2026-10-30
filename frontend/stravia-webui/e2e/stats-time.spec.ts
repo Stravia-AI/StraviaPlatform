@@ -374,8 +374,8 @@ test.describe('statistics absolute time windows', () => {
           upstream_error_count: 0,
           avg_output_tps: 1,
           currency: CURRENCY,
-          actual_cost: knownMoney,
-          usage_equivalent_cost: null,
+          cost: knownMoney,
+          subscription: null,
         }))
       } else if (endpoint === 'api-keys') {
         data = identities.map(({ suffix, deleted, requests }) => ({
@@ -557,8 +557,8 @@ const providerRows = Array.from({ length: resourceTotal }, (_, index) => ({
   avg_duration_ms: 100,
   avg_output_tps: 10 + index,
   currency: CURRENCY,
-  actual_cost: knownMoney,
-  usage_equivalent_cost: null,
+  cost: knownMoney,
+  subscription: null,
 }))
 const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
   api_key_id: `key-${index + 1}`,
@@ -680,8 +680,8 @@ test.describe('statistics resource breakdowns', () => {
               avg_duration_ms: 100,
               avg_output_tps: 10,
               currency: CURRENCY,
-              actual_cost: knownMoney,
-              usage_equivalent_cost: null,
+              cost: knownMoney,
+              subscription: null,
             },
             {
               provider_id: 'p-healthy',
@@ -692,8 +692,8 @@ test.describe('statistics resource breakdowns', () => {
               avg_duration_ms: 100,
               avg_output_tps: 11,
               currency: CURRENCY,
-              actual_cost: knownMoney,
-              usage_equivalent_cost: null,
+              cost: knownMoney,
+              subscription: null,
             },
             {
               provider_id: 'p-idle',
@@ -704,8 +704,8 @@ test.describe('statistics resource breakdowns', () => {
               avg_duration_ms: null,
               avg_output_tps: null,
               currency: CURRENCY,
-              actual_cost: emptyMoney,
-              usage_equivalent_cost: null,
+              cost: emptyMoney,
+              subscription: null,
             },
           ],
         },

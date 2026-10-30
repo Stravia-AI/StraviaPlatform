@@ -19,7 +19,7 @@ Provider Model 价格是成本的唯一输入，因此同时把规格的人工�
 
 纳入：
 
-- Provider 成本方式：按量（默认）或订阅（月付／年付与价格），变更追加生效记录。
+- Provider 成本方式：不计算（`none`）、按量（默认）或订阅（月付／年付与价格），变更追加生效记录。
 - Provider Model 价格的币种标记与峰谷规则；价格字段逐字段固定与恢复同步。
 - Route 计费方式：不计费（默认）、按次、按 Token。
 - API Key 消费上限、已消费、清零。
@@ -167,7 +167,7 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 |`id`|TEXT PK||
 |`provider_id`|TEXT NOT NULL|不加外键，Provider 删除后保留历史|
 |`effective_from`|INTEGER NOT NULL|毫秒 UTC，等于写入时刻|
-|`basis`|TEXT NOT NULL|`usage` 或 `subscription`|
+|`basis`|TEXT NOT NULL|`none`、`usage` 或 `subscription`|
 |`period`|TEXT|`month` 或 `year`；仅订阅|
 |`price_usd_nanos`|INTEGER|仅订阅|
 |`price_custom_nanos`|INTEGER|仅订阅；未设定自定义币种时为空|
@@ -176,7 +176,12 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 
 索引 `(provider_id, effective_from)`。没有任何记录的 Provider 视为按量。
 
-- 修改成本方式或订阅价都追加一条记录，生效时间为写入时刻，不支持回溯生效或编辑旧记录。
+- 三种方式互斥，记录只追加：
+  - `none`（不计算）：不为该 Provider 的尝试估算或展示任何成本；尝试不写成本基准，也不计入未知成本。Route 计费与 Provider 成本方式无关，仍然照常记账。
+  - `usage`（按量）：按 §4.2 计价，是没有任何记录时的默认值。
+  - `subscription`（订阅）：按 §5.4 摊销，同时保留尝试的等价按量成本。
+- `none` 与 `usage` 记录不携带 `period`、`price` 或 `price_currency`；订阅记录必须携带三者。
+- 修改成本方式或订阅价都追加一条记录，生效时间为写入时刻，不支持回溯生效或编辑旧记录。任何一条新记录都结束前一段订阅的摊销；切到 `none` 同样会停止摊销。
 - 删除 Provider 时，若当前为订阅，在同一事务内追加一条 `usage` 记录作为订阅终点，历史摊销保持不变。
 - 复制 Provider（`/api/v1/providers/{id}/copy`）不复制成本方式，新 Provider 从按量开始，避免同一订阅被计两次。
 
@@ -207,19 +212,20 @@ Provider Model 价格来自 `RoutePolicyState` 现有的定价派生缓存（`ba
 
 ```rust
 pub struct AttemptAmounts {
-    pub cost_basis: CostBasis,              // Usage | Subscription
-    pub cost: Option<Amount>,               // None = 未知
+    pub cost_basis: CostBasis,              // Usage | Subscription | Untracked
+    pub cost: Option<Amount>,               // None = 未知或不计算
     pub billing: Option<BillingOutcome>,    // None = 不计费
 }
 pub enum BillingOutcome { Charged(Amount), Unknown }
 ```
 
-每次尝试至多确认一次用量，且在 `finish` 之前或之中完成，因此金额在 `finish` 一次算定。所有尝试都计成本：重试、故障切换、隐藏轮次与平台内部调用。成本未知的原因包括：用量未知、所需分项无价、找不到 Provider Model。新尝试通过 `RunEvent::TargetAttemptStarted` 保存 `cost_basis`；崩溃恢复时补写的 `interrupted` 终态不带金额但保留该成本方式，记为成本未知。运行中的尝试，以及没有 `cost_basis` 的历史尝试，不计入未知成本次数。
+每次尝试至多确认一次用量，且在 `finish` 之前或之中完成，因此金额在 `finish` 一次算定。除 `none` Provider 外，所有尝试都计成本：重试、故障切换、隐藏轮次与平台内部调用。成本未知的原因包括：用量未知、所需分项无价、找不到 Provider Model。新尝试通过 `RunEvent::TargetAttemptStarted` 保存 `cost_basis`；`none` Provider 的尝试写 `None`，`finish` 不估算金额，观测存储把 `cost_basis` 与金额列都留空，因此既不显示成本也不计入未知。崩溃恢复时补写的 `interrupted` 终态不带金额但保留该成本方式：有基准时记为成本未知，`none` 时仍为空。运行中的尝试，以及没有 `cost_basis` 的历史尝试，不计入未知成本次数。
 
 观测写入（`backend/crates/stravia-core/src/interaction_observation/store.rs`）把金额写入 SQLite 与 PostgreSQL 的 `target_attempt_observations` 新列（§7.1），触发器负责累计。没有观测作用域的模型调用不产生任何金额；所有归属 API Key 的路径（代理请求、Agent 循环、MCP `tools/call` 调用的平台工具，包括外部搜索）都运行在观测作用域内。
 
-### 5.4 实际成本与订阅摊销
+### 5.4 实际成本、订阅摊销与价值对比
 
+- **不计算 Provider**：不产生任何成本金额，Provider 统计的成本为 `null`，尝试也不计入未知成本。
 - **按量 Provider**：实际成本 = `cost_basis = usage` 的尝试成本之和。
 - **订阅 Provider**：实际成本 = 查询窗口与各订阅生效段重叠部分的线性摊销。月 = 365/12 天，年 = 365 天：
 
@@ -227,8 +233,18 @@ $$
 \text{摊销} = \sum_{\text{订阅段}} \frac{\lvert [\text{段起},\text{段止}) \cap [\text{窗口起},\text{窗口止}) \rvert}{\text{周期长度}} \times \text{价格}
 $$
 
-  段止为下一条记录的 `effective_from`，最新一段止于当前时刻。订阅 Provider 的尝试成本仍按价格计算，展示为等价按量成本，不计入实际成本。
+  段止为下一条记录的 `effective_from`（任何成本方式，包括 `none`），最新一段止于当前时刻。订阅 Provider 的尝试成本仍按价格计算，作为等价按量成本（`usage_equivalent_cost`），不计入实际成本。
 - **全局实际成本** = 全部按量尝试成本 + 全部订阅摊销（包括已删除 Provider 的历史段）。
+
+订阅价值对比（`SubscriptionValue`）只在窗口与订阅段重叠时出现：
+
+- `cost`：该窗口的摊销订阅费用；
+- `usage_equivalent_cost`：同窗口内按订阅基准完成的尝试的等价按量成本；
+- `multiple`：`usage_equivalent_cost / cost`，用展示币种的精确十进制相除，按「中点远离零」保留 4 位小数；分母为 0 或任一侧不可表示时为 `null`。
+
+倍数是展示口径的比值，不参与准入、计费或路由判断。等价成本存在未知尝试时它是下界：真实按量成本只会更高，因此 WebUI 在 `usage_equivalent_cost.unknown_count > 0` 时标注「≥」，Core 仍返回原值。
+
+保留「按窗口线性日摊销 + 同窗口比值」的理由：摊销是时间的线性函数，对任意窗口可加，多个相邻窗口之和等于合并窗口的结果；生效记录只保存变更时刻与价格，没有也不打算保存续费锚点或账单日，按锚点切分会让历史窗口的结果依赖后来才写入的信息。代价是订阅费用按自然时间均匀分摊，不反映某个月的实际天数或真实扣费日；对「这个窗口内订阅值不值」的判断足够，且同一规则适用于所有 Provider 与所有窗口。本次新增的是精确十进制的 4 位小数倍数、未知尝试时的下界标注，以及分母为 0 时不给出倍数。
 
 摊销在查询时由 Core 从 `provider_cost_plans` 计算；记录数很少，不进入统计桶。订阅价格按 §3.3 的双金额规则展示。记录的生效时间无法表示时，统计查询返回错误，不跳过该记录生成不完整的已知金额。
 
@@ -292,7 +308,7 @@ $$
 
 ### 7.1 `0030_cost_and_billing.sql`
 
-- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。尝试开始时即保存 `cost_basis`；只有进入终态后，`cost_basis` 非空而 `cost_usd_nanos` 为空才计为成本未知，因此崩溃恢复不会漏计，仍在运行的尝试也不会提前计入未知数。历史行全部为空，不计入任何覆盖率。
+- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。尝试开始时即保存 `cost_basis`；只有进入终态后，`cost_basis` 非空而 `cost_usd_nanos` 为空才计为成本未知，因此崩溃恢复不会漏计，仍在运行的尝试也不会提前计入未知数。`none` Provider 的尝试写 `NULL` 且不带金额，既不产生金额也不计入未知。历史行全部为空，不计入任何覆盖率。
 - `stats_usage_buckets` 与 `stats_usage_checkpoints` 各新增 12 列，均为 `INTEGER NOT NULL DEFAULT 0`：
   - 全部尝试成本：`cost_custom_nanos`、`cost_usd_unconverted_nanos`、`cost_known_count`、`cost_unknown_count`；
   - 按量尝试成本：`payg_cost_custom_nanos`、`payg_cost_usd_unconverted_nanos`、`payg_cost_known_count`、`payg_cost_unknown_count`；
@@ -329,23 +345,27 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |`GET /api/v1/currency`|返回 `{custom: null}` 或 §3.2 的对象|
 |`PUT /api/v1/currency`|`{symbol, usd_rate}`；首次设定执行 §3.2 的换算；没有 DELETE|
 |`GET /api/v1/providers/{id}/cost-plans`|生效记录列表，新到旧|
-|`POST /api/v1/providers/{id}/cost-plans`|`{basis, period?, price?: {amount, currency}}`，追加一条|
-|Provider 详情|增加当前成本方式|
+|`POST /api/v1/providers/{id}/cost-plans`|`{basis: "none" \| "usage" \| "subscription", period?, price?: {amount, currency}}`，追加一条；`none` 与 `usage` 不接受 `period`／`price`／`currency`|
+|Provider 详情|增加当前成本方式（`none`／`usage`／`subscription`）|
 |`PUT /api/v1/providers/{id}/model`|改为 `{model_id, revision, changes}`，`changes` 只含改动字段，出现即固定|
 |`POST /api/v1/providers/{id}/model/restore-sync`|`{model_id, revision, fields}`，返回 `ProviderModelDetail`|
 |`POST /api/v1/providers/{id}/model/reimport`|删除|
 |`ProviderModelDetail`|删除 `can_reimport`；增加 `pinned_fields` 与 `restorable_fields`|
 |`POST/PUT /api/v1/models[/{route_id}]`|增加 `billing`|
 |`POST/PUT /api/v1/api-keys[/{id}]`|增加 `spend_limit`（十进制字符串或 `null`，展示币种）|
-|`GET /api/v1/api-keys[/{id}]`|增加 `spend: {spent, reset_at}`|
+|`GET /api/v1/api-keys[/{id}]`|增加 `spend: {spent, reset_at}` 与 `spend_available`（展示币种下的剩余额度，十进制字符串；`max(0, spend_limit - spent)`，无限额时为 `null`）|
 |`POST /api/v1/api-keys/{id}/spend/reset`|清零，返回新的 `spend`|
 |`/api/v1/stats/*`|增加金额字段（见下）|
-|请求详情|每个尝试增加 `cost` 与 `billing`|
+|请求详情|每个尝试增加 `cost` 与 `billing`；`none` Provider 的尝试两者与 `cost_basis` 均为 `null`|
 
 金额字段统一为 `{amount: "12.34", known_count, unknown_count}`，另附 `currency: {kind: "usd" | "custom", symbol}`：
 
-- `overview`、`series` 与 `providers`：`actual_cost`；订阅 Provider 另有 `usage_equivalent_cost`。
+- `overview`：`actual_cost`（不变）；窗口与订阅段重叠时另有 `subscription: SubscriptionValue`。
+- `series`：`actual_cost`（不变）。
+- `providers`：`cost`（该 Provider 全部受追踪尝试的按量估价：按量尝试取实际成本，订阅尝试取等价按量成本；既无受追踪尝试也无订阅段重叠时为 `null`）与 `subscription`（`SubscriptionValue`，无订阅段重叠时为 `null`）。删除原 `actual_cost` 与 `usage_equivalent_cost`。
 - `models`（Route）与 `api-keys`：`cost`（所有尝试的按量估价，包括订阅 Provider 的等价按量成本）与 `billing`；不把 Provider 订阅摊销分配到 Route 或 API Key。
+
+`SubscriptionValue = {cost: 金额, usage_equivalent_cost: 金额, multiple: "1.2345" | null}`：`cost` 是窗口内摊销订阅费用（两个计数恒为 0，摊销溢出时为 `unknown_count: 1`），`usage_equivalent_cost` 是同窗口内订阅基准尝试的等价按量成本，`multiple` 是两者之比的 4 位小数（见 §5.4）。
 
 ## 9. WebUI
 
@@ -356,10 +376,10 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |设置|`frontend/stravia-webui/src/routes/settings/+page.svelte`|「自定义币种」：符号与「1 USD = X」；首次保存前确认，说明设定后不能删除、现有消费上限会按此汇率换算|
 |共享价格编辑器|`price-editor.svelte`、`price-form.ts`|四项价格、上下文分档、每项的币种切换（仅在设有自定义币种时出现）、「添加峰谷定价」；供 Provider Model 与 Route 共用|
 |Provider Model 编辑|`provider-model-editor.svelte`、`provider-model-form.ts`、`provider-model-editing.ts`|字段标签旁显示已固定状态与「恢复同步」；只提交改动字段；删除重新导入菜单与相关文案|
-|Provider|`provider-editor.svelte`、`routes/providers/[id]/+page.svelte`|成本方式：按量／订阅（月付或年付、价格、币种），显示当前生效记录与变更历史|
-|Route|`model-editor.svelte`|计费：不计费／按次（金额与币种）／按 Token（共享价格编辑器）|
-|API Key|`api-key-editor.svelte`、`routes/api-keys/[id]/+page.svelte`|消费上限输入；详情显示已消费、上次清零时间与「清零」按钮（需确认）|
-|用量统计|`routes/stats/+page.svelte`|全局与 Provider：实际成本，订阅 Provider 另列等价按量成本；Route 与 API Key：按量成本、计费金额与已知覆盖率|
+|Provider|`provider-connection-view.svelte`、`routes/providers/[id]/+page.svelte`|成本方式是连接表单内联的 `FormSection`，与「连接」「网络」同级并位于最后，随「保存连接」一起提交；三种方式：不计算／按量／订阅（月付或年付、价格、币种）；显示当前生效记录与变更历史|
+|Route|`model-editor.svelte`|计费：不计费／按次（金额与币种）／按 Token（共享价格编辑器）；当前只在 API Key 页面与模型设置页展示，不进入用量统计的 Route 行|
+|API Key|`api-key-editor.svelte`、`routes/api-keys/[id]/+page.svelte`|消费上限输入；列表以「可用余额」列替代「模型访问」，详情显示已消费、可用余额、上次清零时间与「清零」按钮（需确认）|
+|用量统计|`routes/stats/+page.svelte`|全局：实际成本与订阅价值（订阅费用、等价按量成本、价值倍数）；Provider 行：按量成本、订阅费用、价值倍数（`none` 不显示成本）；Route 与 API Key：按量成本、计费金额与已知覆盖率。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
 |请求详情|`observation-inspector-content.svelte`|每个尝试显示成本（订阅 Provider 标注为等价按量）与计费；未知显示「未知」|
 
 价格编辑器负责必填项与数字、时间的输入语法；时区、星期、时段顺序与重叠、倍率有效性由 Core 统一校验。保存失败时显示 Core 错误并保留草稿，取消编辑或切换模型后清除对应错误。
@@ -368,9 +388,12 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 
 订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示，并单独呈现覆盖率；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。金额卡片与成本趋势使用同一规则，未知尝试不能被画成已知零成本。
 
+订阅价值倍数直接展示 Core 返回的 4 位小数；`usage_equivalent_cost.unknown_count > 0` 时显示为下界（「≥」）。`multiple` 为 `null`（订阅费用为零或任一侧不可表示）时不显示倍数。金额统一由 WebUI 格式化器四舍五入到 2 位小数，Core 返回的纳精度值不截断。
+
 ## 10. 验证计划
 
-- **计价函数单元测试**：选档边界（等于阈值不进档）、零 Token 分项不需要价格、缺价未知、缓存未知按 0、峰谷时段起止边界、跨夏令时的时区、混合币种两侧精确与取整、溢出变未知。
+- **计价函数单元测试**：选档边界（等于阈值不进档）、零 Token 分项不需要价格、缺价未知、缓存未知按 0、峰谷时段起止边界、跨夏令时的时区、混合币种两侧精确与取整、溢出变未知；价值倍数的 4 位小数取整、分母为零与不可换算时不返回倍数。
+- **成本方式测试**：`none` 计划不接受订阅字段；切到 `none` 会结束前一段订阅摊销；`none` Provider 的尝试写入空成本基准与空金额，且不计入未知成本；切回按量或订阅后恢复成本与订阅价值展示。
 - **存储行为的 HTTP E2E（SQLite 与 PostgreSQL）**：尝试结束后桶的金额与计数；有无自定义金额分列；`api_key_spend` 累加、清零、已删除 Key 跳过；观测明细删除不回退统计；`provider_cost_plans` 追加与 Provider 删除时补终点。
 - **迁移测试**：`edited` 带来源→`imported` 全固定，`edited` 无来源不变，阶段中途失败后重入，`0031` 未应用时阶段会重跑。
 - **HTTP E2E**：达到上限后四种协议的 429 错误体，没有 `Retry-After`；调高上限与清零后恢复；MCP `tools/call` 被拒；被拒请求计入错误的请求；首次设定币种后上限换算。

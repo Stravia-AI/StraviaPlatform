@@ -3,11 +3,20 @@ import * as m from '#lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { onDestroy, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
-import { admin } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
+import { formatLogTime } from '#lib/format.js'
 import { localeState } from '#lib/localization.svelte.js'
+import { currencyForKind, formatCostPlanPrice } from '#lib/money.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
+import {
+  costDraftFromPlan,
+  costDraftIssue,
+  costDraftMatchesPlan,
+  costPlanInput,
+  type ProviderCostDraftFields,
+} from '#lib/provider-cost-draft.js'
 import {
   mergeProviderValidationIssues,
   providerConnectionCheckBaseUrlIssues,
@@ -18,16 +27,28 @@ import {
   providerConnectionCheckUnsupportedMessage,
 } from '#lib/provider-connection-check.js'
 import { ProviderConnectionDraft, type ProviderConnectionSubmission } from '#lib/provider-connection-draft.svelte.js'
-import type { Provider, ProviderValidationIssue, UpdateProvider } from '#lib/types.js'
+import type {
+  CostBasis,
+  CurrencyKind,
+  Provider,
+  ProviderCostPlan,
+  ProviderValidationIssue,
+  SubscriptionPeriod,
+  UpdateProvider,
+} from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import FormSection from '#lib/components/form-section.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderConnectionStatus from '#lib/components/provider-connection-status.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
+import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
+import * as InputGroup from '#lib/components/ui/input-group/index.js'
+import * as Select from '#lib/components/ui/select/index.js'
+import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import SettingRow from '#lib/components/setting-row.svelte'
 import { Switch } from '#lib/components/ui/switch/index.js'
@@ -66,6 +87,34 @@ const oauthProvider = $derived(Boolean(channel?.auth))
 const supportsDiscovery = $derived(channel?.capabilities.includes('model_discovery') ?? false)
 const supportsConfigValidation = $derived(channel?.capabilities.includes('config_validation') ?? false)
 
+// 成本草稿与连接字段同属一份表单：成本查询只用于历史与当前生效记录，
+// 编辑状态从 Provider 详情里的当前记录起步，不另开编辑表面。
+const costPlansQuery = createQuery(() => ({
+  queryKey: ['provider-cost-plans', provider.id],
+  queryFn: () => admin.providers.costPlans(provider.id),
+}))
+const currencyQuery = createQuery(() => currencyQueryOptions())
+const customCurrency = $derived(currencyQuery.data ?? null)
+const costPlans = $derived(costPlansQuery.data ?? [])
+const effectiveCostPlan = $derived(costPlans[0] ?? provider.cost_plan ?? null)
+let costFields = $state<ProviderCostDraftFields>(costDraftFromPlan(untrack(() => provider.cost_plan)))
+let costTouched = $state(false)
+let costSaving = $state(false)
+let costError = $state('')
+let costSaveAttempted = $state(false)
+const costDirty = $derived(!costDraftMatchesPlan(costFields, effectiveCostPlan))
+const costIssue = $derived(costDraftIssue(costFields))
+const showCostIssue = $derived(Boolean(costIssue) && (costFields.amount.length > 0 || costSaveAttempted))
+
+// 历史记录晚于 Provider 详情到达时，未编辑过的草稿跟随最新生效记录，避免表单凭空变脏。
+$effect(() => {
+  const plan = costPlansQuery.data?.[0]
+  if (!plan || costTouched) return
+  untrack(() => {
+    costFields = costDraftFromPlan(plan)
+  })
+})
+
 function updateProvider(submission: ProviderConnectionSubmission): Promise<Provider> {
   const input: UpdateProvider = {
     name: submission.name,
@@ -103,7 +152,14 @@ const draft = new ProviderConnectionDraft({
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
       ])
-      toast.success(m.provider_connection_view_connection_settings_saved())
+      // 连接保存成功后再追加成本记录；追加失败只留下成本草稿与错误，不回滚已保存的连接。
+      const savingCost = costDirty
+      const costSaved = await appendCostPlanIfChanged()
+      toast.success(
+        savingCost && costSaved
+          ? m.provider_connection_view_connection_and_cost_saved()
+          : m.provider_connection_view_connection_settings_saved(),
+      )
       onSaved?.(saved)
     },
     onPartialSave: (saved) => {
@@ -113,6 +169,7 @@ const draft = new ProviderConnectionDraft({
         queryClient.invalidateQueries({ queryKey: ['providers'] }),
         queryClient.invalidateQueries({ queryKey: ['provider-models', provider.id] }),
       ]).catch((error) => toast.error(localizeBackendErrorMessage(error)))
+      void appendCostPlanIfChanged()
 
       onSaved?.(saved)
     },
@@ -139,9 +196,14 @@ const submitMessage = $derived(
       : '',
 )
 
-// 草稿离开保护：路由离开、刷新与关页在有未保存变更时先确认；提交期间（preview → write → bind）锁定。
+// 连接与成本同属一份表单：任一草稿有未保存变更都触发离开确认，提交期间一起锁定。
+const formError = $derived([connectionError, submitMessage, previewIssueError, costError].filter(Boolean).join(' '))
 const baseline = new DraftBaseline(() => draft.fields)
-const guard = new DraftGuard({ dirty: () => baseline.dirty, busy: () => draft.submitting })
+const busy = $derived(draft.submitting || costSaving)
+const dirty = $derived(baseline.dirty || costDirty)
+// 只有成本变化时不需要连接可提交；连接有改动时仍按原有连接校验决定。
+const canSave = $derived(!costIssue && (draft.submittable || (costDirty && !baseline.dirty)))
+const guard = new DraftGuard({ dirty: () => dirty, busy: () => busy })
 
 onDestroy(() => {
   invalidateConnectionCheck()
@@ -185,9 +247,13 @@ $effect(() => {
   untrack(invalidateConnectionCheck)
 })
 
-// 取消：把草稿还原为已保存的连接并放弃进行中的授权；有改动时先经过离开确认。
+// 取消：把连接与成本草稿都还原为已保存状态，并放弃进行中的授权；有改动时先经过离开确认。
 function revert(): void {
   invalidateConnectionCheck()
+  costError = ''
+  costSaveAttempted = false
+  costTouched = false
+  costFields = costDraftFromPlan(effectiveCostPlan)
   void draft
     .resetConnection({
       name: provider.name,
@@ -201,7 +267,108 @@ function revert(): void {
 
 function save(): void {
   invalidateConnectionCheck()
+  costError = ''
+  if (busy) return
+  if (costIssue) {
+    costSaveAttempted = true
+    return
+  }
+  // 只有成本草稿变化时，不重跑连接预览与 PUT，直接追加生效记录。
+  if (!baseline.dirty && costDirty) {
+    void appendCostPlanIfChanged().then((saved) => {
+      if (saved) toast.success(m.cost_plan_saved())
+    })
+    return
+  }
   void draft.submit()
+}
+
+function costBasisLabel(basis: CostBasis): string {
+  if (basis === 'none') return m.cost_basis_none()
+  if (basis === 'subscription') return m.cost_basis_subscription()
+  return m.cost_basis_usage()
+}
+
+function costBasisHelp(basis: CostBasis): string {
+  if (basis === 'none') return m.cost_basis_none_help()
+  if (basis === 'subscription') return m.cost_basis_subscription_help()
+  return m.cost_basis_usage_help()
+}
+
+function planSummary(plan: ProviderCostPlan | null): string {
+  if (!plan || plan.basis === 'usage') return m.cost_basis_usage()
+  if (plan.basis === 'none') return m.cost_basis_none()
+  const periodLabel = plan.period === 'year' ? m.cost_period_year() : m.cost_period_month()
+  return `${periodLabel} · ${formatCostPlanPrice(plan.price, customCurrency)}`
+}
+
+function costChanged(): void {
+  costTouched = true
+  costError = ''
+  costSaveAttempted = false
+}
+
+function setCostBasis(value: string): void {
+  if (!value || value === costFields.basis) return
+  const previous = costFields.basis
+  costFields.basis = value as CostBasis
+  // 新建订阅价格时沿用展示币种（与旧编辑器一致）；已有价格写法保持不变。
+  if (value === 'subscription' && previous !== 'subscription' && !costFields.amount) {
+    costFields.currency = customCurrency ? 'custom' : 'usd'
+  }
+  costChanged()
+}
+
+function setCostPeriod(value: string): void {
+  if (!value || value === costFields.period) return
+  costFields.period = value as SubscriptionPeriod
+  costChanged()
+}
+
+function setCostCurrency(value: string): void {
+  if (!value || value === costFields.currency) return
+  costFields.currency = value as CurrencyKind
+  costChanged()
+}
+
+/**
+ * 追加成本记录。与生效记录相同时不发请求；失败时保留草稿与错误，
+ * 连接保存已经成功的事实不受影响。返回值表示成本记录是否已与草稿一致。
+ */
+async function appendCostPlanIfChanged(): Promise<boolean> {
+  if (costSaving) return false
+  if (!costDirty) return true
+  const input = costPlanInput(costFields)
+  if (!input) {
+    costSaveAttempted = true
+    return false
+  }
+  costSaving = true
+  costError = ''
+  try {
+    const plan = await admin.providers.appendCostPlan(provider.id, input)
+    queryClient.setQueryData<ProviderCostPlan[]>(['provider-cost-plans', provider.id], (current) => [
+      plan,
+      ...(current ?? []),
+    ])
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['provider-cost-plans', provider.id] }),
+      queryClient.invalidateQueries({ queryKey: ['providers'] }),
+      queryClient.invalidateQueries({ queryKey: ['stats-providers'] }),
+    ])
+    // 以服务端返回的记录重置草稿，避免金额写法被规范化后仍被判为未保存。
+    costFields = costDraftFromPlan(plan)
+    costTouched = false
+    costSaveAttempted = false
+    return true
+  } catch (error) {
+    costError = localizeBackendErrorMessage(error)
+    // 连接可能已经保存：刷新 Provider 数据，成本草稿保持未保存，错误留在表单里。
+    await queryClient.invalidateQueries({ queryKey: ['providers'] })
+    return false
+  } finally {
+    costSaving = false
+  }
 }
 
 function nameChanged(): void {
@@ -226,7 +393,7 @@ function oauthStateChanged(sessionId: string | undefined, ready: boolean): void 
 }
 
 async function testConnection(): Promise<void> {
-  if (testing || draft.submitting || !descriptor || !channel) return
+  if (testing || busy || !descriptor || !channel) return
   const input = draft.connectionCheckInput({ kind: 'edit', provider, descriptor, channel })
   invalidateConnectionCheck()
   testing = true
@@ -288,12 +455,7 @@ async function testConnection(): Promise<void> {
           class="@2xl/provider-form:grid @2xl/provider-form:grid-cols-[minmax(0,16rem)_minmax(0,1fr)] @2xl/provider-form:gap-x-6">
           <Field.Field>
             <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
-            <Input
-              id="provider-name"
-              bind:value={draft.fields.name}
-              required
-              disabled={draft.submitting}
-              oninput={nameChanged} />
+            <Input id="provider-name" bind:value={draft.fields.name} required disabled={busy} oninput={nameChanged} />
           </Field.Field>
           <Field.Field data-invalid={baseUrlIssues.length > 0 || undefined}>
             <Field.Label for="provider-base-url">{m.common_base_url()}</Field.Label>
@@ -303,7 +465,7 @@ async function testConnection(): Promise<void> {
               bind:value={draft.fields.baseUrl}
               type="url"
               required={!supportsConfigValidation}
-              disabled={draft.submitting}
+              disabled={busy}
               aria-invalid={baseUrlIssues.length > 0 || undefined}
               oninput={configurationChanged} />
             {#each baseUrlIssues as issue, index (`${issue.field}:${issue.code}:${index}`)}
@@ -320,7 +482,7 @@ async function testConnection(): Promise<void> {
               issues={configurationIssues}
               idPrefix={`provider-config-${provider.id}`}
               vendorName={descriptor.display_name}
-              disabled={draft.submitting}
+              disabled={busy}
               onChanged={configurationChanged} />
           {/if}
         </Field.Group>
@@ -343,7 +505,7 @@ async function testConnection(): Promise<void> {
             configuration={draft.oauthConfiguration}
             useProxy={draft.fields.useProxy}
             mode="reconnect"
-            disabled={draft.submitting}
+            disabled={busy}
             onStateChange={oauthStateChanged} />
         {/if}
       </FormSection>
@@ -358,18 +520,128 @@ async function testConnection(): Promise<void> {
           <Switch
             id="provider-use-proxy"
             checked={draft.fields.useProxy}
-            disabled={draft.submitting}
+            disabled={busy}
             onCheckedChange={useProxyChanged} />
         </SettingRow>
       </FormSection>
 
-      {#if connectionError || submitMessage || previewIssueError || connectionNotice}
+      <FormSection title={m.cost_plan_section()}>
+        <Field.Group>
+          <Field.Field size="setting">
+            <Field.Label for="provider-cost-basis" hint={m.cost_plan_help()}>{m.cost_plan_basis()}</Field.Label>
+            <Select.Root type="single" value={costFields.basis} onValueChange={setCostBasis} disabled={busy}>
+              <Select.Trigger id="provider-cost-basis" class="w-full" aria-label={m.cost_plan_basis()}>
+                {costBasisLabel(costFields.basis)}
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  <Select.Item value="none">{m.cost_basis_none()}</Select.Item>
+                  <Select.Item value="usage">{m.cost_basis_usage()}</Select.Item>
+                  <Select.Item value="subscription">{m.cost_basis_subscription()}</Select.Item>
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+            <Field.Description>{costBasisHelp(costFields.basis)}</Field.Description>
+          </Field.Field>
+
+          {#if costFields.basis === 'subscription'}
+            <Field.Group
+              class="@2xl/provider-form:grid @2xl/provider-form:grid-cols-[minmax(0,16rem)_minmax(0,1fr)] @2xl/provider-form:gap-x-6">
+              <Field.Field size="setting">
+                <Field.Label for="provider-cost-period">{m.cost_plan_period()}</Field.Label>
+                <Select.Root type="single" value={costFields.period} onValueChange={setCostPeriod} disabled={busy}>
+                  <Select.Trigger id="provider-cost-period" class="w-full" aria-label={m.cost_plan_period()}>
+                    {costFields.period === 'year' ? m.cost_period_year() : m.cost_period_month()}
+                  </Select.Trigger>
+                  <Select.Content>
+                    <Select.Group>
+                      <Select.Item value="month">{m.cost_period_month()}</Select.Item>
+                      <Select.Item value="year">{m.cost_period_year()}</Select.Item>
+                    </Select.Group>
+                  </Select.Content>
+                </Select.Root>
+              </Field.Field>
+              <Field.Field data-invalid={showCostIssue || undefined}>
+                <Field.Label for="provider-cost-amount">{m.cost_plan_price()}</Field.Label>
+                <InputGroup.Root>
+                  <InputGroup.Addon align="inline-start">
+                    <InputGroup.Text class="font-technical"
+                      >{currencyForKind(costFields.currency, customCurrency).symbol}</InputGroup.Text>
+                  </InputGroup.Addon>
+                  <InputGroup.Input
+                    id="provider-cost-amount"
+                    bind:value={costFields.amount}
+                    inputmode="decimal"
+                    class="font-technical"
+                    placeholder="0.00"
+                    autocomplete="off"
+                    disabled={busy}
+                    aria-invalid={showCostIssue || undefined}
+                    oninput={costChanged} />
+                </InputGroup.Root>
+                <Field.Description>{m.cost_plan_price_help()}</Field.Description>
+                {#if showCostIssue}<Field.Error>{costIssue}</Field.Error>{/if}
+              </Field.Field>
+              {#if customCurrency}
+                <Field.Field size="setting">
+                  <Field.Label for="provider-cost-currency">{m.cost_plan_currency()}</Field.Label>
+                  <Select.Root
+                    type="single"
+                    value={costFields.currency}
+                    onValueChange={setCostCurrency}
+                    disabled={busy}>
+                    <Select.Trigger id="provider-cost-currency" class="w-full" aria-label={m.cost_plan_currency()}>
+                      {costFields.currency === 'custom' ? customCurrency.symbol : m.pricing_currency_usd()}
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        <Select.Item value="usd">{m.pricing_currency_usd()}</Select.Item>
+                        <Select.Item value="custom">{customCurrency.symbol}</Select.Item>
+                      </Select.Group>
+                    </Select.Content>
+                  </Select.Root>
+                </Field.Field>
+              {/if}
+            </Field.Group>
+          {/if}
+        </Field.Group>
+
+        <p class="text-xs leading-normal text-muted-foreground">{m.cost_plan_effective_help()}</p>
+
+        <div class="flex min-w-0 flex-col gap-1">
+          <h4 class="text-sm font-medium">{m.cost_plan_history()}</h4>
+          {#if costPlansQuery.error && costPlansQuery.data === undefined}
+            <RequestFailure
+              title={m.cost_plan_not_loaded()}
+              message={localizeBackendErrorMessage(costPlansQuery.error)}
+              retry={() => void costPlansQuery.refetch()}
+              retrying={costPlansQuery.isFetching} />
+          {:else if costPlansQuery.isPending}
+            <div class="flex flex-col gap-2 py-1" aria-busy="true">
+              <Skeleton class="h-4 w-40" />
+              <Skeleton class="h-4 w-56" />
+            </div>
+          {:else if costPlans.length === 0}
+            <p class="py-1 text-sm text-muted-foreground">{m.cost_plan_no_history()}</p>
+          {:else}
+            <ul class="border-y" aria-label={m.cost_plan_history()}>
+              {#each costPlans as plan (plan.id)}
+                <li class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2 not-first:border-t">
+                  <span class="min-w-0 text-sm">{planSummary(plan)}</span>
+                  <span class="font-technical text-xs text-muted-foreground tabular-nums"
+                    >{formatLogTime(plan.effective_from)}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      </FormSection>
+
+      {#if formError || connectionNotice}
         <p
-          class={connectionError || submitMessage || previewIssueError
-            ? 'text-sm text-destructive'
-            : 'text-sm text-muted-foreground'}
-          role={connectionError || submitMessage || previewIssueError ? 'alert' : 'status'}>
-          {connectionError || submitMessage || previewIssueError || connectionNotice}
+          class={formError ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'}
+          role={formError ? 'alert' : 'status'}>
+          {formError || connectionNotice}
         </p>
       {/if}
       <!-- 固定操作区：在文档流中保留空间，不覆盖最后一个字段；取消在前、保存在后。 -->
@@ -382,7 +654,7 @@ async function testConnection(): Promise<void> {
             class="me-auto"
             data-provider-connection-check
             onclick={() => void testConnection()}
-            disabled={testing || draft.submitting}
+            disabled={testing || busy}
             aria-busy={testing}
             aria-describedby="provider-connection-check-hint">
             {#if testing}<Spinner data-icon="inline-start" />{/if}
@@ -400,9 +672,9 @@ async function testConnection(): Promise<void> {
           type="button"
           variant="outline"
           onclick={() => guard.request(revert)}
-          disabled={draft.submitting || (!baseline.dirty && !draft.oauthSessionId)}>{m.common_cancel()}</Button>
-        <Button type="submit" disabled={draft.submitting || !draft.submittable}>
-          {#if draft.submitting}<Spinner data-icon="inline-start" />{/if}
+          disabled={busy || (!dirty && !draft.oauthSessionId)}>{m.common_cancel()}</Button>
+        <Button type="submit" disabled={busy || !canSave}>
+          {#if busy}<Spinner data-icon="inline-start" />{/if}
           {m.provider_connection_view_save_connection()}
         </Button>
       </div>

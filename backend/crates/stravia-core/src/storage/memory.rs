@@ -1540,7 +1540,7 @@ impl MoneyStore for MemoryStorage {
         );
         let custom = self.custom_currency().await?;
         let (period, price, currency) = match input.basis {
-            CostBasis::Usage => (None, None, None),
+            CostBasis::Untracked | CostBasis::Usage => (None, None, None),
             CostBasis::Subscription => {
                 let period = input.period.context("subscription requires a period")?;
                 let amount = input.price.context("subscription requires a price")?;

@@ -8,6 +8,8 @@ export interface ApiKey {
   /** Decimal string in the current display currency; null means unlimited. */
   spend_limit?: string | null
   spend?: ApiKeySpend
+  /** 剩余可消费金额（展示币种，已消费超出上限时为 "0"）；不限时为 null。 */
+  spend_available?: string | null
   is_enabled: boolean
   mcp_access_enabled: boolean
   transparent_injection_enabled: boolean

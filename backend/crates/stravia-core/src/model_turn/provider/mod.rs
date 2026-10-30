@@ -204,7 +204,7 @@ impl AttemptObservation {
                 upstream_model: actual_model,
                 protocol,
                 upstream_url: upstream_base_url,
-                cost_basis: Some(cost.cost_basis),
+                cost_basis: cost.cost_basis.attempt_basis(),
             });
         }
         let observed = observer.is_some();
@@ -454,11 +454,17 @@ impl AttemptObservation {
         if let Some(observer) = &self.observer {
             let usage = self.confirmed_usage.lock().clone();
             let currency = self.cost.currency.as_deref();
-            // Every finished attempt carries a cost basis; a missing price or
-            // unknown usage records unknown rather than zero. Billing exists
-            // only for completed attempts of an API-Key-scoped Principal.
-            let cost = match (self.cost.pricing.as_deref(), usage.as_ref()) {
-                (Some(pricing), Some(usage)) => {
+            // A finished attempt carries a cost basis unless the Provider is
+            // untracked; a missing price or unknown usage records unknown
+            // rather than zero. Billing exists only for completed attempts of
+            // an API-Key-scoped Principal.
+            // 不计算成本的 Provider 不估算也不记录金额，尝试不写成本基准。
+            let cost = match (
+                self.cost.cost_basis.attempt_basis(),
+                self.cost.pricing.as_deref(),
+                usage.as_ref(),
+            ) {
+                (Some(_), Some(pricing), Some(usage)) => {
                     crate::pricing::estimate_cost(pricing, usage, self.started_wall, currency)
                 }
                 _ => None,

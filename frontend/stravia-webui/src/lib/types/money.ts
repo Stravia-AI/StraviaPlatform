@@ -34,7 +34,7 @@ export interface ProviderCostPlanPrice {
   currency: CurrencyKind
 }
 
-export type CostBasis = 'usage' | 'subscription'
+export type CostBasis = 'none' | 'usage' | 'subscription'
 export type SubscriptionPeriod = 'month' | 'year'
 
 export interface ProviderCostPlan {
@@ -49,7 +49,9 @@ export interface ProviderCostPlan {
 }
 
 export type NewProviderCostPlan =
-  { basis: 'usage' } | { basis: 'subscription'; period: SubscriptionPeriod; price: ProviderCostPlanPrice }
+  | { basis: 'none' }
+  | { basis: 'usage' }
+  | { basis: 'subscription'; period: SubscriptionPeriod; price: ProviderCostPlanPrice }
 
 export interface ApiKeySpend {
   /** Spent amount in the current display currency, decimal string. */

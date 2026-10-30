@@ -129,9 +129,22 @@ pub enum CurrencyKind {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CostBasis {
+    /// 不计算成本：尝试不记录成本基准，统计既不显示金额也不计入未知。
+    #[serde(rename = "none")]
+    Untracked,
     #[default]
     Usage,
     Subscription,
+}
+
+impl CostBasis {
+    /// 尝试记录使用的成本基准；`Untracked` 的尝试不写成本基准，也不估算金额。
+    pub fn attempt_basis(self) -> Option<Self> {
+        match self {
+            Self::Untracked => None,
+            Self::Usage | Self::Subscription => Some(self),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -667,6 +680,37 @@ pub fn nanos_to_decimal_string(nanos: i64) -> String {
 /// 规范化十进制字符串，去除尾零；零输出 `"0"`。
 pub fn format_amount(value: Decimal) -> String {
     value.normalize().to_string()
+}
+
+/// 订阅价值倍数：同窗口等价按量成本 / 摊销订阅费用。
+///
+/// 两侧先换算成展示币种的十进制金额（只取整到纳），再精确相除，最后按
+/// 「中点远离零」保留 4 位小数。分母不为正或任一侧不可表示时返回 `None`。
+pub fn subscription_value_multiple(
+    equivalent_custom_nanos: Decimal,
+    equivalent_usd_unconverted_nanos: Decimal,
+    subscription_custom_nanos: Decimal,
+    subscription_usd_unconverted_nanos: Decimal,
+    currency: Option<&CustomCurrency>,
+) -> Option<String> {
+    let equivalent = display_decimal_amount(
+        equivalent_custom_nanos,
+        equivalent_usd_unconverted_nanos,
+        currency,
+    )?;
+    let subscription = display_decimal_amount(
+        subscription_custom_nanos,
+        subscription_usd_unconverted_nanos,
+        currency,
+    )?;
+    if subscription <= Decimal::ZERO {
+        return None;
+    }
+    let multiple = equivalent.checked_div(subscription)?;
+    Some(format_amount(multiple.round_dp_with_strategy(
+        4,
+        RoundingStrategy::MidpointAwayFromZero,
+    )))
 }
 
 /// 管理 API 的金额展示：金额、已知计数与未知计数。
@@ -1473,6 +1517,133 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cost.usd_unconverted_nanos, dec("94500000000"));
+    }
+
+    #[test]
+    fn subscription_segments_end_at_none_record() {
+        let entries = vec![
+            CostPlanEntry {
+                effective_from: utc("2026-01-01T00:00:00Z"),
+                basis: CostBasis::Subscription,
+                period: Some(SubscriptionPeriod::Month),
+                price: Some(Amount {
+                    usd_nanos: 31_500_000_000,
+                    custom_nanos: None,
+                }),
+            },
+            CostPlanEntry {
+                effective_from: utc("2026-01-16T05:00:00Z"),
+                basis: CostBasis::Untracked,
+                period: None,
+                price: None,
+            },
+        ];
+        let cost = subscription_amortization(
+            &entries,
+            utc("2026-01-01T00:00:00Z"),
+            utc("2026-02-01T00:00:00Z"),
+            utc("2026-02-01T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(cost.usd_unconverted_nanos, dec("15750000000"));
+        assert_eq!(cost.custom_nanos, Decimal::ZERO);
+    }
+
+    #[test]
+    fn untracked_basis_records_no_attempt_basis() {
+        assert_eq!(CostBasis::Untracked.attempt_basis(), None);
+        assert_eq!(CostBasis::Usage.attempt_basis(), Some(CostBasis::Usage));
+        assert_eq!(
+            CostBasis::Subscription.attempt_basis(),
+            Some(CostBasis::Subscription)
+        );
+        assert_eq!(
+            serde_json::to_value(CostBasis::Untracked).unwrap(),
+            serde_json::json!("none")
+        );
+        assert_eq!(
+            serde_json::from_value::<CostBasis>(serde_json::json!("none")).unwrap(),
+            CostBasis::Untracked
+        );
+    }
+
+    #[test]
+    fn subscription_value_multiple_rounds_to_four_decimals() {
+        // 1 / 32 = 0.03125：第五位小数正好是中点，远离零进位。
+        assert_eq!(
+            subscription_value_multiple(
+                Decimal::ZERO,
+                dec("1000000000"),
+                Decimal::ZERO,
+                dec("32000000000"),
+                None,
+            ),
+            Some("0.0313".to_owned())
+        );
+        // 2 / 3 = 0.6666...
+        assert_eq!(
+            subscription_value_multiple(
+                Decimal::ZERO,
+                dec("2000000000"),
+                Decimal::ZERO,
+                dec("3000000000"),
+                None,
+            ),
+            Some("0.6667".to_owned())
+        );
+        // 3 / 2 = 1.5：不足 4 位时不补零，未知计数不参与计算。
+        assert_eq!(
+            subscription_value_multiple(
+                Decimal::ZERO,
+                dec("3000000000"),
+                Decimal::ZERO,
+                dec("2000000000"),
+                None,
+            ),
+            Some("1.5".to_owned())
+        );
+        // 自定义币种按首次汇率换算后相除：20 / (4 × 2) = 2.5。
+        assert_eq!(
+            subscription_value_multiple(
+                dec("20000000000"),
+                Decimal::ZERO,
+                Decimal::ZERO,
+                dec("4000000000"),
+                Some(&currency("2", "2")),
+            ),
+            Some("2.5".to_owned())
+        );
+    }
+
+    #[test]
+    fn subscription_value_multiple_requires_positive_subscription_cost() {
+        assert_eq!(
+            subscription_value_multiple(
+                Decimal::ZERO,
+                Decimal::from(1_000_000_000),
+                Decimal::ZERO,
+                Decimal::ZERO,
+                None,
+            ),
+            None
+        );
+        // 无法换算的自定义币种不伪造倍数。
+        let broken = CustomCurrency {
+            symbol: "x".to_owned(),
+            usd_rate: Decimal::ZERO,
+            first_rate: Decimal::ZERO,
+            configured_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        assert_eq!(
+            subscription_value_multiple(
+                Decimal::ZERO,
+                Decimal::from(1_000_000_000),
+                Decimal::ZERO,
+                Decimal::from(2_000_000_000),
+                Some(&broken),
+            ),
+            None
+        );
     }
 
     #[test]

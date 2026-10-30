@@ -36,9 +36,16 @@ import {
   buildLatencyChart,
   planActivityGrid,
 } from '#lib/stats-chart.js'
-import { formatMoney, formatMoneyCoverage, moneyCoverage, moneyCoverageDetail } from '#lib/money.js'
+import {
+  formatMoney,
+  formatMoneyCoverage,
+  formatValueMultiple,
+  hasMoneyRecords,
+  moneyCoverage,
+  moneyCoverageDetail,
+} from '#lib/money.js'
 import { STATS_TOP_N, sortStatsRows, visibleStatsRows } from '#lib/stats-table.js'
-import type { ApiKeyStats, ModelStats, ProviderStats } from '#lib/types.js'
+import type { ApiKeyStats, ModelStats, MoneyAmount, ProviderStats, StatsOverview } from '#lib/types.js'
 import CostChart from '#lib/components/cost-chart.svelte'
 import MetricStrip from '#lib/components/metric-strip.svelte'
 import AvailabilityChart from '#lib/components/availability-chart.svelte'
@@ -199,6 +206,11 @@ function formatProviderErrorRate(provider: ProviderStats): string {
   return rate == null ? '—' : formatPercent(rate)
 }
 
+// 订阅制供应商的按量成本是「同一时间窗内的等价按量成本」，与订阅费用相比才有意义；其他模式沿用 Core 返回的按量成本。
+function providerUsageCost(provider: ProviderStats): MoneyAmount | null {
+  return provider.subscription?.usage_equivalent_cost ?? provider.cost
+}
+
 const providerRows = $derived(
   sortStatsRows(providerStats, providerSorting, {
     provider: providerLabel,
@@ -206,9 +218,13 @@ const providerRows = $derived(
     upstream_error_count: (provider) => provider.upstream_error_count,
     errorRate: providerErrorRate,
     avg_output_tps: (provider) => provider.avg_output_tps,
-    actual_cost: (provider) => (provider.actual_cost ? Number(provider.actual_cost.amount) : null),
-    usage_equivalent_cost: (provider) =>
-      provider.usage_equivalent_cost == null ? null : Number(provider.usage_equivalent_cost.amount),
+    cost: (provider) => {
+      const cost = providerUsageCost(provider)
+      return cost ? Number(cost.amount) : null
+    },
+    subscription_cost: (provider) => (provider.subscription ? Number(provider.subscription.cost.amount) : null),
+    value_multiple: (provider) =>
+      provider.subscription?.multiple == null ? null : Number(provider.subscription.multiple),
   }),
 )
 const apiKeyRows = $derived(
@@ -238,11 +254,14 @@ const visibleProviders = $derived(visibleStatsRows(providerRows, showAllProvider
 const visibleApiKeys = $derived(visibleStatsRows(apiKeyRows, showAllApiKeys))
 const visibleModels = $derived(visibleStatsRows(modelRows, showAllModels))
 
-// 零个上游错误保持中性色；只有真实错误才使用 destructive。
+// 零个上游错误保持中性色；只有真实错误才使用 destructive。订阅价值倍数达到 1× 即订阅已比按量划算，用成功色强调。
 function providerCellClass(cell: DataTableCell<ProviderStats>): string | undefined {
-  return cell.column.id === 'upstream_error_count' && cell.row.original.upstream_error_count > 0
-    ? 'text-destructive'
-    : undefined
+  const provider = cell.row.original
+  if (cell.column.id === 'upstream_error_count' && provider.upstream_error_count > 0) return 'text-destructive'
+  if (cell.column.id === 'value_multiple' && Number(provider.subscription?.multiple) >= 1) {
+    return 'text-success font-semibold'
+  }
+  return undefined
 }
 const providerStatsColumnHelper = createDataTableColumnHelper<ProviderStats>()
 const providerStatsColumns = providerStatsColumnHelper.columns([
@@ -271,22 +290,27 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
     cell: (context) => formatTps(context.getValue()),
     meta: { label: () => m.stats_output_speed(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  providerStatsColumnHelper.accessor((provider) => formatMoney(provider.actual_cost, provider.currency), {
-    id: 'actual_cost',
-    header: () => m.cost_actual(),
+  providerStatsColumnHelper.accessor((provider) => formatMoney(providerUsageCost(provider), provider.currency), {
+    id: 'cost',
+    header: () => m.cost_usage_cost(),
     cell: (context) => context.getValue(),
-    meta: { label: () => m.cost_actual(), align: 'end', cellClass: 'font-technical tabular-nums' },
+    meta: { label: () => m.cost_usage_cost(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
   providerStatsColumnHelper.accessor(
-    (provider) =>
-      provider.usage_equivalent_cost == null ? '—' : formatMoney(provider.usage_equivalent_cost, provider.currency),
+    (provider) => (provider.subscription ? formatMoney(provider.subscription.cost, provider.currency) : '—'),
     {
-      id: 'usage_equivalent_cost',
-      header: () => m.cost_usage_equivalent(),
+      id: 'subscription_cost',
+      header: () => m.cost_subscription_cost(),
       cell: (context) => context.getValue(),
-      meta: { label: () => m.cost_usage_equivalent(), align: 'end', cellClass: 'font-technical tabular-nums' },
+      meta: { label: () => m.cost_subscription_cost(), align: 'end', cellClass: 'font-technical tabular-nums' },
     },
   ),
+  providerStatsColumnHelper.accessor((provider) => formatValueMultiple(provider.subscription), {
+    id: 'value_multiple',
+    header: () => m.cost_value_multiple(),
+    cell: (context) => context.getValue(),
+    meta: { label: () => m.cost_value_multiple(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
 ])
 const apiKeyStatsColumnHelper = createDataTableColumnHelper<ApiKeyStats>()
 const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
@@ -383,7 +407,7 @@ const displayCurrency = $derived(
     providerStats[0]?.currency ?? { kind: 'usd' as const, symbol: '$' },
 )
 const costChart = $derived(buildCostChart(seriesStats, seriesStats[0]?.bucket_ms ?? seriesBucketSeconds * 1_000))
-const hasCostSeries = $derived(costChart.some((point) => point.cost != null))
+const hasCostSeries = $derived(costChart.some((point) => hasMoneyRecords(point.cost)))
 const activityGrid = $derived(
   buildActivityGrid(activityQuery.data ?? [], {
     startMs: activityPlan.startMs,
@@ -438,13 +462,24 @@ const tokenPie = $derived.by((): { slices: PieSlice[]; total: number } | null =>
   const total = slices.reduce((sum, slice) => sum + slice.value, 0)
   return { slices, total }
 })
+// 没有任何成本记录（例如所有供应商都不计算成本）时显示中性的「—」，不把无数据画成 0。
+function overviewCostValue(stats: StatsOverview | undefined): string {
+  return hasMoneyRecords(stats?.actual_cost) ? formatMoney(stats.actual_cost, stats.currency) : '—'
+}
+
+function costDetail(stats: StatsOverview | undefined): string | undefined {
+  const parts = [
+    moneyCoverageDetail(stats?.actual_cost),
+    stats?.subscription?.multiple == null
+      ? undefined
+      : m.cost_subscription_value({ multiple: formatValueMultiple(stats.subscription) }),
+  ].filter((part) => part !== undefined)
+  return parts.length > 0 ? parts.join(' · ') : undefined
+}
+
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests) },
-  {
-    label: m.cost_actual(),
-    value: formatMoney(overview?.actual_cost, overview?.currency ?? displayCurrency),
-    detail: moneyCoverageDetail(overview?.actual_cost),
-  },
+  { label: m.cost_actual(), value: overviewCostValue(overview), detail: costDetail(overview) },
   { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens) },
   { label: m.stats_output_tokens(), value: formatCompactCount(overview?.total_output_tokens) },
   { label: m.stats_cache_read_tokens(), value: formatCompactCount(overview?.total_cache_read_tokens) },
@@ -815,7 +850,10 @@ function retryAll(): void {
     <div class="grid gap-8">
       <section class="route-section" aria-labelledby="analytics-provider-title">
         <div class="route-section-header">
-          <h2 id="analytics-provider-title" class="route-section-title">{m.common_model_services()}</h2>
+          <div class="flex min-w-0 items-center gap-2">
+            <h2 id="analytics-provider-title" class="route-section-title">{m.common_model_services()}</h2>
+            <Field.Help hint={m.cost_provider_help()} />
+          </div>
           {@render topRange(providerStats.length, showAllProviders, () => (showAllProviders = !showAllProviders))}
         </div>
         {#if providersQuery.error && providersQuery.data === undefined}
@@ -840,13 +878,18 @@ function retryAll(): void {
                 class="route-mobile-row">
                 <div class="min-w-0">
                   <p class="truncate font-medium">{providerLabel(provider)}</p>
-                  <p class="font-technical mt-1 text-xs text-muted-foreground">
-                    {m.cost_actual()}: {formatMoney(provider.actual_cost, provider.currency)}
-                    {#if provider.usage_equivalent_cost}
-                      · {m.cost_usage_equivalent()}:
-                      {formatMoney(provider.usage_equivalent_cost, provider.currency)}
-                    {/if}
-                  </p>
+                  {#if providerUsageCost(provider)}
+                    <p class="font-technical mt-1 text-xs text-muted-foreground">
+                      {m.cost_usage_cost()}: {formatMoney(providerUsageCost(provider), provider.currency)}
+                      {#if provider.subscription}
+                        · {m.cost_subscription_cost()}:
+                        {formatMoney(provider.subscription.cost, provider.currency)} ·
+                        <span
+                          class={Number(provider.subscription.multiple) >= 1 ? 'font-semibold text-success' : undefined}
+                          >{formatValueMultiple(provider.subscription)}</span>
+                      {/if}
+                    </p>
+                  {/if}
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatTps(provider.avg_output_tps)} ·
                     <span class={provider.upstream_error_count > 0 ? 'text-destructive' : undefined}

@@ -31,8 +31,10 @@ def historical_money(view):
     currency = {"kind": "usd", "symbol": "$"}
     if view in ("models", "api-keys"):
         return {"cost": amount, "billing": amount, "currency": currency}
-    return {"actual_cost": amount, "currency": currency,
-            **({"usage_equivalent_cost": None} if view == "providers" else {})}
+    if view == "providers":
+        # 没有受追踪尝试也没有订阅段：成本不展示。
+        return {"cost": None, "subscription": None, "currency": currency}
+    return {"actual_cost": amount, "subscription": None, "currency": currency}
 
 
 def overview(requests=0, terminal=0, failed=0, upstream=0, upstream_errors=0,
@@ -53,6 +55,8 @@ def overview(requests=0, terminal=0, failed=0, upstream=0, upstream_errors=0,
 def series_bucket(start, **values):
     result = overview(**values)
     result["request_count"] = result.pop("total_requests")
+    # series 没有订阅价值字段；它只保留 actual_cost。
+    result.pop("subscription", None)
     return {"bucket_start": start, "bucket_ms": 900000, **result}
 
 

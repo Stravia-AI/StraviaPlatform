@@ -2631,10 +2631,12 @@ async fn insert_event_postgres(
 }
 
 fn cost_basis_column(basis: Option<CostBasis>) -> Option<&'static str> {
-    basis.map(|basis| match basis {
-        CostBasis::Usage => "usage",
-        CostBasis::Subscription => "subscription",
-    })
+    match basis?.attempt_basis()? {
+        CostBasis::Usage => Some("usage"),
+        CostBasis::Subscription => Some("subscription"),
+        // attempt_basis 已把不计算成本的 Provider 归为 None。
+        CostBasis::Untracked => None,
+    }
 }
 
 type AttemptAmountColumns = (
@@ -2648,8 +2650,13 @@ type AttemptAmountColumns = (
 
 /// Recovery terminals preserve the start-time basis without fabricating amounts.
 fn attempt_amount_columns(amounts: &AttemptAmounts) -> AttemptAmountColumns {
+    // 不计算成本的 Provider 不写基准也不写金额；Route 计费与成本基准无关，照常记录。
     let basis = cost_basis_column(Some(amounts.cost_basis));
-    let (cost_usd, cost_custom) = match &amounts.cost {
+    let (cost_usd, cost_custom) = match amounts
+        .cost_basis
+        .attempt_basis()
+        .and(amounts.cost.as_ref())
+    {
         Some(amount) => (Some(amount.usd_nanos), amount.custom_nanos),
         None => (None, None),
     };

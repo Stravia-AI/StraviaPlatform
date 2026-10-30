@@ -32,6 +32,8 @@ export interface StatsOverview {
   avg_output_tps: number | null
   currency: DisplayCurrency
   actual_cost: MoneyAmount
+  /** 窗口内存在订阅生效段时的整体订阅对比；否则为 null。 */
+  subscription: SubscriptionValue | null
 }
 
 export interface StatsSeries {
@@ -83,9 +85,20 @@ export interface ProviderStats {
   /** 已完成请求的输出 Token 总速（tok/s）；未完整报告输出或耗时为 null。 */
   avg_output_tps: number | null
   currency: DisplayCurrency
-  actual_cost: MoneyAmount
-  /** Subscription-only equivalent usage cost; null for usage-based providers. */
-  usage_equivalent_cost: MoneyAmount | null
+  /** 窗口内该供应商所有已记录成本的尝试的按量成本；订阅尝试为等价按量成本。不计算成本且没有订阅时为 null。 */
+  cost: MoneyAmount | null
+  /** 窗口内与订阅生效段重叠时的订阅对比；否则为 null。 */
+  subscription: SubscriptionValue | null
+}
+
+/** 订阅供应商在同一窗口内的成本对比，金额与倍数均由 Core 计算。 */
+export interface SubscriptionValue {
+  /** 按天线性摊销到窗口内的订阅费用。 */
+  cost: MoneyAmount
+  /** 同一窗口内订阅供应商尝试的等价按量成本；存在未知尝试时只是下限。 */
+  usage_equivalent_cost: MoneyAmount
+  /** usage_equivalent_cost ÷ cost 的十进制字符串（最多 4 位小数）；订阅费用为 0 或不可表示时为 null。 */
+  multiple: string | null
 }
 
 export interface ApiKeyStats {

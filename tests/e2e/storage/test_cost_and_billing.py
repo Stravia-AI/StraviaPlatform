@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from decimal import Decimal
+from contextlib import closing
+from decimal import ROUND_HALF_UP, Decimal
 from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any
@@ -112,6 +114,17 @@ def money(value, amount, known, unknown=0):
     assert value["unknown_count"] == unknown, value
 
 
+def assert_subscription_multiple(subscription):
+    """价值倍数 = 等价按量成本 / 摊销订阅费用，Core 保留 4 位小数。"""
+    cost = Decimal(subscription["cost"]["amount"])
+    equivalent = Decimal(subscription["usage_equivalent_cost"]["amount"])
+    if cost == 0:
+        assert subscription["multiple"] is None, subscription
+        return
+    expected = (equivalent / cost).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    assert Decimal(subscription["multiple"]) == expected, subscription
+
+
 def test_frozen_money_survives_rate_changes_reset_and_detail_deletion(usage_env):
     env = usage_env
     provider, route, key = priced_route(
@@ -135,7 +148,7 @@ def test_frozen_money_survives_rate_changes_reset_and_detail_deletion(usage_env)
         row = stats(env, view)[0]
         money(row["cost"], "0.00045", 2)
         money(row["billing"], "0.3", 2)
-    money(stats(env, "providers")[0]["actual_cost"], "0.00045", 2)
+    money(stats(env, "providers")[0]["cost"], "0.00045", 2)
     money(stats(env, "series")[0]["actual_cost"], "0.00045", 2)
 
     reset = admin(env, "POST", f"api-keys/{key['id']}/spend/reset")
@@ -301,7 +314,13 @@ def test_subscription_history_stops_at_delete_and_copy_is_usage(usage_env):
     call(env, key, route)
     wait_spent(env, key, "0.02")
     row = next(row for row in stats(env, "providers") if row["provider_id"] == provider["id"])
-    money(row["usage_equivalent_cost"], "0.00003", 1)
+    # 订阅 Provider 的尝试按等价按量成本计入 cost，并与同窗口摊销费用比较。
+    money(row["cost"], "0.00003", 1)
+    money(row["subscription"]["usage_equivalent_cost"], "0.00003", 1)
+    assert_subscription_multiple(row["subscription"])
+    overview = stats(env)
+    money(overview["subscription"]["usage_equivalent_cost"], "0.00003", 1)
+    assert_subscription_multiple(overview["subscription"])
     money(stats(env, "models")[0]["cost"], "0.00003", 1)
     admin(env, "DELETE", f"models/{route['model_id']}")
     before_delete = time.time_ns() // 1_000_000
@@ -315,7 +334,121 @@ def test_subscription_history_stops_at_delete_and_copy_is_usage(usage_env):
     assert Decimal(stats(env)["actual_cost"]["amount"]) == actual
     deleted = next(row for row in stats(env, "providers") if row["provider_id"] == provider["id"])
     assert deleted["deleted"] is True
-    assert Decimal(deleted["actual_cost"]["amount"]) == actual
+    # 永久统计桶保留订阅尝试的等价按量成本；仅有摊销的 Provider 才显示 0。
+    money(deleted["cost"], "0.00003", 1)
+    assert Decimal(deleted["subscription"]["cost"]["amount"]) == actual
+    assert_subscription_multiple(deleted["subscription"])
+
+
+def fetch_row(env, sql, params=()):
+    """读取隔离数据库中的一行，仅用于断言公开 API 背后的持久化事实。"""
+    if env["backend"] == "postgres":
+        import psycopg
+        runtime = env["storage_runtime"]
+        dsn = runtime["postgres_dsn_for_schema"](runtime["pg_url"], env["schema"])
+        with psycopg.connect(dsn) as connection, connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            return cursor.fetchone()
+    database = env["data_dir"] / "db" / "gateway.db"
+    with closing(sqlite3.connect(database)) as connection:
+        return connection.execute(sql, params).fetchone()
+
+
+def test_none_cost_basis_records_no_cost_until_basis_returns(usage_env):
+    env = usage_env
+    provider, route, key = priced_route(env, "untracked-cost")
+    admin(env, "POST", f"providers/{provider['id']}/cost-plans", {"basis": "none"})
+    call(env, key, route)
+
+    def attempt_counted():
+        current = stats(env)
+        return current if current["upstream_request_count"] == 1 else None
+
+    _wait_for("untracked attempt", attempt_counted)
+    overview = stats(env)
+    money(overview["actual_cost"], "0", 0)
+    assert overview["subscription"] is None
+    row = next(row for row in stats(env, "providers") if row["provider_id"] == provider["id"])
+    assert row["cost"] is None, row
+    assert row["subscription"] is None, row
+    money(stats(env, "models")[0]["cost"], "0", 0)
+
+    def finished_attempt():
+        interactions = _route_interactions(env, route["id"])
+        if not interactions:
+            return None
+        detail = _detail(env, interactions[0]["id"])
+        finished = [
+            event for run in detail["runs"] for event in run["events"]
+            if event["kind"] == "target_attempt_finished"
+        ]
+        return finished[0]["payload"] if finished else None
+
+    payload = _wait_for("untracked attempt amounts", finished_attempt)
+    assert payload["cost_basis"] is None, payload
+    assert payload["cost"] is None, payload
+    placeholder = "%s" if env["backend"] == "postgres" else "?"
+    stored = fetch_row(
+        env,
+        "SELECT cost_basis, cost_usd_nanos, cost_custom_nanos FROM "
+        f"target_attempt_observations WHERE id = {placeholder}",
+        (payload["attempt_id"],),
+    )
+    # 不计算成本的 Provider：不写基准、不写金额，也不计入未知成本。
+    assert stored == (None, None, None), stored
+
+    admin(env, "POST", f"providers/{provider['id']}/cost-plans", {"basis": "usage"})
+    call(env, key, route, "after-usage")
+
+    def usage_row():
+        current = next(
+            (row for row in stats(env, "providers") if row["provider_id"] == provider["id"]),
+            None,
+        )
+        return current if current and current["cost"] and current["cost"]["known_count"] == 1 else None
+
+    row = _wait_for("usage cost after basis switch", usage_row)
+    money(row["cost"], "0.00003", 1)
+    assert row["subscription"] is None, row
+
+    admin(env, "POST", f"providers/{provider['id']}/cost-plans", {
+        "basis": "subscription", "period": "month",
+        "price": {"amount": "2628000", "currency": "usd"},
+    })
+    call(env, key, route, "after-subscription")
+
+    def subscription_row():
+        current = next(
+            (row for row in stats(env, "providers") if row["provider_id"] == provider["id"]),
+            None,
+        )
+        return current if current and current["subscription"] and current["cost"]["known_count"] == 2 else None
+
+    row = _wait_for("subscription value after basis switch", subscription_row)
+    money(row["cost"], "0.00006", 2)
+    money(row["subscription"]["usage_equivalent_cost"], "0.00003", 1)
+    assert_subscription_multiple(row["subscription"])
+    overview = stats(env)
+    assert overview["subscription"] is not None
+    money(overview["subscription"]["usage_equivalent_cost"], "0.00003", 1)
+    assert_subscription_multiple(overview["subscription"])
+
+
+def test_api_key_spend_available_tracks_limit_and_spend(usage_env):
+    env = usage_env
+    _, route, key = priced_route(env, "spend-available", spend_limit="0.05",
+                                billing={"mode": "per_call", "amount": "0.02", "currency": "usd"})
+    assert admin(env, "GET", f"api-keys/{key['id']}")["spend_available"] == "0.05"
+    call(env, key, route)
+    wait_spent(env, key, "0.02")
+    assert admin(env, "GET", f"api-keys/{key['id']}")["spend_available"] == "0.03"
+    unlimited = admin(env, "POST", "api-keys", {
+        "name": "unlimited-spend", "model_ids": [route["id"]],
+    })
+    assert admin(env, "GET", f"api-keys/{unlimited['id']}")["spend_available"] is None
+    # 限额降到已用金额以下时可用余额钳到 0，不出现负余额。
+    admin(env, "PUT", f"api-keys/{key['id']}", {"spend_limit": "0.01"})
+    assert admin(env, "GET", f"api-keys/{key['id']}")["spend_available"] == "0"
 
 
 def test_retry_failure_and_disconnect_never_add_successful_billing(usage_env):
