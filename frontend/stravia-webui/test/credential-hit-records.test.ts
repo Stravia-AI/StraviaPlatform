@@ -250,7 +250,10 @@ describe('entrySegments', () => {
 describe('maskedEntryText', () => {
   test('masks hit fragments but keeps other matches and plain text', () => {
     const text = 'a SECRET b OTHER c'
-    const matches = [match({ start: 2, end: 8, hit: true }), match({ start: 11, end: 16, hit: false, rule_id: 'other' })]
+    const matches = [
+      match({ start: 2, end: 8, hit: true }),
+      match({ start: 11, end: 16, hit: false, rule_id: 'other' }),
+    ]
     expect(maskedEntryText(entrySegments(text, matches))).toBe('a •••••• b OTHER c')
   })
 
