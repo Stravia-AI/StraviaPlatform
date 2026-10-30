@@ -1,7 +1,7 @@
 # 成本与计费设计
 
 > 状态：已实施。
-> 更新：2026-10-28
+> 更新：2026-10-30
 > 相关决策：[ADR-0084](../adr/0084-pin-provider-model-fields-individually.md)、[ADR-0085](../adr/0085-record-cost-and-billing-with-interaction-observation.md)、[ADR-0086](../adr/0086-freeze-dual-currency-amounts-and-derive-history-from-first-rate.md)
 
 ## 1. 结论
@@ -143,6 +143,18 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 ### 4.3 峰谷规则的编辑默认值
 
 价格编辑器「添加峰谷定价」一次性预填：`Asia/Shanghai`、周一至周五、`09:00–12:00` 与 `14:00–18:00`、倍率 `2`。这与 DeepSeek 的高峰时段一致；models.stravia.cn 收录的 DeepSeek 价格是低谷美元价，因此高峰为 ×2。不提供命名预设，预填后与手工填写没有区别。
+
+### 4.4 Provider Model 的来源价格
+
+模型同步、手动添加预填与创建共用价格富化规则：人工固定值优先，其次保留渠道自己的价格；仅在来源整组缺价时，尝试从 `models.stravia.cn/providers/{provider_id}/models.json` 取得模型厂商的官方 API 参考价，否则保持未知。价格组包括基础输入／输出、缓存、多模态与上下文分档，任一分项有值（包括明确的 `0`）就不再补价；不会把渠道的部分报价与官方价拼接。
+
+价格身份优先采用显式 `canonical_id` 或已有 Canonical 来源身份，否则按模型 ID、有限格式归一、最后按名称做唯一匹配。归一保留完整版本与型号，只容忍大小写、命名空间和空白、`-`、`_`、`.` 分隔差异；Claude 的尾部 `thinking` 可作为价格别名，推理 Token 仍按输出计价。官方目录项必须声明相同的 `canonical_id`，或匹配完整版本 ID；不得仅凭同名跨日期或版本引用价格。型号、preview、日期及其他 variant 不会被删除，任何阶段有歧义就不继续猜测。
+
+模型厂商 scope 只采用 Canonical ID 第一段与 Provider ID 相同的目录，不将相近品牌、区域或套餐视作可替代身份。Antigravity 等混合渠道逐模型解析厂商，不整体绑定到某一家；没有官方报价的 GPT-OSS 等模型保持未知，不采用转售商报价冒充官方价。
+
+富化只复制标准 `ModelCost`，仍以 `Decimal` 表示美元／百万 Token，并沿用逐字段固定、本地币种与峰谷规则；不改变渠道的上下文、模态、请求模型 ID、selector 或可用模型集合。官方 scope 每次同步按厂商复用现有目录缓存。可选价格目录暂不可用时明确记录失败，保留上次有效来源价格及固定值，不伪造报价，也不把成功的账号模型发现改成失败；成功刷新后官方不再提供价格时，未固定的旧参考价恢复未知。
+
+官方价只用于参考按量成本，不代表订阅实际支出，不改写 Provider 订阅生效记录，也不改变 Route 对 API Key 的计费或已经冻结的历史金额。
 
 ## 5. 估算成本
 

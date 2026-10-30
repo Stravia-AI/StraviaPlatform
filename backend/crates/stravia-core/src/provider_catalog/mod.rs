@@ -20,6 +20,7 @@ pub use types::*;
 
 mod parse;
 mod persist;
+mod pricing;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ mod tests;
 pub(crate) use parse::source_reasoning_efforts;
 use parse::*;
 use persist::*;
+pub(crate) use pricing::{OfficialPriceIdentity, has_model_prices};
 pub(crate) use source::icon_content_type;
 pub use source::{CatalogSource, HttpCatalogSource};
 
