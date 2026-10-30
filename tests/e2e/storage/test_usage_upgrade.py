@@ -26,7 +26,7 @@ VIEWS = ("overview", "series", "models", "providers", "api-keys")
 
 
 def historical_money(view):
-    # 升级前没有冻结金额，不能由新价格补算，也不计入已知或未知覆盖率。
+    # 升级前没有冻结金额，不能由新价格补算，也不计入已知或未知尝试数。
     amount = {"amount": "0", "known_count": 0, "unknown_count": 0}
     currency = {"kind": "usd", "symbol": "$"}
     if view in ("models", "api-keys"):

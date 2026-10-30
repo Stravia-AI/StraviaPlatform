@@ -1,5 +1,4 @@
 import * as m from '#lib/paraglide/messages.js'
-import { formatPercent } from '#lib/format.js'
 import { getLocale } from '#lib/paraglide/runtime.js'
 import type {
   CurrencyKind,
@@ -98,21 +97,4 @@ export function formatDisplayAmount(amount: DisplayAmount | null | undefined): s
 export function formatCostPlanPrice(price: ProviderCostPlanPrice | null, custom: CustomCurrency | null): string {
   if (!price) return '—'
   return formatAmount(price.amount, currencyForKind(price.currency, custom).symbol)
-}
-
-/** Known share of all attempts that produced an amount; null when no attempt was recorded. */
-export function moneyCoverage(money: MoneyAmount | null | undefined): number | null {
-  if (!money) return null
-  const total = money.known_count + money.unknown_count
-  return total > 0 ? money.known_count / total : null
-}
-
-export function formatMoneyCoverage(money: MoneyAmount | null | undefined): string {
-  const coverage = moneyCoverage(money)
-  return coverage == null ? '—' : formatPercent(coverage)
-}
-
-export function moneyCoverageDetail(money: MoneyAmount | null | undefined): string | undefined {
-  if (!money || money.known_count + money.unknown_count === 0) return undefined
-  return m.billing_coverage_detail({ known: money.known_count, unknown: money.unknown_count })
 }

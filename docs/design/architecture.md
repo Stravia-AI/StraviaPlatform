@@ -1023,7 +1023,7 @@ MCP session、discovery、工具列表等非执行入口不计数。
 内部轮次及工具共享 RootRequest；独立客户端续接或重发各计新根请求。
 ```
 
-消费上限只约束新的根请求，不取消已准入请求，也不停止其隐藏轮次、工具调用或故障切换。金额异步落库及并发准入允许超额；达到上限不禁用 Key，调高上限或清零后立即恢复。每次完成且归属 API Key 的模型尝试按被调用 Route 计费，Chat 使用所选 API Key 的相同规则。清零不重写历史计费或统计，在途金额之后落库时计入清零后的累计值。币种、冻结金额、订阅摊销及覆盖率规则见[成本与计费](cost-and-billing.md)。
+消费上限只约束新的根请求，不取消已准入请求，也不停止其隐藏轮次、工具调用或故障切换。金额异步落库及并发准入允许超额；达到上限不禁用 Key，调高上限或清零后立即恢复。每次完成且归属 API Key 的模型尝试按被调用 Route 计费，Chat 使用所选 API Key 的相同规则。清零不重写历史计费或统计，在途金额之后落库时计入清零后的累计值。币种、冻结金额与订阅摊销规则见[成本与计费](cost-and-billing.md)。
 
 窗口为单调时间的 `(t - 60s, t]`，恰好满 60 秒的记录已离窗；允许瞬时使用剩余额度，不使用固定发送间隔或令牌桶。`rpm_limit` 缺省／`null` 为不限，正整数为上限，零及负数无效；更新省略保持、`null` 清除、正数设置。入口超限不排队、不运行 Hook 或工具，不增加记录。已准入后失败、取消或完成不退回记录；流仍活跃时记录也会在 60 秒离窗，chunk、token、心跳不重复计数。WebSocket upgrade 不作为执行请求计数，每次独立生成事件分别计根请求；复用客户端或上游连接都不合并请求。配置更新影响后续准入而不取消活跃流；已有受限窗口在改限后保留，从不限改为有限不重建未记录历史。
 
@@ -1229,7 +1229,7 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-`0030_cost_and_billing` 增加 `models.billing_json`、`api_keys.spend_limit_nanos`、`provider_models.source_metadata_json`、追加式 `provider_cost_plans` 与独立累计表 `api_key_spend`。随后按 100 行独立事务迁移旧 edited 来源模型，失败保留已提交批次，重启从剩余记录继续；全部完成后执行 `0031_cost_and_billing_stats`。尝试结束事实冻结成本、计费状态与 USD/custom nanos，由同一事务内触发器累加到统计桶和 Key 已消费；清理观测先进入 checkpoint，不重复入账，也不清零 Key 累计。Provider 删除以按量记录终止订阅段并保留成本历史；Key 删除后的在途尝试不重建其累计行。历史尝试没有金额事实，不追溯计价，也不计入已知或未知覆盖率。金额使用整数 nanos 与 Decimal 运算，最终舍入采用 MidpointAwayFromZero；溢出保持未知或明确失败，不饱和或伪造为零。
+`0030_cost_and_billing` 增加 `models.billing_json`、`api_keys.spend_limit_nanos`、`provider_models.source_metadata_json`、追加式 `provider_cost_plans` 与独立累计表 `api_key_spend`。随后按 100 行独立事务迁移旧 edited 来源模型，失败保留已提交批次，重启从剩余记录继续；全部完成后执行 `0031_cost_and_billing_stats`。尝试结束事实冻结成本、计费状态与 USD/custom nanos，由同一事务内触发器累加到统计桶和 Key 已消费；清理观测先进入 checkpoint，不重复入账，也不清零 Key 累计。Provider 删除以按量记录终止订阅段并保留成本历史；Key 删除后的在途尝试不重建其累计行。历史尝试没有金额事实，不追溯计价，也不计入已知或未知尝试数。金额使用整数 nanos 与 Decimal 运算，最终舍入采用 MidpointAwayFromZero；溢出保持未知或明确失败，不饱和或伪造为零。
 
 详情见[成本与计费](cost-and-billing.md)，最终结构见生成的 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql) 参考 schema。
 

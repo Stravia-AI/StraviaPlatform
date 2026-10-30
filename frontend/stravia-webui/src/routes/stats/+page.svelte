@@ -36,14 +36,7 @@ import {
   buildLatencyChart,
   planActivityGrid,
 } from '#lib/stats-chart.js'
-import {
-  formatMoney,
-  formatMoneyCoverage,
-  formatValueMultiple,
-  hasMoneyRecords,
-  moneyCoverage,
-  moneyCoverageDetail,
-} from '#lib/money.js'
+import { formatMoney, formatValueMultiple, hasMoneyRecords } from '#lib/money.js'
 import { STATS_TOP_N, sortStatsRows, visibleStatsRows } from '#lib/stats-table.js'
 import type { ApiKeyStats, ModelStats, MoneyAmount, ProviderStats, StatsOverview } from '#lib/types.js'
 import CostChart from '#lib/components/cost-chart.svelte'
@@ -238,7 +231,6 @@ const apiKeyRows = $derived(
     last_used_at: (apiKey) => apiKey.last_used_at,
     cost: (apiKey) => (apiKey.cost ? Number(apiKey.cost.amount) : null),
     billing: (apiKey) => (apiKey.billing ? Number(apiKey.billing.amount) : null),
-    coverage: (apiKey) => moneyCoverage(apiKey.cost),
   }),
 )
 const modelRows = $derived(
@@ -247,7 +239,6 @@ const modelRows = $derived(
     request_count: (model) => model.request_count,
     cost: (model) => (model.cost ? Number(model.cost.amount) : null),
     billing: (model) => (model.billing ? Number(model.billing.amount) : null),
-    coverage: (model) => moneyCoverage(model.cost),
   }),
 )
 const visibleProviders = $derived(visibleStatsRows(providerRows, showAllProviders))
@@ -361,12 +352,6 @@ const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
     cell: (context) => context.getValue(),
     meta: { label: () => m.billing_billed_amount(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  apiKeyStatsColumnHelper.accessor((apiKey) => formatMoneyCoverage(apiKey.cost), {
-    id: 'coverage',
-    header: () => m.cost_coverage(),
-    cell: (context) => context.getValue(),
-    meta: { label: () => m.cost_coverage(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
 ])
 const modelStatsColumnHelper = createDataTableColumnHelper<ModelStats>()
 const modelStatsColumns = modelStatsColumnHelper.columns([
@@ -391,12 +376,6 @@ const modelStatsColumns = modelStatsColumnHelper.columns([
     header: () => m.billing_billed_amount(),
     cell: (context) => context.getValue(),
     meta: { label: () => m.billing_billed_amount(), align: 'end', cellClass: 'font-technical tabular-nums' },
-  }),
-  modelStatsColumnHelper.accessor((model) => formatMoneyCoverage(model.cost), {
-    id: 'coverage',
-    header: () => m.cost_coverage(),
-    cell: (context) => context.getValue(),
-    meta: { label: () => m.cost_coverage(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
 ])
 const seriesStats = $derived(seriesQuery.data ?? [])
@@ -468,13 +447,9 @@ function overviewCostValue(stats: StatsOverview | undefined): string {
 }
 
 function costDetail(stats: StatsOverview | undefined): string | undefined {
-  const parts = [
-    moneyCoverageDetail(stats?.actual_cost),
-    stats?.subscription?.multiple == null
-      ? undefined
-      : m.cost_subscription_value({ multiple: formatValueMultiple(stats.subscription) }),
-  ].filter((part) => part !== undefined)
-  return parts.length > 0 ? parts.join(' · ') : undefined
+  return stats?.subscription?.multiple == null
+    ? undefined
+    : m.cost_subscription_value({ multiple: formatValueMultiple(stats.subscription) })
 }
 
 const metrics = $derived([
@@ -836,8 +811,7 @@ function retryAll(): void {
                 <p class="truncate font-medium">{modelStatsLabel(model)}</p>
                 <p class="font-technical mt-1 text-xs text-muted-foreground">
                   {m.cost_usage_cost()}: {formatMoney(model.cost, model.currency)} · {m.billing_billed_amount()}:
-                  {formatMoney(model.billing, model.currency)} · {m.cost_coverage()}:
-                  {formatMoneyCoverage(model.cost)}
+                  {formatMoney(model.billing, model.currency)}
                 </p>
               </div>
               <p class="font-technical tabular-nums">{formatCompactCount(model.request_count)}</p>
@@ -938,8 +912,7 @@ function retryAll(): void {
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {m.cost_usage_cost()}: {formatMoney(apiKey.cost, apiKey.currency)} · {m.billing_billed_amount()}:
-                    {formatMoney(apiKey.billing, apiKey.currency)} · {m.cost_coverage()}:
-                    {formatMoneyCoverage(apiKey.cost)}
+                    {formatMoney(apiKey.billing, apiKey.currency)}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatLogTime(apiKey.last_used_at)}

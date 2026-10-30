@@ -308,7 +308,7 @@ $$
 
 ### 7.1 `0030_cost_and_billing.sql`
 
-- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。尝试开始时即保存 `cost_basis`；只有进入终态后，`cost_basis` 非空而 `cost_usd_nanos` 为空才计为成本未知，因此崩溃恢复不会漏计，仍在运行的尝试也不会提前计入未知数。`none` Provider 的尝试写 `NULL` 且不带金额，既不产生金额也不计入未知。历史行全部为空，不计入任何覆盖率。
+- `target_attempt_observations` 新增：`cost_basis TEXT`、`cost_usd_nanos INTEGER`、`cost_custom_nanos INTEGER`、`billing_state TEXT`（`NULL`／`charged`／`unknown`）、`billing_usd_nanos INTEGER`、`billing_custom_nanos INTEGER`。尝试开始时即保存 `cost_basis`；只有进入终态后，`cost_basis` 非空而 `cost_usd_nanos` 为空才计为成本未知，因此崩溃恢复不会漏计，仍在运行的尝试也不会提前计入未知数。`none` Provider 的尝试写 `NULL` 且不带金额，既不产生金额也不计入未知。历史行全部为空，不计入已知或未知尝试数。
 - `stats_usage_buckets` 与 `stats_usage_checkpoints` 各新增 12 列，均为 `INTEGER NOT NULL DEFAULT 0`：
   - 全部尝试成本：`cost_custom_nanos`、`cost_usd_unconverted_nanos`、`cost_known_count`、`cost_unknown_count`；
   - 按量尝试成本：`payg_cost_custom_nanos`、`payg_cost_usd_unconverted_nanos`、`payg_cost_known_count`、`payg_cost_unknown_count`；
@@ -379,14 +379,12 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |Provider|`provider-connection-view.svelte`、`routes/providers/[id]/+page.svelte`|成本方式是连接表单内联的 `FormSection`，与「连接」「网络」同级并位于最后，随「保存连接」一起提交；三种方式：不计算／按量／订阅（月付或年付、价格、币种）；显示当前生效记录与变更历史|
 |Route|`model-editor.svelte`|计费：不计费／按次（金额与币种）／按 Token（共享价格编辑器）；当前只在 API Key 页面与模型设置页展示，不进入用量统计的 Route 行|
 |API Key|`api-key-editor.svelte`、`routes/api-keys/[id]/+page.svelte`|消费上限输入；列表以「可用余额」列替代「模型访问」，详情显示已消费、可用余额、上次清零时间与「清零」按钮（需确认）|
-|用量统计|`routes/stats/+page.svelte`|全局：实际成本与订阅价值（订阅费用、等价按量成本、价值倍数）；Provider 行：按量成本、订阅费用、价值倍数（`none` 不显示成本）；Route 与 API Key：按量成本、计费金额与已知覆盖率。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
+|用量统计|`routes/stats/+page.svelte`|全局：实际成本与订阅价值（订阅费用、等价按量成本、价值倍数）；Provider 行：按量成本、订阅费用、价值倍数（`none` 不显示成本）；Route 与 API Key：按量成本与计费金额。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
 |请求详情|`observation-inspector-content.svelte`|每个尝试显示成本（订阅 Provider 标注为等价按量）与计费；未知显示「未知」|
 
 价格编辑器负责必填项与数字、时间的输入语法；时区、星期、时段顺序与重叠、倍率有效性由 Core 统一校验。保存失败时显示 Core 错误并保留草稿，取消编辑或切换模型后清除对应错误。
 
-覆盖率 = `known_count / (known_count + unknown_count)`，没有任何记录时不显示。
-
-订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示，并单独呈现覆盖率；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。金额卡片与成本趋势使用同一规则，未知尝试不能被画成已知零成本。
+订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。金额卡片与成本趋势使用同一规则，未知尝试不能被画成已知零成本。
 
 订阅价值倍数直接展示 Core 返回的 4 位小数；`usage_equivalent_cost.unknown_count > 0` 时显示为下界（「≥」）。`multiple` 为 `null`（订阅费用为零或任一侧不可表示）时不显示倍数。金额统一由 WebUI 格式化器四舍五入到 2 位小数，Core 返回的纳精度值不截断。
 
