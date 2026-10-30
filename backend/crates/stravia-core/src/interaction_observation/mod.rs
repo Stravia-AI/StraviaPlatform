@@ -5562,7 +5562,6 @@ mod snapshot_tests {
                     end_at: Some(window.1),
                     cursor: cursor.take(),
                     limit: Some(1),
-                    ..Default::default()
                 })
                 .await?;
             assert!(page.items.len() <= 1);
