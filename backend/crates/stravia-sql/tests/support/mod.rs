@@ -75,11 +75,12 @@ impl Captured {
         &self,
         targets: &'static [&'static str],
     ) -> impl Subscriber + Send + Sync + 'static {
-        tracing_subscriber::registry().with(self.clone().with_filter(
-            tracing_subscriber::filter::filter_fn(move |metadata| {
+        // 只有一个采集层；全局过滤避免并发测试 registry 的 per-layer 状态相互干扰。
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::filter_fn(move |metadata| {
                 targets.iter().any(|target| *target == metadata.target())
-            }),
-        ))
+            }))
+            .with(self.clone())
     }
 
     pub fn take(&self) -> Vec<Fields> {

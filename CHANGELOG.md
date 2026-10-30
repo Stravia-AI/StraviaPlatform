@@ -63,6 +63,7 @@
 
 ### Fixed
 
+- SQL diagnostics regression capture now uses subscriber-wide target filtering instead of per-layer filtering, preventing concurrent test registries from losing cleanup spans. Runtime tracing, write coordination and cleanup assertions are unchanged.
 - Removed a redundant struct default from the credential-hit pagination regression fixture, fixing warnings-as-errors Clippy checks without changing query coverage or runtime behavior.
 - Credential-hit records, Settings E2E and hit-window tests now follow the pinned Prettier formatting rules, restoring the WebUI formatting CI gate without changing behavior.
 - SQLite and PostgreSQL credential-hit records now use migration 0035, avoiding the duplicate 0034 version while preserving the already-applied context-event index migration and its checksum. Fresh initialization and incremental upgrades run credential cleanup before 0035 without changing either migration's SQL or rewriting existing migration history.
