@@ -662,12 +662,11 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         assert!(body.contains(r#""finish_reason":"failed""#), "{body}");
         assert!(!body.contains("opaque-reasoning"), "{body}");
 
-        let generation_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
-        )
-        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-        .await
-        .expect("count Generation Chain nodes");
+        let generation_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_nodes WHERE kind = 'response'")
+                .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+                .await
+                .expect("count Generation Chain nodes");
         assert_eq!(generation_count, 0);
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
@@ -875,12 +874,11 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
         .fetch_one(pool)
         .await
         .expect("count History Markers");
-    let generation_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("count Generation Chain nodes");
+    let generation_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_nodes WHERE kind = 'response'")
+            .fetch_one(pool)
+            .await
+            .expect("count Generation Chain nodes");
     assert_eq!(marker_count, 0);
     assert_eq!(generation_count, 0);
     drop(events);
@@ -922,12 +920,11 @@ async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
         assert!(body.contains(r#""finish_reason":"failed""#), "{body}");
         assert!(!body.contains(r#""content":"C2""#), "{body}");
 
-        let generation_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
-        )
-        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-        .await
-        .expect("count Generation Chain nodes");
+        let generation_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_nodes WHERE kind = 'response'")
+                .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+                .await
+                .expect("count Generation Chain nodes");
         assert_eq!(generation_count, 0);
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);

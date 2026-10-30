@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from tests.common.protocol_history_audit import _decode, _digest, _json, _restore
+from tests.common.protocol_history_audit import HistoryReader
 
 
 def private_json(path: Path, value: object) -> None:
@@ -69,23 +69,12 @@ def wire_bytes(record: dict) -> bytes:
 
 
 def node(connection: sqlite3.Connection, identifier: str) -> tuple[dict, dict]:
-    row = connection.execute("SELECT * FROM turn_chain_nodes WHERE id=?", (identifier,)).fetchone()
-    if row is None or row["kind"] != "response" or row["payload_version"] != 6 or row["storage_format"] != 2:
+    reader = HistoryReader(connection, "?")
+    row = reader.node(identifier)
+    if row["kind"] != "response" or row["payload_version"] != 6:
         raise ValueError("unsupported_history_node")
-    envelope = _json(_decode(row["payload"]))
-    contents = {}
-    for content in connection.execute(
-        "SELECT r.principal AS ref_principal,c.principal,c.content_key,c.content "
-        "FROM turn_chain_node_contents r JOIN turn_chain_contents c ON c.id=r.content_id WHERE r.node_id=?",
-        (identifier,),
-    ):
-        if content["principal"] != row["principal"] or content["ref_principal"] != row["principal"]:
-            raise ValueError("history_principal_mismatch")
-        raw = _decode(content["content"])
-        if _digest(raw) != content["content_key"]:
-            raise ValueError("history_content_digest_mismatch")
-        contents[content["content_key"]] = _json(raw)
-    return dict(row), _restore(envelope, contents)
+    payload, _, _ = reader.restore(row)
+    return row, payload
 
 
 def reconstruct(connection: sqlite3.Connection, run: dict, attempt: dict) -> tuple[dict, dict, int]:

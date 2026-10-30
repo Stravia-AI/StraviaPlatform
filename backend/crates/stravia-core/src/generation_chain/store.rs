@@ -240,7 +240,7 @@ impl DiscoveryWorkspace {
                 let size = if context.retains_node(&node.id) {
                     0
                 } else {
-                    serialized_size_bytes(&node.persisted)
+                    persisted_node_retained_bytes(&node.persisted)
                         .saturating_add(node.id.as_str().len())
                         .saturating_add(node.parent_id.as_ref().map_or(0, |id| id.as_str().len()))
                         .saturating_add(128)
@@ -269,8 +269,8 @@ pub(super) struct GenerationChainStore {
 pub(super) struct MaterializedGeneration {
     pub(super) root_id: String,
     pub(super) compaction_record_ids: Vec<String>,
-    pub(super) effective_items: Vec<AiItem>,
-    pub(super) client_items: Vec<AiItem>,
+    pub(super) effective_items: Vec<FrozenItem>,
+    pub(super) client_items: Vec<FrozenItem>,
     pub(super) effective_request: Option<EffectiveRequestConfig>,
     pub(super) effective_system: Option<String>,
     pub(super) upstream_response_id: Option<String>,
@@ -285,16 +285,56 @@ pub(super) struct MaterializedGeneration {
     pub(super) expires_at: std::time::Instant,
 }
 
-#[derive(Serialize, Deserialize)]
-struct CachedCatalog {
-    catalog: Result<Vec<AiItem>, String>,
-    #[serde(with = "cache_deadline")]
-    expires_at: std::time::Instant,
+impl MaterializedGeneration {
+    /// Logical retained size for cache admission: shared item windows are
+    /// charged once per distinct allocation plus their handle storage. Metadata
+    /// strings and request controls (including JSON schemas and native tools)
+    /// are added directly; this is not a serialized length.
+    fn retained_bytes(&self) -> usize {
+        let Self {
+            root_id,
+            compaction_record_ids,
+            effective_items,
+            client_items,
+            effective_request,
+            effective_system,
+            upstream_response_id,
+            effective_state,
+            media_turn_messages,
+            client_history,
+            client_item_units: _,
+            payload_version: _,
+            expires_at: _,
+        } = self;
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(shared_window_bytes(&[
+                effective_items.as_slice(),
+                client_items.as_slice(),
+            ]))
+            .saturating_add(root_id.capacity())
+            .saturating_add(upstream_response_id.as_ref().map_or(0, String::capacity))
+            .saturating_add(effective_system.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                effective_request
+                    .as_ref()
+                    .map_or(0, EffectiveRequestConfig::retained_bytes),
+            )
+            .saturating_add(effective_state.heap_bytes())
+            .saturating_add(string_vec_bytes(compaction_record_ids))
+            .saturating_add(std::mem::size_of_val(media_turn_messages.as_slice()));
+        for (_, turn_ids) in media_turn_messages {
+            bytes = bytes.saturating_add(string_vec_bytes(turn_ids));
+        }
+        if let Some(history) = client_history {
+            bytes = bytes.saturating_add(history.heap_bytes());
+        }
+        bytes
+    }
 }
 
-#[derive(Serialize)]
-struct BorrowedCachedCatalog<'a> {
-    catalog: &'a Result<Vec<AiItem>, String>,
+#[derive(Serialize, Deserialize)]
+struct CachedCatalog {
+    catalog: Result<Arc<Vec<FrozenItem>>, String>,
     #[serde(with = "cache_deadline")]
     expires_at: std::time::Instant,
 }
@@ -978,7 +1018,7 @@ impl GenerationChainStore {
     fn adopt_materialized_parent(
         parent_id: &str,
         materialized: &MaterializedGeneration,
-        catalog: Option<Vec<AiItem>>,
+        catalog: Option<Arc<Vec<FrozenItem>>>,
         ingress: Option<ProtocolId>,
         request: &mut AiRequest,
     ) -> Result<ActiveGenerationChain, String> {
@@ -989,7 +1029,9 @@ impl GenerationChainStore {
         if let Some(config) = materialized.effective_request.clone() {
             config.apply_missing_to(request);
         }
-        request.items = materialized.effective_items.clone();
+        // Execution needs the public owned IR; this is the only deep copy of
+        // the effective window on adoption. Parent state keeps shared handles.
+        request.items = owned_items(&materialized.effective_items);
         request.items.extend(new_messages);
         let instructions_present = request
             .parameters
@@ -1039,7 +1081,13 @@ impl GenerationChainStore {
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
         not_found: &str,
-    ) -> Result<(Arc<MaterializedGeneration>, Result<Vec<AiItem>, String>), String> {
+    ) -> Result<
+        (
+            Arc<MaterializedGeneration>,
+            Result<Arc<Vec<FrozenItem>>, String>,
+        ),
+        String,
+    > {
         let principal_key = principal.continuation_key();
         let cached = self.materialization_cache_get(&principal_key, id).await;
         crate::performance::record_generation_cache_access(cached.is_some());
@@ -1065,8 +1113,15 @@ impl GenerationChainStore {
                     catalog = Err(error);
                 }
             }
-            self.materialization_catalog_insert(&principal_key, id, ingress, &catalog, expires_at)
-                .await;
+            let catalog = catalog.map(Arc::new);
+            self.materialization_catalog_insert(
+                &principal_key,
+                id,
+                ingress,
+                catalog.clone(),
+                expires_at,
+            )
+            .await;
             return Ok((materialized, catalog));
         }
         let chain = self
@@ -1083,11 +1138,12 @@ impl GenerationChainStore {
             Arc::clone(&materialized),
         )
         .await;
+        let catalog = catalog.map(Arc::new);
         self.materialization_catalog_insert(
             &principal_key,
             id,
             ingress,
-            &catalog,
+            catalog.clone(),
             materialized.expires_at,
         )
         .await;
@@ -1175,7 +1231,7 @@ impl GenerationChainStore {
             return;
         }
         let key = generation_cache_key(&principal, &id, None);
-        let bytes = serialized_size_bytes(materialized.as_ref());
+        let bytes = materialized.retained_bytes();
         self.runtime_cache
             .put("generation.materialized", &key, materialized, bytes, ttl)
             .await;
@@ -1186,7 +1242,7 @@ impl GenerationChainStore {
         principal: &str,
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
-    ) -> Option<Result<Vec<AiItem>, String>> {
+    ) -> Option<Result<Arc<Vec<FrozenItem>>, String>> {
         let key = generation_cache_key(principal, id, ingress);
         let entry = self
             .runtime_cache
@@ -1196,6 +1252,7 @@ impl GenerationChainStore {
             self.runtime_cache.remove("generation.catalog", &key).await;
             return None;
         }
+        // Cache hits share the item handles; the catalog is never deep-cloned.
         Some(entry.catalog.clone())
     }
 
@@ -1204,7 +1261,7 @@ impl GenerationChainStore {
         principal: &str,
         id: &TurnNodeId,
         ingress: Option<ProtocolId>,
-        catalog: &Result<Vec<AiItem>, String>,
+        catalog: Result<Arc<Vec<FrozenItem>>, String>,
         expires_at: std::time::Instant,
     ) {
         let ttl = expires_at.saturating_duration_since(std::time::Instant::now());
@@ -1212,10 +1269,10 @@ impl GenerationChainStore {
             return;
         }
         let key = generation_cache_key(principal, id, ingress);
-        // 只计数借用表示；超预算历史仍正常返回，不先深拷贝再丢弃。
-        let bytes = serialized_size_bytes(&BorrowedCachedCatalog {
-            catalog,
-            expires_at,
+        // 共享窗口只计句柄与去重后的 item 分配；超预算历史仍正常返回。
+        let bytes = std::mem::size_of::<CachedCatalog>().saturating_add(match &catalog {
+            Ok(items) => shared_window_bytes(&[items.as_slice()]),
+            Err(error) => error.len(),
         });
         if !self
             .runtime_cache
@@ -1224,7 +1281,7 @@ impl GenerationChainStore {
             return;
         }
         let entry = Arc::new(CachedCatalog {
-            catalog: catalog.clone(),
+            catalog,
             expires_at,
         });
         self.runtime_cache
@@ -1245,32 +1302,18 @@ impl GenerationChainStore {
         &self,
         commit: GenerationChainCommit<'_>,
     ) -> Result<(), TurnCommitError> {
-        let GenerationChainCommit {
-            principal,
-            id,
-            parent,
-            request_delta,
-            response,
-            upstream_response_id,
-            effective_state,
-            ..
-        } = commit;
-        self.save_with_effective(GenerationChainCommit {
-            principal,
-            id,
-            parent,
-            effective_request: None,
-            request_delta,
-            response,
-            upstream_response_id,
-            effective_state,
-        })
-        .await
+        let projected =
+            project_client_commit(commit.parent, commit.request_delta, &commit.response)?;
+        self.save_projected(commit, projected).await
     }
 
-    pub(crate) async fn save_with_effective(
+    /// Persist a staged generation with the client projection captured at
+    /// stage time, so the parent window, delta items and projected output are
+    /// not cloned or re-projected a second time.
+    pub(super) async fn save_projected(
         &self,
         commit: GenerationChainCommit<'_>,
+        projected_client: ProjectedClientCommit,
     ) -> Result<(), TurnCommitError> {
         let GenerationChainCommit {
             principal,
@@ -1284,7 +1327,6 @@ impl GenerationChainStore {
         } = commit;
         let mut response = response;
         let mut effective_request = Cow::Borrowed(effective_request.unwrap_or(request_delta));
-        let projected_client = project_client_commit(parent, request_delta, &response)?;
         let fresh_states = &parent.fresh_inline_states;
         let inline_boundary =
             stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
@@ -1327,16 +1369,20 @@ impl GenerationChainStore {
             effective_state.canonical_controls_fingerprint = proof.controls_fingerprint;
         }
         let ProjectedClientCommit {
-            client_request_delta,
-            client_items: _,
+            client_instructions,
+            client_delta_items,
+            client_items,
             client_output,
-            client_history_mutation,
+            client_history_end,
+            replace_client_history,
             client_history,
             client_item_units,
         } = projected_client;
+        // Persist the effective request's items as a borrowed slice: serde
+        // copies them into the payload once, without freezing a second copy.
         let effective_history_mutation = if effective_inline || parent.replace_effective_history {
             EffectiveHistoryMutation::Replace {
-                items: Cow::Borrowed(&effective_request.items),
+                items: HistoryItems::borrowed(&effective_request.items),
             }
         } else if effective_request
             .items
@@ -1344,13 +1390,13 @@ impl GenerationChainStore {
             .is_some_and(|prefix| items_equal(prefix, &parent.parent_effective_items))
         {
             EffectiveHistoryMutation::Append {
-                items: Cow::Borrowed(
+                items: HistoryItems::borrowed(
                     &effective_request.items[parent.parent_effective_items.len()..],
                 ),
             }
         } else {
             EffectiveHistoryMutation::Replace {
-                items: Cow::Borrowed(&effective_request.items),
+                items: HistoryItems::borrowed(&effective_request.items),
             }
         };
         let item_count = u32::try_from(client_item_units)
@@ -1367,10 +1413,14 @@ impl GenerationChainStore {
         });
         let effective_system = effective_request.instructions.clone();
         let trusted_media_turn_ids = response.trusted_media_turn_ids.clone();
+        let client_history_mutation =
+            replace_client_history.then(|| EffectiveHistoryMutation::Replace {
+                items: HistoryItems::shared(&client_items[..client_history_end]),
+            });
         let payload = serde_json::to_value(PersistedResponseNode {
             client_delta: RequestDelta {
-                messages: Cow::Borrowed(&client_request_delta.items),
-                system: client_request_delta.instructions.clone(),
+                messages: Cow::Borrowed(&client_delta_items),
+                system: client_instructions,
             },
             client_output: Some(client_output),
             client_history_mutation,
@@ -1378,13 +1428,18 @@ impl GenerationChainStore {
             effective_history_mutation: Some(effective_history_mutation),
             effective_system,
             client_history: Some(client_history),
-            effective_output: response,
+            effective_output: FrozenResponse::new(response),
             trusted_media_turn_ids,
             upstream_response_id,
             effective_state,
             effective_request: Some(EffectiveRequestConfig::from_request(&effective_request)),
         })
         .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+        // The payload owns its serialized copies; release the borrowed windows
+        // before awaiting storage so a large projection is not retained.
+        drop(client_items);
+        drop(client_delta_items);
+        drop(effective_request);
         self.turn_chain
             .commit(TurnCommit {
                 id: TurnNodeId::new(id),

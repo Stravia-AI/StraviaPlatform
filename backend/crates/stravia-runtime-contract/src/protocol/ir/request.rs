@@ -651,6 +651,11 @@ impl AiItemMetadata {
         self.opaque.is_none().then_some(&self.extensions)
     }
 
+    /// Borrow legacy non-object metadata without promoting it into graph fields.
+    pub fn opaque_value(&self) -> Option<&Value> {
+        self.opaque.as_ref()
+    }
+
     /// Consume the extension map without exposing typed graph annotations.
     /// Malformed legacy graph fields stay in this map; opaque non-objects have
     /// no object extensions.

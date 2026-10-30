@@ -344,6 +344,12 @@ fn strip_markers(text: &str) -> (String, Vec<String>) {
 }
 
 pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
+    history_marker_references_iter(items.iter())
+}
+
+pub(crate) fn history_marker_references_iter<'a>(
+    items: impl IntoIterator<Item = &'a AiItem>,
+) -> Vec<String> {
     let mut references = Vec::new();
     for item in items {
         if item.role != Role::Assistant {

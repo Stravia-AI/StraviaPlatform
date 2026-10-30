@@ -592,9 +592,18 @@ fn tool_call_value(id: &str, name: &str, arguments: serde_json::Value) -> serde_
 /// delivery metadata and cache policy are not. Unclassified additive wire
 /// fields remain significant until explicitly classified as non-semantic.
 pub fn history_items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
-    left.iter()
+    history_item_refs_equal(left, right)
+}
+
+/// Compare borrowed sequences with the same canonical units as the slice entry
+/// point. Shared histories need not clone items into a contiguous owned slice.
+pub fn history_item_refs_equal<'a>(
+    left: impl IntoIterator<Item = &'a AiItem>,
+    right: impl IntoIterator<Item = &'a AiItem>,
+) -> bool {
+    left.into_iter()
         .flat_map(history_units)
-        .eq(right.iter().flat_map(history_units))
+        .eq(right.into_iter().flat_map(history_units))
 }
 
 pub fn append_history_context_hash(previous: &[u8; 32], item: &AiItem) -> [u8; 32] {

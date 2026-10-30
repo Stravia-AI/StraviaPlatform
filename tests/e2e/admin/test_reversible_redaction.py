@@ -276,7 +276,7 @@ def test_redaction_storage_failures_never_bypass_protection(
         env = {**admin_env, "mock": url}
         model = f"reversible-failure-{failure}"
         route, key = _create_route(env, model)
-        committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_chain_nodes")
+        committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_nodes")
         published_before = mapping_sql(env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL")
         set_enabled(env, failure != "read")
         if failure == "read":
@@ -343,7 +343,7 @@ def test_redaction_storage_failures_never_bypass_protection(
                     env, "SELECT published_at FROM reversible_redaction_mappings WHERE reference = ?",
                     reference.group(),
                 ) == [(None,)]
-            assert mapping_sql(env, "SELECT COUNT(*) FROM turn_chain_nodes") == committed_before
+            assert mapping_sql(env, "SELECT COUNT(*) FROM turn_nodes") == committed_before
             assert mapping_sql(
                 env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL",
             ) == published_before

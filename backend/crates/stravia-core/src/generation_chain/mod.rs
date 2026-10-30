@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::runtime_cache::RuntimeCache;
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::Principal;
@@ -56,6 +57,131 @@ pub(crate) use store::{
 
 // Persisted payloads must match this version exactly; older encodings are rejected.
 const RESPONSE_PAYLOAD_VERSION: u32 = 6;
+
+/// Immutable history item shared by decoded nodes, parent windows, materialized
+/// snapshots and their caches. A window only stores handles, so propagating a
+/// history prefix copies pointers, never Thinking/Base64/ToolUse bodies. The
+/// newtype serializes exactly like [`AiItem`], keeping the persisted and cached
+/// payload shape unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct FrozenItem(Arc<AiItem>);
+
+impl FrozenItem {
+    pub(super) fn new(item: AiItem) -> Self {
+        Self(Arc::new(item))
+    }
+
+    /// Copy-on-write access for projections that must rewrite one item.
+    pub(super) fn make_mut(&mut self) -> &mut AiItem {
+        Arc::make_mut(&mut self.0)
+    }
+
+    pub(super) fn into_owned(self) -> AiItem {
+        Arc::try_unwrap(self.0).unwrap_or_else(|item| (*item).clone())
+    }
+
+    fn allocation(&self) -> *const AiItem {
+        Arc::as_ptr(&self.0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn shares_allocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Deref for FrozenItem {
+    type Target = AiItem;
+
+    fn deref(&self) -> &AiItem {
+        &self.0
+    }
+}
+
+impl AsRef<AiItem> for FrozenItem {
+    fn as_ref(&self) -> &AiItem {
+        &self.0
+    }
+}
+
+impl From<AiItem> for FrozenItem {
+    fn from(item: AiItem) -> Self {
+        Self::new(item)
+    }
+}
+
+impl crate::model_turn::support::ChatReasoningItem for FrozenItem {
+    fn item_mut(&mut self) -> &mut AiItem {
+        self.make_mut()
+    }
+}
+
+/// Borrowed view over owned or shared history items.
+pub(crate) trait HistoryItem {
+    fn history_item(&self) -> &AiItem;
+}
+
+impl HistoryItem for AiItem {
+    fn history_item(&self) -> &AiItem {
+        self
+    }
+}
+
+impl HistoryItem for FrozenItem {
+    fn history_item(&self) -> &AiItem {
+        self
+    }
+}
+
+pub(super) fn freeze_items(items: impl IntoIterator<Item = AiItem>) -> Vec<FrozenItem> {
+    items.into_iter().map(FrozenItem::new).collect()
+}
+
+pub(super) fn freeze_slice(items: &[AiItem]) -> Vec<FrozenItem> {
+    items.iter().cloned().map(FrozenItem::new).collect()
+}
+
+pub(super) fn owned_items(items: &[FrozenItem]) -> Vec<AiItem> {
+    items.iter().map(|item| item.as_ref().clone()).collect()
+}
+
+/// Context digest over owned or shared items. Folding the canonical per-item
+/// units keeps the exact persisted fingerprint contract.
+pub(super) fn history_context_hash_with_count<I: HistoryItem>(items: &[I]) -> ([u8; 32], usize) {
+    let mut digest = stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[]);
+    let mut count = 0;
+    for item in items {
+        let (next, units) =
+            stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash_with_count(
+                &digest,
+                item.history_item(),
+            );
+        digest = next;
+        count += units;
+    }
+    (digest, count)
+}
+
+/// 窗口分组不是历史语义：共享句柄沿用 canonical 单元比较，不深拷贝正文。
+pub(super) fn items_equal<L: HistoryItem, R: HistoryItem>(left: &[L], right: &[R]) -> bool {
+    stravia_runtime_contract::protocol::ir::canonical::history_item_refs_equal(
+        left.iter().map(HistoryItem::history_item),
+        right.iter().map(HistoryItem::history_item),
+    )
+}
+
+/// Inline compaction boundary for shared windows. The codec owns the predicate;
+/// testing one candidate at a time avoids materializing owned history.
+pub(super) fn shared_inline_compaction_boundary(
+    items: &[FrozenItem],
+    fresh_states: &[AiItem],
+) -> Option<usize> {
+    let boundary = stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
+    items
+        .iter()
+        .rposition(|item| boundary(std::slice::from_ref(item.as_ref()), fresh_states).is_some())
+}
 
 #[cfg(test)]
 const DEFAULT_GENERATION_CHAIN_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -135,6 +261,9 @@ struct StagedGeneration {
     response: AiResponse,
     upstream_response_id: Option<String>,
     effective_state: GenerationChainState,
+    /// Client projection captured at stage. Declared empty by
+    /// `record_inline_publications` if the parent window changes afterwards.
+    projection: Option<ProjectedClientCommit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -553,11 +682,13 @@ impl GenerationChain {
                     None => ActiveGenerationChain::default(),
                 };
                 parent.replace_effective_history = true;
-                parent.replacement_client_items = Some(
-                    canonical_client_history_request(&request)
-                        .into_owned()
-                        .items,
-                );
+                // Canonicalization may already own the request; move its items
+                // instead of copying them. The request itself stays live below.
+                let replacement_client_items = match canonical_client_history_request(&request) {
+                    Cow::Owned(canonical) => freeze_items(canonical.items),
+                    Cow::Borrowed(canonical) => freeze_slice(&canonical.items),
+                };
+                parent.replacement_client_items = Some(replacement_client_items);
                 parent.compaction_input_range = Some(native_range.clone());
                 if let Some((count, _)) = source_prefix {
                     Arc::make_mut(&mut request_delta)
@@ -698,7 +829,9 @@ impl GenerationChain {
             .await
             .map_err(|_| BeginError::CompactionUnavailable)?;
         parent.replace_effective_history = true;
-        parent.replacement_client_items = Some(client_request.items);
+        // `client_request` is owned and never read again; move its items into
+        // shared handles instead of freezing a borrowed copy.
+        parent.replacement_client_items = Some(freeze_items(client_request.items));
         parent.compaction_input_range = write.parent.compaction_input_range.clone();
         parent.compaction_record_ids.extend(std::mem::take(
             &mut Arc::make_mut(&mut write.parent).compaction_record_ids,
@@ -778,6 +911,32 @@ struct GenerationChainState {
 }
 
 impl GenerationChainState {
+    fn heap_bytes(&self) -> usize {
+        let Self {
+            context_fingerprint,
+            context_messages: _,
+            model,
+            provider_model,
+            selected_target_key,
+            canonical_controls_fingerprint,
+            target_namespace,
+            protocol,
+        } = self;
+        [
+            context_fingerprint,
+            model,
+            provider_model,
+            selected_target_key,
+            canonical_controls_fingerprint,
+            target_namespace,
+            protocol,
+        ]
+        .into_iter()
+        .fold(0usize, |bytes, value| {
+            bytes.saturating_add(value.capacity())
+        })
+    }
+
     pub(crate) fn from_request(
         request: &AiRequest,
         target_namespace: &str,
@@ -858,10 +1017,10 @@ struct ActiveGenerationChain {
     parent_target_key: Option<String>,
     parent_expires_at: Option<std::time::Instant>,
     pub media_turn_messages: Vec<(usize, Vec<String>)>,
-    parent_effective_items: Vec<AiItem>,
-    parent_client_items: Vec<AiItem>,
+    parent_effective_items: Vec<FrozenItem>,
+    parent_client_items: Vec<FrozenItem>,
     replace_effective_history: bool,
-    replacement_client_items: Option<Vec<AiItem>>,
+    replacement_client_items: Option<Vec<FrozenItem>>,
     compaction_input_range: Option<std::ops::Range<usize>>,
     fresh_inline_states: Vec<AiItem>,
     compaction_record_ids: Vec<String>,
@@ -874,15 +1033,72 @@ struct DiscoveredGenerationPrefix {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct RequestDelta<'a> {
-    messages: Cow<'a, [AiItem]>,
+    messages: Cow<'a, [FrozenItem]>,
     system: Option<String>,
+}
+
+/// Persisted item sequence. Decoding keeps shared [`FrozenItem`] handles so
+/// replay can reuse allocations; writing can borrow an owned IR slice directly
+/// so persisting a large effective request never freezes (copies) its bodies.
+/// Both representations serialize as the same JSON array of items.
+#[derive(Clone)]
+enum HistoryItems<'a> {
+    Frozen(Cow<'a, [FrozenItem]>),
+    Borrowed(&'a [AiItem]),
+}
+
+impl<'a> HistoryItems<'a> {
+    fn shared(items: &'a [FrozenItem]) -> Self {
+        Self::Frozen(Cow::Borrowed(items))
+    }
+
+    fn borrowed(items: &'a [AiItem]) -> Self {
+        Self::Borrowed(items)
+    }
+
+    fn as_shared(&self) -> Cow<'_, [FrozenItem]> {
+        match self {
+            Self::Frozen(items) => Cow::Borrowed(items.as_ref()),
+            Self::Borrowed(items) => Cow::Owned(freeze_slice(items)),
+        }
+    }
+
+    fn into_shared(self) -> Cow<'a, [FrozenItem]> {
+        match self {
+            Self::Frozen(items) => items,
+            Self::Borrowed(items) => Cow::Owned(freeze_slice(items)),
+        }
+    }
+}
+
+impl<'a> From<Vec<FrozenItem>> for HistoryItems<'a> {
+    fn from(items: Vec<FrozenItem>) -> Self {
+        Self::Frozen(Cow::Owned(items))
+    }
+}
+
+impl<'a> Serialize for HistoryItems<'a> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Frozen(items) => items.serialize(serializer),
+            Self::Borrowed(items) => items.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, 'a> Deserialize<'de> for HistoryItems<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::Frozen(Cow::Owned(freeze_items(
+            Vec::<AiItem>::deserialize(deserializer)?,
+        ))))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EffectiveHistoryMutation<'a> {
-    Append { items: Cow<'a, [AiItem]> },
-    Replace { items: Cow<'a, [AiItem]> },
+    Append { items: HistoryItems<'a> },
+    Replace { items: HistoryItems<'a> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -901,11 +1117,22 @@ struct ClientHistoryState {
 const GENERATION_PREFIX_NAMESPACE: &str = "stravia-generation-history-v5:";
 
 impl ClientHistoryState {
-    fn from_request_with_count(request: &AiRequest, items: &[AiItem]) -> (Self, usize) {
-        let (context, units) =
-            stravia_runtime_contract::protocol::ir::canonical::history_context_hash_with_count(
-                items,
-            );
+    fn heap_bytes(&self) -> usize {
+        let Self {
+            projection_version: _,
+            controls_fingerprint,
+            context_fingerprint,
+            context_messages: _,
+            session_fingerprint,
+        } = self;
+        controls_fingerprint
+            .capacity()
+            .saturating_add(context_fingerprint.capacity())
+            .saturating_add(session_fingerprint.as_ref().map_or(0, String::capacity))
+    }
+
+    fn from_request_with_count<I: HistoryItem>(request: &AiRequest, items: &[I]) -> (Self, usize) {
+        let (context, units) = history_context_hash_with_count(items);
         (
             Self {
                 projection_version:
@@ -1004,6 +1231,41 @@ impl TryFrom<EffectiveRequestConfigWire> for EffectiveRequestConfig {
 }
 
 impl EffectiveRequestConfig {
+    /// Logical retained size of the request controls carried by a cached
+    /// materialization. Exhaustive destructuring guards this snapshot's fields,
+    /// not every nested type. Nested control weights are maintained separately;
+    /// JSON schemas and native tools are walked without building another DOM.
+    fn retained_bytes(&self) -> usize {
+        let Self {
+            model,
+            instructions,
+            generation,
+            tools,
+            tool_choice,
+            parallel_tool_calls: _,
+            reasoning,
+            response_format,
+            parameters,
+        } = self;
+        std::mem::size_of::<Self>()
+            .saturating_add(model.len())
+            .saturating_add(instructions.as_ref().map_or(0, String::len))
+            .saturating_add(generation_config_retained_bytes(generation))
+            .saturating_add(
+                tools
+                    .as_ref()
+                    .map_or(0, |tools| tool_specs_retained_bytes(tools)),
+            )
+            .saturating_add(tool_choice.as_ref().map_or(0, tool_choice_retained_bytes))
+            .saturating_add(reasoning_config_retained_bytes(reasoning))
+            .saturating_add(
+                response_format
+                    .as_ref()
+                    .map_or(0, response_format_retained_bytes),
+            )
+            .saturating_add(request_parameters_retained_bytes(parameters))
+    }
+
     fn from_request(request: &AiRequest) -> Self {
         Self {
             model: request.model.clone(),
@@ -1131,11 +1393,85 @@ fn inherit_parameters(
     // 重置只阻止本轮继承，不能成为后续请求的默认值。
 }
 
+/// Persisted upstream response whose item vector is shared as immutable
+/// handles. Serialization emits exactly the [`AiResponse`] object, so payloads
+/// and cache entries keep their established shape.
+#[derive(Clone, Debug)]
+struct FrozenResponse {
+    response: AiResponse,
+    items: Vec<FrozenItem>,
+}
+
+impl FrozenResponse {
+    fn new(mut response: AiResponse) -> Self {
+        let items = std::mem::take(&mut response.items)
+            .into_iter()
+            .map(FrozenItem::new)
+            .collect();
+        Self { response, items }
+    }
+
+    fn items(&self) -> &[FrozenItem] {
+        &self.items
+    }
+
+    fn vendor(&self) -> &stravia_runtime_contract::protocol::ir::vendor_ext::VendorExtensions {
+        &self.response.vendor
+    }
+
+    fn take_items(&mut self) -> Vec<FrozenItem> {
+        std::mem::take(&mut self.items)
+    }
+
+    /// Boundary conversion for legacy fallbacks that still need an owned view.
+    fn to_owned_response(&self) -> AiResponse {
+        let mut response = self.response.clone();
+        response.items = owned_items(&self.items);
+        response
+    }
+}
+
+impl Serialize for FrozenResponse {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Exhaustive destructuring mirrors AiResponse's fields: a new field must
+        // be classified here before this compiles. Trusted media turn IDs are
+        // skipped by AiResponse and persisted separately by the node.
+        let AiResponse {
+            id,
+            model,
+            items: _,
+            stop_reason,
+            usage,
+            embedding_output,
+            error,
+            vendor,
+            trusted_media_turn_ids: _,
+        } = &self.response;
+        let mut state = serializer.serialize_struct("AiResponse", 8)?;
+        state.serialize_field("id", id)?;
+        state.serialize_field("model", model)?;
+        state.serialize_field("items", &self.items)?;
+        state.serialize_field("stop_reason", stop_reason)?;
+        state.serialize_field("usage", usage)?;
+        state.serialize_field("embedding_output", embedding_output)?;
+        state.serialize_field("error", error)?;
+        state.serialize_field("vendor", vendor)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FrozenResponse {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(AiResponse::deserialize(deserializer)?))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct PersistedResponseNode<'a> {
     client_delta: RequestDelta<'a>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_output: Option<Vec<AiItem>>,
+    client_output: Option<Vec<FrozenItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_history_mutation: Option<EffectiveHistoryMutation<'a>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1143,7 +1479,7 @@ struct PersistedResponseNode<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effective_history_mutation: Option<EffectiveHistoryMutation<'a>>,
     effective_system: Option<String>,
-    effective_output: AiResponse,
+    effective_output: FrozenResponse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_history: Option<ClientHistoryState>,
     trusted_media_turn_ids: Vec<String>,

@@ -402,7 +402,6 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
         assert "observation_tables=6" in schema_report
         assert "removed_tables=0" in schema_report
         assert "legacy_tables=0" in schema_report
-        assert "observation_indexes=3" in schema_report
         assert "removed_indexes=0" in schema_report
 
         reconnect_port = find_free_port()

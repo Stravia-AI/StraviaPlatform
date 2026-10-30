@@ -179,8 +179,6 @@ CREATE TABLE interaction_observations (
     started_at INTEGER NOT NULL,
     last_active_at INTEGER NOT NULL,
     visible_tail TEXT NOT NULL DEFAULT '',
-    input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
-    cache_write_tokens INTEGER, reasoning_tokens INTEGER,
     observation_gap INTEGER NOT NULL DEFAULT 0,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL
@@ -234,8 +232,6 @@ CREATE TABLE model_turn_observations (
     status TEXT NOT NULL,
     started_at INTEGER NOT NULL,
     finished_at INTEGER,
-    input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
-    cache_write_tokens INTEGER, reasoning_tokens INTEGER,
     last_event_sequence INTEGER NOT NULL
 , estimated_input_tokens INTEGER
         CHECK (estimated_input_tokens IS NULL OR
@@ -272,10 +268,10 @@ CREATE TABLE native_compaction_states (
     PRIMARY KEY (record_id, fingerprint)
 );
 
-CREATE TABLE native_compactions (
+CREATE TABLE "native_compactions" (
     id TEXT PRIMARY KEY,
     principal TEXT NOT NULL,
-    source_generation_id TEXT REFERENCES turn_chain_nodes(id) ON DELETE RESTRICT,
+    source_generation_id TEXT REFERENCES turn_nodes(id) ON DELETE RESTRICT,
     operation_id TEXT NOT NULL,
     payload TEXT NOT NULL CHECK (json_valid(payload)),
     created_at INTEGER NOT NULL,
@@ -600,26 +596,72 @@ CREATE TABLE target_attempt_observations (
     last_event_sequence INTEGER NOT NULL
 , error_source TEXT, error_message TEXT, upstream_error_code TEXT, cost_basis TEXT, cost_usd_nanos INTEGER, cost_custom_nanos INTEGER, billing_state TEXT, billing_usd_nanos INTEGER, billing_custom_nanos INTEGER);
 
-CREATE TABLE turn_chain_contents (
- id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, content_key TEXT NOT NULL, content BLOB NOT NULL,
- UNIQUE(principal, content_key), UNIQUE(principal, id)
+CREATE TABLE turn_content_gc (
+    content_id INTEGER PRIMARY KEY REFERENCES turn_contents(id) ON DELETE CASCADE
 );
 
-CREATE TABLE turn_chain_node_contents (
- node_id TEXT NOT NULL, principal TEXT NOT NULL, content_id BIGINT NOT NULL,
- PRIMARY KEY(node_id, content_id),
- FOREIGN KEY(node_id, principal) REFERENCES turn_chain_nodes(id, principal) ON DELETE CASCADE,
- FOREIGN KEY(principal, content_id) REFERENCES turn_chain_contents(principal, id) ON DELETE RESTRICT
+CREATE TABLE turn_contents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_id BIGINT NOT NULL REFERENCES turn_scopes(id) ON DELETE RESTRICT,
+    digest BLOB NOT NULL CHECK(length(digest) = 32),
+    content BLOB NOT NULL,
+    UNIQUE(scope_id, digest),
+    UNIQUE(scope_id, id)
+);
+
+CREATE TABLE turn_node_contents (
+    node_pk BIGINT NOT NULL,
+    scope_id BIGINT NOT NULL,
+    ordinal BIGINT NOT NULL CHECK(ordinal >= 0),
+    content_id BIGINT NOT NULL,
+    PRIMARY KEY(node_pk, ordinal),
+    UNIQUE(node_pk, content_id),
+    FOREIGN KEY(node_pk, scope_id)
+        REFERENCES turn_nodes(node_pk, scope_id) ON DELETE CASCADE,
+    FOREIGN KEY(scope_id, content_id)
+        REFERENCES turn_contents(scope_id, id) ON DELETE RESTRICT
 ) WITHOUT ROWID;
 
-CREATE TABLE "turn_chain_nodes" (
- id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('response','agent','web_search')),
- parent_id TEXT, principal TEXT NOT NULL, payload_version INTEGER NOT NULL CHECK(payload_version>0),
- payload BLOB NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
- prefix_namespace TEXT, prefix_fingerprint TEXT, prefix_item_count INTEGER, prefix_completed_at INTEGER,
- storage_format INTEGER NOT NULL DEFAULT 2 CHECK(storage_format IN (0,1,2)), prefix_projection_version INTEGER, prefix_controls_fingerprint TEXT, prefix_context_fingerprint TEXT,
- UNIQUE(id,principal), UNIQUE(id,principal,kind),
- FOREIGN KEY(parent_id,principal,kind) REFERENCES "turn_chain_nodes"(id,principal,kind) ON DELETE RESTRICT
+CREATE TABLE turn_node_gc (
+    node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE
+);
+
+CREATE TABLE turn_node_payloads (
+    node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
+    payload BLOB NOT NULL
+);
+
+CREATE TABLE turn_node_retention (
+    node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL,
+    deleting INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0, 1))
+);
+
+CREATE TABLE turn_nodes (
+    node_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    scope_id BIGINT NOT NULL REFERENCES turn_scopes(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK(kind IN ('response', 'agent', 'web_search')),
+    parent_pk BIGINT,
+    payload_version BIGINT NOT NULL CHECK(payload_version > 0),
+    created_at BIGINT NOT NULL,
+    prefix_namespace TEXT,
+    prefix_fingerprint TEXT,
+    prefix_item_count BIGINT,
+    prefix_completed_at BIGINT,
+    prefix_projection_version BIGINT,
+    prefix_controls_fingerprint TEXT,
+    prefix_context_fingerprint TEXT,
+    UNIQUE(node_pk, scope_id),
+    UNIQUE(node_pk, scope_id, kind),
+    FOREIGN KEY(parent_pk, scope_id, kind)
+        REFERENCES turn_nodes(node_pk, scope_id, kind)
+        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE turn_scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    principal TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE vendor_data_recovery (
@@ -739,20 +781,6 @@ ON reversible_redaction_mappings(expires_at);
 CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
 ON reversible_redaction_mappings(principal, expires_at);
 
-CREATE INDEX idx_turn_chain_expiry ON turn_chain_nodes(expires_at);
-
-CREATE INDEX idx_turn_chain_node_contents_content_id ON turn_chain_node_contents(principal, content_id);
-
-CREATE INDEX idx_turn_chain_node_contents_node ON turn_chain_node_contents(node_id, principal);
-
-CREATE UNIQUE INDEX idx_turn_chain_node_principal ON turn_chain_nodes(id,principal);
-
-CREATE INDEX idx_turn_chain_parent ON turn_chain_nodes(parent_id, principal, kind);
-
-CREATE INDEX idx_turn_chain_principal_kind ON turn_chain_nodes(principal,kind);
-
-CREATE INDEX idx_turn_chain_reusable_prefix ON turn_chain_nodes(principal,kind,prefix_namespace,prefix_fingerprint,prefix_item_count DESC,prefix_completed_at DESC,expires_at,id DESC) WHERE prefix_namespace IS NOT NULL;
-
 CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
 
 CREATE UNIQUE INDEX idx_web_providers_local_singleton
@@ -762,7 +790,7 @@ WHERE kind = 'local';
 CREATE INDEX inference_runs_failed_window_idx
     ON inference_run_observations(started_at DESC, id) WHERE status = 'failed';
 
-CREATE INDEX inference_runs_generation_idx ON inference_run_observations(generation_node_id, generation_parent_id);
+CREATE INDEX inference_runs_generation_idx ON inference_run_observations(generation_node_id);
 
 CREATE INDEX inference_runs_interaction_idx ON inference_run_observations(interaction_id, started_at, id);
 
@@ -774,8 +802,6 @@ CREATE INDEX interaction_observations_expiry_idx ON interaction_observations(exp
 
 CREATE INDEX interaction_observations_filter_idx ON interaction_observations(status, api_key_name, last_active_at DESC);
 
-CREATE INDEX interaction_observations_generation_idx ON interaction_observations(generation_root_id, last_active_at);
-
 CREATE INDEX interaction_observations_parent_idx ON interaction_observations(parent_interaction_id);
 
 CREATE INDEX interaction_observations_window_idx ON interaction_observations(root_id, last_active_at DESC, id);
@@ -786,11 +812,12 @@ CREATE INDEX model_changes_order ON model_changes(checked_at DESC, id DESC);
 
 CREATE INDEX model_changes_provider_order ON model_changes(provider_id, checked_at DESC, id DESC);
 
-CREATE INDEX model_turns_analytics_idx ON model_turn_observations(started_at, route_id, api_key_id, status);
-
 CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_id, started_at, id);
 
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
+
+CREATE INDEX native_compactions_generation_idx ON native_compactions(source_generation_id)
+    WHERE source_generation_id IS NOT NULL;
 
 CREATE INDEX observation_events_credential_discovery_idx
     ON observation_events(kind, interaction_id, occurred_at DESC, expires_at)
@@ -831,10 +858,11 @@ CREATE INDEX public_tool_executions_expiry ON public_tool_executions(expires_at)
 
 CREATE INDEX public_tool_executions_source ON public_tool_executions(source_run_id);
 
-CREATE INDEX rejected_requests_expiry_idx ON rejected_request_observations(expires_at, id);
+CREATE INDEX rejected_requests_client_error_window_idx
+    ON rejected_request_observations(COALESCE(started_at, occurred_at) DESC, id)
+    WHERE status_code <> 499 AND code NOT IN ('request_aborted', 'cancelled', 'client_disconnected');
 
-CREATE INDEX rejected_requests_started_idx
-    ON rejected_request_observations(started_at DESC, id);
+CREATE INDEX rejected_requests_expiry_idx ON rejected_request_observations(expires_at, id);
 
 CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occurred_at DESC, id);
 
@@ -851,6 +879,19 @@ CREATE INDEX target_attempts_turn_idx ON target_attempt_observations(model_turn_
 CREATE INDEX target_attempts_upstream_error_window_idx
     ON target_attempt_observations (started_at DESC, id)
     WHERE status='failed' AND error_source='upstream';
+
+CREATE INDEX turn_node_contents_content_idx ON turn_node_contents(content_id);
+
+CREATE INDEX turn_node_retention_expiry_idx ON turn_node_retention(expires_at, node_pk);
+
+CREATE INDEX turn_nodes_parent_idx ON turn_nodes(parent_pk, scope_id, kind);
+
+CREATE INDEX turn_nodes_prefix_idx
+    ON turn_nodes(scope_id, kind, prefix_namespace, prefix_fingerprint,
+                  prefix_item_count DESC, prefix_completed_at DESC, id DESC)
+    WHERE prefix_namespace IS NOT NULL;
+
+CREATE INDEX turn_nodes_scope_idx ON turn_nodes(scope_id);
 
 CREATE VIEW stats_usage_attempt_source AS
 SELECT

@@ -1,14 +1,10 @@
 use super::{AiStreamDelta, AttemptFailure, VendorPublicationFence};
+use crate::memory::json_heap_bytes;
 
 const PRECOMMIT_BUFFER_BUDGET: usize = 16 * 1024 * 1024;
 // 包含事件槽及 Vec 初始/倍增预留空间；预算是保守占用估算，不是进程 RSS。
 const PRECOMMIT_EVENT_OVERHEAD: usize =
     4 * std::mem::size_of::<(AiStreamDelta, VendorPublicationFence)>();
-
-// 每个 JSON 对象条目的固定占用：键、值槽以及稀疏占用的 map 节点/索引，按 (String, Value)
-// 的 4 倍保守估算。过大的值会让 schema 密集的 `tools` 回显（大量小键）在真实体积远低于
-// 预算时被拒绝。
-const JSON_OBJECT_ENTRY_OVERHEAD: usize = 4 * std::mem::size_of::<(String, serde_json::Value)>();
 
 #[derive(Default)]
 pub(super) struct PrecommitBuffer {
@@ -53,7 +49,7 @@ fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
     use AiStreamDelta as D;
     match delta {
         D::MessageStart { id, model } => id.capacity().saturating_add(model.capacity()),
-        D::ResponseMetadata { metadata } => json_payload_bytes(metadata),
+        D::ResponseMetadata { metadata } => json_heap_bytes(metadata),
         D::TextDelta(text)
         | D::RefusalDelta(text)
         | D::ThinkingDelta(text)
@@ -73,7 +69,7 @@ fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
             .saturating_add(
                 logprobs
                     .iter()
-                    .map(json_payload_bytes)
+                    .map(json_heap_bytes)
                     .fold(0usize, usize::saturating_add),
             )
             .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
@@ -97,45 +93,6 @@ fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
         | D::Done { .. }
         | D::StreamError { .. }
         | D::UnexpectedEof => 0,
-    }
-}
-
-fn json_payload_bytes(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(text) => text.capacity(),
-        // The workspace enables serde_json's arbitrary_precision feature: a
-        // Number can own a large decimal String, not merely an inline float.
-        serde_json::Value::Number(number) => {
-            struct CountBytes(usize);
-            impl std::io::Write for CountBytes {
-                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                    self.0 = self.0.saturating_add(bytes.len());
-                    Ok(bytes.len())
-                }
-                fn flush(&mut self) -> std::io::Result<()> {
-                    Ok(())
-                }
-            }
-            let mut count = CountBytes(0);
-            serde_json::to_writer(&mut count, number).expect("counting writer cannot fail");
-            count.0.saturating_mul(2) // allow for String spare capacity
-        }
-        serde_json::Value::Array(values) => values
-            .capacity()
-            .saturating_mul(std::mem::size_of::<serde_json::Value>())
-            .saturating_add(
-                values
-                    .iter()
-                    .map(json_payload_bytes)
-                    .fold(0usize, usize::saturating_add),
-            ),
-        serde_json::Value::Object(values) => values.iter().fold(0usize, |bytes, (key, value)| {
-            bytes
-                .saturating_add(JSON_OBJECT_ENTRY_OVERHEAD)
-                .saturating_add(key.capacity())
-                .saturating_add(json_payload_bytes(value))
-        }),
-        _ => 0,
     }
 }
 
