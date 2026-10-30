@@ -58,7 +58,7 @@ Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再�
 
 ### 供应商选择器与来源
 
-管理接口 `GET /api/v1/vendors` 返回完整有效的 Provider 元数据，供已有连接读取配置；新建连接使用 `GET /api/v1/vendors?selectable=true` 获取应用替代规则后的候选列表，两者不共用查询缓存。原描述符字段保持扁平布局，新增 `plugin: { id, name }`，由宿主从实际加载的软件包身份及名称生成。卡片与连接配置步骤显示目录标识、来源插件名称和插件 ID；搜索同时覆盖展示名称、目录标识、执行身份及插件来源。
+管理接口 `GET /api/v1/vendors` 返回完整有效的 Provider 元数据，供已有连接读取配置；新建连接使用 `GET /api/v1/vendors?selectable=true` 获取应用替代规则后的候选列表，两者不共用查询缓存。原描述符字段保持扁平布局，新增 `plugin: { id, name }`，由宿主从实际加载的软件包身份及名称生成。卡片显示认证方式；来源为内置 `base` 的卡片不标注来源，外部插件的卡片以拼图图标标记，提示显示插件名称和插件 ID。连接配置步骤显示目录标识、来源插件名称和插件 ID；搜索同时覆盖展示名称、目录标识、执行身份及插件来源。所有卡片图标统一渲染为单色，不保留品牌自带颜色。
 
 Core 以「目录身份 + channel ID」处理选择器中的替代关系：目录身份优先使用 `catalog_id`，未声明时使用 `provider_id`。外部插件声明同一入口时，仅隐藏 `base` 对应 channel 的卡片，并沿用该 base Profile 的展示名称；未匹配的 base channel 继续可选。不同外部插件即使声明相同目录入口也各自保留，不能互相覆盖；不同 channel 的 API 与 Codex／OAuth 接入不合并。卸载外部插件后，原 base 入口重新可选。相同执行身份的已安装包接管及 retired Profile 隐藏规则保持不变。
 
@@ -265,15 +265,16 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 
 ### Provider 图标标识
 
-- `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有受保护的图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。
-- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 按最终 Provider/Catalog 身份精确匹配仓库已有 SVG；共享协议实现不构成共享品牌的依据，未知身份清空模板图标，`custom` 和通用 OpenAI-compatible 不声明品牌图标。专属插件按各自描述符声明适用标志；Kilo 未内嵌 SVG，不以其它品牌图标代替。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
+- `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有宿主图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。图像接口属于公开静态资源，不要求管理登录；入口 origin 策略仍生效。
+- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 的全部 Provider Profile 均不声明 `icon_svg`，也不维护品牌 SVG 清单或图标别名；宿主按原生 `catalog_id` / `provider_id` 请求 Models 图标。`base` 插件自身的 Stravia 标志不属于供应商品牌图，继续保留。专属插件直接声明各自适用标志；Kilo 未内嵌 SVG，不以其它品牌图标代替。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
 - 更换图标需要重建并重新导入独立插件；仅更新宿主不会改写已安装组件。`base` 随宿主更新。品牌名称和图形归各自权利人所有，公开下载地址不等同于再分发授权。
-- 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。
+- 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，只有未声明内嵌 SVG 时才请求 `/logos/openai.svg`。
 - 按选定 ID 获取目录图标失败后才进入网站图标回退；已经选择 `catalog_id` 时，不再追加一次 `provider_id` 目录图标尝试。网站图标来源优先使用插件明确声明的官网地址；没有官网声明时，使用已保存连接 `base_url` 的 origin。不得把文档地址自动视为官网，也不得猜测域名。官网一旦被选为来源，获取失败后不再请求连接 origin 的 favicon。
 - 插件可声明内嵌 SVG、图标身份与网站来源；只有缺少内嵌 SVG 时，宿主才统一获取目录 logo 与网站 favicon，保存在 Stravia 实例磁盘缓存中并供 UI 读取。Desktop 缓存在本机实例，独立 Server 缓存在服务器实例，二者都跨进程重启复用。浏览器不再直接请求外部 favicon，也不以浏览器缓存代替实例持久缓存。
 - 网站图标回退仅请求选定网站 origin 的 `/favicon.ico`，不请求或解析首页 HTML 寻找其他图标；接受仅通过 HTML 声明图标而未提供 `/favicon.ico` 的网站无法获取图标。宿主下载遵守既有网络访问限制，且不携带 Provider 凭据。
 - 目录 logo 与网站 favicon 统一使用 24 小时 TTL。有效缓存直接读取且不访问远端；缓存过期后在下次需要时按需更新，不新增定时刷新任务。每个已选来源更新失败且存在旧缓存时继续使用旧图标；没有缓存时才进入下一级回退。官网存在但获取失败不等同于没有官网声明。
-- 选定网站 favicon 获取失败且没有缓存时结束网络尝试；有对应内置 SVG 时显示该图标，否则 `custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。
+- 选定网站 favicon 获取失败且没有缓存时结束网络尝试；`custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。WebUI 不再打包或查找另一张品牌 SVG 表；调用方明确传入的 `icon_svg` 仍可直接显示。
+- Models 缺少 `providers/<id>/logo.svg` 时会返回 HTTP 200 与通用火花图形，未知 ID 也遵循同一默认图规则。宿主按正常 SVG 缓存并显示，不将其视为请求失败，也不继续尝试 favicon 或首字母回退；真实品牌图应在 Models 源仓库补齐，不在 Stravia 添加映射或内嵌兜底。模型目录身份 `catalog_id` 同时控制模型关联，不能仅为换图标而改写。
 
 ## 已确认的供应商能力覆盖
 

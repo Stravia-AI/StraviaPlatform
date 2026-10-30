@@ -289,17 +289,75 @@ test('Provider detail checks the current draft, separates stages, and never save
   expect(saves).toHaveLength(0)
 })
 
-test('service cards filter sign-in methods and use local logos before remote fallback', async ({ page }) => {
+test('service cards filter sign-in methods and use host logos before letter fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
+  const pluginSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle cx=".5" cy=".5" r=".5"/></svg>'
+  const descriptors = [
+    {
+      provider_id: 'openai',
+      plugin: { id: 'base', name: 'Stravia Base Providers' },
+      catalog_id: 'openai',
+      display_name: 'OpenAI',
+      description: 'OpenAI API connections.',
+      channels: [
+        {
+          id: 'default',
+          name: { 'en-US': 'OpenAI API', 'zh-CN': 'OpenAI API' },
+          description: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
+          auth: null,
+          protocol: 'openai-compatible',
+          default_base_url: 'https://api.openai.com/v1',
+          capabilities: ['infer'],
+          model_capabilities: [],
+        },
+      ],
+      capabilities: ['infer'],
+      config_fields: [],
+      config_groups: [],
+      network: { base_url_field: null, extra_origins: [], field_origins: [] },
+      data_compat: {
+        config_fields_format: 1,
+        private_state_format: 1,
+        credentials_format: 1,
+        model_metadata_format: 1,
+      },
+    },
+    {
+      provider_id: 'openai-codex',
+      plugin: { id: 'openai-codex', name: 'OpenAI Codex' },
+      catalog_id: 'openai',
+      icon_svg: pluginSvg,
+      display_name: 'OpenAI Codex',
+      description: 'Codex OAuth account connections.',
+      channels: [
+        {
+          id: 'codex',
+          name: { 'en-US': 'Codex', 'zh-CN': 'Codex' },
+          description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
+          auth: { flow: 'authorization_code' },
+          protocol: 'open-responses',
+          default_base_url: 'https://chatgpt.com/backend-api/codex',
+          capabilities: ['infer', 'auth_oauth'],
+          model_capabilities: [],
+        },
+      ],
+      capabilities: ['infer', 'auth_oauth'],
+      config_fields: [],
+      config_groups: [],
+      network: { base_url_field: null, extra_origins: [], field_origins: [] },
+      data_compat: {
+        config_fields_format: 1,
+        private_state_format: 1,
+        credentials_format: 1,
+        model_metadata_format: 1,
+      },
+    },
+  ] satisfies ProviderMetadata[]
+  await page.route('**/api/v1/vendors*', (route) => route.fulfill({ json: { data: descriptors } }))
   let failLogo = false
-  let localLogoRequests = 0
-  let remoteLogoRequests = 0
-  await page.route('**/api/v1/catalog/providers/openai/logo', async (route) => {
-    localLogoRequests += 1
-    await route.fulfill({ status: 404, body: '' })
-  })
-  await page.route('**/api/v1/catalog/providers/openai-compatible/logo', async (route) => {
-    remoteLogoRequests += 1
+  const logoRequests: string[] = []
+  await page.route('**/api/v1/catalog/providers/*/logo', async (route) => {
+    logoRequests.push(new URL(route.request().url()).pathname.split('/').at(-2) ?? '')
     if (failLogo) {
       await route.fulfill({ status: 404, body: '' })
     } else {
@@ -312,40 +370,38 @@ test('service cards filter sign-in methods and use local logos before remote fal
   await page.goto('/providers')
   await page.getByRole('button', { name: /添加.*供应商/ }).click()
   const grid = page.locator('[data-provider-grid]')
-  const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥 / })
-  const compatible = grid.getByRole('button', { name: /^OpenAI Compatible API 密钥 / })
-  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥$/ })
+  const codex = grid.getByRole('button', { name: /Codex · OAuth 账号/ })
+  await expect(openAi.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai\/logo$/)
   await expect
     .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
     .toBeGreaterThan(0)
-  await expect(compatible.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai-compatible\/logo$/)
-  await expect
-    .poll(() => compatible.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
-    .toBeGreaterThan(0)
-  expect(remoteLogoRequests).toBeGreaterThan(0)
-  expect(localLogoRequests).toBe(0)
+  await expect(codex.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  await expect.poll(() => codex.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
+  // 专属插件的 icon_svg 直接渲染，不再请求同一个目录 logo。
+  await expect.poll(() => logoRequests.toSorted()).toEqual(['openai'])
 
   const search = page.locator('[data-provider-toolbar] input')
+  // 内置 base 的卡片不重复标注来源；外部插件的入口保留来源名称与 ID。
+  await expect(openAi).not.toContainText('Stravia Base Providers')
+  await expect(codex).toContainText('插件：OpenAI Codex（openai-codex）')
   await search.fill('账号')
   await expect(grid.getByRole('button')).toHaveCount(1)
-  await expect(grid.getByRole('button', { name: /Codex · OAuth 账号/ })).toBeVisible()
+  await expect(codex).toBeVisible()
   await search.fill('API 密钥')
   await expect(openAi).toBeVisible()
   await expect(grid.getByRole('button', { name: /OAuth 账号/ })).toHaveCount(0)
 
   failLogo = true
-  const successfulLogoRequests = remoteLogoRequests
+  logoRequests.length = 0
   await page.reload()
   await page.getByRole('button', { name: /添加.*供应商/ }).click()
-  await expect.poll(() => remoteLogoRequests).toBeGreaterThan(successfulLogoRequests)
-  await expect(compatible.locator('img')).toHaveCount(0)
-  await expect(compatible.locator('.route-provider-mark')).toHaveText('O')
-  await expect(compatible.locator('.route-provider-mark')).toBeVisible()
-  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
-  await expect
-    .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
-    .toBeGreaterThan(0)
-  expect(localLogoRequests).toBe(0)
+  await expect.poll(() => logoRequests.toSorted()).toEqual(['openai'])
+  await expect(openAi.locator('img')).toHaveCount(0)
+  await expect(openAi.locator('.route-provider-mark')).toHaveText('O')
+  await expect(openAi.locator('.route-provider-mark')).toBeVisible()
+  await expect(codex.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  await expect.poll(() => codex.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
 })
 
 test('model ID suggestions preserve arbitrary text, composition, and form focus', async ({ page }) => {
@@ -482,14 +538,14 @@ test('provider editor selects a service before validating its configuration', as
   await expect(refreshButton).toBeVisible()
   await refreshButton.click()
   await expect(page.getByRole('button', { name: /^OpenAI Compatible / })).toBeVisible()
-  await expect(page.getByRole('button', { name: /^OpenAI API key / })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
 
   await searchInput.fill('OpenAI')
-  await expect(page.getByRole('button', { name: /^OpenAI API key / })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
-  const openAiOption = page.getByRole('button', { name: /^OpenAI API key / })
+  const openAiOption = page.getByRole('button', { name: /^OpenAI API key$/ })
   const codexOption = page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })
   await openAiOption.focus()
   await openAiOption.press('ArrowRight')

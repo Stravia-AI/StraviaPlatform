@@ -44,6 +44,14 @@ export function optionPluginSource(option: ProviderOption, locale: Locale): stri
   return m.provider_options_plugin_source({ name, id }, { locale })
 }
 
+/**
+ * `base` 随宿主发布，覆盖绝大多数卡片；只有其余插件提供的入口才需要在卡片上标注来源，
+ * 避免同一来源在每张卡片上重复。完整的插件名称与 ID 仍在连接信息步骤和搜索中可用。
+ */
+export function optionExternalPlugin(option: ProviderOption): ProviderMetadata['plugin'] | undefined {
+  return option.metadata.plugin.id === 'base' ? undefined : option.metadata.plugin
+}
+
 function optionAuthKind(option: ProviderOption, locale: Locale): string {
   return option.channel.auth
     ? m.common_oauth_account({}, { locale })

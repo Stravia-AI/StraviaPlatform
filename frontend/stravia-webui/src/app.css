@@ -543,10 +543,31 @@ html[lang='zh-CN'] .font-structural {
   flex: none;
   place-items: center;
   overflow: hidden;
+  isolation: isolate;
   border-radius: var(--radius-md);
   background: var(--card);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.1);
+  box-shadow: 0 0 0 1px var(--border);
   color: var(--primary);
+}
+
+/*
+ * 所有来源（插件内嵌彩色 SVG、目录 currentColor SVG、站点 favicon）统一画成单色：
+ * 近白色笔画视为镂空，其余按墨色绘制，墨色经 opacity 贴近 foreground。
+ * 目录 SVG 以 <img> 加载时 currentColor 恒为黑色，深色主题若靠 invert 反相，
+ * 彩色品牌图会变成相反色相，因此深色主题先二值化再反相，并改用 screen 混合。
+ */
+.route-provider-mark img {
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+  filter: grayscale(1) brightness(0.54) contrast(1000);
+  mix-blend-mode: multiply;
+  opacity: 0.88;
+}
+
+.dark .route-provider-mark img {
+  filter: grayscale(1) brightness(0.54) contrast(1000) invert(1);
+  mix-blend-mode: screen;
 }
 
 .route-provider-mark:not([class*='size-'], [class*='w-']) {
@@ -560,14 +581,6 @@ html[lang='zh-CN'] .font-structural {
 .route-provider-mark[data-fallback='true'] {
   background: color-mix(in oklch, var(--primary) 12%, var(--card));
   color: var(--primary);
-}
-
-.dark .route-provider-mark {
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.1);
-}
-
-.dark .route-provider-mark img {
-  filter: invert(1);
 }
 
 .route-desktop-table {

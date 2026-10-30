@@ -2502,10 +2502,9 @@ async fn saved_icon_provider(
 #[tokio::test]
 async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    assert!(gw.admin().vendor_metadata("custom")?.icon_svg.is_none());
-    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
+    seed_catalog_logo(&gw.config.data_dir, "alibaba-token-plan-cn", ICON_TEST_SVG)?;
 
-    let icon = gw.provider_icon("custom").await?;
+    let icon = gw.provider_icon("alibaba-token-plan-cn").await?;
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
@@ -2518,8 +2517,9 @@ async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> an
 #[tokio::test]
 async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let provider = saved_icon_provider(&gw, "custom", "https://icon-test.invalid/v1").await?;
-    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
+    let provider =
+        saved_icon_provider(&gw, "alibaba-token-plan-cn", "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "alibaba-token-plan-cn", ICON_TEST_SVG)?;
 
     let icon = gw.provider_icon(&provider.id).await?;
 
@@ -2589,23 +2589,19 @@ async fn provider_icon_prefers_embedded_svg_for_provider_and_catalog_identities(
         .as_deref()
         .expect("Codex declares a catalog identity");
     let catalog_descriptor = gw.admin().vendor_metadata(catalog_id)?;
-    let catalog_svg = catalog_descriptor
-        .icon_svg
-        .as_deref()
-        .expect("OpenAI embeds its brand SVG");
+    assert!(catalog_descriptor.icon_svg.is_none());
     assert_ne!(descriptor.provider_id, catalog_id);
     seed_catalog_logo(&gw.config.data_dir, &descriptor.provider_id, ICON_TEST_SVG)?;
     seed_catalog_logo(&gw.config.data_dir, catalog_id, ICON_TEST_SVG)?;
 
     // Exact provider identity wins over a different profile sharing its catalog id.
     for (key, expected) in [
-        (descriptor.provider_id.as_str(), svg),
-        (catalog_id, catalog_svg),
+        (descriptor.provider_id.as_str(), svg.as_bytes()),
+        (catalog_id, ICON_TEST_SVG),
     ] {
         let icon = gw.provider_icon(key).await?;
         assert_eq!(icon.content_type, "image/svg+xml");
-        assert_eq!(icon.body, expected.as_bytes());
-        assert_ne!(icon.body, ICON_TEST_SVG);
+        assert_eq!(icon.body, expected);
     }
     gw.shutdown().await;
     drop(gw);
@@ -2616,12 +2612,13 @@ async fn provider_icon_prefers_embedded_svg_for_provider_and_catalog_identities(
 #[tokio::test]
 async fn provider_icon_prefers_embedded_svg_for_a_saved_connection() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let descriptor = gw.admin().vendor_metadata("openai")?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
+    let descriptor = gw.admin().vendor_metadata("openai-codex")?;
     let svg = descriptor
         .icon_svg
         .as_deref()
-        .expect("OpenAI embeds its brand SVG");
-    let provider = saved_icon_provider(&gw, "openai", "https://icon-test.invalid/v1").await?;
+        .expect("Codex embeds its brand SVG");
+    let provider = saved_icon_provider(&gw, "openai-codex", "https://icon-test.invalid/v1").await?;
     seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
     seed_catalog_favicon(
         &gw.config.data_dir,

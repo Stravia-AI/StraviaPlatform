@@ -62,9 +62,8 @@ pub fn descriptor() -> VendorDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some(CATALOG_ID.into()),
             icon_svg: Some(
-                stravia_vendor_common::icons::provider_svg("openai")
-                    .expect("OpenAI brand SVG is embedded")
-                    .into(),
+                include_str!("../../../../frontend/stravia-webui/src/assets/icons/openai.svg")
+                    .to_owned(),
             ),
             display_name: "OpenAI Codex".into(),
             description: Some(

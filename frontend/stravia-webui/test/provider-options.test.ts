@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildProviderOptions, providerOptionMatches } from '../src/lib/provider-options'
+import { buildProviderOptions, optionExternalPlugin, providerOptionMatches } from '../src/lib/provider-options'
 import type { ProviderMetadata } from '../src/lib/types'
 
 function metadata(pluginId: string, overrides: Partial<ProviderMetadata> = {}): ProviderMetadata {
@@ -34,5 +34,15 @@ describe('provider options', () => {
     expect(providerOptionMatches(base, 'base', 'zh-CN')).toBe(true)
     expect(providerOptionMatches(option, 'base', 'zh-CN')).toBe(false)
     expect(providerOptionMatches(option, 'other-plugin', 'en-US')).toBe(false)
+  })
+
+  test('only plugins other than the bundled base are surfaced as card sources', () => {
+    const [external, base] = buildProviderOptions([
+      metadata('command-code', { plugin: { id: 'command-code', name: 'Community CLI' } }),
+      metadata('base', { plugin: { id: 'base', name: 'Stravia Base Providers' } }),
+    ])
+
+    expect(optionExternalPlugin(external)).toEqual({ id: 'command-code', name: 'Community CLI' })
+    expect(optionExternalPlugin(base)).toBeUndefined()
   })
 })
