@@ -250,13 +250,13 @@ pub async fn run_sqlite_migrator(
             crate::turn_chain::upgrade::normalize_sqlite(&mut pinned.connection).await?;
         }
     }
-    if runner.version_exists(34) {
-        // 先补齐 0033 及之前的 schema，清理才能依赖已存在的观察与映射表。
+    if runner.version_exists(35) {
+        // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
         runner
-            .run_direct(Some(33), &mut *pinned.connection, false)
+            .run_direct(Some(34), &mut *pinned.connection, false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34 AND success)",
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=35 AND success)",
         )
         .fetch_one(&mut *pinned.connection)
         .await?;
@@ -424,11 +424,11 @@ pub async fn run_postgres_migrator(
             crate::turn_chain::upgrade::normalize_postgres(&mut connection).await?;
         }
     }
-    if runner.version_exists(34) {
-        // 先补齐 0033 及之前的 schema，清理才能依赖已存在的观察与映射表。
-        runner.run_direct(Some(33), &mut *connection, false).await?;
+    if runner.version_exists(35) {
+        // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
+        runner.run_direct(Some(34), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34 AND success)",
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=35 AND success)",
         )
         .fetch_one(&mut *connection)
         .await?;
@@ -940,6 +940,77 @@ mod tests {
             .await
             .unwrap();
         admin.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_context_index_v34_upgrades_without_rewriting_history() {
+        let pool = sqlite_pool().await;
+        let mut migrations: Vec<_> = SQLITE_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 33)
+            .cloned()
+            .collect();
+        let mut context_index = SQLITE_MIGRATOR
+            .iter()
+            .find(|migration| migration.description == "observation context events index")
+            .unwrap()
+            .clone();
+        // 已有实例在版本 34 安装了上下文索引，不能随当前目录重新编号其历史。
+        context_index.version = 34;
+        migrations.push(context_index);
+        super::run_sqlite_migrator(&pool, &Migrator::with_migrations(migrations), None)
+            .await
+            .unwrap();
+        let history: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let payload = serde_json::json!({
+            "kind": "credential_mappings_created",
+            "discoveries": [{
+                "rule_ids": ["kingfisher.retired", "custom.kept"],
+                "source_types": ["user_message"],
+                "marker": "retained-marker"
+            }]
+        });
+        let encoded =
+            crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();
+        sqlx::query("INSERT INTO observation_events(sequence, occurred_at, kind, payload, expires_at) VALUES (1, 1, 'credential_mappings_created', ?, 9999999999999)")
+            .bind(encoded)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        migrate_sqlite(&pool, None).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+
+        let retained: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 34 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, history);
+        let credential_migration: (String, bool) =
+            sqlx::query_as("SELECT description, success FROM _sqlx_migrations WHERE version=35")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            credential_migration,
+            ("credential hit records".into(), true)
+        );
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let actual: serde_json::Value =
+            serde_json::from_slice(&crate::storage_codec::decode(&stored).unwrap()).unwrap();
+        let mut expected = payload;
+        expected["discoveries"][0]["rule_ids"] = serde_json::json!(["custom.kept"]);
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]

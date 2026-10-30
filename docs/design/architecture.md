@@ -749,7 +749,7 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 上面的条数是完整来源快照，不是有效执行目录。编译规则正则前仅折叠经过审阅且解析后策略完全相同的身份：`bittrex-secret-key` → `bittrex-access-key`。规范身份保留上游首次出现的位置与扫描优先级；当前有效目录为 461 条。比较包括正则、路径、secret group、关键词、过滤、`validate` 来源、组件、skipReport、specificity 与 confidence。组件引用随被移除身份迁移，但同时依赖这对身份的父规则不自动折叠；任何策略差异都保留两条规则。不提供运行时别名、不重写历史事件。
 
-内置检测只使用 Betterleaks；不再内置 Kingfisher 补充规则。迁移 `0034_credential_hit_records` 与其启动升级从映射归因和命中事件中移除存量 `kingfisher.*` 规则 ID，界面没有「已移除规则集」的特殊分支。管理规则目录、匹配测试与正式保护使用同一个检测器。
+内置检测只使用 Betterleaks；不再内置 Kingfisher 补充规则。迁移 `0035_credential_hit_records` 与其启动升级从映射归因和命中事件中移除存量 `kingfisher.*` 规则 ID，界面没有「已移除规则集」的特殊分支。管理规则目录、匹配测试与正式保护使用同一个检测器。
 
 SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 

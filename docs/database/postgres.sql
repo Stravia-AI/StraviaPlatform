@@ -4132,6 +4132,7 @@ CREATE INDEX native_compactions_generation_idx ON public.native_compactions USIN
 CREATE INDEX observation_events_context_kinds_idx ON public.observation_events USING btree (interaction_id, sequence) WHERE (kind = ANY (ARRAY['compaction_operation'::text, 'native_compaction_associated'::text, 'retained_tail_associated'::text]));
 
 
+--
 -- Name: observation_events_credential_hit_idx; Type: INDEX; Schema: public; Owner: -
 --
 

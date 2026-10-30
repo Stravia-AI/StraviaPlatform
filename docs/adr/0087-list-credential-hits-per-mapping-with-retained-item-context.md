@@ -16,7 +16,7 @@ status: accepted
   - system、历史用户消息、其他文本：Observation 不保留，显示「正文不可用」。
 - **复用在写入时登记，读取时只做索引查找。** 写 `credential_mappings_reused` 事件的同一事务里，按 `(占位符, Interaction, 来源, 工具调用或最新输入)` 向 `credential_mapping_reuses` upsert 一行，保留最大 `last_reused_at` 与对应 Run；侧栏按占位符读取，不显示次数。事件载荷是 `storage_codec` 编码，SQL 无法按占位符过滤，早先「读时解码事件」的方案要线性扫描该主体的全部复用事件，且设了 50,000 事件的硬上限——按序号升序扫描，触顶丢掉的恰是最新的复用。登记后没有扫描上限，唯一的上限是展示的 200 个位置，超出时 `truncated=true`。
 - **列表索引替换。** `observation_events_credential_discovery_idx`（`kind, interaction_id, occurred_at`）服务于旧的 Interaction 聚合，换成只覆盖创建事件的部分索引 `observation_events_credential_hit_idx`（`kind, sequence DESC`），支持按 `sequence` 倒序翻页；复用事件不再被任何查询读取，不进索引。
-- **Kingfisher 规则 ID 从存量数据中移除。** 内置规则集只剩 Betterleaks（[ADR-0042](0042-keep-reversible-redaction-detection-local.md)）。迁移 0034 删除映射表 `rule_ids` 里的 `kingfisher.*`；同一次升级中，在 0034 应用之前，分批重写 `credential_mappings_created` / `credential_mappings_reused` 事件载荷，去掉 `kingfisher.*` 的规则与位置，删除变空的映射项与变空的事件。这样界面没有「已移除规则集」的特殊分支。
+- **Kingfisher 规则 ID 从存量数据中移除。** 内置规则集只剩 Betterleaks（[ADR-0042](0042-keep-reversible-redaction-detection-local.md)）。迁移 0035 删除映射表 `rule_ids` 里的 `kingfisher.*`；同一次升级中，在 0035 应用之前，分批重写 `credential_mappings_created` / `credential_mappings_reused` 事件载荷，去掉 `kingfisher.*` 的规则与位置，删除变空的映射项与变空的事件。这样界面没有「已移除规则集」的特殊分支。
 
 ## 取舍
 
@@ -31,4 +31,4 @@ status: accepted
 
 - 取代 ADR-0083 中「Interaction 级聚合与 `kind` 筛选」「复用作为行」「`marker` 只在 Debug Run 记录」「不保存可定位片段」几项。其余仍然有效：`credential_mappings_reused` 事件及其「只记本次新提交文本」的口径、`locators`、映射 `rule_ids`、块级高亮入口 `highlight=credential-hits`。
 - `GET /api/v1/reversible-redaction/discoveries` 响应不兼容变更：一行一映射，新增条目详情与复用两个只读端点；不保留旧字段或别名。
-- 迁移 0034 同时覆盖 SQLite 与 PostgreSQL，新增 `credential_mapping_reuses` 并替换命中事件索引，参考 schema 一并重新生成。复用行随所属 Interaction 的保留期清理一并删除。
+- 迁移 0035 同时覆盖 SQLite 与 PostgreSQL，新增 `credential_mapping_reuses` 并替换命中事件索引，参考 schema 一并重新生成。复用行随所属 Interaction 的保留期清理一并删除。
