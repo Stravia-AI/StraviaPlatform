@@ -819,6 +819,10 @@ CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, statu
 CREATE INDEX native_compactions_generation_idx ON native_compactions(source_generation_id)
     WHERE source_generation_id IS NOT NULL;
 
+CREATE INDEX observation_events_context_kinds_idx
+    ON observation_events(interaction_id, sequence)
+    WHERE kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated');
+
 CREATE INDEX observation_events_credential_discovery_idx
     ON observation_events(kind, interaction_id, occurred_at DESC, expires_at)
     WHERE kind IN ('credential_mappings_created','credential_mappings_reused');
