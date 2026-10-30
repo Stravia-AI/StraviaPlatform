@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.0] - 2026-10-30
+
+### Verification
+
+- Manual signed-update smoke checks were not run on Windows x86_64/ARM64 or Linux x86_64/ARM64 because this release environment has no four-platform device matrix. Automated release checks do not replace verification of native installation and relaunch behavior.
+
 ### Added
 
 - Cost and billing share exact decimal pricing with context tiers, per-field USD/custom currency and timezone-aware peak windows. Usage shows Provider usage costs and subscription amortization; Routes support per-call or per-token billing. API Keys expose spent amounts, explicit resets and spend limits enforced before RPM admission across inference and MCP. Attempt amounts remain frozen across price/rate changes, history cleanup and entity deletion. Custom currency cannot be removed after its first configuration; that first rate converts existing spend limits and displays earlier USD records.
