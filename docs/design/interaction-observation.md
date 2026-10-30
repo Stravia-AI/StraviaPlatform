@@ -100,7 +100,7 @@ WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前�
 
 Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 
-- 用量分析总览、时间分桶与「客户端错误」共用同一请求级分类，但读取来源不同：长期汇总读取 `terminal_request_count` 与 `failed_request_count`，保留中的详情读取客户端错误列表。已终结请求 = 终态为 `completed`、`waiting_client`（向客户端交接工具调用）、`superseded` 或 `failed`、已结束、非取消类终止且不是错误的请求的 Inference Run；失败的请求是其中 `failed` 的部分，因此恒有失败 ≤ 已终结。准入前拒绝与未进入 Target 选择就终止的「错误的请求」不计入可用率分母；取消、断线、进行中同样不入账。按请求开始时间归入窗口和分桶；长期 Stats Usage 不按 Observation 保留期过滤，而客户端错误列表仍仅查询保留中的详情；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示请求数；上游请求数（已完成的尝试 + 上游错误）与上游错误数按 Target 尝试计数，包括被重试或切换吸收的错误，按所属 Model Turn 的起点入桶；
+- 用量分析总览、时间分桶与「客户端错误」共用同一请求级分类，但读取来源不同：长期汇总读取 `terminal_request_count` 与 `failed_request_count`，保留中的详情读取客户端错误列表。已终结请求 = 终态为 `completed`、`waiting_client`（向客户端交接工具调用）、`superseded` 或 `failed`、已结束、非取消类终止且不是错误的请求的 Inference Run；失败的请求是其中 `failed` 的部分，因此恒有失败 ≤ 已终结。准入前拒绝与上游发送前被平台校验拒绝的「错误的请求」不进客户端可用率的分子或分母，即使已创建 Target 尝试记录；取消、断线、进行中同样不入账。无可用 Target、额度暂停等服务失败仍计入客户端可用率。按请求开始时间归入窗口和分桶；长期 Stats Usage 不按 Observation 保留期过滤，而客户端错误列表仍仅查询保留中的详情；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示请求数；上游请求数（已完成的尝试 + 上游错误）与上游错误数按 Target 尝试计数，包括被重试或切换吸收的错误，按所属 Model Turn 的起点入桶；
 - 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。供应商汇总改按上游尝试计数：上游请求数 = 已完成的 Target 尝试 + 上游错误，上游错误数 = 来源为上游的失败尝试，重试与切换各自独立计入，因此各供应商数字不是客户端请求的拆分，也不与全局失败的请求数相加。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
 - 管理面 `input_tokens` 统一表示净输入：每个 attempt 的总输入与缓存读取均已知时，先计算 `max(input_tokens - cache_read_tokens, 0)`，再累计各 attempt 的已知净值；缓存写入不参与扣减。任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 计入该缺失；
@@ -761,7 +761,7 @@ Interaction forest 查询参数：
 - `anchor_at` / `window_index`：仅为现有 API 调用者保留的旧窗口参数；未提供显式边界时，0 为下界固定在 `anchor-24h`、无上界的实时页，后续历史页按 24 小时分段。WebUI 始终发送显式边界，包括实时预设；
 - `cursor` / `limit`：同一时间页内按根链游标分批加载；
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
-- 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条属于客户端错误视图的终局错误 Run（失败的请求，或已准入但未进入 Target 选择即终止的错误的请求；取消类除外），用于交互链路成员规则，其失败事实归宿于客户端错误视图，后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
+- 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条属于客户端错误视图的终局错误 Run（失败的请求，或已准入但在上游发送前被平台校验拒绝的错误的请求；取消类除外），用于交互链路成员规则，其失败事实归宿于客户端错误视图，后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
 
 响应同时给出 window bounds、根链总数、next cursor 与 snapshot event sequence。根链按其最新 Interaction 的 `last_active_at` 归入且只归入一个时间页；返回时补全该根 DAG 在保留期内的全部 Interaction。`last_active_at` 只由真实请求准入、请求事件与完成活动推进；断连判定、等待超时、重启恢复、残留观察收口，以及新请求对旧 Run 的打断或接替，不推进旧 Run 的活动时间。Interaction 从所属 Run 聚合活动时间；状态判定事件仍保留实际 `occurred_at` 与递增 sequence，不能因较晚发现中断而把旧链重新归入最近时间窗。旧版本已写入的错误活动时间不自动回填。
 
@@ -807,10 +807,10 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 
 客户端错误列表 `GET /api/v1/observations/client-errors` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
 
-- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `type` 筛选；`type` 取 `failed | rejected`，缺省返回全部，非法值返回 400；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的供应商，错误的请求没有尝试、不会命中供应商筛选；
+- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `type` 筛选；`type` 取 `failed | rejected`，缺省返回全部，非法值返回 400；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 的尝试归属供应商；本地准备阶段被拒绝的请求也可能有尝试记录，无尝试记录的错误请求不会命中供应商筛选；
 - 排序为 `started_at` DESC、`kind` ASC、`id` ASC，`next_cursor` 是不透明的 JSON keyset 游标，相同时间记录跨页不重复、不遗漏；`total` 为当前时间范围与筛选条件下的总数；
 - 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `ClientErrorSummary` 包含 `id`、`kind`（`rejection | run`）、`type`（`failed | rejected`，与 `kind` 正交）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的供应商去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
-- 分类以一次客户端请求的最终结果为准：`rejected` 覆盖全部准入前拒绝，以及已准入但未进入 Target 选择即终止、终止原因属于固定错误码集合（模型不存在、API Key 不允许该模型、请求 Hook 拒绝）的 Run；其余最终 `failed` 的 Run 为 `failed`。请求 Hook 可以指定任意错误码，因此拒绝路径以显式分类标记表达，不按错误码推断。内部重试或切换供应商后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
+- 分类以一次客户端请求的最终结果为准：`rejected` 覆盖全部准入前拒绝，以及尚未发送任何上游请求时被平台校验拒绝的 Run（模型不存在、API Key 不允许该模型、请求 Hook 拒绝和参数校验失败）；创建 Target 尝试记录本身不代表已发送上游。运行收口沿用 `rejected_before_target` 存储分类字段，不新增统计路径；参数拒绝使用平台来源的 400/422 或稳定请求校验错误码判定，请求 Hook 的任意拒绝码使用显式标记。上游 4xx、已发送上游后的本地失败、无可用 Target 和额度暂停仍属于 `failed`。扩展分类只作用于升级后收口的请求，既有运行分类与长期统计桶不重算。内部重试或切换供应商后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
 - 客户端错误记录的开始时间取 ingress 接收时间，结束时间在终止方截取，不使用 writer 入队时间；历史记录缺少的字段如实表达缺口：0045 之前的 Rejected Request 无 `started_at` 时回退按 `occurred_at` 排序并置 `observation_gap=true`，缺失诊断保持未知，不能补回；
 - `GET /api/v1/observations/client-errors/{kind}/{id}` 返回 `{ data: { request, events, trace, snapshot_sequence } }`；`request` 带 `type`。`trace` 是既有 Debug manifest 元数据。诊断包仍通过既有 Interaction/Rejection ticket 与下载入口获取，该列表不新增 Debug 捕获，也不改变脱敏与保留期规则。
 
@@ -837,7 +837,7 @@ forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并�
 
 #### 客户端错误列表
 
-“客户端错误 / Client Errors”页签使用传统表格列表，不使用卡片或拓扑。口径遵循 `GLOSSARY.md` 的「客户端错误」：以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断。`type=rejected` 覆盖全部准入前拒绝，以及已准入但未进入 Target 选择即终止的「错误的请求」（模型不存在、无权使用该模型、请求 Hook 拒绝）；其余最终 `status=failed` 的 Run 为 `type=failed`。内部重试或切换供应商后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 且交付过客户端可见输出的失败 Run 仍保留在原交互链路中；从未交付任何客户端可见输出且最终失败的交互按「交互链路」成员规则默认不进画布，可从客户端错误列表跳转或深链回看。准入前失败只在客户端错误列表展示，不伪造交互关联。
+“客户端错误 / Client Errors”页签使用传统表格列表，不使用卡片或拓扑。口径遵循 `GLOSSARY.md` 的「客户端错误」：以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断。`type=rejected` 覆盖全部准入前拒绝，以及已准入但在上游发送前被平台校验拒绝的「错误的请求」（模型不存在、无权使用该模型、请求 Hook 拒绝、参数校验失败）；其余最终 `status=failed` 的 Run 为 `type=failed`。内部重试或切换供应商后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 且交付过客户端可见输出的失败 Run 仍保留在原交互链路中；从未交付任何客户端可见输出且最终失败的交互按「交互链路」成员规则默认不进画布，可从客户端错误列表跳转或深链回看。准入前失败只在客户端错误列表展示，不伪造交互关联。
 
 列表按请求开始时间倒序（`started_at` DESC、`kind` ASC、`id` ASC，契约见第 9 节），每次客户端错误一行，默认八列为：
 

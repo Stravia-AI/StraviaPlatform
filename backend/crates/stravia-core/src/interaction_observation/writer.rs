@@ -309,7 +309,7 @@ pub(super) enum WriterCommand {
         run_id: String,
         outcome: RunOutcome,
         finished_at: i64,
-        /// 请求阶段 Hook 拒绝或未进入 Target 选择的固定失败。
+        /// 请求阶段 Hook 拒绝或上游发送前的请求校验拒绝。
         rejected_before_target: bool,
     },
     Reject {

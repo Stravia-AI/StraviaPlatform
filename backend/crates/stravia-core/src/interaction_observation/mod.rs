@@ -839,7 +839,7 @@ impl IngressObserver {
             terminal: AtomicBool::new(false),
             client_output_committed: AtomicBool::new(false),
             rejected_before_target: AtomicBool::new(false),
-            target_attempted: AtomicBool::new(false),
+            upstream_started: AtomicBool::new(false),
             admission_queued: false,
             event_boundary: Mutex::new(()),
             gap: AtomicBool::new(false),
@@ -992,8 +992,8 @@ struct RunObserverInner {
     client_output_committed: AtomicBool,
     /// 请求阶段 Hook 拒绝发生在 Target 选择之前：这类 Run 是拒绝请求，不是失败请求。
     rejected_before_target: AtomicBool,
-    /// 已发出过 Target 尝试：此后的模型不可用或访问禁止属于失败的请求，不能再按错误码归为错误的请求。
-    target_attempted: AtomicBool,
+    /// 宿主已准许真实上游发送；创建 Target 尝试仍可能只是在本地准备。
+    upstream_started: AtomicBool,
     admission_queued: bool,
     event_boundary: Mutex<()>,
     gap: AtomicBool,
@@ -1183,6 +1183,10 @@ impl RunObserver {
             .store(true, Ordering::Release);
     }
 
+    pub(crate) fn mark_upstream_started(&self) {
+        self.inner.upstream_started.store(true, Ordering::Release);
+    }
+
     pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
         // 最终 Target 或流处理边界比 HTTP 错误转换保留更准确的上游事实。
         if self.inner.failure.lock().is_none() {
@@ -1200,9 +1204,6 @@ impl RunObserver {
     pub(crate) fn record(&self, mut event: RunEvent) {
         if !self.inner.admission_queued {
             return;
-        }
-        if matches!(event, RunEvent::TargetAttemptStarted { .. }) {
-            self.inner.target_attempted.store(true, Ordering::Release);
         }
         match &mut event {
             RunEvent::ModelTurnStarted {
@@ -1459,13 +1460,26 @@ impl RunObserver {
         if let Some(error) = self.inner.failure.lock().as_ref() {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
-            // 未进入 Target 选择的固定失败：模型不可用与禁止访问模型；
-            // 已发出过尝试后再出现同码（如隐藏轮次路由被删）则属于失败的请求。
-            rejected_before_target |= !self.inner.target_attempted.load(Ordering::Acquire)
-                && error
-                    .code
-                    .as_deref()
-                    .is_some_and(|code| matches!(code, "model_not_found" | "STRAVIA_FORBIDDEN"));
+            // 本地参数拒绝不构成可用性失败；一旦发送过上游，后续本地拒绝仍是失败。
+            // Model Turn 本地诊断不一定带 HTTP 状态，稳定错误码覆盖这些校验路径。
+            rejected_before_target |= !self.inner.upstream_started.load(Ordering::Acquire)
+                && error.source.as_deref() == Some("platform")
+                && (matches!(error.status_code, Some(400 | 422))
+                    || matches!(
+                        error.code.as_deref(),
+                        Some(
+                            "model_not_found"
+                                | "STRAVIA_FORBIDDEN"
+                                | "input_modality_unsupported"
+                                | "compaction_unsupported"
+                                | "compaction_target_mismatch"
+                                | "invalid_compaction_state"
+                                | "vendor_request_invalid"
+                                | "compaction_conflict"
+                                | "protocol_lossy_rejected"
+                                | "STRAVIA_PROTOCOL_LOSSY_REJECTED"
+                        )
+                    ));
         }
         self.finish_thinking();
         self.inner.queued_text.lock().take();
@@ -2235,6 +2249,74 @@ mod snapshot_tests {
             "SELECT COUNT(*) FROM observation_events WHERE run_id='receipt-no-window' AND kind='run_state_changed'",
         ).fetch_one(&pool).await?;
         assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_validation_rejection_requires_no_upstream_send() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        for (id, sent) in [("local-validation", false), ("after-upstream", true)] {
+            let run = test_run(&observation, id, facts(Vec::new()));
+            run.record(RunEvent::ModelTurnStarted {
+                retention_detached: false,
+                model_turn_id: id.into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                estimated_input_tokens: None,
+            });
+            run.record(RunEvent::TargetAttemptStarted {
+                model_turn_id: id.into(),
+                attempt_id: id.into(),
+                target_id: "target".into(),
+                provider_id: "provider".into(),
+                provider_name: "Provider".into(),
+                upstream_model: "model".into(),
+                protocol: "messages".into(),
+                upstream_url: "http://127.0.0.1".into(),
+                cost_basis: None,
+            });
+            if sent {
+                run.mark_upstream_started();
+            }
+            // 与 Model Turn 的本地校验诊断一致：没有 HTTP 状态，但有稳定错误码。
+            run.record_failure(FailureDiagnostic {
+                source: Some("platform".into()),
+                code: Some("vendor_request_invalid".into()),
+                ..Default::default()
+            });
+            run.finish(RunOutcome {
+                client_output_committed: false,
+                delivery: None,
+                delivery_completed_at: None,
+                status: "failed".into(),
+                terminal_reason: None,
+                generation_node_id: None,
+                generation_root_id: None,
+            });
+        }
+        observation.flush().await?;
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT id,rejected_before_target FROM inference_run_observations ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            rows,
+            [
+                ("after-upstream".into(), false),
+                ("local-validation".into(), true)
+            ]
+        );
+        let counters: (i64, i64) = sqlx::query_as(
+            "SELECT SUM(terminal_request_count),SUM(failed_request_count) FROM stats_usage_buckets WHERE scope='global'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(counters, (1, 1));
+        observation.shutdown().await;
+        pool.close().await;
         Ok(())
     }
 

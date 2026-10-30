@@ -77,6 +77,14 @@ def usage_upstream():
                 self.wfile.flush()
                 self.close_connection = True
                 return
+            if scenario == "invalid-parameter":
+                body = json.dumps({"error": {"type": "invalid_request_error", "message": "Unsupported parameter"}}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if scenario == "failed" or scenario in ("recovered", "tool-call-recovered") and attempt == 1:
                 body = json.dumps({"error": {"type": "upstream_unavailable", "message": "local fixture failure"}}).encode()
                 self.send_response(503)
@@ -156,7 +164,7 @@ def usage_upstream():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield server, entered, release
+        yield server, entered, release, attempts
     finally:
         release.set()
         server.shutdown()
@@ -178,7 +186,7 @@ def usage_env(request, stravia_binary: Path, storage_runtime: dict[str, Any], tm
     process = None
     logs = []
     try:
-        with usage_upstream() as (upstream, entered, release):
+        with usage_upstream() as (upstream, entered, release, attempts):
             base = f"http://127.0.0.1:{find_free_port()}"
             args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", base.rsplit(":", 1)[1]]
             process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args + storage_runtime["server_args"](backend))
@@ -186,6 +194,7 @@ def usage_env(request, stravia_binary: Path, storage_runtime: dict[str, Any], tm
             session = initialize_server(base, wait_for_setup_token(logs, process), database)
             yield {"admin": base, "proxy": base, "auth": session.auth_headers(),
                    "mock": f"http://127.0.0.1:{upstream.server_port}", "entered": entered, "release": release,
+                   "attempts": attempts,
                    "backend": backend, "data_dir": tmp_path, "schema": schema,
                    "storage_runtime": storage_runtime, "process": process}
     finally:
@@ -303,14 +312,14 @@ def assert_split(view, *, terminal, failed, upstream, errors):
     assert "error_count" not in view, view
 
 
-def provider(env, name, base_url, *, input_modalities=("text",), reasoning_efforts=()):
+def provider(env, name, base_url, *, input_modalities=("text",), reasoning_efforts=(), protocol="openai-compatible"):
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/providers",
         payload={
             "name": name,
             "source": {
                 "type": "custom", "vendor": "custom", "channel": "default",
-                "protocol": "openai-compatible", "base_url": base_url,
+                "protocol": protocol, "base_url": base_url,
             },
             "credential": {"type": "api_key", "value": "upstream-key"},
             "vendor_options": {},
@@ -890,6 +899,42 @@ def test_rejected_requests_stay_out_of_availability(usage_env):
     assert all("error_count" not in row for row in series)
     # 错误的请求没有 Target 尝试，因此不会伪造供应商行。
     assert stats(env, "providers") == []
+
+
+def test_local_request_validation_does_not_reduce_availability(usage_env):
+    env = usage_env
+    _route, key = _create_route(env, "usage-invalid-input", retry_budget=0)
+    status, body = _proxy(env, key, "usage-invalid-input", [{"role": "user", "content": "known"}])
+    assert status == 200, body
+    status, body = _proxy(env, key, "usage-invalid-input", [{"role": "user", "content": "invalid-parameter"}])
+    assert status == 400, body
+    anthropic = provider(env, "usage-local-encoding", env["mock"], protocol="anthropic-messages")
+    _, encoding_key = route_with_targets(env, "usage-local-encoding", [{
+        "provider_id": anthropic, "model": "gpt-4o-mini",
+    }])
+    status, body = _proxy(env, encoding_key, "usage-local-encoding", [
+        {"role": "user", "content": "invalid tool choice"},
+    ], body_extra={"tools": TOOLS, "tool_choice": {"type": "function", "function": {"name": ""}}})
+    assert status == 400, body
+    assert env["attempts"] == {"known": 1, "invalid-parameter": 1}
+
+    def client_errors():
+        status, body = http_request("GET", f"{env['admin']}/api/v1/observations/client-errors", headers=env["auth"])
+        assert status == 200, body
+        return body["data"]["items"] if body["data"]["total"] == 2 else None
+
+    errors = _wait_for("both rejected and failed request observations", client_errors)
+    assert next(row for row in errors if row["error"]["code"] == "vendor_request_invalid")["type"] == "rejected"
+    assert sorted(row["type"] for row in errors) == ["failed", "rejected"]
+    clear(env)
+    overview = stats(env)
+    assert overview["total_requests"] == 3
+    # 同为 400：上游拒绝计为失败，本地参数拦截不进可用率的分子或分母。
+    assert_split(overview, terminal=2, failed=1, upstream=2, errors=1)
+    series = stats(env, "series")
+    assert sum(row["request_count"] for row in series) == 3
+    for field, expected in zip(SPLIT_COUNTERS, (2, 1, 2, 1)):
+        assert sum(row[field] for row in series) == expected
 
 
 def test_no_eligible_target_and_quota_suspension_fail_without_upstream_attempts(usage_env):

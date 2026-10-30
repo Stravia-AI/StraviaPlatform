@@ -975,7 +975,7 @@ pub struct StatsOverview {
     /// 成功 attempt 的 Σ输出 Token / Σ完整耗时（tok/s），包含首字等待。
     /// 无成功样本、任一输出或耗时未知、或总耗时不为正时为 null。
     pub avg_output_tps: Option<f64>,
-    /// 已终结请求：完成或最终失败、非客户端取消、且未在 Target 选择前被拒绝。
+    /// 已终结请求：完成或最终失败、非客户端取消，排除未发送上游的请求校验拒绝。
     pub terminal_request_count: i64,
     /// 已终结请求中最终失败的数量；取消、断线与进行中不计入。
     pub failed_request_count: i64,
