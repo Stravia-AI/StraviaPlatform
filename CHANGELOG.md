@@ -63,7 +63,7 @@
 
 ### Fixed
 
-- Credential-hit record tests now follow the pinned Prettier formatting rules, restoring the WebUI formatting CI gate without changing test behavior.
+- Credential-hit records, Settings E2E and hit-window tests now follow the pinned Prettier formatting rules, restoring the WebUI formatting CI gate without changing behavior.
 - SQLite and PostgreSQL credential-hit records now use migration 0035, avoiding the duplicate 0034 version while preserving the already-applied context-event index migration and its checksum. Fresh initialization and incremental upgrades run credential cleanup before 0035 without changing either migration's SQL or rewriting existing migration history.
 - Windows desktop smoke now explicitly selects the update source used by its native fixture and checks download eligibility after switching the listener port. Production source validation is unchanged; the fixture no longer loses its Download update action when the default update service differs.
 - Client availability now excludes platform request-validation rejections when no upstream request was sent, including errors raised after Target preparation begins. Rejected requests remain in total request counts and diagnostics but do not enter availability's numerator or denominator. Actual upstream 4xx responses, failures after an earlier upstream send, unavailable Targets and allowance suspensions remain failures. Existing historical classifications and stats buckets are not recalculated.

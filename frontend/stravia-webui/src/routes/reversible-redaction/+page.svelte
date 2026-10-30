@@ -495,9 +495,7 @@ function selectMatch(match: CredentialMatch): void {
         {:else}
           {#if customRulesQuery.isError}
             <div class="panel-notice">
-              <RequestFailure
-                message={m.credential_custom_load_failed()}
-                retry={() => customRulesQuery.refetch()} />
+              <RequestFailure message={m.credential_custom_load_failed()} retry={() => customRulesQuery.refetch()} />
             </div>
           {/if}
           <DataTable

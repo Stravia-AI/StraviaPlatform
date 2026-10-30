@@ -60,7 +60,11 @@ describe('shiftHitWindow', () => {
 
   test('keeps a custom range custom when it is shifted or returns to live', () => {
     const custom = customHitWindow(NOW - 3 * HOUR, NOW - 2 * HOUR)
-    expect(shiftHitWindow(custom, -1, NOW)).toMatchObject({ custom: true, startAt: NOW - 4 * HOUR, endAt: NOW - 3 * HOUR })
+    expect(shiftHitWindow(custom, -1, NOW)).toMatchObject({
+      custom: true,
+      startAt: NOW - 4 * HOUR,
+      endAt: NOW - 3 * HOUR,
+    })
     expect(shiftHitWindow(custom, 1, NOW)).toMatchObject({ live: false, startAt: NOW - 2 * HOUR, endAt: NOW - HOUR })
     expect(shiftHitWindow(customHitWindow(NOW - 2 * HOUR, NOW - HOUR), 1, NOW)).toEqual(live(1, true))
   })

@@ -2434,9 +2434,13 @@ test('credential protection distinguishes failed saves, unavailable observations
   await expect(page.locator('#credential-rule-search')).toBeVisible()
   await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
   await expect(timeline.getByRole('alert')).toContainText('Hit records are unavailable.')
-  await expect(timeline.getByText('No credential mappings were created in this period.', { exact: false })).toHaveCount(0)
+  await expect(timeline.getByText('No credential mappings were created in this period.', { exact: false })).toHaveCount(
+    0,
+  )
   await timeline.getByRole('button', { name: 'Retry', exact: true }).click()
-  await expect(timeline.getByText('No credential mappings were created in this period.', { exact: false })).toBeVisible()
+  await expect(
+    timeline.getByText('No credential mappings were created in this period.', { exact: false }),
+  ).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
   await page.getByRole('textbox', { name: 'Text to test', exact: true }).fill('test_credential')

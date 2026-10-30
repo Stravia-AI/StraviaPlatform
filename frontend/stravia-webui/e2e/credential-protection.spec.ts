@@ -464,9 +464,7 @@ test.describe('hit records', () => {
   })
 
   test('keeps the creating rules when no hit lists them', async ({ page }) => {
-    await mockRedaction(page, {
-      discoveries: [discovery(0, { rule_ids: ['fixture-rule-0'], hits: [] })],
-    })
+    await mockRedaction(page, { discoveries: [discovery(0, { rule_ids: ['fixture-rule-0'], hits: [] })] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     const dialog = await openRow(page)
@@ -937,8 +935,7 @@ test.describe('hit records time range', () => {
   const HOUR = 3_600_000
   const frozen = new Date('2026-10-27T09:00:00Z')
   const frozenMs = frozen.getTime()
-  const near = (actual: number | null, expected: number) =>
-    actual !== null && Math.abs(actual - expected) < 60_000
+  const near = (actual: number | null, expected: number) => actual !== null && Math.abs(actual - expected) < 60_000
 
   test('lists the last 7 days by default and keeps the time controls on this tab only', async ({ page }) => {
     await page.clock.install({ time: frozen })
@@ -1026,7 +1023,9 @@ test.describe('hit records time range', () => {
 
   test('explains an empty range and reloads on request', async ({ page }) => {
     await page.clock.install({ time: frozen })
-    const state = await mockRedaction(page, { discoveryPage: (_query, call) => ({ items: call === 1 ? [] : [discovery(0)] }) })
+    const state = await mockRedaction(page, {
+      discoveryPage: (_query, call) => ({ items: call === 1 ? [] : [discovery(0)] }),
+    })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     await expect(page.getByText('No hit records in this time range')).toBeVisible()
@@ -1085,7 +1084,9 @@ test.describe('rules workspace', () => {
       await page.goto('/reversible-redaction')
       await openRules(page)
       const tabs = await box(page.getByRole('tablist'))
-      const search = await box(page.locator('#credential-rule-search').locator('xpath=ancestor::*[@data-slot="input-group"]'))
+      const search = await box(
+        page.locator('#credential-rule-search').locator('xpath=ancestor::*[@data-slot="input-group"]'),
+      )
       const filter = await box(page.getByLabel('Rule source'))
       const add = await box(page.getByRole('button', { name: 'Add custom rule' }))
       expect(search.y).toBeGreaterThanOrEqual(tabs.y + tabs.height - 0.5)
