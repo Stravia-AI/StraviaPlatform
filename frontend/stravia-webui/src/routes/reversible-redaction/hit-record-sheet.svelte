@@ -2,12 +2,13 @@
 import * as m from '#lib/paraglide/messages.js'
 import { createQuery } from '@tanstack/svelte-query'
 import { resolve } from '$app/paths'
-import type { CredentialDiscoveryRecord } from '#lib/types.js'
+import type { CredentialDiscoveryRecord, CredentialHit } from '#lib/types.js'
 
 import {
   credentialSourceLabel,
   displayRuleSets,
   hitQueryFailure,
+  hitsCoverRules,
   hitSourceKind,
   requestLogPath,
   ruleSetLabel,
@@ -39,6 +40,8 @@ const detailQuery = createQuery(() =>
 )
 const reusesQuery = createQuery(() => credentialHitReusesQuery(record?.id ?? null, open && record?.linkable === true))
 const reuses = $derived(reusesQuery.data ? uniqueReuses(reusesQuery.data.items) : [])
+// 命中行已写出规则名时不再重复「创建规则」；没有命中定位或被省略时它是唯一的规则信息。
+const showCreatedRules = $derived(record !== null && !hitsCoverRules(record.rule_ids, record.hits))
 
 const title = $derived(
   record
@@ -48,17 +51,34 @@ const title = $derived(
       })
     : m.credential_protection_discoveries_title(),
 )
+
+let content = $state<HTMLElement | null>(null)
+
+// 默认会聚焦第一个可聚焦元素，常常是工具 ID 的 Tooltip 触发器：脚本聚焦会弹出气泡，并让第一次 Escape 只关气泡。
+function focusClose(event: Event): void {
+  event.preventDefault()
+  requestAnimationFrame(() => content?.querySelector<HTMLElement>('[data-slot="sheet-close"]')?.focus())
+}
 </script>
+
+{#snippet hitLabel(hit: CredentialHit)}
+  <span class="font-medium">{ruleNames.get(hit.rule_id) ?? hit.rule_id}</span>
+  <span aria-hidden="true" class="text-muted-foreground">←</span>
+  <span class="sr-only">{m.credential_protection_hits_found_in()}</span>
+  <span class="text-muted-foreground">{credentialSourceLabel(hitSourceKind(hit))}</span>
+{/snippet}
 
 <Sheet.Root bind:open>
   <Sheet.Content
+    bind:ref={content}
     closeLabel={m.common_close()}
+    onOpenAutoFocus={focusClose}
     class="data-[side=right]:w-full data-[side=right]:sm:max-w-xl overflow-y-auto">
     <Sheet.Header class="pr-12">
       <Sheet.Title>{title}</Sheet.Title>
     </Sheet.Header>
     {#if record}
-      <div class="flex min-w-0 flex-col gap-5 px-4 pb-6">
+      <div class="flex min-w-0 flex-col gap-6 px-4 pb-6">
         <dl class="summary-meta">
           <dt>{m.credential_protection_hit_records_rule_sets()}</dt>
           <dd>
@@ -72,92 +92,92 @@ const title = $derived(
               <span class="text-muted-foreground">—</span>
             {/if}
           </dd>
-          <dt>{m.credential_protection_hit_records_created_by()}</dt>
-          <dd>
-            {#if record.rule_ids.length}
+          {#if showCreatedRules}
+            <dt>{m.credential_protection_hit_records_created_by()}</dt>
+            <dd>
               <span class="flex flex-wrap gap-1.5">
                 {#each record.rule_ids as ruleId (ruleId)}
                   <Badge variant="outline" class="h-auto max-w-full whitespace-normal" title={ruleId}
                     >{ruleNames.get(ruleId) ?? ruleId}</Badge>
                 {/each}
               </span>
-            {:else}
-              <span class="text-muted-foreground">—</span>
-            {/if}
-          </dd>
+            </dd>
+          {/if}
         </dl>
 
-        <section aria-labelledby="hit-list-title">
-          <h3 id="hit-list-title" class="mb-2 text-sm font-medium">
+        <section class="flex min-w-0 flex-col gap-3" aria-labelledby="hit-list-title">
+          <h3 id="hit-list-title" class="text-sm font-semibold">
             {m.credential_protection_hit_records_hits()}
           </h3>
-          {#if record.hits.length}
-            <ul class="flex flex-col gap-1.5">
-              {#each record.hits as hit, index (`${hit.rule_id}:${hitSourceKind(hit)}:${index}`)}
-                <li>
-                  <Button
-                    variant={index === hitIndex ? 'secondary' : 'ghost'}
-                    class="h-auto w-full justify-start gap-1.5 whitespace-normal py-2 text-left"
-                    aria-pressed={index === hitIndex}
-                    onclick={() => (hitIndex = index)}>
-                    <span class="font-medium">{ruleNames.get(hit.rule_id) ?? hit.rule_id}</span>
-                    <span aria-hidden="true" class="text-muted-foreground">←</span>
-                    <span class="sr-only">{m.credential_protection_hits_found_in()}</span>
-                    <span class="text-muted-foreground">{credentialSourceLabel(hitSourceKind(hit))}</span>
-                  </Button>
-                </li>
-              {/each}
-            </ul>
+          {#if record.hits.length === 0}
+            <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_no_hits()}</p>
           {:else}
-            <p class="entry-note">{m.credential_protection_hit_records_no_hits()}</p>
+            {#if record.hits.length === 1}
+              <!-- 只有一条命中时没有可选的东西，不画成按钮。 -->
+              <p class="flex flex-wrap items-baseline gap-x-1.5 text-sm">{@render hitLabel(record.hits[0])}</p>
+            {:else}
+              <ul class="flex flex-col gap-1">
+                {#each record.hits as hit, index (`${hit.rule_id}:${hitSourceKind(hit)}:${index}`)}
+                  <li>
+                    <Button
+                      variant={index === hitIndex ? 'secondary' : 'ghost'}
+                      class="h-auto w-full justify-start gap-1.5 whitespace-normal py-2 text-left"
+                      aria-pressed={index === hitIndex}
+                      onclick={() => (hitIndex = index)}>
+                      {@render hitLabel(hit)}
+                    </Button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+
+            {#if selectedHit}
+              {#key `${record.id}:${hitIndex}`}
+                {#if detailQuery.isPending}
+                  <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
+                    ><Spinner />{m.credential_protection_hit_records_detail_loading()}</span>
+                {:else if detailQuery.isError}
+                  {#if hitQueryFailure(detailQuery.error) === 'gone'}
+                    <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_detail_gone()}</p>
+                  {:else}
+                    <Alert.Root variant="destructive"
+                      ><Alert.Description>{m.credential_protection_hit_records_detail_failed()}</Alert.Description
+                      ></Alert.Root>
+                    <Button class="self-start" variant="outline" onclick={() => void detailQuery.refetch()}
+                      >{m.common_retry()}</Button>
+                  {/if}
+                {:else if detailQuery.data}
+                  <CredentialHitDetail detail={detailQuery.data} {ruleNames} />
+                {/if}
+              {/key}
+            {/if}
           {/if}
         </section>
 
-        {#if selectedHit}
-          {#key `${record.id}:${hitIndex}`}
-            {#if detailQuery.isPending}
-              <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-                ><Spinner />{m.credential_protection_hit_records_detail_loading()}</span>
-            {:else if detailQuery.isError}
-              {#if hitQueryFailure(detailQuery.error) === 'gone'}
-                <p class="entry-note">{m.credential_protection_hit_records_detail_gone()}</p>
-              {:else}
-                <Alert.Root variant="destructive"
-                  ><Alert.Description>{m.credential_protection_hit_records_detail_failed()}</Alert.Description
-                  ></Alert.Root>
-                <Button class="self-start" variant="outline" onclick={() => void detailQuery.refetch()}
-                  >{m.common_retry()}</Button>
-              {/if}
-            {:else if detailQuery.data}
-              <CredentialHitDetail detail={detailQuery.data} {ruleNames} />
-            {/if}
-          {/key}
-        {/if}
-
-        <section aria-labelledby="hit-reuse-title">
-          <h3 id="hit-reuse-title" class="mb-2 text-sm font-medium">
+        <section class="flex min-w-0 flex-col gap-3" aria-labelledby="hit-reuse-title">
+          <h3 id="hit-reuse-title" class="text-sm font-semibold">
             {m.credential_protection_hit_records_reuse()}
           </h3>
           {#if !record.linkable}
-            <p class="entry-note">{m.credential_protection_hit_records_reuse_unlinkable()}</p>
+            <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_reuse_unlinkable()}</p>
           {:else if reusesQuery.isPending}
             <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
               ><Spinner />{m.credential_protection_hit_records_reuse_loading()}</span>
           {:else if reusesQuery.isError}
             {#if hitQueryFailure(reusesQuery.error) === 'gone'}
-              <p class="entry-note">{m.credential_protection_hit_records_detail_gone()}</p>
+              <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_detail_gone()}</p>
             {:else}
               <Alert.Root variant="destructive"
                 ><Alert.Description>{m.credential_protection_hit_records_reuse_failed()}</Alert.Description
                 ></Alert.Root>
-              <Button class="mt-2 self-start" variant="outline" onclick={() => void reusesQuery.refetch()}
+              <Button class="self-start" variant="outline" onclick={() => void reusesQuery.refetch()}
                 >{m.common_retry()}</Button>
             {/if}
           {:else if reusesQuery.data}
             {#if !reusesQuery.data.linkable}
-              <p class="entry-note">{m.credential_protection_hit_records_reuse_unlinkable()}</p>
+              <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_reuse_unlinkable()}</p>
             {:else if !reuses.length}
-              <p class="entry-note">{m.credential_protection_hit_records_reuse_empty()}</p>
+              <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_reuse_empty()}</p>
             {:else}
               <ul class="reuse-list">
                 {#each reuses as item (`${item.interaction_id}:${item.source_type}:${item.tool_id ?? item.latest_input ?? ''}`)}
@@ -179,7 +199,7 @@ const title = $derived(
                 {/each}
               </ul>
               {#if reusesQuery.data.truncated}
-                <p class="mt-2 text-xs text-muted-foreground">
+                <p class="text-xs text-muted-foreground">
                   {m.credential_protection_hit_records_reuse_truncated()}
                 </p>
               {/if}
@@ -200,14 +220,6 @@ const title = $derived(
   font-size: 0.8125rem;
 }
 .summary-meta dt {
-  color: var(--muted-foreground);
-}
-.entry-note {
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--muted);
-  font-size: 0.8125rem;
   color: var(--muted-foreground);
 }
 .reuse-list {

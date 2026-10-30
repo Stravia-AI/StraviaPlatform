@@ -358,7 +358,7 @@ test.describe('hit records', () => {
     await expect(hits.getByText('+4', { exact: true })).toBeVisible()
   })
 
-  test('opens a side panel with field context, the full entry and match details', async ({ page }) => {
+  test('opens a side panel with the hit, its tool and the full entry', async ({ page }) => {
     await mockRedaction(page, {
       discoveries: [
         discovery(0, {
@@ -371,18 +371,22 @@ test.describe('hit records', () => {
     await page.goto('/reversible-redaction')
     const row = rowOf(page, 'omp-key')
     const dialog = await openRow(page)
+    // 初始焦点在关闭按钮：落在工具 ID 的 Tooltip 触发器上会弹出气泡，并吞掉第一次 Escape。
+    await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
     await expect(dialog.getByRole('heading', { name: /omp-key/ })).toBeVisible()
     await expect(dialog.getByRole('heading', { name: /2026/ })).toBeVisible()
 
-    await expect(chip(dialog, 'Fixture credential 0', 'Tool result')).toHaveAttribute('aria-pressed', 'true')
-    const fieldSection = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) })
-    await expect(fieldSection).toContainText('Tool result')
-    await expect(fieldSection).toContainText('Lookup')
-    await expect(fieldSection).toContainText('tool-1')
-    const context = dialog.locator('.context-box')
-    await expect(context).toContainText('fourth line')
-    await expect(context).toContainText('sixth line')
-    await expect(context).not.toContainText('first line')
+    // 唯一的命中没有可选项，不画成按钮；规则与来源只写一次，已覆盖的创建规则不再重复。
+    const hitSection = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Hits' }) })
+    await expect(hitSection.getByRole('button', { name: /found in/ })).toHaveCount(0)
+    await expect(hitSection).toContainText('Fixture credential 0')
+    await expect(hitSection).toContainText('Tool result')
+    await expect(hitSection).toContainText('Lookup')
+    await expect(hitSection).toContainText('tool-1')
+    await expect(dialog.getByText('Rule sets', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Created by', { exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('Source', { exact: true })).toHaveCount(0)
 
     const entry = dialog.locator('[data-slot="credential-entry"]')
     await expect(entry).toContainText('fourth line')
@@ -404,6 +408,69 @@ test.describe('hit records', () => {
     const reopened = await openRow(page)
     await expect(reopened.locator('[data-slot="credential-entry"]')).not.toContainText('test_credential')
     await expect(reopened.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+  })
+
+  test('opens a long entry centred on the hit and lists matches only when they add something', async ({ page }) => {
+    const lines = Array.from({ length: 120 }, (_, index) => `filler line ${index + 1}`)
+    lines[89] = 'token: long_secret_value'
+    const text = lines.join('\n')
+    const start = text.indexOf('long_secret_value')
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      detail: () =>
+        availableDetail({
+          text,
+          matches: [
+            {
+              rule_id: 'fixture-rule-0',
+              start,
+              end: start + 'long_secret_value'.length,
+              start_line: 90,
+              start_column: 8,
+              end_line: 90,
+              end_column: 25,
+              hit: true,
+            },
+          ],
+        }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    const mask = entry.getByRole('button', { name: 'Show matched text' })
+    await expect(mask).toBeVisible()
+    // 命中位于第 90 行，条目框必须已经滚到它；否则用户得到的是第 1 行起的无关内容。
+    await expect
+      .poll(() =>
+        entry.evaluate((box) => {
+          const frame = box.getBoundingClientRect()
+          const target = box.querySelector('[data-match-index="0"]')?.getBoundingClientRect()
+          return target !== undefined && target.top >= frame.top && target.bottom <= frame.bottom
+        }),
+      )
+      .toBe(true)
+    // 唯一的匹配就是命中本身，不再单列一遍。
+    await expect(dialog.getByRole('heading', { name: 'Matches' })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })).toHaveCount(0)
+  })
+
+  test('keeps the creating rules when no hit lists them', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [discovery(0, { rule_ids: ['fixture-rule-0'], hits: [] })],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await expect(dialog.getByText('Created by', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Fixture credential 0', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('No hit context is available for this mapping.')).toBeVisible()
+    await expect(dialog.locator('[data-slot="credential-entry"]')).toHaveCount(0)
   })
 
   test('switches hits without leaking the previous entry and re-masks the snippet', async ({ page }) => {
@@ -464,10 +531,7 @@ test.describe('hit records', () => {
     await expect(entry).not.toContainText('secret_one')
     await expect(entry).not.toContainText('secret_two')
     await expect(entry.getByRole('button', { name: 'Show matched text' })).toBeVisible()
-    await expect(dialog.getByRole('heading', { name: 'Field context' })).toBeVisible()
-    await expect(
-      dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) }),
-    ).toContainText('Reader')
+    await expect(dialog.getByText('Reader', { exact: true })).toBeVisible()
     expect(state.detailRequests).toEqual([
       { id: '100.0', index: 0 },
       { id: '100.0', index: 1 },
@@ -596,7 +660,7 @@ test.describe('hit records', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
     const empty = await openRow(page, 'empty-key')
-    await expect(empty.getByText('No later reuse.')).toBeVisible()
+    await expect(empty.getByText('None yet.')).toBeVisible()
     expect(state.reuseRequests).toEqual(['100.1'])
   })
 
