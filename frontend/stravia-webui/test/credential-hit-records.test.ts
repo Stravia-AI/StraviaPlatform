@@ -3,12 +3,11 @@ import {
   HIT_RECORDS_REFRESH_MS,
   appendHitRecords,
   displayRuleSets,
-  entryContext,
   entrySegments,
   hitQueryFailure,
+  hitsCoverRules,
   hitRecordsRefreshDelay,
   hitSourceKind,
-  maskedEntryText,
   previewHits,
   refreshHitRecords,
   requestLogPath,
@@ -168,40 +167,24 @@ describe('displayRuleSets', () => {
   })
 })
 
-describe('entryContext', () => {
-  const text = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join('\n')
+describe('hitsCoverRules', () => {
+  const hits = [
+    { rule_id: 'a', source_type: 'tool_result' },
+    { rule_id: 'b', source_type: 'user_message', latest_input: true },
+  ]
 
-  test('takes three lines before and after the match line', () => {
-    const context = entryContext(text, 5)
-    expect(context.lines.map((line) => line.number)).toEqual([2, 3, 4, 5, 6, 7, 8])
-    expect(context.lines[3].text).toBe('line 5')
-    expect(context.hasBefore).toBe(true)
-    expect(context.hasAfter).toBe(true)
+  test('is covered when every creating rule appears in a hit', () => {
+    expect(hitsCoverRules(['a', 'b'], hits)).toBe(true)
+    expect(hitsCoverRules(['b'], hits)).toBe(true)
   })
 
-  test('clamps at the start and the end of the entry', () => {
-    expect(entryContext(text, 1)).toEqual({
-      lines: [
-        { number: 1, text: 'line 1' },
-        { number: 2, text: 'line 2' },
-        { number: 3, text: 'line 3' },
-        { number: 4, text: 'line 4' },
-      ],
-      hasBefore: false,
-      hasAfter: true,
-    })
-    const tail = entryContext(text, 10)
-    expect(tail.lines.map((line) => line.number)).toEqual([7, 8, 9, 10])
-    expect(tail.hasAfter).toBe(false)
+  test('keeps creating rules whose hits were omitted or never recorded', () => {
+    expect(hitsCoverRules(['a', 'c'], hits)).toBe(false)
+    expect(hitsCoverRules(['a'], [])).toBe(false)
   })
 
-  test('strips CRLF carriage returns and keeps empty entries at the boundary', () => {
-    expect(entryContext('a\r\nb\r\nc', 2).lines).toEqual([
-      { number: 1, text: 'a' },
-      { number: 2, text: 'b' },
-      { number: 3, text: 'c' },
-    ])
-    expect(entryContext('', 1)).toEqual({ lines: [{ number: 1, text: '' }], hasBefore: false, hasAfter: false })
+  test('has nothing to show when no rule created the mapping', () => {
+    expect(hitsCoverRules([], [])).toBe(true)
   })
 })
 
@@ -251,29 +234,6 @@ describe('entrySegments', () => {
 
   test('returns nothing for an empty entry', () => {
     expect(entrySegments('', [match({ start: 0, end: 1 })])).toEqual([])
-  })
-})
-
-describe('maskedEntryText', () => {
-  test('masks hit fragments but keeps other matches and plain text', () => {
-    const text = 'a SECRET b OTHER c'
-    const matches = [
-      match({ start: 2, end: 8, hit: true }),
-      match({ start: 11, end: 16, hit: false, rule_id: 'other' }),
-    ]
-    expect(maskedEntryText(entrySegments(text, matches))).toBe('a •••••• b OTHER c')
-  })
-
-  test('shows the plaintext again once the hit is revealed', () => {
-    const matches = [match({ start: 2, end: 8, hit: true })]
-    expect(maskedEntryText(entrySegments('a SECRET b', matches, new Set([0])))).toBe('a SECRET b')
-  })
-
-  test('keeps the line numbering when a masked hit spans lines', () => {
-    const text = 'x\nSEC\nRET\ny'
-    const masked = maskedEntryText(entrySegments(text, [match({ start: 2, end: 9, hit: true })]))
-    expect(masked).toBe('x\n••••••\n\ny')
-    expect(masked.split('\n')).toHaveLength(text.split('\n').length)
   })
 })
 

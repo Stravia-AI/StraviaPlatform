@@ -19,9 +19,6 @@ export const HIT_RECORDS_PAGE_SIZE = 30
 /** 行内只并列展示前几个命中，其余收敛成计数。 */
 export const HIT_PREVIEW_LIMIT = 3
 
-/** 命中处上下各展示的行数。 */
-export const HIT_CONTEXT_LINES = 3
-
 export interface HitRecordsState {
   items: CredentialDiscoveryRecord[]
   nextCursor: string | null
@@ -129,24 +126,12 @@ export function credentialSourceLabel(sourceKind: string): string {
   }
 }
 
-export interface CredentialEntryContext {
-  lines: { number: number; text: string }[]
-  hasBefore: boolean
-  hasAfter: boolean
-}
-
-/** 以命中所占行号截取上下各 `radius` 行；1 起始，超出文本时收敛到边界。 */
-export function entryContext(text: string, line: number, radius = HIT_CONTEXT_LINES): CredentialEntryContext {
-  const lines = text.split('\n').map((value) => (value.endsWith('\r') ? value.slice(0, -1) : value))
-  const total = Math.max(1, lines.length)
-  const center = Math.min(Math.max(1, Math.trunc(line)), total)
-  const first = Math.max(1, center - radius)
-  const last = Math.min(total, center + radius)
-  return {
-    lines: lines.slice(first - 1, last).map((value, index) => ({ number: first + index, text: value })),
-    hasBefore: first > 1,
-    hasAfter: last < total,
-  }
+/**
+ * 命中列表已经列出了全部创建规则时，「创建规则」不再提供额外信息。
+ * 旧记录没有命中定位、或定位超出上限被省略时，规则只出现在创建规则里，必须保留。
+ */
+export function hitsCoverRules(ruleIds: readonly string[], hits: readonly CredentialHit[]): boolean {
+  return ruleIds.every((ruleId) => hits.some((hit) => hit.rule_id === ruleId))
 }
 
 export interface CredentialEntrySegment {
@@ -194,20 +179,6 @@ export function entrySegments(
 }
 
 export const HIT_MASK = '••••••'
-
-/**
- * 把未展开的命中片段换成遮罩后拼回正文，供上下文行使用，避免旁路泄露明文。
- * 命中跨行时保留其中的换行，使行号与服务端返回的 `start_line` 一致。
- */
-export function maskedEntryText(segments: readonly CredentialEntrySegment[]): string {
-  return segments
-    .map((segment) =>
-      segment.kind === 'hit' && !segment.revealed
-        ? HIT_MASK + '\n'.repeat(segment.text.split('\n').length - 1)
-        : segment.text,
-    )
-    .join('')
-}
 
 /**
  * 复用位置的展示去重：同一位置在多次扫描中可能重复出现，只保留最近一次；
