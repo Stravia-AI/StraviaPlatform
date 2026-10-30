@@ -16,6 +16,8 @@ import type {
   CustomCredentialRuleInput,
   CredentialDiscoveryQuery,
   CredentialDiscoveryPage,
+  CredentialHitDetail,
+  CredentialHitReuses,
   ProviderModelDetail,
   PreparedProviderModel,
   ProviderModelList,
@@ -180,6 +182,13 @@ export const admin = {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
       request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
+    hit: (id: string, index: number) =>
+      request<CredentialHitDetail>(
+        'GET',
+        `/reversible-redaction/discoveries/${encodeURIComponent(id)}/hits/${encodeURIComponent(String(index))}`,
+      ),
+    reuses: (id: string) =>
+      request<CredentialHitReuses>('GET', `/reversible-redaction/discoveries/${encodeURIComponent(id)}/reuses`),
     test: (text: string) => request<{ matches: CredentialMatch[] }>('POST', '/reversible-redaction/test', { text }),
     customRules: {
       list: () => request<CustomCredentialRule[]>('GET', '/reversible-redaction/custom-rules'),

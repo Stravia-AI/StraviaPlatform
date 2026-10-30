@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded by ADR-0087
 ---
 
 # 命中记录同时记录新增与复用，并携带块级定位
+
+> Interaction 级聚合与 `kind` 筛选、复用作为列表行、占位符 `marker` 仅限 Debug Run、命中记录不保存可定位片段这几项已被 [ADR-0087](0087-list-credential-hits-per-mapping-with-retained-item-context.md) 取代。`credential_mappings_reused` 事件及其口径、`locators`、映射 `rule_ids` 与请求记录的块级高亮入口仍然有效；原文保留供追溯。
 
 ## 决定
 

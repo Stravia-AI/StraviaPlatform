@@ -460,119 +460,173 @@ impl super::InteractionObservation {
     ) -> anyhow::Result<CredentialDiscoveryPage> {
         self.inner.store.credential_discoveries(query).await
     }
+
+    pub(crate) async fn credential_discovery_record(
+        &self,
+        sequence: i64,
+        index: usize,
+    ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
+        self.inner
+            .store
+            .credential_discovery_record(sequence, index)
+            .await
+    }
+
+    pub(crate) async fn credential_discovery_hit_context(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        hit: &CredentialDiscoveryHit,
+    ) -> anyhow::Result<CredentialDiscoveryHitContext> {
+        self.inner
+            .store
+            .credential_discovery_hit_context(record, hit)
+            .await
+    }
+
+    pub(crate) async fn credential_discovery_reuses(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        marker: &str,
+    ) -> anyhow::Result<CredentialDiscoveryReuses> {
+        self.inner
+            .store
+            .credential_discovery_reuses(record, marker)
+            .await
+    }
 }
 
 #[derive(FromRow)]
-struct DiscoveryRow {
+struct DiscoveryEventRow {
+    sequence: i64,
+    occurred_at: i64,
     interaction_id: String,
+    run_id: Option<String>,
     api_key_name: Option<String>,
-    discovered_at: i64,
-    status: String,
-    observation_gap: bool,
+    payload: Vec<u8>,
 }
 
 #[derive(serde::Deserialize)]
 struct DiscoveryPayload {
     discoveries: Vec<CredentialDiscovery>,
-    #[serde(default)]
-    omitted_discoveries: usize,
 }
 
-/// 一个 Interaction 在筛选范围内的全部命中，新增与复用各自按「规则 ← 来源」去重。
-#[derive(Default)]
-struct DiscoveryHits {
-    observed: bool,
-    new_credential_count: i64,
-    created: std::collections::BTreeSet<CredentialHit>,
-    reused: std::collections::BTreeSet<CredentialHit>,
+const DISCOVERY_EVENT_BATCH: i64 = 200;
+/// 侧栏最多展示的复用位置；多出一个用于判断是否截断。
+const REUSE_ITEM_LIMIT: usize = 200;
+
+fn decode_discovery_payload(payload: &[u8]) -> anyhow::Result<DiscoveryPayload> {
+    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+        payload,
+    )?)?)
 }
 
-impl DiscoveryHits {
-    fn add(&mut self, created: bool, payload: DiscoveryPayload) {
-        self.observed = true;
-        if created {
-            self.new_credential_count +=
-                (payload.discoveries.len() + payload.omitted_discoveries) as i64;
-        }
-        let side = if created {
-            &mut self.created
-        } else {
-            &mut self.reused
-        };
-        for discovery in payload.discoveries {
-            if discovery.locators.is_empty() {
-                // 升级前的事件只有规则集合与来源集合；对单个映射，二者的组合是对原位置的最佳还原。
-                for rule_id in &discovery.rule_ids {
-                    for source_type in &discovery.source_types {
-                        side.insert(CredentialHit {
-                            rule_id: rule_id.clone(),
-                            source_type: source_type.clone(),
-                            latest_input: None,
-                        });
-                    }
-                }
-            }
-            for locator in discovery.locators {
-                side.insert(CredentialHit {
-                    rule_id: locator.rule_id,
-                    source_type: locator.source_type,
-                    latest_input: locator.latest_input,
+/// 一行映射的「规则 ← 来源」配对。升级前的事件没有逐项位置，用规则集合与来源集合合成。
+fn discovery_hits(discovery: &CredentialDiscovery) -> Vec<CredentialDiscoveryHit> {
+    let mut hits = std::collections::BTreeSet::new();
+    if discovery.locators.is_empty() {
+        for rule_id in &discovery.rule_ids {
+            for source_type in &discovery.source_types {
+                hits.insert(CredentialDiscoveryHit {
+                    rule_id: rule_id.clone(),
+                    source_type: source_type.clone(),
+                    tool_id: None,
+                    latest_input: None,
                 });
             }
         }
     }
+    for locator in &discovery.locators {
+        hits.insert(CredentialDiscoveryHit {
+            rule_id: locator.rule_id.clone(),
+            source_type: locator.source_type.clone(),
+            tool_id: locator.tool_id.clone(),
+            latest_input: locator.latest_input,
+        });
+    }
+    hits.into_iter().collect()
 }
 
-// 发现列表只扫描两类命中事件。部分索引以 kind 为前导；SQLite 不能从
-// IN(所选一种) 推出 IN(两种)，因此显式保留与索引谓词一致的全集条件，
-// 再叠加所选筛选，created/reused 才能同样命中索引。
-const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind IN (";
-
-macro_rules! discovery_payload_reader {
-    ($name:ident, $db:ty, $pool:ty) => {
-        async fn $name(
-            pool: &$pool,
-            rows: &[DiscoveryRow],
-            kinds: &'static str,
-            now: i64,
-        ) -> anyhow::Result<Vec<DiscoveryHits>> {
-            if rows.is_empty() {
-                return Ok(Vec::new());
+fn discovery_rule_sets(rule_ids: &std::collections::BTreeSet<String>) -> Vec<String> {
+    rule_ids
+        .iter()
+        .map(|rule_id| {
+            if rule_id.starts_with(stravia_credential_protection::CUSTOM_RULE_ID_PREFIX) {
+                "custom".to_owned()
+            } else {
+                "builtin".to_owned()
             }
-            let mut builder = QueryBuilder::<$db>::new(
-                "WITH page(ordinal,interaction_id,discovered_at) AS (",
-            );
-            builder.push_values(rows.iter().enumerate(), |mut row, (ordinal, discovery)| {
-                row.push_bind(ordinal as i64)
-                    .push_bind(discovery.interaction_id.as_str())
-                    .push_bind(discovery.discovered_at);
-            });
-            // 与选页查询相同：先匹配部分索引的全集谓词，再按所选命中类型过滤。
-            builder
-                .push(") SELECT page.ordinal,e.kind='credential_mappings_created' AS created,e.payload FROM page JOIN observation_events e ON e.interaction_id=page.interaction_id WHERE e.kind IN (")
-                .push(CredentialHitKind::All.event_kinds())
-                .push(") AND e.kind IN (")
-                .push(kinds)
-                .push(") AND e.expires_at>")
-                .push_bind(now)
-                .push(" AND e.occurred_at<=page.discovered_at");
-            let query = builder.build_query_as::<(i64, bool, Vec<u8>)>();
-            let mut payloads = query.fetch(pool);
-            let mut hits: Vec<DiscoveryHits> =
-                (0..rows.len()).map(|_| DiscoveryHits::default()).collect();
-            // 仅解码当前页的安全元数据；逐事件归并，避免一次保留整页原始 payload。
-            // 沿用选页时的发现时间上界，排除发现时间更晚的事件。
-            while let Some((ordinal, created, payload)) = payloads.try_next().await? {
-                let payload: DiscoveryPayload =
-                    serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                hits[ordinal as usize].add(created, payload);
-            }
-            Ok(hits)
-        }
-    };
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
-discovery_payload_reader!(discovery_payloads_sqlite, sqlx::Sqlite, sqlx::SqlitePool);
-discovery_payload_reader!(discovery_payloads_postgres, sqlx::Postgres, sqlx::PgPool);
+
+fn discovery_item(
+    sequence: i64,
+    occurred_at: i64,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    api_key_name: Option<&str>,
+    discovery: &CredentialDiscovery,
+    index: usize,
+) -> CredentialDiscoveryItem {
+    let rule_ids: std::collections::BTreeSet<_> = discovery.rule_ids.iter().cloned().collect();
+    CredentialDiscoveryItem {
+        id: format!("{sequence}.{index}"),
+        created_at: occurred_at,
+        interaction_id: interaction_id.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        api_key_name: api_key_name.map(str::to_owned),
+        rule_sets: discovery_rule_sets(&rule_ids),
+        rule_ids: rule_ids.into_iter().collect(),
+        hits: discovery_hits(discovery),
+        omitted_hits: discovery.omitted_locators,
+        linkable: discovery
+            .marker
+            .as_deref()
+            .is_some_and(|marker| !marker.is_empty()),
+    }
+}
+
+fn parse_discovery_cursor(cursor: Option<&str>) -> anyhow::Result<Option<(i64, usize)>> {
+    cursor
+        .map(|cursor| {
+            anyhow::ensure!(cursor.len() <= 64, CredentialDiscoveryError::InvalidCursor);
+            let parsed: (i64, usize) = serde_json::from_str(cursor)
+                .map_err(|_| CredentialDiscoveryError::InvalidCursor)?;
+            anyhow::ensure!(parsed.0 >= 0, CredentialDiscoveryError::InvalidCursor);
+            Ok(parsed)
+        })
+        .transpose()
+}
+
+fn encode_discovery_cursor(sequence: i64, index: usize) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&(sequence, index))?)
+}
+
+fn discovery_event_sql(builder: &mut QueryBuilder<sqlx::Sqlite>, now: i64, upper: i64) {
+    builder
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+        .push_bind(now)
+        .push(" AND i.expires_at>")
+        .push_bind(now)
+        .push(" AND e.sequence<=")
+        .push_bind(upper)
+        .push(" ORDER BY e.sequence DESC LIMIT ")
+        .push_bind(DISCOVERY_EVENT_BATCH);
+}
+
+fn discovery_event_sql_postgres(builder: &mut QueryBuilder<sqlx::Postgres>, now: i64, upper: i64) {
+    builder
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+        .push_bind(now)
+        .push(" AND i.expires_at>")
+        .push_bind(now)
+        .push(" AND e.sequence<=")
+        .push_bind(upper)
+        .push(" ORDER BY e.sequence DESC LIMIT ")
+        .push_bind(DISCOVERY_EVENT_BATCH);
+}
 
 impl ObservationStore {
     pub(super) async fn observation_root_id(
@@ -595,101 +649,432 @@ impl ObservationStore {
         })
     }
 
+    /// 按 `(event sequence DESC, discovery index DESC)` 翻页；一行对应一次新建映射。
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
-        let cursor: Option<(i64, String)> = query
-            .cursor
-            .as_deref()
-            .map(|cursor| {
-                anyhow::ensure!(cursor.len() <= 512, "命中记录游标过长");
-                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("命中记录游标无效"))
-            })
-            .transpose()?;
+        let cursor = parse_discovery_cursor(query.cursor.as_deref())?;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
-        let kinds = query.kind.event_kinds();
-        let mut rows: Vec<DiscoveryRow> = match self {
-            Self::Sqlite(pool, _) => {
-                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DISCOVERY_SELECT);
-                builder
-                    .push(CredentialHitKind::All.event_kinds())
-                    .push(") AND e.kind IN (")
-                    .push(kinds)
-                    .push(") AND i.expires_at>")
-                    .push_bind(now)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" GROUP BY i.id,i.api_key_name,i.status,i.observation_gap");
-                if let Some((time, id)) = &cursor {
-                    builder
-                        .push(" HAVING (MAX(e.occurred_at),i.id)<(")
-                        .push_bind(*time)
-                        .push(",")
-                        .push_bind(id)
-                        .push(")");
+        let mut items = Vec::with_capacity(limit + 1);
+        let mut upper = cursor.map_or(i64::MAX, |(sequence, _)| sequence);
+        'scan: loop {
+            let rows: Vec<DiscoveryEventRow> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+                    discovery_event_sql(&mut builder, now, upper);
+                    builder.build_query_as().fetch_all(pool).await?
                 }
-                builder
-                    .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
-                    .push_bind((limit + 1) as i64);
-                builder.build_query_as().fetch_all(pool).await?
-            }
-            Self::Postgres(pool, _) => {
-                let mut builder = QueryBuilder::<sqlx::Postgres>::new(DISCOVERY_SELECT);
-                builder
-                    .push(CredentialHitKind::All.event_kinds())
-                    .push(") AND e.kind IN (")
-                    .push(kinds)
-                    .push(") AND i.expires_at>")
-                    .push_bind(now)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" GROUP BY i.id,i.api_key_name,i.status,i.observation_gap");
-                if let Some((time, id)) = &cursor {
-                    builder
-                        .push(" HAVING (MAX(e.occurred_at),i.id)<(")
-                        .push_bind(*time)
-                        .push(",")
-                        .push_bind(id)
-                        .push(")");
+                Self::Postgres(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+                    discovery_event_sql_postgres(&mut builder, now, upper);
+                    builder.build_query_as().fetch_all(pool).await?
                 }
-                builder
-                    .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
-                    .push_bind((limit + 1) as i64);
-                builder.build_query_as().fetch_all(pool).await?
+            };
+            let Some(last) = rows.last() else {
+                break;
+            };
+            upper = last.sequence.saturating_sub(1);
+            for row in rows {
+                let payload = decode_discovery_payload(&row.payload)?;
+                for (index, discovery) in payload.discoveries.iter().enumerate().rev() {
+                    if cursor.is_some_and(|(sequence, index_cursor)| {
+                        (row.sequence, index) >= (sequence, index_cursor)
+                    }) {
+                        continue;
+                    }
+                    items.push(discovery_item(
+                        row.sequence,
+                        row.occurred_at,
+                        &row.interaction_id,
+                        row.run_id.as_deref(),
+                        row.api_key_name.as_deref(),
+                        discovery,
+                        index,
+                    ));
+                    if items.len() > limit {
+                        break 'scan;
+                    }
+                }
             }
-        };
-        let next_cursor = if rows.len() > limit {
-            let last = &rows[limit - 1];
-            Some(serde_json::to_string(&(
-                last.discovered_at,
-                &last.interaction_id,
-            ))?)
+        }
+        let next_cursor = if items.len() > limit {
+            let last = &items[limit - 1];
+            let (sequence, index) = last
+                .id
+                .split_once('.')
+                .and_then(|(sequence, index)| {
+                    Some((sequence.parse::<i64>().ok()?, index.parse::<usize>().ok()?))
+                })
+                .ok_or_else(|| anyhow::anyhow!("命中记录行标识无效"))?;
+            Some(encode_discovery_cursor(sequence, index)?)
         } else {
             None
         };
-        rows.truncate(limit);
-        let hits = match self {
-            Self::Sqlite(pool, _) => discovery_payloads_sqlite(pool, &rows, kinds, now).await?,
-            Self::Postgres(pool, _) => discovery_payloads_postgres(pool, &rows, kinds, now).await?,
-        };
-        let mut items = Vec::with_capacity(rows.len());
-        for (row, hits) in rows.into_iter().zip(hits) {
-            if hits.observed {
-                items.push(CredentialDiscoverySummary {
-                    interaction_id: row.interaction_id,
-                    api_key_name: row.api_key_name,
-                    discovered_at: row.discovered_at,
-                    new_credential_count: hits.new_credential_count,
-                    created: hits.created.into_iter().collect(),
-                    reused: hits.reused.into_iter().collect(),
-                    status: row.status,
-                    observation_gap: row.observation_gap,
-                });
-            }
-        }
+        items.truncate(limit);
         Ok(CredentialDiscoveryPage { items, next_cursor })
+    }
+
+    /// 读取一行新建映射的落库事实；行不存在或已过期时返回 `None`。
+    pub(super) async fn credential_discovery_record(
+        &self,
+        sequence: i64,
+        index: usize,
+    ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
+        let now = chrono::Utc::now().timestamp_millis();
+        type DiscoveryRow = (i64, String, Option<String>, String, Option<String>, Vec<u8>);
+        let row: Option<DiscoveryRow> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=? AND e.kind='credential_mappings_created' AND e.expires_at>? AND i.expires_at>?"
+            )
+            .bind(sequence)
+            .bind(now)
+            .bind(now)
+            .fetch_optional(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=$1 AND e.kind='credential_mappings_created' AND e.expires_at>$2 AND i.expires_at>$2"
+            )
+            .bind(sequence)
+            .bind(now)
+            .fetch_optional(pool)
+            .await?,
+        };
+        let Some((_occurred_at, interaction_id, run_id, principal, _api_key_name, payload)) = row
+        else {
+            return Ok(None);
+        };
+        let payload = decode_discovery_payload(&payload)?;
+        let Some(discovery) = payload.discoveries.get(index) else {
+            return Ok(None);
+        };
+        Ok(Some(CredentialDiscoveryRecord {
+            sequence,
+            interaction_id,
+            run_id,
+            principal,
+            hits: discovery_hits(discovery),
+            discovery: discovery.clone(),
+        }))
+    }
+
+    /// 解析命中正文：工具来源按 `tool_id` 回溯，用户消息取输入预览；其余来源不保留。
+    pub(super) async fn credential_discovery_hit_context(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        hit: &CredentialDiscoveryHit,
+    ) -> anyhow::Result<CredentialDiscoveryHitContext> {
+        const TOOL_NAME_KINDS: &str = "'platform_tool_started','client_tool_handoff'";
+        const TOOL_RESULT_KINDS: &str = "'client_tool_result','platform_tool_finished'";
+        let now = chrono::Utc::now().timestamp_millis();
+        match hit.source_type.as_str() {
+            "tool_arguments" | "tool_result" => {
+                let Some(tool_id) = hit.tool_id.as_deref() else {
+                    return Ok(CredentialDiscoveryHitContext {
+                        tool_name: None,
+                        body: CredentialDiscoveryBody::NotRetained,
+                    });
+                };
+                let (body_kinds, field) = if hit.source_type == "tool_arguments" {
+                    (TOOL_NAME_KINDS, "input")
+                } else {
+                    (TOOL_RESULT_KINDS, "content")
+                };
+                let body_event = self
+                    .credential_tool_event(record, body_kinds, tool_id, now)
+                    .await?;
+                let tool_name = if body_kinds == TOOL_NAME_KINDS {
+                    body_event
+                        .as_ref()
+                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
+                } else {
+                    self.credential_tool_event(record, TOOL_NAME_KINDS, tool_id, now)
+                        .await?
+                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
+                };
+                let body = match body_event {
+                    None => CredentialDiscoveryBody::Missing,
+                    Some(payload) => match payload.get(field) {
+                        Some(value) if !value.is_null() => {
+                            CredentialDiscoveryBody::Retained(value.clone())
+                        }
+                        _ => CredentialDiscoveryBody::NotRetained,
+                    },
+                };
+                Ok(CredentialDiscoveryHitContext { tool_name, body })
+            }
+            "user_message" if hit.latest_input == Some(true) => {
+                let body = match self.credential_input_preview(record, now).await? {
+                    None => CredentialDiscoveryBody::Missing,
+                    Some(payload) => {
+                        match payload.get("text").and_then(serde_json::Value::as_str) {
+                            Some(text) => CredentialDiscoveryBody::Retained(text.into()),
+                            None => CredentialDiscoveryBody::NotRetained,
+                        }
+                    }
+                };
+                Ok(CredentialDiscoveryHitContext {
+                    tool_name: None,
+                    body,
+                })
+            }
+            _ => Ok(CredentialDiscoveryHitContext {
+                tool_name: None,
+                body: CredentialDiscoveryBody::NotRetained,
+            }),
+        }
+    }
+
+    async fn credential_tool_event(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        kinds: &'static str,
+        tool_id: &str,
+        now: i64,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let payload = match self {
+            Self::Sqlite(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                );
+                builder
+                    .push_bind(&record.interaction_id)
+                    .push(" AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                let payload: Option<Vec<u8>> = builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?;
+                if let Some(payload) = payload {
+                    return Ok(Some(serde_json::from_slice(
+                        &crate::storage_codec::decode(&payload)?,
+                    )?));
+                }
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                );
+                builder
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND e.sequence<=")
+                    .push_bind(record.sequence)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Self::Postgres(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                );
+                builder
+                    .push_bind(&record.interaction_id)
+                    .push(" AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                let payload: Option<Vec<u8>> = builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?;
+                if let Some(payload) = payload {
+                    return Ok(Some(serde_json::from_slice(
+                        &crate::storage_codec::decode(&payload)?,
+                    )?));
+                }
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                );
+                builder
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND e.sequence<=")
+                    .push_bind(record.sequence)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        payload
+            .map(|payload| {
+                Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                    &payload,
+                )?)?)
+            })
+            .transpose()
+    }
+
+    async fn credential_input_preview(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        now: i64,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let payload = match self {
+            Self::Sqlite(pool, _) => {
+                if let Some(run_id) = &record.run_id {
+                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
+                        "SELECT payload FROM observation_events WHERE interaction_id=? AND run_id=? AND kind='input_preview_recorded' AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .bind(&record.interaction_id)
+                    .bind(run_id)
+                    .bind(now)
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(payload) = payload {
+                        return Ok(Some(serde_json::from_slice(
+                            &crate::storage_codec::decode(&payload)?,
+                        )?));
+                    }
+                }
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT payload FROM observation_events WHERE interaction_id=? AND kind='input_preview_recorded' AND sequence<? AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                )
+                .bind(&record.interaction_id)
+                .bind(record.sequence)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+            }
+            Self::Postgres(pool, _) => {
+                if let Some(run_id) = &record.run_id {
+                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
+                        "SELECT payload FROM observation_events WHERE interaction_id=$1 AND run_id=$2 AND kind='input_preview_recorded' AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .bind(&record.interaction_id)
+                    .bind(run_id)
+                    .bind(now)
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(payload) = payload {
+                        return Ok(Some(serde_json::from_slice(
+                            &crate::storage_codec::decode(&payload)?,
+                        )?));
+                    }
+                }
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='input_preview_recorded' AND sequence<$2 AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                )
+                .bind(&record.interaction_id)
+                .bind(record.sequence)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+            }
+        };
+        payload
+            .map(|payload| {
+                Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                    &payload,
+                )?)?)
+            })
+            .transpose()
+    }
+
+    /// 按占位符读取写入时登记的复用位置；登记行已按位置去重，只保留最新一次复用。
+    pub(super) async fn credential_discovery_reuses(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        marker: &str,
+    ) -> anyhow::Result<CredentialDiscoveryReuses> {
+        if marker.is_empty() {
+            return Ok(CredentialDiscoveryReuses {
+                linkable: false,
+                items: Vec::new(),
+                truncated: false,
+            });
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        // 多取一行判断是否截断；上限只约束展示的位置数，与登记量无关。
+        let limit = REUSE_ITEM_LIMIT as i64 + 1;
+        type ReuseStoreRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            bool,
+            i64,
+        );
+        let rows: Vec<ReuseStoreRow> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>? ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ?",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3 ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT $4",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
+        };
+        let truncated = rows.len() > REUSE_ITEM_LIMIT;
+        let items = rows
+            .into_iter()
+            .take(REUSE_ITEM_LIMIT)
+            .map(
+                |(
+                    interaction_id,
+                    run_id,
+                    api_key_name,
+                    source_type,
+                    tool_id,
+                    latest_input,
+                    last_reused_at,
+                )| {
+                    // 登记表按去重键归一：工具来源只有 `tool_id`，用户消息只有是否本次输入。
+                    let latest_input = (source_type == "user_message").then_some(latest_input);
+                    let tool_id = (!tool_id.is_empty()).then_some(tool_id);
+                    CredentialDiscoveryReuse {
+                        interaction_id,
+                        run_id,
+                        api_key_name,
+                        source_type,
+                        tool_id,
+                        latest_input,
+                        last_reused_at,
+                    }
+                },
+            )
+            .collect();
+        Ok(CredentialDiscoveryReuses {
+            linkable: true,
+            items,
+            truncated,
+        })
     }
 
     pub async fn query_root_changes(

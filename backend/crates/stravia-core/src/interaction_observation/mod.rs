@@ -1527,7 +1527,7 @@ impl RunPublicationGuard {
     }
 
     /// 命中事件的载荷上限在这里统一执行：长会话重放会让每个 Model Turn 都命中大量历史秘密，
-    /// 不能让它们占满观察写入队列。凭据标记只对 Debug 开启的 Run 保留。
+    /// 不能让它们占满观察写入队列。占位符对所有 Run 记录，用于关联后续复用。
     fn credential_hits(
         &self,
         mut discoveries: Vec<CredentialDiscovery>,
@@ -1540,9 +1540,6 @@ impl RunPublicationGuard {
         discoveries.truncate(MAX_EVENT_DISCOVERIES);
         for discovery in &mut discoveries {
             bound_locators(discovery, self.client_input);
-            if !self.inner.debug_enabled {
-                discovery.marker = None;
-            }
         }
         let occurred_at = writer::now();
         let _boundary = self.inner.event_boundary.lock();
@@ -1771,7 +1768,7 @@ fn record_trace_observed_at(
 mod snapshot_tests {
     use std::time::Duration;
 
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     fn visible_item(id: &str, text: &str) -> RunEvent {
         RunEvent::ClientVisibleContent {
@@ -4196,9 +4193,9 @@ mod snapshot_tests {
                 .iter()
                 .any(|item| item["source_type"] == "user_message" && item["latest_input"] == true)
         );
-        assert!(
-            discovery.get("marker").is_none(),
-            "Debug 关闭的 Run 不记录占位符"
+        assert_eq!(
+            discovery["marker"], "<!--sr:abcdefghijklmnopqrstuvwxyzab-->",
+            "占位符对所有 Run 记录"
         );
 
         let created = payload("credential_mappings_created").await?;
@@ -4491,16 +4488,96 @@ mod snapshot_tests {
         Ok(())
     }
 
-    fn credential_discovery_payload(rules: &[&str], sources: &[&str]) -> anyhow::Result<Vec<u8>> {
-        crate::storage_codec::encode(
-            serde_json::json!({
-                "kind": "credential_mappings_created",
-                "discoveries": [{"rule_ids": rules, "source_types": sources}]
-            })
-            .to_string()
-            .as_bytes()
-            .into(),
-        )
+    fn stored_json(value: Value) -> anyhow::Result<Vec<u8>> {
+        crate::storage_codec::encode(serde_json::to_string(&value)?.as_bytes().into())
+    }
+
+    fn credential_payload(
+        kind: &str,
+        discoveries: Value,
+        omitted: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut payload = json!({"kind": kind, "discoveries": discoveries});
+        if omitted > 0 {
+            payload["omitted_discoveries"] = omitted.into();
+        }
+        stored_json(payload)
+    }
+
+    fn rule_locator(
+        rule_id: &str,
+        source_type: &str,
+        tool_id: Option<&str>,
+        latest_input: Option<bool>,
+    ) -> CredentialLocator {
+        CredentialLocator {
+            rule_id: rule_id.into(),
+            source_type: source_type.into(),
+            tool_id: tool_id.map(str::to_owned),
+            latest_input,
+        }
+    }
+
+    fn locator(
+        source_type: &str,
+        tool_id: Option<&str>,
+        latest_input: Option<bool>,
+    ) -> CredentialLocator {
+        rule_locator("rule-a", source_type, tool_id, latest_input)
+    }
+
+    async fn reuse_row_count(store: &store::ObservationStore, marker: &str) -> anyhow::Result<i64> {
+        Ok(match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM credential_mapping_reuses WHERE marker=?")
+                    .bind(marker)
+                    .fetch_one(pool)
+                    .await?
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM credential_mapping_reuses WHERE marker=$1")
+                    .bind(marker)
+                    .fetch_one(pool)
+                    .await?
+            }
+        })
+    }
+
+    /// 走与写入路径相同的登记辅助函数，避免测试复制生产 SQL。
+    async fn register_reuses(
+        observations: &store::ObservationStore,
+        interaction_id: &str,
+        run_id: Option<&str>,
+        occurred_at: i64,
+        discoveries: &[CredentialDiscovery],
+    ) -> anyhow::Result<()> {
+        match observations {
+            store::ObservationStore::Sqlite(pool, _) => {
+                let mut tx = pool.begin().await?;
+                store::upsert_credential_mapping_reuses_sqlite(
+                    &mut tx,
+                    interaction_id,
+                    run_id,
+                    occurred_at,
+                    discoveries,
+                )
+                .await?;
+                tx.commit().await?;
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                let mut tx = pool.begin().await?;
+                store::upsert_credential_mapping_reuses_postgres(
+                    &mut tx,
+                    interaction_id,
+                    run_id,
+                    occurred_at,
+                    discoveries,
+                )
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(())
     }
 
     async fn seed_credential_discoveries(
@@ -4509,348 +4586,1057 @@ mod snapshot_tests {
     ) -> anyhow::Result<()> {
         let live_until = now + 86_400_000;
         let interactions = [
-            ("first", "failed", now + 100, false, live_until),
-            ("second", "interrupted", now + 200, false, live_until),
-            ("tied", "completed", now + 300, false, live_until),
-            // 只有复用事件的交互新增数为零，仍保留在默认列表中并带逐行 gap。
-            ("reused-only", "completed", now + 250, true, live_until),
-            ("expired-newer", "completed", now + 400, false, live_until),
-            // 已过期交互的载荷即使无法解码也不能进入当前页。
-            ("expired-owner", "completed", now + 500, false, 0),
-            ("missing", "completed", now, true, live_until),
+            ("first", live_until),
+            ("second", live_until),
+            ("tied", live_until),
+            ("expired-newer", live_until),
+            ("expired-owner", 0),
         ];
-        let events = [
+        let events = vec![
             (
                 1,
                 Some("first"),
+                Some("run-1"),
+                "credential_mappings_created",
                 now - 30,
-                &["rule-a"][..],
-                &["user_message"][..],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([
+                        {
+                            "rule_ids": ["rule-a"],
+                            "source_types": ["user_message"],
+                            "locators": [
+                                {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false}
+                            ],
+                            "marker": "m-first"
+                        },
+                        {
+                            "rule_ids": ["rule-c", "rule-b"],
+                            "source_types": ["tool_result"],
+                            "locators": [
+                                {"rule_id": "rule-b", "source_type": "tool_result", "tool_id": "call-1"}
+                            ],
+                            "omitted_locators": 2,
+                            "marker": "m-first-2"
+                        }
+                    ]),
+                    0,
+                )?,
                 live_until,
             ),
             (
                 2,
                 Some("second"),
+                None,
+                "credential_mappings_created",
                 now - 20,
-                &["rule-b"],
-                &["tool_result"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["rule-d"], "source_types": ["tool_result"]}]),
+                    0,
+                )?,
                 live_until,
             ),
-            // 升级前的事件没有逐项位置；同一映射的规则与来源组合是原位置的最佳还原，
-            // 重复来源只聚合一次。
             (
                 3,
                 Some("first"),
+                None,
+                "credential_mappings_created",
                 now - 10,
-                &["rule-a", "rule-c"],
-                &["tool_result", "tool_result"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["rule-e"], "source_types": ["system"], "marker": ""}]),
+                    0,
+                )?,
                 live_until,
             ),
             // 未归属交互的发现不进入列表。
             (
                 4,
                 None,
+                None,
+                "credential_mappings_created",
                 now,
-                &["internal-rule"],
-                &["system_history"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["internal-rule"], "source_types": ["system_history"]}]),
+                    0,
+                )?,
                 live_until,
             ),
-            // 同一最新毫秒按交互 ID 降序稳定排序；tied 与 reused-only 共享该时间。
+            // 同一事件内的位置去重后按规则、来源、工具排序。
             (
                 5,
                 Some("tied"),
+                None,
+                "credential_mappings_created",
                 now - 10,
-                &["rule-tie"],
-                &["system_or_history"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["custom.rule-f", "custom.rule-f"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "custom.rule-f", "source_type": "tool_result", "tool_id": "b"},
+                            {"rule_id": "custom.rule-f", "source_type": "tool_result", "tool_id": "a"},
+                            {"rule_id": "custom.rule-f", "source_type": "tool_result", "tool_id": "b"}
+                        ],
+                        "marker": "m-tied"
+                    }]),
+                    0,
+                )?,
                 live_until,
             ),
-            // 只有过期的新事件被排除，较旧的未过期事件仍决定发现时间。
             (
                 6,
                 Some("expired-newer"),
+                None,
+                "credential_mappings_created",
                 now - 40,
-                &["rule-live"],
-                &["user_message"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["rule-live"], "source_types": ["user_message"]}]),
+                    0,
+                )?,
                 live_until,
             ),
             (
                 7,
                 Some("expired-newer"),
+                None,
+                "credential_mappings_created",
                 now - 5,
-                &["rule-expired"],
-                &["system_or_history"],
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["rule-expired"], "source_types": ["system_or_history"]}]),
+                    0,
+                )?,
                 0,
             ),
+            (
+                8,
+                Some("first"),
+                Some("run-1"),
+                "credential_mappings_reused",
+                now - 5,
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([{
+                        "rule_ids": ["rule-a", "rule-b"],
+                        "source_types": ["user_message", "tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false},
+                            {"rule_id": "rule-b", "source_type": "tool_result", "tool_id": "call-1"}
+                        ],
+                        "marker": "m-first"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                9,
+                Some("second"),
+                None,
+                "credential_mappings_reused",
+                now - 2,
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false}
+                        ],
+                        "marker": "m-first"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                10,
+                Some("first"),
+                Some("run-1"),
+                "credential_mappings_reused",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([{
+                        "rule_ids": ["rule-a", "rule-b", "rule-c"],
+                        "source_types": ["user_message", "tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false},
+                            {"rule_id": "rule-b", "source_type": "tool_result", "tool_id": "call-1"},
+                            {"rule_id": "rule-c", "source_type": "tool_result", "tool_id": "call-2"}
+                        ],
+                        "marker": "m-first"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                11,
+                Some("tied"),
+                None,
+                "credential_mappings_reused",
+                now - 3,
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([{
+                        "rule_ids": ["custom.rule-f"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "custom.rule-f", "source_type": "tool_result", "tool_id": "a"}
+                        ],
+                        "marker": "m-tied"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 其他占位符不是该映射的复用。
+            (
+                12,
+                Some("first"),
+                Some("run-1"),
+                "credential_mappings_reused",
+                now,
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false}
+                        ],
+                        "marker": "other"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 非发现事件既不产生行，也不参与复用。
+            (
+                13,
+                Some("first"),
+                None,
+                "run_admitted",
+                now - 5,
+                stored_json(json!({"status": "running"}))?,
+                live_until,
+            ),
+            // 已过期交互的载荷即使有效也不能进入当前页。
+            (
+                14,
+                Some("expired-owner"),
+                None,
+                "credential_mappings_created",
+                now - 5,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{"rule_ids": ["rule-x"], "source_types": ["system"]}]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 过期事件不解码。
+            (
+                15,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                crate::storage_codec::encode(b"not json".as_slice().into())?,
+                0,
+            ),
+            // 超出每事件上限的 discovery 不产生行，也不再统计。
+            (
+                16,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 15,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-g"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-g", "source_type": "tool_result", "tool_id": "call-9"}
+                        ],
+                        "marker": "m-omitted"
+                    }]),
+                    5,
+                )?,
+                live_until,
+            ),
         ];
-        let unrelated = crate::storage_codec::encode(
-            serde_json::json!({"status": "running"})
-                .to_string()
-                .as_bytes()
-                .into(),
-        )?;
-        // 过期事件若被送去解码会使整页失败；过期交互同理。事件 12 的
-        // occurred_at 落在 first 的发现时间上界内，只有到期过滤能排除它。
-        let undecodable =
-            crate::storage_codec::encode(b"not a credential discovery payload".as_slice().into())?;
-        // 升级后的复用事件带逐项位置，规则与来源不能被跨项误配对。
-        let reused = crate::storage_codec::encode(
-            serde_json::json!({
-                "kind": "credential_mappings_reused",
-                "discoveries": [{
-                    "rule_ids": ["rule-a", "rule-d"],
-                    "source_types": ["user_message", "tool_result"],
-                    "locators": [
-                        {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false},
-                        {"rule_id": "rule-d", "source_type": "tool_result", "tool_id": "call-1"},
-                    ],
-                }]
-            })
-            .to_string()
-            .as_bytes()
-            .into(),
-        )?;
-        // 只有复用事件的交互：新增数为零，但仍是真实命中。
-        let reused_only = crate::storage_codec::encode(
-            serde_json::json!({
-                "kind": "credential_mappings_reused",
-                "discoveries": [{
-                    "rule_ids": ["rule-e"],
-                    "source_types": ["user_message"],
-                    "locators": [
-                        {"rule_id": "rule-e", "source_type": "user_message", "latest_input": true},
-                    ],
-                }]
-            })
-            .to_string()
-            .as_bytes()
-            .into(),
-        )?;
+        // 复用事件在写入时登记；这里用同一生产辅助函数补齐登记行，读取侧只查登记表。
+        let mut registrations = Vec::new();
+        for (_, interaction, run_id, kind, occurred_at, payload, _) in &events {
+            if *kind == "credential_mappings_reused" {
+                let payload: Value =
+                    serde_json::from_slice(&crate::storage_codec::decode(payload)?)?;
+                registrations.push((
+                    interaction.expect("seeded reuse belongs to an interaction"),
+                    *run_id,
+                    *occurred_at,
+                    serde_json::from_value::<Vec<CredentialDiscovery>>(
+                        payload["discoveries"].clone(),
+                    )?,
+                ));
+            }
+        }
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                for (id, status, last_active, gap, expires_at) in interactions {
+                for (id, expires_at) in interactions {
                     sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
                         .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
-                        .bind("test-route").bind(status).bind(now - 100).bind(last_active)
-                        .bind(gap).bind(expires_at).execute(pool).await?;
+                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                        .bind(false).bind(expires_at).execute(pool).await?;
                 }
-                for (sequence, interaction, occurred_at, rules, sources, expires_at) in events {
-                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
-                        .bind(sequence).bind(occurred_at).bind(interaction)
-                        .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
-                        .execute(pool).await?;
+                for run in ["run-1", "run-2"] {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                        .bind(run).bind("first").bind("test").bind("test-route")
+                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
+                        .bind(live_until).execute(pool).await?;
                 }
-                // 复用只增加命中时间与复用配对，不增加新增计数。
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,?,'first','credential_mappings_reused',?,?)")
-                    .bind(now - 5).bind(reused).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,?,'reused-only','credential_mappings_reused',?,?)")
-                    .bind(now - 10).bind(reused_only).bind(live_until)
-                    .execute(pool).await?;
-                // 非发现事件既不参与最新发现时间，也不贡献规则或来源。
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,?,'first','run_admitted',?,?)")
-                    .bind(now - 5).bind(unrelated).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (11,?,'expired-owner','credential_mappings_created',?,?)")
-                    .bind(now - 1).bind(undecodable.clone()).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (12,?,'first','credential_mappings_created',?,0)")
-                    .bind(now - 20).bind(undecodable)
+                for (sequence, interaction, run_id, kind, occurred_at, payload, expires_at) in
+                    events
+                {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?,?)")
+                        .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
+                        .bind(kind).bind(payload).bind(expires_at).execute(pool).await?;
+                }
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                for (id, expires_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                        .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
+                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                        .bind(false).bind(expires_at).execute(pool).await?;
+                }
+                for run in ["run-1", "run-2"] {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                        .bind(run).bind("first").bind("test").bind("test-route")
+                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
+                        .bind(live_until).execute(pool).await?;
+                }
+                for (sequence, interaction, run_id, kind, occurred_at, payload, expires_at) in
+                    events
+                {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+                        .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
+                        .bind(kind).bind(payload).bind(expires_at).execute(pool).await?;
+                }
+            }
+        }
+        for (interaction, run_id, occurred_at, discoveries) in &registrations {
+            register_reuses(store, interaction, *run_id, *occurred_at, discoveries).await?;
+        }
+        Ok(())
+    }
+
+    async fn seed_credential_details(
+        store: &store::ObservationStore,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let live_until = now + 86_400_000;
+        let events = vec![
+            (
+                17,
+                Some("first"),
+                None,
+                "platform_tool_finished",
+                now - 60,
+                stored_json(json!({"content": null}))?,
+                live_until,
+            ),
+            (
+                18,
+                Some("first"),
+                None,
+                "client_tool_handoff",
+                now - 59,
+                stored_json(json!({"name": "client_tool", "input": "handoff input"}))?,
+                live_until,
+            ),
+            (
+                19,
+                Some("first"),
+                None,
+                "platform_tool_finished",
+                now - 58,
+                stored_json(json!({"content": "finished content"}))?,
+                live_until,
+            ),
+            (
+                20,
+                Some("first"),
+                None,
+                "platform_tool_started",
+                now - 57,
+                stored_json(json!({"name": "read_file", "input": {"path": "/tmp/x"}}))?,
+                live_until,
+            ),
+            (
+                21,
+                Some("first"),
+                None,
+                "client_tool_result",
+                now - 56,
+                stored_json(json!({"content": "secret in result"}))?,
+                live_until,
+            ),
+            (
+                22,
+                Some("first"),
+                Some("run-1"),
+                "input_preview_recorded",
+                now - 55,
+                stored_json(json!({"text": "latest user input"}))?,
+                live_until,
+            ),
+            (
+                23,
+                Some("first"),
+                Some("run-1"),
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": true}
+                        ],
+                        "marker": "m-input"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                24,
+                Some("first"),
+                Some("run-2"),
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": true}
+                        ],
+                        "marker": "m-input-2"
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                25,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_arguments"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_arguments", "tool_id": "call-1"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                26,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "call-1"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                27,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "call-2"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                28,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": false}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 工具事件在更早的 Interaction，同 principal 且 sequence 不晚于创建事件时仍可取到。
+            (
+                29,
+                Some("second"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "call-1"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                30,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "call-3"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                31,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_arguments"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_arguments", "tool_id": "call-4"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            (
+                32,
+                Some("first"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "call-5"}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 本 Run 没有输入预览，且同 Interaction 此前也没有。
+            (
+                35,
+                Some("tied"),
+                None,
+                "credential_mappings_created",
+                now - 1,
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["user_message"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "user_message", "latest_input": true}
+                        ]
+                    }]),
+                    0,
+                )?,
+                live_until,
+            ),
+            // 创建事件之后的预览不能被当成此前输入。
+            (
+                38,
+                Some("tied"),
+                None,
+                "input_preview_recorded",
+                now,
+                stored_json(json!({"text": "later preview"}))?,
+                live_until,
+            ),
+        ];
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                for (sequence, interaction, run_id, kind, occurred_at, payload, expires_at) in
+                    events
+                {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?,?)")
+                        .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
+                        .bind(kind).bind(payload).bind(expires_at).execute(pool).await?;
+                }
+                sqlx::query("UPDATE observation_events SET tool_id=CASE sequence WHEN 17 THEN 'call-5' WHEN 18 THEN 'call-4' WHEN 19 THEN 'call-3' WHEN 20 THEN 'call-1' WHEN 21 THEN 'call-1' END WHERE sequence BETWEEN 17 AND 21")
                     .execute(pool).await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
-                for (id, status, last_active, gap, expires_at) in interactions {
-                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
-                        .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
-                        .bind("test-route").bind(status).bind(now - 100).bind(last_active)
-                        .bind(gap).bind(expires_at).execute(pool).await?;
+                for (sequence, interaction, run_id, kind, occurred_at, payload, expires_at) in
+                    events
+                {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+                        .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
+                        .bind(kind).bind(payload).bind(expires_at).execute(pool).await?;
                 }
-                for (sequence, interaction, occurred_at, rules, sources, expires_at) in events {
-                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES ($1,$2,$3,'credential_mappings_created',$4,$5)")
-                        .bind(sequence).bind(occurred_at).bind(interaction)
-                        .bind(credential_discovery_payload(rules, sources)?).bind(expires_at)
-                        .execute(pool).await?;
-                }
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (8,$1,'first','credential_mappings_reused',$2,$3)")
-                    .bind(now - 5).bind(reused).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (9,$1,'reused-only','credential_mappings_reused',$2,$3)")
-                    .bind(now - 10).bind(reused_only).bind(live_until)
-                    .execute(pool).await?;
-                // 非发现事件既不参与最新发现时间，也不贡献规则或来源。
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (10,$1,'first','run_admitted',$2,$3)")
-                    .bind(now - 5).bind(unrelated).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (11,$1,'expired-owner','credential_mappings_created',$2,$3)")
-                    .bind(now - 1).bind(undecodable.clone()).bind(live_until)
-                    .execute(pool).await?;
-                sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (12,$1,'first','credential_mappings_created',$2,0)")
-                    .bind(now - 20).bind(undecodable)
+                sqlx::query("UPDATE observation_events SET tool_id=CASE sequence WHEN 17 THEN 'call-5' WHEN 18 THEN 'call-4' WHEN 19 THEN 'call-3' WHEN 20 THEN 'call-1' WHEN 21 THEN 'call-1' END WHERE sequence BETWEEN 17 AND 21")
                     .execute(pool).await?;
             }
         }
         Ok(())
     }
 
+    async fn hit_context(
+        store: &store::ObservationStore,
+        sequence: i64,
+        index: usize,
+    ) -> anyhow::Result<super::CredentialDiscoveryHitContext> {
+        let record = store
+            .credential_discovery_record(sequence, index)
+            .await?
+            .expect("discovery record exists");
+        assert_eq!(record.hits.len(), 1);
+        store
+            .credential_discovery_hit_context(&record, &record.hits[0])
+            .await
+    }
+
     async fn assert_credential_discovery_contract(
         store: &store::ObservationStore,
         now: i64,
     ) -> anyhow::Result<()> {
-        let hit = |rule_id: &str, source_type: &str, latest_input| CredentialHit {
-            rule_id: rule_id.into(),
-            source_type: source_type.into(),
-            latest_input,
-        };
+        let live_until = now + 86_400_000;
         let all = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                limit: Some(10),
+                limit: Some(20),
                 ..Default::default()
             })
             .await?;
         assert!(all.next_cursor.is_none());
-        let ids: Vec<_> = all
-            .items
-            .iter()
-            .map(|item| item.interaction_id.as_str())
-            .collect();
-        assert_eq!(
-            ids,
-            ["first", "tied", "reused-only", "second", "expired-newer"]
-        );
+        let ids: Vec<_> = all.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["16.0", "6.0", "5.0", "3.0", "2.0", "1.1", "1.0"]);
 
-        let first = &all.items[0];
-        // 默认筛选包含复用：行时间是最近一次命中，不是最近一次新增。
-        assert_eq!(first.discovered_at, now - 5);
-        assert_eq!(first.new_credential_count, 2);
-        // 升级前的事件没有逐项位置，按单个映射的规则集合与来源集合组合还原。
+        let omitted = &all.items[0];
+        assert_eq!(omitted.interaction_id, "first");
+        assert_eq!(omitted.created_at, now - 15);
+        assert_eq!(omitted.run_id, None);
+        assert_eq!(omitted.api_key_name.as_deref(), Some("测试 API Key"));
+        assert_eq!(omitted.rule_ids, ["rule-g"]);
+        assert_eq!(omitted.rule_sets, ["builtin"]);
+        assert_eq!(omitted.hits.len(), 1);
+        assert_eq!(omitted.omitted_hits, 0);
+        assert!(omitted.linkable);
+        let serialized = serde_json::to_value(omitted)?;
+        assert!(serialized.get("omitted_discoveries").is_none());
+        assert!(serialized.get("status").is_none());
+        assert!(serialized.get("new_credential_count").is_none());
+
+        let expired_newer = &all.items[1];
+        assert_eq!(expired_newer.interaction_id, "expired-newer");
+        assert_eq!(expired_newer.created_at, now - 40);
+        assert_eq!(expired_newer.rule_ids, ["rule-live"]);
         assert_eq!(
-            first.created,
+            expired_newer.hits,
+            [CredentialDiscoveryHit {
+                rule_id: "rule-live".into(),
+                source_type: "user_message".into(),
+                tool_id: None,
+                latest_input: None,
+            }]
+        );
+        assert!(!expired_newer.linkable);
+
+        let tied = &all.items[2];
+        assert_eq!(tied.interaction_id, "tied");
+        assert_eq!(tied.rule_ids, ["custom.rule-f"]);
+        assert_eq!(tied.rule_sets, ["custom"]);
+        assert_eq!(
+            tied.hits,
             [
-                hit("rule-a", "tool_result", None),
-                hit("rule-a", "user_message", None),
-                hit("rule-c", "tool_result", None),
+                CredentialDiscoveryHit {
+                    rule_id: "custom.rule-f".into(),
+                    source_type: "tool_result".into(),
+                    tool_id: Some("a".into()),
+                    latest_input: None,
+                },
+                CredentialDiscoveryHit {
+                    rule_id: "custom.rule-f".into(),
+                    source_type: "tool_result".into(),
+                    tool_id: Some("b".into()),
+                    latest_input: None,
+                },
             ]
         );
+        assert!(tied.linkable);
+
+        let unlinkable = &all.items[3];
+        assert_eq!(unlinkable.interaction_id, "first");
+        assert_eq!(unlinkable.created_at, now - 10);
+        assert_eq!(unlinkable.rule_ids, ["rule-e"]);
+        assert!(!unlinkable.linkable);
+
+        let synthesized = &all.items[4];
+        assert_eq!(synthesized.interaction_id, "second");
+        assert_eq!(synthesized.created_at, now - 20);
+        assert_eq!(synthesized.rule_sets, ["builtin"]);
         assert_eq!(
-            first.reused,
-            [
-                hit("rule-a", "user_message", Some(false)),
-                hit("rule-d", "tool_result", None),
-            ]
+            synthesized.hits,
+            [CredentialDiscoveryHit {
+                rule_id: "rule-d".into(),
+                source_type: "tool_result".into(),
+                tool_id: None,
+                latest_input: None,
+            }]
         );
-        assert_eq!(first.status, "failed");
-        assert!(!first.observation_gap);
+        assert!(!synthesized.linkable);
 
-        let tied = &all.items[1];
-        assert_eq!(tied.discovered_at, now - 10);
-        assert_eq!(tied.new_credential_count, 1);
-        assert_eq!(tied.created, [hit("rule-tie", "system_or_history", None)]);
-        assert!(tied.reused.is_empty());
-        assert_eq!(tied.status, "completed");
-        assert!(!tied.observation_gap);
-
-        // 只有复用事件的交互新增数为零，仍保留在默认列表并保留逐行 gap。
-        let reused_only = &all.items[2];
-        assert_eq!(reused_only.discovered_at, now - 10);
-        assert_eq!(reused_only.new_credential_count, 0);
-        assert!(reused_only.created.is_empty());
+        let second = &all.items[5];
+        assert_eq!(second.interaction_id, "first");
+        assert_eq!(second.created_at, now - 30);
+        assert_eq!(second.run_id.as_deref(), Some("run-1"));
+        assert_eq!(second.rule_ids, ["rule-b", "rule-c"]);
+        assert_eq!(second.omitted_hits, 2);
         assert_eq!(
-            reused_only.reused,
-            [hit("rule-e", "user_message", Some(true))]
+            second.hits,
+            [CredentialDiscoveryHit {
+                rule_id: "rule-b".into(),
+                source_type: "tool_result".into(),
+                tool_id: Some("call-1".into()),
+                latest_input: None,
+            }]
         );
-        assert!(reused_only.observation_gap);
+        assert!(second.linkable);
 
-        let second = &all.items[3];
-        assert_eq!(second.discovered_at, now - 20);
-        assert_eq!(second.new_credential_count, 1);
-        assert_eq!(second.created, [hit("rule-b", "tool_result", None)]);
-        assert!(second.reused.is_empty());
-        assert_eq!(second.status, "interrupted");
-
-        let expired_newer = &all.items[4];
-        assert_eq!(expired_newer.discovered_at, now - 40);
-        assert_eq!(expired_newer.new_credential_count, 1);
+        let first = &all.items[6];
+        assert_eq!(first.interaction_id, "first");
+        assert_eq!(first.created_at, now - 30);
+        assert_eq!(first.rule_ids, ["rule-a"]);
         assert_eq!(
-            expired_newer.created,
-            [hit("rule-live", "user_message", None)]
+            first.hits,
+            [CredentialDiscoveryHit {
+                rule_id: "rule-a".into(),
+                source_type: "user_message".into(),
+                tool_id: None,
+                latest_input: Some(false),
+            }]
         );
-        assert!(expired_newer.reused.is_empty());
+        assert!(first.linkable);
 
-        // 游标切在同一毫秒的两条发现之间，仍不能重复或遗漏交互。
+        // 游标切在同一事件的两条发现之间，仍不能重复或遗漏。
+        let expected = ["16.0", "6.0", "5.0", "3.0", "2.0", "1.1", "1.0"];
         let mut cursor: Option<String> = None;
-        for expected in ["first", "tied", "reused-only", "second", "expired-newer"] {
+        for id in expected {
             let page = store
                 .credential_discoveries(CredentialDiscoveryQuery {
                     cursor: cursor.take(),
                     limit: Some(1),
-                    ..Default::default()
                 })
                 .await?;
             assert_eq!(page.items.len(), 1);
-            assert_eq!(page.items[0].interaction_id, expected);
+            assert_eq!(page.items[0].id, id);
             cursor = page.next_cursor;
         }
         assert!(cursor.is_none());
 
-        let created = store
+        let page = store
             .credential_discoveries(CredentialDiscoveryQuery {
-                kind: CredentialHitKind::Created,
+                cursor: Some(serde_json::to_string(&(1, 1))?),
                 limit: Some(10),
-                ..Default::default()
             })
             .await?;
-        let ids: Vec<_> = created
-            .items
-            .iter()
-            .map(|item| item.interaction_id.as_str())
-            .collect();
-        assert_eq!(ids, ["tied", "first", "second", "expired-newer"]);
-        // 仅新增时不看复用事件的时间，也不返回复用配对。
-        let item = &created.items[1];
-        assert_eq!(item.interaction_id, "first");
-        assert_eq!(item.discovered_at, now - 10);
-        assert_eq!(item.new_credential_count, 2);
-        assert_eq!(item.created.len(), 3);
-        assert!(item.reused.is_empty());
-
-        let reused = store
-            .credential_discoveries(CredentialDiscoveryQuery {
-                kind: CredentialHitKind::Reused,
-                limit: Some(10),
-                ..Default::default()
-            })
-            .await?;
-        let ids: Vec<_> = reused
-            .items
-            .iter()
-            .map(|item| item.interaction_id.as_str())
-            .collect();
-        assert_eq!(ids, ["first", "reused-only"]);
-        let item = &reused.items[0];
-        assert_eq!(item.discovered_at, now - 5);
-        assert_eq!(item.new_credential_count, 0);
-        assert!(item.created.is_empty());
         assert_eq!(
-            item.reused,
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1.0"]
+        );
+
+        let error = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: Some("invalid".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CredentialDiscoveryError>().copied(),
+            Some(CredentialDiscoveryError::InvalidCursor)
+        );
+
+        assert!(store.credential_discovery_record(999, 0).await?.is_none());
+        assert!(store.credential_discovery_record(1, 9).await?.is_none());
+
+        seed_credential_details(store, now).await?;
+
+        let context = hit_context(store, 1, 0).await?;
+        assert_eq!(context.tool_name, None);
+        assert!(matches!(context.body, CredentialDiscoveryBody::NotRetained));
+
+        let context = hit_context(store, 1, 1).await?;
+        assert_eq!(context.tool_name.as_deref(), Some("read_file"));
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("secret in result"));
+            }
+            _ => panic!("tool result should be retained"),
+        }
+
+        let context = hit_context(store, 23, 0).await?;
+        assert_eq!(context.tool_name, None);
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("latest user input"));
+            }
+            _ => panic!("input preview should be retained"),
+        }
+
+        // 没有该 Run 的预览时取同 Interaction 此前最近一条。
+        let context = hit_context(store, 24, 0).await?;
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("latest user input"));
+            }
+            _ => panic!("fallback preview should be retained"),
+        }
+
+        let context = hit_context(store, 25, 0).await?;
+        assert_eq!(context.tool_name.as_deref(), Some("read_file"));
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!({"path": "/tmp/x"}));
+            }
+            _ => panic!("tool arguments should be retained"),
+        }
+
+        let context = hit_context(store, 26, 0).await?;
+        assert_eq!(context.tool_name.as_deref(), Some("read_file"));
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("secret in result"));
+            }
+            _ => panic!("tool result should be retained"),
+        }
+
+        let context = hit_context(store, 27, 0).await?;
+        assert_eq!(context.tool_name, None);
+        assert!(matches!(context.body, CredentialDiscoveryBody::Missing));
+
+        let context = hit_context(store, 28, 0).await?;
+        assert!(matches!(context.body, CredentialDiscoveryBody::NotRetained));
+
+        // 工具事件在更早的 Interaction，按同 principal 与 sequence 回溯。
+        let context = hit_context(store, 29, 0).await?;
+        assert_eq!(context.tool_name.as_deref(), Some("read_file"));
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("secret in result"));
+            }
+            _ => panic!("cross-interaction tool result should be retained"),
+        }
+
+        let context = hit_context(store, 30, 0).await?;
+        assert_eq!(context.tool_name, None);
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("finished content"));
+            }
+            _ => panic!("finished content should be retained"),
+        }
+
+        let context = hit_context(store, 31, 0).await?;
+        assert_eq!(context.tool_name.as_deref(), Some("client_tool"));
+        match context.body {
+            CredentialDiscoveryBody::Retained(value) => {
+                assert_eq!(value, json!("handoff input"));
+            }
+            _ => panic!("handoff input should be retained"),
+        }
+
+        let context = hit_context(store, 32, 0).await?;
+        assert_eq!(context.tool_name, None);
+        assert!(matches!(context.body, CredentialDiscoveryBody::NotRetained));
+
+        let context = hit_context(store, 35, 0).await?;
+        assert!(matches!(context.body, CredentialDiscoveryBody::Missing));
+
+        let record = store.credential_discovery_record(1, 0).await?.unwrap();
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-first")
+            .await?;
+        assert!(reuses.linkable);
+        assert!(!reuses.truncated);
+        assert_eq!(
+            reuses
+                .items
+                .iter()
+                .map(|item| (
+                    item.interaction_id.as_str(),
+                    item.source_type.as_str(),
+                    item.tool_id.as_deref(),
+                    item.latest_input,
+                    item.last_reused_at,
+                ))
+                .collect::<Vec<_>>(),
             [
-                hit("rule-a", "user_message", Some(false)),
-                hit("rule-d", "tool_result", None),
+                ("first", "tool_result", Some("call-1"), None, now - 1),
+                ("first", "tool_result", Some("call-2"), None, now - 1),
+                ("first", "user_message", None, Some(false), now - 1),
+                ("second", "user_message", None, Some(false), now - 2),
             ]
         );
-        let item = &reused.items[1];
-        assert_eq!(item.new_credential_count, 0);
-        assert!(item.created.is_empty());
-        assert_eq!(item.reused.len(), 1);
-        assert!(item.observation_gap);
-
-        assert!(
-            store
-                .credential_discoveries(CredentialDiscoveryQuery {
-                    cursor: Some("invalid".into()),
-                    ..Default::default()
-                })
-                .await
-                .is_err()
+        assert_eq!(reuses.items[0].run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            reuses.items[0].api_key_name.as_deref(),
+            Some("测试 API Key")
         );
+        assert_eq!(reuses.items[3].run_id, None);
+
+        let record = store.credential_discovery_record(1, 1).await?.unwrap();
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-first-2")
+            .await?;
+        assert!(reuses.linkable);
+        assert!(reuses.items.is_empty());
+        assert!(!reuses.truncated);
+
+        let record = store.credential_discovery_record(3, 0).await?.unwrap();
+        let reuses = store.credential_discovery_reuses(&record, "").await?;
+        assert!(!reuses.linkable);
+        assert!(reuses.items.is_empty());
+
+        // 超过 200 项时截断并标记。
+        let many: Vec<_> = (0..201)
+            .map(|index| {
+                json!({
+                    "rule_id": "rule-a",
+                    "source_type": "tool_result",
+                    "tool_id": format!("t{index}")
+                })
+            })
+            .collect();
+        let many_discovery = json!({
+            "rule_ids": ["rule-a"],
+            "source_types": ["tool_result"],
+            "locators": many,
+            "marker": "m-many"
+        });
+        let events = [
+            (
+                40,
+                "credential_mappings_created",
+                credential_payload(
+                    "credential_mappings_created",
+                    json!([{
+                        "rule_ids": ["rule-a"],
+                        "source_types": ["tool_result"],
+                        "locators": [
+                            {"rule_id": "rule-a", "source_type": "tool_result", "tool_id": "t0"}
+                        ],
+                        "marker": "m-many"
+                    }]),
+                    0,
+                )?,
+            ),
+            (
+                41,
+                "credential_mappings_reused",
+                credential_payload(
+                    "credential_mappings_reused",
+                    json!([many_discovery.clone()]),
+                    0,
+                )?,
+            ),
+        ];
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                for (sequence, kind, payload) in events {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?)")
+                        .bind(sequence).bind(now).bind("first").bind(kind).bind(payload)
+                        .bind(live_until).execute(pool).await?;
+                }
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                for (sequence, kind, payload) in events {
+                    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5,$6)")
+                        .bind(sequence).bind(now).bind("first").bind(kind).bind(payload)
+                        .bind(live_until).execute(pool).await?;
+                }
+            }
+        }
+        let record = store.credential_discovery_record(40, 0).await?.unwrap();
+        let reused_many: Vec<CredentialDiscovery> =
+            serde_json::from_value(json!([many_discovery]))?;
+        register_reuses(store, "first", None, now, &reused_many).await?;
+        let reuses = store.credential_discovery_reuses(&record, "m-many").await?;
+        assert!(reuses.linkable);
+        assert!(reuses.truncated);
+        assert_eq!(reuses.items.len(), 200);
+
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
                 sqlx::query("UPDATE observation_events SET expires_at=0")
@@ -4886,8 +5672,573 @@ mod snapshot_tests {
         Ok(())
     }
 
+    fn reuse_discovery(
+        marker: Option<&str>,
+        locators: Vec<CredentialLocator>,
+    ) -> CredentialDiscovery {
+        let mut source_types: Vec<String> = locators
+            .iter()
+            .map(|locator| locator.source_type.clone())
+            .collect();
+        source_types.sort();
+        source_types.dedup();
+        CredentialDiscovery {
+            rule_ids: vec!["rule-a".into()],
+            source_types,
+            locators,
+            omitted_locators: 0,
+            marker: marker.map(str::to_owned),
+        }
+    }
+
+    async fn persist_reuse_event(
+        store: &store::ObservationStore,
+        interaction_id: &str,
+        run_id: &str,
+        at: i64,
+        event: RunEvent,
+        expires_at: i64,
+    ) -> anyhow::Result<i64> {
+        let mut persisted = store
+            .persist_run_events(interaction_id, run_id, &[(event, None, at)], expires_at)
+            .await?;
+        anyhow::ensure!(persisted.len() == 1, "one event yields one row");
+        Ok(persisted.remove(0).sequence)
+    }
+
+    /// 复用写入时登记的契约：SQLite 与 PostgreSQL 共用同一组断言。
+    async fn assert_credential_reuse_registration_contract(
+        store: &store::ObservationStore,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        let live_until = now + 86_400_000;
+        let interactions = [
+            ("reuse-owner", "api-key:owner", "Owner Key", live_until),
+            ("reuse-other", "api-key:other", "Other Key", live_until),
+            ("reuse-expired", "api-key:owner", "Owner Key", 0),
+        ];
+        let runs = [
+            ("reuse-run-1", "reuse-owner", live_until),
+            ("reuse-run-2", "reuse-owner", live_until),
+            ("reuse-run-other", "reuse-other", live_until),
+            ("reuse-run-expired", "reuse-expired", 0),
+        ];
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                for (id, principal, key, expires_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                        .bind(id).bind(principal).bind(key).bind(id).bind(id)
+                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                        .bind(false).bind(expires_at).execute(pool).await?;
+                }
+                for (id, interaction, expires_at) in runs {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                        .bind(id).bind(interaction).bind("test").bind("test-route")
+                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
+                        .bind(expires_at).execute(pool).await?;
+                }
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                for (id, principal, key, expires_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                        .bind(id).bind(principal).bind(key).bind(id).bind(id)
+                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                        .bind(false).bind(expires_at).execute(pool).await?;
+                }
+                for (id, interaction, expires_at) in runs {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                        .bind(id).bind(interaction).bind("test").bind("test-route")
+                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
+                        .bind(expires_at).execute(pool).await?;
+                }
+            }
+        }
+
+        let created = |marker: Option<&str>| RunEvent::CredentialMappingsCreated {
+            discoveries: vec![reuse_discovery(
+                marker,
+                vec![locator("user_message", None, Some(true))],
+            )],
+            omitted_discoveries: 0,
+        };
+        let reused = |marker: Option<&str>, locators: Vec<CredentialLocator>| {
+            RunEvent::CredentialMappingsReused {
+                discoveries: vec![reuse_discovery(marker, locators)],
+                omitted_discoveries: 0,
+            }
+        };
+        let user_input = || vec![locator("user_message", None, Some(true))];
+
+        // (a) 同一位置重复复用只留一行，时间与 Run 跟随最新一次。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 1_000,
+            created(Some("m-repeat")),
+            live_until,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 900,
+            reused(Some("m-repeat"), user_input()),
+            live_until,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-2",
+            now - 800,
+            reused(Some("m-repeat"), user_input()),
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-repeat")
+            .await?;
+        assert!(reuses.linkable);
+        assert!(!reuses.truncated);
+        assert_eq!(reuses.items.len(), 1);
+        let item = &reuses.items[0];
+        assert_eq!(item.interaction_id, "reuse-owner");
+        assert_eq!(item.run_id.as_deref(), Some("reuse-run-2"));
+        assert_eq!(item.api_key_name.as_deref(), Some("Owner Key"));
+        assert_eq!(item.source_type, "user_message");
+        assert_eq!(item.tool_id, None);
+        assert_eq!(item.latest_input, Some(true));
+        assert_eq!(item.last_reused_at, now - 800);
+        assert_eq!(reuse_row_count(store, "m-repeat").await?, 1);
+
+        // (b) 更新的复用先写入，乱序到达的旧事件不得覆盖时间与 Run。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-2",
+            now - 400,
+            created(Some("m-order")),
+            live_until,
+        )
+        .await?;
+        let tool_ids = || vec![locator("tool_result", Some("call-a"), None)];
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-2",
+            now - 400,
+            reused(Some("m-order"), tool_ids()),
+            live_until,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 500,
+            reused(Some("m-order"), tool_ids()),
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-order")
+            .await?;
+        assert_eq!(reuses.items.len(), 1);
+        assert_eq!(reuses.items[0].last_reused_at, now - 400);
+        assert_eq!(reuses.items[0].run_id.as_deref(), Some("reuse-run-2"));
+
+        // (c) 不同工具调用与最新输入是不同位置，不互相合并。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 600,
+            created(Some("m-distinct")),
+            live_until,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 300,
+            reused(
+                Some("m-distinct"),
+                vec![
+                    locator("tool_result", Some("call-a"), None),
+                    locator("tool_result", Some("call-b"), None),
+                    locator("user_message", None, Some(true)),
+                ],
+            ),
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-distinct")
+            .await?;
+        assert_eq!(
+            reuses
+                .items
+                .iter()
+                .map(|item| (
+                    item.source_type.as_str(),
+                    item.tool_id.as_deref(),
+                    item.latest_input,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("tool_result", Some("call-a"), None),
+                ("tool_result", Some("call-b"), None),
+                ("user_message", None, Some(true)),
+            ]
+        );
+
+        // (e) 同一占位符属于另一个主体时，读取不返回别的主体的登记行。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-other",
+            "reuse-run-other",
+            now - 1_500,
+            created(Some("m-repeat")),
+            live_until,
+        )
+        .await?;
+        let other = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store
+            .credential_discovery_reuses(&other, "m-repeat")
+            .await?;
+        assert!(reuses.linkable);
+        assert!(reuses.items.is_empty());
+        assert!(!reuses.truncated);
+
+        // (f) 超过 200 个位置时只返回 200 项并标记截断，登记行本身不丢。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 600,
+            created(Some("m-wide")),
+            live_until,
+        )
+        .await?;
+        let wide: Vec<_> = (0..201)
+            .map(|index| {
+                let tool_id = format!("wide-{index:03}");
+                locator("tool_result", Some(&tool_id), None)
+            })
+            .collect();
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 200,
+            reused(Some("m-wide"), wide),
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store.credential_discovery_reuses(&record, "m-wide").await?;
+        assert!(reuses.truncated);
+        assert_eq!(reuses.items.len(), 200);
+        assert_eq!(reuses.items[0].tool_id.as_deref(), Some("wide-000"));
+        assert_eq!(reuses.items[199].tool_id.as_deref(), Some("wide-199"));
+        assert_eq!(reuse_row_count(store, "m-wide").await?, 201);
+
+        // (g) 没有占位符的复用事件不登记，创建行也无法关联复用。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 600,
+            created(None),
+            live_until,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 500,
+            reused(None, user_input()),
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        assert!(record.discovery.marker.is_none());
+        let reuses = store.credential_discovery_reuses(&record, "").await?;
+        assert!(!reuses.linkable);
+        assert!(reuses.items.is_empty());
+        assert!(!reuses.truncated);
+        assert_eq!(reuse_row_count(store, "").await?, 0);
+
+        // (h) 同一事件内归一化后同键的位置只登记一行：规则不同但来源、工具调用与
+        // 最新输入标记相同；跨写入块的同键位置与同一占位符的第二个映射同样只算一次。
+        let sequence = persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 600,
+            created(Some("m-collide")),
+            live_until,
+        )
+        .await?;
+        let mut colliding = vec![
+            rule_locator("rule-a", "tool_result", Some("call-shared"), None),
+            rule_locator("rule-b", "tool_result", Some("call-shared"), None),
+            rule_locator("rule-a", "tool_arguments", Some("call-shared"), None),
+            rule_locator("rule-a", "system", None, None),
+            rule_locator("rule-b", "system", None, None),
+            rule_locator("rule-a", "user_message", None, Some(true)),
+            rule_locator("rule-b", "user_message", None, Some(true)),
+        ];
+        colliding.extend((0..150).map(|index| {
+            let tool_id = format!("fill-{index:03}");
+            locator("tool_result", Some(&tool_id), None)
+        }));
+        // 与首个位置同键，但排在第二个写入块。
+        colliding.push(rule_locator(
+            "rule-c",
+            "tool_result",
+            Some("call-shared"),
+            None,
+        ));
+        persist_reuse_event(
+            store,
+            "reuse-owner",
+            "reuse-run-1",
+            now - 500,
+            RunEvent::CredentialMappingsReused {
+                discoveries: vec![
+                    reuse_discovery(Some("m-collide"), colliding),
+                    reuse_discovery(
+                        Some("m-collide"),
+                        vec![locator("tool_result", Some("call-shared"), None)],
+                    ),
+                ],
+                omitted_discoveries: 0,
+            },
+            live_until,
+        )
+        .await?;
+        let record = store
+            .credential_discovery_record(sequence, 0)
+            .await?
+            .expect("created discovery");
+        let reuses = store
+            .credential_discovery_reuses(&record, "m-collide")
+            .await?;
+        assert!(!reuses.truncated);
+        assert_eq!(reuses.items.len(), 154);
+        assert_eq!(reuse_row_count(store, "m-collide").await?, 154);
+
+        // (d) 保留期清理与交互一起删除登记行。
+        persist_reuse_event(
+            store,
+            "reuse-expired",
+            "reuse-run-expired",
+            now - 2_000,
+            created(Some("m-purge")),
+            0,
+        )
+        .await?;
+        persist_reuse_event(
+            store,
+            "reuse-expired",
+            "reuse-run-expired",
+            now - 1_000,
+            reused(
+                Some("m-purge"),
+                vec![locator("user_message", None, Some(false))],
+            ),
+            0,
+        )
+        .await?;
+        assert_eq!(reuse_row_count(store, "m-purge").await?, 1);
+        store.purge_expired_batch(now).await?;
+        assert_eq!(reuse_row_count(store, "m-purge").await?, 0);
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                let remaining: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM interaction_observations WHERE id='reuse-expired'",
+                )
+                .fetch_one(pool)
+                .await?;
+                assert_eq!(remaining, 0);
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                let remaining: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM interaction_observations WHERE id='reuse-expired'",
+                )
+                .fetch_one(pool)
+                .await?;
+                assert_eq!(remaining, 0);
+            }
+        }
+
+        // 创建事件与无占位符事件都不写登记行。
+        let total: i64 = match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM credential_mapping_reuses")
+                    .fetch_one(pool)
+                    .await?
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM credential_mapping_reuses")
+                    .fetch_one(pool)
+                    .await?
+            }
+        };
+        assert_eq!(total, 1 + 1 + 3 + 201 + 154);
+        Ok(())
+    }
+
     #[tokio::test]
-    async fn discoveries_group_by_latest_discovery_and_survive_restart() -> anyhow::Result<()> {
+    async fn credential_reuse_registration_is_an_indexed_lookup() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
+        );
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_credential_reuse_registration_contract(&store, now).await?;
+
+        // 列表仍走只覆盖创建事件的部分索引。
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>0 AND i.expires_at>0 AND e.sequence<=9223372036854775807 ORDER BY e.sequence DESC LIMIT 200",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("observation_events_credential_hit_idx")),
+            "list query must use the credential hit index: {plan:?}"
+        );
+
+        // 复用读取按占位符索引，不扫描登记表。
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker='m-repeat' AND i.principal='api-key:owner' AND i.expires_at>0 ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT 201",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert!(
+            plan.iter().any(|(_, _, _, detail)| detail.contains("USING")
+                && detail.contains("credential_mapping_reuses")),
+            "reuses must be an index lookup: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|(_, _, _, detail)| detail.contains("SCAN r")),
+            "reuses must not scan registrations: {plan:?}"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+    async fn postgres_credential_reuse_registration_matches_sqlite_contract() -> anyhow::Result<()>
+    {
+        let url = std::env::var("STRAVIA_TEST_POSTGRES_URL")
+            .expect("set STRAVIA_TEST_POSTGRES_URL to run PostgreSQL reuse contracts");
+        let directory = tempfile::tempdir()?;
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+        let schema = format!("stravia_reuse_test_{}", uuid::Uuid::new_v4().simple());
+        let options: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("PostgreSQL connection options");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.clone().options([("search_path", schema.as_str())]))
+            .await
+            .expect("isolated PostgreSQL pool");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated PostgreSQL schema");
+
+        let diagnostics = directory.path().to_path_buf();
+        let scenario_pool = pool.clone();
+        let scenario_schema = schema.clone();
+        let scenario = tokio::spawn(async move {
+            crate::migrations::migrate_postgres(&scenario_pool, None)
+                .await
+                .expect("PostgreSQL migrations");
+            let now = chrono::Utc::now().timestamp_millis();
+            let store = store::ObservationStore::Postgres(
+                scenario_pool.clone(),
+                Arc::new(manifest_index::DebugTraceIndex::empty(&diagnostics)),
+            );
+            assert_credential_reuse_registration_contract(&store, now)
+                .await
+                .expect("credential reuse registration contract");
+            drop(store);
+            scenario_pool.close().await;
+            // 重连后仍读到已提交的登记行，证明没有依赖写入进程的内存状态。
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options.options([("search_path", scenario_schema.as_str())]))
+                .await
+                .expect("reconnect isolated PostgreSQL pool");
+            let store = store::ObservationStore::Postgres(
+                pool.clone(),
+                Arc::new(manifest_index::DebugTraceIndex::empty(&diagnostics)),
+            );
+            assert_eq!(
+                reuse_row_count(&store, "m-wide")
+                    .await
+                    .expect("registered rows"),
+                201
+            );
+            pool.close().await;
+        })
+        .await;
+
+        // Keep cleanup outside the task so contract panics still drop the schema.
+        pool.close().await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        cleanup.expect("drop isolated PostgreSQL schema");
+        if let Err(error) = scenario {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("PostgreSQL reuse contract task failed: {error}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_discovery_rows_survive_restart() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(directory.path().join("observations.sqlite"))
@@ -5249,10 +6600,9 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery::default())
             .await?;
         assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].status, "running");
-        assert_eq!(page.items[0].new_credential_count, 1);
-        assert_eq!(page.items[0].created.len(), 1);
-        assert_eq!(page.items[0].reused.len(), 1);
+        assert_eq!(page.items[0].rule_ids, ["created"]);
+        assert_eq!(page.items[0].hits.len(), 1);
+        assert_eq!(page.items[0].hits[0].source_type, "user_message");
 
         active.finish(RunOutcome {
             client_output_committed: false,

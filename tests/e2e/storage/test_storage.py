@@ -527,9 +527,9 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
                 "persisted credential discovery before restart",
                 lambda: key_discoveries(env, f"{model}-key"),
             )
-            assert len(initial) == 1 and initial[0]["new_credential_count"] == 1
-            assert [(hit["rule_id"], hit["source_type"]) for hit in initial[0]["created"]] == [("github-pat", "user_message")]
-            assert initial[0]["reused"] == []
+            assert len(initial) == 1
+            assert [(hit["rule_id"], hit["source_type"], hit.get("latest_input")) for hit in initial[0]["hits"]] == [("github-pat", "user_message", True)]
+            assert initial[0]["linkable"] is True
             preview = _wait_for(
                 "original input preview before restart",
                 lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
@@ -550,7 +550,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             restored = key_discoveries(env, f"{model}-key")
             assert len(restored) == 1
             assert restored[0]["interaction_id"] == initial[0]["interaction_id"]
-            assert restored[0]["new_credential_count"] == 1
+            assert restored[0]["hits"] == initial[0]["hits"]
             assert SECRET not in json.dumps(restored)
             assert reference not in json.dumps(restored)
             assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == SECRET
@@ -564,7 +564,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             wire = json.dumps(received[-1]["body"])
             assert SECRET not in wire
             assert set(REFERENCE.findall(wire)) == {reference}
-            assert sum(row["new_credential_count"] for row in key_discoveries(env, f"{model}-key")) == 1
+            assert len(key_discoveries(env, f"{model}-key")) == 1
             status, cleared = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
             assert status == 200, cleared
             assert key_discoveries(env, f"{model}-key") == []
@@ -572,19 +572,12 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert status == 200, reused
             assert reused["choices"][0]["message"]["content"] == SECRET
             assert set(REFERENCE.findall(json.dumps(received[-1]["body"]))) == {reference}
-            # 清空历史后，旧映射仍被复用：新的命中记录只含复用，没有新增。
-            reuse_rows = _wait_for(
-                "reuse-only hit after history clearing",
-                lambda: key_discoveries(env, f"{model}-key"),
-            )
-            assert len(reuse_rows) == 1
-            assert reuse_rows[0]["new_credential_count"] == 0 and reuse_rows[0]["created"] == []
-            assert [hit["rule_id"] for hit in reuse_rows[0]["reused"]] == ["github-pat"]
-            assert key_discoveries(env, f"{model}-key", kind="created") == []
+            # 清空历史后旧映射仍被复用，但列表只展示创建事件，因此不再有行。
             new_interactions = _wait_for(
                 "new observation after restart and history clearing",
                 lambda: _route_interactions(env, route_id),
             )
+            assert key_discoveries(env, f"{model}-key") == []
             assert _detail(env, new_interactions[0]["id"])["interaction"]["input_preview"] == SECRET
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])

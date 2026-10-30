@@ -1421,6 +1421,21 @@ CREATE TABLE public.credential_custom_rules (
 
 
 --
+-- Name: credential_mapping_reuses; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credential_mapping_reuses (
+    marker text NOT NULL,
+    interaction_id text NOT NULL,
+    run_id text,
+    source_type text NOT NULL,
+    tool_id text DEFAULT ''::text NOT NULL,
+    latest_input boolean DEFAULT false NOT NULL,
+    last_reused_at bigint NOT NULL
+);
+
+
+--
 -- Name: history_markers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3380,6 +3395,14 @@ ALTER TABLE ONLY public.credential_custom_rules
 
 
 --
+-- Name: credential_mapping_reuses credential_mapping_reuses_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credential_mapping_reuses
+    ADD CONSTRAINT credential_mapping_reuses_pkey PRIMARY KEY (marker, interaction_id, source_type, tool_id, latest_input);
+
+
+--
 -- Name: history_markers history_markers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3788,6 +3811,13 @@ ALTER TABLE ONLY public.web_providers
 
 
 --
+-- Name: credential_mapping_reuses_interaction_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX credential_mapping_reuses_interaction_idx ON public.credential_mapping_reuses USING btree (interaction_id);
+
+
+--
 -- Name: idx_admin_sessions_expiry; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4096,10 +4126,10 @@ CREATE INDEX native_compactions_generation_idx ON public.native_compactions USIN
 
 
 --
--- Name: observation_events_credential_discovery_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: observation_events_credential_hit_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX observation_events_credential_discovery_idx ON public.observation_events USING btree (kind, interaction_id, occurred_at DESC, expires_at) WHERE (kind = ANY (ARRAY['credential_mappings_created'::text, 'credential_mappings_reused'::text]));
+CREATE INDEX observation_events_credential_hit_idx ON public.observation_events USING btree (kind, sequence DESC) WHERE (kind = 'credential_mappings_created'::text);
 
 
 --
@@ -4444,6 +4474,14 @@ ALTER TABLE ONLY public.artifact_upload_parts
 
 ALTER TABLE ONLY public.artifact_uploads
     ADD CONSTRAINT artifact_uploads_artifact_id_fkey FOREIGN KEY (artifact_id) REFERENCES public.artifacts(id) ON DELETE CASCADE;
+
+
+--
+-- Name: credential_mapping_reuses credential_mapping_reuses_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credential_mapping_reuses
+    ADD CONSTRAINT credential_mapping_reuses_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
 
 
 --

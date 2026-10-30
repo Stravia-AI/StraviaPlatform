@@ -250,6 +250,29 @@ pub async fn run_sqlite_migrator(
             crate::turn_chain::upgrade::normalize_sqlite(&mut pinned.connection).await?;
         }
     }
+    if runner.version_exists(34) {
+        // 先补齐 0033 及之前的 schema，清理才能依赖已存在的观察与映射表。
+        runner
+            .run_direct(Some(33), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "credential_cleanup",
+                "Removing retired credential rules",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade::retire_kingfisher_discoveries_sqlite(
+                &mut pinned.connection,
+            )
+            .await?;
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -399,6 +422,27 @@ pub async fn run_postgres_migrator(
         if !finalized {
             report("history_data", "Normalizing history storage", 0, None);
             crate::turn_chain::upgrade::normalize_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(34) {
+        // 先补齐 0033 及之前的 schema，清理才能依赖已存在的观察与映射表。
+        runner.run_direct(Some(33), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=34 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "credential_cleanup",
+                "Removing retired credential rules",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade::retire_kingfisher_discoveries_postgres(
+                &mut connection,
+            )
+            .await?;
         }
     }
     report(

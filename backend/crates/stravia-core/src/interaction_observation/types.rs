@@ -361,7 +361,7 @@ pub(crate) struct RunOutcome {
     pub generation_root_id: Option<String>,
 }
 
-/// 一个映射在一次请求里的命中。`marker` 只在 Debug 开启的 Run 中记录，永不进入列表接口。
+/// 一个映射在一次请求里的命中。`marker` 对所有 Run 记录，但永不进入列表接口。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct CredentialDiscovery {
     pub rule_ids: Vec<String>,
@@ -413,61 +413,130 @@ impl CredentialDiscovery {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialHitKind {
-    #[default]
-    All,
-    Created,
-    Reused,
-}
-
-impl CredentialHitKind {
-    /// 对应的事件 `kind` 列取值；只含固定字面量，可直接拼入 SQL。
-    pub(super) fn event_kinds(self) -> &'static str {
-        match self {
-            Self::All => "'credential_mappings_created','credential_mappings_reused'",
-            Self::Created => "'credential_mappings_created'",
-            Self::Reused => "'credential_mappings_reused'",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CredentialDiscoveryQuery {
     pub cursor: Option<String>,
     pub limit: Option<u32>,
-    #[serde(default)]
-    pub kind: CredentialHitKind,
 }
 
-/// 命中记录列表里的一个「规则 ← 来源」配对。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CredentialHit {
+/// 命中记录列表里的一个「规则 ← 来源」配对；顺序由载荷排序确定，`hits/{index}` 依赖它。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CredentialDiscoveryHit {
     pub rule_id: String,
     pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
     /// 仅用户消息有意义：`true` 是本次输入，`false` 是客户端重放的历史。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_input: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialDiscoverySummary {
+/// 命中记录列表的一行：一次新建映射。
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryItem {
+    /// `{event.sequence}.{discovery index}`。
+    pub id: String,
+    /// 创建事件的发生时间（毫秒）。
+    pub created_at: i64,
     pub interaction_id: String,
+    pub run_id: Option<String>,
     pub api_key_name: Option<String>,
-    /// 当前筛选下该 Interaction 最近一次命中的时间。
-    pub discovered_at: i64,
-    pub new_credential_count: i64,
-    pub created: Vec<CredentialHit>,
-    pub reused: Vec<CredentialHit>,
-    pub status: String,
-    pub observation_gap: bool,
+    /// 由规则 ID 前缀推导，按字典序去重；`rule_ids` 为空时同样为空。
+    pub rule_sets: Vec<String>,
+    pub rule_ids: Vec<String>,
+    pub hits: Vec<CredentialDiscoveryHit>,
+    pub omitted_hits: usize,
+    /// 载荷携带非空占位符，才能关联后续复用。
+    pub linkable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CredentialDiscoveryPage {
-    pub items: Vec<CredentialDiscoverySummary>,
+    pub items: Vec<CredentialDiscoveryItem>,
     pub next_cursor: Option<String>,
+}
+
+/// 命中字段与来源事件；不含正文。
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryField {
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+/// 命中详情；正文含明文，响应类型不得实现 `Debug`。
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CredentialDiscoveryHitDetail {
+    Available {
+        field: CredentialDiscoveryField,
+        text: String,
+        truncated: bool,
+        /// `secret`：按映射明文命中；`rule`：退化为按所选规则命中。
+        hit_basis: String,
+        matches: Vec<stravia_credential_protection::CredentialTextMatch>,
+    },
+    Unavailable {
+        field: CredentialDiscoveryField,
+        /// `not_retained` 或 `missing`。
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryReuse {
+    pub interaction_id: String,
+    pub run_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub source_type: String,
+    pub tool_id: Option<String>,
+    pub latest_input: Option<bool>,
+    pub last_reused_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryReuses {
+    pub linkable: bool,
+    pub items: Vec<CredentialDiscoveryReuse>,
+    pub truncated: bool,
+}
+
+/// 命中记录的行引用、游标与索引错误；服务端据此区分 400/404。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialDiscoveryError {
+    #[error("invalid credential discovery cursor")]
+    InvalidCursor,
+    #[error("invalid credential discovery reference")]
+    InvalidReference,
+    #[error("credential discovery not found")]
+    NotFound,
+}
+
+/// 一条新建映射的落库事实；只在内核与服务端适配层之间使用。
+#[derive(Debug, Clone)]
+pub(crate) struct CredentialDiscoveryRecord {
+    pub sequence: i64,
+    pub interaction_id: String,
+    pub run_id: Option<String>,
+    pub principal: String,
+    pub discovery: CredentialDiscovery,
+    pub hits: Vec<CredentialDiscoveryHit>,
+}
+
+/// 命中正文的解析结果；正文只在可用时携带。
+pub(crate) enum CredentialDiscoveryBody {
+    /// 来源事件不在库中或已过期。
+    Missing,
+    /// 该来源不保留正文，或来源事件没有正文。
+    NotRetained,
+    Retained(serde_json::Value),
+}
+
+pub(crate) struct CredentialDiscoveryHitContext {
+    pub tool_name: Option<String>,
+    pub body: CredentialDiscoveryBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

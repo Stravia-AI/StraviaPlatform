@@ -12,6 +12,7 @@ pub use custom::{
 pub use detection::rule_catalog;
 pub use detection::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
+    CredentialTextMatch,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -52,7 +53,7 @@ pub struct CredentialDiscovery {
     pub source_types: Vec<String>,
     /// 规则与位置的逐项配对，已去重。
     pub locators: Vec<CredentialLocator>,
-    /// 该映射的不透明占位符；是否记录由观察方按 Debug 状态决定。
+    /// 该映射的不透明占位符，观察方原样写入事件载荷，用于关联后续复用。
     pub marker: String,
 }
 
@@ -192,6 +193,15 @@ impl ReversibleRedaction {
     /// 只检测本次提交的文本，规则集与实际保护一致（内置规则加已启用的自定义规则）。
     pub async fn test_text(&self, text: String) -> Result<Vec<CredentialMatch>, RedactionError> {
         detection::test_text(text, self.custom_rules.compiled().await?).await
+    }
+
+    /// 只读定位一段已落库的文本；`secret` 为映射明文时，秘密字面值等于它的匹配标记为命中。
+    pub async fn locate_text(
+        &self,
+        text: String,
+        secret: Option<String>,
+    ) -> Result<Vec<CredentialTextMatch>, RedactionError> {
+        detection::locate_text(text, secret, self.custom_rules.compiled().await?).await
     }
 
     pub async fn protect(
@@ -467,6 +477,37 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn locate_text_marks_only_matches_of_the_requested_secret() {
+        let custom = Arc::new(
+            detection::CompiledCustomRules::compile(std::iter::empty::<(
+                &str,
+                &custom::CustomRuleSpec,
+            )>())
+            .unwrap(),
+        );
+        let wanted = "ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH";
+        let other = "ghp_7Cp6lO1uK8rW3zQ5sJ2mE4vG0iA9bXyTdHnF";
+        let text = format!("first {wanted}\nsecond {other}");
+        let found = detection::locate_text(text.clone(), Some(wanted.into()), custom.clone())
+            .await
+            .unwrap();
+        let github: Vec<_> = found
+            .iter()
+            .filter(|found| found.rule_id == "github-pat")
+            .collect();
+        assert_eq!(github.len(), 2);
+        assert!(github[0].hit);
+        assert!(!github[1].hit);
+        assert_eq!((github[0].start_line, github[0].start_column), (1, 7));
+        assert_eq!((github[1].start_line, github[1].start_column), (2, 8));
+        let encoded = text.encode_utf16().count();
+        assert!(github.iter().all(|found| found.end <= encoded));
+
+        let unmarked = detection::locate_text(text, None, custom).await.unwrap();
+        assert!(unmarked.iter().all(|found| !found.hit));
     }
 
     #[test]

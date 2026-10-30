@@ -68,6 +68,19 @@ pub struct CredentialMatch {
     pub end_column: usize,
 }
 
+/// 与「密钥匹配测试」同形的命中位置，另标记秘密字面值是否等于给定明文。
+#[derive(Clone, Serialize)]
+pub struct CredentialTextMatch {
+    pub rule_id: String,
+    pub start: usize,
+    pub end: usize,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub hit: bool,
+}
+
 pub(super) struct DetectedCredential {
     pub secret: String,
     pub findings: Vec<DetectedFinding>,
@@ -136,35 +149,73 @@ pub async fn test_text(
     custom: Arc<CompiledCustomRules>,
 ) -> Result<Vec<CredentialMatch>> {
     tokio::task::spawn_blocking(move || {
-        let mut findings: Vec<_> = detect_all(&[&text], &custom)?
+        Ok(positioned(&text, &custom, None)?
             .into_iter()
-            .flat_map(|credential| credential.findings)
-            .collect();
-        findings.sort_by(|a, b| (a.start, a.end, &a.rule_id).cmp(&(b.start, b.end, &b.rule_id)));
-        let mut matches = Vec::with_capacity(findings.len());
-        let mut previous_start = 0;
-        let mut start_position = (0, 1, 1);
-        for finding in findings {
-            // 按位置前进，避免大量重复命中时反复扫描整段输入前缀。
-            start_position = advance_position(&text[previous_start..finding.start], start_position);
-            previous_start = finding.start;
-            let (start, start_line, start_column) = start_position;
-            let (end, end_line, end_column) =
-                advance_position(&text[finding.start..finding.end], start_position);
-            matches.push(CredentialMatch {
-                rule_id: finding.rule_id,
-                start,
-                end,
-                start_line,
-                start_column,
-                end_line,
-                end_column,
-            });
-        }
-        Ok(matches)
+            .map(|found| CredentialMatch {
+                rule_id: found.rule_id,
+                start: found.start,
+                end: found.end,
+                start_line: found.start_line,
+                start_column: found.start_column,
+                end_line: found.end_line,
+                end_column: found.end_column,
+            })
+            .collect())
     })
     .await
     .map_err(|_| RedactionError::Detection)?
+}
+
+/// 只读定位一段文本中的命中；`secret` 给定时标记秘密字面值等于它的匹配。
+pub(super) async fn locate_text(
+    text: String,
+    secret: Option<String>,
+    custom: Arc<CompiledCustomRules>,
+) -> Result<Vec<CredentialTextMatch>> {
+    tokio::task::spawn_blocking(move || positioned(&text, &custom, secret.as_deref()))
+        .await
+        .map_err(|_| RedactionError::Detection)?
+}
+
+fn positioned(
+    text: &str,
+    custom: &CompiledCustomRules,
+    secret: Option<&str>,
+) -> Result<Vec<CredentialTextMatch>> {
+    let mut findings: Vec<_> = detect_all(&[text], custom)?
+        .into_iter()
+        .flat_map(|credential| {
+            let hit = secret.is_some_and(|secret| credential.secret == secret);
+            credential
+                .findings
+                .into_iter()
+                .map(move |finding| (finding, hit))
+        })
+        .collect();
+    findings
+        .sort_by(|(a, _), (b, _)| (a.start, a.end, &a.rule_id).cmp(&(b.start, b.end, &b.rule_id)));
+    let mut matches = Vec::with_capacity(findings.len());
+    let mut previous_start = 0;
+    let mut start_position = (0, 1, 1);
+    for (finding, hit) in findings {
+        // 按位置前进，避免大量重复命中时反复扫描整段输入前缀。
+        start_position = advance_position(&text[previous_start..finding.start], start_position);
+        previous_start = finding.start;
+        let (start, start_line, start_column) = start_position;
+        let (end, end_line, end_column) =
+            advance_position(&text[finding.start..finding.end], start_position);
+        matches.push(CredentialTextMatch {
+            rule_id: finding.rule_id,
+            start,
+            end,
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+            hit,
+        });
+    }
+    Ok(matches)
 }
 
 fn advance_position(

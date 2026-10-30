@@ -4,7 +4,8 @@ use sqlx::{PgPool, Row, SqlitePool};
 use std::{borrow::Cow, sync::Arc};
 
 use super::types::{
-    ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome, RunStart,
+    ConfirmedUsage, CredentialDiscovery, IngressStart, ObservationEvent, RejectedOutcome, RunEvent,
+    RunOutcome, RunStart,
 };
 use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
 
@@ -1366,6 +1367,17 @@ impl ObservationStore {
                         )
                         .await?;
                     }
+                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
+                        upsert_credential_mapping_reuses_sqlite(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            at,
+                            discoveries,
+                        )
+                        .await?;
+                    }
                     result.push(event(
                         sequence,
                         at,
@@ -1511,6 +1523,17 @@ impl ObservationStore {
                                 payload: &payload,
                                 expires_at,
                             },
+                        )
+                        .await?;
+                    }
+                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
+                        upsert_credential_mapping_reuses_postgres(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            at,
+                            discoveries,
                         )
                         .await?;
                     }
@@ -2627,6 +2650,134 @@ async fn insert_event_postgres(
     event: EventInsert<'_>,
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at,tool_id,operation_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)").bind(event.sequence).bind(event.occurred_at).bind(event.interaction_id).bind(event.run_id).bind(event.rejection_id).bind(event.kind).bind(crate::storage_codec::encode(serde_json::to_vec(event.payload)?.into())?).bind(event.expires_at).bind(event.payload.get("tool_id").and_then(Value::as_str)).bind(event.payload.get("operation_id").and_then(Value::as_str)).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// 一个复用事件最多 50 个映射 × 50 个位置；按块写入，绑定参数数留有余量。
+const REUSE_ROW_BATCH: usize = 100;
+
+struct ReuseRow<'a> {
+    marker: &'a str,
+    interaction_id: &'a str,
+    run_id: Option<&'a str>,
+    source_type: &'a str,
+    tool_id: &'a str,
+    latest_input: bool,
+    last_reused_at: i64,
+}
+
+/// 把复用事件展开成登记行。没有占位符的映射无法关联回创建行，不登记；
+/// `tool_id` 与 `latest_input` 按去重键归一，与读取侧返回的来源字段一致。
+/// 位置携带 `rule_id`，不同规则可以在同一位置命中同一秘密，归一后就会落到同一主键；
+/// 一条 INSERT 不能对同一行执行两次 `ON CONFLICT`（PostgreSQL 直接报错），
+/// 而同一事件的登记行共享时间与 Run，所以这里按主键先取第一条。
+fn reuse_rows<'a>(
+    interaction_id: &'a str,
+    run_id: Option<&'a str>,
+    occurred_at: i64,
+    discoveries: &'a [CredentialDiscovery],
+) -> Vec<ReuseRow<'a>> {
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for discovery in discoveries {
+        let Some(marker) = discovery
+            .marker
+            .as_deref()
+            .filter(|marker| !marker.is_empty())
+        else {
+            continue;
+        };
+        for locator in &discovery.locators {
+            let source_type = locator.source_type.as_str();
+            let tool_id = locator.tool_id.as_deref().unwrap_or_default();
+            let latest_input = locator.tool_id.is_none() && locator.latest_input.unwrap_or(false);
+            if !seen.insert((marker, interaction_id, source_type, tool_id, latest_input)) {
+                continue;
+            }
+            rows.push(ReuseRow {
+                marker,
+                interaction_id,
+                run_id,
+                source_type,
+                tool_id,
+                latest_input,
+                last_reused_at: occurred_at,
+            });
+        }
+    }
+    rows
+}
+
+/// 登记行的写入语句；两种后端只差绑定风格，冲突处理必须完全一致。
+const REUSE_INSERT: &str = "INSERT INTO credential_mapping_reuses(marker,interaction_id,run_id,source_type,tool_id,latest_input,last_reused_at)";
+/// 只有更晚的复用能覆盖时间与 Run：乱序到达的旧事件不得回退最新事实，时间相同时保留先写入的 Run。
+const REUSE_CONFLICT: &str = " ON CONFLICT(marker,interaction_id,source_type,tool_id,latest_input) DO UPDATE SET run_id=excluded.run_id,last_reused_at=excluded.last_reused_at WHERE excluded.last_reused_at>credential_mapping_reuses.last_reused_at";
+
+fn insert_reuse_sql(builder: &mut sqlx::QueryBuilder<sqlx::Sqlite>, rows: &[ReuseRow<'_>]) {
+    builder.push(REUSE_INSERT);
+    builder.push_values(rows, |mut values, row| {
+        values
+            .push_bind(row.marker)
+            .push_bind(row.interaction_id)
+            .push_bind(row.run_id)
+            .push_bind(row.source_type)
+            .push_bind(row.tool_id)
+            .push_bind(row.latest_input)
+            .push_bind(row.last_reused_at);
+    });
+    builder.push(REUSE_CONFLICT);
+}
+
+fn insert_reuse_sql_postgres(
+    builder: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    rows: &[ReuseRow<'_>],
+) {
+    builder.push(REUSE_INSERT);
+    builder.push_values(rows, |mut values, row| {
+        values
+            .push_bind(row.marker)
+            .push_bind(row.interaction_id)
+            .push_bind(row.run_id)
+            .push_bind(row.source_type)
+            .push_bind(row.tool_id)
+            .push_bind(row.latest_input)
+            .push_bind(row.last_reused_at);
+    });
+    builder.push(REUSE_CONFLICT);
+}
+
+/// 与复用事件同一事务登记，任何一步失败都会连同事件一起回滚。
+pub(super) async fn upsert_credential_mapping_reuses_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    occurred_at: i64,
+    discoveries: &[CredentialDiscovery],
+) -> anyhow::Result<()> {
+    for chunk in
+        reuse_rows(interaction_id, run_id, occurred_at, discoveries).chunks(REUSE_ROW_BATCH)
+    {
+        let mut insert = sqlx::QueryBuilder::<sqlx::Sqlite>::new("");
+        insert_reuse_sql(&mut insert, chunk);
+        insert.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn upsert_credential_mapping_reuses_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    occurred_at: i64,
+    discoveries: &[CredentialDiscovery],
+) -> anyhow::Result<()> {
+    for chunk in
+        reuse_rows(interaction_id, run_id, occurred_at, discoveries).chunks(REUSE_ROW_BATCH)
+    {
+        let mut insert = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+        insert_reuse_sql_postgres(&mut insert, chunk);
+        insert.build().execute(&mut **tx).await?;
+    }
     Ok(())
 }
 

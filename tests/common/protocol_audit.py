@@ -229,12 +229,11 @@ def _credential_proof(row: dict, run: dict, expected: dict,
             not isinstance(discovery.get("rule_ids"), list) or not discovery["rule_ids"]
             or "user_message" not in discovery.get("source_types", []) for discovery in discoveries):
         failures.append("credential_discovery_missing_or_mismatched")
-    # 只有 Debug 开启的 Run 可以在 `marker` 字段携带本次请求的占位符；其余字段与普通 Run 不得出现。
+    # 占位符对所有 Run 记录；除 `marker` 外不得出现任何占位符，且 marker 必须是本次请求的占位符。
     markers = [discovery["marker"] for discovery in recorded if "marker" in discovery]
     unmarked = [{key: value for key, value in discovery.items() if key != "marker"} for discovery in recorded]
     if (any(item in json.dumps(recorded, ensure_ascii=False) for item in secrets)
             or any(item in json.dumps(unmarked, ensure_ascii=False) for item in references)
-            or (markers and not run.get("debug_enabled"))
             or not set(markers) <= set(references)):
         failures.append("credential_discovery_sensitive_payload")
     checks = capture.get("credential_checks", {}).get(row.get("nonce"), {})

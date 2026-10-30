@@ -2,7 +2,10 @@ import { expect, test } from '@playwright/test'
 import type { Locator, Page, Route } from '@playwright/test'
 
 import type {
-  CredentialDiscoverySummary,
+  CredentialDiscoveryRecord,
+  CredentialHitDetail,
+  CredentialHitReuse,
+  CredentialHitReuses,
   CredentialRule,
   CustomCredentialRule,
   CustomCredentialRuleInput,
@@ -37,12 +40,31 @@ const savedRule: CustomCredentialRule = {
   updated_at: 1,
 }
 
+const createdAt = 1_788_854_400_000
+
+const entryLines = [
+  'first line',
+  'second line',
+  'third line',
+  'fourth line',
+  'secret test_credential here',
+  'sixth line',
+  'seventh line other_secret here',
+  'eighth line',
+  'ninth line',
+  'tenth line',
+]
+const entryText = entryLines.join('\n')
+const secretStart = entryText.indexOf('test_credential')
+const otherStart = entryText.indexOf('other_secret')
+
 interface DiscoveryQuery {
-  kind: string | null
   cursor: string | null
 }
 
-type DiscoveryReply = { items: CredentialDiscoverySummary[]; next_cursor?: string | null } | { status: number }
+type DiscoveryReply = { items: CredentialDiscoveryRecord[]; next_cursor?: string | null } | { status: number }
+type DetailReply = CredentialHitDetail | { status: number }
+type ReusesReply = CredentialHitReuses | { status: number }
 
 interface Mock {
   customRules: CustomCredentialRule[]
@@ -51,21 +73,83 @@ interface Mock {
   testText: string[]
   failTest: boolean
   discoveryRequests: DiscoveryQuery[]
+  detailRequests: Array<{ id: string; index: number }>
+  reuseRequests: string[]
 }
 
-function discovery(index: number, overrides: Partial<CredentialDiscoverySummary> = {}): CredentialDiscoverySummary {
+interface MockOptions {
+  rules?: number
+  custom?: CustomCredentialRule[]
+  discoveries?: CredentialDiscoveryRecord[]
+  /** 按请求顺序给出每一页；`call` 从 1 开始，便于模拟某一次请求失败。 */
+  discoveryPage?: (query: DiscoveryQuery, call: number) => DiscoveryReply
+  detail?: (id: string, index: number) => DetailReply
+  reuses?: (id: string) => ReusesReply
+}
+
+function discovery(index: number, overrides: Partial<CredentialDiscoveryRecord> = {}): CredentialDiscoveryRecord {
   return {
+    id: `100.${index}`,
+    created_at: createdAt - index * 1000,
     interaction_id: `interaction-${index}`,
+    run_id: `run-${index}`,
     api_key_name: 'omp-key',
-    discovered_at: 1_788_854_400_000 - index * 1000,
-    new_credential_count: 2,
-    created: [
+    rule_sets: ['builtin'],
+    rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
+    hits: [
       { rule_id: 'fixture-rule-0', source_type: 'tool_result' },
       { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
     ],
-    reused: [],
-    status: 'running',
-    observation_gap: false,
+    omitted_hits: 0,
+    linkable: true,
+    ...overrides,
+  }
+}
+
+function availableDetail(
+  overrides: Partial<Extract<CredentialHitDetail, { state: 'available' }>> = {},
+): CredentialHitDetail {
+  return {
+    state: 'available',
+    field: { source_type: 'tool_result', tool_id: 'tool-1', tool_name: 'Lookup' },
+    text: entryText,
+    truncated: false,
+    hit_basis: 'secret',
+    matches: [
+      {
+        rule_id: 'fixture-rule-0',
+        start: secretStart,
+        end: secretStart + 'test_credential'.length,
+        start_line: 5,
+        start_column: 8,
+        end_line: 5,
+        end_column: 23,
+        hit: true,
+      },
+      {
+        rule_id: 'fixture-rule-1',
+        start: otherStart,
+        end: otherStart + 'other_secret'.length,
+        start_line: 7,
+        start_column: 14,
+        end_line: 7,
+        end_column: 26,
+        hit: false,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function reuse(overrides: Partial<CredentialHitReuse> = {}): CredentialHitReuse {
+  return {
+    interaction_id: 'reuse-1',
+    run_id: 'run-reuse-1',
+    api_key_name: 'omp-key',
+    source_type: 'tool_arguments',
+    tool_id: 'tool-9',
+    latest_input: null,
+    last_reused_at: createdAt,
     ...overrides,
   }
 }
@@ -89,16 +173,7 @@ async function openRules(page: Page) {
   await page.getByRole('tab', { name: /Current rules/ }).click()
 }
 
-async function mockRedaction(
-  page: Page,
-  options: {
-    rules?: number
-    custom?: CustomCredentialRule[]
-    discoveries?: CredentialDiscoverySummary[]
-    /** 按请求顺序给出每一页；`call` 从 1 开始，便于模拟某一次请求失败。 */
-    discoveryPage?: (query: DiscoveryQuery, call: number) => DiscoveryReply
-  } = {},
-) {
+async function mockRedaction(page: Page, options: MockOptions = {}) {
   const state: Mock = {
     customRules: [...(options.custom ?? [])],
     writes: [],
@@ -106,6 +181,8 @@ async function mockRedaction(
     testText: [],
     failTest: false,
     discoveryRequests: [],
+    detailRequests: [],
+    reuseRequests: [],
   }
   const rules = Array.from({ length: options.rules ?? 35 }, (_, index) => builtin(index))
   await page.route('**/api/v1/settings/reversible_redaction_enabled', (route) =>
@@ -118,7 +195,7 @@ async function mockRedaction(
     if (pathname.endsWith('/rules')) return route.fulfill({ json: { data: { rules, prefilter: '', filter: '' } } })
     if (pathname.endsWith('/discoveries')) {
       const params = new URL(request.url()).searchParams
-      const query = { kind: params.get('kind'), cursor: params.get('cursor') }
+      const query = { cursor: params.get('cursor') }
       state.discoveryRequests.push(query)
       const reply = options.discoveryPage?.(query, state.discoveryRequests.length) ?? {
         items: query.cursor ? [] : (options.discoveries ?? []),
@@ -127,6 +204,24 @@ async function mockRedaction(
         return route.fulfill({ status: reply.status, json: { error: 'Fixture hit records unavailable' } })
       }
       return route.fulfill({ json: { data: { items: reply.items, next_cursor: reply.next_cursor ?? null } } })
+    }
+    const hitPath = pathname.match(/\/reversible-redaction\/discoveries\/([^/]+)\/hits\/(\d+)$/)
+    if (hitPath) {
+      const id = decodeURIComponent(hitPath[1])
+      const index = Number(hitPath[2])
+      state.detailRequests.push({ id, index })
+      const reply = options.detail?.(id, index) ?? availableDetail()
+      if ('status' in reply) return route.fulfill({ status: reply.status, json: { error: 'Fixture hit unavailable' } })
+      return route.fulfill({ json: { data: reply } })
+    }
+    const reusePath = pathname.match(/\/reversible-redaction\/discoveries\/([^/]+)\/reuses$/)
+    if (reusePath) {
+      const id = decodeURIComponent(reusePath[1])
+      state.reuseRequests.push(id)
+      const reply = options.reuses?.(id) ?? { linkable: true, items: [], truncated: false }
+      if ('status' in reply)
+        return route.fulfill({ status: reply.status, json: { error: 'Fixture reuse unavailable' } })
+      return route.fulfill({ json: { data: reply } })
     }
     if (pathname.endsWith('/test')) {
       const { text } = request.postDataJSON() as { text: string }
@@ -205,8 +300,15 @@ async function scrollHits(page: Page, to: 'top' | 'bottom' | number) {
   }, to)
 }
 
+async function openRow(page: Page, apiKey = 'omp-key') {
+  await rowOf(page, apiKey).getByRole('cell').nth(1).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  return dialog
+}
+
 test.describe('hit records', () => {
-  test('is the first and default tab and shows each hit as a rule-from-source chip in one row', async ({ page }) => {
+  test('is the first and default tab and shows one created mapping per row', async ({ page }) => {
     await mockRedaction(page, { discoveries: [discovery(0)] })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
@@ -216,97 +318,336 @@ test.describe('hit records', () => {
     await expect(tabs.nth(2)).toHaveText(/Matching test/)
     await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true')
 
+    await expect(page.getByRole('columnheader')).toHaveCount(5)
     const row = rowOf(page, 'omp-key')
-    const created = row.getByRole('cell').nth(2)
-    await expect(chip(created, 'Fixture credential 0', 'Tool result')).toBeVisible()
-    await expect(chip(created, 'Fixture credential 1', 'Tool result')).toBeVisible()
-    await expect(created).toContainText('2 new credentials')
-    await expect(row.getByRole('cell').nth(3)).toHaveText('—')
-    await expect(row.getByRole('status')).toHaveText('Running')
-    await expect(row.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
-      'href',
-      '/logs?interaction=interaction-0&highlight=credential-hits',
-    )
+    const cells = row.getByRole('cell')
+    await expect(cells.nth(0)).toHaveText(/\d{4}/)
+    await expect(cells.nth(1)).toHaveText('omp-key')
+    await expect(cells.nth(2)).toContainText('Built-in')
+    await expect(cells.nth(3)).toContainText('Fixture credential 0')
+    await expect(cells.nth(3)).toContainText('Fixture credential 1')
+    const hits = cells.nth(4)
+    await expect(hits.getByRole('listitem')).toHaveCount(2)
+    await expect(chip(hits, 'Fixture credential 0', 'Tool result')).toBeVisible()
+    await expect(chip(hits, 'Fixture credential 1', 'Tool result')).toBeVisible()
+    // 创建映射没有请求状态，也没有行内跳转箭头。
+    await expect(row.getByRole('status')).toHaveCount(0)
+    await expect(row.getByRole('link')).toHaveCount(0)
   })
 
-  test('keeps new and reused hits in separate columns and tells replayed user messages from the latest input', async ({
-    page,
-  }) => {
+  test('collapses extra hit pairs and adds the locators omitted during capture', async ({ page }) => {
     await mockRedaction(page, {
       discoveries: [
         discovery(0, {
-          api_key_name: 'mixed-key',
-          new_credential_count: 1,
-          created: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true }],
-          reused: [
-            { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false },
-            { rule_id: 'fixture-rule-1', source_type: 'tool_arguments' },
+          rule_ids: ['fixture-rule-0'],
+          hits: [
+            { rule_id: 'fixture-rule-0', source_type: 'tool_result' },
+            { rule_id: 'fixture-rule-0', source_type: 'tool_arguments' },
+            { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
+            { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
+            { rule_id: 'fixture-rule-1', source_type: 'user_message', latest_input: false },
           ],
-        }),
-        discovery(1, {
-          api_key_name: 'reuse-only-key',
-          new_credential_count: 0,
-          created: [],
-          reused: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }],
+          omitted_hits: 2,
         }),
       ],
     })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
-
-    const mixed = rowOf(page, 'mixed-key')
-    await expect(chip(mixed.getByRole('cell').nth(2), 'Fixture credential 0', 'User message')).toBeVisible()
-    await expect(mixed.getByRole('cell').nth(2).getByRole('button')).toHaveCount(1)
-    const reused = mixed.getByRole('cell').nth(3)
-    await expect(chip(reused, 'Fixture credential 0', 'Earlier user message')).toBeVisible()
-    await expect(chip(reused, 'Fixture credential 1', 'Tool arguments')).toBeVisible()
-    await expect(reused.getByRole('button')).toHaveCount(2)
-
-    const reuseOnly = rowOf(page, 'reuse-only-key')
-    await expect(reuseOnly.getByRole('cell').nth(2)).toHaveText('—')
-    await expect(chip(reuseOnly.getByRole('cell').nth(3), 'Fixture credential 1', 'Tool result')).toBeVisible()
+    const hits = rowOf(page, 'omp-key').getByRole('cell').nth(4)
+    await expect(hits.getByRole('listitem')).toHaveCount(4)
+    await expect(hits.getByText('+4', { exact: true })).toBeVisible()
   })
 
-  test('opens the matched rule from its chip and keeps the rule ID reachable there', async ({ page }) => {
-    await mockRedaction(page, { discoveries: [discovery(0)] })
+  test('opens a side panel with field context, the full entry and match details', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result', tool_id: 'tool-1' }],
+        }),
+      ],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const row = rowOf(page, 'omp-key')
+    const dialog = await openRow(page)
+    await expect(dialog.getByRole('heading', { name: /omp-key/ })).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: /2026/ })).toBeVisible()
+
+    await expect(chip(dialog, 'Fixture credential 0', 'Tool result')).toHaveAttribute('aria-pressed', 'true')
+    const fieldSection = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) })
+    await expect(fieldSection).toContainText('Tool result')
+    await expect(fieldSection).toContainText('Lookup')
+    await expect(fieldSection).toContainText('tool-1')
+    const context = dialog.locator('.context-box')
+    await expect(context).toContainText('fourth line')
+    await expect(context).toContainText('sixth line')
+    await expect(context).not.toContainText('first line')
+
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    await expect(entry).toContainText('fourth line')
+    await expect(entry).toContainText('other_secret')
+    await expect(entry).not.toContainText('test_credential')
+    await entry.getByRole('button', { name: 'Show matched text' }).click()
+    await expect(entry).toContainText('test_credential')
+    await expect(entry.getByRole('button', { name: 'Hide matched text' })).toBeVisible()
+
+    const hitMatch = dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })
+    await expect(hitMatch).toHaveAttribute('data-emphasis', 'hit')
+    const otherMatch = dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })
+    await expect(otherMatch).toHaveAttribute('data-emphasis', 'match')
+
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(row).toBeFocused()
+
+    const reopened = await openRow(page)
+    await expect(reopened.locator('[data-slot="credential-entry"]')).not.toContainText('test_credential')
+    await expect(reopened.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+  })
+
+  test('switches hits without leaking the previous entry and re-masks the snippet', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          hits: [
+            { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
+            { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
+          ],
+        }),
+      ],
+      detail: (_id, index) =>
+        index === 0
+          ? availableDetail({
+              field: { source_type: 'user_message' },
+              text: 'first entry\nsecret_one',
+              matches: [
+                {
+                  rule_id: 'fixture-rule-0',
+                  start: 12,
+                  end: 22,
+                  start_line: 2,
+                  start_column: 1,
+                  end_line: 2,
+                  end_column: 11,
+                  hit: true,
+                },
+              ],
+            })
+          : availableDetail({
+              field: { source_type: 'tool_result', tool_id: 'tool-2', tool_name: 'Reader' },
+              text: 'second entry\nsecret_two\nmore',
+              matches: [
+                {
+                  rule_id: 'fixture-rule-1',
+                  start: 13,
+                  end: 23,
+                  start_line: 2,
+                  start_column: 1,
+                  end_line: 2,
+                  end_column: 11,
+                  hit: true,
+                },
+              ],
+            }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    await expect(entry).toContainText('first entry')
+    await entry.getByRole('button', { name: 'Show matched text' }).click()
+    await expect(entry).toContainText('secret_one')
+
+    await chip(dialog, 'Fixture credential 1', 'Tool result').click()
+    await expect(entry).toContainText('second entry')
+    await expect(entry).not.toContainText('secret_one')
+    await expect(entry).not.toContainText('secret_two')
+    await expect(entry.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: 'Field context' })).toBeVisible()
+    await expect(
+      dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) }),
+    ).toContainText('Reader')
+    expect(state.detailRequests).toEqual([
+      { id: '100.0', index: 0 },
+      { id: '100.0', index: 1 },
+    ])
+  })
+
+  test('explains when the entry text is unavailable and why', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          hits: [
+            { rule_id: 'fixture-rule-0', source_type: 'system_or_history' },
+            { rule_id: 'fixture-rule-1', source_type: 'other_text' },
+          ],
+        }),
+      ],
+      detail: (_id, index) =>
+        index === 0
+          ? { state: 'unavailable', field: { source_type: 'system_or_history' }, reason: 'not_retained' }
+          : { state: 'unavailable', field: { source_type: 'other_text' }, reason: 'missing' },
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await expect(dialog.getByText('Entry text unavailable', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('The text at this location is not part of the retained history.')).toBeVisible()
+    await chip(dialog, 'Fixture credential 1', 'Other readable text').click()
+    await expect(dialog.getByText('This observation has expired or was removed.')).toBeVisible()
+    // 正文不可用时没有完整条目或匹配列表，也不报错。
+    await expect(dialog.locator('[data-slot="credential-entry"]')).toHaveCount(0)
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('warns when the hit is located by rule, the entry is truncated, or no hit match remains', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          hits: [
+            { rule_id: 'fixture-rule-0', source_type: 'tool_result' },
+            { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
+          ],
+        }),
+      ],
+      detail: (_id, index) =>
+        index === 0
+          ? availableDetail({ truncated: true, hit_basis: 'rule', matches: [availableDetail().matches[1]] })
+          : availableDetail({ matches: [] }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await expect(dialog.getByRole('alert')).toContainText('located by rule')
+    await expect(dialog.getByText('Only the beginning of this entry is available.')).toBeVisible()
+    await expect(
+      dialog.getByText('The detected credential is not in the available text.', { exact: false }),
+    ).toBeVisible()
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })).toHaveAttribute('data-emphasis', 'match')
+
+    await chip(dialog, 'Fixture credential 1', 'Tool result').click()
+    await expect(dialog.getByText('No rule matched this entry.')).toBeVisible()
+  })
+
+  test('lists deduplicated later reuse with links to request records', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      reuses: () => ({
+        linkable: true,
+        items: [
+          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 10 }),
+          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 100 }),
+          reuse({
+            interaction_id: 'reuse-2',
+            source_type: 'user_message',
+            tool_id: null,
+            latest_input: true,
+            last_reused_at: createdAt,
+          }),
+        ],
+        truncated: true,
+      }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const links = dialog.getByRole('link', { name: /Open request record/ })
+    await expect(links).toHaveCount(2)
+    await expect(links.first()).toHaveAttribute('href', '/logs?interaction=reuse-2&highlight=credential-hits')
+    await expect(links.first()).toContainText('User message')
+    await expect(links.last()).toHaveAttribute('href', '/logs?interaction=reuse-1&highlight=credential-hits')
+    await expect(links.last()).toContainText('Tool arguments')
+    await expect(links.last()).toContainText('Last reused')
+    await expect(dialog.getByText('Only some reuse locations are shown.')).toBeVisible()
+    // 不显示复用次数，只列出去重后的位置。
+    expect(state.reuseRequests).toEqual(['100.0'])
+  })
+
+  test('explains an unlinkable mapping and an empty reuse history', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          api_key_name: 'unlinkable-key',
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+          linkable: false,
+        }),
+        discovery(1, {
+          api_key_name: 'empty-key',
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const unlinkable = await openRow(page, 'unlinkable-key')
+    await expect(
+      unlinkable.getByText('This mapping was created before the upgrade, so later reuse cannot be linked.'),
+    ).toBeVisible()
+    expect(state.reuseRequests).toEqual([])
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    const empty = await openRow(page, 'empty-key')
+    await expect(empty.getByText('No later reuse.')).toBeVisible()
+    expect(state.reuseRequests).toEqual(['100.1'])
+  })
+
+  test('tells an expired hit from a temporary detail failure and retries the latter', async ({ page }) => {
+    let detailAttempts = 0
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          hits: [
+            { rule_id: 'fixture-rule-0', source_type: 'tool_result' },
+            { rule_id: 'fixture-rule-1', source_type: 'tool_result' },
+          ],
+        }),
+      ],
+      detail: (_id, index) => {
+        if (index === 0) return { status: 404 }
+        detailAttempts += 1
+        return detailAttempts === 1 ? { status: 503 } : availableDetail()
+      },
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await expect(dialog.getByText('This hit is no longer available.')).toBeVisible()
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+
+    await chip(dialog, 'Fixture credential 1', 'Tool result').click()
+    await expect(dialog.getByRole('alert')).toContainText('Hit details could not be loaded.')
+    await dialog.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(dialog.locator('[data-slot="credential-entry"]')).toContainText('fourth line')
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('opens the matched rule from its chip without opening the hit panel', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }],
+        }),
+      ],
+    })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     await chip(page.getByRole('row'), 'Fixture credential 1', 'Tool result').click()
-    const inspector = page.getByRole('dialog')
-    await expect(inspector.getByRole('heading', { name: 'Fixture credential 1' })).toBeVisible()
-    await expect(inspector.getByText('fixture-rule-1', { exact: true })).toBeVisible()
-    await inspector.getByRole('button', { name: 'Close' }).click()
-    await expect(inspector).toHaveCount(0)
-    // 回到命中记录，不被带到现有规则页签。
+    const sheet = page.getByRole('dialog')
+    await expect(sheet.getByRole('heading', { name: 'Fixture credential 1' })).toBeVisible()
+    await expect(sheet.getByText('fixture-rule-1', { exact: true })).toBeVisible()
+    await sheet.getByRole('button', { name: 'Close' }).click()
+    await expect(sheet).toHaveCount(0)
     await expect(page.getByRole('tab', { name: 'Hit records' })).toHaveAttribute('aria-selected', 'true')
-  })
-
-  test('falls back to the rule ID for a rule that is gone and flags only the row with incomplete observation', async ({
-    page,
-  }) => {
-    await mockRedaction(page, {
-      discoveries: [
-        discovery(0, {
-          created: [{ rule_id: 'retired-rule', source_type: 'tool_result' }],
-          new_credential_count: 1,
-          observation_gap: true,
-        }),
-        discovery(1, { api_key_name: 'complete-key' }),
-      ],
-    })
-    await page.setViewportSize({ width: 1440, height: 900 })
-    await page.goto('/reversible-redaction')
-    const row = rowOf(page, 'omp-key')
-    await expect(row.getByText('retired-rule', { exact: true })).toBeVisible()
-    await expect(row.getByRole('button')).toHaveCount(0)
-    await expect(row.getByRole('status').filter({ hasText: 'Observation incomplete' })).toBeVisible()
-    await expect(
-      rowOf(page, 'complete-key').getByRole('status').filter({ hasText: 'Observation incomplete' }),
-    ).toHaveCount(0)
-    // 页面级的「观察数据不完整」提示、刷新与加载更多按钮都已取消。
-    await expect(page.getByRole('alert')).toHaveCount(0)
-    await expect(page.getByText('Observation data is incomplete.')).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Refresh|Load more/ })).toHaveCount(0)
   })
 
   test('loads further pages on scroll and renders only the rows near the viewport', async ({ page }) => {
@@ -331,15 +672,15 @@ test.describe('hit records', () => {
   test('sizes rows to their content and never lets neighbouring rows overlap', async ({ page }) => {
     await mockRedaction(page, {
       discoveries: [
-        discovery(0, { api_key_name: 'key-0', created: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }] }),
+        discovery(0, { api_key_name: 'key-0', hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }] }),
         discovery(1, {
           api_key_name: 'key-1',
-          created: Array.from({ length: 9 }, (_, index) => ({
+          hits: Array.from({ length: 9 }, (_, index) => ({
             rule_id: `fixture-rule-${index}`,
             source_type: ['tool_result', 'tool_arguments', 'system_or_history'][index % 3],
           })),
         }),
-        discovery(2, { api_key_name: 'key-2', created: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }] }),
+        discovery(2, { api_key_name: 'key-2', hits: [{ rule_id: 'fixture-rule-1', source_type: 'tool_result' }] }),
       ],
     })
     await page.setViewportSize({ width: 1280, height: 800 })
@@ -359,7 +700,7 @@ test.describe('hit records', () => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     await expect(page.getByRole('alert')).toContainText('Hit records are unavailable.')
-    await expect(page.getByText('No credential hits in the available observations.')).toHaveCount(0)
+    await expect(page.getByText('No credential mappings have been created yet.')).toHaveCount(0)
     await page.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(rowOf(page, 'omp-key')).toBeVisible()
     await expect(page.getByRole('alert')).toHaveCount(0)
@@ -383,25 +724,6 @@ test.describe('hit records', () => {
     }).toPass()
     await expect(alert).toHaveCount(0)
     expect(state.discoveryRequests.map((request) => request.cursor)).toEqual([null, '30', '30'])
-  })
-
-  test('filters on the server and restarts the list from the first page', async ({ page }) => {
-    const state = await mockRedaction(page, {
-      discoveryPage: ({ kind }) => ({
-        items: [discovery(0, { api_key_name: kind === 'created' ? 'created-key' : 'all-key' })],
-      }),
-    })
-    await page.setViewportSize({ width: 1440, height: 900 })
-    await page.goto('/reversible-redaction')
-    await expect(rowOf(page, 'all-key')).toBeVisible()
-    await page.getByLabel('Hit type').click()
-    await page.getByRole('option', { name: 'New only' }).click()
-    await expect(rowOf(page, 'created-key')).toBeVisible()
-    await expect(rowOf(page, 'all-key')).toHaveCount(0)
-    expect(state.discoveryRequests).toEqual([
-      { kind: 'all', cursor: null },
-      { kind: 'created', cursor: null },
-    ])
   })
 
   test('refreshes every 30 seconds at the top, merges new rows in front and ignores a failed refresh', async ({
@@ -476,26 +798,23 @@ test.describe('hit records', () => {
   })
 
   for (const width of [1440, 1280]) {
-    test(`fits every column, including the request link, without horizontal scrolling at ${width}px`, async ({
-      page,
-    }) => {
+    test(`fits every column without horizontal scrolling at ${width}px`, async ({ page }) => {
       await mockRedaction(page, {
         discoveries: [
           discovery(0, {
-            observation_gap: true,
-            created: [
+            hits: [
               { rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true },
               { rule_id: 'fixture-rule-1', source_type: 'tool_arguments' },
             ],
-            reused: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: false }],
+            rule_sets: ['custom', 'builtin'],
           }),
           discovery(1, {
             api_key_name: 'Second fixture key',
-            created: Array.from({ length: 4 }, (_, index) => ({
+            rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
+            hits: Array.from({ length: 4 }, (_, index) => ({
               rule_id: `fixture-rule-${index}`,
               source_type: 'system_or_history',
             })),
-            new_credential_count: 14,
           }),
         ],
       })
@@ -504,10 +823,10 @@ test.describe('hit records', () => {
       const panel = page.getByRole('tabpanel')
       await expect(panel.getByRole('table')).toBeVisible()
       expect(await hitViewport(page).evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
-      const links = panel.getByRole('link', { name: 'Open request observation' })
-      await expect(links).toHaveCount(2)
-      await expect(links.first()).toBeInViewport({ ratio: 1 })
-      await expect(links.last()).toBeInViewport({ ratio: 1 })
+      // 行内不再提供跳转箭头；请求入口只出现在侧栏的复用列表。
+      await expect(panel.getByRole('link')).toHaveCount(0)
+      await expect(rowOf(page, 'omp-key').getByRole('cell').nth(2)).toContainText('Built-in')
+      await expect(rowOf(page, 'omp-key').getByRole('cell').nth(2)).toContainText('Custom')
     })
   }
 
@@ -525,27 +844,23 @@ test.describe('hit records', () => {
       await mockRedaction(page, {
         discoveries: [
           discovery(0, {
-            new_credential_count: 1,
-            created: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true }],
-            reused: [{ rule_id: 'fixture-rule-1', source_type: 'tool_arguments' }],
+            rule_ids: ['fixture-rule-0'],
+            hits: [{ rule_id: 'fixture-rule-0', source_type: 'user_message', latest_input: true }],
+            omitted_hits: 2,
           }),
-          discovery(1, { api_key_name: 'reuse-only-key', new_credential_count: 0, created: [] }),
+          discovery(1, { api_key_name: 'second-key', rule_ids: ['fixture-rule-1'] }),
         ],
       })
       await page.setViewportSize({ width, height: 800 })
       await page.goto('/reversible-redaction')
       const row = rowOf(page, 'omp-key')
       await expect(page.getByRole('columnheader')).toHaveCount(0)
+      await expect(row.getByText('Rule sets', { exact: true })).toBeVisible()
+      await expect(row.getByText('Created by', { exact: true })).toBeVisible()
+      await expect(row.getByText('Hits', { exact: true })).toBeVisible()
       await expect(chip(row, 'Fixture credential 0', 'User message')).toBeVisible()
-      await expect(row.getByText('1 new credentials')).toBeVisible()
-      await expect(row.getByText('Reused', { exact: true })).toBeVisible()
-      await expect(chip(row, 'Fixture credential 1', 'Tool arguments')).toBeVisible()
-      await expect(row.getByRole('link', { name: 'Open request observation' })).toHaveAttribute(
-        'href',
-        '/logs?interaction=interaction-0&highlight=credential-hits',
-      )
-      // 没有新增的一侧不占位。
-      await expect(rowOf(page, 'reuse-only-key').getByText('1 new credentials')).toHaveCount(0)
+      await expect(row.getByText('+2', { exact: true })).toBeVisible()
+      await expect(row.getByRole('link')).toHaveCount(0)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     })
   }

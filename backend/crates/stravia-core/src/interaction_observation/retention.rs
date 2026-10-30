@@ -74,6 +74,7 @@ impl ObservationStore {
                     // 仍在同一事务中收口，不能向续接或详情读取暴露半个交互。
                     for sql in [
                         "DELETE FROM observation_events WHERE interaction_id=?",
+                        "DELETE FROM credential_mapping_reuses WHERE interaction_id=?",
                         "DELETE FROM observation_pending_tools WHERE interaction_id=?",
                         "DELETE FROM observation_tail_sources WHERE interaction_id=?",
                         "DELETE FROM target_attempt_observations WHERE interaction_id=?",
@@ -109,6 +110,7 @@ impl ObservationStore {
                 if let Some(id) = &interaction {
                     for sql in [
                         "DELETE FROM observation_events WHERE interaction_id=$1",
+                        "DELETE FROM credential_mapping_reuses WHERE interaction_id=$1",
                         "DELETE FROM observation_pending_tools WHERE interaction_id=$1",
                         "DELETE FROM observation_tail_sources WHERE interaction_id=$1",
                         "DELETE FROM target_attempt_observations WHERE interaction_id=$1",
@@ -203,6 +205,10 @@ impl ObservationStore {
                     sqlx::query("DELETE FROM rejected_request_observations")
                         .execute(&mut *tx)
                         .await?;
+                    // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
+                    sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
+                        .execute(&mut *tx)
+                        .await?;
                     let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
                     tx.commit().await?;
                     connection.finish().await?;
@@ -215,6 +221,10 @@ impl ObservationStore {
             Self::Postgres(p, _) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations")
+                    .execute(&mut *tx)
+                    .await?;
+                // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
+                sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
                     .execute(&mut *tx)
                     .await?;
                 let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
