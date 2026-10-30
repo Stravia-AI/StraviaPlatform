@@ -7,34 +7,48 @@ import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 import { cn } from '#lib/utils.js'
 
 let {
-  mark,
+  marks,
   ruleNames,
   children,
 }: {
-  /** 没有命中时只透传内容，不引入布局。 */
-  mark?: HitMark
+  /** 同一块上的命中（如工具调用参数与结果各一处）；全为 undefined 时只透传内容，不引入布局。 */
+  marks: readonly (HitMark | undefined)[]
   ruleNames: ReadonlyMap<string, string>
   children: Snippet
 } = $props()
 
-const label = $derived(
-  mark?.kind === 'created' ? m.credential_protection_hits_created() : m.credential_protection_hits_reused(),
-)
-const rules = $derived(mark?.ruleIds.map((id) => ruleNames.get(id) ?? id).join(', ') ?? '')
+// 参数与结果可能命中同一规则：相同徽标只留一个，同时保证 each 键唯一。
+const hits = $derived([
+  ...new Map(
+    marks
+      .filter((mark) => mark !== undefined)
+      .map((mark) => {
+        const hit = {
+          kind: mark.kind,
+          label:
+            mark.kind === 'created' ? m.credential_protection_hits_created() : m.credential_protection_hits_reused(),
+          rules: mark.ruleIds.map((id) => ruleNames.get(id) ?? id).join(', '),
+        }
+        return [`${hit.kind}:${hit.rules}`, hit] as const
+      }),
+  ).values(),
+])
+// 新增优先于复用：块的高亮跟随最强的一处命中。
+const kind = $derived(hits.some((hit) => hit.kind === 'created') ? 'created' : hits[0]?.kind)
 </script>
 
-<div class="hit" data-credential-hit={mark?.kind}>
-  {#if mark}
+<div class="hit" data-credential-hit={kind}>
+  {#each hits as hit (`${hit.kind}:${hit.rules}`)}
     <Tooltip.Root delayDuration={0}>
       <Tooltip.Trigger
         type="button"
-        class={cn(badgeVariants({ variant: mark.kind === 'created' ? 'default' : 'secondary' }), 'hit-badge')}
-        aria-label="{label}: {rules}">
-        {label}
+        class={cn(badgeVariants({ variant: hit.kind === 'created' ? 'default' : 'secondary' }), 'hit-badge')}
+        aria-label="{hit.label}: {hit.rules}">
+        {hit.label}
       </Tooltip.Trigger>
-      <Tooltip.Content class="max-w-80 text-pretty">{rules}</Tooltip.Content>
+      <Tooltip.Content class="max-w-80 text-pretty">{hit.rules}</Tooltip.Content>
     </Tooltip.Root>
-  {/if}
+  {/each}
   {@render children()}
 </div>
 

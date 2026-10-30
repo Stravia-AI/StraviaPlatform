@@ -1,15 +1,10 @@
 import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, ObservationOutputPreview, RunDetail } from './types/observation'
-import {
-  observationConversationActivities,
-  type ObservationActivity,
-  type ToolActivity,
-} from './observation-activities'
+import { observationConversationActivities, type ObservationActivity } from './observation-activities'
 
 export type ObservationConversationBlock =
   | { kind: 'text'; id: string; text: string; live: boolean; at: number; sequence?: number; receiveOrder?: number }
   | ObservationActivity
-  | { kind: 'result'; id: string; at: number; sequence?: number; receiveOrder?: number; activity: ToolActivity }
 
 function hasVisibleText(text: string): boolean {
   return text.replace(/<!--[\s\S]*?(?:-->|$)/g, '').trim().length > 0
@@ -29,33 +24,10 @@ export function observationConversationBlocks(
     if (!output.has(key)) output.set(key, items)
     items.push(block)
   }
+  // 工具调用与其结果是同一块：结果内联在调用里，状态随结果到达原地更新，不另起结果块。
   for (const [key, value] of activities) {
-    for (const activity of value) {
-      if (activity.kind === 'thinking') {
-        append(key.slice('assistant:'.length), activity)
-        continue
-      }
-      append(key.slice('assistant:'.length), { ...activity, results: [] })
-      for (const result of activity.results) {
-        append(result.runId ?? key.slice('assistant:'.length), {
-          kind: 'result',
-          id: result.id,
-          at: result.at,
-          sequence: result.sequence,
-          receiveOrder: result.receiveOrder,
-          activity: {
-            ...activity,
-            id: result.id,
-            at: result.at,
-            input: undefined,
-            live: false,
-            status: result.isError ? 'error' : 'returned',
-            reason: undefined,
-            results: [result],
-          },
-        })
-      }
-    }
+    const runId = key.slice('assistant:'.length)
+    for (const activity of value) append(runId, activity)
   }
   for (const run of detail.runs) {
     let legacy: Map<string, Array<{ sequence: number; at: number; text: string }>> | undefined

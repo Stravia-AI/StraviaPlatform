@@ -78,7 +78,6 @@
   "markdown_image_open": "Open image",
   "markdown_image_download": "Download image",
   "observation_activity_running": "Running",
-  "observation_activity_waiting_client": "Waiting for client result",
   "observation_activity_returned": "Returned",
   "observation_activity_missing_result": "No result received",
   "observation_activity_superseded": "Waiting ended: Run continued",

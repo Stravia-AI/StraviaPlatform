@@ -78,7 +78,6 @@
   "markdown_image_open": "打开图片",
   "markdown_image_download": "下载图片",
   "observation_activity_running": "执行中",
-  "observation_activity_waiting_client": "等待客户端回传",
   "observation_activity_returned": "已返回",
   "observation_activity_missing_result": "未收到返回",
   "observation_activity_superseded": "等待已结束：Run 已续接",

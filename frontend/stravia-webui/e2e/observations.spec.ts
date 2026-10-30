@@ -2876,7 +2876,9 @@ test.describe('Interaction Observation canvas', () => {
     await assertOrder()
   })
 
-  test('places concurrent tool results at their actual finish positions live and after reload', async ({ page }) => {
+  test('keeps concurrent tool calls at their start positions with results inline live and after reload', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page, false, false, true, (detail) => {
       if (detail.interaction.id === 'interaction-cinder')
         detail.runs[0].events = detail.runs[0].events.filter((event) => event.sequence >= 20)
@@ -2906,26 +2908,22 @@ test.describe('Interaction Observation canvas', () => {
     }
     const conversation = page.getByRole('log', { name: 'Conversation' })
     const assertOrder = async () => {
-      await expect(conversation.getByRole('button', { name: 'Tool result · Concurrent A', exact: true })).toBeVisible()
+      await expect(conversation.getByRole('button', { name: 'Tool call Concurrent A', exact: true })).toBeVisible()
+      await expect(conversation.getByText('between-results', { exact: true })).toBeVisible()
       const text = await conversation.innerText()
-      const ordered = [
-        'Tool call Concurrent A',
-        'between-first',
-        'Tool call Concurrent B',
-        'Tool result · Concurrent B',
-        'between-results',
-        'Tool result · Concurrent A',
-      ]
+      const ordered = ['Tool call Concurrent A', 'between-first', 'Tool call Concurrent B', 'between-results']
       for (let index = 1; index < ordered.length; index++)
         expect(text.indexOf(ordered[index - 1])).toBeLessThan(text.indexOf(ordered[index]))
       await expect(conversation.locator('[data-activity-kind="tool"]')).toHaveCount(2)
-      await expect(conversation.locator('[data-activity-kind="result"]')).toHaveCount(2)
+      await expect(conversation.locator('[data-activity-kind="tool"][aria-busy="true"]')).toHaveCount(0)
+      await expect(conversation.getByRole('button', { name: /^(Tool|Client) result/ })).toHaveCount(0)
     }
     await assertOrder()
     await page.reload()
     await assertOrder()
-    await conversation.getByRole('button', { name: 'Tool result · Concurrent B', exact: true }).click()
+    await conversation.getByRole('button', { name: 'Tool call Concurrent B', exact: true }).click()
     await expect(conversation.getByText('Finished B', { exact: true })).toBeVisible()
+    await expect(conversation.getByText('Finished A', { exact: true })).toHaveCount(0)
   })
 
   test('groups only consecutive same-name client tools and shows attempt-local output speed', async ({ page }) => {
@@ -3096,7 +3094,7 @@ test.describe('Interaction Observation canvas', () => {
     const b = activity('Read B')
     await expect(a).toHaveAttribute('aria-busy', 'true')
     await expect(b).toHaveAttribute('aria-busy', 'true')
-    await expect(b).toContainText('Waiting for client result')
+    await expect(b).toHaveAttribute('data-activity-status', 'waiting')
     await b.getByRole('button').click()
     const advance = async (next: number, sequence: number) => {
       phase = next
@@ -3114,21 +3112,23 @@ test.describe('Interaction Observation canvas', () => {
     }
     await advance(1, 456)
     await expect(a).toHaveAttribute('aria-busy', 'false')
-    await expect(a).toContainText('Failed')
+    await expect(a).toHaveAttribute('data-activity-status', 'error')
+    await expect(a.getByTitle('Failed', { exact: true })).toBeVisible()
     await expect(b).toHaveAttribute('aria-busy', 'true')
     await expect(search).toHaveAttribute('aria-busy', 'false')
-    await expect(search).toContainText('Failed')
+    await expect(search).toHaveAttribute('data-activity-status', 'error')
     await advance(2, 457)
     await expect(b).toHaveAttribute('aria-busy', 'false')
-    await expect(b).toContainText('Waiting ended: Run continued')
+    await expect(b).toHaveAttribute('data-activity-status', 'missing-result')
+    await expect(b.getByTitle('Waiting ended: Run continued', { exact: true })).toBeVisible()
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
     await advance(3, 458)
-    await expect(b).not.toContainText('Returned')
-    await expect(b).not.toContainText('Waiting ended: Run continued')
-    await expect(b.getByText('legitimate late evidence', { exact: true })).toHaveCount(0)
-    await conversation.getByRole('button', { name: 'Client result · Read B', exact: true }).click()
-    await expect(conversation.getByText('legitimate late evidence', { exact: true })).toBeVisible()
+    await expect(b).toHaveAttribute('data-activity-status', 'returned')
+    await expect(b.getByTitle('Waiting ended: Run continued', { exact: true })).toHaveCount(0)
+    await expect(b).toHaveAttribute('aria-busy', 'false')
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    await expect(b.getByText('legitimate late evidence', { exact: true })).toBeVisible()
+    await expect(conversation.getByRole('button', { name: /^(Tool|Client) result/ })).toHaveCount(0)
     await page.reload()
     await expect(search).toHaveAttribute('aria-busy', 'false')
   })
@@ -3173,7 +3173,8 @@ test.describe('Interaction Observation canvas', () => {
       fixture.emit(event)
       await sendObservation(page, 'observation', event, 12)
       await expect(activity).toHaveAttribute('aria-busy', 'false')
-      await expect(activity).toContainText(label)
+      await expect(activity).toHaveAttribute('data-activity-status', 'missing-result')
+      await expect(activity.getByTitle(label, { exact: true })).toBeVisible()
       await activity.getByRole('button').click()
       await expect(activity.getByText('Client result', { exact: true })).toHaveCount(0)
       await expect(activity.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
@@ -3330,15 +3331,12 @@ test.describe('Interaction Observation canvas', () => {
       await expect(responseTime).toHaveAttribute('datetime', new Date(startedAt + 299_006).toISOString())
       await tool.press('Enter')
       await expect(conversation.getByRole('heading', { name: 'Tool input', exact: true })).toBeVisible()
-      const clientResult = conversation.getByRole('button', { name: 'Client result · Bash', exact: true })
-      await clientResult.click()
       await expect(conversation.getByText('Client result', { exact: true })).toBeVisible()
       await expect(conversation.getByText(/printf/)).toBeVisible()
       await expect(conversation.getByText('tool-output-sentinel', { exact: true })).toBeVisible()
       const platform = conversation.getByRole('button', { name: 'Tool call Web search', exact: true })
       await expect(platform).toHaveAttribute('aria-expanded', 'false')
       await platform.press('Enter')
-      await conversation.getByRole('button', { name: 'Tool result · Web search', exact: true }).press('Enter')
       await expect(conversation.getByText('Tool result', { exact: true })).toBeVisible()
       await expect(conversation.getByText(/platform-output-sentinel/)).toBeVisible()
       await thinking.click()
@@ -4069,6 +4067,8 @@ test.describe('Interaction Observation canvas', () => {
         [
           ['platform_tool_started', { tool_id: 'call-a', name: 'Deploy', input: { query: 'hit-tool-input' } }],
           ['platform_tool_finished', { tool_id: 'call-a', status: 'completed', content: 'hit-tool-result' }],
+          ['platform_tool_started', { tool_id: 'call-b', name: 'Lookup', input: { query: 'hit-lookup-input' } }],
+          ['platform_tool_finished', { tool_id: 'call-b', status: 'completed', content: 'hit-lookup-result' }],
         ] as const
       ).map(([kind, payload], index) => ({
         sequence: 30 + index,
@@ -4110,7 +4110,7 @@ test.describe('Interaction Observation canvas', () => {
       ]),
       hitEvent(21, 'credential_mappings_reused', [
         located(
-          { rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-a' },
+          { rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-b' },
           { rule_id: 'aws-key', source_type: 'system_or_history' },
           { rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'earlier-interaction-call' },
         ),
@@ -4141,6 +4141,7 @@ test.describe('Interaction Observation canvas', () => {
       // Hit tool blocks open without being asked and without touching the saved expansion preference.
       await expect(conversation.getByText('hit-tool-input')).toBeVisible()
       await expect(conversation.getByText('hit-tool-result')).toBeVisible()
+      await expect(conversation.getByText('hit-lookup-result')).toBeVisible()
       expect(
         await page.evaluate(() =>
           Object.keys(localStorage).filter((key) => key.startsWith('stravia:observation-activity:')),
@@ -4154,6 +4155,31 @@ test.describe('Interaction Observation canvas', () => {
       await expect.poll(() => new URL(page.url()).search).toBe('?interaction=interaction-atlas')
       expect(fixture.detailRequests).toHaveLength(detailRequests)
       await expect(inspector).toBeVisible()
+    })
+
+    test('shows a tool call hit and its result hit on the same block', async ({ page }) => {
+      await ruleCatalog(page)
+      const events = [
+        hitEvent(20, 'credential_mappings_created', [
+          located({ rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'call-a' }),
+        ]),
+        hitEvent(21, 'credential_mappings_reused', [
+          located({ rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-a' }),
+        ]),
+        ...toolEvents().slice(0, 2),
+      ]
+      await installObservationFixture(page, false, false, true, withHits(events))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const conversation = page
+        .getByRole('complementary', { name: 'Observation details' })
+        .getByRole('log', { name: 'Conversation' })
+      const block = conversation.locator('[data-credential-hit]')
+      await expect(block).toHaveCount(1)
+      await expect(block).toHaveAttribute('data-credential-hit', 'created')
+      await expect(block.getByRole('button', { name: 'New: GitHub token', exact: true })).toBeVisible()
+      await expect(block.getByRole('button', { name: 'Reused: AWS key', exact: true })).toBeVisible()
+      await expect(block.getByText('hit-tool-input')).toBeVisible()
+      await expect(block.getByText('hit-tool-result')).toBeVisible()
     })
 
     test('sends hits without a block to their run in diagnostics', async ({ page }) => {

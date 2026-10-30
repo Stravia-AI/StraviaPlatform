@@ -125,13 +125,27 @@ describe('observation conversation', () => {
       ]),
     ])
     const refreshed = observationConversationBlocks(durable, [thought, before, after]).get('assistant:first')!
-    const visible = (items: typeof live) =>
-      items.map((item) =>
-        item.kind === 'tool' ? item.name : item.kind === 'result' ? item.activity.results[0].content : item.text,
-      )
-    expect(visible(live)).toEqual(['Reasoning', 'Before', 'Search', 'result', 'After'])
+    const visible = (items: typeof live) => items.map((item) => (item.kind === 'tool' ? item.name : item.text))
+    expect(visible(live)).toEqual(['Reasoning', 'Before', 'Search', 'After'])
     expect(visible(refreshed)).toEqual(visible(live))
-    expect(refreshed.find((item) => item.kind === 'tool')?.results).toEqual([])
+    expect(refreshed.find((item) => item.kind === 'tool')?.results.map((result) => result.content)).toEqual(['result'])
+  })
+
+  test('a client tool call stays one block and gains its result in place when a later run returns it', () => {
+    const handoff = event('root', 2, 'client_tool_handoff', { tool_id: 'read', name: 'Read', input: { path: 'a' } })
+    const waiting = { ...run('root', 1, [handoff]), status: 'waiting_client' }
+    const before = observationConversationBlocks(detail([waiting])).get('assistant:root')!
+    expect(before).toMatchObject([{ kind: 'tool', status: 'waiting', live: true, results: [] }])
+
+    const child = {
+      ...run('child', 3, [event('child', 4, 'client_tool_result', { tool_id: 'read', content: 'ok' })]),
+      parent_run_id: 'root',
+    }
+    const blocks = observationConversationBlocks(detail([{ ...waiting, status: 'completed' }, child]))
+    expect(blocks.get('assistant:root')).toMatchObject([
+      { kind: 'tool', id: before[0].id, status: 'returned', live: false, results: [{ content: 'ok' }] },
+    ])
+    expect(blocks.get('assistant:child') ?? []).toEqual([])
   })
 
   test('prepending and replaying overlapping event pages preserves causal text and existing messages', () => {
