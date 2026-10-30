@@ -14,12 +14,13 @@ import {
   refreshHitRecords,
   ruleSetLabel,
 } from '#lib/credential-hit-records.js'
+import { hitWindowQuery, type HitWindow } from '#lib/credential-hit-window.js'
 import { formatLogTime, formatNumber } from '#lib/format.js'
 
 import type { CredentialDiscoveryRecord, CredentialHit, CredentialRuleSet } from '#lib/types.js'
 
 import HitRecordSheet from './hit-record-sheet.svelte'
-import * as Alert from '#lib/components/ui/alert/index.js'
+import RequestFailure from '#lib/components/request-failure.svelte'
 import { Badge, badgeVariants } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
@@ -31,13 +32,15 @@ import HistoryIcon from '@lucide/svelte/icons/history'
 interface Props {
   /** 命中记录页签是否正在显示；隐藏时不自动刷新。 */
   active: boolean
+  /** 按创建时间筛选的窗口；换成新对象后从第一页重新加载。 */
+  range: HitWindow
   ruleNames: ReadonlyMap<string, string>
   rulesPending: boolean
   onOpenRule: (ruleId: string) => void
   onTest: () => void
 }
 
-let { active, ruleNames, rulesPending, onOpenRule, onTest }: Props = $props()
+let { active, range, ruleNames, rulesPending, onOpenRule, onTest }: Props = $props()
 
 const ESTIMATED_ROW_HEIGHT = 92
 // 距列表末尾还剩这么多行时就预取下一页，避免滚动到底才开始等待。
@@ -62,7 +65,9 @@ let detailOpen = $state(false)
 let selectedRecord = $state.raw<CredentialDiscoveryRecord | null>(null)
 let selectedHitIndex = $state(0)
 
-const autoRefresh = $derived(active && pageVisible && atTop && headLoaded && !refreshing && failure !== 'head')
+const autoRefresh = $derived(
+  active && range.live && pageVisible && atTop && headLoaded && !refreshing && failure !== 'head',
+)
 
 const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
   count: 0,
@@ -73,7 +78,12 @@ const virtualizer = createVirtualizer<HTMLDivElement, HTMLDivElement>({
 
 onMount(() => {
   pageVisible = document.visibilityState === 'visible'
-  void reset()
+})
+
+// 挂载与时间窗口变化都从第一页重新开始；页面只在用户操作时换新窗口对象。
+$effect(() => {
+  void range
+  untrack(() => void reset())
 })
 
 // 虚拟化器不会自己发现滚动容器与行集合的变化；每次换成新的 getItemKey 才会让它丢弃按旧下标缓存的测量。
@@ -112,7 +122,16 @@ $effect(() => {
 })
 
 function fetchPage(cursor?: string) {
-  return admin.credentialProtection.discoveries({ limit: HIT_RECORDS_PAGE_SIZE, cursor })
+  return admin.credentialProtection.discoveries({
+    limit: HIT_RECORDS_PAGE_SIZE,
+    cursor,
+    ...hitWindowQuery(range, Date.now()),
+  })
+}
+
+/** 由页面的刷新按钮调用：丢弃已加载的行，按当前窗口重新取第一页。 */
+export function reload(): void {
+  void reset()
 }
 
 async function reset(): Promise<void> {
@@ -167,7 +186,7 @@ async function refresh(): Promise<void> {
       lastFetchAt = previousFetchAt
       return
     }
-    const refreshed = refreshHitRecords({ items, nextCursor }, page)
+    const refreshed = refreshHitRecords({ items, nextCursor }, page, Date.now() - range.spanMs)
     items = refreshed.items
     nextCursor = refreshed.nextCursor
   } catch {
@@ -307,103 +326,120 @@ function openRuleFromChip(event: MouseEvent, ruleId: string): void {
   </ul>
 {/snippet}
 
-{#if failure === 'head'}
-  <Alert.Root variant="destructive" class="shrink-0"
-    ><Alert.Description>{m.credential_protection_discoveries_failed()}</Alert.Description></Alert.Root>
-  <Button class="shrink-0 self-start" variant="outline" onclick={retry}>{m.common_retry()}</Button>
-{:else if !headLoaded}
-  <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-    ><Spinner />{m.credential_protection_discoveries_loading()}</span>
-{:else if !items.length}
-  <Empty.Root class="min-h-72"
-    ><Empty.Header
-      ><Empty.Media variant="icon"><HistoryIcon /></Empty.Media>
-      <Empty.Title>{m.credential_protection_no_records()}</Empty.Title>
-      <Empty.Description>{m.credential_protection_discoveries_empty()}</Empty.Description></Empty.Header>
-    <Empty.Content
-      ><Button variant="outline" onclick={onTest}
-        >{m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" /></Button
-      ></Empty.Content>
-  </Empty.Root>
-{/if}
-
-<div
-  class={['hit-table', { 'hit-table--hidden': !items.length }]}
-  role="table"
-  aria-label={m.credential_protection_discoveries_title()}
-  aria-rowcount={nextCursor ? -1 : items.length + 1}>
-  <div class="hit-header hit-grid" role="row" style:padding-right="{scrollbarWidth}px">
-    <div role="columnheader">{m.credential_protection_hit_records_created_at()}</div>
-    <div role="columnheader">{m.credential_protection_discoveries_api_key()}</div>
-    <div role="columnheader">{m.credential_protection_hit_records_rule_sets()}</div>
-    <div role="columnheader">{m.credential_protection_hit_records_created_by()}</div>
-    <div role="columnheader">{m.credential_protection_hit_records_hits()}</div>
-  </div>
-  <div bind:this={scroller} class="hit-scroller" data-slot="hit-records-viewport" onscroll={handleScroll}>
-    <div class="relative w-full" role="rowgroup" style:height="{$virtualizer.getTotalSize()}px">
-      {#each $virtualizer.getVirtualItems() as row (row.key)}
-        {@const record = items[row.index]}
-        {#if record}
-          <div
-            class="hit-row hit-grid"
-            role="row"
-            aria-rowindex={row.index + 2}
-            tabindex="0"
-            data-index={row.index}
-            style:transform="translateY({row.start}px)"
-            use:measureRow={row.index}
-            onclick={() => openRecord(record)}
-            onkeydown={(event) => handleRowKeydown(event, record)}>
-            <div role="cell" class="hit-time">{formatLogTime(record.created_at)}</div>
-            <div role="cell" class="hit-key">
-              {record.api_key_name ?? m.credential_protection_discoveries_unknown_key()}
-            </div>
-            <div role="cell" class="hit-rulesets">
-              <span class="hit-cell-label">{m.credential_protection_hit_records_rule_sets()}</span>
-              {@render ruleSetBadges(record.rule_sets)}
-            </div>
-            <div role="cell" class="hit-rules">
-              <span class="hit-cell-label">{m.credential_protection_hit_records_created_by()}</span>
-              {@render createdRules(record.rule_ids)}
-            </div>
-            <div role="cell" class="hit-hits">
-              <span class="hit-cell-label">{m.credential_protection_hit_records_hits()}</span>
-              {#if record.hits.length}
-                {@render hitChips(record.hits, record.omitted_hits)}
-              {:else}
-                <span class="text-muted-foreground" aria-hidden="true">—</span>
-              {/if}
-            </div>
-          </div>
-        {/if}
-      {/each}
+<div class="hit-records">
+  {#if failure === 'head'}
+    <div class="hit-state">
+      <RequestFailure class="w-full max-w-xl" message={m.credential_protection_discoveries_failed()} {retry} />
     </div>
-    {#if loadingMore}
-      <div class="hit-footer text-sm text-muted-foreground" role="status">
-        <Spinner />{m.credential_protection_discoveries_loading()}
+  {:else if !headLoaded}
+    <div class="hit-state">
+      <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
+        ><Spinner />{m.credential_protection_discoveries_loading()}</span>
+    </div>
+  {:else if !items.length}
+    <div class="hit-state">
+      <Empty.Root
+        ><Empty.Header
+          ><Empty.Media variant="icon"><HistoryIcon /></Empty.Media>
+          <Empty.Title>{m.credential_protection_no_records_in_range()}</Empty.Title>
+          <Empty.Description>{m.credential_protection_discoveries_empty_in_range()}</Empty.Description></Empty.Header>
+        <Empty.Content
+          ><Button variant="outline" onclick={onTest}
+            >{m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" /></Button
+          ></Empty.Content>
+      </Empty.Root>
+    </div>
+  {/if}
+
+  <div
+    class={['hit-table', { 'hit-table--hidden': !items.length }]}
+    role="table"
+    aria-label={m.credential_protection_discoveries_title()}
+    aria-rowcount={nextCursor ? -1 : items.length + 1}>
+    <div class="hit-header hit-grid" role="row" style:padding-right="{scrollbarWidth}px">
+      <div role="columnheader">{m.credential_protection_hit_records_created_at()}</div>
+      <div role="columnheader">{m.credential_protection_discoveries_api_key()}</div>
+      <div role="columnheader">{m.credential_protection_hit_records_rule_sets()}</div>
+      <div role="columnheader">{m.credential_protection_hit_records_created_by()}</div>
+      <div role="columnheader">{m.credential_protection_hit_records_hits()}</div>
+    </div>
+    <div bind:this={scroller} class="hit-scroller" data-slot="hit-records-viewport" onscroll={handleScroll}>
+      <div class="relative w-full" role="rowgroup" style:height="{$virtualizer.getTotalSize()}px">
+        {#each $virtualizer.getVirtualItems() as row (row.key)}
+          {@const record = items[row.index]}
+          {#if record}
+            <div
+              class="hit-row hit-grid"
+              role="row"
+              aria-rowindex={row.index + 2}
+              tabindex="0"
+              data-index={row.index}
+              style:transform="translateY({row.start}px)"
+              use:measureRow={row.index}
+              onclick={() => openRecord(record)}
+              onkeydown={(event) => handleRowKeydown(event, record)}>
+              <div role="cell" class="hit-time">{formatLogTime(record.created_at)}</div>
+              <div role="cell" class="hit-key">
+                {record.api_key_name ?? m.credential_protection_discoveries_unknown_key()}
+              </div>
+              <div role="cell" class="hit-rulesets">
+                <span class="hit-cell-label">{m.credential_protection_hit_records_rule_sets()}</span>
+                {@render ruleSetBadges(record.rule_sets)}
+              </div>
+              <div role="cell" class="hit-rules">
+                <span class="hit-cell-label">{m.credential_protection_hit_records_created_by()}</span>
+                {@render createdRules(record.rule_ids)}
+              </div>
+              <div role="cell" class="hit-hits">
+                <span class="hit-cell-label">{m.credential_protection_hit_records_hits()}</span>
+                {#if record.hits.length}
+                  {@render hitChips(record.hits, record.omitted_hits)}
+                {:else}
+                  <span class="text-muted-foreground" aria-hidden="true">—</span>
+                {/if}
+              </div>
+            </div>
+          {/if}
+        {/each}
       </div>
-    {:else if failure === 'more'}
-      <div class="hit-footer">
-        <Alert.Root variant="destructive"
-          ><Alert.Description>{m.credential_protection_discoveries_failed()}</Alert.Description></Alert.Root>
-        <Button variant="outline" size="sm" onclick={retry}>{m.common_retry()}</Button>
-      </div>
-    {/if}
+      {#if loadingMore}
+        <div class="hit-footer text-sm text-muted-foreground" role="status">
+          <Spinner />{m.credential_protection_discoveries_loading()}
+        </div>
+      {:else if failure === 'more'}
+        <div class="hit-footer">
+          <RequestFailure class="w-full" message={m.credential_protection_discoveries_failed()} {retry} />
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 
 <HitRecordSheet bind:open={detailOpen} bind:hitIndex={selectedHitIndex} record={selectedRecord} {ruleNames} />
 
 <style>
-/* 记录较少时保持自然高度，较多时在滚动区内部滚动。 */
+.hit-records {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.hit-state {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  place-items: center;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+}
+/* 工作区外框已提供边界：表格贴边，记录较少时保持自然高度，较多时在滚动区内部滚动。 */
 .hit-table {
   display: flex;
   flex: 0 1 auto;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
-  border-radius: var(--radius-md, 0.375rem);
 }
 .hit-table--hidden {
   display: none;

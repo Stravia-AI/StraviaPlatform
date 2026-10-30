@@ -68,11 +68,11 @@ test.beforeEach(async ({ page }) => {
 })
 
 for (const width of [390, 320]) {
-  test(`DataTable toolbar puts search on its own row without overlap at ${width}px`, async ({ page }) => {
+  test(`rules toolbar puts search on its own row without overlap at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 })
     await page.goto('/reversible-redaction')
     await page.getByRole('tab', { name: /Current rules/ }).click()
-    const toolbar = page.locator('[data-slot="data-table-toolbar"]')
+    const toolbar = page.locator('[data-slot="credential-rules-toolbar"]')
     await expect(toolbar).toBeVisible()
     const search = toolbar.locator('[data-slot="input-group"]').first()
     const filter = toolbar.getByLabel('Rule source')
@@ -90,14 +90,23 @@ for (const width of [390, 320]) {
   })
 }
 
-test('DataTable toolbar keeps search and actions on one row when the table is wide', async ({ page }) => {
+test('rules toolbar keeps tabs, search, filter and Add on one row when the workspace is wide', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/reversible-redaction')
   await page.getByRole('tab', { name: /Current rules/ }).click()
-  const toolbar = page.locator('[data-slot="data-table-toolbar"]')
-  const [searchBox, filterBox] = await boxes([toolbar.locator('input').first(), toolbar.getByLabel('Rule source')])
-  expect(Math.abs(searchBox.y - filterBox.y)).toBeLessThan(searchBox.height)
-  expect(searchBox.x).toBeGreaterThan(filterBox.x)
+  const toolbar = page.locator('[data-slot="credential-rules-toolbar"]')
+  const [tabsBox, searchBox, filterBox, addBox] = await boxes([
+    page.getByRole('tablist'),
+    toolbar.locator('input').first(),
+    toolbar.getByLabel('Rule source'),
+    toolbar.getByRole('button', { name: 'Add custom rule' }),
+  ])
+  for (const box of [searchBox, filterBox, addBox]) {
+    expect(Math.abs(tabsBox.y + tabsBox.height / 2 - (box.y + box.height / 2))).toBeLessThan(tabsBox.height / 2)
+  }
+  expect(tabsBox.x + tabsBox.width).toBeLessThanOrEqual(searchBox.x)
+  expect(searchBox.x + searchBox.width).toBeLessThanOrEqual(filterBox.x + 0.5)
+  expect(filterBox.x + filterBox.width).toBeLessThanOrEqual(addBox.x + 0.5)
 })
 
 test('workbench list scrolls inside the remaining height and keeps the paginator reachable', async ({ page }) => {

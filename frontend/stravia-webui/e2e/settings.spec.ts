@@ -2144,7 +2144,7 @@ test('credential protection table keeps its header above the draggable body scro
   const viewport = scrollArea.locator('[data-scroll-area-viewport]')
   const main = page.getByRole('main')
   const paginator = page.locator('[data-slot="data-table-paginator"]')
-  // 规则区占满窗口剩余高度：任何窗口高度下分页器都贴在底部，表体内部滚动。
+  // 规则区占满窗口剩余高度：任何窗口高度下分页器都贴在工作区底部（只隔着外框边线与分页器内边距），表体内部滚动。
   for (const height of [800, 1039]) {
     await page.setViewportSize({ width: 1280, height })
     await expect
@@ -2152,7 +2152,7 @@ test('credential protection table keeps its header above the draggable body scro
         const mainBox = (await main.boundingBox())!
         const paginatorBox = (await paginator.boundingBox())!
         const bottomGap = mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
-        return bottomGap >= 0 && bottomGap <= 24
+        return bottomGap >= 0 && bottomGap <= 40
       })
       .toBe(true)
   }
@@ -2162,13 +2162,14 @@ test('credential protection table keeps its header above the draggable body scro
   await expect(thumb).toBeVisible()
   const headerBefore = (await header.boundingBox())!
   await expect.poll(async () => (await bar.boundingBox())!.y).toBeCloseTo(headerBefore.y + headerBefore.height, 0)
+  // 表格贴着工作区外框：滚动条叠在表体右缘之内，不越过外框边线。
   await expect
     .poll(async () => {
       const viewportBox = (await viewport.boundingBox())!
       const barBox = (await bar.boundingBox())!
-      return barBox.x - viewportBox.x - viewportBox.width
+      return viewportBox.x + viewportBox.width - (barBox.x + barBox.width)
     })
-    .toBeGreaterThanOrEqual(0)
+    .toBeGreaterThanOrEqual(-0.5)
   const thumbBox = (await thumb.boundingBox())!
   await page.mouse.move(thumbBox.x + thumbBox.width / 2, thumbBox.y + thumbBox.height / 2)
   await page.mouse.down()
@@ -2430,12 +2431,12 @@ test('credential protection distinguishes failed saves, unavailable observations
   await expect(catalog.getByRole('alert')).toContainText('Rules could not be loaded.', { timeout: 15_000 })
   unavailable = false
   await catalog.getByRole('button', { name: 'Retry', exact: true }).click()
-  await expect(catalog.locator('#credential-rule-search')).toBeVisible()
+  await expect(page.locator('#credential-rule-search')).toBeVisible()
   await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
   await expect(timeline.getByRole('alert')).toContainText('Hit records are unavailable.')
-  await expect(timeline.getByText('No credential mappings have been created yet.')).toHaveCount(0)
+  await expect(timeline.getByText('No credential mappings were created in this period.', { exact: false })).toHaveCount(0)
   await timeline.getByRole('button', { name: 'Retry', exact: true }).click()
-  await expect(timeline.getByText('No credential mappings have been created yet.')).toBeVisible()
+  await expect(timeline.getByText('No credential mappings were created in this period.', { exact: false })).toBeVisible()
   await expect(timeline.getByRole('alert')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
   await page.getByRole('textbox', { name: 'Text to test', exact: true }).fill('test_credential')
@@ -2477,7 +2478,7 @@ test('credential protection separates setting load failure from empty rules and 
     page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
   ).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('switch')).toBeDisabled()
-  await expect(page.getByText('No credential mappings have been created yet.', { exact: true })).toBeVisible()
+  await expect(page.getByText('No credential mappings were created in this period.', { exact: false })).toBeVisible()
   await page.getByRole('tab', { name: /Current rules/ }).click()
   await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
   settingsUnavailable = false

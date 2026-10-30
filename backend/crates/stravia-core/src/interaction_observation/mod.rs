@@ -5476,6 +5476,7 @@ mod snapshot_tests {
                 .credential_discoveries(CredentialDiscoveryQuery {
                     cursor: cursor.take(),
                     limit: Some(1),
+                    ..Default::default()
                 })
                 .await?;
             assert_eq!(page.items.len(), 1);
@@ -5488,6 +5489,7 @@ mod snapshot_tests {
             .credential_discoveries(CredentialDiscoveryQuery {
                 cursor: Some(serde_json::to_string(&(1, 1))?),
                 limit: Some(10),
+                ..Default::default()
             })
             .await?;
         assert_eq!(
@@ -5497,6 +5499,83 @@ mod snapshot_tests {
                 .collect::<Vec<_>>(),
             ["1.0"]
         );
+
+        // 时间窗按创建事件的 occurred_at 过滤：左闭右开，两端各自可选。
+        let window_ids = |page: &super::CredentialDiscoveryPage| {
+            page.items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let start_only = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                start_at: Some(now - 19),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(window_ids(&start_only), ["16.0", "5.0", "3.0"]);
+        assert!(start_only.next_cursor.is_none());
+
+        // 上界不含：`now - 10` 的两行必须被排除。
+        let end_only = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                end_at: Some(now - 10),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(window_ids(&end_only), ["16.0", "6.0", "2.0", "1.1", "1.0"]);
+        assert!(end_only.next_cursor.is_none());
+
+        let window = (now - 31, now - 9);
+        let both = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                start_at: Some(window.0),
+                end_at: Some(window.1),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(
+            window_ids(&both),
+            ["16.0", "5.0", "3.0", "2.0", "1.1", "1.0"]
+        );
+
+        // 空窗（`end_at <= start_at`）不报错，直接返回空页。
+        for (start_at, end_at) in [(now - 10, now - 10), (now - 10, now - 20)] {
+            let empty = store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    start_at: Some(start_at),
+                    end_at: Some(end_at),
+                    ..Default::default()
+                })
+                .await?;
+            assert!(empty.items.is_empty());
+            assert!(empty.next_cursor.is_none());
+        }
+
+        // 游标在窗口内翻页时，只返回窗口内的行。
+        let mut cursor: Option<String> = None;
+        let mut paged = Vec::new();
+        loop {
+            let page = store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    start_at: Some(window.0),
+                    end_at: Some(window.1),
+                    cursor: cursor.take(),
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .await?;
+            assert!(page.items.len() <= 1);
+            for item in &page.items {
+                assert!(item.created_at >= window.0 && item.created_at < window.1);
+                paged.push(item.id.clone());
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(paged, ["16.0", "5.0", "3.0", "2.0", "1.1", "1.0"]);
 
         let error = store
             .credential_discoveries(CredentialDiscoveryQuery {

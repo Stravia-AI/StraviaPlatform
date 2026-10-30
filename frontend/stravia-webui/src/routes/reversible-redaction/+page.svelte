@@ -12,17 +12,24 @@ import type { CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib
 import PageHeader from '#lib/components/page-header.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
 import CredentialMatchItem from '#lib/components/credential-match-item.svelte'
+import RequestFailure from '#lib/components/request-failure.svelte'
+import TimeWindowControls from '#lib/components/time-window-controls.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
+import { Input } from '#lib/components/ui/input/index.js'
+import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import { renderSnippet } from '@tanstack/svelte-table'
 import ListFilterIcon from '@lucide/svelte/icons/list-filter'
 import HistoryIcon from '@lucide/svelte/icons/history'
 import ScanTextIcon from '@lucide/svelte/icons/scan-text'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
 import InfoIcon from '@lucide/svelte/icons/info'
+import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import SearchIcon from '@lucide/svelte/icons/search'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import CustomRuleSheet from './custom-rule-sheet.svelte'
@@ -43,6 +50,14 @@ import {
   CUSTOM_CREDENTIAL_RULES_KEY,
   customCredentialRulesQuery,
 } from '#lib/credential-protection-queries.js'
+import {
+  customHitWindow,
+  hitWindowBounds,
+  isValidHitRange,
+  shiftHitWindow,
+  toLocalDateTimeInput,
+  type HitWindow,
+} from '#lib/credential-hit-window.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
@@ -70,13 +85,22 @@ let detailsOpen = $state(false)
 let selectedRule = $state.raw<CredentialRule>()
 let customSheet = $state<{ show: (rule: CustomCredentialRule | null) => void }>()
 let originFilter = $state('all')
+let ruleSearch = $state('')
+let pagination = $state({ pageIndex: 0, pageSize: 25 })
 const rules = $derived(rulesQuery.data?.rules ?? [])
 const customRules = $derived(customRulesQuery.data ?? [])
 const ruleRows = $derived<RuleRow[]>([
   ...customRules.map((rule): RuleRow => ({ origin: 'custom', id: rule.id, name: rule.name, rule })),
   ...rules.map((rule): RuleRow => ({ origin: 'builtin', id: rule.id, name: rule.name, rule })),
 ])
-const visibleRows = $derived(originFilter === 'all' ? ruleRows : ruleRows.filter((row) => row.origin === originFilter))
+const visibleRows = $derived.by(() => {
+  const needle = ruleSearch.trim().toLocaleLowerCase()
+  return ruleRows.filter(
+    (row) =>
+      (originFilter === 'all' || row.origin === originFilter) &&
+      (!needle || ruleSearchText(row).toLocaleLowerCase().includes(needle)),
+  )
+})
 const ruleNames = $derived(new Map(ruleRows.map((row) => [row.id, row.name])))
 const ruleRowById = $derived(new Map(ruleRows.map((row) => [row.id, row])))
 const originFilterLabel = $derived(
@@ -98,20 +122,13 @@ const tableLabels = $derived({
 })
 const ruleColumn = createDataTableColumnHelper<RuleRow>()
 const ruleColumns = ruleColumn.columns([
-  // 自定义规则的匹配文本可能就是凭据本身，不参与搜索索引。
-  ruleColumn.accessor(
-    (row) =>
-      row.origin === 'builtin'
-        ? `${row.name} ${row.id} ${row.rule.target} ${row.rule.description}`
-        : `${row.name} ${row.id} ${row.rule.description}`,
-    {
-      id: 'rule',
-      header: () => m.credential_protection_rule_name(),
-      meta: { label: () => m.credential_protection_rule_name(), width: 'compact' },
-      cell: (context) => renderSnippet(ruleNameCell, context),
-      size: 288,
-    },
-  ),
+  ruleColumn.accessor(ruleSearchText, {
+    id: 'rule',
+    header: () => m.credential_protection_rule_name(),
+    meta: { label: () => m.credential_protection_rule_name(), width: 'compact' },
+    cell: (context) => renderSnippet(ruleNameCell, context),
+    size: 288,
+  }),
   ruleColumn.accessor((row) => (row.origin === 'builtin' ? row.rule.keywords.join(' ') : ''), {
     id: 'conditions',
     header: () => m.credential_protection_rule_conditions(),
@@ -121,6 +138,56 @@ const ruleColumns = ruleColumn.columns([
     size: 320,
   }),
 ])
+
+// 自定义规则的匹配文本可能就是凭据本身，不参与搜索索引。
+function ruleSearchText(row: RuleRow): string {
+  return row.origin === 'builtin'
+    ? `${row.name} ${row.id} ${row.rule.target} ${row.rule.description} ${row.rule.keywords.join(' ')}`
+    : `${row.name} ${row.id} ${row.rule.description}`
+}
+
+const HOUR_MS = 3_600_000
+const windowPresets = $derived([
+  { value: String(6 * HOUR_MS), label: m.stats_last_6h() },
+  { value: String(24 * HOUR_MS), label: m.stats_last_24h() },
+  { value: String(72 * HOUR_MS), label: m.stats_last_3d() },
+  { value: String(168 * HOUR_MS), label: m.stats_last_7d() },
+])
+// 默认 7 天与观察记录的默认保留期一致，打开页面就能看到全部保留的命中。
+let hitWindow = $state.raw<HitWindow>({ live: true, custom: false, spanMs: 168 * HOUR_MS })
+let hitRecords = $state<{ reload: () => void }>()
+// 实时窗口的起点随时间推移，时间条每秒跟进一次；固定窗口不需要。
+let now = $state(Date.now())
+let rangeOpen = $state(false)
+let draftStart = $state('')
+let draftEnd = $state('')
+const hitBounds = $derived(hitWindowBounds(hitWindow, now))
+const windowPresetValue = $derived(hitWindow.custom ? '' : String(hitWindow.spanMs))
+const windowSelectedLabel = $derived(
+  windowPresets.find((preset) => preset.value === windowPresetValue)?.label ?? m.observation_custom_range(),
+)
+const draftStartMs = $derived(new Date(draftStart).getTime())
+const draftEndMs = $derived(new Date(draftEnd).getTime())
+const validDraftRange = $derived(isValidHitRange(draftStartMs, draftEndMs))
+
+$effect(() => {
+  if (tab !== 'records' || !hitWindow.live) return
+  now = Date.now()
+  const timer = setInterval(() => (now = Date.now()), 1000)
+  return () => clearInterval(timer)
+})
+
+function openRange(): void {
+  draftStart = toLocalDateTimeInput(hitBounds.startAt)
+  draftEnd = toLocalDateTimeInput(hitBounds.endAt)
+  rangeOpen = true
+}
+
+function applyRange(): void {
+  if (!validDraftRange) return
+  rangeOpen = false
+  hitWindow = customHitWindow(draftStartMs, draftEndMs)
+}
 
 function patternKeywords(rule: CustomCredentialRule): string[] {
   return rule.spec.mode === 'pattern' ? rule.spec.keywords : []
@@ -225,9 +292,6 @@ function selectMatch(match: CredentialMatch): void {
     }}>
     <InfoIcon data-icon="inline-start" />{m.credential_protection_details()}
   </Button>
-  <Button onclick={() => customSheet?.show(null)}>
-    <PlusIcon data-icon="inline-start" />{m.credential_custom_add()}
-  </Button>
 {/snippet}
 
 {#snippet ruleNameCell(context: DataTableCellContext<RuleRow>)}
@@ -326,25 +390,86 @@ function selectMatch(match: CredentialMatch): void {
     </section>
   {/if}
 
-  <Tabs.Root bind:value={tab} class="min-h-0 min-w-0 gap-0">
-    <Tabs.List aria-label={m.reversible_redaction_title()}>
-      <Tabs.Trigger value="records"><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
-      <Tabs.Trigger value="rules"
-        ><ListFilterIcon />{m.credential_protection_catalog_title()}
-        {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(ruleRows.length)}</Badge>{/if}
-      </Tabs.Trigger>
-      <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
-    </Tabs.List>
+  <Tabs.Root
+    bind:value={tab}
+    class="credential-workspace relative min-h-0 min-w-0 gap-0 rounded-lg border bg-background">
+    <div class="workspace-toolbar">
+      <Tabs.List aria-label={m.reversible_redaction_title()}>
+        <Tabs.Trigger value="records"><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
+        <Tabs.Trigger value="rules"
+          ><ListFilterIcon />{m.credential_protection_catalog_title()}
+          {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(ruleRows.length)}</Badge>{/if}
+        </Tabs.Trigger>
+        <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
+      </Tabs.List>
+      {#if tab === 'records'}
+        <TimeWindowControls
+          presets={windowPresets}
+          value={windowPresetValue}
+          selectedLabel={windowSelectedLabel}
+          startMs={hitBounds.startAt}
+          endMs={hitBounds.endAt}
+          live={hitWindow.live}
+          selectLabel={m.credential_protection_records_window_label()}
+          rangeLabel={m.observation_choose_range()}
+          olderLabel={m.observation_older_window()}
+          newerLabel={m.observation_newer_window()}
+          newerDisabled={hitWindow.live}
+          onpreset={(value: string) => (hitWindow = { live: true, custom: false, spanMs: Number(value) })}
+          onolder={() => (hitWindow = shiftHitWindow(hitWindow, -1, Date.now()))}
+          onnewer={() => (hitWindow = shiftHitWindow(hitWindow, 1, Date.now()))}
+          onrange={openRange}>
+          {#snippet trailing()}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={m.credential_protection_records_refresh()}
+              onclick={() => hitRecords?.reload()}><RefreshCwIcon /></Button>
+          {/snippet}
+        </TimeWindowControls>
+      {:else if tab === 'rules'}
+        <div class="toolbar-actions" data-slot="credential-rules-toolbar">
+          {#if !rulesQuery.isError}
+            <InputGroup.Root class="w-full min-w-0 sm:w-auto sm:max-w-72 sm:flex-1 sm:basis-48">
+              <InputGroup.Input
+                id="credential-rule-search"
+                bind:value={ruleSearch}
+                aria-label={m.credential_protection_catalog_search()}
+                placeholder={m.credential_protection_catalog_search()}
+                oninput={() => (pagination = { ...pagination, pageIndex: 0 })} />
+              <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+            </InputGroup.Root>
+            <Select.Root
+              type="single"
+              bind:value={originFilter}
+              onValueChange={() => (pagination = { ...pagination, pageIndex: 0 })}>
+              <Select.Trigger class="w-36" aria-label={m.credential_custom_filter_label()}
+                >{originFilterLabel}</Select.Trigger>
+              <Select.Content>
+                <Select.Group>
+                  <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
+                  <Select.Item value="builtin">{m.credential_custom_filter_builtin()}</Select.Item>
+                  <Select.Item value="custom">{m.credential_custom_filter_custom()}</Select.Item>
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          {/if}
+          <Button onclick={() => customSheet?.show(null)}>
+            <PlusIcon data-icon="inline-start" />{m.credential_custom_add()}
+          </Button>
+        </div>
+      {/if}
+    </div>
 
     <Tabs.Content value="records" class="flex min-h-0 min-w-0 flex-col">
-      <section
-        class="workspace-panel flex min-h-0 flex-1 flex-col gap-3"
-        aria-labelledby="credential-discoveries-title">
+      <section class="workspace-panel" aria-labelledby="credential-discoveries-title">
         <h2 id="credential-discoveries-title" class="sr-only">
           {m.credential_protection_discoveries_title()}
         </h2>
         <HitRecords
+          bind:this={hitRecords}
           active={tab === 'records'}
+          range={hitWindow}
           {ruleNames}
           rulesPending={rulesQuery.isPending || customRulesQuery.isPending}
           onOpenRule={(ruleId: string) => {
@@ -358,25 +483,26 @@ function selectMatch(match: CredentialMatch): void {
     </Tabs.Content>
 
     <Tabs.Content value="rules" class="flex min-h-0 min-w-0 flex-col">
-      <section class="workspace-panel flex min-h-0 flex-1 flex-col" aria-labelledby="credential-rules-title">
+      <section class="workspace-panel rules-panel" aria-labelledby="credential-rules-title">
         <h2 id="credential-rules-title" class="sr-only">{m.credential_protection_catalog_title()}</h2>
         {#if rulesQuery.isError}
-          <Alert.Root variant="destructive"
-            ><Alert.Description>{m.credential_protection_catalog_failed()}</Alert.Description></Alert.Root>
-          <Button class="mt-3" variant="outline" onclick={() => void rulesQuery.refetch()}>{m.common_retry()}</Button>
+          <div class="panel-state">
+            <RequestFailure
+              class="w-full max-w-xl"
+              message={m.credential_protection_catalog_failed()}
+              retry={() => rulesQuery.refetch()} />
+          </div>
         {:else}
           {#if customRulesQuery.isError}
-            <Alert.Root variant="destructive" class="mb-3"
-              ><Alert.Description class="flex flex-wrap items-center justify-between gap-3"
-                >{m.credential_custom_load_failed()}
-                <Button variant="outline" size="sm" onclick={() => void customRulesQuery.refetch()}
-                  >{m.common_retry()}</Button
-                ></Alert.Description
-              ></Alert.Root>
+            <div class="panel-notice">
+              <RequestFailure
+                message={m.credential_custom_load_failed()}
+                retry={() => customRulesQuery.refetch()} />
+            </div>
           {/if}
           <DataTable
             workbench
-            class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
+            class="min-h-0 flex-1"
             data={visibleRows}
             columns={ruleColumns}
             labels={tableLabels}
@@ -386,26 +512,10 @@ function selectMatch(match: CredentialMatch): void {
             stickyHeader
             loading={rulesQuery.isPending}
             loadingRows={8}
-            globalFilterEnabled
-            globalFilterId="credential-rule-search"
-            globalFilterPlaceholder={m.credential_protection_catalog_search()}
             paginator
-            pagination={{ pageIndex: 0, pageSize: 25 }}
+            bind:pagination
             pageSizeOptions={[10, 25, 50]}
             onRowClick={({ row }: DataTableRowPointerEvent<RuleRow>) => openRule(row.original)}>
-            {#snippet toolbar()}
-              <Select.Root type="single" bind:value={originFilter}>
-                <Select.Trigger class="w-40" aria-label={m.credential_custom_filter_label()}
-                  >{originFilterLabel}</Select.Trigger>
-                <Select.Content>
-                  <Select.Group>
-                    <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
-                    <Select.Item value="builtin">{m.credential_custom_filter_builtin()}</Select.Item>
-                    <Select.Item value="custom">{m.credential_custom_filter_custom()}</Select.Item>
-                  </Select.Group>
-                </Select.Content>
-              </Select.Root>
-            {/snippet}
             {#snippet empty()}
               <Empty.Root
                 ><Empty.Header
@@ -511,6 +621,58 @@ function selectMatch(match: CredentialMatch): void {
     </Tabs.Content>
   </Tabs.Root>
 </div>
+
+<Dialog.Root bind:open={rangeOpen}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <div class="flex items-center gap-1.5">
+        <Dialog.Title>{m.observation_date_time_range()}</Dialog.Title>
+        <Field.Help hint={m.observation_range_local_time()} />
+      </div>
+      <Dialog.Description>{m.credential_protection_records_range_help()}</Dialog.Description>
+    </Dialog.Header>
+    <form
+      class="flex flex-col gap-4"
+      onsubmit={(event) => {
+        event.preventDefault()
+        applyRange()
+      }}>
+      <Field.FieldGroup>
+        <Field.Field data-invalid={!validDraftRange || undefined}>
+          <Field.FieldLabel for="credential-range-start">{m.observation_start_time()}</Field.FieldLabel>
+          <Input
+            id="credential-range-start"
+            type="datetime-local"
+            step="1"
+            required
+            bind:value={draftStart}
+            aria-invalid={!validDraftRange}
+            aria-describedby={validDraftRange ? undefined : 'credential-range-help'} />
+        </Field.Field>
+        <Field.Field data-invalid={!validDraftRange || undefined}>
+          <Field.FieldLabel for="credential-range-end">{m.observation_end_time()}</Field.FieldLabel>
+          <Input
+            id="credential-range-end"
+            type="datetime-local"
+            step="1"
+            required
+            bind:value={draftEnd}
+            aria-invalid={!validDraftRange}
+            aria-describedby={validDraftRange ? undefined : 'credential-range-help'} />
+        </Field.Field>
+      </Field.FieldGroup>
+      {#if !validDraftRange}
+        <p id="credential-range-help" class="text-sm text-destructive" role="alert">
+          {m.credential_protection_records_range_invalid()}
+        </p>
+      {/if}
+      <Dialog.Footer>
+        <Button variant="outline" onclick={() => (rangeOpen = false)}>{m.common_cancel()}</Button>
+        <Button type="submit" disabled={!validDraftRange}>{m.observation_apply_range()}</Button>
+      </Dialog.Footer>
+    </form>
+  </Dialog.Content>
+</Dialog.Root>
 
 <CustomRuleSheet
   bind:this={customSheet}
@@ -679,10 +841,10 @@ function selectMatch(match: CredentialMatch): void {
 
 <style>
 .table-workspace {
-  /* 页头与可选的错误区段取自然高度，页签区吸收其余高度；不依赖兄弟节点数量定位行。 */
+  /* 页头与可选的错误区段取自然高度，工作区吸收其余高度；不依赖兄弟节点数量定位行。 */
   display: flex;
   flex-direction: column;
-  /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给规则工作区；超出时页面滚动并保留底部内边距。 */
+  /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给工作区；超出时页面滚动并保留底部内边距。 */
   min-height: calc(100svh - 5rem);
 }
 @media (max-width: 767px) {
@@ -691,22 +853,84 @@ function selectMatch(match: CredentialMatch): void {
   }
 }
 /* 工作区不以表格内容撑高，而是吸收剩余高度，表体在其中滚动。
- * 低窗口至少保留 24rem 的列表工作区（外加页签与面板上内边距）；窄屏的工具栏与分页器各占多行，需要更多高度。
- * 命中记录与现有规则共用这套布局。 */
-.table-workspace > :global([data-slot='tabs']) {
-  flex: 1 1 calc(24rem + 4.5rem);
-  min-height: calc(24rem + 4.5rem);
+ * 低窗口至少保留 24rem 的列表工作区（外加工具栏）；窄屏的工具栏与分页器各占多行，需要更多高度。
+ * 命中记录与现有规则共用这套布局；匹配测试以自然高度显示。 */
+.table-workspace > :global(.credential-workspace) {
+  flex: 1 1 calc(24rem + 3.5rem + 2px);
+  min-height: calc(24rem + 3.5rem + 2px);
   contain: size;
 }
 @media (max-width: 767px) {
-  .table-workspace > :global([data-slot='tabs']) {
-    flex-basis: calc(34rem + 4.5rem);
-    min-height: calc(34rem + 4.5rem);
+  .table-workspace > :global(.credential-workspace) {
+    flex-basis: calc(34rem + 7rem);
+    min-height: calc(34rem + 7rem);
+  }
+}
+.workspace-toolbar {
+  display: flex;
+  flex-shrink: 0;
+  min-height: 3.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+}
+.toolbar-actions {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+@media (max-width: 767px) {
+  .workspace-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .toolbar-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar-actions :global([data-slot='select-trigger']) {
+    width: 100%;
   }
 }
 .workspace-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   min-width: 0;
-  padding-top: 1.5rem;
+}
+.panel-state {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  padding: 2rem 1rem;
+}
+.panel-notice {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+}
+/* 工作区外框已提供边界：规则表贴边，分页器与表体以细线分隔。
+ * 表格滚动条默认画在表格盒外侧，贴边后改为叠在表格内。 */
+.rules-panel :global([data-slot='data-table']) {
+  gap: 0;
+}
+.rules-panel :global([data-slot='data-table-viewport']) {
+  border: 0;
+  border-radius: 0;
+}
+.rules-panel :global([data-scroll-area-scrollbar]) {
+  translate: none;
+}
+.rules-panel :global([data-slot='data-table-footer']) {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
 }
 .rule-link {
   display: flex;
@@ -756,9 +980,6 @@ function selectMatch(match: CredentialMatch): void {
 .test-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
   background: var(--card);
 }
 .test-input-pane {

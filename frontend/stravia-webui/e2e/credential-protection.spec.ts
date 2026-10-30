@@ -60,6 +60,8 @@ const otherStart = entryText.indexOf('other_secret')
 
 interface DiscoveryQuery {
   cursor: string | null
+  startAt: number | null
+  endAt: number | null
 }
 
 type DiscoveryReply = { items: CredentialDiscoveryRecord[]; next_cursor?: string | null } | { status: number }
@@ -195,7 +197,8 @@ async function mockRedaction(page: Page, options: MockOptions = {}) {
     if (pathname.endsWith('/rules')) return route.fulfill({ json: { data: { rules, prefilter: '', filter: '' } } })
     if (pathname.endsWith('/discoveries')) {
       const params = new URL(request.url()).searchParams
-      const query = { cursor: params.get('cursor') }
+      const bound = (name: string) => (params.has(name) ? Number(params.get(name)) : null)
+      const query = { cursor: params.get('cursor'), startAt: bound('start_at'), endAt: bound('end_at') }
       state.discoveryRequests.push(query)
       const reply = options.discoveryPage?.(query, state.discoveryRequests.length) ?? {
         items: query.cursor ? [] : (options.discoveries ?? []),
@@ -358,7 +361,7 @@ test.describe('hit records', () => {
     await expect(hits.getByText('+4', { exact: true })).toBeVisible()
   })
 
-  test('opens a side panel with field context, the full entry and match details', async ({ page }) => {
+  test('opens a side panel with the hit, its tool and the full entry', async ({ page }) => {
     await mockRedaction(page, {
       discoveries: [
         discovery(0, {
@@ -371,18 +374,22 @@ test.describe('hit records', () => {
     await page.goto('/reversible-redaction')
     const row = rowOf(page, 'omp-key')
     const dialog = await openRow(page)
+    // 初始焦点在关闭按钮：落在工具 ID 的 Tooltip 触发器上会弹出气泡，并吞掉第一次 Escape。
+    await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
     await expect(dialog.getByRole('heading', { name: /omp-key/ })).toBeVisible()
     await expect(dialog.getByRole('heading', { name: /2026/ })).toBeVisible()
 
-    await expect(chip(dialog, 'Fixture credential 0', 'Tool result')).toHaveAttribute('aria-pressed', 'true')
-    const fieldSection = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) })
-    await expect(fieldSection).toContainText('Tool result')
-    await expect(fieldSection).toContainText('Lookup')
-    await expect(fieldSection).toContainText('tool-1')
-    const context = dialog.locator('.context-box')
-    await expect(context).toContainText('fourth line')
-    await expect(context).toContainText('sixth line')
-    await expect(context).not.toContainText('first line')
+    // 唯一的命中没有可选项，不画成按钮；规则与来源只写一次，已覆盖的创建规则不再重复。
+    const hitSection = dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Hits' }) })
+    await expect(hitSection.getByRole('button', { name: /found in/ })).toHaveCount(0)
+    await expect(hitSection).toContainText('Fixture credential 0')
+    await expect(hitSection).toContainText('Tool result')
+    await expect(hitSection).toContainText('Lookup')
+    await expect(hitSection).toContainText('tool-1')
+    await expect(dialog.getByText('Rule sets', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Created by', { exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('Source', { exact: true })).toHaveCount(0)
 
     const entry = dialog.locator('[data-slot="credential-entry"]')
     await expect(entry).toContainText('fourth line')
@@ -404,6 +411,69 @@ test.describe('hit records', () => {
     const reopened = await openRow(page)
     await expect(reopened.locator('[data-slot="credential-entry"]')).not.toContainText('test_credential')
     await expect(reopened.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+  })
+
+  test('opens a long entry centred on the hit and lists matches only when they add something', async ({ page }) => {
+    const lines = Array.from({ length: 120 }, (_, index) => `filler line ${index + 1}`)
+    lines[89] = 'token: long_secret_value'
+    const text = lines.join('\n')
+    const start = text.indexOf('long_secret_value')
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      detail: () =>
+        availableDetail({
+          text,
+          matches: [
+            {
+              rule_id: 'fixture-rule-0',
+              start,
+              end: start + 'long_secret_value'.length,
+              start_line: 90,
+              start_column: 8,
+              end_line: 90,
+              end_column: 25,
+              hit: true,
+            },
+          ],
+        }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    const mask = entry.getByRole('button', { name: 'Show matched text' })
+    await expect(mask).toBeVisible()
+    // 命中位于第 90 行，条目框必须已经滚到它；否则用户得到的是第 1 行起的无关内容。
+    await expect
+      .poll(() =>
+        entry.evaluate((box) => {
+          const frame = box.getBoundingClientRect()
+          const target = box.querySelector('[data-match-index="0"]')?.getBoundingClientRect()
+          return target !== undefined && target.top >= frame.top && target.bottom <= frame.bottom
+        }),
+      )
+      .toBe(true)
+    // 唯一的匹配就是命中本身，不再单列一遍。
+    await expect(dialog.getByRole('heading', { name: 'Matches' })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })).toHaveCount(0)
+  })
+
+  test('keeps the creating rules when no hit lists them', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [discovery(0, { rule_ids: ['fixture-rule-0'], hits: [] })],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await expect(dialog.getByText('Created by', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('Fixture credential 0', { exact: true })).toBeVisible()
+    await expect(dialog.getByText('No hit context is available for this mapping.')).toBeVisible()
+    await expect(dialog.locator('[data-slot="credential-entry"]')).toHaveCount(0)
   })
 
   test('switches hits without leaking the previous entry and re-masks the snippet', async ({ page }) => {
@@ -464,10 +534,7 @@ test.describe('hit records', () => {
     await expect(entry).not.toContainText('secret_one')
     await expect(entry).not.toContainText('secret_two')
     await expect(entry.getByRole('button', { name: 'Show matched text' })).toBeVisible()
-    await expect(dialog.getByRole('heading', { name: 'Field context' })).toBeVisible()
-    await expect(
-      dialog.locator('section').filter({ has: page.getByRole('heading', { name: 'Field context' }) }),
-    ).toContainText('Reader')
+    await expect(dialog.getByText('Reader', { exact: true })).toBeVisible()
     expect(state.detailRequests).toEqual([
       { id: '100.0', index: 0 },
       { id: '100.0', index: 1 },
@@ -596,7 +663,7 @@ test.describe('hit records', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
     const empty = await openRow(page, 'empty-key')
-    await expect(empty.getByText('No later reuse.')).toBeVisible()
+    await expect(empty.getByText('None yet.')).toBeVisible()
     expect(state.reuseRequests).toEqual(['100.1'])
   })
 
@@ -700,7 +767,7 @@ test.describe('hit records', () => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     await expect(page.getByRole('alert')).toContainText('Hit records are unavailable.')
-    await expect(page.getByText('No credential mappings have been created yet.')).toHaveCount(0)
+    await expect(page.getByText('No credential mappings were created in this period.', { exact: false })).toHaveCount(0)
     await page.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(rowOf(page, 'omp-key')).toBeVisible()
     await expect(page.getByRole('alert')).toHaveCount(0)
@@ -866,6 +933,124 @@ test.describe('hit records', () => {
   }
 })
 
+test.describe('hit records time range', () => {
+  const HOUR = 3_600_000
+  const frozen = new Date('2026-10-27T09:00:00Z')
+  const frozenMs = frozen.getTime()
+  const near = (actual: number | null, expected: number) =>
+    actual !== null && Math.abs(actual - expected) < 60_000
+
+  test('lists the last 7 days by default and keeps the time controls on this tab only', async ({ page }) => {
+    await page.clock.install({ time: frozen })
+    const state = await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+    expect(state.discoveryRequests).toHaveLength(1)
+    // 实时窗口只带起点；终点是“现在”，新命中不会被终点挡住。
+    expect(near(state.discoveryRequests[0].startAt, frozenMs - 168 * HOUR)).toBe(true)
+    expect(state.discoveryRequests[0].endAt).toBeNull()
+    await expect(page.getByRole('button', { name: 'Hit records time range' })).toContainText('Last 7d')
+    await expect(page.getByRole('button', { name: 'Reload hit records' })).toBeVisible()
+    await expect(page.locator('#credential-rule-search')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add custom rule' })).toHaveCount(0)
+
+    await openRules(page)
+    await expect(page.getByRole('button', { name: 'Hit records time range' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Reload hit records' })).toHaveCount(0)
+    await expect(page.locator('#credential-rule-search')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add custom rule' })).toBeVisible()
+
+    await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Hit records time range' })).toHaveCount(0)
+    await expect(page.locator('#credential-rule-search')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add custom rule' })).toHaveCount(0)
+  })
+
+  test('reloads from the first page when a preset is chosen and steps through older and newer windows', async ({
+    page,
+  }) => {
+    await page.clock.install({ time: frozen })
+    const state = await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Hit records time range' }).click()
+    await page.getByRole('option', { name: 'Last 6h' }).click()
+    await expect.poll(() => state.discoveryRequests.length).toBe(2)
+    expect(near(state.discoveryRequests[1].startAt, frozenMs - 6 * HOUR)).toBe(true)
+    expect(state.discoveryRequests[1].endAt).toBeNull()
+    await expect(page.getByRole('button', { name: 'Newer', exact: true })).toBeDisabled()
+
+    // 较早：紧邻当前实时窗口之前的 6 小时，起止都固定。
+    await page.getByRole('button', { name: 'Older', exact: true }).click()
+    await expect.poll(() => state.discoveryRequests.length).toBe(3)
+    const older = state.discoveryRequests[2]
+    expect(near(older.endAt, frozenMs - 6 * HOUR)).toBe(true)
+    expect(older.startAt).toBe((older.endAt ?? 0) - 6 * HOUR)
+    await expect(page.getByRole('button', { name: 'Newer', exact: true })).toBeEnabled()
+
+    // 较新追上现在时回到实时窗口，只带起点。
+    await page.getByRole('button', { name: 'Newer', exact: true }).click()
+    await expect.poll(() => state.discoveryRequests.length).toBe(4)
+    expect(near(state.discoveryRequests[3].startAt, frozenMs - 6 * HOUR)).toBe(true)
+    expect(state.discoveryRequests[3].endAt).toBeNull()
+    await expect(page.getByRole('button', { name: 'Newer', exact: true })).toBeDisabled()
+  })
+
+  test('applies a custom range exactly as entered and rejects an end that is not after the start', async ({ page }) => {
+    await page.clock.install({ time: frozen })
+    const state = await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Choose date and time range' }).click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByLabel('Start time').fill('2026-10-01T08:00')
+    await dialog.getByLabel('End time').fill('2026-10-01T08:00')
+    await expect(dialog.getByRole('alert')).toContainText('End time must be after start time')
+    await expect(dialog.getByRole('button', { name: 'Apply' })).toBeDisabled()
+
+    // 跨度不设上限：这里是 10 天。
+    await dialog.getByLabel('End time').fill('2026-10-11T08:00')
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Apply' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect.poll(() => state.discoveryRequests.length).toBe(2)
+    const [start, end] = [new Date('2026-10-01T08:00'), new Date('2026-10-11T08:00')]
+    expect(state.discoveryRequests[1]).toMatchObject({ cursor: null, startAt: start.getTime(), endAt: end.getTime() })
+    await expect(page.getByRole('button', { name: 'Hit records time range' })).toContainText('Custom')
+  })
+
+  test('explains an empty range and reloads on request', async ({ page }) => {
+    await page.clock.install({ time: frozen })
+    const state = await mockRedaction(page, { discoveryPage: (_query, call) => ({ items: call === 1 ? [] : [discovery(0)] }) })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(page.getByText('No hit records in this time range')).toBeVisible()
+    await expect(page.getByText('No credential mappings were created in this period.', { exact: false })).toBeVisible()
+    await page.getByRole('button', { name: 'Reload hit records' }).click()
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+    expect(state.discoveryRequests).toHaveLength(2)
+    await expect(page.getByText('No hit records in this time range')).toHaveCount(0)
+  })
+
+  test('does not refresh a fixed window in the background', async ({ page }) => {
+    await page.clock.install({ time: frozen })
+    const state = await mockRedaction(page, { discoveries: [discovery(0)] })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    await expect(rowOf(page, 'omp-key')).toBeVisible()
+    await page.getByRole('button', { name: 'Older', exact: true }).click()
+    await expect.poll(() => state.discoveryRequests.length).toBe(2)
+    await page.clock.pauseAt(new Date('2026-10-27T09:00:10Z'))
+    await page.clock.runFor(120_000)
+    expect(state.discoveryRequests).toHaveLength(2)
+  })
+})
+
 test.describe('rules workspace', () => {
   test('fills the 120rem container and the remaining height at 2560px with content-sized columns', async ({ page }) => {
     await mockRedaction(page)
@@ -885,28 +1070,29 @@ test.describe('rules workspace', () => {
     const conditionCell = await box(table.getByRole('columnheader').nth(1))
     expect(nameCell.width).toBeLessThan(500)
     expect(conditionCell.width).toBeGreaterThan(nameCell.width * 2)
-    // 分页器贴在工作区底部，没有固定限高造成的大块留白。
+    // 分页器贴在工作区底部：只隔着外框边线、分页器内边距与主内容区的正常底部内边距，没有大块留白。
     const main = await box(page.getByRole('main'))
     const paginator = await box(page.locator('[data-slot="data-table-paginator"]'))
     const gap = main.y + main.height - paginator.y - paginator.height
     expect(gap).toBeGreaterThanOrEqual(0)
-    expect(gap).toBeLessThanOrEqual(24)
+    expect(gap).toBeLessThanOrEqual(36)
   })
 
   for (const width of [390, 320]) {
-    test(`keeps search, filter, tabs and paginator apart and operable at ${width}px`, async ({ page }) => {
+    test(`keeps tabs, search, filter, add and paginator apart and operable at ${width}px`, async ({ page }) => {
       await mockRedaction(page)
       await page.setViewportSize({ width, height: 800 })
       await page.goto('/reversible-redaction')
       await openRules(page)
-      const toolbar = page.locator('[data-slot="data-table-toolbar"]')
-      await expect(toolbar).toBeVisible()
       const tabs = await box(page.getByRole('tablist'))
-      const search = await box(toolbar.locator('[data-slot="input-group"]').first())
-      const filter = await box(toolbar.getByLabel('Rule source'))
+      const search = await box(page.locator('#credential-rule-search').locator('xpath=ancestor::*[@data-slot="input-group"]'))
+      const filter = await box(page.getByLabel('Rule source'))
+      const add = await box(page.getByRole('button', { name: 'Add custom rule' }))
       expect(search.y).toBeGreaterThanOrEqual(tabs.y + tabs.height - 0.5)
       expect(filter.y).toBeGreaterThanOrEqual(search.y + search.height - 0.5)
+      expect(add.y).toBeGreaterThanOrEqual(filter.y + filter.height - 0.5)
       expect(overlaps(search, filter)).toBe(false)
+      expect(overlaps(filter, add)).toBe(false)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 
       const next = page.getByRole('button', { name: 'Next', exact: true })
@@ -1062,6 +1248,7 @@ test.describe('custom rule Sheet', () => {
     await mockRedaction(page)
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.goto('/reversible-redaction')
+    await openRules(page)
     await page.getByRole('button', { name: 'Add custom rule' }).click()
     const sheet = sheetOf(page)
     await expect(sheet.getByRole('heading', { name: 'Add custom rule' })).toBeVisible()
