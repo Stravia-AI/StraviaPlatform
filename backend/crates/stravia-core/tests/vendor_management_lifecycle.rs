@@ -1615,7 +1615,11 @@ async fn allowance_reset_reads_once_at_deadline_without_optimistically_resuming(
     // Await the upstream event itself, rather than sleeping and assuming the timer fired.
     let request = tokio::time::timeout(std::time::Duration::from_secs(10), upstream.next()).await?;
     assert_eq!(request.operation(), "allowance");
-    assert!(chrono::Utc::now().timestamp_millis() >= reset);
+    let observed_at = chrono::Utc::now().timestamp_millis();
+    assert!(
+        observed_at >= reset,
+        "reset={reset}, observed_at={observed_at}"
+    );
     let held = gateway
         .admin()
         .get_provider_allowance_suspension(&provider.id)

@@ -34,11 +34,23 @@ async fn suspended_allowance_providers(
     Ok(SuspendedAllowanceProviders { ids, refreshable })
 }
 
-async fn run_allowance_suspension_lifecycle(gw: Gateway) {
+async fn run_allowance_suspension_lifecycle(gw: Gateway, startup: SuspendedAllowanceProviders) {
     let cancellation = gw.lifecycle.cancellation.clone();
     let admin = gw.admin();
     let mut fired = std::collections::HashMap::<String, i64>::new();
-    let mut startup = true;
+    for (id, reset_at) in startup.refreshable {
+        if let Some(reset_at) = reset_at
+            && reset_at <= chrono::Utc::now().timestamp_millis()
+        {
+            fired.insert(id.clone(), reset_at);
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            result = admin.refresh_provider_allowance(&id) => {
+                if let Err(error) = result { tracing::warn!(provider_id = %id, error = ?error, "startup allowance refresh failed"); }
+            }
+        }
+    }
     loop {
         let suspended = match suspended_allowance_providers(&gw).await {
             Ok(suspended) => suspended,
@@ -55,23 +67,6 @@ async fn run_allowance_suspension_lifecycle(gw: Gateway) {
             }
         };
         fired.retain(|id, _| suspended.ids.contains(id));
-        if startup {
-            for (id, reset_at) in suspended.refreshable {
-                if let Some(reset_at) = reset_at
-                    && reset_at <= chrono::Utc::now().timestamp_millis()
-                {
-                    fired.insert(id.clone(), reset_at);
-                }
-                tokio::select! {
-                    _ = cancellation.cancelled() => return,
-                    result = admin.refresh_provider_allowance(&id) => {
-                        if let Err(error) = result { tracing::warn!(provider_id = %id, error = ?error, "startup allowance refresh failed"); }
-                    }
-                }
-            }
-            startup = false;
-            continue;
-        }
         let mut next = None::<(String, i64)>;
         for (id, reset_at) in suspended.refreshable {
             let Some(reset_at) = reset_at else { continue };
@@ -701,9 +696,11 @@ impl Gateway {
         }
 
         {
+            // 在发布 Gateway 前冻结启动恢复集合，后台首次轮询不能纳入后来新增的暂停。
+            let startup = suspended_allowance_providers(&gw).await?;
             let gw_suspension = gw.background_clone();
             gw.lifecycle.spawn(async move {
-                run_allowance_suspension_lifecycle(gw_suspension).await;
+                run_allowance_suspension_lifecycle(gw_suspension, startup).await;
             });
         }
 

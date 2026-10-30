@@ -725,7 +725,7 @@ def test_postgres_peer_currency_refresh_uses_snapshot_and_converted_limit(
     logs_a: list[str] = []
     logs_b: list[str] = []
     try:
-        with usage_upstream() as (upstream, _, _):
+        with usage_upstream() as (upstream, _, _, _):
             port_a = find_free_port()
             base_a = f"http://127.0.0.1:{port_a}"
             process_a, logs_a = start_stravia_server(
