@@ -1,75 +1,106 @@
 use super::*;
 
-pub(super) fn project_client_output(
-    ingress: Option<ProtocolId>,
-    response: &AiResponse,
-    prefix: &mut [AiItem],
-) -> Result<Vec<AiItem>, TurnCommitError> {
-    let Some(ingress) = ingress else {
-        return Ok(generic_client_history_output(response));
-    };
-    project_client_history(ingress, response, prefix).map_err(TurnCommitError::Storage)
-}
-
-pub(super) struct ProjectedClientCommit<'a> {
-    pub(super) client_request_delta: Cow<'a, AiRequest>,
-    pub(super) client_items: Vec<AiItem>,
-    pub(super) client_output: Vec<AiItem>,
-    pub(super) client_history_mutation: Option<EffectiveHistoryMutation<'static>>,
+#[derive(Clone)]
+pub(super) struct ProjectedClientCommit {
+    /// Canonical client instructions persisted beside the delta. The request
+    /// itself is not retained: controls and session identity are already
+    /// folded into `client_history`.
+    pub(super) client_instructions: Option<String>,
+    /// Immutable delta handles appended to the client window.
+    pub(super) client_delta_items: Vec<FrozenItem>,
+    /// Full client window including this node's output.
+    pub(super) client_items: Vec<FrozenItem>,
+    pub(super) client_output: Vec<FrozenItem>,
+    /// Window length before the output was appended; the Replace mutation
+    /// stores exactly this retained prefix.
+    pub(super) client_history_end: usize,
+    pub(super) replace_client_history: bool,
     pub(super) client_history: ClientHistoryState,
     pub(super) client_item_units: usize,
 }
 
-pub(super) fn project_client_commit<'a>(
+pub(super) fn project_client_commit(
     parent: &ActiveGenerationChain,
-    request_delta: &'a AiRequest,
+    request_delta: &AiRequest,
     response: &AiResponse,
-) -> Result<ProjectedClientCommit<'a>, TurnCommitError> {
+) -> Result<ProjectedClientCommit, TurnCommitError> {
     let fresh_states = &parent.fresh_inline_states;
-    let inline_boundary = stravia_protocol_codec::codec::open_responses::inline_compaction_boundary;
     let mut client_request_delta = canonical_client_history_request(request_delta);
     let mut client_items = parent
         .replacement_client_items
         .clone()
         .unwrap_or_else(|| parent.parent_client_items.clone());
     let parent_items = client_items.len();
+    // Freeze the canonical delta once; the client window and the persisted
+    // delta then share every item handle.
+    let mut client_delta_items = match &mut client_request_delta {
+        Cow::Borrowed(request) => freeze_slice(&request.items),
+        Cow::Owned(request) => freeze_items(std::mem::take(&mut request.items)),
+    };
     if parent.replacement_client_items.is_none() {
-        client_items.extend(client_request_delta.items.clone());
+        client_items.extend(client_delta_items.iter().cloned());
     }
     let ingress = ProtocolTransform::inferred_ingress(request_delta);
     let rewrites_delta = ingress
         == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
         && has_gemini_tool_calls(&client_items);
-    let mut client_output = project_client_output(ingress, response, &mut client_items)?;
-    let client_inline = if let Some(start) = inline_boundary(&client_output, fresh_states) {
-        client_items.clear();
-        client_output.drain(..start);
-        true
-    } else if let Some(start) = inline_boundary(&client_items, fresh_states) {
-        client_items.drain(..start);
-        true
-    } else {
-        false
-    };
-    let client_history_mutation = (client_inline || parent.replacement_client_items.is_some())
-        .then(|| EffectiveHistoryMutation::Replace {
-            items: Cow::Owned(client_items.clone()),
-        });
-    if client_history_mutation.is_none() && rewrites_delta {
-        client_request_delta.to_mut().items = client_items[parent_items..].to_vec();
+    let mut client_output = project_client_output_shared(ingress, response, &mut client_items)?;
+    let client_inline =
+        if let Some(start) = shared_inline_compaction_boundary(&client_output, fresh_states) {
+            client_items.clear();
+            client_output.drain(..start);
+            true
+        } else if let Some(start) = shared_inline_compaction_boundary(&client_items, fresh_states) {
+            client_items.drain(..start);
+            true
+        } else {
+            false
+        };
+    let replace_client_history = client_inline || parent.replacement_client_items.is_some();
+    if !replace_client_history && rewrites_delta {
+        // Normalization may have detached delta items in the shared window;
+        // persist those handles. The request copy itself is never needed.
+        client_delta_items = client_items[parent_items..].to_vec();
     }
-    client_items.extend(client_output.clone());
+    let client_history_end = client_items.len();
+    client_items.extend(client_output.iter().cloned());
     // 输出改写与压缩替换完成后才投影；计数只随这个不可变快照传递，不缓存可变请求。
     let (client_history, client_item_units) =
         ClientHistoryState::from_request_with_count(&client_request_delta, &client_items);
+    let client_instructions = match client_request_delta {
+        Cow::Borrowed(request) => request.instructions.clone(),
+        Cow::Owned(request) => request.instructions,
+    };
     Ok(ProjectedClientCommit {
-        client_request_delta,
+        client_instructions,
+        client_delta_items,
         client_items,
         client_output,
-        client_history_mutation,
+        client_history_end,
+        replace_client_history,
         client_history,
         client_item_units,
     })
+}
+
+/// Client output projection over a shared window. Gemini alias normalization
+/// rewrites only the items that actually change; the rest keep their handles.
+fn project_client_output_shared(
+    ingress: Option<ProtocolId>,
+    response: &AiResponse,
+    prefix: &mut [FrozenItem],
+) -> Result<Vec<FrozenItem>, TurnCommitError> {
+    let Some(ingress) = ingress else {
+        return Ok(freeze_items(generic_client_history_output(response)));
+    };
+    if ingress == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+        let mut output = freeze_items(gemini_client_history_output(response));
+        normalize_gemini_client_tool_ids_shared(prefix.iter_mut().chain(output.iter_mut()));
+        return Ok(output);
+    }
+    project_client_history(ingress, response, &mut [])
+        .map(freeze_items)
+        .map_err(TurnCommitError::Storage)
 }
 
 impl ClientHistoryState {
@@ -203,6 +234,14 @@ fn project_anthropic_history(response: &AiResponse) -> Vec<AiItem> {
 }
 
 fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<AiItem> {
+    let mut output = gemini_client_history_output(response);
+    normalize_gemini_client_tool_ids(prefix.iter_mut().chain(output.iter_mut()));
+    output
+}
+
+/// Gemini client history output before alias normalization; shared callers
+/// normalize their handle-based window and this fresh output in one pass.
+fn gemini_client_history_output(response: &AiResponse) -> Vec<AiItem> {
     let mut output = generic_client_history_output(response);
     for item in &mut output {
         if let MessageContent::Blocks(blocks) = &mut item.content
@@ -232,12 +271,12 @@ fn project_gemini_history(response: &AiResponse, prefix: &mut [AiItem]) -> Vec<A
             }
         }
     }
-    normalize_gemini_client_tool_ids(prefix.iter_mut().chain(output.iter_mut()));
     output
 }
 
-pub(crate) fn has_gemini_tool_calls(items: &[AiItem]) -> bool {
+pub(crate) fn has_gemini_tool_calls<I: HistoryItem>(items: &[I]) -> bool {
     items.iter().any(|item| {
+        let item = item.history_item();
         item.tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
@@ -249,60 +288,146 @@ pub(crate) fn has_gemini_tool_calls(items: &[AiItem]) -> bool {
 pub(super) fn normalize_gemini_client_tool_ids<'a>(
     items: impl IntoIterator<Item = &'a mut AiItem>,
 ) {
-    let mut ids = HashMap::<
-        stravia_runtime_contract::protocol::ir::ToolCallId,
-        stravia_runtime_contract::protocol::ir::ToolCallId,
-    >::new();
-    let mut names = HashMap::<String, stravia_runtime_contract::protocol::ir::ToolCallId>::new();
-
+    let mut aliases = GeminiToolAliases::default();
     for item in items {
-        if let MessageContent::Blocks(blocks) = &mut item.content {
-            for block in blocks {
-                match block {
-                    ContentBlock::ToolUse {
-                        id, name, input, ..
-                    } => {
-                        let stable = stravia_runtime_contract::protocol::ir::ToolCallId::new(
-                            stable_gemini_tool_id(name, input),
-                        );
-                        ids.insert(id.clone(), stable.clone());
-                        names.insert(name.clone(), stable.clone());
-                        *id = stable;
-                    }
-                    ContentBlock::ToolResult { tool_use_id, .. } => {
-                        if let Some(stable) = ids
-                            .get(tool_use_id)
-                            .or_else(|| names.get(tool_use_id.as_str()))
-                            .cloned()
-                        {
-                            *tool_use_id = stable;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(tool_calls) = item.tool_calls.as_mut() {
-            for call in tool_calls {
-                let arguments = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone()));
-                let stable = stravia_runtime_contract::protocol::ir::ToolCallId::new(
-                    stable_gemini_tool_id(&call.name, &arguments),
-                );
-                ids.insert(call.id.clone(), stable.clone());
-                names.insert(call.name.clone(), stable.clone());
-                call.id = stable;
-            }
-        }
-        if let Some(tool_call_id) = item.tool_call_id.as_mut()
-            && let Some(stable) = ids
-                .get(tool_call_id)
-                .or_else(|| names.get(tool_call_id.as_str()))
-                .cloned()
-        {
-            *tool_call_id = stable;
+        let rewrites = gemini_id_rewrites(item, &mut aliases);
+        if !rewrites.is_empty() {
+            apply_gemini_id_rewrites(item, rewrites);
         }
     }
+}
+
+/// Shared-window alias normalization: the read-only pass records both the
+/// alias table and the exact ID substitutions, so an unchanged item keeps its
+/// shared allocation while changed items are detached once.
+fn normalize_gemini_client_tool_ids_shared<'a>(
+    items: impl IntoIterator<Item = &'a mut FrozenItem>,
+) {
+    let mut aliases = GeminiToolAliases::default();
+    for item in items {
+        let rewrites = gemini_id_rewrites(item.as_ref(), &mut aliases);
+        if !rewrites.is_empty() {
+            apply_gemini_id_rewrites(item.make_mut(), rewrites);
+        }
+    }
+}
+
+#[derive(Default)]
+struct GeminiToolAliases {
+    ids: HashMap<
+        stravia_runtime_contract::protocol::ir::ToolCallId,
+        stravia_runtime_contract::protocol::ir::ToolCallId,
+    >,
+    names: HashMap<String, stravia_runtime_contract::protocol::ir::ToolCallId>,
+}
+
+/// Exact ID substitutions planned by the single read-only alias pass.
+#[derive(Default)]
+struct GeminiIdRewrites {
+    blocks: Vec<(usize, stravia_runtime_contract::protocol::ir::ToolCallId)>,
+    tool_calls: Vec<(usize, stravia_runtime_contract::protocol::ir::ToolCallId)>,
+    tool_call_id: Option<stravia_runtime_contract::protocol::ir::ToolCallId>,
+}
+
+impl GeminiIdRewrites {
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.tool_calls.is_empty() && self.tool_call_id.is_none()
+    }
+}
+
+fn gemini_id_rewrites(item: &AiItem, aliases: &mut GeminiToolAliases) -> GeminiIdRewrites {
+    use stravia_runtime_contract::protocol::ir::ToolCallId;
+
+    let mut rewrites = GeminiIdRewrites::default();
+    if let MessageContent::Blocks(blocks) = &item.content {
+        for (index, block) in blocks.iter().enumerate() {
+            match block {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
+                    let stable: ToolCallId = stable_gemini_tool_id(name, input).into();
+                    if *id != stable {
+                        rewrites.blocks.push((index, stable.clone()));
+                    }
+                    aliases.ids.insert(id.clone(), stable.clone());
+                    aliases.names.insert(name.clone(), stable);
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    if let Some(stable) = aliases
+                        .ids
+                        .get(tool_use_id)
+                        .or_else(|| aliases.names.get(tool_use_id.as_str()))
+                        && *tool_use_id != *stable
+                    {
+                        rewrites.blocks.push((index, stable.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(tool_calls) = item.tool_calls.as_ref() {
+        for (index, call) in tool_calls.iter().enumerate() {
+            let arguments = gemini_tool_arguments(call);
+            let stable: ToolCallId = stable_gemini_tool_id(&call.name, &arguments).into();
+            if call.id != stable {
+                rewrites.tool_calls.push((index, stable.clone()));
+            }
+            aliases.ids.insert(call.id.clone(), stable.clone());
+            aliases.names.insert(call.name.clone(), stable);
+        }
+    }
+    if let Some(tool_call_id) = item.tool_call_id.as_ref()
+        && let Some(stable) = aliases
+            .ids
+            .get(tool_call_id)
+            .or_else(|| aliases.names.get(tool_call_id.as_str()))
+        && *tool_call_id != *stable
+    {
+        rewrites.tool_call_id = Some(stable.clone());
+    }
+    rewrites
+}
+
+fn apply_gemini_id_rewrites(item: &mut AiItem, rewrites: GeminiIdRewrites) {
+    let AiItem {
+        content,
+        tool_calls,
+        tool_call_id,
+        ..
+    } = item;
+    if let MessageContent::Blocks(blocks) = content {
+        for (index, replacement) in rewrites.blocks {
+            if let Some(
+                ContentBlock::ToolUse { id, .. }
+                | ContentBlock::ToolResult {
+                    tool_use_id: id, ..
+                },
+            ) = blocks.get_mut(index)
+            {
+                *id = replacement;
+            }
+        }
+    }
+    if let Some(calls) = tool_calls.as_mut() {
+        for (index, replacement) in rewrites.tool_calls {
+            if let Some(call) = calls.get_mut(index) {
+                call.id = replacement;
+            }
+        }
+    }
+    if let Some(replacement) = rewrites.tool_call_id
+        && let Some(slot) = tool_call_id.as_mut()
+    {
+        *slot = replacement;
+    }
+}
+
+fn gemini_tool_arguments(
+    call: &stravia_runtime_contract::protocol::ir::ToolCall,
+) -> serde_json::Value {
+    serde_json::from_str(&call.arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone()))
 }
 
 fn stable_gemini_tool_id(name: &str, arguments: &serde_json::Value) -> String {
@@ -349,7 +474,7 @@ pub(super) fn item_reference_node_ids(ingress: ProtocolId, items: &[AiItem]) -> 
 pub(super) fn resolve_protocol_item_references(
     ingress: ProtocolId,
     items: &mut [AiItem],
-    catalog: &[AiItem],
+    catalog: &[FrozenItem],
 ) -> Result<(), String> {
     if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24 {
         let requested: std::collections::HashSet<&str> =
@@ -373,8 +498,8 @@ pub(super) fn resolve_protocol_item_references(
                         == item.meta.as_ref().and_then(|meta| meta.get("phase"));
                     if !same_phase
                         || !stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
-                            std::slice::from_ref(previous),
-                            std::slice::from_ref(item),
+                            std::slice::from_ref(previous.as_ref()),
+                            std::slice::from_ref(item.as_ref()),
                         )
                     {
                         return Err("item_reference_ambiguous".into());
@@ -387,7 +512,7 @@ pub(super) fn resolve_protocol_item_references(
                 continue;
             };
             if let Some(resolved) = index.get(reference.as_str()) {
-                *item = (*resolved).clone();
+                *item = resolved.as_ref().clone();
             }
         }
         return Ok(());
@@ -529,7 +654,7 @@ pub(super) fn attach_persisted_profile(
 }
 
 pub(super) fn append_history_catalog_node(
-    catalog: &mut Vec<AiItem>,
+    catalog: &mut Vec<FrozenItem>,
     node: &PersistedResponseNode<'_>,
     ingress: Option<ProtocolId>,
 ) -> Result<(), String> {
@@ -537,13 +662,16 @@ pub(super) fn append_history_catalog_node(
     if let Some(output) = &node.client_output {
         catalog.extend(output.iter().cloned());
     } else if let Some(ingress) = ingress {
-        catalog.extend(project_client_history(
+        let response = node.effective_output.to_owned_response();
+        catalog.extend(freeze_items(project_client_history(
             ingress,
-            &node.effective_output,
+            &response,
             &mut [],
-        )?);
+        )?));
     } else {
-        catalog.extend(generic_client_history_output(&node.effective_output));
+        catalog.extend(freeze_items(generic_client_history_output(
+            &node.effective_output.to_owned_response(),
+        )));
     }
     Ok(())
 }
@@ -551,7 +679,7 @@ pub(super) fn append_history_catalog_node(
 fn history_catalog(
     persisted: &[(TurnNodeId, PersistedResponseNode<'_>)],
     ingress: Option<ProtocolId>,
-) -> Result<Vec<AiItem>, String> {
+) -> Result<Vec<FrozenItem>, String> {
     let mut catalog = Vec::new();
     for (_, node) in persisted {
         append_history_catalog_node(&mut catalog, node, ingress)?;
@@ -570,7 +698,7 @@ pub(super) fn resolve_item_references(
 
 pub(super) fn resolve_catalog_references(
     messages: &mut [AiItem],
-    catalog: &[AiItem],
+    catalog: &[FrozenItem],
     ingress: Option<ProtocolId>,
 ) -> Result<(), String> {
     if let Some(ingress) = ingress {
@@ -585,10 +713,6 @@ pub(super) fn resolve_catalog_references(
         return Err("item_reference_not_found".into());
     }
     Ok(())
-}
-
-pub(super) fn items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
-    stravia_runtime_contract::protocol::ir::canonical::history_items_equal(left, right)
 }
 
 pub(super) fn canonical_client_history_request(
@@ -627,9 +751,9 @@ pub(super) fn canonical_client_history_request(
     canonical
 }
 
-pub(super) fn tool_result_id_mapping<'a>(
-    client_history: &'a [AiItem],
-    effective_history: &'a [AiItem],
+pub(super) fn tool_result_id_mapping<'a, C: HistoryItem, E: HistoryItem>(
+    client_history: &'a [C],
+    effective_history: &'a [E],
 ) -> HashMap<&'a str, &'a str> {
     let client_calls = history_tool_calls(client_history);
     let effective_calls = history_tool_calls(effective_history);
@@ -645,10 +769,10 @@ pub(super) fn tool_result_id_mapping<'a>(
     ids
 }
 
-pub(super) fn remap_client_tool_result_ids(
+pub(super) fn remap_client_tool_result_ids<C: HistoryItem, E: HistoryItem>(
     delta: &mut [AiItem],
-    client_history: &[AiItem],
-    effective_history: &[AiItem],
+    client_history: &[C],
+    effective_history: &[E],
 ) {
     let ids = tool_result_id_mapping(client_history, effective_history);
     for item in delta {
@@ -670,10 +794,11 @@ pub(super) fn remap_client_tool_result_ids(
     }
 }
 
-fn history_tool_calls(items: &[AiItem]) -> Vec<(&str, &str)> {
+fn history_tool_calls<I: HistoryItem>(items: &[I]) -> Vec<(&str, &str)> {
     let mut calls = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for item in items {
+        let item = item.history_item();
         if let Some(tool_calls) = item.tool_calls.as_ref() {
             for call in tool_calls {
                 if seen.insert((call.id.as_str(), call.name.to_ascii_lowercase())) {
@@ -697,9 +822,10 @@ fn history_tool_calls(items: &[AiItem]) -> Vec<(&str, &str)> {
     calls
 }
 
-pub(super) fn history_context_fingerprint(messages: &[AiItem]) -> String {
+pub(super) fn history_context_fingerprint<I: HistoryItem>(messages: &[I]) -> String {
+    // 与 canonical::history_context_hash 相同的逐 item 折叠；共享窗口无需物化。
     stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-        &stravia_runtime_contract::protocol::ir::canonical::history_context_hash(messages),
+        &history_context_hash_with_count(messages).0,
     )
 }
 

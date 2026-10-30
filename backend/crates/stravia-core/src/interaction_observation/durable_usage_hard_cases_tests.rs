@@ -3,14 +3,20 @@
 // Observation retention/clear transactions, and both migrated databases remain real.
 use std::sync::Arc;
 
-use super::{manifest_index::DebugTraceIndex, store::ObservationStore};
+use super::{
+    manifest_index::DebugTraceIndex,
+    store::ObservationStore,
+    types::{ConfirmedUsage, ForestQuery, RunEvent, UsageCoverage},
+};
 use crate::{
     db::models::StatsWindow,
+    pricing::{Amount, AttemptAmounts, BillingOutcome, CostBasis},
     storage::{Storage, UsageStatsStore, postgres::PostgresStorage, sqlite::SqliteStorage},
 };
 
 const QUARTER: i64 = 900_000;
 const START: i64 = 1_800_000;
+const BATCH: i64 = START + 10 * QUARTER;
 
 // All interpolated SQL values below are test-owned literals, never external input.
 enum Database {
@@ -38,6 +44,21 @@ impl Database {
         Ok(match self {
             Self::Sqlite(pool) => sqlx::query_scalar(sql).fetch_one(pool).await?,
             Self::Postgres(pool) => sqlx::query_scalar(sql).fetch_one(pool).await?,
+        })
+    }
+    async fn scalar_with(&self, sql: impl Into<String>) -> anyhow::Result<i64> {
+        let sql = sql.into();
+        Ok(match self {
+            Self::Sqlite(pool) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(pool)
+                    .await?
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(pool)
+                    .await?
+            }
         })
     }
     fn observation(&self, directory: &std::path::Path) -> anyhow::Result<ObservationStore> {
@@ -457,6 +478,268 @@ INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_
     Ok(())
 }
 
+fn confirmed_usage(
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
+) -> ConfirmedUsage {
+    ConfirmedUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens: None,
+        coverage: None,
+    }
+}
+
+fn attempt_finished(
+    turn: &str,
+    attempt: &str,
+    usage: Option<ConfirmedUsage>,
+    amounts: Option<AttemptAmounts>,
+) -> RunEvent {
+    RunEvent::TargetAttemptFinished {
+        model_turn_id: turn.into(),
+        attempt_id: attempt.into(),
+        status: "completed".into(),
+        status_code: None,
+        error_code: None,
+        error: None,
+        duration_ms: 1000,
+        first_token_ms: None,
+        usage,
+        amounts,
+    }
+}
+
+fn usage_confirmed(turn: &str, attempt: &str, usage: ConfirmedUsage) -> RunEvent {
+    RunEvent::UsageConfirmed {
+        model_turn_id: turn.into(),
+        attempt_id: attempt.into(),
+        usage,
+    }
+}
+
+fn charged_amounts() -> AttemptAmounts {
+    AttemptAmounts {
+        cost_basis: CostBasis::Usage,
+        cost: Some(Amount {
+            usd_nanos: 100,
+            custom_nanos: None,
+        }),
+        billing: Some(BillingOutcome::Charged(Amount {
+            usd_nanos: 40,
+            custom_nanos: None,
+        })),
+    }
+}
+
+async fn persist_batch(
+    observation: &ObservationStore,
+    run: &str,
+    events: Vec<RunEvent>,
+) -> anyhow::Result<()> {
+    let batch: Vec<_> = events
+        .into_iter()
+        .map(|event| (event, None, BATCH))
+        .collect();
+    observation
+        .persist_ordered_run_events(run, run, &batch, &[], i64::MAX)
+        .await?;
+    Ok(())
+}
+
+async fn seed_batch_interaction(db: &Database, interaction: &str) -> anyhow::Result<()> {
+    db.seed(interaction, BATCH, BATCH, 1000, 20, 0).await?;
+    db.execute(format!(
+        "INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES ('{interaction}-b','{interaction}','{interaction}','{interaction}','target','provider','Provider','upstream','responses','running',{BATCH},0)"
+    ))
+    .await
+}
+
+async fn ordered_batch_usage_and_billing(
+    db: &Database,
+    stats: &dyn UsageStatsStore,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    db.execute("INSERT INTO api_keys (id,token,name) VALUES ('key','sk-test','Test key')")
+        .await?;
+    let spend_before: i64 = db
+        .scalar("SELECT COALESCE(CAST(SUM(spent_usd_unconverted_nanos) AS BIGINT),0) FROM api_key_spend WHERE api_key_id='key'")
+        .await?;
+    let selected = window(BATCH, BATCH + QUARTER);
+    let before = stats.stats_overview(selected).await?;
+    assert_eq!(before.total_requests, 0);
+    assert_eq!(before.total_input_tokens, None);
+    seed_batch_interaction(db, "batch-one").await?;
+    seed_batch_interaction(db, "batch-split").await?;
+
+    // One batch: a confirmation precedes its finish, a late revision follows the
+    // finish, and a second attempt's finish absorbs its own confirmation.
+    persist_batch(
+        observation,
+        "batch-one",
+        vec![
+            usage_confirmed(
+                "batch-one",
+                "batch-one",
+                confirmed_usage(Some(10), Some(7), Some(0), None),
+            ),
+            attempt_finished(
+                "batch-one",
+                "batch-one",
+                Some(confirmed_usage(Some(10), Some(7), Some(0), None)),
+                Some(charged_amounts()),
+            ),
+            usage_confirmed(
+                "batch-one",
+                "batch-one",
+                confirmed_usage(Some(15), Some(9), None, Some(2)),
+            ),
+            attempt_finished("batch-one", "batch-one-b", None, None),
+            usage_confirmed(
+                "batch-one",
+                "batch-one-b",
+                confirmed_usage(Some(5), Some(3), Some(1), None),
+            ),
+        ],
+    )
+    .await?;
+
+    // The same facts across three ordered batches must converge identically and
+    // turn the late confirmation into a durable terminal revision.
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![
+            usage_confirmed(
+                "batch-split",
+                "batch-split",
+                confirmed_usage(Some(10), Some(7), Some(0), None),
+            ),
+            attempt_finished(
+                "batch-split",
+                "batch-split",
+                Some(confirmed_usage(Some(10), Some(7), Some(0), None)),
+                Some(charged_amounts()),
+            ),
+        ],
+    )
+    .await?;
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![usage_confirmed(
+            "batch-split",
+            "batch-split",
+            confirmed_usage(Some(15), Some(9), None, Some(2)),
+        )],
+    )
+    .await?;
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![
+            attempt_finished("batch-split", "batch-split-b", None, None),
+            usage_confirmed(
+                "batch-split",
+                "batch-split-b",
+                confirmed_usage(Some(5), Some(3), Some(1), None),
+            ),
+        ],
+    )
+    .await?;
+
+    let one = observation
+        .get_interaction("batch-one", ForestQuery::default())
+        .await?
+        .unwrap();
+    let split = observation
+        .get_interaction("batch-split", ForestQuery::default())
+        .await?
+        .unwrap();
+    let expected = ConfirmedUsage {
+        // Attempt A: 15 input, 0 cache-read => 15 net. Attempt B: 5 input,
+        // 1 cache-read => 4 net. Known zero cache-read must overwrite the seed.
+        input_tokens: Some(19),
+        output_tokens: Some(12),
+        cache_read_tokens: Some(1),
+        cache_write_tokens: Some(2),
+        reasoning_tokens: None,
+        coverage: Some(UsageCoverage {
+            attempt_count: 2,
+            missing_input_tokens: 0,
+            missing_output_tokens: 0,
+            missing_cache_read_tokens: 0,
+            missing_cache_write_tokens: 1,
+            missing_reasoning_tokens: 2,
+        }),
+    };
+    assert_eq!(one.interaction.usage, expected);
+    assert_eq!(split.interaction.usage, expected);
+    assert_eq!(one.interaction.usage, split.interaction.usage);
+
+    let revisions = split.runs[0]
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
+        })
+        .count();
+    assert_eq!(revisions, 2, "late confirmation must persist a revision");
+    let revised = split.runs[0]
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
+        })
+        .unwrap();
+    // Management reads project input to net input, which needs a known cache
+    // read; this revision leaves cache read unknown and keeps the prior zero.
+    assert!(revised.payload["usage"]["input_tokens"].is_null());
+    assert_eq!(revised.payload["usage"]["output_tokens"], 9);
+    assert_eq!(revised.payload["usage"]["cache_write_tokens"], 2);
+
+    let after = stats.stats_overview(selected).await?;
+    assert_eq!(after.total_requests, 2);
+    assert_eq!(after.total_input_tokens, Some(38));
+    assert_eq!(after.total_output_tokens, Some(24));
+    assert_eq!(after.total_cache_read_tokens, Some(2));
+    assert_eq!(after.total_cache_write_tokens, Some(4));
+    assert_eq!(after.total_reasoning_tokens, None);
+    assert_eq!(after.upstream_request_count, 4);
+    let billing: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(billing_usd_unconverted_nanos) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(billing, 80, "each charged finish contributes once");
+    let charged: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(billing_charged_count) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(charged, 2);
+    let cost: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(cost_usd_unconverted_nanos) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(cost, 200);
+    let spend_after: i64 = db
+        .scalar("SELECT COALESCE(CAST(SUM(spent_usd_unconverted_nanos) AS BIGINT),0) FROM api_key_spend WHERE api_key_id='key'")
+        .await?;
+    assert_eq!(
+        spend_after - spend_before,
+        80,
+        "usage revisions must not recharge frozen billing"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -469,7 +752,8 @@ async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
         retention_and_failed_clear(&db, storage.usage_stats(), &observation).await?;
         retention_across_batches(&db, storage.usage_stats(), &observation).await?;
         failed_parent_delete_restores_children_and_usage(&db, storage.usage_stats(), &observation)
-            .await
+            .await?;
+        ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
     }
     .await;
     pool.close().await;
@@ -526,7 +810,8 @@ async fn postgres_durable_usage_hard_cases() -> anyhow::Result<()> {
                 storage.usage_stats(),
                 &observation,
             )
-            .await
+            .await?;
+            ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
         }
         .await;
         pool.close().await;

@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 _DIRECTIONS = {"client_to_platform", "platform_to_upstream", "upstream_to_platform", "platform_to_client"}
-_SAFE = ("generation_id", "expected_parent", "expected_parent_nonce", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "expected_observation_output_sha256", "observation_redaction_applied", "input_tokens", "upstream_input_tokens", "output_tokens", "client_output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream", "nonce", "session_id", "run_id")
+_SAFE = ("generation_id", "expected_parent", "expected_parent_nonce", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "input_tokens", "upstream_input_tokens", "output_tokens", "client_output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream", "nonce", "session_id", "run_id")
 
 
 class AuditAPIError(RuntimeError):
@@ -128,13 +128,6 @@ def _wire(session: Any, detail: dict, deadline: float, credential_expectations: 
         archive = response.read()
     result = {}
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
-        protected = tuple(value for expected in (credential_expectations or {}).values()
-                          for value in expected.get("secrets", ()))
-        metadata_clean = True
-        for name in bundle.namelist():
-            if not name.endswith("/") and not name.endswith("/events.jsonl"):
-                data = bundle.read(name)
-                metadata_clean &= not any(value.encode() in data for value in protected)
         for name in bundle.namelist():
             if not name.endswith("/events.jsonl"):
                 continue
@@ -148,12 +141,9 @@ def _wire(session: Any, detail: dict, deadline: float, credential_expectations: 
             request_ids = set()
             wire_events = []
             bodies = {direction: bytearray() for direction in _DIRECTIONS}
-            ordinary_clean = True
             for line in bundle.read(name).splitlines():
                 if line.strip():
                     event = json.loads(line)
-                    if event.get("kind") != "wire" and event.get("direction") not in _DIRECTIONS | {"upstream_request", "upstream_response"}:
-                        ordinary_clean &= not any(value in json.dumps(event, ensure_ascii=False) for value in protected)
                     event["direction"] = {"upstream_request": "platform_to_upstream",
                                           "upstream_response": "upstream_to_platform"}.get(
                                               event.get("direction"), event.get("direction"))
@@ -183,13 +173,13 @@ def _wire(session: Any, detail: dict, deadline: float, credential_expectations: 
             result[run_id] = {"directions": counts, "markers": markers, "request_ids": request_ids,
                               "digests": {direction: value.hexdigest() for direction, value in hashes.items()},
                               "credential_checks": {
-                                  nonce: _credential_wire(expected, wire_events, bodies, metadata_clean and ordinary_clean)
+                                  nonce: _credential_wire(expected, wire_events, bodies)
                                   for nonce in markers
                                   if (expected := (credential_expectations or {}).get(nonce))}}
     return result
 
 
-def _credential_wire(expected: dict, events: list[dict], bodies: dict, metadata_clean: bool) -> dict:
+def _credential_wire(expected: dict, events: list[dict], bodies: dict) -> dict:
     """Summarize actual archive bytes without retaining secrets or references."""
     def authorization(direction: str) -> bool:
         values = [value for event in events if event.get("direction") == direction
@@ -206,7 +196,6 @@ def _credential_wire(expected: dict, events: list[dict], bodies: dict, metadata_
         value for event in events if event.get("direction") == "platform_to_upstream"
         for value in parse_qs(urlsplit(event.get("url") or "").query).get("key", [])]
     return {
-        "metadata_masked": metadata_clean,
         "client_authorization_masked": authorization("client_to_platform"),
         "upstream_authorization_masked": authorization("platform_to_upstream"),
         "native_credentials_preserved": all(value == "benchmark-only" for value in native_headers + native_query),
@@ -219,7 +208,7 @@ def _credential_wire(expected: dict, events: list[dict], bodies: dict, metadata_
     }
 
 
-def _credential_proof(row: dict, detail: dict, run: dict, expected: dict,
+def _credential_proof(row: dict, run: dict, expected: dict,
                       capture: dict, proof: dict, principal: str | None) -> dict:
     failures = []
     secrets, references = expected.get("secrets", ()), expected.get("references", ())
@@ -229,9 +218,6 @@ def _credential_proof(row: dict, detail: dict, run: dict, expected: dict,
             or len(new) != 2 or row.get("expected_new_mappings") != 2
             or not set(new).issubset(references)):
         failures.append("credential_expectations_missing_or_invalid")
-    serialized = json.dumps(detail, ensure_ascii=False)
-    if any(value in serialized for value in secrets):
-        failures.append("credential_ordinary_observation_leak")
     def hits(kind: str) -> list[dict]:
         return [discovery for event in run.get("events", []) if event.get("kind") == kind
                 for discovery in event.get("payload", {}).get("discoveries", [])]
@@ -252,7 +238,7 @@ def _credential_proof(row: dict, detail: dict, run: dict, expected: dict,
             or not set(markers) <= set(references)):
         failures.append("credential_discovery_sensitive_payload")
     checks = capture.get("credential_checks", {}).get(row.get("nonce"), {})
-    for field in ("metadata_masked", "client_authorization_masked",
+    for field in ("client_authorization_masked",
                   "client_body_contains_credentials", "upstream_body_protected",
                   "native_credentials_preserved"):
         if checks.get(field) is not True:
@@ -355,7 +341,7 @@ def _check(row: dict, detail: dict, run: dict) -> dict:
     evidence["persisted_output_items"] = len(contents)
     if not contents or any(content.get("complete") is not True for content in contents):
         failures.append("persisted_visible_output_incomplete")
-    if digest.hexdigest() != row["expected_observation_output_sha256"]:
+    if digest.hexdigest() != row["output_sha256"]:
         failures.append("persisted_output_digest_mismatch")
     evidence["failures"] = failures
     return evidence
@@ -463,6 +449,18 @@ def _performance_index(snapshot: dict) -> dict:
     return {identity: {"traceEvents": spans} for identity, spans in groups.items()}
 
 
+def _audit_ready(run: dict, require_debug: bool) -> bool:
+    if run["status"] == "running":
+        return False
+    if require_debug and (run.get("trace") or {}).get("status") not in {"complete", "partial"}:
+        return False
+    # Delivery receipts and complete traces can precede final run settlement and Generation publication.
+    # A failed delivery is also terminal; _check must reject it rather than waiting for success.
+    return any(event["kind"] == "run_finished"
+               and (event["payload"].get("delivery") or {}).get("status") is not None
+               for event in run.get("events", []))
+
+
 def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: float = 30,
                    *, require_debug: bool = False, performance_snapshot: Any = None,
                    history_evidence: Any = None, credential_expectations: dict | None = None,
@@ -475,7 +473,7 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
     """
     del routes
     deadline = time.monotonic() + timeout
-    required = {"expected_parent", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "expected_observation_output_sha256", "input_tokens", "output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream"}
+    required = {"expected_parent", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "input_tokens", "output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream"}
     for row in requests:
         missing = required - row.keys()
         if missing:
@@ -494,18 +492,14 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
                            (row.get("generation_id") and run.get("generation_node_id") == row["generation_id"])
                            or (row.get("run_id") and run["id"] == row["run_id"])]
                 if not row.get("generation_id") and not row.get("run_id") and require_debug:
-                    # Header lookup happens in the bundle, once terminal trace
-                    # manifests are present. Do not spend the download deadline
+                    # Header lookup happens in the bundle, once delivery and trace
+                    # terminals are present. Do not spend the download deadline
                     # waiting for a vendor response ID to become a Generation ID.
                     candidates = [run for _, run in runs if run.get("route_id") == row["route_id"]]
-                    if not candidates or any(run["status"] == "running" or
-                                             (run.get("trace") or {}).get("status") not in {"complete", "partial"}
-                                             for run in candidates):
+                    if not candidates or any(not _audit_ready(run, require_debug) for run in candidates):
                         ready = False
                     continue
-                if len(matches) != 1 or matches[0][1]["status"] == "running":
-                    ready = False
-                elif require_debug and (matches[0][1].get("trace") or {}).get("status") not in {"complete", "partial"}:
+                if len(matches) != 1 or not _audit_ready(matches[0][1], require_debug):
                     ready = False
             if ready:
                 break
@@ -630,7 +624,7 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
         if item["history_storage"]["output_sha256"] != row["output_sha256"]:
             item["failures"].append("history_storage_output_digest_mismatch")
         item["credential_protection"] = _credential_proof(
-            row, detail, run, credential_rows.get(row.get("nonce"), {}),
+            row, run, credential_rows.get(row.get("nonce"), {}),
             wire_cache.get(detail["interaction"]["id"], {}).get(run["id"], {}),
             (credential_evidence or {}).get(row.get("nonce"), {}),
             item["history_storage"].get("principal_sha256"))

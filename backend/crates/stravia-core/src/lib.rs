@@ -17,6 +17,7 @@ pub mod logging;
 pub mod mcp;
 pub(crate) mod media;
 pub mod media_generation;
+mod memory;
 pub mod migrations;
 pub(crate) mod model_turn;
 pub mod outbound_proxy;

@@ -656,7 +656,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
         String::from_utf8_lossy(&second_body)
     );
     let child_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response' AND parent_id IS NOT NULL",
+        "SELECT COUNT(*) FROM turn_nodes WHERE kind = 'response' AND parent_pk IS NOT NULL",
     )
     .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
     .await

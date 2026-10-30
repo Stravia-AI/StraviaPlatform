@@ -28,7 +28,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from tests.common.helpers import initialize_server, start_stravia_server, stop_stravia_server, wait_for_setup_token
 from tests.common.protocol_audit import audit_requests
-from tests.common.protocol_history_audit import read_credential_evidence, read_history_evidence
+from tests.common.protocol_history_audit import (
+    NORMALIZED_HISTORY, history_storage_schema, read_credential_evidence, read_history_evidence,
+)
 from tests.common.protocol_workload import (
     Message, Workload, build_request, canonical_digest,
     canonical_input, timed_response_frames,
@@ -707,7 +709,7 @@ def main() -> int:
     metadata = {key: str(value) if isinstance(value, Path) else value for key, value in metadata.items()}
     args.workload_generator = Workload(credential_probes=True, **{key: value for key, value in vars(args).items()
                                          if key == "seed" or key == "image_size" or key.startswith(("min_input_", "max_input_", "min_images", "max_images", "min_first_", "max_first_", "min_tokens_", "max_tokens_", "min_duration", "max_duration"))})
-    result = {"schema_version": 4, "response_validation": "full-chain-credentials-token-paced-v2",
+    result = {"schema_version": 5, "response_validation": "full-chain-credentials-token-paced-v3",
               "run_id": run_id, "timestamp": time.time(), "binary_sha256": sha,
               "platform": platform.platform(), "logical_cpus": os.cpu_count(), "workload": metadata,
               "tokenizer": {"package": "tiktoken", "version": "0.14.0", "encoding": "cl100k_base",
@@ -839,7 +841,8 @@ def main() -> int:
                                 case[phase]["chain_audit"] = audit_requests(
                                     session, case[phase]["requests"], routes, timeout=args.audit_timeout,
                                     require_debug=True, performance_snapshot=performance_snapshot,
-                                    history_evidence=lambda ids: read_history_evidence(args, directory, ids),
+                                    history_evidence=lambda ids: read_history_evidence(
+                                        args, directory, ids, allow_legacy=True),
                                     credential_expectations=upstream.credential_expectations,
                                     credential_evidence=lambda expected: read_credential_evidence(args, directory, expected))
                                 upstream.credential_expectations.clear()
@@ -869,15 +872,25 @@ def main() -> int:
                 with closing(sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)) as connection:
                     connection.execute("BEGIN")
                     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    result["storage_inventory"] = {table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in sorted(tables) if "observation" in table or table.startswith("turn_chain_")}
+                    # Table presence selects normalized v3 or the frozen legacy
+                    # layout so baseline binaries remain measurable.
+                    schema = history_storage_schema(tables)
+                    if schema == NORMALIZED_HISTORY:
+                        history_tables = sorted(table for table in tables if table.startswith("turn_"))
+                        payload_sources = (("turn_node_payloads", "payload"), ("turn_contents", "content"))
+                    else:
+                        history_tables = sorted(table for table in tables if table.startswith("turn_chain_"))
+                        payload_sources = (("turn_chain_nodes", "payload"), ("turn_chain_contents", "content"))
+                    result["storage_inventory"] = {
+                        table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                        for table in sorted(tables)
+                        if "observation" in table or table in history_tables
+                    }
                     result["storage_bytes"] = {
+                        "history_schema": schema,
                         "encoded_payloads": {
                             table: connection.execute(f'SELECT COALESCE(SUM(length("{column}")), 0) FROM "{table}"').fetchone()[0]
-                            for table, column in (
-                                ("turn_chain_nodes", "payload"),
-                                ("turn_chain_contents", "content"),
-                                ("observation_events", "payload"),
-                            )
+                            for table, column in (*payload_sources, ("observation_events", "payload"))
                         },
                     }
                     connection.execute("COMMIT")

@@ -1,4 +1,4 @@
-"""Storage evidence exercises real SQLite rows and the production codec layout."""
+"""Storage evidence exercises real normalized-v3 SQLite rows and codec bytes."""
 import hashlib
 import json
 import sqlite3
@@ -7,21 +7,22 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from tests.common.protocol_history_audit import _Reader, read_credential_evidence, read_history_evidence
+from tests.common.protocol_history_audit import (
+    LEGACY_HISTORY, NORMALIZED_HISTORY, HistoryReader, content_digest,
+    history_storage_schema, read_credential_evidence, read_history_evidence,
+)
+
+
+def test_storage_schema_selection_prefers_normalized_and_keeps_baseline_adapter():
+    assert history_storage_schema({"turn_nodes", "turn_chain_nodes"}) == NORMALIZED_HISTORY
+    assert history_storage_schema({"turn_chain_nodes"}) == LEGACY_HISTORY
+    with pytest.raises(ValueError):
+        history_storage_schema(set())
 
 
 def encode(raw, compressed=False):
     body = zstandard.ZstdCompressor(write_checksum=True).compress(raw) if compressed else raw
     return body + bytes([int(compressed)]) + b"\0" * 4 + len(raw).to_bytes(8, "little") + b"\1"
-
-
-def digest(raw):
-    number = int.from_bytes(hashlib.sha256(raw).digest(), "big")
-    result = ""
-    for _ in range(55):
-        number, remainder = divmod(number, 26)
-        result = chr(97 + remainder) + result
-    return result
 
 
 def raw(value):
@@ -33,13 +34,21 @@ def history(tmp_path):
     (tmp_path / "db").mkdir()
     connection = sqlite3.connect(tmp_path / "db" / "gateway.db")
     connection.executescript("""
-        CREATE TABLE turn_chain_nodes(id TEXT PRIMARY KEY,parent_id TEXT,kind TEXT,principal TEXT,payload_version INTEGER,storage_format INTEGER,payload BLOB);
-        CREATE TABLE turn_chain_contents(id INTEGER PRIMARY KEY,principal TEXT,content_key TEXT,content BLOB);
-        CREATE TABLE turn_chain_node_contents(node_id TEXT,principal TEXT,content_id INTEGER);
+        CREATE TABLE turn_scopes(id INTEGER PRIMARY KEY, principal TEXT UNIQUE);
+        CREATE TABLE turn_nodes(
+            node_pk INTEGER PRIMARY KEY, id TEXT UNIQUE, scope_id INTEGER NOT NULL,
+            kind TEXT NOT NULL, parent_pk INTEGER, payload_version INTEGER NOT NULL);
+        CREATE TABLE turn_node_payloads(node_pk INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+        CREATE TABLE turn_contents(
+            id INTEGER PRIMARY KEY, scope_id INTEGER NOT NULL, digest BLOB NOT NULL,
+            content BLOB NOT NULL, UNIQUE(scope_id, digest));
+        CREATE TABLE turn_node_contents(
+            node_pk INTEGER NOT NULL, scope_id INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+            content_id INTEGER NOT NULL, PRIMARY KEY(node_pk, ordinal),
+            UNIQUE(node_pk, content_id));
     """)
     item = {"role": "assistant", "content": [{"type": "text", "text": "输出😀" * 100}]}
     item_raw = raw(item)
-    key = digest(item_raw)
     state = dict.fromkeys(("context_fingerprint", "model", "provider_model", "selected_target_key",
                            "canonical_controls_fingerprint", "target_namespace", "protocol"), "")
     state["context_messages"] = 0
@@ -49,10 +58,14 @@ def history(tmp_path):
                                     "usage": {}, "vendor": {}},
                "trusted_media_turn_ids": [], "upstream_response_id": None,
                "effective_state": state, "effective_request": None}
-    envelope = {"data": payload, "slots": [["/client_output/0", 0], ["/client_output/1", 0]], "contents": [key]}
-    connection.execute("INSERT INTO turn_chain_nodes VALUES(?,?,?,?,?,?,?)", ("generation", None, "response", "private-owner", 6, 2, encode(raw(envelope), True)))
-    connection.execute("INSERT INTO turn_chain_contents VALUES(?,?,?,?)", (1, "private-owner", key, encode(item_raw, True)))
-    connection.execute("INSERT INTO turn_chain_node_contents VALUES(?,?,?)", ("generation", "private-owner", 1))
+    envelope = {"data": payload, "slots": [["/client_output/0", 0], ["/client_output/1", 0]]}
+    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (1, "private-owner"))
+    connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
+                       (1, "generation", 1, "response", None, 6))
+    connection.execute("INSERT INTO turn_node_payloads VALUES(?,?)", (1, encode(raw(envelope), True)))
+    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
+                       (1, 1, content_digest(item_raw), encode(item_raw, True)))
+    connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 0, 1))
     connection.commit()
     yield tmp_path, connection, envelope, item
     connection.close()
@@ -76,13 +89,18 @@ def test_restores_repeated_slots_and_hashes_real_output(history):
 
 
 @pytest.mark.parametrize("mutation,code", [
-    ("DELETE FROM turn_chain_contents", "reference_principal"),
-    ("UPDATE turn_chain_contents SET content_key='wrong'", "content_fingerprint"),
-    ("UPDATE turn_chain_node_contents SET principal='other'", "reference_principal"),
-    ("UPDATE turn_chain_nodes SET parent_id=id", "parent_cycle"),
-    ("UPDATE turn_chain_nodes SET parent_id='missing'", "node_missing"),
-    ("UPDATE turn_chain_nodes SET storage_format=1", "payload_version"),
-    ("UPDATE turn_chain_nodes SET kind='agent'", "node_identity"),
+    ("DELETE FROM turn_contents", "reference_missing"),
+    ("UPDATE turn_contents SET digest=zeroblob(32)", "content_fingerprint"),
+    ("UPDATE turn_contents SET digest=zeroblob(31)", "content_digest"),
+    ("UPDATE turn_node_contents SET content_id=99", "reference_missing"),
+    ("UPDATE turn_node_contents SET scope_id=2", "reference_scope"),
+    ("DELETE FROM turn_node_contents", "slot_index"),
+    ("UPDATE turn_node_contents SET ordinal=1", "ordinal_sequence"),
+    ("UPDATE turn_nodes SET parent_pk=1", "parent_cycle"),
+    ("UPDATE turn_nodes SET parent_pk=99", "parent_missing"),
+    ("UPDATE turn_nodes SET payload_version=5", "payload_version"),
+    ("UPDATE turn_nodes SET kind='agent'", "node_identity"),
+    ("DELETE FROM turn_node_payloads", "payload_missing"),
 ])
 def test_rejects_corrupt_storage(history, mutation, code):
     history[1].execute(mutation)
@@ -91,64 +109,124 @@ def test_rejects_corrupt_storage(history, mutation, code):
     assert result["failures"] == [code]
 
 
-def test_parent_principal_is_checked(history):
+def test_parent_scope_is_checked(history):
     connection = history[1]
-    connection.execute("INSERT INTO turn_chain_nodes SELECT 'parent',NULL,kind,'another-owner',payload_version,storage_format,payload FROM turn_chain_nodes")
-    connection.execute("UPDATE turn_chain_nodes SET parent_id='parent' WHERE id='generation'")
-    assert proof(history)["failures"] == ["node_identity"]
+    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (2, "another-owner"))
+    connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
+                       (2, "parent", 2, "response", None, 6))
+    connection.execute("INSERT INTO turn_node_payloads SELECT 2,payload FROM turn_node_payloads WHERE node_pk=1")
+    connection.execute("UPDATE turn_nodes SET parent_pk=2 WHERE node_pk=1")
+    assert proof(history)["failures"] == ["parent_scope"]
+
+
+def test_content_scope_is_checked(history):
+    connection = history[1]
+    item_raw = raw(history[3])
+    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (2, "another-owner"))
+    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
+                       (2, 2, content_digest(item_raw), encode(item_raw)))
+    connection.execute("UPDATE turn_node_contents SET content_id=2 WHERE node_pk=1")
+    assert proof(history)["failures"] == ["reference_scope"]
 
 
 def test_real_json_pointer_parent_before_child(history):
     directory, connection, envelope, item = history
     profile = {"output": [None], "a/b~c": "kept"}
     profile_raw = raw(profile)
-    profile_key = digest(profile_raw)
     envelope["data"]["__open_responses_response_profile"] = None
-    envelope["contents"].append(profile_key)
     envelope["slots"].extend([["/__open_responses_response_profile", 1], ["/__open_responses_response_profile/output/0", 0]])
-    connection.execute("INSERT INTO turn_chain_contents VALUES(?,?,?,?)", (2, "private-owner", profile_key, encode(profile_raw)))
-    connection.execute("INSERT INTO turn_chain_node_contents VALUES(?,?,?)", ("generation", "private-owner", 2))
-    connection.execute("UPDATE turn_chain_nodes SET payload=?", (encode(raw(envelope)),))
+    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
+                       (2, 1, content_digest(profile_raw), encode(profile_raw)))
+    connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
+    connection.execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
     assert proof(history)["read_verified"]
 
 
-def test_rejects_slot_out_of_range(history):
+def test_rejects_slot_ordinal_out_of_range(history):
     envelope = history[2]
     envelope["slots"][0][1] = 3
-    history[1].execute("UPDATE turn_chain_nodes SET payload=?", (encode(raw(envelope)),))
+    history[1].execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
     assert proof(history)["failures"] == ["slot_index"]
 
 
 def test_rejects_unknown_codec(history):
-    history[1].execute("UPDATE turn_chain_contents SET content=?", (b"invalid" + b"\0" * 13 + b"\2",))
+    history[1].execute("UPDATE turn_contents SET content=?", (b"invalid" + b"\0" * 13 + b"\2",))
     assert proof(history)["failures"] == ["codec_version"]
+
+
+def test_rejects_malformed_descriptor_json(history):
+    history[1].execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(b"{"),))
+    assert proof(history)["failures"] == ["json_invalid"]
+
+
+def test_rejects_malformed_content_json(history):
+    body = b"{"
+    history[1].execute("UPDATE turn_contents SET digest=?,content=?",
+                       (content_digest(body), encode(body)))
+    assert proof(history)["failures"] == ["json_invalid"]
 
 
 def test_complete_ancestor_chain_is_restored(history):
     connection = history[1]
-    connection.execute("INSERT INTO turn_chain_nodes SELECT 'parent',NULL,kind,principal,payload_version,storage_format,payload FROM turn_chain_nodes")
-    connection.execute("INSERT INTO turn_chain_node_contents SELECT 'parent',principal,content_id FROM turn_chain_node_contents")
-    connection.execute("UPDATE turn_chain_nodes SET parent_id='parent' WHERE id='generation'")
+    connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
+                       (2, "parent", 1, "response", None, 6))
+    connection.execute("INSERT INTO turn_node_payloads SELECT 2,payload FROM turn_node_payloads WHERE node_pk=1")
+    connection.execute("INSERT INTO turn_node_contents SELECT 2,scope_id,ordinal,content_id FROM turn_node_contents WHERE node_pk=1")
+    connection.execute("UPDATE turn_nodes SET parent_pk=2 WHERE node_pk=1")
     result = proof(history)
     assert result["read_verified"] and result["ancestor_count"] == 1
     assert result["parent_id"] == "parent"
     assert result["content_count"] == 2
 
 
+def test_restore_preserves_arbitrary_precision_integers(history):
+    directory, connection, envelope, item = history
+    number = b"1234567890123456789012345678901234567890"
+    envelope["data"]["opaque_big"] = None
+    envelope["slots"].append(["/opaque_big", 1])
+    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
+                       (2, 1, content_digest(number), encode(number)))
+    connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
+    connection.execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
+    reader = HistoryReader(connection, "?")
+    data, count, slots = reader.restore(reader.node("generation"))
+    assert data["opaque_big"] == int(number)
+    assert count == 2 and slots == 3
+
+
 def test_decodes_escaped_pointer_tokens(history):
     envelope = history[2]
     envelope["data"]["a/b~c"] = None
     envelope["slots"].append(["/a~1b~0c", 0])
-    history[1].execute("UPDATE turn_chain_nodes SET payload=?", (encode(raw(envelope)),))
+    history[1].execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
     assert proof(history)["read_verified"]
 
 
-def test_reference_rows_must_match_envelope(history):
+def test_reference_rows_must_cover_descriptor_slots(history):
+    history[1].execute("DELETE FROM turn_node_contents")
+    assert proof(history)["failures"] == ["slot_index"]
+
+
+def test_unreferenced_content_ordinal_is_rejected(history):
+    directory, connection, envelope, item = history
+    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
+                       (2, 1, content_digest(b"null"), encode(b"null")))
+    connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
+    assert proof(history)["failures"] == ["unused_content"]
+
+
+def test_legacy_contents_array_is_rejected(history):
     envelope = history[2]
     envelope["contents"] = []
-    envelope["slots"] = []
-    history[1].execute("UPDATE turn_chain_nodes SET payload=?", (encode(raw(envelope)),))
-    assert proof(history)["failures"] == ["reference_set"]
+    history[1].execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
+    assert proof(history)["failures"] == ["envelope_shape"]
+
+
+def test_repeated_slot_pointer_is_rejected(history):
+    envelope = history[2]
+    envelope["slots"].append(["/client_output/0", 0])
+    history[1].execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
+    assert proof(history)["failures"] == ["slot_pointer"]
 
 
 def test_rejects_non_loopback_postgres_without_connecting(tmp_path):
@@ -313,7 +391,7 @@ def test_postgres_reader_adapts_bound_query_without_interpolating_secrets(creden
             assert values[0] not in query
             return credentials[1].execute(query.replace("%s", "?"), values)
 
-    reader = _Reader(PostgresParameters(), "%s")
+    reader = HistoryReader(PostgresParameters(), "%s")
     reference = credentials[2]["first"]["references"][0]
     rows = reader.rows("SELECT secret FROM reversible_redaction_mappings WHERE reference=?",
                        (reference,))

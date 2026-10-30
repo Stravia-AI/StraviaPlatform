@@ -18,7 +18,7 @@ struct PendingGenerationCommit {
     principal: Principal,
     node_id: String,
     controls_fingerprint: String,
-    client_items: Vec<AiItem>,
+    client_items: Vec<FrozenItem>,
     resolved: tokio::sync::watch::Sender<bool>,
 }
 
@@ -27,14 +27,14 @@ impl PendingGenerationCommits {
         &self,
         principal: Principal,
         node_id: String,
-        projected: ProjectedClientCommit<'_>,
+        projected: &ProjectedClientCommit,
     ) -> GenerationCommitFence {
         let (resolved, _) = tokio::sync::watch::channel(false);
         let pending = Arc::new(PendingGenerationCommit {
             principal,
             node_id,
-            controls_fingerprint: projected.client_history.controls_fingerprint,
-            client_items: projected.client_items,
+            controls_fingerprint: projected.client_history.controls_fingerprint.clone(),
+            client_items: projected.client_items.clone(),
             resolved,
         });
         let mut entries = self.entries.lock();
@@ -95,10 +95,10 @@ impl PendingGenerationCommits {
                 || item_nodes.iter().any(|id| id == &pending.node_id);
             let prefix_match = pending.controls_fingerprint == controls_fingerprint
                 && canonical.items.len() > pending.client_items.len()
-                && canonical
-                    .items
-                    .get(..pending.client_items.len())
-                    .is_some_and(|items| items_equal(items, &pending.client_items));
+                && items_equal(
+                    &pending.client_items,
+                    &canonical.items[..pending.client_items.len()],
+                );
             if id_match || prefix_match {
                 pending.wait().await;
             }

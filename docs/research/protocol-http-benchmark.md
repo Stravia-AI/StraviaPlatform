@@ -66,7 +66,7 @@ uv run --locked --group test python -m tests.common.measure_protocol_http --bina
 
 保护引用与原凭据的 tokenizer 长度不同。因此 `input_tokens` 记录保护前客户端负载，`upstream_input_tokens` 记录真实受保护的模型输入；`output_tokens` 是按速率发送的模型输出，`client_output_tokens` / `actual_output_tokens` 是还原后的客户端文本。usage 对照模型侧实际计数，客户端 token/s 单独实测，不能用其中一个计数冒充另一个。
 
-**普通 Observation 与 Debug/Wire 是不同安全边界。** 普通观测的完整可见正文与预期脱敏正文逐字节摘要核对，并检查输入预览、事件及非 Wire 导出元数据没有合成秘密；随机正文中的裸 `Bearer` / `Basic` 也遵循现有永久脱敏策略，不把合法脱敏误报成内容丢失。[ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md) 则规定 Wire 只替换大小写不敏感的 `Authorization` header 值；其他 header、URL 和 body 保留原文。bench 检查实际 Authorization 已遮蔽，以及 Anthropic `x-api-key` / Gemini URL `key` 的原始保真，**不宣称 Debug ZIP 不含凭据**。四方向 body 摘要仍与实际收发字节完全一致，客户端与历史中的合法还原正文不得被错误脱敏。
+**普通 Observation 与 Debug/Wire 的捕获范围不同，永久脱敏规则相同。** [ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md) 只要求替换实际 HTTP `Authorization` header 值，header 名不区分大小写；其他 header、URL、body 和普通诊断 metadata 不作全局凭据字面量过滤。普通观测的完整可见正文直接与客户端完整正文逐字节摘要核对，不生成另一份 blanket-redaction 预期。bench 检查实际 Authorization 已遮蔽，以及 Anthropic `x-api-key` / Gemini URL `key` 的原始保真，**不宣称普通 Observation 或 Debug ZIP 不含凭据**。四方向 body 摘要仍与实际收发字节完全一致，客户端与历史中的合法还原正文不得被错误脱敏；业务凭据保护的上游无明文、发现事件与 Principal-scoped 映射验证另行执行。
 
 普通观测中的非凭据字段允许保留完整的可逆引用，例如 Responses 原生内容元数据；引用不是原秘密，也不自行授予访问权。不能把引用一律判为秘密泄露。发现事件仍不得包含秘密或可恢复引用，客户端最终可见文本则必须完成实际还原。
 
@@ -88,19 +88,19 @@ uv run --locked --group test python -m tests.common.measure_protocol_http --bina
 
 ## 指标、审计与失败
 
-JSON schema 为 **4**，`response_validation=full-chain-credentials-token-paced-v2`。记录 binary SHA256、平台、构建条件、tokenizer、seed、负载配置、实际 server PID、每请求 token/图片/生成计划和实测时序、HTTP 结果，以及 PID CPU/内存样本。不保存原始大正文、图片、API Key 或数据库凭据。每 case checkpoint，失败以非零退出；旧 schema 1/2 的 bytes/短输出/Debug=false 结果，以及 schema 3 未注入可逆凭据探针的结果，均不能直接比较。
+JSON schema 为 **5**，`response_validation=full-chain-credentials-token-paced-v3`。记录 binary SHA256、平台、构建条件、tokenizer、seed、负载配置、实际 server PID、每请求 token/图片/生成计划和实测时序、HTTP 结果，以及 PID CPU/内存样本。不保存原始大正文、图片、API Key 或数据库凭据。每 case checkpoint，失败以非零退出。schema 5 按 ADR-0063 的 Authorization-only 策略验证捕获：普通可见输出使用客户端完整正文的同一摘要，不再生成另一份 blanket-redaction 预期。旧 schema 1–4 的负载或捕获契约不同，不能与新结果直接比较。
 
 每个请求都必须取得以下真实证据，缺失或不一致使 `full_chain_verified=false` 和整个 case 无效：
 
 1. HTTP 入站捕获的关联 header → 实际 Run ID；只有 Responses 响应 ID 是 Generation ID，不能拿 Chat/Anthropic/Gemini 的供应商消息 ID 代替。
 2. 实际 Route、ModelTurn 与唯一成功 TargetAttempt，包含 Provider、上游模型及实际调度 Target key；配置 Target UUID 另存，不与 `provider:model` 调度 key 混用。
-3. 客户端完整内容与原生成功终态；Run completed、`client_output_committed=true`、delivery completed/delivered、真实模型侧 input/output usage coverage，以及普通观测持久化可见输出与预期脱敏正文的完整 SHA256。
+3. 客户端完整内容与原生成功终态；Run completed、`client_output_committed=true`、delivery completed/delivered、真实模型侧 input/output usage coverage，以及普通观测持久化可见输出与完整客户端正文的同一 SHA256。
 4. 四方向 Wire body 原始字节的 SHA256，分别与客户端发出/收到和本地上游收到/发出的正文核对；不能以存在一个 body record 代替全文完整性。
-5. SQLite/PostgreSQL 只读一致性快照中的真实 Generation 节点、父边和全部祖先；解压真实 format-2 envelope、恢复 JSON Pointer slots、检查 Principal/引用以及外置 content 的 SHA256/base26 key，核对持久化 client output 摘要。不是表行数推断。
+5. SQLite/PostgreSQL 只读一致性快照中的真实 Generation 节点、父边和全部祖先；解压 codec、恢复 JSON Pointer slots、验证 Principal/kind、ordinal、引用与域前缀 SHA-256，核对持久化 client output 摘要。冻结基线的 format-2 envelope 仅经显式旧格式审计适配器读取，不是产品双读路径，也不是表行数推断。
 6. `proxy.inference_run.args.request_id` 与真实 Run ID 一致，沿 `span_id` / `parent_id` 检查并发请求各自已结束的路由、Provider、历史和 SQL 因果子树。该内部 ID 仅进入 Debug 时间线，不进入指标标签，也不是用户提供的 `x-request-id`。
-7. 实际凭据保护往返、普通脱敏与 Debug 独立边界、准确发现事件和已发布的 Principal-scoped 映射。不能仅凭设置已开启或凭据表行数增加宣布覆盖。
+7. 实际凭据保护往返、所有捕获的实际 Authorization header 值脱敏、模型侧正文不含探针明文、准确发现事件和已发布的 Principal-scoped 映射。普通正文、其他 header、URL 和诊断 metadata 不适用全局凭据字面量过滤；审计结果自身仍仅保留安全标识、摘要、计数与失败码。不能仅凭设置已开启或凭据表行数增加宣布覆盖。
 
-观测完成是异步状态：有截止时间地等待真实 Run/trace 终态，然后核验；不靠固定 sleep 宣称落盘。每 phase 完整核验并导出后才切换 Debug epoch，避免前一批容量计数混入下一批；数据库历史、普通观测与产品缓存不清空。
+观测完成是异步状态：在既有截止时间内等待真实 `run_finished.delivery` 终态及终结的 trace，再读取历史和核验。交付收据可以先登记 `completed` 与 `delivery_completed_at`，完整 trace 也可以先于 Generation 发布和最终 Run 收口，不能把这些中间投影视为完整落盘。已知 Run ID 与通过捕获 header 关联的入口采用同一完成条件；失败 delivery 仍立即进入失败核验，永久缺失终态仍使成绩无效。不增加推理重试、不延长截止时间，也不靠固定 sleep 宣称落盘。每 phase 完整核验并导出后才切换 Debug epoch，避免前一批容量计数混入下一批；数据库历史、普通观测与产品缓存不清空。
 
 - **CPU**：仅该 server PID 累计 user+kernel CPU 时间的差分除以实际采样间隔，`100% = 1 核`，多核可超过 100%。不采集整机 CPU、不除以逻辑核心数。loadgen 和 synthetic upstream 在同一个 Python PID，另标 `harness_loadgen_and_upstream`，不能与 server 样本相加冒充产品占用。
 - **内存**：Windows `rss_bytes` 是 working set，`private_commit_bytes` 是 PROCESS_MEMORY_COUNTERS_EX.PrivateUsage，分别报告。Linux RSS 来自 `/proc/PID/stat`；`RssAnon + VmSwap` 另报，不等价于 Windows private commit；VmSize 不是实际占用。MB 为十进制，MiB 为 `bytes/1,048,576`。
@@ -112,7 +112,7 @@ JSON schema 为 **4**，`response_validation=full-chain-credentials-token-paced-
 
 baseline 与 optimized 使用同脚本、seed、case 顺序、token/图片/时序范围、模式、并发、采样间隔、Debug 状态、构建档位和主机背景条件。数据库与 Redis 各自使用同规格空实例。只有 binary/label/source-commit/output 等身份参数不同。旧 binary 若缺少请求身份时间线，需要先补同一采集改动，不能豁免完整链路校验。
 
-使用 `uv run --locked --group test python -m tests.common.report_protocol_http baseline.json optimized.json --output comparison.csv`。要求 schema 4、同平台/核心数/tokenizer/凭据保护/采样口径、相同 workload 与 case 集合；拒绝缩小矩阵或不同 seed/范围比较。CSV 保留失败 case，输出 Server RSS/private commit 峰值、CPU p50/p95 核心数、成功 QPS、延迟、错误数、逐请求链路核验数以及平均输入 token/图片/模型输出 token。内存上限通过显式 `--budget-mb 250` 等参数指定；不指定时仅判断运行和完整链路有效，不宣称达到任何内存目标。外部服务资源另看独立样本。
+使用 `uv run --locked --group test python -m tests.common.report_protocol_http baseline.json optimized.json --output comparison.csv`。要求 schema 5、同平台/核心数/tokenizer/凭据保护/采样口径、相同 workload 与 case 集合；拒绝缩小矩阵或不同 seed/范围比较。CSV 保留失败 case，输出 Server RSS/private commit 峰值、CPU p50/p95 核心数、成功 QPS、延迟、错误数、逐请求链路核验数以及平均输入 token/图片/模型输出 token。内存上限通过显式 `--budget-mb 250` 等参数指定；不指定时仅判断运行和完整链路有效，不宣称达到任何内存目标。外部服务资源另看独立样本。
 
 一个运行共用一个 Server PID 和数据库，case 之间保留真实历史/普通观测与缓存；没有人为清空历史来压低内存。case 顺序固定，后续组合有累积数据，因此比较必须固定顺序，必要时用筛选单组合的新进程补充定位。预热同样写真实数据库，其错误也使case失败。JSON checkpoint 本身发生在 case 间，会消耗 harness CPU，可能使下一case带入短暂背景活动，不应当作主机资源独占结果。
 

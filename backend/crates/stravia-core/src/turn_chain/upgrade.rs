@@ -1,13 +1,68 @@
-//! Startup-only legacy decoder. Each batch commits its worklist progress atomically.
-use super::content;
+//! Startup-only history conversion.
+//!
+//! Two hooks exist, and neither is a product read path:
+//!
+//! 1. [`convert_history_sqlite`] / [`convert_history_postgres`] run from the
+//!    historical migration-0007 hook, before migration 0032 exists. They turn
+//!    format-0/1 legacy rows into the legacy 256-byte-threshold format-2
+//!    envelope using the private [`format2`] helper, then drop the legacy
+//!    columns/tables exactly as before.
+//! 2. [`normalize_sqlite`] / [`normalize_postgres`] run after migration 0032
+//!    created the permanent tables and before migration 0033 drops the old
+//!    `turn_chain_*` tables. They normalize `turn_chain_*` into the v3 tables.
+//!
+//! Normalization is resumable from the single `turn_history_upgrade` row:
+//!
+//! - stage 0 copies thin node metadata (public ids and scope interned, parent
+//!   edge still NULL) in bounded batches. Each batch commits its rows and
+//!   `last_node_id` atomically; a crash re-reads rows after that cursor.
+//! - stage 1 copies legacy content rows with their original numeric ids,
+//!   verifies each legacy SHA256 key against the decoded raw body once,
+//!   computes the domain-prefixed SHA-256 identity and keeps the codec bytes unchanged. Batches
+//!   are metadata/byte bounded (8 MiB plus one oversized row). The PostgreSQL
+//!   content identity sequence is advanced explicitly when stage 1 completes,
+//!   before stage 2 interns anything.
+//! - stage 2 converts each descriptor: opaque item/system/tool content keeps
+//!   its verified id, inline semantic units are extracted by the product
+//!   module, and externalized profile containers are re-extracted with their
+//!   nested slots. One descriptor, its parent edge, retention row and ordinal
+//!   mapping commit together with `last_node_id`.
+//! - stage 3 validates counts, ownership, parent edges, descriptor ordinals and
+//!   link rows, then deletes copied contents that are no longer referenced in
+//!   bounded batches. Only after all of that succeeds is the work state marked
+//!   stage 4. Migration 0033 then owns dropping old tables and work state.
+//!
+//! The old tables are authoritative until stage 4; every failure leaves the
+//! last committed stage/cursor intact for the next startup. Callers must run
+//! normalization after 0032 and only run 0033 after it returns `Ok(())`.
+
 use anyhow::{Context, ensure};
 use serde_json::Value;
 
 use std::collections::HashMap;
 
+use format2::{put_postgres_prepared, put_sqlite_prepared};
+
+mod format2;
+mod normalize;
+
+/// Startup hook after migration 0032 and before migration 0033.
+pub(crate) async fn normalize_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+) -> anyhow::Result<()> {
+    normalize::run_sqlite(connection, normalize::Limits::default()).await
+}
+
+/// Startup hook after migration 0032 and before migration 0033.
+pub(crate) async fn normalize_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+) -> anyhow::Result<()> {
+    normalize::run_postgres(connection, normalize::Limits::default()).await
+}
+
 type LegacyRef = (String, String, String);
 type LegacyNode = (String, String, i64, String, Vec<LegacyRef>);
-type PreparedNode = (String, String, content::Encoded);
+type PreparedNode = (String, String, format2::Encoded);
 
 fn workers() -> usize {
     std::thread::available_parallelism()
@@ -81,7 +136,7 @@ fn prepare((node, principal, format, json, refs): LegacyNode) -> anyhow::Result<
             .take();
         for (path, key, json) in refs {
             ensure!(
-                content::content_key(json.as_bytes()) == key,
+                format2::content_key(json.as_bytes()) == key,
                 "damaged legacy history content"
             );
             let slot = payload
@@ -93,7 +148,7 @@ fn prepare((node, principal, format, json, refs): LegacyNode) -> anyhow::Result<
     } else {
         ensure!(format == 0, "unsupported legacy history format");
     }
-    Ok((node, principal, content::encode(payload)?))
+    Ok((node, principal, format2::encode(payload)?))
 }
 
 macro_rules! converter {
@@ -153,7 +208,7 @@ macro_rules! converter {
                 }).await?.into_iter().collect();
                 let mut transaction = connection.begin().await?;
                 for (node, principal, encoded) in &prepared {
-                    content::$put(&mut transaction, node, principal, encoded, &contents).await?;
+                    $put(&mut transaction, node, principal, encoded, &contents).await?;
                     sqlx::query("UPDATE turn_chain_nodes SET payload = $1, storage_format = 2, legacy_payload = NULL WHERE id = $2")
                         .bind(&encoded.payload).bind(node).execute(&mut *transaction).await?;
                 }
@@ -187,210 +242,4 @@ converter!(
 );
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn fixture() -> anyhow::Result<sqlx::SqliteConnection<'static>> {
-        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await?;
-        sqlx::raw_sql("CREATE TABLE turn_chain_nodes (id TEXT PRIMARY KEY, principal TEXT NOT NULL, storage_format INTEGER NOT NULL, legacy_payload TEXT, payload BLOB);
-         CREATE TABLE turn_chain_legacy_refs (node_id TEXT, principal TEXT, path TEXT, content_key TEXT);
-         CREATE TABLE turn_chain_legacy_contents (principal TEXT, content_key TEXT, content TEXT, PRIMARY KEY(principal, content_key));
-         CREATE TABLE turn_chain_contents (id INTEGER PRIMARY KEY, principal TEXT, content_key TEXT, content BLOB, UNIQUE(principal, content_key));
-         CREATE TABLE turn_chain_node_contents (node_id TEXT, principal TEXT, content_id INTEGER, PRIMARY KEY(node_id, content_id));")
-            .execute(&mut connection).await?;
-        Ok(connection)
-    }
-
-    async fn restored(
-        connection: &mut sqlx::SqliteConnection<'_>,
-        id: &str,
-    ) -> anyhow::Result<Value> {
-        let (principal, bytes): (String, Vec<u8>) =
-            sqlx::query_as("SELECT principal, payload FROM turn_chain_nodes WHERE id = $1")
-                .bind(id)
-                .fetch_one(&mut *connection)
-                .await?;
-        let mut envelope: Value = serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?;
-        let mut data = envelope["data"].take();
-        for slot in envelope["slots"].as_array().context("slots")? {
-            let key = envelope["contents"][slot[1].as_u64().context("index")? as usize]
-                .as_str()
-                .context("key")?;
-            let bytes: Vec<u8> = sqlx::query_scalar(
-                "SELECT content FROM turn_chain_contents WHERE principal = $1 AND content_key = $2",
-            )
-            .bind(&principal)
-            .bind(key)
-            .fetch_one(&mut *connection)
-            .await?;
-            let raw = crate::storage_codec::decode(&bytes)?;
-            ensure!(content::content_key(&raw) == key, "content changed");
-            *data
-                .pointer_mut(slot[0].as_str().context("pointer")?)
-                .context("slot")? = serde_json::from_slice(&raw)?;
-        }
-        Ok(data)
-    }
-
-    #[tokio::test]
-    async fn resumes_after_batch_rollback_and_restores_scoped_nested_refs() -> anyhow::Result<()> {
-        let mut connection = fixture().await?;
-        let item = serde_json::json!({"text": "x".repeat(400), "meta": {"phase": "completed"}});
-        let plain = serde_json::json!({"items": [item.clone(), null, item.clone()], "unknown": {"keep": true}});
-        for index in 0..101 {
-            sqlx::query("INSERT INTO turn_chain_nodes VALUES ($1, 'a', 0, $2, NULL)")
-                .bind(format!("{index:03}"))
-                .bind(plain.to_string())
-                .execute(&mut connection)
-                .await?;
-        }
-        let parent_json = serde_json::json!({"items": [null], "preserved": [null, 1]}).to_string();
-        let item_json = item.to_string();
-        for (path, json) in [("/nested", &parent_json), ("/nested/items/0", &item_json)] {
-            let key = content::content_key(json.as_bytes());
-            // Same hash in another principal must never be used for restore.
-            sqlx::query("INSERT INTO turn_chain_legacy_contents VALUES ('b', $1, 'false')")
-                .bind(&key)
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("INSERT INTO turn_chain_legacy_contents VALUES ('a', $1, $2)")
-                .bind(&key)
-                .bind(json)
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("INSERT INTO turn_chain_legacy_refs VALUES ('101', 'a', $1, $2)")
-                .bind(path)
-                .bind(&key)
-                .execute(&mut connection)
-                .await?;
-        }
-        sqlx::query("INSERT INTO turn_chain_nodes VALUES ('101', 'a', 1, $1, NULL)")
-            .bind(serde_json::json!({"references": 2, "data": {"nested": null}}).to_string())
-            .execute(&mut connection)
-            .await?;
-        sqlx::raw_sql("CREATE TRIGGER fail_batch BEFORE UPDATE ON turn_chain_nodes WHEN NEW.id = '101' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
-            .execute(&mut connection).await?;
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let observed = events.clone();
-        assert!(
-            crate::startup_progress::observe_startup(
-                move |event| observed.lock().unwrap().push(event),
-                convert_history_sqlite(&mut connection),
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|event| (event.completed, event.total))
-                .collect::<Vec<_>>(),
-            vec![(0, Some(102)), (100, Some(102))]
-        );
-        let formats: Vec<(String, i64)> = sqlx::query_as("SELECT id, CAST(storage_format AS BIGINT) FROM turn_chain_nodes WHERE id >= '099' ORDER BY id")
-            .fetch_all(&mut connection).await?;
-        assert_eq!(
-            formats,
-            vec![("099".into(), 2), ("100".into(), 0), ("101".into(), 1)]
-        );
-        assert_eq!(restored(&mut connection, "000").await?, plain);
-        sqlx::query("DROP TRIGGER fail_batch")
-            .execute(&mut connection)
-            .await?;
-        events.lock().unwrap().clear();
-        let observed = events.clone();
-        crate::startup_progress::observe_startup(
-            move |event| observed.lock().unwrap().push(event),
-            convert_history_sqlite(&mut connection),
-        )
-        .await?;
-        assert_eq!(
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|event| event.total.is_some())
-                .map(|event| (event.completed, event.total))
-                .collect::<Vec<_>>(),
-            vec![(0, Some(2)), (2, Some(2))]
-        );
-        assert_eq!(restored(&mut connection, "100").await?, plain);
-        assert_eq!(
-            restored(&mut connection, "101").await?,
-            serde_json::json!({"nested": {"items": [item], "preserved": [null, 1]}})
-        );
-        // Clean cutover permits subsequent startup with no legacy tables/column.
-        convert_history_sqlite(&mut connection).await?;
-        let legacy_column: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('turn_chain_nodes') WHERE name = 'legacy_payload')")
-            .fetch_one(&mut connection).await?;
-        assert!(!legacy_column);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn resumes_cleanup_after_legacy_tables_were_removed() -> anyhow::Result<()> {
-        let mut connection = fixture().await?;
-        let payload = serde_json::json!({"preserved": ["completed", null, 7]});
-        let encoded = content::encode(payload.clone())?;
-        sqlx::query("INSERT INTO turn_chain_nodes VALUES ('done', 'a', 2, NULL, $1)")
-            .bind(&encoded.payload)
-            .execute(&mut connection)
-            .await?;
-        sqlx::raw_sql("DROP TABLE turn_chain_legacy_refs; DROP TABLE turn_chain_legacy_contents;")
-            .execute(&mut connection)
-            .await?;
-        convert_history_sqlite(&mut connection).await?;
-        assert_eq!(restored(&mut connection, "done").await?, payload);
-        let legacy_column: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('turn_chain_nodes') WHERE name='legacy_payload')",
-        )
-        .fetch_one(&mut connection)
-        .await?;
-        assert!(!legacy_column);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn rejects_damaged_refs_and_pointer_overwrite_without_committing() -> anyhow::Result<()> {
-        for (data, content_json) in [
-            (serde_json::json!({"slot": null}), "false"),
-            (serde_json::json!({"slot": 7}), "true"),
-        ] {
-            let mut connection = fixture().await?;
-            let key = content::content_key(b"true");
-            sqlx::query("INSERT INTO turn_chain_nodes VALUES ('n', 'a', 1, $1, NULL)")
-                .bind(serde_json::json!({"references": 1, "data": data}).to_string())
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("INSERT INTO turn_chain_legacy_refs VALUES ('n', 'a', '/slot', $1)")
-                .bind(&key)
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("INSERT INTO turn_chain_legacy_contents VALUES ('a', $1, $2)")
-                .bind(&key)
-                .bind(content_json)
-                .execute(&mut connection)
-                .await?;
-            assert!(convert_history_sqlite(&mut connection).await.is_err());
-            let format: i64 = sqlx::query_scalar(
-                "SELECT CAST(storage_format AS BIGINT) FROM turn_chain_nodes WHERE id = 'n'",
-            )
-            .fetch_one(&mut connection)
-            .await?;
-            assert_eq!(format, 1);
-            sqlx::query("UPDATE turn_chain_legacy_contents SET content = 'true'")
-                .execute(&mut connection)
-                .await?;
-            sqlx::query("UPDATE turn_chain_nodes SET legacy_payload = '{\"references\":1,\"data\":{\"slot\":null}}'")
-                .execute(&mut connection).await?;
-            convert_history_sqlite(&mut connection).await?;
-            assert_eq!(
-                restored(&mut connection, "n").await?,
-                serde_json::json!({"slot": true})
-            );
-        }
-        Ok(())
-    }
-}
+mod tests;

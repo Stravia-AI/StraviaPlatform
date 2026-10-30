@@ -18,6 +18,11 @@ from urllib.parse import urlsplit
 import zstandard
 
 
+CONTENT_DIGEST_DOMAIN = b"stravia.turn-content.v1\0"
+NORMALIZED_HISTORY = "normalized-v3"
+LEGACY_HISTORY = "legacy-format2"
+
+
 class InvalidHistory(ValueError):
     pass
 
@@ -27,7 +32,27 @@ def _require(condition, code):
         raise InvalidHistory(code)
 
 
-def _digest(raw):
+def content_digest(raw):
+    """Full SHA-256 over the fixed domain prefix and original JSON bytes."""
+    digest = hashlib.sha256(CONTENT_DIGEST_DOMAIN)
+    digest.update(raw)
+    return digest.digest()
+
+
+def history_storage_schema(tables):
+    """Select the persisted history layout by table presence.
+
+    Normalized v3 is authoritative whenever it exists. The legacy branch is a
+    measurement adapter for frozen pre-v3 binaries, never a runtime fallback.
+    """
+    if "turn_nodes" in tables:
+        return NORMALIZED_HISTORY
+    if "turn_chain_nodes" in tables:
+        return LEGACY_HISTORY
+    raise InvalidHistory("history_schema")
+
+
+def _legacy_digest(raw):
     number = int.from_bytes(hashlib.sha256(raw).digest(), "big")
     digits = []
     for _ in range(55):
@@ -63,11 +88,46 @@ def _json(raw):
             _require(key not in result, "json_duplicate_key")
             result[key] = value
         return result
-    return json.loads(raw, object_pairs_hook=unique,
-                      parse_constant=lambda _: (_ for _ in ()).throw(InvalidHistory("json_constant")))
+    try:
+        return json.loads(raw, object_pairs_hook=unique,
+                          parse_constant=lambda _: (_ for _ in ()).throw(InvalidHistory("json_constant")))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise InvalidHistory("json_invalid") from error
 
 
-def _restore(envelope, contents):
+def _restore(descriptor, contents):
+    """Restore a v3 descriptor from ordinal-ordered decoded content values."""
+    _require(isinstance(descriptor, dict) and set(descriptor) == {"data", "slots"}, "envelope_shape")
+    slots = descriptor["slots"]
+    _require(isinstance(slots, list), "slots_shape")
+    _require(isinstance(contents, list), "contents_shape")
+    data = descriptor["data"]
+    seen, used = set(), set()
+    for slot in slots:
+        _require(isinstance(slot, list) and len(slot) == 2, "slot_shape")
+        pointer, ordinal = slot
+        _require(isinstance(pointer, str) and pointer.startswith("/") and pointer not in seen, "slot_pointer")
+        _require(type(ordinal) is int and 0 <= ordinal < len(contents), "slot_index")
+        seen.add(pointer)
+        used.add(ordinal)
+        tokens = pointer[1:].split("/")
+        for token in tokens:
+            _require(not any(token[i] == "~" and (i + 1 == len(token) or token[i + 1] not in "01") for i in range(len(token))), "slot_escape")
+        tokens = [t.replace("~1", "/").replace("~0", "~") for t in tokens]
+        parent = data
+        for token in tokens[:-1]:
+            parent = _pointer_child(parent, token)
+        token = tokens[-1]
+        _require(_pointer_child(parent, token) is None, "slot_target")
+        if isinstance(parent, list):
+            parent[int(token)] = copy.deepcopy(contents[ordinal])
+        else:
+            parent[token] = copy.deepcopy(contents[ordinal])
+    _require(used == set(range(len(contents))), "unused_content")
+    return data
+
+
+def _legacy_restore(envelope, contents):
     _require(isinstance(envelope, dict) and set(envelope) == {"data", "slots", "contents"}, "envelope_shape")
     keys, slots = envelope["contents"], envelope["slots"]
     _require(isinstance(keys, list) and all(isinstance(k, str) for k in keys), "contents_shape")
@@ -146,17 +206,88 @@ def _output(payload):
     return hashlib.sha256("".join(text).encode()).hexdigest()
 
 
-class _Reader:
+class _SqlReader:
     def __init__(self, connection, placeholder):
         self.connection, self.placeholder = connection, placeholder
 
     def rows(self, query, values):
         return self.connection.execute(query.replace("?", self.placeholder), values).fetchall()
 
+
+class HistoryReader(_SqlReader):
+    """Strict normalized-v3 reader shared by audit evidence and fixture export."""
+
+    def node(self, identifier):
+        rows = self.rows(
+            "SELECT n.node_pk,n.id,n.parent_pk,parent.id,parent.scope_id,parent.kind,"
+            "n.kind,n.scope_id,s.principal,n.payload_version,p.payload "
+            "FROM turn_nodes n JOIN turn_scopes s ON s.id=n.scope_id "
+            "LEFT JOIN turn_nodes parent ON parent.node_pk=n.parent_pk "
+            "LEFT JOIN turn_node_payloads p ON p.node_pk=n.node_pk WHERE n.id=?",
+            (identifier,),
+        )
+        _require(len(rows) == 1, "node_missing")
+        (node_pk, node_id, parent_pk, parent_id, parent_scope, parent_kind,
+         kind, scope_id, principal, payload_version, payload) = rows[0]
+        _require(node_id == identifier and isinstance(principal, str) and bool(principal), "node_identity")
+        if parent_pk is not None:
+            _require(parent_id is not None, "parent_missing")
+            _require(parent_scope == scope_id and parent_kind == kind, "parent_scope")
+        _require(payload is not None, "payload_missing")
+        return {"node_pk": node_pk, "id": node_id, "parent_id": parent_id,
+                "kind": kind, "scope_id": scope_id, "principal": principal,
+                "payload_version": payload_version, "payload": payload}
+
+    def restore(self, node):
+        """Decode one descriptor and validate its complete ordinal/content set."""
+        rows = self.rows(
+            "SELECT c.ordinal,c.content_id,c.scope_id,t.scope_id,t.digest,t.content "
+            "FROM turn_node_contents c "
+            "JOIN turn_nodes n ON n.node_pk=c.node_pk "
+            "JOIN turn_scopes s ON s.id=n.scope_id "
+            "LEFT JOIN turn_contents t ON t.id=c.content_id "
+            "WHERE c.node_pk=? AND s.principal=? ORDER BY c.ordinal",
+            (node["node_pk"], node["principal"]),
+        )
+        descriptor = _json(_decode(node["payload"]))
+        contents, content_ids = [], set()
+        for expected, (ordinal, content_id, mapping_scope, content_scope, digest, encoded) in enumerate(rows):
+            _require(ordinal == expected, "ordinal_sequence")
+            _require(mapping_scope == node["scope_id"], "reference_scope")
+            _require(content_scope is not None and encoded is not None, "reference_missing")
+            _require(content_scope == node["scope_id"], "reference_scope")
+            _require(content_id not in content_ids, "reference_duplicate")
+            content_ids.add(content_id)
+            _require(isinstance(digest, (bytes, bytearray, memoryview)) and len(digest) == 32,
+                     "content_digest")
+            raw = _decode(encoded)
+            _require(content_digest(raw) == bytes(digest), "content_fingerprint")
+            contents.append(_json(raw))
+        data = _restore(descriptor, contents)
+        return data, len(rows), len(descriptor["slots"])
+
+    def identity(self, node):
+        return node["parent_id"], node["principal"]
+
+    def verify(self, identifier, principal):
+        node = self.node(identifier)
+        _require(node["id"] == identifier and node["principal"] == principal
+                 and node["kind"] == "response", "node_identity")
+        _require(node["payload_version"] == 6, "payload_version")
+        payload, count, slots = self.restore(node)
+        return node["parent_id"], _output(payload), count, slots
+
+
+class _LegacyHistoryReader(_SqlReader):
+    """Read-only adapter for frozen pre-v3 benchmark binaries only."""
+
     def node(self, identifier):
         rows = self.rows("SELECT id,parent_id,kind,principal,payload_version,storage_format,payload FROM turn_chain_nodes WHERE id=?", (identifier,))
         _require(len(rows) == 1, "node_missing")
         return rows[0]
+
+    def identity(self, node):
+        return node[1], node[3]
 
     def verify(self, identifier, principal):
         node = self.node(identifier)
@@ -170,11 +301,26 @@ class _Reader:
             _require(ref_owner == principal and content_owner == principal and encoded_content is not None, "reference_principal")
             _require(key not in contents, "reference_duplicate")
             raw = _decode(encoded_content)
-            _require(_digest(raw) == key, "content_fingerprint")
+            _require(_legacy_digest(raw) == key, "content_fingerprint")
             contents[key] = _json(raw)
-        payload = _restore(envelope, contents)
+        payload = _legacy_restore(envelope, contents)
         output = _output(payload)
         return parent_id, output, len(rows), len(envelope["slots"])
+
+
+def _history_tables(connection, placeholder):
+    query = ("SELECT name FROM sqlite_master WHERE type='table'" if placeholder == "?"
+             else "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema()")
+    return {row[0] for row in connection.execute(query).fetchall()}
+
+
+def _history_reader(connection, placeholder, allow_legacy=False):
+    tables = _history_tables(connection, placeholder)
+    if not allow_legacy and "turn_nodes" not in tables:
+        raise InvalidHistory("history_schema")
+    schema = history_storage_schema(tables)
+    reader = HistoryReader if schema == NORMALIZED_HISTORY else _LegacyHistoryReader
+    return reader(connection, placeholder)
 
 
 def _connect(args, directory):
@@ -197,15 +343,19 @@ def _connect(args, directory):
     return connection, "%s", "postgres"
 
 
-def read_history_evidence(args, directory, generation_ids):
-    """Verify every resolved generation and its complete principal-scoped ancestry."""
+def read_history_evidence(args, directory, generation_ids, *, allow_legacy=False):
+    """Verify every resolved generation and its complete principal-scoped ancestry.
+
+    ``allow_legacy`` is only for frozen pre-v3 benchmark binaries; current
+    product tests require the normalized schema.
+    """
     identifiers = list(dict.fromkeys(generation_ids))
     result = {}
     connection = None
     backend = "postgres" if getattr(args, "database_url", None) else "sqlite"
     try:
         connection, placeholder, backend = _connect(args, directory)
-        reader = _Reader(connection, placeholder)
+        reader = _history_reader(connection, placeholder, allow_legacy)
         for identifier in identifiers:
             proof = {"generation_id": identifier, "parent_id": None, "principal_sha256": None,
                      "output_sha256": None, "payload_valid": False, "references_valid": False,
@@ -214,8 +364,7 @@ def read_history_evidence(args, directory, generation_ids):
             result[identifier] = proof
             try:
                 node = reader.node(identifier)
-                proof["parent_id"] = node[1]
-                principal = node[3]
+                proof["parent_id"], principal = reader.identity(node)
                 proof["principal_sha256"] = hashlib.sha256(principal.encode()).hexdigest()
                 seen, cursor = set(), identifier
                 while cursor is not None:
@@ -264,7 +413,7 @@ def read_credential_evidence(args, directory, expectations):
     connection = None
     try:
         connection, placeholder, backend = _connect(args, directory)
-        reader = _Reader(connection, placeholder)
+        reader = _SqlReader(connection, placeholder)
         now = time.time_ns() // 1_000_000
         identities, reverse_identities = {}, {}
         principal = None

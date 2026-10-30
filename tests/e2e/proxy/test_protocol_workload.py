@@ -10,19 +10,9 @@ import pytest
 
 from tests.common.protocol_workload import (
     HistoryBudgetExceeded, Message, PROTOCOLS, Workload, build_request,
-    canonical_digest, canonical_input, expected_observation_text, timed_response_frames,
+    canonical_digest, canonical_input, timed_response_frames,
 )
 from tests.common.measure_protocol_http import visible
-
-
-@pytest.mark.parametrize("source,expected", [
-    ("safe bearer candidate tail", "safe bearer *** tail"),
-    ("safe bEaReR BaSiC candidate tail", "safe bEaReR BaSiC *** tail"),
-    ("safe basic\n\tvalue tail", "safe basic\n\t*** tail"),
-    ("safe unbearable baseline basic", "safe unbearable baseline basic"),
-])
-def test_observation_oracle_preserves_full_prose_except_contract_redaction(source, expected):
-    assert expected_observation_text(source) == expected
 
 
 def workload(**kwargs):
@@ -240,8 +230,6 @@ def test_bound_probes_preserve_full_semantics_and_exact_model_pacing(protocol, r
     assert metadata["expected_new_mappings"] == 2
     assert metadata["credential_protection_enabled"]
     assert metadata["output_sha256"] == hashlib.sha256(restored.encode()).hexdigest()
-    ordinary = expected_observation_text(restored, plan.credential_secrets)
-    assert metadata["expected_observation_output_sha256"] == hashlib.sha256(ordinary.encode()).hexdigest()
     serialized = json.dumps(metadata)
     assert all(value not in serialized for value in (*mappings, *mappings.values()))
 
@@ -308,12 +296,6 @@ def test_multiround_reuses_every_full_history_mapping_and_rejects_changes():
     assert mappings == references(first)
 
 
-def test_registered_secret_oracle_preserves_whitespace_and_nonsecret_suffix():
-    secret = "ghp_" + "x" * 36
-    text = f"before\t{secret}\n{secret}suffix  bearer value tail"
-    assert expected_observation_text(text, (secret,)) == "before\t***\n***suffix  bearer *** tail"
-
-
 def test_probe_budgets_fail_instead_of_truncating_and_legacy_binding_is_trivial():
     tiny = Workload(min_input_tokens=1, max_input_tokens=2, credential_probes=True,
                     min_images=0, max_images=0, image_size=4, image_pool_size=1)
@@ -352,5 +334,3 @@ def test_registered_probe_metadata_uses_full_text_not_just_nonce():
     bound = source.bind_protected_plan(plan, protected_messages(plan, references(plan)), {})
     modified = replace(bound.client, output_text=bound.client.output_text + " suffix")
     assert modified.metadata()["output_sha256"] != bound.client.metadata()["output_sha256"]
-    assert (modified.metadata()["expected_observation_output_sha256"]
-            != bound.client.metadata()["expected_observation_output_sha256"])

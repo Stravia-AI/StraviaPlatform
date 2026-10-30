@@ -457,12 +457,6 @@ async fn main() -> anyhow::Result<()> {
                 .bind(&schema)
                 .fetch_one(&pool)
                 .await?;
-                let indexes: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('interaction_observations_window_idx', 'model_turns_analytics_idx', 'target_attempts_analytics_idx')",
-                )
-                .bind(&schema)
-                .fetch_one(&pool)
-                .await?;
                 let removed_indexes: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('observation_events_expiry_idx')",
                 )
@@ -472,7 +466,6 @@ async fn main() -> anyhow::Result<()> {
                 println!("observation_tables={tables}");
                 println!("removed_tables={removed}");
                 println!("legacy_tables={legacy}");
-                println!("observation_indexes={indexes}");
                 println!("removed_indexes={removed_indexes}");
             }
             other => anyhow::bail!("unknown schema action: {other}"),

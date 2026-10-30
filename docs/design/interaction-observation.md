@@ -151,7 +151,7 @@ Gemini `thoughtsTokenCount` 保留为 reasoning 子项，输出仍只包含一�
 
 Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通诊断失败不得改变 Inference Run 的响应、重试、Target 选择、Client Output Commit 或 Generation Chain 提交。无法记录时产生显式 `observation_gap` 或把 Debug Trace 标成 `partial`；不得因普通观测缺口阻塞、取消或伪造业务结果。
 
-数据库、事务日志或实例文件存储失败（包括容量耗尽）适用 [ADR-0060 的请求/任务局部处理约束](../adr/0060-own-interaction-observation-outside-generation-chain.md#存储失败只影响所属请求或任务)：关键同步操作沿原 Result 失败当前相关请求或任务，Observation/Debug 独立异步写入失败只归所属诊断任务并保留 gap/partial，不牵连推理与无关请求/后台任务，Server/Desktop 继续服务。诊断不作为执行事实源；不新增全局 fatal 广播、全入口 scope、降级模式、健康检查或自动重试，不补造用量、不自动重放模型调用。独立长期 Stats 未可靠汇总时相关破坏性清理仍明确失败。队列满、Trace 限额及普通缺口保留原语义；该局部策略已实现并通过真实 Server SQLite/PostgreSQL 与 Desktop SQLite 的宿主/HTTP 验收，覆盖在途/后续请求、已交付后的后台 Media 任务、诊断 gap/partial 与双库 Stats 写失败的清理保护；真实 SQLITE_FULL 与隔离固定 PostgreSQL trigger 的边界见[整体架构 §4.10](architecture.md#410-interaction-observation)。专项及完整本地测试矩阵已通过，运行记录见[本地规格](../../.scratch/independent-usage-statistics/spec.md)。
+数据库、事务日志或实例文件存储失败（包括容量耗尽）适用 [ADR-0060 的请求/任务局部处理约束](../adr/0060-own-interaction-observation-outside-generation-chain.md#存储失败只影响所属请求或任务)：关键同步操作沿原 Result 失败当前相关请求或任务，Observation/Debug 独立异步写入失败只归所属诊断任务并保留 gap/partial，不牵连推理与无关请求/后台任务，Server/Desktop 继续服务。诊断不作为执行事实源；不新增全局 fatal 广播、全入口 scope、降级模式、健康检查或自动重试，不补造用量、不自动重放模型调用。独立长期 Stats 未可靠汇总时相关破坏性清理仍明确失败。队列满、Trace 限额及普通缺口保留原语义；该局部策略已实现，真实 Server SQLite/PostgreSQL 与 Desktop SQLite 的[宿主/HTTP 测试](../../tests/e2e/storage/test_storage_failures.py)覆盖在途/后续请求、已交付后的后台 Media 任务、诊断 gap/partial 与双库 Stats 写失败的清理保护；真实 SQLITE_FULL 与隔离固定 PostgreSQL trigger 的边界见[整体架构 §4.10](architecture.md#410-interaction-observation)。
 
 ### 3.5 凭据命中记录
 
@@ -616,6 +616,14 @@ SQL 只计入最近的业务操作，不重复累加到祖先或 SQL 自身记�
 用工作量字段区分大批次与过多小批次，用因果关系识别重复物化，但不将后台 SQL 重复算作同步请求成本。指标是进程累计值，关闭或清除 Debug 数据不会归零；会话 timeline 与累计 metrics 不一定覆盖相同时间窗口，不能直接相除推导每请求查询量。缺失采样、丢弃的 SQL、未知祖先或陈旧远端快照必须明确为证据缺口，不能解读成零成本或零占用。
 
 `tests/common/measure_history_paths.py` 对真实 Server 使用隔离数据库与 loopback 上游，分别报告新建或持续连接的 `connect_ms`、不含连接建立的 `http_request_ms` 和总 `latency_ms`；普通模式、连接模式及 SharedCache 容量必须在前后对照中一致。专用进程默认用 `--trace-completed-capacity 20000` 同时配置操作与 SQL 内存批次，不改变产品默认值，成功写盘不判为证据损失。前后快照必须为 schema 3、Debug 开启、同一 epoch 且存储状态 `ready`；存储已有错误或错误增长、实际记录丢失、活动拒收、不完整 span 或缺少完整请求根/子树证据时，报告仍判无效，不能为通过比较而忽略这些标记。历史重建只有完整的独立 `observation.*` 根，或经过 `observation.command.process` 且因果祖先完整时，才单列为后台观测工作，不混入请求同步路径；未知根、缺失祖先或环仍判为归属不完整。正常完整投影场景与将独立测试 Principal 的派生投影置为未知的共享祖先诊断场景分别报告；后者只验证保守回退的读取复用，不代表正常数据的收益。内容、父节点、拒绝时无父关系和完整压缩窗口是正确性依据，候选数量与读链次数只作工作量证据。
+
+长历史探针在管理诊断请求前检查 access Cookie 的剩余期限，必要时通过真实 `/api/v1/auth/refresh` 续期。它不修改产品会话 TTL，不重放失败推理，也不以延长认证有效期换取测量通过；已审查的失败只输出阶段和 HTTP 状态，未知异常不输出可能含凭据的正文。
+
+历史探针报告 schema 4 默认使用 `--performance-debug enabled`，沿用 schema 3 的整轮采集：每个 repetition 只在开始、结束各导出一次完整时间线，并一次性校验、索引整个因果森林。请求通过已完成 Observation 的 Run ID 匹配 `proxy.inference_run.args.request_id`，不按时间戳、执行顺序或相邻快照猜测归属；请求外的 span 在 `performance_captures` 中单独保留一次。缺失或重复身份、未认领的新增请求根、断父、环、丢失、冻结和未结束的同步请求子树仍拒收。进程 CPU/RSS 窗口包含 provision、推理与 Observation 检查，但排除开始/结束的完整时间线导出及 Python 离线归因；不能与旧报告 schema 2 包含逐请求全量导出的资源窗口直接比较。这里的报告版本与 Server 时间线的 schema 3 是两个独立契约。探针逐请求输出不含正文或凭据的进度，中断和不完整运行不生成有效成绩。
+
+`--performance-debug disabled` 用于正常运行成本对照，仍执行相同请求数、完整有效上游输入、输出、父节点和压缩窗口校验，等待普通 Observation 完成，并在首尾确认 Debug 关闭、epoch 未变化且没有采集 span。它不提供完整因果链证据，SQL 次数、SQL 时长和阶段成本输出 `null`，不能解释为零；控制证据单列在 `debug_disabled_controls`，不冒充 `performance_captures`。两端必须使用相同 Debug 模式，关闭模式不能替代开启模式的因果归因验收。Linux 额外记录资源窗口内整个服务端进程的 `read_bytes`、`write_bytes` 与 `cancelled_write_bytes` 差值；它们包含所有服务端文件和线程，不是纯数据库 I/O，也不是设备写放大。其他平台明确输出未知。
+
+`--history-items tool-json` 在每个新用户消息后增加已完成、由客户端提供的工具调用和结果，包含嵌套 JSON、空值及超出 `u64` 的精确整数；不执行平台工具。工具绑定、原始 arguments 和结果均参加上游输入校验，分支按完整轮次取前缀，不假设每轮只有两个 Item。默认 `text` 保留原文本负载；前后对照的形状必须一致，不能把结构化负载与文本成绩混合。
 
 #### 7.1.3 CPU 与堆专项抓取
 

@@ -385,7 +385,7 @@ stravia-server::start_http_server() → 绑定 listener 并提供优雅关闭
 - **请求生命周期追踪**：`RequestContext` 携带 request_id、deadline、cancellation token、outcome，以及请求范围扩展，端到端贯穿 dispatcher 与 handler。
 - **确定性协议协商**：`negotiate()`（`proxy/planner/negotiator.rs`）实现三级 egress 解析（Exact → Same-family → Provider Default），`ProtocolRegistry` 只暴露 endpoint identity、capabilities、alias 与 ingress route 查询。
 - **协议与平台 IR 双向适配**：每个 codec 只实现自身 wire 与 canonical IR 的双向映射，不为「Responses → Chat」等协议对编写独立转换规则。`ProtocolTransform::bind(ingress, egress)` 返回的 `ProtocolPair` 只组合入口解码和出口编码；请求、响应与有状态 stream session 都经过平台 IR，目标编码器不依据客户端来源协议猜测历史消息边界。
-- **完整模型响应回放**：一次完整同步响应或累积完成的 SSE 响应以 `AiResponse` 为事实单元。Generation Chain 恢复、隐藏平台工具轮次和 Agent 循环把响应追加到历史时，保留原有序 item graph，并记录平台生成的响应归属；不以可能重复的上游 ID、item 邻接、角色或 phase 推断归组。Chat 出口将同一响应的可表示思考、正文和并行工具调用投影为一条 assistant，再按历史顺序追加工具结果或用户消息；不同响应与未经归组的原生 Chat 消息保持独立。item ID、phase、真实签名、密文及来源证据仍留在原 IR，不为合并消息而丢弃。内部归属不接受客户端自报、不出现在上游 wire，也不改变 prompt 指纹；已有持久化节点中的完整 `effective_output` 足以恢复边界，无数据库迁移。只有纯平铺历史且无完整响应事实时不猜测归组。
+- **完整模型响应回放**：一次完整同步响应或累积完成的 SSE 响应以 `AiResponse` 为事实单元。Generation Chain 恢复、隐藏平台工具轮次和 Agent 循环把响应追加到历史时，保留原有序 item graph，并记录平台生成的响应归属；不以可能重复的上游 ID、item 邻接、角色或 phase 推断归组。Chat 出口将同一响应的可表示思考、正文和并行工具调用投影为一条 assistant，再按历史顺序追加工具结果或用户消息；不同响应与未经归组的原生 Chat 消息保持独立。History Marker 展开的 assistant 条目仅继承载体已有的可信响应归属，不复制条目 ID 或受保护载荷的来源证明，也不覆盖恢复项已有的归属。item ID、phase、真实签名、密文及来源证据仍留在原 IR，不为合并消息而丢弃。内部归属不接受客户端自报、不出现在上游 wire，也不改变 prompt 指纹；已有持久化节点中的完整 `effective_output` 足以恢复边界，无数据库迁移。只有纯平铺历史且无完整响应事实时不猜测归组。
 - **请求编码所有权**：Rust 请求编码接口消费 `AiRequest`，编码入口先按目标能力形成保留可表达部分、省略不可表达部分的此次编码视图；标准协议共用准备入口，私有 wire 由所属插件准备。四类标准 codec 取出唯一归属的文本、移入已拥有的 JSON 子树；共享文本、历史快照、工具关联、原生字段优先级和 metadata 隔离语义保持不变，不提供旧借用编码兼容路径。
 - **内容解码所有权**：Canonical `MessageContent` 与 Chat 文本/parts 通过直接 Serde visitor 接收已有 `String` 或 typed sequence，避免 untagged 缓冲再借用复制。来自 wire 字节的文本仍按需要拥有缓冲；保留现有 JSON 形状、原生工具 JSON、任意精度 wire 数字和非法内容拒绝行为，不更换 JSON backend。
 - **Compatibility-first representability**：request、response 与 stream delta encode 保留目标可表达的内容、控制与扩展，默认省略无法表达的部分，不因语义损失整体拒绝、不提供严格模式开关。同协议可承载字段保持；此次编码的准备视图不改写共享 canonical 历史。非法源 wire、解析错误、安全与凭据校验及网络错误仍报错。
@@ -667,7 +667,7 @@ Generation 准备阶段将已经核验的 Principal、父 ID、最终 Target、�
 
 SQLite 与 PostgreSQL 的候选查询仍将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，保留 Principal、kind、namespace、期限过滤及按 canonical 单元数、完成时间、节点 ID 的原排序。迁移 `0017_history_candidate_projection` 在节点表增加可空的投影版本、controls 指纹与客户端 context 指纹；提交从实际客户端投影 `client_items` 计算，旧索引升级到 Generation history v3 namespace 时从 retained client items 重放重建，不借用 Provider 脱敏视图的证明。查询在 SQL 中用版本匹配的 controls 与 `(context fingerprint, canonical unit count)` 配对否决确定不匹配的候选；缺失字段、未知版本或没有查询证明时保守保留。指纹只能否决，不能证明匹配：其余候选仍按顺序读取并执行完整 canonical 历史核验，session hint 不能替代语义一致性。确定不匹配的分支不读取，因此该分支的 payload 或祖先损坏不会影响当前请求；可能匹配的分支保持原有错误与 TTL 语义。自动父发现先查询并严格核验 session 层，只有该层没有可用父链时才查询 controls 层；`candidate_count` 只统计实际 SQL 返回的候选，不能再用于推断被投影排除的分支也经过了读链。
 
-外置内容恢复从 immutable 节点 envelope 提取 slot 路径与 content key，不再读取节点引用表来恢复正文。它先在当前节点批次内去重，再查询请求上下文中的已校验内容，只对缺失的唯一 `(Principal, content_key)` 按最多 400 项分批读取。新读内容校验摘要并解码后恢复到引用位置；缺失正文、损坏摘要或非法 slot 仍按原错误返回，不能以部分成功污染请求上下文。内容接纳与节点完整重放共用前述预算和成功边界；不同 Principal 不共享内容。跨候选复用避免的是重复数据库读取、解压与解析，不承诺消除恢复 JSON slot 所需的全部复制。
+外置内容恢复从 immutable descriptor 提取 JSON Pointer 与 ordinal，以 `turn_node_contents` 的数值映射作为唯一内容引用权威；descriptor 不再保存摘要或内容 ID 副本。经过 Principal/kind 过滤的节点查询同时投影 scope 与整数引用映射，不另查一次关联，也不重复携带正文；恢复器按 ordinal 排序并检查连续、完整和同 scope，不依赖聚合输出顺序。先在当前节点批次内去重，再查询请求上下文中的已校验内容，只对缺失的数值 content_id 按最多 256 项分批读取。内容解码后验证带域 SHA-256 再恢复 slot；缺失正文、损坏归属/摘要或非法 slot 明确失败，不能以部分成功污染上下文。内容接纳与节点完整重放共用前述预算和成功边界；不同 Principal 不共享内容。跨候选复用避免重复数据库读取、解压与解析，不承诺消除 JSON slot 恢复所需的全部复制。
 
 历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或过期历史撤销不可用索引，不重写原始节点或父边。
 
@@ -702,7 +702,7 @@ Codex HTTP 推理实际发送 `stream=true` 时，Vendor 显式选择既有 SSE 
 
 SQLite 与 PostgreSQL 的 Interaction usage 汇总从该 Interaction 的索引 Run 集合关联 Target attempts，避免每次确认 usage 扫描全局历史。仍对全部所属 attempts 执行 `SUM`，保留未知值、显式零、失败 attempt 和仅首次确认入账的语义；这一诊断汇总与长期管理统计是不同读取边界。
 
-**存储局部故障验收边界：** `tests/e2e/storage/test_storage_failures.py` 已通过真实宿主/HTTP 验收，使用 Server SQLite/PostgreSQL 与真实 Desktop SQLite。覆盖所属同步请求错误、Observation durable gap/Debug partial、在途与后续请求成功、已交付后的真实后台 Media 任务、队列/Trace 限额对照，以及双库 Stats 写失败后清理返回 503 且应计事实保留。真实错误与类型注入证据分开记录，不以进程存活或假的继续服务函数代替实际行为证据；该专项与完整本地测试矩阵均已通过，运行记录见[本地规格](../../.scratch/independent-usage-statistics/spec.md)。以下隔离控制仅用于测试，不作为生产配置或公开管理 API，不填满开发机磁盘，也不调用外部上游。
+**存储局部故障验收边界：** [存储故障测试](../../tests/e2e/storage/test_storage_failures.py) 使用 Server SQLite/PostgreSQL 与真实 Desktop SQLite 做宿主/HTTP 验收。覆盖所属同步请求错误、Observation durable gap/Debug partial、在途与后续请求成功、已交付后的真实后台 Media 任务、队列/Trace 限额对照，以及双库 Stats 写失败后清理返回 503 且应计事实保留。真实错误与类型注入证据分开记录，不以进程存活或假的继续服务函数代替实际行为证据。以下隔离控制仅用于测试，不作为生产配置或公开管理 API，不填满开发机磁盘，也不调用外部上游。
 
 |测试控制|实际边界与限制|
 |---|---|
@@ -1202,6 +1202,8 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 
 `Gateway::prepare(config)` 解析数据根并建立存储、迁移及连接池，返回持有这些资源的 `PreparedGateway`，尚不启动 Gateway 后台任务。宿主通过 `storage()` 检查管理员和完成初始化，再消费同一个对象调用 `start()`；`Gateway::new` 也组合这两个阶段。Server 的正常启动和首次设置完成都沿用同一份准备结果，不再次建池或执行迁移。
 
+Core 的共享 SQLite 连接池在每条新连接初始化时读取实际 `page_size`，把自动 checkpoint 触发窗口设为 32 MiB 对应的页数；默认 4 KiB 页为 8,192 页。这样让有界小事务对相同索引页的修改合并回写，不扩大写事务或延后其 WAL 提交同步。页缓存、`synchronous`、写协调和 `busy_timeout` 保持不变。32 MiB 是页负载触发阈值，不是缓存容量或 WAL 文件硬上限：事务可以越过阈值，长期 reader 也可能阻止回收。离线复制与维护的专用连接池不因此改变。测量与代价见[存储性能设计](data-layout-performance.md#sqlite-checkpoint-窗口决策)。
+
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 
 Core 的 `build.rs` 显式跟踪整个 `migrations/` 目录，使新增迁移也能触发增量构建重新嵌入；仅依赖 `sqlx::migrate!` 对已有文件的跟踪不能发现新增文件。`0015_history_retention_indexes` 在两后端将父边索引扩展为 `(parent_id, principal, kind)`，并增加内容引用的 `(node_id, principal)` 索引，使外键删除检查按完整关系定位，避免清理每个节点时反复扫描同一 Principal 的全部历史并长时间占用 SQLite 写锁。迁移只调整索引，不改变历史、保留期、身份或会话契约。
@@ -1233,13 +1235,17 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 详情见[成本与计费](cost-and-billing.md)，最终结构见生成的 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql) 参考 schema。
 
-Turn Chain format 2 在同一 Principal 内按 raw JSON 内容项摘要去重，至少 256B 的指定历史槽外置为内容行；节点 envelope 的 `slots` 保存路径与重复位置，`contents` 保存唯一摘要，`turn_chain_node_contents` 只保存不同内容的引用集合而非每个路径一行。复合外键约束节点与内容归属；写入先查已有项再插缺失项，物化按链批量读取并核验正文摘要，持锁 GC 维持引用安全。节点 envelope、内容及普通 Observation payload 使用同一二进制 codec，压缩门槛仍为 128B。精确的 14 字节 trailer、启动分阶段转换钩子、备份恢复与无可重复性能回退验收见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 状态不再进入关系表：`diagnostics/observation-debug/<trace_id>/manifest.json` 配合进程内 `DebugTraceIndex` 提供详情、失败请求列表与 Bundle 状态，单实例文件可见性不变；事件收敛见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+`0032_normalized_turn_storage` / `0033_finalize_normalized_history` 将 Turn Chain 切换为规范化存储 v3。`turn_scopes` 字典化 Principal，`turn_nodes` 保留公开 ID、kind、数值父边与前缀，正文与可变期限分别进入 `turn_node_payloads` / `turn_node_retention`。所有非 null 语义内容单元统一以 `SHA256(b"stravia.turn-content.v1\0" + raw_compact_json)` 的完整 32 字节寻址，不再有 256B 分流；空值类型仍精确保留，opaque Item 不拆成标量 EAV。`turn_contents` 仅在 scope 内共享，`turn_node_contents` 以 ordinal 映射数值 ID，复合外键保证 scope/kind 隔离。descriptor 只有 data/slots，关联表是唯一内容引用权威。
 
-普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 envelope，再查询内容存在性提示；查询释放连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 保留 `ROW EXCLUSIVE` 表锁及既有行的 `FOR KEY SHARE`；SQLite 仍在共享 gate 内裁决。若 GC 在提示查询与事务之间删除内容，则使用保留的 raw JSON 在 blocking worker 中补做压缩，此异常路径保持写/GC 互斥，不释放锁后重试。缺失内容批量 `INSERT ... DO NOTHING RETURNING`，冲突后仅定向取号；节点与去重引用仍在同一事务提交。两后端使用相同准备与重查流程，不改变 SQL schema、格式版本或保留期。
+迁移先建立新结构，再按阶段/游标验证旧正文、引用集合并转换，全部完成后才切换 native compaction 外键、删除旧表与工作表；0001–0031 checksum 保持不变，已完成库重启不访问旧表。升级需备份完整数据根和外部数据库，预留新旧结构并存空间；回退必须恢复配套备份。节点 descriptor、内容及普通 Observation payload 继续共用二进制 codec，128B 压缩门槛与内容寻址规则无关。14 字节 trailer、锁序、候选 GC、deleting 恢复与验收边界见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 仍由 `diagnostics/observation-debug/<trace_id>/manifest.json` 与本实例 `DebugTraceIndex` 提供，不进入共享数据库；事件契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+
+普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 descriptor，再查询内容存在性提示；释放查询连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 按 nodes→contents 取得 `ROW EXCLUSIVE` 表锁并按稳定摘要顺序锁定已有内容；SQLite 在共享 gate 与 BEGIN IMMEDIATE 内裁决。若 GC 删除了提示中的内容，则以保留的 raw JSON 补做压缩，保持写/GC 互斥，不释放锁后重试。缺失内容批量插入，冲突后定向取号；节点、payload、retention、ordinal 关联和前缀同事务提交。祖先续期仍为 O(depth)，只更新确实增长的窄 retention 行，不改变保留期语义。
 
 锁内确认内容存在后，立即释放已不再需要的恢复正文。缺失内容的压缩缓冲按所有权交给 SQLx 参数：SQLite 复用原 `Vec<u8>`，避免借用 slice 的绑定副本；PostgreSQL 仍需将 BYTEA 编码进协议参数区，但源缓冲在编码后释放，不再跨数据库等待重复驻留。启动迁移保留共享 prepared map 的借用路径，不改变其数据复用与原子提交。
 
-每个可外置历史值先对原始 compact JSON 流同时计数和散列，重复内容不分配第二份 raw body，首次内容才按精确长度写入正文。内容 key 仍取原始 JSON bytes 而不是语义指纹；256-byte 边界、逐 occurrence 的 slot、未知字段及完整恢复保持不变。
+内容抽取复用 compact JSON 序列化 scratch 和摘要去重，内容身份仍取确切 JSON bytes 而不是语义指纹；逐 occurrence 的 slot、未知字段、精确数字及完整恢复不变。解码后的 `FrozenItem(Arc<AiItem>)` 在 client/effective/mutation/catalog 窗口间共享，真正改写才 COW；已有 owned canonical 结果直接接管，准备好的客户端投影在提交时消费而非复制。缓存按唯一 Item allocation、深层 metadata 与完整 effective_request 控制估重；请求工作区还计入解码节点保留的响应扩展与容器，不再为准入序列化整节点。JSON 估重与 precommit 共用 `memory` 的借用遍历，计入任意精度数字词法及保守容器开销，内容条目另计 Arc 头和槽位；不为计量构造第二棵 DOM。PostgreSQL 的 payload/content BYTEA 列保持 `STORAGE EXTERNAL`，避免对 storage codec 帧重复尝试 TOAST 压缩。
+
+0033 同时移除 interaction/model-turn 各五个无生产读者的 Token 副本，以 attempt 为查询权威，保留 estimated_input_tokens 和全部金额事实。Observation 批内复用 usage、按需读取 durable attempt，并把 finish 的状态/金额/usage 合并更新；不重写事件顺序、迟到修订、stats 触发器或长期 spend。Client Errors 的拒绝分支用匹配 `COALESCE(started_at,occurred_at)` 与排除取消条件的部分表达式索引，普通列表和 expiry 索引仍各司其职。
 
 本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 

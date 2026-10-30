@@ -1,4 +1,6 @@
+use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::Role;
 use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
 
 pub(crate) fn explicit_chat_reasoning_field(resp: &AiResponse) -> Option<&serde_json::Value> {
@@ -8,71 +10,101 @@ pub(crate) fn explicit_chat_reasoning_field(resp: &AiResponse) -> Option<&serde_
         .filter(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
 }
 
-pub(crate) fn restore_response_history(
-    items: &mut Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+/// True when an item already carries readable reasoning, in which case the
+/// empty Chat `reasoning_content` field must not be restored.
+fn item_has_visible_reasoning(item: &AiItem) -> bool {
+    item.thinking_ref()
+        .is_some_and(|(text, _)| !text.is_empty())
+        || item.reasoning_ref().is_some_and(|(summary, content, _)| {
+            summary.iter().chain(content).any(|text| !text.is_empty())
+        })
+        || item
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("reasoning_content"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+}
+
+/// History container accepted by completed-response restoration.
+/// Owned items mutate in place; shared windows detach for required metadata changes.
+pub(crate) trait ChatReasoningItem:
+    crate::generation_chain::HistoryItem + From<AiItem>
+{
+    fn item_mut(&mut self) -> &mut AiItem;
+}
+
+impl ChatReasoningItem for AiItem {
+    fn item_mut(&mut self) -> &mut AiItem {
+        self
+    }
+}
+
+pub(crate) fn restore_response_history<T: ChatReasoningItem>(
+    items: &mut Vec<T>,
     output_start: usize,
     response_group: &str,
     field: Option<&serde_json::Value>,
 ) {
     restore_chat_reasoning_field(items, output_start, field);
     // 调用方刚追加了一个完整响应；只记录这个事实，不从条目邻接关系推断。
-    stravia_runtime_contract::protocol::ir::response::mark_response_history(
-        &mut items[output_start..],
-        response_group,
-    );
+    for item in &mut items[output_start..] {
+        stravia_runtime_contract::protocol::ir::response::mark_response_history(
+            std::slice::from_mut(item.item_mut()),
+            response_group,
+        );
+    }
 }
 
-fn restore_chat_reasoning_field(
-    items: &mut Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+fn restore_chat_reasoning_field<T: ChatReasoningItem>(
+    items: &mut Vec<T>,
     output_start: usize,
     field: Option<&serde_json::Value>,
 ) {
-    use stravia_runtime_contract::protocol::ir::{AiItem, Role};
-
     let Some(value) = field.filter(|value| value.is_null() || value.as_str() == Some("")) else {
         return;
     };
-    let output = &items[output_start..];
-    if output.iter().any(|item| {
-        item.thinking_ref()
-            .is_some_and(|(text, _)| !text.is_empty())
-            || item.reasoning_ref().is_some_and(|(summary, content, _)| {
-                summary.iter().chain(content).any(|text| !text.is_empty())
-            })
-            || item
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("reasoning_content"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| !text.is_empty())
-    }) {
+    if items[output_start..]
+        .iter()
+        .any(|item| item_has_visible_reasoning(item.history_item()))
+    {
         return;
     }
     // 字段随响应的可回放项保留；最终消息形状由目标协议编码器投影。
     // 不制造 Thinking，也不能把字段附到随后会被丢弃的受保护推理项。
     let mut restored = false;
     for item in &mut items[output_start..] {
-        if item.role != Role::Assistant
-            || item.thinking_ref().is_some()
-            || item.reasoning_ref().is_some()
-        {
+        if !chat_reasoning_target(item.history_item()) {
             continue;
         }
-        let meta = item.meta.get_or_insert_with(Default::default);
-        if meta.get("reasoning_content").is_none() {
-            meta.insert_graph_extension("reasoning_content", value.clone())
-                .expect("reasoning_content is ordinary item metadata");
+        if chat_reasoning_field_missing(item.history_item()) {
+            insert_chat_reasoning_field(item.item_mut(), value);
         }
         restored = true;
     }
     if !restored {
         let mut item = AiItem::output_text("");
-        item.meta
-            .get_or_insert_with(Default::default)
-            .insert_graph_extension("reasoning_content", value.clone())
-            .expect("reasoning_content is ordinary item metadata");
-        items.push(item);
+        insert_chat_reasoning_field(&mut item, value);
+        items.push(T::from(item));
     }
+}
+
+fn chat_reasoning_target(item: &AiItem) -> bool {
+    item.role == Role::Assistant && item.thinking_ref().is_none() && item.reasoning_ref().is_none()
+}
+
+fn chat_reasoning_field_missing(item: &AiItem) -> bool {
+    item.meta
+        .as_ref()
+        .and_then(|meta| meta.get("reasoning_content"))
+        .is_none()
+}
+
+fn insert_chat_reasoning_field(item: &mut AiItem, value: &serde_json::Value) {
+    item.meta
+        .get_or_insert_with(Default::default)
+        .insert_graph_extension("reasoning_content", value.clone())
+        .expect("reasoning_content is ordinary item metadata");
 }
 
 pub(crate) fn ai_response_to_deltas(

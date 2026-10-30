@@ -34,19 +34,23 @@ fn expires_after(now: i64, ttl: Duration) -> i64 {
 
 // 两种 SQL adapter 共享同一事务算法；$N 参数形式也由 SQLite 原生支持。
 macro_rules! extend_source {
-    ($tx:ident, $principal:expr, $source:expr, $now:expr, $expires:expr) => {{
+    ($tx:ident, $retain:ident, $principal:expr, $source:expr, $now:expr, $expires:expr) => {{
         if let Some(source) = $source {
-            let available: Option<i64> = sqlx::query_scalar(
-                "SELECT CAST(1 AS BIGINT) FROM turn_chain_nodes WHERE id = $1 AND principal = $2 AND kind = 'response' AND expires_at > $3",
-            ).bind(source).bind($principal).bind($now).fetch_optional(&mut *$tx).await.map_err(storage)?;
-            if available.is_none() { return Err(CompactionError::Unavailable); }
-            sqlx::query(
-                "WITH RECURSIVE ancestors(id, parent_id) AS (
-                    SELECT id, parent_id FROM turn_chain_nodes WHERE id = $1 AND principal = $2
-                    UNION SELECT n.id, n.parent_id FROM turn_chain_nodes n JOIN ancestors a ON n.id = a.parent_id WHERE n.principal = $2
-                 ) UPDATE turn_chain_nodes SET expires_at = CASE WHEN expires_at < $3 THEN $3 ELSE expires_at END
-                 WHERE id IN (SELECT id FROM ancestors) AND principal = $2",
-            ).bind(source).bind($principal).bind($expires).execute(&mut *$tx).await.map_err(storage)?;
+            crate::turn_chain::SqlTurnChainStore::$retain(
+                &mut $tx,
+                $principal,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::Response,
+                source,
+                $now,
+                $expires,
+            )
+            .await
+            .map_err(|error| match error {
+                stravia_runtime_contract::turn_chain::TurnCommitError::ParentUnavailable => {
+                    CompactionError::Unavailable
+                }
+                _ => CompactionError::Storage,
+            })?;
         }
     }};
 }
@@ -68,10 +72,11 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $begin:literal) => {{
+            ($pool:expr, $begin:literal, $retain:ident, $lock:literal) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
-                extend_source!(tx, &principal, record.source_generation_id.as_deref(), now, expires);
+                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
+                extend_source!(tx, $retain, &principal, record.source_generation_id.as_deref(), now, expires);
                 for predecessor in &record.source_record_ids {
                     let exists: Option<i64> = sqlx::query_scalar("SELECT CAST(1 AS BIGINT) FROM native_compactions WHERE id = $1 AND principal = $2 AND expires_at > $3")
                         .bind(predecessor).bind(&principal).bind(now).fetch_optional(&mut *tx).await.map_err(storage)?;
@@ -95,8 +100,13 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE"),
-            Self::Postgres(pool) => insert!(pool, "BEGIN"),
+            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", retain_sqlite, ""),
+            Self::Postgres(pool) => insert!(
+                pool,
+                "BEGIN",
+                retain_postgres,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
+            ),
         }
     }
 
@@ -180,10 +190,11 @@ impl Store {
         let now = chrono::Utc::now().timestamp_millis();
         let expires = expires_after(now, ttl);
         macro_rules! extend {
-            ($pool:expr, $begin:literal) => {{
+            ($pool:expr, $begin:literal, $retain:ident, $lock:literal) => {{
                 // 先取得 SQLite 写锁，避免交付确认与立即回传的快照升级竞争。
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                 let mut queue = ids.to_vec();
                 let mut visited = HashSet::new();
                 while let Some(id) = queue.pop() {
@@ -192,7 +203,7 @@ impl Store {
                     let payload: Option<String> = sqlx::query_scalar("SELECT payload FROM native_compactions WHERE id = $1 AND principal = $2 AND expires_at > $3")
                         .bind(&id).bind(&principal).bind(now).fetch_optional(&mut *tx).await.map_err(storage)?;
                     let record: CompactionRecord = serde_json::from_str(&payload.ok_or(CompactionError::Unavailable)?).map_err(storage)?;
-                    extend_source!(tx, &principal, record.source_generation_id.as_deref(), now, expires);
+                    extend_source!(tx, $retain, &principal, record.source_generation_id.as_deref(), now, expires);
                     let referenced_at = (!delivered || !ids.contains(&id)).then_some(now);
                     sqlx::query("UPDATE native_compactions SET expires_at = CASE WHEN expires_at < $3 THEN $3 ELSE expires_at END, referenced_at = COALESCE(referenced_at, $4) WHERE id = $1 AND principal = $2")
                         .bind(&id).bind(&principal).bind(expires).bind(referenced_at).execute(&mut *tx).await.map_err(storage)?;
@@ -208,8 +219,13 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => extend!(pool, "BEGIN IMMEDIATE"),
-            Self::Postgres(pool) => extend!(pool, "BEGIN"),
+            Self::Sqlite(pool) => extend!(pool, "BEGIN IMMEDIATE", retain_sqlite, ""),
+            Self::Postgres(pool) => extend!(
+                pool,
+                "BEGIN",
+                retain_postgres,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
+            ),
         }
     }
 

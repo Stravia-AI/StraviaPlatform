@@ -16,11 +16,12 @@ async fn candidate_projection_uses_client_controls_and_retained_items() {
 
     for replacement in [None, Some(vec![user_message("retained replacement")])] {
         let parent = ActiveGenerationChain {
-            parent_client_items: vec![user_message("old client history")],
-            replacement_client_items: replacement.clone(),
+            parent_client_items: freeze_items(vec![user_message("old client history")]),
+            replacement_client_items: replacement.clone().map(freeze_items),
             ..Default::default()
         };
-        let projected = project_client_commit(&parent, write.request_delta(), &response).unwrap();
+        let delta = write.request_delta();
+        let projected = project_client_commit(&parent, delta, &response).unwrap();
         let projection = projected.client_history.reusable_projection();
         let mut expected = replacement.unwrap_or_else(|| {
             vec![
@@ -28,7 +29,7 @@ async fn candidate_projection_uses_client_controls_and_retained_items() {
                 user_message("client input"),
             ]
         });
-        expected.extend(projected.client_output.clone());
+        expected.extend(owned_items(&projected.client_output));
         assert_eq!(
             projected.client_item_units,
             expected
@@ -1236,8 +1237,9 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
 fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
     let mut response = AiResponse::new("resp_saved", "model");
     response.items = vec![AiItem::output_text("saved answer")];
-    let output =
-        project_client_history(OPEN_RESPONSES_2026_04_24, &response, &mut []).expect("project");
+    let output = freeze_items(
+        project_client_history(OPEN_RESPONSES_2026_04_24, &response, &mut []).expect("project"),
+    );
     let id = output[0].id_ref().expect("stamped id").to_owned();
     assert_eq!(
         stravia_protocol_codec::codec::open_responses::formatter::response_id_from_gateway_item_id(
@@ -1297,7 +1299,7 @@ fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_his
         resolve_protocol_item_references(
             OPEN_RESPONSES_2026_04_24,
             &mut requested,
-            &[saved.clone(), conflicting]
+            &[saved.clone().into(), conflicting.into()]
         )
         .expect_err("conflicting interpretations are ambiguous"),
         "item_reference_ambiguous",
@@ -1306,7 +1308,7 @@ fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_his
     resolve_protocol_item_references(
         OPEN_RESPONSES_2026_04_24,
         &mut requested,
-        &[saved.clone(), saved.clone()],
+        &[saved.clone().into(), saved.clone().into()],
     )
     .expect("identical history can repeat");
     assert_eq!(requested[0].content.to_text(), "saved answer");
@@ -1330,7 +1332,7 @@ fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_his
         resolve_protocol_item_references(
             OPEN_RESPONSES_2026_04_24,
             &mut requested,
-            &[commentary, final_answer]
+            &[commentary.into(), final_answer.into()]
         )
         .expect_err("phase changes model-visible meaning"),
         "item_reference_ambiguous",
@@ -1354,9 +1356,33 @@ fn requested_item_reference_rejects_semantic_conflicts_but_accepts_identical_his
     resolve_protocol_item_references(
         OPEN_RESPONSES_2026_04_24,
         &mut requested,
-        &[saved, unrelated, other],
+        &[saved.into(), unrelated.into(), other.into()],
     )
     .expect("unrequested identities must not affect resolution");
+}
+
+#[test]
+fn shared_windows_compare_canonical_units_across_item_grouping() {
+    let grouped: AiItem = serde_json::from_value(serde_json::json!({
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "reason", "signature": null},
+            {"type": "text", "text": "answer"}
+        ]
+    }))
+    .unwrap();
+    let grouped = freeze_items(vec![grouped]);
+    let split = vec![
+        AiItem::thinking("reason", None),
+        AiItem::output_text("answer"),
+    ];
+    assert!(items_equal(&grouped, &split));
+    assert!(items_equal(&split, &grouped));
+    let different = vec![
+        AiItem::thinking("reason", None),
+        AiItem::output_text("different"),
+    ];
+    assert!(!items_equal(&grouped, &different));
 }
 
 #[test]
@@ -1478,4 +1504,132 @@ fn chat_rejects_item_references() {
         resolve_protocol_item_references(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, &mut items, &[])
             .expect_err("item references are Open Responses only");
     assert_eq!(error, "item_reference_not_found");
+}
+
+#[test]
+fn shared_history_detaches_only_mutated_items() {
+    let parent = ActiveGenerationChain {
+        parent_client_items: freeze_items(vec![
+            user_message("parent"),
+            AiItem::output_text("parent answer"),
+        ]),
+        ..Default::default()
+    };
+    let parent_snapshot = serde_json::to_value(owned_items(&parent.parent_client_items)).unwrap();
+    let delta = Arc::new(responses_request(vec![user_message("next")]));
+    let mut response = AiResponse::new("upstream", "model");
+    response.push_output_text("answer");
+    let mut projected = project_client_commit(&parent, &delta, &response).unwrap();
+    assert!(
+        projected.client_items[..2]
+            .iter()
+            .zip(&parent.parent_client_items)
+            .all(|(left, right)| left.shares_allocation(right)),
+        "an unchanged parent prefix must stay shared, not be copied"
+    );
+    assert!(
+        projected.client_delta_items[0].shares_allocation(&projected.client_items[2]),
+        "the persisted delta and the client window must share item handles"
+    );
+    *projected.client_items[0].make_mut() = user_message("edited");
+    assert_eq!(
+        serde_json::to_value(owned_items(&parent.parent_client_items)).unwrap(),
+        parent_snapshot,
+        "detaching a projected item must not mutate the parent window"
+    );
+}
+
+#[test]
+fn shared_gemini_projection_keeps_unchanged_items_shared() {
+    let mut parent_item = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            input: serde_json::json!({"value": 1}),
+            cache_control: None,
+        }]),
+        tool_calls: Some(vec![ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: "{\"value\":1}".into(),
+        }]),
+        tool_call_id: None,
+        meta: None,
+    };
+    crate::generation_chain::project::normalize_gemini_client_tool_ids(std::iter::once(
+        &mut parent_item,
+    ));
+    let parent = ActiveGenerationChain {
+        parent_client_items: freeze_items(vec![parent_item]),
+        ..Default::default()
+    };
+    let mut request = responses_request(vec![user_message("next")]);
+    request.meta.source_protocol =
+        Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
+    let delta = Arc::new(request);
+    let mut response = AiResponse::new("gemini", "model");
+    response.push_output_text("answer");
+    let projected = project_client_commit(&parent, &delta, &response).unwrap();
+    assert!(
+        projected.client_items[0].shares_allocation(&parent.parent_client_items[0]),
+        "an already-normalized Gemini item must keep its shared allocation",
+    );
+    assert!(
+        projected.client_delta_items[0].shares_allocation(&projected.client_items[1]),
+        "an unchanged Gemini delta must keep its shared allocation",
+    );
+}
+
+#[test]
+fn frozen_history_keeps_the_public_wire_shape() {
+    let mut response = AiResponse::new("response", "model");
+    response.push_output_text("hello");
+    response
+        .vendor
+        .ingress
+        .insert("vendor_field".into(), serde_json::json!({"n": 1}));
+    assert_eq!(
+        serde_json::to_value(FrozenResponse::new(response.clone())).unwrap(),
+        serde_json::to_value(&response).unwrap(),
+    );
+    let item = AiItem::output_text("hello");
+    assert_eq!(
+        serde_json::to_value(FrozenItem::new(item.clone())).unwrap(),
+        serde_json::to_value(&item).unwrap(),
+    );
+}
+
+#[test]
+fn persisted_mutations_share_one_wire_shape_for_borrowed_and_frozen_items() {
+    let items = vec![user_message("history body")];
+    let borrowed = EffectiveHistoryMutation::Replace {
+        items: HistoryItems::borrowed(&items),
+    };
+    let frozen = EffectiveHistoryMutation::Replace {
+        items: freeze_items(items.clone()).into(),
+    };
+    let wire = serde_json::to_value(&borrowed).expect("borrowed mutation");
+    assert_eq!(wire, serde_json::to_value(&frozen).unwrap());
+    let EffectiveHistoryMutation::Replace {
+        items: borrowed_items,
+    } = &borrowed
+    else {
+        panic!("replace mutation");
+    };
+    let HistoryItems::Borrowed(slice) = borrowed_items else {
+        panic!("borrowed mutation items");
+    };
+    assert_eq!(
+        slice.as_ptr(),
+        items.as_ptr(),
+        "persisting an owned request must borrow its items instead of freezing a copy",
+    );
+    let decoded: EffectiveHistoryMutation<'static> =
+        serde_json::from_value(wire).expect("decode mutation");
+    let EffectiveHistoryMutation::Replace { items } = decoded else {
+        panic!("replace mutation");
+    };
+    assert!(matches!(&items, HistoryItems::Frozen(_)));
+    assert_eq!(items.as_shared()[0].content.to_text(), "history body");
 }

@@ -126,6 +126,11 @@ impl GenerationChainWrite {
         }
         parent.compaction_record_ids.sort();
         parent.compaction_record_ids.dedup();
+        // The client projection depends on the parent's inline states; capture
+        // it again at persist time if a publication landed after staging.
+        if let Some(staged) = self.staged.as_mut() {
+            staged.projection = None;
+        }
     }
 
     pub(crate) fn inherited_media_turns(&self) -> &[(usize, Vec<String>)] {
@@ -188,12 +193,13 @@ impl GenerationChainWrite {
         self.commit_fence = Some(self.chain.pending_commits.register(
             self.principal.clone(),
             self.id.clone(),
-            projected,
+            &projected,
         ));
         self.staged = Some(StagedGeneration {
             response: response.clone(),
             upstream_response_id,
             effective_state,
+            projection: Some(projected),
         });
         true
     }
@@ -232,7 +238,9 @@ impl GenerationChainWrite {
     }
 
     async fn persist_inner(&mut self) -> Result<(), PersistError> {
-        let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
+        let staged = self.staged.as_mut().ok_or(PersistError::NotStaged)?;
+        let projection = staged.projection.take();
+        let mut staged = staged.clone();
         if let Some(compaction) = &self.chain.compaction {
             compaction
                 .extend_retention(&self.principal, &self.parent.compaction_record_ids)
@@ -254,8 +262,9 @@ impl GenerationChainWrite {
             }
         }
         if let Some(store) = &self.chain.history_markers {
-            let mut parent_references =
-                crate::history_marker::history_marker_references(&self.parent.parent_client_items);
+            let mut parent_references = crate::history_marker::history_marker_references_iter(
+                self.parent.parent_client_items.iter().map(AsRef::as_ref),
+            );
             parent_references.sort();
             parent_references.dedup();
             let parent_resolved = store
@@ -304,18 +313,26 @@ impl GenerationChainWrite {
                 .await
                 .map_err(PersistError::HistoryMarker)?;
         }
+        let projected = match projection {
+            Some(projected) => projected,
+            None => project_client_commit(&self.parent, &self.request_delta, &staged.response)
+                .map_err(PersistError::Store)?,
+        };
         self.chain
             .store
-            .save_with_effective(GenerationChainCommit {
-                principal: self.principal.clone(),
-                id: self.id.clone(),
-                parent: &self.parent,
-                request_delta: &self.request_delta,
-                effective_request: Some(&self.request),
-                response: staged.response,
-                upstream_response_id: staged.upstream_response_id,
-                effective_state: staged.effective_state,
-            })
+            .save_projected(
+                GenerationChainCommit {
+                    principal: self.principal.clone(),
+                    id: self.id.clone(),
+                    parent: &self.parent,
+                    request_delta: &self.request_delta,
+                    effective_request: Some(&self.request),
+                    response: staged.response,
+                    upstream_response_id: staged.upstream_response_id,
+                    effective_state: staged.effective_state,
+                },
+                projected,
+            )
             .await
             .map_err(PersistError::Store)
     }
