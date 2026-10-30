@@ -164,7 +164,7 @@ const activityKey = $derived(
             <ConversationMessage {user} label={actor}>
               {#each group as message (message.id)}
                 {#if user}
-                  <CredentialHitMark mark={hits?.userMessages.get(message.id)} {ruleNames}>
+                  <CredentialHitMark marks={[hits?.userMessages.get(message.id)]} {ruleNames}>
                     <StreamingMarkdown text={message.text} active={false} snapshotKey={liveContentEpoch} virtualized />
                   </CredentialHitMark>
                 {:else}
@@ -176,24 +176,18 @@ const activityKey = $derived(
                         snapshotKey={liveContentEpoch}
                         virtualized
                         allowImages />
-                    {:else if block.kind === 'result'}
-                      {@const mark = hits?.toolResults.get(block.activity.callId)}
-                      <CredentialHitMark {mark} {ruleNames}>
-                        <ObservationActivity
-                          activity={block.activity}
-                          virtualized
-                          resultOnly
-                          revealed={mark !== undefined} />
-                      </CredentialHitMark>
                     {:else}
-                      {@const mark = block.kind === 'tool' ? hits?.toolCalls.get(block.callId) : undefined}
-                      <CredentialHitMark {mark} {ruleNames}>
+                      {@const marks =
+                        block.kind === 'tool'
+                          ? [hits?.toolCalls.get(block.callId), hits?.toolResults.get(block.callId)]
+                          : []}
+                      <CredentialHitMark {marks} {ruleNames}>
                         <ObservationActivity
                           activity={block}
                           {liveActive}
                           {liveContentEpoch}
                           virtualized
-                          revealed={mark !== undefined} />
+                          revealed={marks.some((mark) => mark !== undefined)} />
                       </CredentialHitMark>
                     {/if}
                   {/each}

@@ -33,7 +33,7 @@ export interface CredentialHitResolution {
 export interface HitResolutionContext {
   /** Run ID → 该 Run 带来的用户输入在对话里的消息 ID；工具续跑等没有新用户输入的 Run 不在其中。 */
   userMessageIdByRun: ReadonlyMap<string, string>
-  /** 对话里展示的活动：工具调用块与结果块按它们的 `callId` 定位。 */
+  /** 对话里展示的活动：工具调用块（结果内联其中）按 `callId` 定位。 */
   activities: Iterable<ObservationActivity>
 }
 
