@@ -1,4 +1,5 @@
 import { computeTps, formatDuration, formatNumber, formatTps, type TpsInput } from '#lib/format.js'
+import { formatAmount } from '#lib/money.js'
 import { failureOriginLabel, observationContextStatusLabel, observationStatusLabel } from '#lib/observation-labels.js'
 import { payloadCount, payloadRecord } from '#lib/observation-payload.js'
 import * as m from '#lib/paraglide/messages.js'
@@ -34,6 +35,7 @@ const TITLES: Record<string, () => string> = {
   client_visible_content: m.observation_event_client_visible_content,
   input_preview_recorded: m.observation_event_input_preview_recorded,
   credential_mappings_created: m.observation_event_credential_mappings_created,
+  credential_mappings_reused: m.observation_event_credential_mappings_reused,
   checkpoint: m.observation_event_checkpoint,
   wire: m.observation_event_wire,
 }
@@ -43,6 +45,15 @@ const count = payloadCount
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+/** Attempt amounts arrive already converted to the display currency; the UI only formats them. */
+function displayMoney(value: unknown): string | undefined {
+  const amount = record(value)
+  const decimal = text(amount?.amount)
+  if (!decimal) return undefined
+  const currency = record(amount?.currency)
+  return formatAmount(decimal, text(currency?.symbol) ?? '$')
 }
 
 function observationGapNote(reason: string | undefined): string {
@@ -168,6 +179,23 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
           if (count(usage[key])) add(label(), formatNumber(usage[key]))
         }
         add(m.logs_token_speed(), formatTps(computeTps(attemptTpsInput(payload))))
+        // Amounts are frozen at attempt end; subscription costs are equivalent usage cost, not actual cost.
+        const costBasis = text(payload.cost_basis)
+        if (costBasis) {
+          add(
+            costBasis === 'subscription' ? m.cost_usage_equivalent() : m.cost_attempt_cost(),
+            displayMoney(payload.cost) ?? m.billing_unknown(),
+          )
+          const billingState = text(payload.billing_state)
+          add(
+            m.billing_billed_amount(),
+            billingState === 'charged'
+              ? (displayMoney(payload.billing) ?? m.billing_unknown())
+              : billingState === 'unknown'
+                ? m.billing_unknown()
+                : m.billing_not_billed(),
+          )
+        }
       }
       if (event.kind === 'platform_tool_finished') {
         duration('duration_ms', m.observation_duration())
@@ -253,10 +281,21 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
       add(m.observation_event_reason(), payload.reason)
       break
     case 'credential_mappings_created':
-      if (Array.isArray(payload.discoveries) && payload.discoveries.length > 0) {
-        add(m.observation_event_credentials(), formatNumber(payload.discoveries.length))
+    case 'credential_mappings_reused': {
+      // 超出单事件上限的映射只留计数，仍属于这次命中。
+      const mappings =
+        (Array.isArray(payload.discoveries) ? payload.discoveries.length : 0) +
+        (count(payload.omitted_discoveries) ? payload.omitted_discoveries : 0)
+      if (mappings > 0) {
+        add(
+          event.kind === 'credential_mappings_created'
+            ? m.observation_event_credentials()
+            : m.observation_event_credentials_reused(),
+          formatNumber(mappings),
+        )
       }
       break
+    }
     case 'checkpoint':
       add(m.observation_event_stage(), payload.stage)
       break

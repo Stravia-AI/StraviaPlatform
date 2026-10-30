@@ -150,8 +150,10 @@ pub struct TurnReadContext {
     budget: usize,
     admission_open: bool,
     validated_until: HashMap<TurnNodeId, Instant>,
-    contents: HashMap<String, (Arc<Value>, usize)>,
-    pending_contents: HashMap<String, (Arc<Value>, usize)>,
+    /// Internal `turn_contents.id` values; each id is owned by exactly one
+    /// principal scope, so a numeric key never crosses principals.
+    contents: HashMap<i64, (Arc<Value>, usize)>,
+    pending_contents: HashMap<i64, (Arc<Value>, usize)>,
     pending_bytes: usize,
 }
 
@@ -243,14 +245,16 @@ impl TurnReadContext {
         self.pending_bytes = 0;
     }
 
-    pub fn cached_content(&self, key: &str) -> Option<Arc<Value>> {
-        self.contents.get(key).map(|(value, _)| value.clone())
+    pub fn cached_content(&self, content_id: i64) -> Option<Arc<Value>> {
+        self.contents
+            .get(&content_id)
+            .map(|(value, _)| value.clone())
     }
 
-    pub fn stage_content(&mut self, key: String, value: Arc<Value>, bytes: usize) {
+    pub fn stage_content(&mut self, content_id: i64, value: Arc<Value>, bytes: usize) {
         if !self.admission_open
-            || self.contents.contains_key(&key)
-            || self.pending_contents.contains_key(&key)
+            || self.contents.contains_key(&content_id)
+            || self.pending_contents.contains_key(&content_id)
         {
             return;
         }
@@ -264,7 +268,7 @@ impl TurnReadContext {
             return;
         }
         self.pending_bytes += bytes;
-        self.pending_contents.insert(key, (value, bytes));
+        self.pending_contents.insert(content_id, (value, bytes));
     }
 
     pub fn matches(&self, principal: &Principal, kind: TurnNodeKind) -> bool {

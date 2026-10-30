@@ -44,7 +44,7 @@ pub(super) fn regex(source: &str) -> Result<Regex> {
             }
         }
     }
-    Regex::with_options(&pattern, true, 32 * 1024 * 1024).map_err(|_| invalid())
+    Regex::with_size_limit(&pattern, 32 * 1024 * 1024).map_err(|_| invalid())
 }
 
 fn counted_repetition(mut chars: std::str::Chars<'_>) -> bool {

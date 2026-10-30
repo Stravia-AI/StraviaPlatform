@@ -1,16 +1,33 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, ensure};
+use async_trait::async_trait;
 use bytes::Bytes;
 use stravia_runtime_contract::protocol::ir::canonical::{hash_bytes, hash_hex};
+use stravia_vendor_runtime::{ComponentBytes, ComponentSource, SourceError};
 
 pub(super) const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// 安装记录只保存内容摘要，路径始终由实例目录派生，不接受包提供的文件名。
+#[derive(Clone)]
 pub(super) struct PluginArtifacts {
     directory: PathBuf,
+}
+
+/// 已安装组件的编译产物被释放后，按内容摘要重新读取并校验字节。
+struct ArtifactSource {
+    artifacts: PluginArtifacts,
+    digest: String,
+}
+
+#[async_trait]
+impl ComponentSource for ArtifactSource {
+    async fn read(&self) -> Result<ComponentBytes, SourceError> {
+        Ok(Box::new(self.artifacts.read(&self.digest).await?))
+    }
 }
 
 impl PluginArtifacts {
@@ -18,6 +35,13 @@ impl PluginArtifacts {
         Self {
             directory: plugin_directory.join("artifacts"),
         }
+    }
+
+    pub(super) fn source(&self, digest: &str) -> Arc<dyn ComponentSource> {
+        Arc::new(ArtifactSource {
+            artifacts: self.clone(),
+            digest: digest.to_owned(),
+        })
     }
 
     fn path(&self, digest: &str) -> anyhow::Result<PathBuf> {
@@ -29,6 +53,21 @@ impl PluginArtifacts {
             "invalid plugin artifact digest"
         );
         Ok(self.directory.join(format!("{digest}.wasm")))
+    }
+
+    /// 只检查文件存在且大小合规，不读取内容：恢复准入记录时用它保持"安装包
+    /// 缺失即标记不可用"的启动行为；内容摘要在组件被装入时才校验。
+    pub(super) async fn is_available(&self, digest: &str) -> bool {
+        let Ok(path) = self.path(digest) else {
+            return false;
+        };
+        tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.len() > 0
+                    && metadata.len() <= MAX_COMPONENT_BYTES as u64
+            })
     }
 
     pub(super) async fn read(&self, digest: &str) -> anyhow::Result<Bytes> {
@@ -145,5 +184,35 @@ impl Drop for StagedArtifact {
         {
             tracing::warn!(%error, "failed to remove staged plugin artifact");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest_of(bytes: &[u8]) -> String {
+        hash_hex(&hash_bytes(bytes))
+    }
+
+    #[tokio::test]
+    async fn released_plugin_bytes_come_back_from_the_stored_artifact_only_when_intact() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let artifacts = PluginArtifacts::new(directory.path().to_owned());
+        let component = Bytes::from_static(b"\0asm installed component");
+        let digest = digest_of(&component);
+        artifacts
+            .store(&digest, component.clone())
+            .await
+            .expect("store artifact");
+
+        let source = artifacts.source(&digest);
+        let restored = source.read().await.expect("restore intact artifact");
+        assert_eq!((*restored).as_ref(), component.as_ref());
+
+        // 磁盘上的字节被改动后，来源拒绝返回，不会把不同代码交给运行时。
+        let path = artifacts.path(&digest).expect("artifact path");
+        fs::write(&path, b"\0asm tampered component").expect("tamper artifact");
+        assert!(source.read().await.is_err());
     }
 }

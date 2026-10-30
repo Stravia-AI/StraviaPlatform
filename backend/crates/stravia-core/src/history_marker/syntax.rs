@@ -344,6 +344,12 @@ fn strip_markers(text: &str) -> (String, Vec<String>) {
 }
 
 pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
+    history_marker_references_iter(items.iter())
+}
+
+pub(crate) fn history_marker_references_iter<'a>(
+    items: impl IntoIterator<Item = &'a AiItem>,
+) -> Vec<String> {
     let mut references = Vec::new();
     for item in items {
         if item.role != Role::Assistant {
@@ -675,6 +681,7 @@ async fn materialize_parsed_item(
     request_marker_references: &HashSet<String>,
     context: &mut ResolutionContext<'_>,
 ) -> Result<(), HistoryMarkerError> {
+    let output_start = context.resolved_items.len();
     let mut meta = original.meta.clone();
     let mut remaining_calls = original.tool_calls.take().unwrap_or_default();
     for atom in atoms {
@@ -772,6 +779,29 @@ async fn materialize_parsed_item(
             tool_call_id: original.tool_call_id,
             meta,
         });
+    }
+    // 展开可信历史载体后，只继承响应归属，不复制条目 ID 或受保护载荷的来源证明。
+    let group_key = stravia_runtime_contract::protocol::ir::response::RESPONSE_HISTORY_GROUP_META;
+    if let Some(group) = original
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(group_key))
+        .and_then(serde_json::Value::as_str)
+    {
+        for item in &mut context.resolved_items[output_start..] {
+            if item.role == Role::Assistant
+                && item
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get(group_key))
+                    .is_none()
+            {
+                stravia_runtime_contract::protocol::ir::response::mark_response_history(
+                    std::slice::from_mut(item),
+                    group,
+                );
+            }
+        }
     }
     Ok(())
 }

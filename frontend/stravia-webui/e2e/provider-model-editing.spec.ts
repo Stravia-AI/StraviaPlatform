@@ -22,15 +22,31 @@ function model(id: string, name: string): ProviderModelDetail & ProviderModelSum
     available: true,
     source_kind: 'manual',
     snapshot_state: { type: 'edited', source: null },
+    pinned_fields: [],
+    restorable_fields: [],
     selection_policy: 'auto',
     specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
-    can_reimport: false,
     metadata: { id, name, description: `${name} specification`, limit: { context: 128000 } },
     extensions: {},
     created_at: timestamp,
     updated_at: timestamp,
   }
+}
+
+function applyChanges(detail: Detail, changes: Record<string, unknown>): Detail {
+  const metadata = structuredClone(detail.metadata)
+  if ('name' in changes) metadata.name = changes.name as string | null
+  if ('description' in changes) metadata.description = changes.description as string | null
+  if ('limit.context' in changes) metadata.limit = { context: changes['limit.context'] as number | null }
+  if ('reasoning_efforts' in changes) metadata.reasoning_efforts = changes.reasoning_efforts as string[]
+  if ('modalities.input' in changes || 'modalities.output' in changes) {
+    metadata.modalities = {
+      input: (changes['modalities.input'] as string[] | null) ?? [],
+      output: (changes['modalities.output'] as string[] | null) ?? [],
+    }
+  }
+  return { ...detail, metadata }
 }
 
 type Detail = ProviderModelDetail
@@ -158,10 +174,47 @@ for (const surface of ['detail', 'cell'] as const) {
     await page.keyboard.press('Escape')
     await page.getByRole('button', { name: surface === 'detail' ? 'Save model' : 'Save', exact: true }).click()
     await expect
-      .poll(() => fixture.writes.map((write) => (write.metadata as Detail['metadata']).modalities))
-      .toEqual([{ input: ['text', 'audio', 'binary'], output: ['text', 'image'] }])
+      .poll(() => fixture.writes.map((write) => write.changes))
+      .toEqual([{ 'modalities.input': ['text', 'audio', 'binary'], 'modalities.output': ['text', 'image'] }])
   })
 }
+
+test('rejected peak pricing retains the model draft and clears the error when discarded', async ({ page }) => {
+  const fixture = await setup(page)
+  await page.route('**/api/v1/settings/rpm_admission', (route) => route.fulfill({ json: { data: null } }))
+  fixture.details['model-a'].metadata.cost = {
+    input: '1',
+    peak: { timezone: 'UTC', weekdays: [1], ranges: [{ start: '09:00', end: '10:00' }], multiplier: '1' },
+  }
+  fixture.save = async (route) => {
+    await route.fulfill({
+      status: 400,
+      json: {
+        error: 'Invalid Provider Model changes',
+        code: 'PROVIDER_MODEL_INVALID_CHANGES',
+        params: { error: 'Unknown peak pricing timezone' },
+      },
+    })
+  }
+  await openModel(page, 'Alpha Model')
+  await nameField(page).fill('Retained pricing draft')
+  const timezone = page.locator('[data-price-editor] input[id$="-peak-timezone"]')
+  await timezone.fill('Invalid/Timezone')
+  await page.getByRole('button', { name: 'Save model', exact: true }).click()
+
+  const alert = page.getByRole('alert').filter({ hasText: 'Cannot save' })
+  await expect(alert).toContainText('Unknown peak pricing timezone')
+  await expect(nameField(page)).toHaveValue('Retained pricing draft')
+  await expect(timezone).toHaveValue('Invalid/Timezone')
+  await expect(page.getByRole('button', { name: 'Save model', exact: true })).toBeEnabled()
+  expect(fixture.writes).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await discardDialog(page).getByRole('button', { name: 'Discard changes', exact: true }).click()
+  await openModel(page, 'Beta Model')
+  await expect(nameField(page)).toHaveValue('Beta Model')
+  await expect(alert).toHaveCount(0)
+})
 
 test('cell editors keep optional explanations behind help hints', async ({ page }) => {
   await setup(page)
@@ -325,7 +378,8 @@ test('pending save locks fields, availability, Cancel, repeated save, and browse
   const gate = deferred()
   fixture.save = async (route, detail, body) => {
     await gate.promise
-    await route.fulfill({ json: { data: { ...detail, metadata: body.metadata, revision: 2 } } })
+    const saved = applyChanges(detail, body.changes as Record<string, unknown>)
+    await route.fulfill({ json: { data: { ...saved, revision: 2 } } })
   }
   await openModel(page, 'Alpha Model')
   await nameField(page).fill('Saved Alpha')
@@ -357,18 +411,19 @@ test('availability writes preserve unsaved specifications and advance the next s
   await expect(discardDialog(page)).toBeVisible()
   await page.getByRole('button', { name: 'Keep editing' }).click()
   fixture.save = async (route, detail, body) => {
-    await route.fulfill({ json: { data: { ...detail, metadata: body.metadata, revision: 3 } } })
+    const saved = applyChanges(detail, body.changes as Record<string, unknown>)
+    await route.fulfill({ json: { data: { ...saved, revision: 3 } } })
   }
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => fixture.writes.length).toBe(1)
-  expect(fixture.writes[0]).toMatchObject({ revision: 2, metadata: { name: 'Unsaved specification' } })
+  expect(fixture.writes[0]).toMatchObject({ revision: 2, changes: { name: 'Unsaved specification' } })
   await expect(nameField(page)).toBeEnabled()
 })
 
 test('saved revision survives refresh failure and Retry refreshes without repeating the write', async ({ page }) => {
   const fixture = await setup(page)
   fixture.save = async (route, detail, body) => {
-    const saved = { ...detail, metadata: body.metadata as Detail['metadata'], revision: 7 }
+    const saved = { ...applyChanges(detail, body.changes as Record<string, unknown>), revision: 7 }
     fixture.details[detail.id] = saved
     fixture.failInventory = true
     await route.fulfill({ json: { data: saved } })
@@ -387,10 +442,11 @@ test('saved revision survives refresh failure and Retry refreshes without repeat
   expect(fixture.writes).toHaveLength(1)
   await nameField(page).fill('Next revision')
   fixture.save = async (route, detail, body) => {
-    await route.fulfill({ json: { data: { ...detail, metadata: body.metadata, revision: 8 } } })
+    const saved = applyChanges(detail, body.changes as Record<string, unknown>)
+    await route.fulfill({ json: { data: { ...saved, revision: 8 } } })
   }
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => fixture.writes.length).toBe(2)
-  expect(fixture.writes[1]).toMatchObject({ revision: 7, metadata: { name: 'Next revision' } })
+  expect(fixture.writes[1]).toMatchObject({ revision: 7, changes: { name: 'Next revision' } })
   await expect(nameField(page)).toBeEnabled()
 })

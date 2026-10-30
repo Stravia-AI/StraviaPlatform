@@ -58,7 +58,7 @@ Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再�
 
 ### 供应商选择器与来源
 
-管理接口 `GET /api/v1/vendors` 返回完整有效的 Provider 元数据，供已有连接读取配置；新建连接使用 `GET /api/v1/vendors?selectable=true` 获取应用替代规则后的候选列表，两者不共用查询缓存。原描述符字段保持扁平布局，新增 `plugin: { id, name }`，由宿主从实际加载的软件包身份及名称生成。卡片与连接配置步骤显示目录标识、来源插件名称和插件 ID；搜索同时覆盖展示名称、目录标识、执行身份及插件来源。
+管理接口 `GET /api/v1/vendors` 返回完整有效的 Provider 元数据，供已有连接读取配置；新建连接使用 `GET /api/v1/vendors?selectable=true` 获取应用替代规则后的候选列表，两者不共用查询缓存。原描述符字段保持扁平布局，新增 `plugin: { id, name }`，由宿主从实际加载的软件包身份及名称生成。卡片显示认证方式；来源为内置 `base` 的卡片不标注来源，外部插件的卡片以拼图图标标记，提示显示插件名称和插件 ID。连接配置步骤显示目录标识、来源插件名称和插件 ID；搜索同时覆盖展示名称、目录标识、执行身份及插件来源。所有卡片图标统一渲染为单色，不保留品牌自带颜色。
 
 Core 以「目录身份 + channel ID」处理选择器中的替代关系：目录身份优先使用 `catalog_id`，未声明时使用 `provider_id`。外部插件声明同一入口时，仅隐藏 `base` 对应 channel 的卡片，并沿用该 base Profile 的展示名称；未匹配的 base channel 继续可选。不同外部插件即使声明相同目录入口也各自保留，不能互相覆盖；不同 channel 的 API 与 Codex／OAuth 接入不合并。卸载外部插件后，原 base 入口重新可选。相同执行身份的已安装包接管及 retired Profile 隐藏规则保持不变。
 
@@ -144,11 +144,11 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 |Claude Code|官方 [native `2.1.300` 发行包](https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.300.tgz)与 [Beta Messages 类型](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/resources/beta/messages/messages.ts)|该 native 包实际运行并捕获含／不含 safeguards 的请求；另用本机 `2.1.248` 核对手动 thinking 与 adaptive/effort。不能把 SDK 的完整公共参数全集直接放行给订阅端点。|
 |Command Code|官方 [npm `1.82.1`](https://registry.npmjs.org/command-code/1.82.1) 的 `createModelClient`|源码确认 model、messages、tools、system、max_tokens、stream、temperature、reasoning_effort 与 promptCache；不发送该工具没有产出的 tool_choice／parallel_tool_calls。发行 tarball SHA-1 为 `0484a5dda887bec30a349db0b84a5a8933df69cd`，与 registry 一致；本轮未实际运行其账号推理。|
 |Grok|官方 [Grok Build 固定提交](https://github.com/xai-org/grok-build/tree/9684fa3cdbf2995e30ea8b9b637f1db008f144fc)的 Responses、sampler、tool override 实现|按源码重建 body、搜索控制与 `x-grok-*` 会话头；本轮未完成官方 CLI 账号抓包。|
-|Devin|已固定 OMP `v18.10.4` 的 `providers/devin.ts`、现有私有 protobuf 编码证据|官方 CLI 隔离配置尝试因无法确定 config directory 失败，捕获请求为零，不能宣称本轮 CLI 抓包成功。真实请求验证与源码证据分开记录。|
+|Devin|[OMP `v18.12.6` 的 `buildChatMessagePrompts`](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/ai/src/providers/devin.ts)、[官方 CLI `3000.11.3` manifest](https://static.devin.ai/cli/3000.11.3/manifest.json) 与授权实调捕获|2026-10-26 使用隔离配置运行官方 CLI，捕获 `deepseek-v4-1-flash-1017-max` 的工具调用、返回与最终正文；无签名思考在续接请求中保留为 `#11`，不降级到 `#3`。修复后的实际 Wasm 经隔离 Stravia HTTP 服务完成同模型的读文件工具循环并返回 `SUM=42`；不据此宣称所有模型或参数均获验证。|
 |OpenCode Zen Free|官方 `1.18.25` 的隔离请求捕获、[原生 ID 算法](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/schema/src/identifier.ts)与匿名单变量探测|捕获完整 UA、会话头和工具输入 schema；实际 Wasm 在 `/inference/v1` 对 `big-pickle` 返回 200 与准确探测文本。不能外推为所有免费模型、其他协议或未来门控的支持证明。|
 |其他插件|各自既有固定官方协议／工具源码、模型目录与 OMP 实现|通过实际 Wasm 合同验证投影与流式解析，不把离线 fixture 当作账号资格证明。Muse Code 账号授权与 Kilo OAuth 仍需要对应账号。|
 
-上述 CLI 捕获均使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对非 compact 操作固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。compact 保持其官方非流式契约。
+除表中明确注明的授权真实调用外，上述 CLI 捕获使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。Devin 的真实调用使用只读生产数据库取得的连接凭据、临时 CLI 配置与临时 Stravia 数据库，不修改生产连接或部署；已安装的独立 Devin 插件须重建并重新导入才能采用无签名思考修复。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对非 compact 操作固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。compact 保持其官方非流式契约。
 
 ### Command Code 模型发现
 
@@ -159,7 +159,7 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 - 插件将 `context_length` 和 `inputModalities` 转为统一上下文与模态规格，将 `reasoningEfforts` 转为 `reasoning_efforts`。目录的 `off` 在统一规格中表示为 `none`，供 Core 生成规范的 `off` 档映射；私有 codec 发送时再还原为 CLI 原生的 `reasoning_effort: "off"`。显式无 effort 声明保持为空列表，缺失声明保持未知，不硬编码具体型号的档位。
 - `static_models` 只能进一步缩小当前订阅允许的目录集合，不能添加未知或更高套餐的型号，也不绕过账号查询。显式 `models_source` 仍指定目录地址，但响应必须包含客户端目录所需的订阅要求；插件不把仅含 ID 的列表当作订阅权限证明。
 
-升级后重新构建并导入独立插件，再同步模型。来源托管的规格按既有同步规则更新；管理员已编辑的规格仍需显式 re-import，不自动覆盖，也不删除已有 Route 或 Target。
+升级后重新构建并导入独立插件，再同步模型。未固定的规格字段跟随来源更新；管理员修改的字段保持固定，可逐字段恢复同步，不自动覆盖固定值，也不删除已有 Route 或 Target。
 
 ### OpenCode Zen Free 准入限制
 
@@ -247,7 +247,7 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 推理清单只采用 `agentModelSorts[].groups[].modelIds` 引用的 Agent 选项，不把完整 `models` 目录或搜索等其他用途清单当作可推理模型。解析真实 `deprecatedModelIds` 重定向并排除 disabled 后，按官方显示 slug 的家族与明确档位合并：例如 Gemini 3.1 Pro 登记为 `gemini-3.1-pro`，支持 `low`、`high`，默认实际 selector 为 `gemini-pro-agent`。同名或同 enum 不构成合并依据，Thinking 标签不自动生成离散档位。筛选和映射证据见 [模型映射调研](../research/antigravity-model-mapping.md)。
 
-模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；来源托管规格随同步刷新，人工编辑规格保持不变。生图复用原 OAuth、project 与连接，走原生 SSE，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；新增链路通过本地上游验证，不代表所有真实账号都有生图权限或额度。
+模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，走原生 SSE，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；新增链路通过本地上游验证，不代表所有真实账号都有生图权限或额度。
 
 合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。Effort 通过 envelope 的模型 ID 实现，不同时转换为 Gemini thinking budget；独立的原生 Budget 等控制保持既有行为。
 
@@ -265,15 +265,16 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 
 ### Provider 图标标识
 
-- `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有受保护的图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。
-- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 按最终 Provider/Catalog 身份精确匹配仓库已有 SVG；共享协议实现不构成共享品牌的依据，未知身份清空模板图标，`custom` 和通用 OpenAI-compatible 不声明品牌图标。专属插件按各自描述符声明适用标志；Kilo 未内嵌 SVG，不以其它品牌图标代替。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
+- `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有宿主图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。图像接口属于公开静态资源，不要求管理登录；入口 origin 策略仍生效。
+- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 的全部 Provider Profile 均不声明 `icon_svg`，也不维护品牌 SVG 清单或图标别名；宿主按原生 `catalog_id` / `provider_id` 请求 Models 图标。`base` 插件自身的 Stravia 标志不属于供应商品牌图，继续保留。专属插件直接声明各自适用标志；Kilo 未内嵌 SVG，不以其它品牌图标代替。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
 - 更换图标需要重建并重新导入独立插件；仅更新宿主不会改写已安装组件。`base` 随宿主更新。品牌名称和图形归各自权利人所有，公开下载地址不等同于再分发授权。
-- 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，因此请求 `/logos/openai.svg`。
+- 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，只有未声明内嵌 SVG 时才请求 `/logos/openai.svg`。
 - 按选定 ID 获取目录图标失败后才进入网站图标回退；已经选择 `catalog_id` 时，不再追加一次 `provider_id` 目录图标尝试。网站图标来源优先使用插件明确声明的官网地址；没有官网声明时，使用已保存连接 `base_url` 的 origin。不得把文档地址自动视为官网，也不得猜测域名。官网一旦被选为来源，获取失败后不再请求连接 origin 的 favicon。
 - 插件可声明内嵌 SVG、图标身份与网站来源；只有缺少内嵌 SVG 时，宿主才统一获取目录 logo 与网站 favicon，保存在 Stravia 实例磁盘缓存中并供 UI 读取。Desktop 缓存在本机实例，独立 Server 缓存在服务器实例，二者都跨进程重启复用。浏览器不再直接请求外部 favicon，也不以浏览器缓存代替实例持久缓存。
 - 网站图标回退仅请求选定网站 origin 的 `/favicon.ico`，不请求或解析首页 HTML 寻找其他图标；接受仅通过 HTML 声明图标而未提供 `/favicon.ico` 的网站无法获取图标。宿主下载遵守既有网络访问限制，且不携带 Provider 凭据。
 - 目录 logo 与网站 favicon 统一使用 24 小时 TTL。有效缓存直接读取且不访问远端；缓存过期后在下次需要时按需更新，不新增定时刷新任务。每个已选来源更新失败且存在旧缓存时继续使用旧图标；没有缓存时才进入下一级回退。官网存在但获取失败不等同于没有官网声明。
-- 选定网站 favicon 获取失败且没有缓存时结束网络尝试；有对应内置 SVG 时显示该图标，否则 `custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。
+- 选定网站 favicon 获取失败且没有缓存时结束网络尝试；`custom` 显示 Lucide `Plug`，其他 Profile 显示名称首字母。WebUI 不再打包或查找另一张品牌 SVG 表；调用方明确传入的 `icon_svg` 仍可直接显示。
+- Models 缺少 `providers/<id>/logo.svg` 时会返回 HTTP 200 与通用火花图形，未知 ID 也遵循同一默认图规则。宿主按正常 SVG 缓存并显示，不将其视为请求失败，也不继续尝试 favicon 或首字母回退；真实品牌图应在 Models 源仓库补齐，不在 Stravia 添加映射或内嵌兜底。模型目录身份 `catalog_id` 同时控制模型关联，不能仅为换图标而改写。
 
 ## 已确认的供应商能力覆盖
 
@@ -283,7 +284,7 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 - base 启动时优先使用本地最后一次成功供应商清单，没有缓存则使用插件内嵌供应商清单，随后尝试远端更新。首次离线仍可选择内嵌供应商，已有安装断网时仍可使用缓存供应商；内嵌清单只用于 bootstrap，不限制远端动态新增。缓存、内嵌和远端条目都必须按当前 base 已实现的协议与认证能力校验后才能注册。
 - 供应商模型目录属于对应 Provider Profile，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 是供应商接入身份，不是已保存连接 UUID。内嵌供应商清单不包含全部 provider-scoped 模型数据。Core 保留 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
 - 目录关联与缺省模型来源由已选 Profile 和 channel 决定，不由管理请求的 `catalog` / `custom` 创建分支决定。新建连接保存 Profile 的 `catalog_id`；模型来源优先使用显式配置，否则仅在 channel 声明消费目录且目录中存在对应供应商时使用 Catalog，其余沿用 channel 声明的默认来源。显式静态列表仍优先决定模型集合，账号级发现渠道不会被目录清单替换。
-- 已保存连接未记录目录关联或模型来源时，发现与同步使用本次执行锁定的 Profile 声明解析缺省值，无需改写连接或执行数据库迁移。同步补齐未手改模型的供应商规格时，同时更新快照来源；人工编辑的规格保持不变。已有 Target 的手改映射不受影响，Generated Mapping 仍通过显式 Provider Model re-import 重算。
+- 已保存连接未记录目录关联或模型来源时，发现与同步使用本次执行锁定的 Profile 声明解析缺省值，无需改写连接。同步更新未固定的规格字段及最后有效来源快照，保留人工固定字段；恢复同步只使用此来源快照，不重新读取目录。`reasoning_efforts` 因同步、编辑或恢复而改变时，同一事务重算 Generated Mapping，已有 Target 的手改映射不受影响。
 - 模型集合已经由上游发现或管理员添加，但供应商模型目录元数据获取超时、返回 HTTP 500 等失败时，允许用 Core Canonical Model 补充元数据。必须明确报告目录获取失败，不得把本次目录刷新标为成功，不得覆盖已有有效数据，也不得扩大模型集合。真正的上游账号级模型发现失败不适用该回退，不能用全局目录冒充成功。
 - base 的供应商目录与 Core 的全局 Canonical Model 目录独立刷新，不再跨模块等待或原子切换到同一 revision。base 新增兼容供应商不受 Core 下载失败阻塞，Core 刷新也不等待 base；接受两边短时 revision 不同。两边分别校验各自下载的一致性，失败不得标记成功，并保留已有有效数据。
 - 除上述已确认变更外，目录迁移遵循 [ADR-0073 定义的插件化迁移前原生基线](../adr/0073-register-runtime-catalog-profiles-through-base-vendor.md#迁移基线)，不得从插件化后的当前实现或 `ProviderDescriptor` 反推继承行为。继承的刷新节奏是启动后立即后台刷新、之后每小时刷新；失败明确记录并保留当前有效快照。
@@ -421,6 +422,8 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - 同一 Engine 的运行时克隆可复用相同完整 SHA-256 字节身份、仍被已加载版本持有的不可变编译 Component，并合并同一身份的并发编译。缓存只保存有界元数据与弱引用，不延长退役版本的生命周期，也不缓存加载失败；每次加载仍检查 imports，并使用新的 Store 实例读取和验证 descriptor。操作的 HostServices、私有状态、取消与权限边界不共享。
 - 每个已加载版本在检查 imports 后准备一次 typed `VendorPre<StoreState>`，复用导入解析与导出索引；descriptor、协议选择、执行和 catalog 同步统一从该 blueprint 实例化，但每次仍创建独立 Store、HostServices 与资源表。blueprint 绑定组件原 Engine，因此由另一 `VendorRuntime` 执行时也不能改用调用方的 Engine。`with_descriptor` 同时保留 blueprint 和外层 `Arc<Component>`；后者让已有弱编译缓存继续有效，全部版本句柄释放后仍可回收，不改成强引用常驻缓存。
+- 持久运行时的首次装载与空闲恢复共用不可变编译镜像缓存：以完整 Wasm 身份及 Engine 兼容性区分产物，校验长度和 SHA-256 后通过 `Component::deserialize_file` 映射执行。发布与清理由跨进程文件锁协调，只原子替换目录项，不修改仍被映射的文件内容；缺失或损坏的可信产物重新编译，不可信条目不读取或覆盖。干净文件页可以回收，但 Store、guest 线性内存及宿主堆不因此移到磁盘。Core 使用 `<data-dir>/cache/wasmtime-images`，不自动删除旧压缩缓存；目录信任、回退与软容量见 [架构：Wasmtime 编译缓存](architecture.md#wasmtime-编译缓存)。`runtime::compilation_cache_tests` 覆盖源身份、Engine fuel 配置、并发发布、损坏恢复、不完整校验记录下的不可信条目保护，以及淘汰后既有映射继续执行。
+- `LoadedPlugin` 把轻量的 descriptor 与内容身份同可释放的编译产物（`Component` 与 `VendorPre`）分开。运行时带持久编译缓存时，调用方通过 `with_source(ComponentSource)` 绑定字节来源（Core 为已安装插件的 artifact 和内嵌组件各提供一种），已装入的产物沿用，每次操作持有租约，所有租约归还且空闲满 60 分钟后释放；释放不影响正在执行的操作。恢复重新读取字节，核对完整 SHA-256 后才编译，再次检查 imports；来源返回不同字节、读取失败或编译失败都使该次操作失败，不改用其他代码。并发恢复串行化为一次，等待恢复同样服从取消与截止时间。没有持久编译缓存的运行时忽略 `with_source`，插件保持常驻。`with_descriptor` 共享同一驻留，因此版本切换与描述符覆盖不会复制编译产物。`with_admission_records(目录)` 启用准入记录：`load` 成功后 `record_admission` 写入组件自身的原始 descriptor，`restore(摘要, 来源)` 在记录有效且运行时带持久编译缓存时返回尚未装入的句柄，否则返回 `None`，调用方回退到 `load`。句柄首次装入时完整检查 imports，并要求组件报告的 descriptor 等于记录，不等则该次操作失败并作废记录。真实 base Component 的驻留与准入记录回归为显式 opt-in：先执行 `task build:vendors`，再运行 `cargo test --locked -p stravia-vendor-runtime --lib residency -- --ignored`；这些用例也纳入 `task test:all` 的本地 opt-in 清单。
 - `stravia-vendor-runtime/tests/wasi_compatibility.rs` 通过公开加载接口检查权限边界、预发布版与其他版本系列拒绝，以及非法 SemVer 的组件校验失败。真实 base Component 的多个稳定 patch、build metadata、混合版本加载和协议选择回归为显式 opt-in，并验证新 patch 要求宿主不存在的函数时加载失败：先执行 `task build:vendors`，再运行 `cargo test --locked -p stravia-vendor-runtime --test wasi_compatibility -- --ignored`；该用例也纳入 `task test:all` 的本地 opt-in 清单。缺少 manifest 或产物时明确失败，不静默跳过。测试重定向实际 Component 的顶层 WASI import 名称，保留 guest 实现和内部元数据，并保持跨接口资源族的版本一致。
 - `backend/crates/stravia-vendor-base/`、`stravia-vendor-codex/`、`stravia-vendor-grok/`、`stravia-vendor-command-code/`、`stravia-vendor-devin/`、`stravia-vendor-claudecode/` 等 crate 是 guest 实现来源；只有 `stravia-vendor-base` 进入 Core 的默认内嵌集合。
 - `backend/crates/stravia-vendor-common/` 是只提供多个 guest 实际共用辅助代码的 `rlib`。标准 codec 由 guest 在 Rust 源码层链接 `stravia-protocol-codec` 并编入 Component，而非采用 Component composition；Command Code 与 Devin 私有 codec 留在各自 crate，Bedrock、Cohere、Gateway、WatsonX 等私有实现留在 `base`。

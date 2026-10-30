@@ -1,20 +1,17 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { onMount, tick } from 'svelte'
-import { resolve } from '$app/paths'
+import { tick } from 'svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import { formatLogTime, formatNumber } from '#lib/format.js'
-import { observationStatusLabel } from '#lib/observation-labels.js'
-import { observationStatusTone } from '#lib/observation-event-summary.js'
+import { formatNumber } from '#lib/format.js'
 
-import type { CredentialDiscoverySummary, CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib/types.js'
+import type { CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib/types.js'
 
 import PageHeader from '#lib/components/page-header.svelte'
-import StatusIndicator from '#lib/components/status-indicator.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
+import CredentialMatchItem from '#lib/components/credential-match-item.svelte'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -25,11 +22,11 @@ import ListFilterIcon from '@lucide/svelte/icons/list-filter'
 import HistoryIcon from '@lucide/svelte/icons/history'
 import ScanTextIcon from '@lucide/svelte/icons/scan-text'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
-import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import InfoIcon from '@lucide/svelte/icons/info'
-import { Badge, badgeVariants } from '#lib/components/ui/badge/index.js'
+import { Badge } from '#lib/components/ui/badge/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import CustomRuleSheet from './custom-rule-sheet.svelte'
+import HitRecords from './hit-records.svelte'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
@@ -41,15 +38,18 @@ import {
   type DataTableRowPointerEvent,
 } from '#lib/components/ui/data-table/index.js'
 
+import {
+  credentialRulesQuery,
+  CUSTOM_CREDENTIAL_RULES_KEY,
+  customCredentialRulesQuery,
+} from '#lib/credential-protection-queries.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
-import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import { Textarea } from '#lib/components/ui/textarea/index.js'
 
 const settingKey = 'reversible_redaction_enabled'
 const queryKey = ['setting', settingKey]
-const customRulesKey = ['credential-protection-custom-rules']
 
 // 内置与自定义规则在同一张表浏览；详情与编辑各自沿用唯一的表面。
 type RuleRow =
@@ -59,14 +59,8 @@ type RuleRow =
 const queryClient = useQueryClient()
 const settingQuery = createQuery(() => ({ queryKey, queryFn: () => admin.settings.get(settingKey) }))
 
-const rulesQuery = createQuery(() => ({
-  queryKey: ['credential-protection-rules'],
-  queryFn: admin.credentialProtection.rules,
-}))
-const customRulesQuery = createQuery(() => ({
-  queryKey: customRulesKey,
-  queryFn: admin.credentialProtection.customRules.list,
-}))
+const rulesQuery = createQuery(() => credentialRulesQuery())
+const customRulesQuery = createQuery(() => customCredentialRulesQuery())
 let saving = $state(false)
 let saveError = $state('')
 const storedEnabled = $derived(settingQuery.data === 'true')
@@ -141,114 +135,12 @@ function openRule(row: RuleRow): void {
   ruleOpen = true
 }
 
-function discoveryKeyName(discovery: CredentialDiscoverySummary): string {
-  return discovery.api_key_name ?? m.credential_protection_discoveries_unknown_key()
-}
-
-function discoverySources(discovery: CredentialDiscoverySummary): string {
-  return discovery.source_types.map(sourceLabel).join(' · ')
-}
-
-function discoveryStatusTone(status: string): 'healthy' | 'warning' | 'error' | 'neutral' {
-  const tone = observationStatusTone(status)
-  return tone === 'success' ? 'healthy' : tone
-}
-
-function requestLogHref(discovery: CredentialDiscoverySummary): string {
-  return resolve(`logs?interaction=${encodeURIComponent(discovery.interaction_id)}`)
-}
-
-// 命中记录按服务端的时间倒序分页，客户端排序只会重排已加载部分，因此列不提供排序。
-const discoveryColumn = createDataTableColumnHelper<CredentialDiscoverySummary>()
-const discoveryColumns = discoveryColumn.columns([
-  discoveryColumn.accessor('discovered_at', {
-    header: () => m.credential_protection_discoveries_time(),
-    cell: (context) => formatLogTime(context.getValue()),
-    enableSorting: false,
-    meta: {
-      label: () => m.credential_protection_discoveries_time(),
-      width: 'compact',
-      cellClass: 'font-technical text-xs tabular-nums whitespace-nowrap',
-    },
-    size: 146,
-  }),
-  discoveryColumn.accessor(discoveryKeyName, {
-    id: 'api_key',
-    header: () => m.credential_protection_discoveries_api_key(),
-    enableSorting: false,
-    meta: {
-      label: () => m.credential_protection_discoveries_api_key(),
-      width: 'compact',
-      cellClass: 'break-words whitespace-normal',
-    },
-    size: 96,
-  }),
-  discoveryColumn.display({
-    id: 'rules',
-    header: () => m.credential_protection_discoveries_rules(),
-    cell: (context) => renderSnippet(discoveryRulesCell, context),
-    enableSorting: false,
-    meta: { label: () => m.credential_protection_discoveries_rules(), width: 'fill' },
-    size: 200,
-  }),
-  discoveryColumn.display({
-    id: 'sources',
-    header: () => m.credential_protection_discoveries_sources(),
-    cell: (context) => renderSnippet(discoverySourcesCell, context),
-    enableSorting: false,
-    meta: {
-      label: () => m.credential_protection_discoveries_sources(),
-      width: 'compact',
-      cellClass: 'whitespace-normal',
-    },
-    size: 112,
-  }),
-  discoveryColumn.accessor('new_credential_count', {
-    header: () => m.credential_protection_discoveries_new_credentials(),
-    cell: (context) => formatNumber(context.getValue()),
-    enableSorting: false,
-    meta: {
-      label: () => m.credential_protection_discoveries_new_credentials(),
-      align: 'end',
-      width: 'compact',
-      cellClass: 'font-technical tabular-nums',
-    },
-    size: 72,
-  }),
-  discoveryColumn.display({
-    id: 'status',
-    header: () => m.credential_protection_discoveries_status(),
-    cell: (context) => renderSnippet(discoveryStatusCell, context),
-    enableSorting: false,
-    meta: { label: () => m.credential_protection_discoveries_status(), width: 'compact' },
-    size: 104,
-  }),
-  discoveryColumn.display({
-    id: 'actions',
-    header: () => m.common_actions(),
-    cell: (context) => renderSnippet(discoveryActionsCell, context),
-    enableSorting: false,
-    meta: { label: () => m.common_actions(), align: 'end', exportable: false, width: 'compact' },
-    size: 64,
-  }),
-])
-
-let discoveries = $state.raw<CredentialDiscoverySummary[]>([])
-let nextCursor = $state<string | null>(null)
-let discoveriesLoading = $state(true)
-let discoveriesError = $state(false)
-let observationGap = $state(false)
-let discoveryRetryAppend = false
 let testInput = $state('')
 let inputElement = $state<HTMLTextAreaElement | null>(null)
 let testing = $state(false)
 let testError = $state(false)
 let matches = $state.raw<CredentialMatch[]>()
 let resultsPane = $state<HTMLElement | null>(null)
-
-onMount(() => {
-  void loadDiscoveries(false)
-})
 
 async function setEnabled(enabled: boolean): Promise<void> {
   if (!settingQuery.isSuccess || saving || enabled === storedEnabled) return
@@ -263,27 +155,6 @@ async function setEnabled(enabled: boolean): Promise<void> {
     toast.error(saveError)
   } finally {
     saving = false
-  }
-}
-
-async function loadDiscoveries(append: boolean): Promise<void> {
-  discoveriesLoading = true
-  discoveriesError = false
-  discoveryRetryAppend = append
-  try {
-    const result = await admin.credentialProtection.discoveries({
-      cursor: append ? (nextCursor ?? undefined) : undefined,
-      limit: 20,
-    })
-
-    discoveries = append ? [...discoveries, ...result.items] : result.items
-    nextCursor = result.next_cursor
-
-    observationGap = append ? observationGap || result.observation_gap : result.observation_gap
-  } catch {
-    discoveriesError = true
-  } finally {
-    discoveriesLoading = false
   }
 }
 
@@ -310,23 +181,6 @@ function confidenceLabel(confidence: string): string {
       return m.credential_protection_confidence_low()
     default:
       return confidence
-  }
-}
-
-function sourceLabel(source: string): string {
-  switch (source) {
-    case 'user_message':
-      return m.credential_protection_source_user_message()
-    case 'system_or_history':
-      return m.credential_protection_source_system_or_history()
-    case 'tool_arguments':
-      return m.credential_protection_source_tool_arguments()
-    case 'tool_result':
-      return m.credential_protection_source_tool_result()
-    case 'other_text':
-      return m.credential_protection_source_other_text()
-    default:
-      return m.credential_protection_source_unknown()
   }
 }
 
@@ -435,72 +289,6 @@ function selectMatch(match: CredentialMatch): void {
   {/if}
 {/snippet}
 
-{#snippet ruleChips(discovery: CredentialDiscoverySummary)}
-  <div class="flex min-w-0 flex-wrap items-center gap-1.5">
-    {#each discovery.rule_ids as id (id)}
-      {@const rule = ruleRowById.get(id)}
-      {#if rule}
-        <button
-          type="button"
-          title={id}
-          class={badgeVariants({
-            variant: 'secondary',
-            class: 'h-auto max-w-full cursor-pointer py-1 text-left whitespace-normal hover:bg-secondary/80',
-          })}
-          onclick={() => openRule(rule)}>{rule.name}</button>
-      {:else if rulesQuery.isPending || customRulesQuery.isPending}
-        <Skeleton class="h-5 w-28" />
-      {:else}
-        <span
-          title={id}
-          class={badgeVariants({
-            variant: 'outline',
-            class: 'font-technical h-auto max-w-full py-1 whitespace-normal',
-          })}>{id}</span>
-      {/if}
-    {/each}
-  </div>
-{/snippet}
-
-{#snippet discoverySourcesCell(context: DataTableCellContext<CredentialDiscoverySummary>)}
-  <ul class="flex flex-col gap-0.5">
-    {#each context.row.original.source_types as type (type)}
-      <li>{sourceLabel(type)}</li>
-    {/each}
-  </ul>
-{/snippet}
-
-{#snippet discoveryRulesCell(context: DataTableCellContext<CredentialDiscoverySummary>)}
-  {@render ruleChips(context.row.original)}
-{/snippet}
-
-{#snippet discoveryStatus(discovery: CredentialDiscoverySummary)}
-  <div class="flex flex-col items-start gap-0.5">
-    <StatusIndicator
-      compact
-      label={observationStatusLabel(discovery.status)}
-      tone={discoveryStatusTone(discovery.status)} />
-    {#if discovery.observation_gap}
-      <StatusIndicator compact tone="warning" label={m.observation_event_observation_gap()} />
-    {/if}
-  </div>
-{/snippet}
-
-{#snippet discoveryStatusCell(context: DataTableCellContext<CredentialDiscoverySummary>)}
-  {@render discoveryStatus(context.row.original)}
-{/snippet}
-
-{#snippet discoveryActionsCell(context: DataTableCellContext<CredentialDiscoverySummary>)}
-  <Button
-    variant="ghost"
-    size="icon-sm"
-    href={requestLogHref(context.row.original)}
-    aria-label={m.credential_protection_discoveries_open()}
-    title={m.credential_protection_discoveries_open()}>
-    <ArrowRightIcon />
-  </Button>
-{/snippet}
-
 <div class={['route-page', { 'table-workspace': tab !== 'test' }]}>
   <PageHeader
     title={m.reversible_redaction_title()}
@@ -555,88 +343,17 @@ function selectMatch(match: CredentialMatch): void {
         <h2 id="credential-discoveries-title" class="sr-only">
           {m.credential_protection_discoveries_title()}
         </h2>
-        <div class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2">
-          <Button variant="outline" size="sm" disabled={discoveriesLoading} onclick={() => void loadDiscoveries(false)}>
-            <RefreshCwIcon data-icon="inline-start" />{m.credential_protection_discoveries_refresh()}
-          </Button>
-          {#if discoveriesLoading}
-            <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-              ><Spinner />{m.credential_protection_discoveries_loading()}</span>
-          {/if}
-        </div>
-        {#if observationGap}
-          <Alert.Root variant="warning" class="shrink-0"
-            ><Alert.Description>{m.credential_protection_discoveries_gap()}</Alert.Description></Alert.Root>
-        {/if}
-        {#if discoveriesError}
-          <Alert.Root variant="destructive" class="shrink-0"
-            ><Alert.Description>{m.credential_protection_discoveries_failed()}</Alert.Description></Alert.Root>
-          <Button
-            class="shrink-0 self-start"
-            variant="outline"
-            disabled={discoveriesLoading}
-            onclick={() => void loadDiscoveries(discoveryRetryAppend)}>{m.common_retry()}</Button>
-        {/if}
-        {#if discoveries.length}
-          <div class="records-table">
-            <DataTable
-              workbench
-              class="h-auto min-h-0 [&>[data-slot=data-table-viewport]]:min-h-0"
-              data={discoveries}
-              columns={discoveryColumns}
-              labels={tableLabels}
-              getRowId={(row: CredentialDiscoverySummary) => row.interaction_id}
-              ariaLabel={m.credential_protection_discoveries_title()}
-              size="large"
-              stickyHeader />
-          </div>
-          <ul class="records-list" aria-label={m.credential_protection_discoveries_title()}>
-            {#each discoveries as discovery (discovery.interaction_id)}
-              <li class="route-mobile-row">
-                <div class="flex min-w-0 flex-col gap-2">
-                  <div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                    <span class="font-medium break-all">{discoveryKeyName(discovery)}</span>
-                    <span class="font-technical text-xs text-muted-foreground tabular-nums"
-                      >{formatLogTime(discovery.discovered_at)}</span>
-                  </div>
-                  {@render ruleChips(discovery)}
-                  <p class="text-xs text-muted-foreground">
-                    {m.credential_protection_discoveries_count({ count: formatNumber(discovery.new_credential_count) })}
-                    · {discoverySources(discovery)}
-                  </p>
-                  {@render discoveryStatus(discovery)}
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  href={requestLogHref(discovery)}
-                  aria-label={m.credential_protection_discoveries_open()}>
-                  <ArrowRightIcon />
-                </Button>
-              </li>
-            {/each}
-          </ul>
-          {#if nextCursor}
-            <div class="shrink-0">
-              <Button variant="outline" disabled={discoveriesLoading} onclick={() => void loadDiscoveries(true)}
-                >{m.credential_protection_discoveries_more()}</Button>
-            </div>
-          {/if}
-        {:else if !discoveriesLoading && !discoveriesError && !observationGap}
-          <Empty.Root class="min-h-72"
-            ><Empty.Header
-              ><Empty.Media variant="icon"><HistoryIcon /></Empty.Media>
-              <Empty.Title>{m.credential_protection_no_records()}</Empty.Title>
-              <Empty.Description>{m.credential_protection_discoveries_empty()}</Empty.Description></Empty.Header>
-            <Empty.Content
-              ><Button
-                variant="outline"
-                onclick={() => {
-                  tab = 'test'
-                }}>{m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" /></Button
-              ></Empty.Content>
-          </Empty.Root>
-        {/if}
+        <HitRecords
+          active={tab === 'records'}
+          {ruleNames}
+          rulesPending={rulesQuery.isPending || customRulesQuery.isPending}
+          onOpenRule={(ruleId: string) => {
+            const row = ruleRowById.get(ruleId)
+            if (row) openRule(row)
+          }}
+          onTest={() => {
+            tab = 'test'
+          }} />
       </section>
     </Tabs.Content>
 
@@ -784,25 +501,7 @@ function selectMatch(match: CredentialMatch): void {
               </div>
               <ul class="flex flex-col gap-2">
                 {#each matches as match (`${match.rule_id}:${match.start}:${match.end}`)}
-                  <li>
-                    <Button
-                      variant="outline"
-                      class="h-auto w-full justify-start whitespace-normal py-3 text-left"
-                      onclick={() => selectMatch(match)}
-                      ><span class="flex min-w-0 flex-col gap-1"
-                        ><span class="break-all"
-                          >{ruleNames.get(match.rule_id) ?? match.rule_id}
-                          <span class="text-xs text-muted-foreground">({match.rule_id})</span></span
-                        ><span
-                          >{m.credential_protection_tester_position({
-                            startLine: match.start_line,
-                            startColumn: match.start_column,
-                            endLine: match.end_line,
-                            endColumn: match.end_column,
-                          })}</span
-                        ></span
-                      ></Button>
-                  </li>
+                  <CredentialMatchItem {match} {ruleNames} onselect={selectMatch} />
                 {/each}
               </ul>
             {/if}
@@ -815,7 +514,7 @@ function selectMatch(match: CredentialMatch): void {
 
 <CustomRuleSheet
   bind:this={customSheet}
-  onchanged={() => void queryClient.invalidateQueries({ queryKey: customRulesKey })} />
+  onchanged={() => void queryClient.invalidateQueries({ queryKey: CUSTOM_CREDENTIAL_RULES_KEY })} />
 
 <Sheet.Root bind:open={ruleOpen}>
   <Sheet.Content
@@ -950,6 +649,7 @@ function selectMatch(match: CredentialMatch): void {
         <p>{m.reversible_redaction_off()}</p>
         <p>{m.reversible_redaction_tools_warning()}</p>
         <p>{m.reversible_redaction_limits()}</p>
+        <p>{m.credential_protection_hits_limits()}</p>
       </div>
       <Accordion.Root type="single">
         <Accordion.Item value="shared-conditions"
@@ -1039,27 +739,6 @@ function selectMatch(match: CredentialMatch): void {
 }
 .rule-parameters dd {
   text-align: end;
-}
-/* 记录较少时保持自然高度，较多时在表体内部滚动；加载更多固定在表格下方。 */
-.records-table {
-  display: flex;
-  flex: 0 1 auto;
-  flex-direction: column;
-  min-height: 0;
-}
-.records-list {
-  display: none;
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-@container route-page (max-width: 52rem) {
-  .records-table {
-    display: none;
-  }
-  .records-list {
-    display: block;
-  }
 }
 .rule-code {
   max-width: 100%;

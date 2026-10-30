@@ -182,6 +182,7 @@ impl GenerationRouteFixture {
                     },
                 ],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
     }
@@ -394,14 +395,15 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
     let route = fixture.create_route("filtered-image", true).await?;
     let provider_id = &fixture.incompatible_provider.id;
     let model = admin.get_provider_model(provider_id, CODEX_MODEL).await?;
-    let mut metadata = serde_json::to_value(model.metadata)?;
-    metadata["modalities"]["output"] = json!(["text"]);
     admin
         .update_provider_model(
             provider_id,
             CODEX_MODEL,
             crate::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text"]),
+                )]),
                 revision: model.revision,
             },
         )
@@ -425,14 +427,15 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
     );
 
     let model = admin.get_provider_model(provider_id, CODEX_MODEL).await?;
-    let mut metadata = serde_json::to_value(model.metadata)?;
-    metadata["modalities"]["output"] = json!(["text", "image"]);
     admin
         .update_provider_model(
             provider_id,
             CODEX_MODEL,
             crate::provider_models::UpdateProviderModel {
-                metadata,
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text", "image"]),
+                )]),
                 revision: model.revision,
             },
         )
@@ -447,14 +450,15 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
         &fixture.incompatible_provider.id,
     ] {
         let model = admin.get_provider_model(provider_id, CODEX_MODEL).await?;
-        let mut metadata = serde_json::to_value(model.metadata)?;
-        metadata["modalities"]["output"] = json!(["text"]);
         admin
             .update_provider_model(
                 provider_id,
                 CODEX_MODEL,
                 crate::provider_models::UpdateProviderModel {
-                    metadata,
+                    changes: std::collections::BTreeMap::from([(
+                        "modalities.output".to_string(),
+                        json!(["text"]),
+                    )]),
                     revision: model.revision,
                 },
             )

@@ -146,6 +146,68 @@ impl Drop for Completion {
     }
 }
 
+/// Terminal bookkeeping for a wall-clock `stravia::perf` phase span.
+///
+/// The span is deliberately never entered: SQLite workers may clone an entered
+/// span beyond the future that produced it, which would stretch a phase past its
+/// real lifetime. Status is published when the phase ends; a phase dropped
+/// before its explicit terminal record is reported as cancelled, never completed.
+#[derive(Debug)]
+pub(super) struct Phase {
+    span: Span,
+    finished: bool,
+}
+
+impl Phase {
+    pub(super) fn new(span: Span) -> Self {
+        Self {
+            span,
+            finished: false,
+        }
+    }
+
+    pub(super) fn span(&self) -> &Span {
+        &self.span
+    }
+
+    pub(super) fn complete(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.span.record("status", "completed");
+        }
+    }
+
+    /// Records a failure, including after a drop-path phase was marked cancelled:
+    /// the cleanup error is the more specific terminal outcome.
+    pub(super) fn fail(&mut self, error: &Error) {
+        self.finished = true;
+        self.span.record("error_kind", error_kind(error));
+        self.span.record("status", "error");
+    }
+
+    pub(super) fn finish(&mut self, error: Option<&Error>) {
+        match error {
+            Some(error) => self.fail(error),
+            None => self.complete(),
+        }
+    }
+
+    pub(super) fn cancel_if_unfinished(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.span.record("status", "cancelled");
+        }
+    }
+}
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.span.record("status", "cancelled");
+        }
+    }
+}
+
 struct Identified<Q> {
     query: Q,
     span: Span,

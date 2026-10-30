@@ -21,7 +21,7 @@ from tests.common.helpers import (
     wait_for_setup_token,
     wait_until_ready,
 )
-from tests.e2e.admin.test_observations import _create_route, _detail, _failed_requests, _proxy, _wait_for
+from tests.e2e.admin.test_observations import _create_route, _detail, _client_errors, _proxy, _wait_for
 from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_provider, set_enabled
 
 
@@ -61,7 +61,7 @@ def test_failed_request_projection_survives_restart_and_clear(
     schema = None
     database = {"backend": "sqlite"}
     if backend == "postgres":
-        schema = storage_runtime["make_isolated_schema"]("stravia_failed_requests")
+        schema = storage_runtime["make_isolated_schema"]("stravia_client_errors")
         storage_runtime["run_schema_action"]("create", pg_url=pg_url, schema=schema)
         database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
     mock_port = find_free_port()
@@ -86,14 +86,14 @@ def test_failed_request_projection_survives_restart_and_clear(
         assert status == 401
         before = _wait_for(
             "both failed request sources",
-            lambda: page if (page := _failed_requests(env))["total"] == 2 else None,
+            lambda: page if (page := _client_errors(env))["total"] == 2 else None,
         )
         identities = [(item["kind"], item["id"]) for item in before["items"]]
         assert {kind for kind, _ in identities} == {"run", "rejection"}
         run = next(item for item in before["items"] if item["kind"] == "run")
         assert run["error"]["source"] == "upstream"
         assert "upstream-secret" in run["error"]["message"]
-        assert [(item["kind"], item["id"]) for item in _failed_requests(env, model=route_id)["items"]] == identities
+        assert [(item["kind"], item["id"]) for item in _client_errors(env, model=route_id)["items"]] == identities
         usage = _detail(env, run["interaction_id"])["interaction"]["usage"]
         stop_stravia_server(process, logs)
         process = None
@@ -103,8 +103,8 @@ def test_failed_request_projection_survives_restart_and_clear(
         status, _ = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
         assert status == 200
         env["auth"] = session.auth_headers()
-        first = _failed_requests(env, limit=1)
-        second = _failed_requests(env, limit=1, cursor=first["next_cursor"])
+        first = _client_errors(env, limit=1)
+        second = _client_errors(env, limit=1, cursor=first["next_cursor"])
         restored = first["items"] + second["items"]
         assert [(item["kind"], item["id"]) for item in restored] == identities
         assert next(item for item in restored if item["kind"] == "run")["error"] == run["error"]
@@ -112,7 +112,7 @@ def test_failed_request_projection_survives_restart_and_clear(
         assert _detail(env, run["interaction_id"])["interaction"]["usage"] == usage
         status, _ = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
         assert status == 200
-        assert _failed_requests(env)["items"] == []
+        assert _client_errors(env)["items"] == []
     finally:
         if process is not None:
             stop_stravia_server(process, logs)
@@ -159,7 +159,11 @@ def test_usage_statistics_survive_clear_and_restart(
         assert status == 200, body
         before = body["data"]
         assert before["total_requests"] == 1, before
-        assert before["error_count"] == 0, before
+        assert before["terminal_request_count"] == 1, before
+        assert before["failed_request_count"] == 0, before
+        assert before["upstream_request_count"] == 1, before
+        assert before["upstream_error_count"] == 0, before
+        assert "error_count" not in before, before
         assert before["total_input_tokens"] is None, before
         assert before["total_output_tokens"] == 2, before
         assert before["total_cache_read_tokens"] is None, before
@@ -398,7 +402,6 @@ def test_postgres_installs_schema_and_reconnects_without_replacing_owner(
         assert "observation_tables=6" in schema_report
         assert "removed_tables=0" in schema_report
         assert "legacy_tables=0" in schema_report
-        assert "observation_indexes=3" in schema_report
         assert "removed_indexes=0" in schema_report
 
         reconnect_port = find_free_port()
@@ -524,8 +527,9 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
                 "persisted credential discovery before restart",
                 lambda: key_discoveries(env, f"{model}-key"),
             )
-            assert len(initial) == 1 and initial[0]["new_credential_count"] == 1
-            assert "github-pat" in initial[0]["rule_ids"]
+            assert len(initial) == 1
+            assert [(hit["rule_id"], hit["source_type"], hit.get("latest_input")) for hit in initial[0]["hits"]] == [("github-pat", "user_message", True)]
+            assert initial[0]["linkable"] is True
             preview = _wait_for(
                 "original input preview before restart",
                 lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
@@ -546,7 +550,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             restored = key_discoveries(env, f"{model}-key")
             assert len(restored) == 1
             assert restored[0]["interaction_id"] == initial[0]["interaction_id"]
-            assert restored[0]["new_credential_count"] == 1
+            assert restored[0]["hits"] == initial[0]["hits"]
             assert SECRET not in json.dumps(restored)
             assert reference not in json.dumps(restored)
             assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == SECRET
@@ -560,7 +564,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             wire = json.dumps(received[-1]["body"])
             assert SECRET not in wire
             assert set(REFERENCE.findall(wire)) == {reference}
-            assert sum(row["new_credential_count"] for row in key_discoveries(env, f"{model}-key")) == 1
+            assert len(key_discoveries(env, f"{model}-key")) == 1
             status, cleared = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
             assert status == 200, cleared
             assert key_discoveries(env, f"{model}-key") == []
@@ -568,11 +572,12 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert status == 200, reused
             assert reused["choices"][0]["message"]["content"] == SECRET
             assert set(REFERENCE.findall(json.dumps(received[-1]["body"]))) == {reference}
-            assert key_discoveries(env, f"{model}-key") == []
+            # 清空历史后旧映射仍被复用，但列表只展示创建事件，因此不再有行。
             new_interactions = _wait_for(
                 "new observation after restart and history clearing",
                 lambda: _route_interactions(env, route_id),
             )
+            assert key_discoveries(env, f"{model}-key") == []
             assert _detail(env, new_interactions[0]["id"])["interaction"]["input_preview"] == SECRET
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])

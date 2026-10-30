@@ -9,6 +9,7 @@ use stravia_runtime_contract::thinking::ThinkingLevel;
 
 mod model_discovery;
 mod model_records;
+mod provider_model_pricing;
 mod provider_model_records;
 mod thinking_map;
 use model_discovery::RouteModelDiscoveryError;
@@ -358,6 +359,7 @@ impl<'a> RouteModule<'a> {
                 presence: original.presence,
                 selection_policy: original.selection_policy,
                 snapshot_state: original.snapshot_state,
+                source_metadata: original.source_metadata,
                 metadata: original.metadata,
             },
             None => NewProviderModelRecord {
@@ -367,7 +369,8 @@ impl<'a> RouteModule<'a> {
                 metadata_source_provider_id: None,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
-                snapshot_state: crate::provider_models::SnapshotState::Edited { source: None },
+                snapshot_state: crate::provider_models::SnapshotState::Local,
+                source_metadata: None,
                 metadata: serde_json::from_value(serde_json::json!({
                     "id": provider_model_id,
                     "name": provider_model_id,
@@ -535,6 +538,7 @@ impl<'a> RouteModule<'a> {
                     display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),
                     default_thinking_level: None,
+                    billing: None,
                     targets: vec![CreateTarget {
                         provider_id,
                         model: provider_model_id,

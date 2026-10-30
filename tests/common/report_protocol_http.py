@@ -44,12 +44,12 @@ def main() -> int:
         parser.error("budget-mb must be positive and finite")
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
     candidate = json.loads(args.candidate.read_text(encoding="utf-8"))
-    if any(result.get("schema_version") != 4
-           or result.get("response_validation") != "full-chain-credentials-token-paced-v2"
+    if any(result.get("schema_version") != 5
+           or result.get("response_validation") != "full-chain-credentials-token-paced-v3"
            or type(result.get("gateway_instruction_consistent")) is not bool
            or result.get("credential_protection", {}).get("enabled") is not True
            for result in (baseline, candidate)):
-        parser.error("comparison requires credential-protected full-chain token-paced schema 4; older workload contracts are incomparable")
+        parser.error("comparison requires authorization-only full-chain token-paced schema 5; older workload contracts are incomparable")
     for key in ("schema_version", "response_validation", "platform", "logical_cpus", "cpu_units", "memory_units",
                 "tokenizer", "debug_observation", "ordinary_observation", "credential_protection"):
         if baseline[key] != candidate[key]:

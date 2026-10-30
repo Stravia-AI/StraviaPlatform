@@ -10,6 +10,12 @@ An independent prefix compact case
 adds a new user to the penultimate generation and must find that successful source
 after scanning newer same-depth decoys; it does not replace the exact-window case.
 No protocol-matrix coverage is implied.
+Report schema 4 distinguishes Debug-enabled causal evidence from explicitly
+disabled normal-runtime measurements. Enabled runs export the timeline only
+before and after each repetition, then partition it by observed Run identity.
+Disabled runs retain HTTP/history checks but report unknown SQL/stage costs.
+Resource sampling excludes snapshots and offline attribution, as in schema 3
+and unlike schema 2's repeated-snapshot window.
 """
 from __future__ import annotations
 
@@ -21,9 +27,11 @@ import platform
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,12 +44,31 @@ from tests.common.helpers import (
 from tests.common.measure_protocol_http import (
     Catalog, ProcessReader, database_config, encode, response_frames, response_text,
 )
+from tests.common.protocol_history_audit import NORMALIZED_HISTORY, history_storage_schema
+
+
+class MeasurementFailure(RuntimeError):
+    """Only explicitly sanitized benchmark diagnostics may enter reports."""
+
+
+def ensure_administrator_access(session):
+    access = next((cookie for cookie in session.cookies if cookie.name == "stravia_access"), None)
+    if access is not None and access.expires is not None and access.expires > time.time() + 60:
+        return
+    # Renew before the next diagnostic call, not by replaying failed requests.
+    status, _ = session.request("POST", "/api/v1/auth/refresh", {}, timeout=60)
+    if status != 200:
+        raise MeasurementFailure(f"administrator refresh HTTP {status}")
 
 
 def semantics(items):
     """Same native-window normalization as admin/test_compaction.py."""
     items = json.loads(json.dumps(items))
     for item in items:
+        if item.get("type") in ("function_call", "function_call_output"):
+            item.pop("id", None)
+            item.pop("status", None)
+            continue
         if item.get("role"):
             item.setdefault("type", "message")
         if item.get("type") != "message":
@@ -54,6 +81,23 @@ def semantics(items):
         for key in ("id", "status"):
             item.pop(key, None)
     return items
+
+
+def history_input(user, padding, shape):
+    if shape == "text":
+        return [user]
+    identity = hashlib.sha256(user["content"].encode()).hexdigest()
+    arguments = {
+        "context": identity,
+        "chunks": [{"index": index, "text": padding[start:start + 512], "flags": [True, None, []], "empty": {}}
+                   for index, start in enumerate(range(0, len(padding), 512))],
+        "exact_integer": 18446744073709551617,
+    }
+    call_id = "call_" + identity[:24]
+    # 完整的客户端历史工具回合，不执行平台工具；参数原文及 call_id 均参与上游验真。
+    return [user, {"type": "function_call", "call_id": call_id, "name": "recorded_lookup",
+                   "arguments": json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)},
+            {"type": "function_call_output", "call_id": call_id, "output": "recorded-result-" + identity}]
 
 
 def compact_semantics(items):
@@ -120,15 +164,16 @@ class NativeProvider(BaseHTTPRequestHandler):
                                          "input_sha256": hashlib.sha256(encode(semantics(items))).hexdigest(), "input_items": len(items),
                                          "effective_input_sha256": hashlib.sha256(encode(semantics(effective_items))).hexdigest(), "effective_input_items": len(effective_items),
                                          # Digest the fake provider's actual output, not the Gateway response.
-                                         # This runs after the write, outside the client request timer.
+                                         # Runs after the write; excluded from Rust CPU, but may overlap client wall time.
                                          "compact_output_sha256": compact_digest(result["output"]) if compact and valid else None})
 
 
 def admin(session, method, path, body=None, expected=200):
+    ensure_administrator_access(session)
     status, value = session.request(method, path, body, timeout=60)
     if status != expected:
         # Response bodies can contain credentials; never include them in errors.
-        raise RuntimeError(f"admin {method} {path}: HTTP {status}")
+        raise MeasurementFailure(f"admin {method} {path}: HTTP {status}")
     return value["data"]
 
 
@@ -150,7 +195,7 @@ def provision(session, port, suffix):
     return model, route["id"], key
 
 
-def observe(session, route, generation, directory, exclude_runs=()):
+def observe(session, route, generation, directory, exclude_runs=(), *, require_trace=True):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         query = urlencode({"model": route, "anchor_at": int(time.time() * 1000) + 1000, "window_index": 0, "limit": 100})
@@ -162,42 +207,63 @@ def observe(session, route, generation, directory, exclude_runs=()):
                     if run["id"] in exclude_runs or run.get("generation_node_id") != generation:
                         continue
                     trace = run.get("trace") or {}
-                    if trace.get("status") != "complete":
+                    if require_trace and trace.get("status") != "complete":
+                        continue
+                    if not require_trace and run.get("status") != "completed":
                         continue
                     return run
         time.sleep(.1)
-    raise RuntimeError("completed Generation observation/trace not available")
+    raise MeasurementFailure("completed Generation observation/required trace not available")
 
 
 def unknown_projection_fixture(args, directory, route, key, candidate_ids):
-    """Clear only nullable derived proofs for this driver's own fresh Principal."""
+    """Clear only nullable derived proofs for this driver's own fresh Principal.
+
+    Table presence selects normalized v3 or the frozen legacy layout; this is a
+    measurement adapter for baseline binaries, not a product compatibility path.
+    """
     fields = ("prefix_projection_version", "prefix_controls_fingerprint", "prefix_context_fingerprint")
     report = {"backend": args.backend, "operation": "set derived candidate projection to NULL outside inference timer",
               "unknown_fields": [], "updated_nodes": 0, "candidate_nodes": len(candidate_ids),
               "performance_scope": "conservative unknown-projection fallback; not normal projected-data benefit"}
     assignments = ", ".join(field + " = NULL" for field in fields)
+
+    def table_and_schema(tables):
+        schema = history_storage_schema(tables)
+        return ("turn_nodes" if schema == NORMALIZED_HISTORY else "turn_chain_nodes"), schema
+
+    def scope_guard(schema, key_sql, route_sql):
+        effective = (f"(SELECT 'api-key:' || k.id FROM api_keys k "
+                     "JOIN api_key_models km ON km.api_key_id = k.id "
+                     f"WHERE k.token = {key_sql} AND km.model_id = {route_sql})")
+        if schema == NORMALIZED_HISTORY:
+            return f"scope_id = (SELECT s.id FROM turn_scopes s WHERE s.principal = {effective})"
+        return f"principal = {effective}"
+
     if args.backend == "sqlite":
         path = Path(directory) / "db" / "gateway.db"
         if not path.is_file():
-            raise RuntimeError("isolated SQLite database not found")
+            raise MeasurementFailure("isolated SQLite database not found")
         with closing(sqlite3.connect(path, timeout=30)) as connection, connection:
-            present = {row[1] for row in connection.execute("PRAGMA table_info(turn_chain_nodes)")}
+            table, schema = table_and_schema(
+                {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+            report["history_schema"] = schema
+            present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             available = set(fields) & present
             if not available:
                 report["status"] = "baseline schema has no projection columns; no writes"
                 return report
             if available != set(fields):
-                raise RuntimeError("incomplete candidate projection schema")
+                raise MeasurementFailure("incomplete candidate projection schema")
+            owner = scope_guard(schema, "?", "?")
             placeholders = ",".join("?" for _ in candidate_ids)
             cursor = connection.execute(
-                f"UPDATE turn_chain_nodes SET {assignments} WHERE id IN ({placeholders}) "
-                "AND principal = (SELECT 'api-key:' || k.id FROM api_keys k "
-                "JOIN api_key_models km ON km.api_key_id = k.id WHERE k.token = ? AND km.model_id = ?)",
+                f"UPDATE {table} SET {assignments} WHERE id IN ({placeholders}) AND {owner}",
                 (*candidate_ids, key, route),
             )
             report["updated_nodes"] = cursor.rowcount
             if cursor.rowcount != len(candidate_ids):
-                raise RuntimeError("isolated projection fixture did not update every candidate")
+                raise MeasurementFailure("isolated projection fixture did not update every candidate")
     else:
         # Test tooling only; psql is explicitly reported and never a production dependency.
         address = urlsplit(args.database_url)
@@ -220,35 +286,36 @@ def unknown_projection_fixture(args, directory, route, key, candidate_ids):
                 input=sql, text=True, capture_output=True, timeout=60, env=connection_env,
             )
             if completed.returncode:
-                raise RuntimeError("isolated PostgreSQL projection fixture failed")
+                raise MeasurementFailure("isolated PostgreSQL projection fixture failed")
             return [line for line in completed.stdout.splitlines() if line]
 
         def literal(value):
             return "'" + value.replace("'", "''") + "'"
 
+        table, schema = table_and_schema(set(query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema();")))
+        report["history_schema"] = schema
         names = ",".join(literal(field) for field in fields)
         available = set(query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() "
-                              f"AND table_name='turn_chain_nodes' AND column_name IN ({names});"))
+                              f"AND table_name={literal(table)} AND column_name IN ({names});"))
         report["tool"] = "psql"
         if not available:
             report["status"] = "baseline schema has no projection columns; no writes"
             return report
         if available != set(fields):
-            raise RuntimeError("incomplete candidate projection schema")
+            raise MeasurementFailure("incomplete candidate projection schema")
         identifiers = ",".join(literal(value) for value in candidate_ids)
         # A count guard inside the transaction prevents partial fixture writes.
-        guard = (f"id IN ({identifiers}) AND principal=(SELECT 'api-key:' || k.id FROM api_keys k "
-                 "JOIN api_key_models km ON km.api_key_id=k.id "
-                 f"WHERE k.token={literal(key)} AND km.model_id={literal(route)})")
+        guard = f"id IN ({identifiers}) AND {scope_guard(schema, literal(key), literal(route))}"
         sql = ("BEGIN; SET LOCAL standard_conforming_strings=on; "
-               f"DO $fixture$ BEGIN IF (SELECT count(*) FROM turn_chain_nodes WHERE {guard}) <> {len(candidate_ids)} "
+               f"DO $fixture$ BEGIN IF (SELECT count(*) FROM {table} WHERE {guard}) <> {len(candidate_ids)} "
                "THEN RAISE EXCEPTION 'isolated fixture count mismatch'; END IF; END $fixture$; "
-               f"WITH changed AS (UPDATE turn_chain_nodes SET {assignments} WHERE {guard} RETURNING id) "
+               f"WITH changed AS (UPDATE {table} SET {assignments} WHERE {guard} RETURNING id) "
                "SELECT count(*) FROM changed; COMMIT;")
         output = query(sql)
         counts = [int(line) for line in output if line.isdecimal()]
         if counts != [len(candidate_ids)]:
-            raise RuntimeError("isolated PostgreSQL projection fixture count unavailable")
+            raise MeasurementFailure("isolated PostgreSQL projection fixture count unavailable")
         report["updated_nodes"] = counts[0]
     report.update(status="applied", unknown_fields=list(fields))
     return report
@@ -365,70 +432,38 @@ def send(transport, base, key, model, items, upstream, case, expected_parent, te
 
 
 def timeline(session):
+    ensure_administrator_access(session)
     status, value = session.request("GET", "/api/v1/performance/timeline", timeout=60)
     if status != 200:
-        raise RuntimeError(f"performance timeline HTTP {status}")
+        raise MeasurementFailure(f"performance timeline HTTP {status}")
     return value
 
 
-def trace_key(event):
-    return (event.get("pid"), event.get("tid"), event.get("ts"), event.get("name"), event.get("ph"))
+def report_progress(result, row):
+    print(json.dumps({"completed_requests": len(result["requests"]), "case": row["case"],
+                      "round": row["round"], "repetition": row["repetition"]}), flush=True)
 
 
-def attach_performance(session, row, before):
-    attach_performance_snapshot(row, before, timeline(session))
-
-
-def attach_performance_snapshot(row, before, snapshot):
-    """按完整因果链验收快照；活动状态本身不是采集丢失。"""
-    prior = {trace_key(event) for event in before.get("traceEvents", []) if event.get("ph") == "X"}
-    events = []
-    for event in snapshot.get("traceEvents", []):
-        if event.get("ph") != "X" or trace_key(event) in prior:
-            continue
-        # Keep stage names and numeric attribution only: never serialize auth,
-        # provider credentials, request content, or debug wire payloads.
-        args = {key: value for key, value in event.get("args", {}).items()
-                if isinstance(value, (int, float, bool)) and not any(word in key.lower() for word in ("token", "key", "secret"))}
-        capture_state = event.get("args", {}).get("capture_state")
-        if capture_state in ("active", "frozen", "finished"):
-            args["capture_state"] = capture_state
-        events.append({"name": event["name"], "ts_us": event.get("ts"), "dur_us": event.get("dur"), "args": args,
-                       "sql_count": args.get("sql_query_count", 0), "sql_duration_us": args.get("sql_query_duration_us", 0)})
-    row["performance_spans"] = events
-    stage_counts = {}
-    for event in events:
-        stage_counts[event["name"]] = stage_counts.get(event["name"], 0) + 1
-    row["performance_stage_counts"] = stage_counts
+def attach_performance_snapshot(rows, before, snapshot):
+    """整轮只索引一次因果森林；通过已观测 Run ID 归属，不依赖时间窗或请求顺序。"""
     metadata_fields = ("dropped_active", "dropped_completed", "dropped_sql_completed", "dropped_resource_samples",
                        "incomplete", "incomplete_total", "active_spans", "frozen_spans", "frozen_total",
                        "storage_errors", "debug_epoch")
     loss_fields = ("dropped_active", "dropped_completed", "dropped_sql_completed", "dropped_resource_samples",
                    "frozen_spans", "frozen_total", "storage_errors")
-    row["trace_metadata_before"] = {key: before.get("metadata", {}).get(key) for key in metadata_fields}
-    row["trace_metadata_after"] = {key: snapshot.get("metadata", {}).get(key) for key in metadata_fields}
-    row["trace_metadata_valid"] = all(
-        type(row["trace_metadata_before"][key]) is int
-        and type(row["trace_metadata_after"][key]) is int
-        and row["trace_metadata_before"][key] >= 0
-        and row["trace_metadata_after"][key] >= 0
-        and (key not in loss_fields or row["trace_metadata_after"][key] <= row["trace_metadata_before"][key])
+    metadata_before = {key: before.get("metadata", {}).get(key) for key in metadata_fields}
+    metadata_after = {key: snapshot.get("metadata", {}).get(key) for key in metadata_fields}
+    metadata_valid = all(
+        type(metadata_before[key]) is int and type(metadata_after[key]) is int
+        and metadata_before[key] >= 0 and metadata_after[key] >= 0
+        and (key not in loss_fields or metadata_after[key] <= metadata_before[key])
         for key in metadata_fields
+    ) and metadata_before["debug_epoch"] == metadata_after["debug_epoch"] and all(
+        value.get("metadata", {}).get("schema_version") == 3
+        and value.get("metadata", {}).get("storage_status") == "ready"
+        and value.get("metadata", {}).get("debug_enabled") is True
+        for value in (before, snapshot)
     )
-    row["trace_metadata_valid"] = (
-        row["trace_metadata_valid"]
-        and row["trace_metadata_before"]["debug_epoch"] == row["trace_metadata_after"]["debug_epoch"]
-        and all(value.get("metadata", {}).get("schema_version") == 3
-                and value.get("metadata", {}).get("storage_status") == "ready"
-                and value.get("metadata", {}).get("debug_enabled") is True
-                for value in (before, snapshot))
-    )
-    prior_all = {trace_key(event) for event in before.get("traceEvents", [])}
-    fresh_incomplete = [event["name"] for event in snapshot.get("traceEvents", [])
-                        if event.get("ph") == "B" and trace_key(event) not in prior_all]
-    row["fresh_incomplete_spans"] = fresh_incomplete
-    row["global_incomplete_spans"] = [event["name"] for event in snapshot.get("traceEvents", []) if event.get("ph") == "B"]
-    span_events = [event for event in snapshot.get("traceEvents", []) if event.get("ph") in ("B", "X")]
     capture_errors = []
     for label, value in (("before", before), ("after", snapshot)):
         states = {"active": 0, "frozen": 0}
@@ -442,122 +477,188 @@ def attach_performance_snapshot(row, before, snapshot):
                 states[state] += 1
             if state == "frozen":
                 capture_errors.append(f"{label}: frozen span: {event.get('name')}")
+            if state == "finished" and not isinstance(event.get("dur"), (int, float)):
+                capture_errors.append(f"{label}: missing duration: {event.get('name')}")
         for state, field in (("active", "active_spans"), ("frozen", "frozen_spans")):
             if value.get("metadata", {}).get(field) != states[state]:
                 capture_errors.append(f"{label}: {field} does not match retained spans")
-    roots = [span for span in events if span["name"] == "proxy.inference_run"]
-    row["inference_root_span_count"] = len(roots)
-    root_id = roots[0]["args"].get("span_id") if len(roots) == 1 else None
-    row["inference_root_span_id"] = root_id
-    by_id = {
-        event["args"]["span_id"]: {"name": event["name"], "dur_us": event.get("dur"), "args": event["args"]}
-        for event in snapshot.get("traceEvents", [])
-        if event.get("ph") in ("B", "X") and type(event.get("args", {}).get("span_id")) is int
-    }
-    if len(by_id) != len(span_events):
+    raw_events = [event for event in snapshot.get("traceEvents", []) if event.get("ph") in ("B", "X")]
+    by_id = {event["args"]["span_id"]: event for event in raw_events
+             if type(event.get("args", {}).get("span_id")) is int}
+    if len(by_id) != len(raw_events):
         capture_errors.append("missing or duplicate span_id")
-
-    def attribution(span):
-        current = span
-        visited = set()
-        background = False
-        while True:
-            identifier = current["args"].get("span_id")
-            if type(identifier) is not int or identifier in visited:
-                return "unattributed"
-            visited.add(identifier)
-            if current["args"].get("capture_state") == "finished" and not isinstance(current.get("dur_us"), (int, float)):
-                return "unattributed"
-            background |= current["name"] == "observation.command.process"
-            parent = current["args"].get("parent_id")
-            if parent is None:
-                if identifier == root_id:
-                    return "observation" if background else "inference"
-                if current["name"].startswith("observation."):
-                    return "observation"
-                if background and current["name"] == "proxy.inference_run":
-                    return "observation"
-                if current["name"] == "proxy.inference_run":
-                    return "other_inference"
-                if current["name"] in ("sql.query", "sql.pool.acquire") and len(visited) == 1:
-                    return "unrelated_sql"
-                return "unattributed"
-            if type(parent) is not int:
-                return "unattributed"
-            current = by_id.get(parent)
-            if current is None:
-                return "unattributed"
-
-    # 缺失父节点和环不能用 observation 名称或已结束状态掩盖。
-    for span in by_id.values():
-        current = span
-        visited = set()
-        while True:
-            identifier = current["args"]["span_id"]
-            if identifier in visited:
-                capture_errors.append(f"causal cycle: {span['name']}")
+    prior_ids = {event.get("args", {}).get("span_id") for event in before.get("traceEvents", [])
+                 if event.get("ph") in ("B", "X")}
+    contexts = {}
+    for identifier in by_id:
+        cursor, path, seen = identifier, [], set()
+        while cursor not in contexts:
+            if cursor in seen:
+                capture_errors.append(f"causal cycle: {by_id[identifier]['name']}")
+                contexts[cursor] = (None, "unattributed")
                 break
-            visited.add(identifier)
-            parent = current["args"].get("parent_id")
+            seen.add(cursor)
+            event = by_id[cursor]
+            parent = event.get("args", {}).get("parent_id")
             if parent is None:
+                name = event["name"]
+                kind = ("inference" if name == "proxy.inference_run" else
+                        "observation" if name.startswith("observation.") else
+                        "unrelated_sql" if name in ("sql.query", "sql.pool.acquire") else "unattributed")
+                contexts[cursor] = (cursor, kind)
                 break
+            path.append(cursor)
             if type(parent) is not int or parent not in by_id:
-                capture_errors.append(f"missing parent: {span['name']}")
+                capture_errors.append(f"missing parent: {event['name']}")
+                contexts[cursor] = (None, "unattributed")
                 break
-            current = by_id[parent]
+            cursor = parent
+        root, kind = contexts[cursor]
+        for member in reversed(path):
+            if kind == "unrelated_sql":
+                kind = "unattributed"
+            if kind == "inference" and by_id[member]["name"] == "observation.command.process":
+                kind = "observation"
+            contexts[member] = (root, kind)
+    groups, roots_by_request, safe_events, active = {}, {}, [], []
+    for event in raw_events:
+        raw_args = event.get("args", {})
+        identifier = raw_args.get("span_id")
+        root, kind = contexts.get(identifier, (None, "unattributed"))
+        # 只输出固定名称与数值归因；不复制请求身份以外的字符串、正文或凭据。
+        args = {key: value for key, value in raw_args.items()
+                if isinstance(value, (int, float, bool))
+                and not any(word in key.lower() for word in ("token", "key", "secret"))}
+        state = raw_args.get("capture_state")
+        if state in ("active", "frozen", "finished"):
+            args["capture_state"] = state
+        safe = {"name": event["name"], "ts_us": event.get("ts"), "dur_us": event.get("dur"), "args": args,
+                "sql_count": args.get("sql_query_count", 0), "sql_duration_us": args.get("sql_query_duration_us", 0)}
+        if event.get("ph") == "X":
+            safe_events.append(safe)
+            groups.setdefault(root, []).append((safe, kind))
+        if state == "active":
+            active.append((root, kind, {"name": event["name"], "span_id": identifier,
+                                       "parent_id": raw_args.get("parent_id")}))
+        if event["name"] == "proxy.inference_run" and identifier not in prior_ids:
+            request_id = raw_args.get("request_id")
+            if isinstance(request_id, str):
+                roots_by_request.setdefault(request_id, []).append(safe)
+            else:
+                capture_errors.append("missing inference request identity")
+    wanted = [row.get("observation_run_id") for row in rows]
+    if any(not isinstance(identity, str) or not identity for identity in wanted) or len(set(wanted)) != len(wanted):
+        capture_errors.append("missing or duplicate observed request identity")
+    unclaimed = set(roots_by_request).difference(wanted)
+    if unclaimed:
+        capture_errors.append("unclaimed inference request identity")
+    unattributed_active = [dict(span, attribution=kind) for _, kind, span in active if kind == "unattributed"]
+    observation_active = [dict(span, attribution=kind) for _, kind, span in active if kind == "observation"]
+    routing_unattributed = []
+    for span in safe_events:
+        name = span["name"]
+        if not name.startswith(("router.select", "generation_chain.", "turn_chain.")):
+            continue
+        _, kind = contexts.get(span["args"].get("span_id"), (None, "unattributed"))
+        if kind != "inference" and not (kind == "observation" and name.startswith(("generation_chain.", "turn_chain."))):
+            routing_unattributed.append(name)
+    fresh_incomplete = [span["name"] for _, _, span in active if span["span_id"] not in prior_ids]
+    global_incomplete = [event["name"] for event in raw_events if event.get("ph") == "B"]
+    selected_roots = set()
+    for row in rows:
+        roots = roots_by_request.get(row.get("observation_run_id"), [])
+        root_id = roots[0]["args"].get("span_id") if len(roots) == 1 else None
+        if root_id is not None:
+            selected_roots.add(root_id)
+        associated = groups.get(root_id, []) if root_id is not None else []
+        events = [span for span, _ in associated]
+        request_spans = [span for span, kind in associated if kind == "inference"]
+        request_history = [span for span in request_spans
+                           if span["name"].startswith(("router.select", "generation_chain.", "turn_chain."))]
+        active_request = [dict(span, attribution="inference") for root, kind, span in active
+                          if kind == "inference" and root == root_id]
+        row.update(
+            performance_spans=events,
+            performance_stage_counts=dict(Counter(span["name"] for span in events)),
+            trace_metadata_before=metadata_before, trace_metadata_after=metadata_after,
+            inference_root_span_count=len(roots), inference_root_span_id=root_id,
+            fresh_incomplete_spans=fresh_incomplete, global_incomplete_spans=global_incomplete,
+            active_request_spans=active_request, active_observation_spans=observation_active,
+            active_unrelated_spans=[dict(span, attribution="other_inference" if kind == "inference" else kind)
+                                    for root, kind, span in active
+                                    if kind == "unrelated_sql" or (kind == "inference" and root != root_id)],
+            unattributed_active_spans=unattributed_active, trace_capture_errors=capture_errors,
+            trace_metadata_valid=metadata_valid and not capture_errors and not active_request and not unattributed_active,
+            request_sql_span_count=sum(span["name"] == "sql.query" for span in request_spans),
+            request_sql_duration_us=sum(span["dur_us"] for span in request_spans
+                                        if span["name"] == "sql.query" and isinstance(span["dur_us"], (int, float))),
+            request_subtree_span_count=len(request_spans),
+            observation_history_spans=[span for span, kind in associated if kind == "observation"
+                                       and span["name"].startswith(("generation_chain.", "turn_chain."))],
+            history_measurements=[{"name": span["name"], "dur_us": span["dur_us"], "sql_count": span["sql_count"],
+                                   "sql_duration_us": span["sql_duration_us"], "counters": span["args"]}
+                                  for span in request_history if span["name"].startswith(("generation_chain.", "turn_chain."))],
+            unattributed_routing_history_spans=routing_unattributed,
+            request_span_valid=(len(roots) == 1 and type(root_id) is int
+                                and roots[0]["args"].get("capture_state") == "finished"
+                                and isinstance(roots[0].get("dur_us"), (int, float))
+                                and bool(request_history) and not routing_unattributed and not active_request and not unclaimed),
+            trace_attribution="按真实 Observation Run ID 选择唯一已结束推理根并索引完整因果森林；observation 单列，其他请求不计入该请求；不均摊后台成本、不累加嵌套 SQL 计数",
+        )
+    return {"trace_metadata_before": metadata_before, "trace_metadata_after": metadata_after,
+            "trace_capture_errors": capture_errors,
+            "background_performance_spans": [span for span in safe_events
+                                              if contexts.get(span["args"].get("span_id"), (None, "unattributed"))[0]
+                                              not in selected_roots],
+            "valid": bool(rows) and all(row["trace_metadata_valid"] and row["request_span_valid"] for row in rows)}
 
-    active = [
-        {"name": event["name"], "span_id": event.get("args", {}).get("span_id"),
-         "parent_id": event.get("args", {}).get("parent_id"),
-         "attribution": attribution({"name": event["name"], "args": event.get("args", {})})}
-        for event in span_events if event.get("args", {}).get("capture_state") == "active"
-    ]
-    row["active_request_spans"] = [span for span in active if span["attribution"] == "inference"]
-    row["active_observation_spans"] = [span for span in active if span["attribution"] == "observation"]
-    row["active_unrelated_spans"] = [
-        span for span in active if span["attribution"] in ("other_inference", "unrelated_sql")
-    ]
-    row["unattributed_active_spans"] = [span for span in active if span["attribution"] == "unattributed"]
-    row["trace_capture_errors"] = capture_errors
-    row["trace_metadata_valid"] = (
-        row["trace_metadata_valid"] and not capture_errors
-        and not row["active_request_spans"] and not row["unattributed_active_spans"]
-    )
-    request_spans = [span for span in events if attribution(span) == "inference"]
-    row["request_sql_span_count"] = sum(span["name"] == "sql.query" for span in request_spans)
-    row["request_sql_duration_us"] = sum(
-        span["dur_us"] for span in request_spans
-        if span["name"] == "sql.query" and isinstance(span["dur_us"], (int, float))
-    )
-    routing_history = [span for span in events
-                       if span["name"].startswith(("router.select", "generation_chain.", "turn_chain."))]
-    request_history = [span for span in routing_history if attribution(span) == "inference"]
-    observation_history = [span for span in routing_history
-                           if span["name"].startswith(("generation_chain.", "turn_chain."))
-                           and attribution(span) == "observation"]
-    row["request_subtree_span_count"] = sum(attribution(span) == "inference" for span in events) if root_id is not None else 0
-    row["observation_history_spans"] = observation_history
-    row["history_measurements"] = [
-        {"name": span["name"], "dur_us": span["dur_us"], "sql_count": span["sql_count"],
-         "sql_duration_us": span["sql_duration_us"], "counters": span["args"]}
-        for span in request_history if span["name"].startswith(("generation_chain.", "turn_chain."))
-    ]
-    row["unattributed_routing_history_spans"] = [
-        span["name"] for span in routing_history
-        if attribution(span) != "inference"
-        and not (span["name"].startswith(("generation_chain.", "turn_chain.")) and attribution(span) == "observation")
-    ]
-    row["request_span_valid"] = (
-        len(roots) == 1 and isinstance(root_id, int)
-        and isinstance(roots[0].get("dur_us"), (int, float))
-        and bool(request_history) and not row["unattributed_routing_history_spans"]
-        and not row["active_request_spans"]
-    )
-    row["trace_attribution"] = "唯一已结束推理根及其同步 routing/history 因果子树；完整 observation 根或 command.process 因果链单列，活动的同步请求节点拒收；无父 SQL 或其他已证实推理根下的活动节点单列且不计请求 SQL；不均摊后台成本、不累加嵌套 SQL 计数"
+
+
+def attach_disabled_performance_controls(rows, before, after):
+    """只验证显式关闭 Debug 的控制条件，不把未采集的 SQL 或阶段成本记成零。"""
+    errors = []
+    metadata = []
+    for label, snapshot in (("before", before), ("after", after)):
+        meta = snapshot.get("metadata") if isinstance(snapshot, dict) else None
+        events = snapshot.get("traceEvents") if isinstance(snapshot, dict) else None
+        if not isinstance(meta, dict):
+            errors.append(label + ": missing metadata")
+            metadata.append({})
+            continue
+        epoch = meta.get("debug_epoch")
+        if (type(meta.get("schema_version")) is not int or meta["schema_version"] != 3
+                or meta.get("debug_enabled") is not False or "debug_epoch" not in meta
+                or not (epoch is None or (type(epoch) is int and epoch >= 0))):
+            errors.append(label + ": Debug-disabled control is not established")
+        if not isinstance(events, list) or any(not isinstance(event, dict) or event.get("ph") not in ("M", "C") for event in events):
+            errors.append(label + ": unexpected performance spans")
+        metadata.append({key: meta.get(key) for key in ("schema_version", "debug_enabled", "debug_epoch")})
+    if metadata[0].get("debug_epoch") != metadata[1].get("debug_epoch"):
+        errors.append("Debug session changed during the measurement")
+    identities = [row.get("observation_run_id") for row in rows]
+    if not rows or any(not isinstance(identity, str) or not identity for identity in identities):
+        errors.append("missing observed request identity")
+    elif len(set(identities)) != len(identities):
+        errors.append("duplicate observed request identity")
+    for row in rows:
+        row.update(request_sql_span_count=None, request_sql_duration_us=None, history_measurements=None)
+    return {"metadata_before": metadata[0], "metadata_after": metadata[1],
+            "control_errors": errors, "valid": not errors}
+
+
+def process_io_counters(pid):
+    if not sys.platform.startswith("linux"):
+        return None
+    fields = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/io").read_text().splitlines())
+    return {key: int(fields[key]) for key in ("read_bytes", "write_bytes", "cancelled_write_bytes")}
 
 
 def finalize_validity(result, args):
     rows = result["requests"]
+    performance_debug = result["performance_debug"]
+    captures = result["performance_captures"] if performance_debug else result["debug_disabled_controls"]
+    if len(captures) != args.repetitions or any(not capture["valid"] for capture in captures):
+        result["failure_reasons"].append("missing or invalid whole-repetition performance capture/control")
     if any(not row["valid"] for row in rows):
         result["failure_reasons"].append("HTTP, parent, terminal or content validation failed")
     expected = args.repetitions * (3 * args.rounds + 3 * args.candidates + 2 * args.shared_rounds + 10)
@@ -569,9 +670,9 @@ def finalize_validity(result, args):
     evidence = []
     for row in compact_rows:
         spans = [span for span in row.get("performance_spans", []) if span["name"] == "generation_chain.parent.discover_prefix"]
-        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans]
+        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans] if performance_debug else None
         valid = row.get("parent_valid", False) and row.get("content_valid", False)
-        evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans), "candidate_counts": candidate_counts, "valid": valid})
+        evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans) if performance_debug else None, "candidate_counts": candidate_counts, "valid": valid})
         if not valid:
             result["failure_reasons"].append("native compact source parent or full output-window digest mismatch")
     result["native_discovery_evidence"] = evidence
@@ -581,9 +682,9 @@ def finalize_validity(result, args):
     prefix_evidence = []
     for row in prefix_rows:
         spans = [span for span in row.get("performance_spans", []) if span["name"] == "generation_chain.parent.discover_prefix"]
-        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans]
+        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans] if performance_debug else None
         valid = row.get("parent_valid", False) and row.get("content_valid", False)
-        prefix_evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans), "candidate_counts": candidate_counts,
+        prefix_evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans) if performance_debug else None, "candidate_counts": candidate_counts,
                                 "expected_parent": row["expected_parent"], "observed_parent": row.get("observed_parent"),
                                 "parent_valid": row.get("parent_valid", False), "valid": valid})
         if not valid:
@@ -595,9 +696,9 @@ def finalize_validity(result, args):
     rejected_evidence = []
     for row in rejected_rows:
         spans = [span for span in row.get("performance_spans", []) if span["name"] == "generation_chain.parent.discover_prefix"]
-        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans]
+        candidate_counts = [span["args"].get("candidate_count", 0) for span in spans] if performance_debug else None
         valid = row.get("parent_valid", False) and row.get("observed_parent") is None and row.get("content_valid", False)
-        rejected_evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans), "candidate_counts": candidate_counts,
+        rejected_evidence.append({"repetition": row["repetition"], "discovery_span_count": len(spans) if performance_debug else None, "candidate_counts": candidate_counts,
                                   "observed_parent": row.get("observed_parent"), "parent_valid": row.get("parent_valid", False), "valid": valid})
         if not valid:
             result["failure_reasons"].append("rejected-session case lacks a verified null parent or full output-window digest")
@@ -620,11 +721,11 @@ def finalize_validity(result, args):
                 result["failure_reasons"].append(f"{name} real parent/content oracle failed")
     result["shared_history_evidence"] = shared_evidence
     result["expected_request_count"] = expected
-    if any(not row.get("performance_spans") for row in rows):
+    if performance_debug and any(not row.get("performance_spans") for row in rows):
         result["failure_reasons"].append("missing per-request performance spans")
-    if any(not row.get("trace_metadata_valid") for row in rows):
+    if performance_debug and any(not row.get("trace_metadata_valid") for row in rows):
         result["failure_reasons"].append("trace metadata missing, changed Debug session, storage failure, dropped/frozen spans, invalid causal chains or unfinished request spans")
-    if any(not row.get("request_span_valid") for row in rows):
+    if performance_debug and any(not row.get("request_span_valid") for row in rows):
         result["failure_reasons"].append("request trace lacks exactly one completed inference root or routing/history spans are outside its subtree")
     if result["rss_peak_bytes"] is None:
         result["failure_reasons"].append("no server RSS samples")
@@ -645,6 +746,8 @@ def main():
     parser.add_argument("--rounds", type=int, default=8)
     parser.add_argument("--candidates", type=int, default=48)
     parser.add_argument("--prompt-bytes", type=int, default=8192)
+    parser.add_argument("--history-items", choices=("text", "tool-json"), default="text",
+                        help="Add a completed client-owned tool call/result to each new user; tool-json retains structured arguments and exact large integers")
     parser.add_argument("--shared-rounds", type=int, default=8, help="Rounds in the independent common-ancestor chain")
     parser.add_argument("--cache-capacity-mb", type=int, default=0, help="SharedCache capacity; 0 disables it for cold-path measurement")
     parser.add_argument("--http-connection", choices=("fresh", "persistent"), default="fresh",
@@ -652,8 +755,11 @@ def main():
     parser.add_argument("--psql", default="psql", help="PostgreSQL-only test fixture executable; no Python DB driver required")
     parser.add_argument("--trace-completed-capacity", type=int, default=20000,
                         help="Dedicated server completed-span memory buffers; overflow spills to temporary files and actual loss remains invalid")
+    parser.add_argument("--performance-debug", choices=("enabled", "disabled"), default="enabled",
+                        help="Disabled measures normal runtime cost with the same HTTP/history checks, but cannot report causal spans or SQL costs")
     parser.add_argument("--sample-interval", type=float, default=.05)
     args = parser.parse_args()
+    performance_debug = args.performance_debug == "enabled"
     if args.repetitions < 1 or args.rounds < 2 or args.candidates < 2 or args.prompt_bytes < 128 or args.sample_interval <= 0:
         parser.error("repetitions >=1, rounds >=2, candidates >=2, prompt-bytes >=128 and positive sample-interval required")
     if args.shared_rounds < 2 or args.cache_capacity_mb < 0:
@@ -675,8 +781,15 @@ def main():
     metadata = {name: str(value) if isinstance(value, Path) else value for name, value in vars(args).items()}
     metadata["database_url"] = "isolated loopback database (credentials omitted)" if args.database_url else None
     metadata["redis_url"] = "isolated loopback Redis (credentials omitted)" if args.redis_url else None
-    result = {"schema_version": 2, "label": args.label, "binary_sha256": sha, "platform": platform.platform(), "workload": metadata, "seed": "history-paths-v1", "session_header": "x-session-id=history-paths-v1:<model>; fixed per route across root, candidates and compact", "compaction_source": "canonical full history without response item identities; same controls as source generations", "native_prefix_compaction_source": "independent successful penultimate-generation prefix plus a deterministic new user; newer same-depth decoys must not be selected over that source; not the original exact-window case", "candidate_depth": "main chain minus one round; distinct content in shared session namespace", "rejected_session_case": "unchanged canonical full history with legal mismatched instructions; observed null parent required, projection filtering allowed", "cache": {"capacity_mb": args.cache_capacity_mb}, "performance_debug": True, "ordinary_observation_history": True, "projection_fixtures": [], "samples": [], "requests": [], "valid": False, "failure_reasons": []}
+    result = {"schema_version": 4, "label": args.label, "binary_sha256": sha, "platform": platform.platform(), "workload": metadata, "seed": "history-paths-v1", "session_header": "x-session-id=history-paths-v1:<model>; fixed per route across root, candidates and compact", "compaction_source": "canonical full history without response item identities; same controls as source generations", "native_prefix_compaction_source": "independent successful penultimate-generation prefix plus a deterministic new user; newer same-depth decoys must not be selected over that source; not the original exact-window case", "candidate_depth": "main chain minus one round; distinct content in shared session namespace", "rejected_session_case": "unchanged canonical full history with legal mismatched instructions; observed null parent required, projection filtering allowed", "cache": {"capacity_mb": args.cache_capacity_mb}, "performance_debug": performance_debug, "ordinary_observation_history": True, "projection_fixtures": [], "samples": [], "requests": [], "valid": False, "failure_reasons": []}
     result.update(
+        performance_captures=[],
+        debug_disabled_controls=[],
+        process_io_windows=[],
+        trace_collection=("one initial and one final snapshot per repetition; observed Run ID selects the request causal subtree; unassigned spans reported once per capture" if performance_debug
+                          else "Debug explicitly disabled; initial/final controls checked; no causal span or SQL-cost evidence collected"),
+        resource_sampling_scope="provisioning, inference and observation inspection; excludes initial/final full timeline export and offline attribution; not comparable to schema 2 whole-window CPU/RSS",
+        process_io_scope="Linux process I/O counters across the resource window, including all server files/threads; not database-only I/O or device write amplification; null on unsupported platforms",
         http_timing={"latency_ms": "connect plus inference HTTP exchange through complete body",
                      "connect_ms": "explicit socket connect only; zero for reused sockets",
                      "http_request_ms": "inference HTTP exchange through complete body, excluding connect"},
@@ -727,8 +840,11 @@ def main():
                     base = "http://" + listener
                     stage = f"repetition-{repetition}:http-setup"
                     session = initialize_server(base, token, database)
-                    stage = f"repetition-{repetition}:debug-enable"
-                    admin(session, "PUT", "/api/v1/observations/debug", {"enabled": True, "confirmed": True})
+                    stage = f"repetition-{repetition}:debug-control"
+                    admin(session, "PUT", "/api/v1/observations/debug", {"enabled": performance_debug, "confirmed": True})
+                    capture_before = timeline(session)
+                    first_request = len(result["requests"])
+                    io_before = process_io_counters(process.pid)
                     reader = ProcessReader(process.pid)
                     def sample():
                         while not stop.is_set():
@@ -739,6 +855,7 @@ def main():
                                 return
                             stop.wait(args.sample_interval)
                     sampler = threading.Thread(target=sample, daemon=True)
+                    result["samples"].append({"repetition": repetition, "timestamp": time.time(), **reader.read()})
                     sampler.start()
                     for mode in ("explicit-parent", "automatic-full-history", "native-compaction"):
                         stage = f"repetition-{repetition}:{mode}:provision"
@@ -751,49 +868,47 @@ def main():
                             stage = f"repetition-{repetition}:{mode}:round-{round_index}"
                             user = {"role": "user", "content": f"{mode}:{round_index}:" + padding}
                             text = "answer-" + hashlib.sha256(user["content"].encode()).hexdigest()
-                            full = history + [user]
-                            items = [user] if mode == "explicit-parent" else full
-                            before = timeline(session)
+                            new_items = history_input(user, padding, args.history_items)
+                            full = history + new_items
+                            items = new_items if mode == "explicit-parent" else full
                             row, response = send(transport, base, key, model, items, upstream, {"name": mode, "round": round_index, "upstream_input": full}, parent, text, previous=parent if mode == "explicit-parent" else None)
                             row.update(repetition=repetition, route_id=route)
                             result["requests"].append(row)
                             if not row["valid"]:
-                                raise RuntimeError("generation HTTP/content/upstream validation failed")
-                            run = observe(session, route, response["id"], directory)
-                            row["observed_parent"] = run.get("generation_parent_id")
+                                raise MeasurementFailure("generation HTTP/content/upstream validation failed")
+                            run = observe(session, route, response["id"], directory, require_trace=performance_debug)
+                            row.update(observation_run_id=run["id"], observed_parent=run.get("generation_parent_id"))
                             row["parent_valid"] = "generation_parent_id" in run and row["observed_parent"] == parent
                             row["valid"] = row["valid"] and row["parent_valid"]
-                            attach_performance(session, row, before)
+                            report_progress(result, row)
                             history = full + response["output"]
                             parent = response["id"]
                             main_chain_ids.append(parent)
                             main_chain_histories.append(history)
                         if mode == "native-compaction":
                             branch_parent = main_chain_ids[-3] if args.rounds >= 3 else None
-                            branch_prefix = main_chain_histories[-2][:-2]
+                            branch_prefix = main_chain_histories[-3] if args.rounds >= 3 else []
                             for candidate in range(args.candidates):
                                 stage = f"repetition-{repetition}:native-candidate-{candidate}"
                                 decoy_user = {"role": "user", "content": f"native-compaction:decoy-{candidate}:" + padding}
-                                decoy_input = branch_prefix + [decoy_user]
+                                decoy_input = branch_prefix + history_input(decoy_user, padding, args.history_items)
                                 decoy_text = "answer-" + hashlib.sha256(decoy_user["content"].encode()).hexdigest()
-                                before = timeline(session)
                                 decoy_row, decoy_response = send(transport, base, key, model, decoy_input, upstream, {"name": "native-discovery-candidate", "round": candidate, "upstream_input": decoy_input}, branch_parent, decoy_text)
                                 decoy_row.update(repetition=repetition, route_id=route)
                                 result["requests"].append(decoy_row)
                                 if not decoy_row["valid"]:
-                                    raise RuntimeError("native candidate generation validation failed")
-                                decoy_run = observe(session, route, decoy_response["id"], directory)
-                                decoy_row["observed_parent"] = decoy_run.get("generation_parent_id")
+                                    raise MeasurementFailure("native candidate generation validation failed")
+                                decoy_run = observe(session, route, decoy_response["id"], directory, require_trace=performance_debug)
+                                decoy_row.update(observation_run_id=decoy_run["id"], observed_parent=decoy_run.get("generation_parent_id"))
                                 decoy_row["parent_valid"] = "generation_parent_id" in decoy_run and decoy_row["observed_parent"] == branch_parent
                                 decoy_row["valid"] = decoy_row["valid"] and decoy_row["parent_valid"]
-                                attach_performance(session, decoy_row, before)
+                                report_progress(result, decoy_row)
                             # Independent successful prefix-source case: append a new user
                             # to the penultimate generation, not the original exact window.
                             stage = f"repetition-{repetition}:native-prefix-compact-operation"
                             prefix_parent = main_chain_ids[-2]
                             prefix_user = {"role": "user", "content": "native-compaction:prefix-new-user:" + padding}
-                            prefix_input = semantics(main_chain_histories[-2] + [prefix_user])
-                            before = timeline(session)
+                            prefix_input = semantics(main_chain_histories[-2] + history_input(prefix_user, padding, args.history_items))
                             prefix_row, _ = send(
                                 transport, base, key, model, prefix_input, upstream,
                                 {"name": "native-prefix-compact-operation", "round": args.rounds,
@@ -803,47 +918,44 @@ def main():
                                               parent_validation="successful penultimate-generation prefix plus a new user; newer same-depth decoys must be rejected")
                             result["requests"].append(prefix_row)
                             if not prefix_row["valid"]:
-                                raise RuntimeError("native prefix compact HTTP/content validation failed")
-                            prefix_run = observe(session, route, None, directory)
+                                raise MeasurementFailure("native prefix compact HTTP/content validation failed")
+                            prefix_run = observe(session, route, None, directory, require_trace=performance_debug)
                             prefix_row["observation_run_id"] = prefix_run["id"]
                             prefix_row["observed_parent"] = prefix_run.get("generation_parent_id")
                             prefix_row["parent_valid"] = "generation_parent_id" in prefix_run and prefix_row["observed_parent"] == prefix_parent
                             prefix_row["valid"] = prefix_row["valid"] and prefix_row["parent_valid"]
-                            attach_performance(session, prefix_row, before)
+                            report_progress(result, prefix_row)
                             stage = f"repetition-{repetition}:native-compact-operation"
                             compact_input = semantics(history)
-                            before = timeline(session)
                             row, compacted = send(transport, base, key, model, compact_input, upstream, {"name": "native-compact-operation", "round": args.rounds, "upstream_input": compact_input}, parent, "", compact=True)
                             row.update(repetition=repetition, route_id=route)
                             result["requests"].append(row)
                             if not row["valid"]:
-                                raise RuntimeError("native compact operation validation failed")
-                            compact_run = observe(session, route, None, directory, exclude_runs={prefix_run["id"]})
+                                raise MeasurementFailure("native compact operation validation failed")
+                            compact_run = observe(session, route, None, directory, exclude_runs={prefix_run["id"]}, require_trace=performance_debug)
                             row["observation_run_id"] = compact_run["id"]
                             row["observed_parent"] = compact_run.get("generation_parent_id")
                             row["parent_valid"] = "generation_parent_id" in compact_run and row["observed_parent"] == parent
                             row["valid"] = row["valid"] and row["parent_valid"]
-                            attach_performance(session, row, before)
+                            report_progress(result, row)
                             user = {"role": "user", "content": "continue compacted task:" + padding}
-                            full = compacted["output"] + [user]
+                            full = compacted["output"] + history_input(user, padding, args.history_items)
                             text = "continued from compacted window"
                             stage = f"repetition-{repetition}:native-compacted-continuation"
-                            before = timeline(session)
                             row, response = send(transport, base, key, model, full, upstream, {"name": "native-compacted-continuation", "round": args.rounds + 1, "upstream_input": full}, parent, text)
                             row.update(repetition=repetition, route_id=route)
                             result["requests"].append(row)
                             if not row["valid"]:
-                                raise RuntimeError("native continuation validation failed")
-                            run = observe(session, route, response["id"], directory)
-                            row["observed_parent"] = run.get("generation_parent_id")
+                                raise MeasurementFailure("native continuation validation failed")
+                            run = observe(session, route, response["id"], directory, require_trace=performance_debug)
+                            row.update(observation_run_id=run["id"], observed_parent=run.get("generation_parent_id"))
                             row["parent_valid"] = "generation_parent_id" in run and row["observed_parent"] == parent
                             row["valid"] = row["valid"] and row["parent_valid"]
-                            attach_performance(session, row, before)
+                            report_progress(result, row)
                             # Deliberately mismatch legal controls, not content or
                             # session identity. A projection may reject these
                             # candidates without any full-history reads.
                             stage = f"repetition-{repetition}:rejected-session-candidates"
-                            before = timeline(session)
                             rejected_row, _ = send(
                                 transport, base, key, model, compact_input, upstream,
                                 {"name": "rejected-session-candidates", "round": args.rounds + 2,
@@ -855,20 +967,19 @@ def main():
                                                 parent_validation="standalone control-mismatch operation; not a successful source continuation")
                             result["requests"].append(rejected_row)
                             if not rejected_row["valid"]:
-                                raise RuntimeError("rejected session candidate compact HTTP/content validation failed")
-                            rejected_run = observe(session, route, None, directory, exclude_runs={prefix_run["id"], compact_run["id"]})
+                                raise MeasurementFailure("rejected session candidate compact HTTP/content validation failed")
+                            rejected_run = observe(session, route, None, directory, exclude_runs={prefix_run["id"], compact_run["id"]}, require_trace=performance_debug)
                             rejected_row["observation_run_id"] = rejected_run["id"]
                             rejected_row["observed_parent"] = rejected_run.get("generation_parent_id")
                             rejected_row["parent_valid"] = "generation_parent_id" in rejected_run and rejected_row["observed_parent"] is None
                             rejected_row["valid"] = rejected_row["valid"] and rejected_row["parent_valid"]
-                            attach_performance(session, rejected_row, before)
+                            report_progress(result, rejected_row)
                     def shared_workload(unprojected):
                         # Each workload owns its route, API key Principal and session.
                         suffix = "shared-ancestor-unprojected-candidates" if unprojected else "shared-ancestor"
                         model, route, key = provision(session, upstream.server_port, f"{repetition}-{suffix}")
 
                         def checked_request(name, index, items, expected_parent, text):
-                            before = timeline(session)
                             row, response = send(
                                 transport, base, key, model, items, upstream,
                                 {"name": name, "round": index, "upstream_input": items},
@@ -877,12 +988,12 @@ def main():
                             row.update(repetition=repetition, route_id=route, shared_workload=suffix)
                             result["requests"].append(row)
                             if not row["valid"]:
-                                raise RuntimeError("shared ancestor HTTP/content/upstream validation failed")
-                            run = observe(session, route, response["id"], directory)
-                            row["observed_parent"] = run.get("generation_parent_id")
+                                raise MeasurementFailure("shared ancestor HTTP/content/upstream validation failed")
+                            run = observe(session, route, response["id"], directory, require_trace=performance_debug)
+                            row.update(observation_run_id=run["id"], observed_parent=run.get("generation_parent_id"))
                             row["parent_valid"] = "generation_parent_id" in run and row["observed_parent"] == expected_parent
                             row["valid"] = row["valid"] and row["parent_valid"]
-                            attach_performance(session, row, before)
+                            report_progress(result, row)
                             return response
 
                         shared_history = []
@@ -890,14 +1001,14 @@ def main():
                         candidate_ids = []
                         for index in range(args.shared_rounds):
                             user = {"role": "user", "content": f"{suffix}:{index}:" + padding}
-                            full = shared_history + [user]
+                            full = shared_history + history_input(user, padding, args.history_items)
                             response = checked_request(suffix, index, full, ancestor, f"shared-answer-{index}")
                             shared_history = full + response["output"]
                             ancestor = response["id"]
                         source = source_history = None
                         for index in range(args.candidates + 1):
                             user = {"role": "user", "content": f"{suffix}:branch:{index}:" + padding}
-                            full = shared_history + [user]
+                            full = shared_history + history_input(user, padding, args.history_items)
                             response = checked_request(suffix + ("-source" if index == 0 else "-decoy"),
                                                        index, full, ancestor, f"branch-answer-{index}")
                             candidate_ids.append(response["id"])
@@ -911,7 +1022,7 @@ def main():
                             fixture.update(repetition=repetition, route_id=route, workload=suffix)
                             result["projection_fixtures"].append(fixture)
                         probe_user = {"role": "user", "content": suffix + ":probe:" + padding}
-                        probe_input = source_history + [probe_user]
+                        probe_input = source_history + history_input(probe_user, padding, args.history_items)
                         # Same controls and lengths, but no canonical ancestor can
                         # match the altered first message. Reject before matching
                         # so the successful continuation cannot become a decoy.
@@ -924,6 +1035,21 @@ def main():
                     shared_workload(False)
                     stage = f"repetition-{repetition}:shared-ancestor-unprojected-candidates"
                     shared_workload(True)
+                    stop.set()
+                    sampler.join()
+                    result["samples"].append({"repetition": repetition, "timestamp": time.time(), **reader.read()})
+                    io_after = process_io_counters(process.pid)
+                    io_delta = None if io_before is None or io_after is None else {key: io_after[key] - value for key, value in io_before.items()}
+                    if io_delta is not None and any(value < 0 for value in io_delta.values()):
+                        raise MeasurementFailure("server I/O counters moved backwards")
+                    result["process_io_windows"].append({"repetition": repetition, "counters": io_delta})
+                    stage = f"repetition-{repetition}:performance-capture"
+                    print(json.dumps({"stage": stage, "completed_requests": len(result["requests"])}), flush=True)
+                    capture_after = timeline(session)
+                    capture = (attach_performance_snapshot(result["requests"][first_request:], capture_before, capture_after) if performance_debug
+                               else attach_disabled_performance_controls(result["requests"][first_request:], capture_before, capture_after))
+                    capture["repetition"] = repetition
+                    result["performance_captures" if performance_debug else "debug_disabled_controls"].append(capture)
                 finally:
                     transport.close()
                     stop.set()
@@ -934,7 +1060,8 @@ def main():
                     if process:
                         stop_stravia_server(process, logs, print_tail=0)
     except Exception as error:
-        result["failure_reasons"].append(f"stage={stage}: {type(error).__name__} (exception body omitted to protect credentials)")
+        message = str(error) if isinstance(error, MeasurementFailure) else "exception body omitted to protect credentials"
+        result["failure_reasons"].append(f"stage={stage}: {type(error).__name__} ({message})")
     finally:
         for server in (upstream, catalog):
             server.shutdown()

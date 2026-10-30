@@ -663,14 +663,15 @@ impl<E: AttributionEvidence> RunAttribution<E> {
     }
 
     /// Confirmed current-tool continuation: the request tail submits results for
-    /// the source run's pending client tool calls. A unique source is required.
+    /// the source run's pending client tool calls. A unique, unexpired pending
+    /// source is required; that index is authoritative, so attribution never
+    /// re-materializes the source window to prove the same IDs again.
     async fn current_tool_source(
         &self,
         principal: &str,
         input: &Window,
         ingress_received_at: i64,
         now: i64,
-        workspace: &mut Option<GenerationDiscoveryWorkspace>,
     ) -> Option<DiagnosticSource> {
         let ids = input.current_tail_tool_ids()?;
         let rows = self
@@ -680,7 +681,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             .ok()?;
         let mut source = None;
         for id in &ids {
-            let mut matches: Vec<(String, String)> = self.tail.pending_runs(id, principal);
+            let mut matches: Vec<(String, String)> = self.tail.pending_runs(id, principal, now);
             for (tool_id, run, interaction) in &rows {
                 if tool_id == id && !matches.iter().any(|(existing, _)| existing == run) {
                     matches.push((run.clone(), interaction.clone()));
@@ -696,26 +697,6 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             }
         }
         let (run_id, interaction_id) = source?;
-        let pending = if let Some(window) = self.tail.window(&run_id) {
-            window.pending_tool_ids()?
-        } else {
-            let sources = [(run_id.as_str(), None)];
-            let windows = self
-                .evidence
-                .source_windows(principal, &sources, None, false, workspace)
-                .await
-                .ok()?;
-            match windows.into_iter().next()? {
-                SourceWindow::Captured(window) => window.pending_tool_ids()?,
-                SourceWindow::Unavailable | SourceWindow::ResourceLimit => return None,
-            }
-        };
-        if !ids
-            .iter()
-            .all(|id| pending.iter().any(|pending_id| pending_id == id))
-        {
-            return None;
-        }
         let delivery_completed_at = self.evidence.delivery_completed_at(&run_id).await.ok()??;
         if delivery_completed_at > ingress_received_at {
             return None;
@@ -753,7 +734,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         // 历史编辑可能只保留较早的生成前缀；当前工具结果仍能确认实际续接来源。
         if tool_result_relation != ToolResultRelation::UserOnlyReplay
             && let Some(mut source) = self
-                .current_tool_source(principal, input, ingress_received_at, now, workspace)
+                .current_tool_source(principal, input, ingress_received_at, now)
                 .await
         {
             if tool_result_relation == ToolResultRelation::EditedUserBranch {
@@ -1768,6 +1749,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_tool_continuation_needs_no_cached_or_generation_source_window() {
+        // The unexpired pending index plus the completed delivery is the whole
+        // proof: no cached window and no Generation node may rebuild one.
+        let mut evidence = MemoryEvidence::default();
+        evidence.pending_tools.push((
+            "call-1".into(),
+            "source-run".into(),
+            "source-interaction".into(),
+            "owner".into(),
+        ));
+        evidence.delivered.insert("source-run".into(), 1_000);
+        let mut attribution = RunAttribution::new(evidence);
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut facts(vec![long_user("task"), tool_result("call-1")]).prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
+        assert_eq!(assigned.parent_interaction_id, None);
+        assert!(!assigned.interrupt_parent);
+        assert_eq!(
+            assigned.diagnostic_source_run_id.as_deref(),
+            Some("source-run")
+        );
+        assert!(assigned.diagnostic_event.is_none());
+    }
+
+    #[tokio::test]
+    async fn current_tool_continuation_needs_no_source_window_under_stale_parent_and_new_user() {
+        let mut evidence = MemoryEvidence::default();
+        evidence.parents.insert(
+            "early-node".into(),
+            (
+                "owner".into(),
+                observed_parent("early-interaction", "early-run", Some(100)),
+            ),
+        );
+        evidence.pending_tools.push((
+            "call-1".into(),
+            "source-run".into(),
+            "source-interaction".into(),
+            "owner".into(),
+        ));
+        evidence.delivered.insert("source-run".into(), 1_000);
+        let mut attribution = RunAttribution::new(evidence);
+        let mut request = facts(vec![long_user("task"), tool_result("call-1")]);
+        request.generation_parent_id = Some("early-node".into());
+        request.has_new_user = true;
+        let assigned = attribution
+            .admit(&start("run"), &mut request.prepare("run"), 5_000, 5_000)
+            .await;
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
+        assert_eq!(assigned.parent_interaction_id, None);
+        assert!(!assigned.interrupt_parent);
+        assert_eq!(
+            assigned.diagnostic_source_run_id.as_deref(),
+            Some("source-run")
+        );
+    }
+
+    #[tokio::test]
+    async fn current_tool_requires_one_source_for_every_pending_id() {
+        for (rows, one_source) in [
+            (
+                vec![
+                    ("call-1", "run-a", "interaction-a"),
+                    ("call-2", "run-b", "interaction-b"),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    ("call-1", "run-a", "interaction-a"),
+                    ("call-2", "run-a", "interaction-a"),
+                ],
+                true,
+            ),
+        ] {
+            let mut evidence = MemoryEvidence::default();
+            for (tool_id, run, interaction) in rows {
+                evidence.pending_tools.push((
+                    tool_id.into(),
+                    run.into(),
+                    interaction.into(),
+                    "owner".into(),
+                ));
+                evidence.delivered.insert(run.into(), 1_000);
+            }
+            let mut attribution = RunAttribution::new(evidence);
+            let assigned = attribution
+                .admit(
+                    &start("run"),
+                    &mut facts(vec![
+                        long_user("task"),
+                        tool_result("call-1"),
+                        tool_result("call-2"),
+                    ])
+                    .prepare("run"),
+                    5_000,
+                    5_000,
+                )
+                .await;
+            if one_source {
+                assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+                assert_eq!(assigned.interaction_id, "interaction-a");
+                assert_eq!(assigned.parent_run_id.as_deref(), Some("run-a"));
+            } else {
+                assert_eq!(assigned.grouping_reason, "new_root");
+                assert_eq!(assigned.diagnostic_source_run_id, None);
+                assert_ne!(assigned.interaction_id, "interaction-a");
+                assert_ne!(assigned.interaction_id, "interaction-b");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn current_tool_ignores_other_principal_pending_sources() {
+        // Persisted pending row owned by another principal.
+        let mut evidence = MemoryEvidence::default();
+        evidence.pending_tools.push((
+            "call-1".into(),
+            "source-run".into(),
+            "source-interaction".into(),
+            "other".into(),
+        ));
+        evidence.delivered.insert("source-run".into(), 1_000);
+        let mut attribution = RunAttribution::new(evidence);
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut facts(vec![long_user("task"), tool_result("call-1")]).prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_eq!(assigned.grouping_reason, "new_root");
+        assert_eq!(assigned.diagnostic_source_run_id, None);
+
+        // In-memory tail source owned by another principal.
+        let mut attribution = RunAttribution::new(MemoryEvidence::default());
+        completed_tail_source(
+            &mut attribution,
+            "source-run",
+            "source-interaction",
+            "other",
+            &[long_user("task"), tool_call("call-1")],
+        );
+        attribution
+            .evidence
+            .delivered
+            .insert("source-run".into(), 1_000);
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut facts(vec![long_user("task"), tool_result("call-1")]).prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_eq!(assigned.grouping_reason, "new_root");
+        assert_eq!(assigned.diagnostic_source_run_id, None);
+    }
+
+    #[tokio::test]
+    async fn expired_memory_pending_source_does_not_authorize_current_tool() {
+        let mut attribution = RunAttribution::new(MemoryEvidence::default());
+        attribution.insert_tail_source(
+            "source-run".into(),
+            Window::capture(&[long_user("task"), tool_call("call-1")]).unwrap(),
+            1_000,
+            "owner".into(),
+            "source-interaction".into(),
+        );
+        attribution
+            .evidence
+            .delivered
+            .insert("source-run".into(), 1_000);
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut facts(vec![long_user("task"), tool_result("call-1")]).prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_eq!(assigned.grouping_reason, "new_root");
+        assert_eq!(assigned.diagnostic_source_run_id, None);
+        assert_ne!(assigned.interaction_id, "source-interaction");
+    }
+
+    #[tokio::test]
     async fn current_tool_continuation_advances_beyond_stale_generation_parent() {
         let mut evidence = MemoryEvidence::default();
         evidence.parents.insert(
@@ -1976,6 +2155,37 @@ mod tests {
             "owner",
             &[long_user("task"), tool_call("call-1")],
         );
+        let assigned = attribution
+            .admit(
+                &start("run"),
+                &mut request.clone().prepare("run"),
+                5_000,
+                5_000,
+            )
+            .await;
+        assert_ne!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.grouping_reason, "new_user");
+        assert_eq!(
+            assigned.parent_interaction_id.as_deref(),
+            Some("parent-interaction")
+        );
+
+        // A unique source that has not completed delivery declines too.
+        let mut evidence = MemoryEvidence::default();
+        evidence.parents.insert(
+            "node".into(),
+            (
+                "owner".into(),
+                observed_parent("parent-interaction", "parent-run", Some(1_000)),
+            ),
+        );
+        evidence.pending_tools.push((
+            "call-1".into(),
+            "source-run".into(),
+            "source-interaction".into(),
+            "owner".into(),
+        ));
+        let mut attribution = RunAttribution::new(evidence);
         let assigned = attribution
             .admit(
                 &start("run"),

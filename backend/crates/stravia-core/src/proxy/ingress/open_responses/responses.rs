@@ -393,7 +393,7 @@ pub(crate) fn protocol_error(
     message: impl Into<String>,
 ) -> Response {
     let message = message.into();
-    let error_type = if code == "allowance_suspended" {
+    let error_type = if matches!(code, "allowance_suspended" | "api_key_spend_limit_reached") {
         "insufficient_quota"
     } else if code == "unsupported_feature" {
         "invalid_request"
@@ -444,6 +444,7 @@ pub(super) async fn normalize_error_response(response: Response) -> Response {
         .and_then(Value::as_str)
         .and_then(|code| match code {
             "allowance_suspended" => Some("allowance_suspended"),
+            "api_key_spend_limit_reached" => Some("api_key_spend_limit_reached"),
             "invalid_request" => Some("invalid_request"),
             "unsupported_feature" => Some("unsupported_feature"),
             "previous_response_not_found" => Some("previous_response_not_found"),

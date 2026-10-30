@@ -101,8 +101,19 @@ fn reject_before_admission(
     observer: &mut Option<IngressObserver>,
     stage: &str,
     code: &str,
-    response: Response,
+    mut response: Response,
 ) -> Response {
+    // Rejection rows carry the stable reason code. The already-rendered wire
+    // body is replaced later by the protocol rewrite, which accepts this code.
+    if code == "spend_limit"
+        && let Some(mut diagnostic) = response
+            .extensions()
+            .get::<crate::interaction_observation::FailureDiagnostic>()
+            .cloned()
+    {
+        diagnostic.code = Some(code.to_owned());
+        response.extensions_mut().insert(diagnostic);
+    }
     if let Some(observer) = observer.take() {
         return crate::proxy::ingress::observation::reject(observer, stage, code, response);
     }
@@ -386,6 +397,7 @@ pub(super) async fn orchestrate(
         }
     };
     let rpm_limit = authenticated_principal.rpm_limit;
+    let spend_limit_nanos = authenticated_principal.spend_limit_nanos;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
     ingress_observer.set_authenticated_source(principal.api_key_id(), &api_key_name);
@@ -613,6 +625,20 @@ pub(super) async fn orchestrate(
     }
     ctx.deadline
         .reset(std::time::Instant::now() + execution_window);
+    // Spend admission runs before RPM so a rejected root request never
+    // consumes an RPM window. Only the root request is checked.
+    if let Err(error) = gw
+        .check_api_key_spend_limit(principal.api_key_id(), spend_limit_nanos)
+        .await
+    {
+        let response = inference_access_error_response(error);
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "admission",
+            "spend_limit",
+            response,
+        );
+    }
     if let Err(error) = gw.principal_admission.acquire(&principal, rpm_limit) {
         let response = inference_access_error_response(error);
         return reject_before_admission(
@@ -942,6 +968,9 @@ async fn dispatch_round(
             ));
         }
     };
+    // 只有最初的请求阶段拒绝属于「错误的请求」；隐藏轮次/后续跟进的拒绝
+    // 发生在目标选择与输出之后，仍按失败请求处理。
+    let request_phase = matches!(phase.current(), Phase::Request);
     if ctx.cancellation.is_cancelled() {
         return error_response(499, "request cancelled");
     }
@@ -1022,6 +1051,21 @@ async fn dispatch_round(
                 .await;
             }
             Ok(control) => {
+                if request_phase
+                    && matches!(
+                        control,
+                        stravia_runtime_contract::hook::HookControl::Reject(_)
+                    )
+                {
+                    // 请求 Hook 拒绝的错误码由 Hook 任意指定，无法按固定码集合
+                    // 归类；必须在拒绝路径显式标记「未进入 Target 选择」。
+                    if let Some(observer) = ctx
+                        .extensions
+                        .get::<crate::interaction_observation::RunObserver>()
+                    {
+                        observer.mark_rejected_before_target();
+                    }
+                }
                 return render_hook_control(control, ingress, request.stream.enabled);
             }
             Err(error) => return hook_failure_response(error),

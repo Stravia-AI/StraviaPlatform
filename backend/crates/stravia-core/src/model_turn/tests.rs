@@ -613,6 +613,7 @@ async fn gateway_with_captured_protocol(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -636,6 +637,7 @@ async fn gateway_with_captured_protocol(
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("other Model");
@@ -653,6 +655,7 @@ async fn gateway_with_captured_protocol(
             inject_media_generation: false,
             model_ids,
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -810,6 +813,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -825,6 +829,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();
@@ -976,6 +981,7 @@ async fn run_anthropic_reasoning_rejection(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -991,6 +997,7 @@ async fn run_anthropic_reasoning_rejection(
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();
@@ -1110,6 +1117,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -1125,6 +1133,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -1543,6 +1552,7 @@ mod rpm_admission {
                         balance: None,
                         targets: vec![target(provider)],
                         default_thinking_level: None,
+                        billing: None,
                     })
                     .await
                     .unwrap()
@@ -1563,6 +1573,7 @@ mod rpm_admission {
                 inject_media_generation: false,
                 inject_media_understanding: false,
                 model_ids: route_ids,
+                spend_limit: None,
             })
             .await
             .unwrap()
@@ -2544,6 +2555,7 @@ async fn execute_tools_without_model_capability_declarations() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -2559,6 +2571,7 @@ async fn execute_tools_without_model_capability_declarations() {
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");
@@ -2796,13 +2809,14 @@ async fn set_thinking_metadata(gateway: &Gateway, provider_id: &str, efforts: Op
         .get_provider_model(provider_id, "upstream-model")
         .await
         .expect("Provider Model");
-    let mut metadata = serde_json::json!({
-        "id": "upstream-model",
-        "modalities": {"input": ["text"], "output": ["text"]},
-    });
-    if let Some(efforts) = efforts {
-        metadata["reasoning_efforts"] = serde_json::json!(efforts);
-    }
+    let changes = efforts
+        .map(|efforts| {
+            std::collections::BTreeMap::from([(
+                "reasoning_efforts".to_string(),
+                serde_json::json!(efforts),
+            )])
+        })
+        .unwrap_or_default();
     gateway
         .admin()
         .update_provider_model(
@@ -2810,7 +2824,7 @@ async fn set_thinking_metadata(gateway: &Gateway, provider_id: &str, efforts: Op
             "upstream-model",
             crate::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata,
+                changes,
             },
         )
         .await

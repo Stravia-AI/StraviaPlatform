@@ -2,6 +2,9 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { prepareApp } from './prepare-app'
 
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const knownMoney = { amount: '0.01', known_count: 1, unknown_count: 0 }
+
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -48,7 +51,7 @@ test('Chat does not treat a failed configuration fetch as an empty instance', as
 test('Usage analytics exposes a failed latency series and recovers without fabricating zero speed', async ({
   page,
 }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   let seriesFails = true
   await page.route('**/api/v1/stats/series**', async (route) => {
     if (seriesFails && new URL(route.request().url()).searchParams.get('bucket') === '3600') {
@@ -72,7 +75,7 @@ test('Usage analytics exposes a failed latency series and recovers without fabri
 })
 
 test('Usage analytics with traffic shows latency with output speed', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   await page.goto('/stats')
 
   const latency = page.locator('section').filter({ has: page.getByLabel('Latency and speed chart', { exact: true }) })
@@ -87,7 +90,7 @@ test('Usage analytics with traffic shows latency with output speed', async ({ pa
 
 for (const routePath of ['/stats']) {
   test(`${routePath} does not turn unknown latency and speed into a zero-valued chart`, async ({ page }) => {
-    await stubTraffic(page, { requests: 12, errors: 0 })
+    await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
     await page.route('**/api/v1/stats/overview**', async (route) => {
       await route.fulfill({ json: { data: latencyOverview(null, null) } })
     })
@@ -103,7 +106,7 @@ for (const routePath of ['/stats']) {
   })
 
   test(`${routePath} binds seconds and TPS to independent zero-based linear axes`, async ({ page }) => {
-    await stubTraffic(page, { requests: 12, errors: 0 })
+    await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
     const start = new Date(2026, 8, 26, 12).getTime()
     await page.clock.setFixedTime(start + 4 * 3_600_000 + 5 * 60_000)
     let firstTokenFactor = 1
@@ -178,7 +181,7 @@ for (const routePath of ['/stats']) {
   })
 
   test(`${routePath} retains known metrics, genuine zero speed and unconnected gaps`, async ({ page }) => {
-    await stubTraffic(page, { requests: 12, errors: 0 })
+    await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
     const start = new Date(2026, 8, 26, 12).getTime()
     await page.clock.setFixedTime(start + 9 * 3_600_000 + 5 * 60_000)
     let overviewFirstToken: number | null = null
@@ -242,7 +245,7 @@ for (const routePath of ['/stats']) {
     await expect(section.getByText('0 tok/s', { exact: true })).toHaveCount(0)
   })
   test(`${routePath} latency stays chronological across repeated clock labels`, async ({ page }) => {
-    await stubTraffic(page, { requests: 22, errors: 0 })
+    await stubTraffic(page, { requests: 22, failed: 0, upstreamErrors: 0 })
     const start = new Date(2026, 8, 26, 19).getTime()
     await page.clock.setFixedTime(new Date(start + 24 * 3_600_000 + 5 * 60_000))
     await page.route('**/api/v1/stats/series**', async (route) => {
@@ -250,7 +253,10 @@ for (const routePath of ['/stats']) {
         bucket_ms: 3_600_000,
         bucket_start: start + hour * 3_600_000,
         request_count: 1,
-        error_count: 0,
+        terminal_request_count: 1,
+        failed_request_count: 0,
+        upstream_request_count: 1,
+        upstream_error_count: 0,
         total_input_tokens: 10,
         total_output_tokens: 5,
         total_cache_read_tokens: 0,
@@ -259,6 +265,8 @@ for (const routePath of ['/stats']) {
         avg_duration_ms: 5_000 + (hour % 5) * 1_000,
         avg_first_token_ms: 1_000 + (hour % 3) * 500,
         avg_output_tps: 10_000 + (hour % 5) * 2_000,
+        currency: CURRENCY,
+        actual_cost: knownMoney,
       })).filter((_, hour) => ![7, 13, 14].includes(hour))
       await route.fulfill({ json: { data } })
     })
@@ -300,7 +308,7 @@ test.describe('touch metric explanations', () => {
   test.use({ hasTouch: true })
 
   test('touch chart readings stay above the contact point and inside the viewport', async ({ page }) => {
-    await stubTraffic(page, { requests: 12, errors: 0 })
+    await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
     await page.setViewportSize({ width: 320, height: 800 })
     await page.goto('/stats')
     const chart = page.getByLabel('Latency and speed chart', { exact: true })
@@ -326,7 +334,7 @@ test.describe('touch metric explanations', () => {
 
   for (const routePath of ['/stats']) {
     test(`${routePath} touch opens and dismisses the latency definition`, async ({ page }) => {
-      await stubTraffic(page, { requests: 12, errors: 0 })
+      await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
       await page.setViewportSize({ width: 320, height: 800 })
       await page.goto(routePath)
       const latency = page
@@ -345,7 +353,7 @@ test.describe('touch metric explanations', () => {
 })
 
 test('Usage analytics preserves range choices and hourly latency buckets', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   const queries: URL[] = []
   await page.route('**/api/v1/stats/series**', async (route) => {
     const query = new URL(route.request().url())
@@ -399,7 +407,7 @@ for (const routePath of ['/stats']) {
   test(`${routePath} refreshes chart summary and series after thirty seconds`, async ({ page }) => {
     await page.clock.install({ time: new Date(2026, 8, 26, 19, 5) })
     await page.clock.pauseAt(new Date(2026, 8, 26, 19, 5, 1))
-    await stubTraffic(page, { requests: 12, errors: 0 })
+    await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
     let overviewReads = 0
     let seriesReads = 0
     await page.route('**/api/v1/stats/overview**', async (route) => {
@@ -446,7 +454,7 @@ for (const locale of ['en-US', 'zh-CN']) {
     test(`latency axes, summaries, tooltips and explanations remain readable at 320px in ${locale} ${theme}`, async ({
       page,
     }) => {
-      await stubTraffic(page, { requests: 12, errors: 0 })
+      await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
       await page.addInitScript(
         ({ locale, theme }) => {
           localStorage.setItem('stravia-locale', locale)
@@ -514,7 +522,7 @@ for (const locale of ['en-US', 'zh-CN']) {
 }
 
 test('Usage analytics uses backend input and output without re-counting cache or reasoning', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   await page.goto('/stats')
 
   for (const [label, value] of [
@@ -552,7 +560,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
 })
 
 test('Usage analytics finishes its first load when breakdowns arrive before the summary', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   let releaseOverview!: () => void
   const overviewGate = new Promise<void>((resolve) => {
     releaseOverview = resolve
@@ -579,7 +587,7 @@ test('Usage analytics finishes its first load when breakdowns arrive before the 
 })
 
 test('Usage analytics exposes an initial query failure and recovers on retry', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   let seriesFails = true
   await page.route('**/api/v1/stats/series**', async (route) => {
     if (seriesFails) {
@@ -792,6 +800,10 @@ test('deleting an API Key quotes the name on a solid destructive confirm', async
 function latencyOverview(firstToken: number | null, tps: number | null) {
   return {
     total_requests: 12,
+    terminal_request_count: 12,
+    failed_request_count: 0,
+    upstream_request_count: 12,
+    upstream_error_count: 0,
     total_input_tokens: 920,
     total_output_tokens: 86,
     total_cache_read_tokens: 320,
@@ -800,7 +812,8 @@ function latencyOverview(firstToken: number | null, tps: number | null) {
     avg_duration_ms: 120,
     avg_first_token_ms: firstToken,
     avg_output_tps: tps,
-    error_count: 0,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
   }
 }
 
@@ -809,7 +822,10 @@ function latencyBucket(start: number, hour: number, firstToken: number | null, t
     bucket_ms: 3_600_000,
     bucket_start: start + hour * 3_600_000,
     request_count: 1,
-    error_count: 0,
+    terminal_request_count: 1,
+    failed_request_count: 0,
+    upstream_request_count: 1,
+    upstream_error_count: 0,
     total_input_tokens: 10,
     total_output_tokens: 5,
     total_cache_read_tokens: 0,
@@ -818,6 +834,8 @@ function latencyBucket(start: number, hour: number, firstToken: number | null, t
     avg_duration_ms: 2000,
     avg_first_token_ms: firstToken,
     avg_output_tps: tps,
+    currency: CURRENCY,
+    actual_cost: knownMoney,
   }
 }
 
@@ -948,12 +966,19 @@ async function stubConnectableConfiguration(page: Page): Promise<void> {
   })
 }
 
-async function stubTraffic(page: Page, counts: { requests: number; errors: number }): Promise<void> {
+async function stubTraffic(
+  page: Page,
+  counts: { requests: number; failed: number; upstreamErrors: number },
+): Promise<void> {
   await page.route('**/api/v1/stats/overview**', async (route) => {
     await route.fulfill({
       json: {
         data: {
           total_requests: counts.requests,
+          terminal_request_count: counts.requests,
+          failed_request_count: counts.failed,
+          upstream_request_count: counts.requests,
+          upstream_error_count: counts.upstreamErrors,
           total_input_tokens: 600,
           total_output_tokens: 86,
           total_cache_read_tokens: 320,
@@ -962,7 +987,8 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
           avg_duration_ms: 120,
           avg_first_token_ms: 40,
           avg_output_tps: 25,
-          error_count: counts.errors,
+          currency: CURRENCY,
+          actual_cost: knownMoney,
         },
       },
     })
@@ -977,7 +1003,10 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
               Number(new URL(route.request().url()).searchParams.get('end_at')) -
               Number(new URL(route.request().url()).searchParams.get('bucket')) * 1000,
             request_count: counts.requests,
-            error_count: counts.errors,
+            terminal_request_count: counts.requests,
+            failed_request_count: counts.failed,
+            upstream_request_count: counts.requests,
+            upstream_error_count: counts.upstreamErrors,
             total_input_tokens: 600,
             total_output_tokens: 86,
             total_cache_read_tokens: 320,
@@ -986,6 +1015,8 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             avg_duration_ms: 120,
             avg_first_token_ms: 40,
             avg_output_tps: 25,
+            currency: CURRENCY,
+            actual_cost: knownMoney,
           },
         ],
       },
@@ -1004,6 +1035,9 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             total_output_tokens: 86,
             total_reasoning_tokens: 44,
             avg_duration_ms: 120,
+            currency: CURRENCY,
+            cost: knownMoney,
+            billing: knownMoney,
           },
         ],
       },
@@ -1024,6 +1058,9 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             cache_write_tokens: 12,
             reasoning_tokens: 44,
             last_used_at: Date.UTC(2026, 7, 26),
+            currency: CURRENCY,
+            cost: knownMoney,
+            billing: knownMoney,
           },
         ],
       },
@@ -1032,7 +1069,7 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
 }
 
 test('Usage analytics keeps optional explanations in help tooltips instead of permanent text', async ({ page }) => {
-  await stubTraffic(page, { requests: 12, errors: 0 })
+  await stubTraffic(page, { requests: 12, failed: 0, upstreamErrors: 0 })
   await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto('/stats')
   await expect(page.getByRole('group', { name: 'Token activity' })).toBeVisible()
@@ -1043,7 +1080,7 @@ test('Usage analytics keeps optional explanations in help tooltips instead of pe
   for (const removed of [
     'First response and output rate over the same period.',
     'Failed requests by time bucket.',
-    'Requests, errors, and output speed for each provider.',
+    'Upstream requests, upstream errors, and output speed for each provider.',
     'Client volume, Token usage, cache reads and writes, and last activity.',
     'Share of reported input, output, cache-read, and cache-write tokens.',
     'Share of all requests.',

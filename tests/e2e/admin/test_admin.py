@@ -887,10 +887,11 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
     retained_prices = {"input": 0.125, "output": 2.5, "cache_read": 0.0625, "cache_write": 0.25}
     obsolete_prices = {"reasoning": 7, "input_audio": 8, "output_audio": 9}
     tier_threshold = {"type": "context", "size": 300_000}
+    expected_prices = {key: str(value) for key, value in retained_prices.items()}
     expected_cost = {
-        **retained_prices,
-        "context_over_200k": retained_prices,
-        "tiers": [{"tier": tier_threshold, **retained_prices}],
+        **expected_prices,
+        "context_over_200k": expected_prices,
+        "tiers": [{"tier": tier_threshold, **expected_prices}],
     }
     metadata = {
         "id": model_id,
@@ -969,13 +970,18 @@ def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[s
             "context": 1_048_576,
         },
     }
+    assert saved["pinned_fields"] == []
+    assert saved["restorable_fields"] == []
     status, updated = http_request(
         "PUT",
         f"{admin_env['admin']}/api/v1/providers/{provider_id}/model",
         payload={
             "model_id": model_id,
-            "metadata": revised_metadata,
             "revision": saved["revision"],
+            "changes": {
+                "reasoning_efforts": revised_metadata["reasoning_efforts"],
+                "limit.context": revised_metadata["limit"]["context"],
+            },
         },
         headers=admin_env["auth"],
     )

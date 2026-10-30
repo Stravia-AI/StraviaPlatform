@@ -8,6 +8,8 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -190,6 +192,68 @@ def streaming_upstream():
         thread.join()
 
 
+@pytest.mark.parametrize('backend', ['sqlite', 'postgres'])
+def test_observation_queue_preserves_model_event_times(
+    backend, stravia_binary, storage_runtime, tmp_path,
+):
+    hold_port = find_free_port()
+    controls = {'STRAVIA_TEST_OBSERVATION_QUEUE_HOLD_ADDR': f'127.0.0.1:{hold_port}'}
+    with isolated_host('server', backend, stravia_binary, storage_runtime, tmp_path, controls) as (env, _, log):
+        with streaming_upstream() as (upstream, entered, release, _):
+            env['mock'] = f'http://127.0.0.1:{upstream.server_port}'
+            model = 'queued-observation-event-times'
+            route, key = _create_route(env, model, retry_budget=0)
+            hold = socket.create_connection(('127.0.0.1', hold_port), timeout=20)
+            try:
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_HELD')
+                with ThreadPoolExecutor(max_workers=1) as clients:
+                    response = clients.submit(
+                        http_request, 'POST', env['proxy'] + '/v1/chat/completions',
+                        {'model': model, 'stream': True,
+                         'messages': [{'role': 'user', 'content': 'Report the synthetic result.'}]},
+                        {'Authorization': f'Bearer {key}'},
+                    )
+                    try:
+                        assert entered.wait(20), 'model request did not reach the local upstream'
+                        started_by = time.time_ns() // 1_000_000
+                        release.set()
+                        status, body = response.result(timeout=20)
+                        delivered_by = time.time_ns() // 1_000_000
+                        assert status == 200 and '[DONE]' in body, body
+                    finally:
+                        release.set()
+            finally:
+                hold.close()
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_RELEASED')
+                log.wait('STRAVIA_TEST_OBSERVATION_QUEUE_DRAINED')
+
+            interaction = _wait_for(
+                'completed request observed after releasing the queue',
+                lambda: next(iter(_route_interactions(env, route)), None),
+            )
+            detail = _wait_for(
+                'queued lifecycle events persisted',
+                lambda: _finished_detail(env, interaction['id']),
+            )
+            assert len(detail['runs']) == 1, detail
+            run = detail['runs'][0]
+            assert run['status'] == 'completed', run
+            assert not detail['interaction']['observation_gap'], detail
+            assert run['delivery_completed_at'] <= delivered_by
+            for kind, upper_bound in [
+                ('model_turn_started', started_by),
+                ('target_attempt_started', started_by),
+                ('target_attempt_finished', delivered_by),
+                ('model_turn_finished', delivered_by),
+            ]:
+                matching = [event for event in run['events'] if event['kind'] == kind]
+                assert len(matching) == 1, (kind, matching)
+                # 模型与交付已在 writer 阻塞期间完成，出队不能重新定义发生时间。
+                assert run['started_at'] <= matching[0]['occurred_at'] <= upper_bound, (
+                    kind, matching[0]['occurred_at'], upper_bound,
+                )
+
+
 @pytest.mark.parametrize('host,backend', HOST_DATABASES)
 @pytest.mark.parametrize('control', ['queue-full', 'trace-limit'])
 def test_diagnostic_limits_preserve_real_host_inference(
@@ -308,6 +372,23 @@ def test_storage_failure_preserves_active_and_following_inference(
                     if b'first' in line:
                         break
                 assert process.poll() is None
+                if source == 'observation':
+                    # The first SSE text is emitted by the upstream, not by the
+                    # observation writer. On a slower backend the admission and
+                    # its retained-tail diagnostic can still be queued here; a
+                    # fault armed now would be consumed by that diagnostic (which
+                    # is best-effort) instead of a Run event. Wait for the public
+                    # diagnostic event before arming so the next write is a Run
+                    # event and its failure must leave a durable Interaction gap.
+                    _wait_for(
+                        'active inference admission persisted before fault',
+                        lambda: any(
+                            event['kind'] == 'retained_tail_associated'
+                            for interaction in _route_interactions(env, route_id)
+                            for run in _detail(env, interaction['id'])['runs']
+                            for event in run['events']
+                        ),
+                    )
                 arm.touch()
                 if source == 'observation':
                     # Fail a Run event write, not the separate best-effort

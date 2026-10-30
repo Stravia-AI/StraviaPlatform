@@ -750,6 +750,7 @@ mod tests {
                     model_id: "model".into(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: SnapshotState::Unregistered,
+                    source_metadata: None,
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -845,7 +846,9 @@ mod tests {
                 source: SourceStamp::ProviderCatalog {
                     provider_id: "catalog-a".to_owned(),
                 },
+                pinned: BTreeSet::new(),
             },
+            source_metadata: None,
             metadata_source_provider_id: Some("catalog-a".to_owned()),
             presence: ProviderModelPresence::Present,
             selection_policy: ProviderModelSelectionPolicy::ForceEnabled,

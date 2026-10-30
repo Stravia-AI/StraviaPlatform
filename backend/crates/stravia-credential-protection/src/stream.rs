@@ -586,6 +586,7 @@ mod tests {
             reference: reference.into(),
             secret: secret.into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         }];
         let input = format!(
             "{{\"{reference}\":\"前缀\\u003c!--sr:abcdefghijklmnopqrstuvwxyzab-->尾部\",\"other\":\"\\u003c{}\"}}",
@@ -622,6 +623,7 @@ mod tests {
             reference: reference.into(),
             secret: "restored-credential".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         }];
         for split in 1..reference.len() {
             let mut restorer = StreamRestorer::new();
@@ -685,6 +687,7 @@ mod tests {
             reference: reference.into(),
             secret: "stravia".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         }];
         let input = format!("前缀<<backend/crates/{reference}-core/src {unknown} {legacy} <!--sr:");
         let expected = input.replace(reference, "stravia");

@@ -11,6 +11,7 @@ struct RouteRow {
     display_name: Option<String>,
     output_modality: Option<RouteOutputModality>,
     default_thinking_level: Option<String>,
+    billing_json: Option<sqlx::types::Json<crate::pricing::BillingConfig>>,
     balance: String,
     is_enabled: bool,
     created_at: String,
@@ -25,6 +26,7 @@ impl RouteRow {
             output_modality: self.output_modality,
             image_generation_bound: false,
             default_thinking_level: self.default_thinking_level,
+            billing: self.billing_json.map(|billing| billing.0),
             balance: self.balance,
             is_enabled: self.is_enabled,
             created_at: self.created_at,
@@ -98,8 +100,8 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, output_modality, default_thinking_level, balance, \
-             is_enabled, created_at \
+            "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+             billing_json, balance, is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
         let mut routes = sqlx::query_as::<_, RouteRow>(sqlx::AssertSqlSafe(sql))
@@ -133,8 +135,8 @@ impl SqliteRouteStore {
         route_id: &str,
     ) -> anyhow::Result<Option<RouteConfig>> {
         let route = sqlx::query_as::<_, RouteRow>(
-            "SELECT id, model_id, display_name, output_modality, default_thinking_level, balance, \
-             is_enabled, created_at \
+            "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+             billing_json, balance, is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
         .bind(route_id)
@@ -158,7 +160,7 @@ impl SqliteRouteStore {
         provider_model_id: &str,
         metadata: &crate::provider_models::ProviderModelMetadata,
         generated: &[crate::thinking::ThinkingLevelMapping],
-        validate_map: &crate::provider_models::ReimportThinkingMapValidator<'_>,
+        validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()> {
         let rows = sqlx::query_as::<_, TargetMapRow>(
             "SELECT id, thinking_level_map FROM model_backends \
@@ -172,7 +174,7 @@ impl SqliteRouteStore {
             let mut map = row.thinking_level_map.0;
             let changed =
                 crate::thinking::refresh_generated_thinking_level_map(&mut map, generated)?;
-            validate_map(metadata, &map)?;
+            validate_map(provider_model_id, metadata, &map)?;
             if !changed {
                 continue;
             }
@@ -220,6 +222,11 @@ impl RouteStore for SqliteRouteStore {
             .as_ref()
             .map(|id| id.as_str().to_owned())
             .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+        let billing_present = route.billing.is_some();
+        let billing_json = route
+            .billing
+            .clone()
+            .map(|billing| billing.map(sqlx::types::Json));
         let mut connection = self.pool.acquire_write().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let conflict = sqlx::query_scalar::<_, String>(
@@ -238,7 +245,7 @@ impl RouteStore for SqliteRouteStore {
 
         if route.id.is_some() {
             let updated = sqlx::query(
-                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, default_thinking_level = ?, output_modality = ? WHERE id = ?",
+                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, default_thinking_level = ?, output_modality = ?, billing_json = CASE WHEN ? THEN ? ELSE billing_json END WHERE id = ?",
             )
             .bind(route.model_id.as_str().trim())
             .bind(route.display_name.as_deref())
@@ -246,6 +253,8 @@ impl RouteStore for SqliteRouteStore {
             .bind(route.is_enabled)
             .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
             .bind(route.output_modality.map(RouteOutputModality::as_str))
+            .bind(billing_present)
+            .bind(billing_json)
             .bind(&route_storage_id)
             .execute(&mut *tx)
             .await?;
@@ -254,7 +263,7 @@ impl RouteStore for SqliteRouteStore {
             }
         } else {
             sqlx::query(
-                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, output_modality) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, output_modality, billing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
                 .bind(&route_storage_id)
                 .bind(route.model_id.as_str().trim())
@@ -263,6 +272,7 @@ impl RouteStore for SqliteRouteStore {
                 .bind(route.is_enabled)
                 .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
                 .bind(route.output_modality.map(RouteOutputModality::as_str))
+                .bind(billing_json.flatten())
                 .execute(&mut *tx)
                 .await?;
         }
@@ -397,6 +407,7 @@ mod tests {
                 is_enabled: true,
                 targets: Some(vec![target("provider-1", "working-model")]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("initial Route");
@@ -411,6 +422,7 @@ mod tests {
                 is_enabled: true,
                 targets: Some(vec![target("missing-provider", "broken-model")]),
                 default_thinking_level: None,
+                billing: None,
             })
             .await;
         assert!(failed.is_err());
@@ -439,6 +451,7 @@ mod tests {
                 is_enabled: persisted.is_enabled,
                 targets: None,
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("metadata-only patch must not write Target rows");
@@ -487,6 +500,7 @@ mod tests {
                     is_enabled: true,
                     targets: Some(vec![target("provider-1", "provider-model")]),
                     default_thinking_level: None,
+                    billing: None,
                 })
                 .await
         });

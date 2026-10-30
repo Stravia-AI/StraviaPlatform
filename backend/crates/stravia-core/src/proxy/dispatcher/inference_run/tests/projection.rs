@@ -904,14 +904,6 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     let messages = second_body["messages"]
         .as_array()
         .expect("provider messages");
-    let reasoning_index = messages
-        .iter()
-        .position(|message| message["reasoning_content"] == "R1")
-        .unwrap_or_else(|| panic!("canonical first reasoning message: {messages:?}"));
-    let text_index = messages
-        .iter()
-        .position(|message| message["content"] == "C1")
-        .expect("canonical platform prelude message");
     let call_index = messages
         .iter()
         .position(|message| {
@@ -924,13 +916,9 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
         .iter()
         .position(|message| message["tool_call_id"] == "platform-call")
         .expect("canonical platform result message");
-    // `reasoning_content` may ride the same assistant message as its turn's
-    // text (DeepSeek rejects a standalone reasoning-only assistant message),
-    // but it must never land after that turn's text, call, or result.
-    assert!(
-        reasoning_index <= text_index && text_index < call_index && call_index < result_index,
-        "{messages:?}"
-    );
+    assert_eq!(messages[call_index]["reasoning_content"], "R1");
+    assert_eq!(messages[call_index]["content"], "C1");
+    assert!(call_index < result_index, "{messages:?}");
     assert!(
         !second_body
             .to_string()
@@ -993,14 +981,6 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
             })
             .unwrap_or_default()
     };
-    let r1 = replay_messages
-        .iter()
-        .position(|message| message["reasoning_content"] == "R1")
-        .expect("replayed R1");
-    let c1 = replay_messages
-        .iter()
-        .position(|message| message_text(message) == "C1")
-        .unwrap_or_else(|| panic!("replayed C1: {replay_messages:?}"));
     let call = replay_messages
         .iter()
         .position(|message| message["tool_calls"][0]["id"] == "platform-call")
@@ -1013,16 +993,13 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
         .iter()
         .position(|message| message["reasoning_content"] == "R2")
         .expect("replayed R2");
-    let c2 = replay_messages
-        .iter()
-        .position(|message| message_text(message) == "C2")
-        .expect("replayed C2");
-    // Same-turn `reasoning_content` may share the assistant message with its
-    // text; it must never appear after that turn's text, call, or result.
-    assert!(
-        r1 <= c1 && c1 < call && call < result && result < r2 && r2 <= c2,
+    assert_eq!(
+        replay_messages[call]["reasoning_content"], "R1",
         "{replay_messages:?}"
     );
+    assert_eq!(message_text(&replay_messages[call]), "C1");
+    assert_eq!(message_text(&replay_messages[r2]), "C2");
+    assert!(call < result && result < r2, "{replay_messages:?}");
     let replay_wire = replay_body.to_string();
     assert!(
         !replay_wire.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
@@ -1464,36 +1441,11 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
                 "{ingress}: {body}"
             );
             let first_thinking = &runs[0].1;
+            assert_eq!(
+                first_thinking, "R1",
+                "lossless Thinking stays native: {body}"
+            );
             if ingress == OPEN_RESPONSES_2026_04_24 {
-                let references = crate::history_marker::history_marker_references(&[
-                    stravia_runtime_contract::protocol::ir::AiItem::thinking(first_thinking, None),
-                ]);
-                assert_eq!(
-                    references.len(),
-                    1,
-                    "one authoritative marker for R1: {body}"
-                );
-                let reference = &references[0];
-                let preview = first_thinking
-                    .strip_suffix(&crate::history_marker::render_history_marker_reference(
-                        reference,
-                    ))
-                    .expect("preview is followed by its authoritative marker");
-                let public = preview
-                    .strip_prefix(&crate::history_marker::render_preview_projection_start(
-                        reference, 0,
-                    ))
-                    .and_then(|preview| {
-                        preview.strip_suffix(&crate::history_marker::render_preview_projection_end(
-                            reference, 0,
-                        ))
-                    })
-                    .expect("one paired native public preview for the same reference");
-                assert_eq!(
-                    public.trim_matches('\n'),
-                    "R1",
-                    "public preview contains exactly the original readable thought: {body}"
-                );
                 let terminal = body
                     .lines()
                     .filter_map(|line| line.strip_prefix("data: "))

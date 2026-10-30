@@ -7,8 +7,8 @@ import {
   observation_output_delivered_no_preview,
 } from '../src/lib/paraglide/messages.js'
 import type {
+  ClientErrorSummary,
   ConfirmedUsage,
-  FailedRequestSummary,
   ForestRoot,
   InteractionDetail,
   InteractionSummary,
@@ -129,13 +129,14 @@ function runFor(item: InteractionSummary): RunDetail {
 
 function failedRequest(
   id: string,
-  kind: FailedRequestSummary['kind'],
+  kind: ClientErrorSummary['kind'],
   occurredAt: number,
-  overrides: Partial<FailedRequestSummary> = {},
-): FailedRequestSummary {
+  overrides: Partial<ClientErrorSummary> = {},
+): ClientErrorSummary {
   return {
     id,
     kind,
+    type: kind === 'rejection' ? 'rejected' : 'failed',
     request_id: `req-${id}`,
     started_at: occurredAt,
     duration_ms: null,
@@ -170,10 +171,7 @@ interface ObservationFixture {
   releaseRemainingRoots(): void
   holdNextRead(id: string): () => void
   addInteraction(item: InteractionSummary): void
-  addFailure(
-    request: FailedRequestSummary,
-    detail?: { events?: ObservationEvent[]; trace?: TraceManifest | null },
-  ): void
+  addFailure(request: ClientErrorSummary, detail?: { events?: ObservationEvent[]; trace?: TraceManifest | null }): void
   holdNextFailureRead(): () => void
   reset(): void
   forestRequests: URL[]
@@ -329,7 +327,7 @@ async function installObservationFixture(
   const streamEvents: ObservationEvent[] = []
   let debugEnabled = false
   let snapshotSequence = 10
-  const failures: FailedRequestSummary[] = []
+  const failures: ClientErrorSummary[] = []
   const failureDetails = new Map<string, { events: ObservationEvent[]; trace: TraceManifest | null }>()
   const failureRequests: URL[] = []
   const failureDetailRequests: URL[] = []
@@ -394,7 +392,7 @@ async function installObservationFixture(
       return
     }
 
-    if (path === '/observations/failed-requests') {
+    if (path === '/observations/client-errors') {
       failureRequests.push(url)
       const heldList = heldFailureList
       heldFailureList = undefined
@@ -403,8 +401,9 @@ async function installObservationFixture(
       const end = Number(url.searchParams.get('end_at'))
       const limit = Number(url.searchParams.get('limit') ?? 30)
       const cursor = url.searchParams.get('cursor')
+      const type = url.searchParams.get('type')
       const sorted = failures
-        .filter((item) => item.started_at >= start && item.started_at < end)
+        .filter((item) => item.started_at >= start && item.started_at < end && (!type || item.type === type))
         .toSorted((a, b) => b.started_at - a.started_at || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id))
       let offset = 0
       if (cursor) {
@@ -429,7 +428,7 @@ async function installObservationFixture(
       return
     }
 
-    const failureDetailMatch = path.match(/^\/observations\/failed-requests\/([^/]+)\/([^/]+)$/)
+    const failureDetailMatch = path.match(/^\/observations\/client-errors\/([^/]+)\/([^/]+)$/)
     if (failureDetailMatch) {
       failureDetailRequests.push(url)
       const kind = decodeURIComponent(failureDetailMatch[1])
@@ -1547,7 +1546,7 @@ test.describe('Interaction Observation canvas', () => {
       { width: 320, height: 740 },
     ]) {
       await page.setViewportSize(viewport)
-      for (const tab of ['Interaction Chains', 'Failed Requests']) {
+      for (const tab of ['Interaction Chains', 'Client Errors']) {
         await page.getByRole('tab', { name: tab, exact: true }).click()
         await expect
           .poll(() =>
@@ -1564,10 +1563,7 @@ test.describe('Interaction Observation canvas', () => {
           .toEqual({ gap: 0, overflow: 0, horizontalOverflow: 0 })
       }
       // 窄工作区（容器 ≤52rem）以行列表取代表格。
-      const failures = page.getByRole(viewport.width <= 500 ? 'list' : 'table', {
-        name: 'Failed Requests',
-        exact: true,
-      })
+      const failures = page.getByRole(viewport.width <= 500 ? 'list' : 'table', { name: 'Client Errors', exact: true })
       await expect(failures).toBeVisible()
       const lastRowTime = failures.getByRole('button').last()
       await scrollListToBottom(lastRowTime)
@@ -1617,10 +1613,11 @@ test.describe('Interaction Observation canvas', () => {
       }),
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Client Errors', exact: true })
     await expect(table.getByRole('columnheader')).toHaveText([
       'Time',
+      'Type',
       'Client / API Key',
       'Model',
       'Provider',
@@ -1661,7 +1658,7 @@ test.describe('Interaction Observation canvas', () => {
 
     await page.setViewportSize({ width: 320, height: 740 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
-    const list = page.getByRole('list', { name: 'Failed Requests', exact: true })
+    const list = page.getByRole('list', { name: 'Client Errors', exact: true })
     await list.getByRole('button').last().click()
     const dialog = page.getByRole('dialog', { name: 'Observation details' })
     await expect(dialog.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
@@ -1693,13 +1690,13 @@ test.describe('Interaction Observation canvas', () => {
       },
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
     const rowTime = page
-      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('table', { name: 'Client Errors', exact: true })
       .getByRole('button', { name: logTime(startedAt + 220_000), exact: true })
     await rowTime.click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
-    await expect(inspector.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
+    await expect(inspector.getByRole('heading', { name: 'Rejected Request', exact: true, level: 2 })).toBeVisible()
     await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
     await expect(inspector.getByText('req-rejection-decode', { exact: true })).toBeVisible()
     await expect(inspector.getByText('HTTP 400', { exact: true })).toBeVisible()
@@ -1716,7 +1713,7 @@ test.describe('Interaction Observation canvas', () => {
       if (detailAttempts === 1) await route.fulfill({ status: 503, json: { error: 'Failure detail unavailable' } })
       else await route.fallback()
     }
-    await page.route('**/api/v1/observations/failed-requests/rejection/**', failDetail)
+    await page.route('**/api/v1/observations/client-errors/rejection/**', failDetail)
     await rowTime.click()
     const detailError = page.getByRole('alert').filter({ hasText: 'Failure detail unavailable' })
     await expect(detailError).toBeVisible()
@@ -1724,7 +1721,7 @@ test.describe('Interaction Observation canvas', () => {
     await detailError.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
     expect(detailAttempts).toBe(2)
-    await page.unroute('**/api/v1/observations/failed-requests/rejection/**', failDetail)
+    await page.unroute('**/api/v1/observations/client-errors/rejection/**', failDetail)
   })
 
   test('a wide workspace keeps the inspector bounded and the canvas readable while it is resized', async ({ page }) => {
@@ -1803,10 +1800,10 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 })
-      await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-      const list = page.getByRole('list', { name: 'Failed Requests', exact: true })
+      await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+      const list = page.getByRole('list', { name: 'Client Errors', exact: true })
       await expect(list).toBeVisible()
-      await expect(page.getByRole('table', { name: 'Failed Requests', exact: true })).toBeHidden()
+      await expect(page.getByRole('table', { name: 'Client Errors', exact: true })).toBeHidden()
       const rows = list.getByRole('listitem')
       const first = rows.first()
       const parts = {
@@ -1845,7 +1842,7 @@ test.describe('Interaction Observation canvas', () => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width)
     }
     await page
-      .getByRole('list', { name: 'Failed Requests', exact: true })
+      .getByRole('list', { name: 'Client Errors', exact: true })
       .getByRole('button', { name: logTime(startedAt + 250_000), exact: true })
       .click()
     const dialog = page.getByRole('dialog', { name: 'Observation details' })
@@ -1898,9 +1895,9 @@ test.describe('Interaction Observation canvas', () => {
       },
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
     await page
-      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('table', { name: 'Client Errors', exact: true })
       .getByRole('button', { name: logTime(startedAt + 245_000), exact: true })
       .click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
@@ -1961,9 +1958,9 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await expect(node(page, 'Flint', 'interrupted')).toHaveCount(0)
     await expect(node(page, 'Cinder', 'running')).toBeVisible()
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
     await page
-      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('table', { name: 'Client Errors', exact: true })
       .getByRole('button', { name: logTime(startedAt + 280_000), exact: true })
       .click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
@@ -2159,8 +2156,8 @@ test.describe('Interaction Observation canvas', () => {
       }),
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Client Errors', exact: true })
     await expect(table.getByRole('button')).toHaveCount(30)
     await expect(page.getByText('30 / 31', { exact: true })).toBeVisible()
     await expect(table.getByRole('button', { name: logTime(startedAt + 50_000), exact: true })).toHaveCount(1)
@@ -2185,12 +2182,12 @@ test.describe('Interaction Observation canvas', () => {
   test('separates the empty, failed, and loading states of the failed request list', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-    await expect(page.getByText('No failed requests', { exact: true })).toBeVisible()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+    await expect(page.getByText('No client errors', { exact: true })).toBeVisible()
     await expect(
-      page.getByText('No final request failures match this time range and these filters.', { exact: true }),
+      page.getByText('No failed or rejected requests match this time range and these filters.', { exact: true }),
     ).toBeVisible()
-    await expect(page.getByRole('table', { name: 'Failed Requests', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('table', { name: 'Client Errors', exact: true })).toHaveCount(0)
 
     fixture.addFailure(
       failedRequest('state-run', 'run', startedAt + 90_000, {
@@ -2210,21 +2207,21 @@ test.describe('Interaction Observation canvas', () => {
       if (listAttempts === 1) await route.fulfill({ status: 503, json: { error: 'Failed requests unavailable' } })
       else await route.fallback()
     }
-    await page.route('**/api/v1/observations/failed-requests?**', failList)
+    await page.route('**/api/v1/observations/client-errors?**', failList)
     await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     const listError = page.getByRole('alert').filter({ hasText: 'Failed requests unavailable' })
     await expect(listError).toBeVisible()
-    await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('No client errors', { exact: true })).toHaveCount(0)
     await listError.getByRole('button', { name: 'Retry', exact: true }).click()
-    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    const table = page.getByRole('table', { name: 'Client Errors', exact: true })
     await expect(table.getByRole('button')).toHaveCount(1)
     await expect(listError).toHaveCount(0)
-    await page.unroute('**/api/v1/observations/failed-requests?**', failList)
+    await page.unroute('**/api/v1/observations/client-errors?**', failList)
 
     const release = fixture.holdNextFailureRead()
     await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
-    await expect(page.getByText('Loading failed requests…', { exact: true })).toBeVisible()
-    await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Loading client errors…', { exact: true })).toBeVisible()
+    await expect(page.getByText('No client errors', { exact: true })).toHaveCount(0)
     await expect(table.getByRole('button')).toHaveCount(0)
     release()
     await expect(table.getByRole('button')).toHaveCount(1)
@@ -2245,8 +2242,8 @@ test.describe('Interaction Observation canvas', () => {
       }),
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Client Errors', exact: true })
     const rowByTime = (timestamp: number) =>
       table.getByRole('button', { name: logTime(timestamp), exact: true }).locator('xpath=ancestor::tr[1]')
     await expect(table.getByRole('button', { name: logTime(startedAt + 150_000), exact: true })).toBeVisible()
@@ -2353,8 +2350,8 @@ test.describe('Interaction Observation canvas', () => {
         },
       }),
     )
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
-    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Client Errors', exact: true })
     await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toBeVisible()
     await expect(page.getByText('2 / 2', { exact: true })).toBeVisible()
     expect(Number(fixture.failureRequests[0].searchParams.get('end_at'))).toBeGreaterThan(rejectedAt)
@@ -2407,9 +2404,9 @@ test.describe('Interaction Observation canvas', () => {
       }),
     )
     await page.goto('/logs')
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
     const rowTime = page
-      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('table', { name: 'Client Errors', exact: true })
       .getByRole('button', { name: logTime(startedAt + 130_000), exact: true })
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await rowTime.focus()
@@ -2879,7 +2876,9 @@ test.describe('Interaction Observation canvas', () => {
     await assertOrder()
   })
 
-  test('places concurrent tool results at their actual finish positions live and after reload', async ({ page }) => {
+  test('keeps concurrent tool calls at their start positions with results inline live and after reload', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page, false, false, true, (detail) => {
       if (detail.interaction.id === 'interaction-cinder')
         detail.runs[0].events = detail.runs[0].events.filter((event) => event.sequence >= 20)
@@ -2909,26 +2908,22 @@ test.describe('Interaction Observation canvas', () => {
     }
     const conversation = page.getByRole('log', { name: 'Conversation' })
     const assertOrder = async () => {
-      await expect(conversation.getByRole('button', { name: 'Tool result · Concurrent A', exact: true })).toBeVisible()
+      await expect(conversation.getByRole('button', { name: 'Tool call Concurrent A', exact: true })).toBeVisible()
+      await expect(conversation.getByText('between-results', { exact: true })).toBeVisible()
       const text = await conversation.innerText()
-      const ordered = [
-        'Tool call Concurrent A',
-        'between-first',
-        'Tool call Concurrent B',
-        'Tool result · Concurrent B',
-        'between-results',
-        'Tool result · Concurrent A',
-      ]
+      const ordered = ['Tool call Concurrent A', 'between-first', 'Tool call Concurrent B', 'between-results']
       for (let index = 1; index < ordered.length; index++)
         expect(text.indexOf(ordered[index - 1])).toBeLessThan(text.indexOf(ordered[index]))
       await expect(conversation.locator('[data-activity-kind="tool"]')).toHaveCount(2)
-      await expect(conversation.locator('[data-activity-kind="result"]')).toHaveCount(2)
+      await expect(conversation.locator('[data-activity-kind="tool"][aria-busy="true"]')).toHaveCount(0)
+      await expect(conversation.getByRole('button', { name: /^(Tool|Client) result/ })).toHaveCount(0)
     }
     await assertOrder()
     await page.reload()
     await assertOrder()
-    await conversation.getByRole('button', { name: 'Tool result · Concurrent B', exact: true }).click()
+    await conversation.getByRole('button', { name: 'Tool call Concurrent B', exact: true }).click()
     await expect(conversation.getByText('Finished B', { exact: true })).toBeVisible()
+    await expect(conversation.getByText('Finished A', { exact: true })).toHaveCount(0)
   })
 
   test('groups only consecutive same-name client tools and shows attempt-local output speed', async ({ page }) => {
@@ -3087,8 +3082,7 @@ test.describe('Interaction Observation canvas', () => {
       })
       await expect(conversation.getByRole('status', { name: 'Loading earlier events', exact: true })).toBeInViewport()
       // Bodies are windowed: the previous page's oldest paragraph is mounted only while the loader is next to it.
-      if (pageIndex === 1)
-        await expect(conversation.getByText('History paragraph 51', { exact: true })).toHaveCount(1)
+      if (pageIndex === 1) await expect(conversation.getByText('History paragraph 51', { exact: true })).toHaveCount(1)
       release()
       await response
     }
@@ -3100,7 +3094,7 @@ test.describe('Interaction Observation canvas', () => {
     const b = activity('Read B')
     await expect(a).toHaveAttribute('aria-busy', 'true')
     await expect(b).toHaveAttribute('aria-busy', 'true')
-    await expect(b).toContainText('Waiting for client result')
+    await expect(b).toHaveAttribute('data-activity-status', 'waiting')
     await b.getByRole('button').click()
     const advance = async (next: number, sequence: number) => {
       phase = next
@@ -3118,21 +3112,23 @@ test.describe('Interaction Observation canvas', () => {
     }
     await advance(1, 456)
     await expect(a).toHaveAttribute('aria-busy', 'false')
-    await expect(a).toContainText('Failed')
+    await expect(a).toHaveAttribute('data-activity-status', 'error')
+    await expect(a.getByTitle('Failed', { exact: true })).toBeVisible()
     await expect(b).toHaveAttribute('aria-busy', 'true')
     await expect(search).toHaveAttribute('aria-busy', 'false')
-    await expect(search).toContainText('Failed')
+    await expect(search).toHaveAttribute('data-activity-status', 'error')
     await advance(2, 457)
     await expect(b).toHaveAttribute('aria-busy', 'false')
-    await expect(b).toContainText('Waiting ended: Run continued')
+    await expect(b).toHaveAttribute('data-activity-status', 'missing-result')
+    await expect(b.getByTitle('Waiting ended: Run continued', { exact: true })).toBeVisible()
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
     await advance(3, 458)
-    await expect(b).not.toContainText('Returned')
-    await expect(b).not.toContainText('Waiting ended: Run continued')
-    await expect(b.getByText('legitimate late evidence', { exact: true })).toHaveCount(0)
-    await conversation.getByRole('button', { name: 'Client result · Read B', exact: true }).click()
-    await expect(conversation.getByText('legitimate late evidence', { exact: true })).toBeVisible()
+    await expect(b).toHaveAttribute('data-activity-status', 'returned')
+    await expect(b.getByTitle('Waiting ended: Run continued', { exact: true })).toHaveCount(0)
+    await expect(b).toHaveAttribute('aria-busy', 'false')
     await expect(b.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+    await expect(b.getByText('legitimate late evidence', { exact: true })).toBeVisible()
+    await expect(conversation.getByRole('button', { name: /^(Tool|Client) result/ })).toHaveCount(0)
     await page.reload()
     await expect(search).toHaveAttribute('aria-busy', 'false')
   })
@@ -3177,7 +3173,8 @@ test.describe('Interaction Observation canvas', () => {
       fixture.emit(event)
       await sendObservation(page, 'observation', event, 12)
       await expect(activity).toHaveAttribute('aria-busy', 'false')
-      await expect(activity).toContainText(label)
+      await expect(activity).toHaveAttribute('data-activity-status', 'missing-result')
+      await expect(activity.getByTitle(label, { exact: true })).toBeVisible()
       await activity.getByRole('button').click()
       await expect(activity.getByText('Client result', { exact: true })).toHaveCount(0)
       await expect(activity.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
@@ -3334,15 +3331,12 @@ test.describe('Interaction Observation canvas', () => {
       await expect(responseTime).toHaveAttribute('datetime', new Date(startedAt + 299_006).toISOString())
       await tool.press('Enter')
       await expect(conversation.getByRole('heading', { name: 'Tool input', exact: true })).toBeVisible()
-      const clientResult = conversation.getByRole('button', { name: 'Client result · Bash', exact: true })
-      await clientResult.click()
       await expect(conversation.getByText('Client result', { exact: true })).toBeVisible()
       await expect(conversation.getByText(/printf/)).toBeVisible()
       await expect(conversation.getByText('tool-output-sentinel', { exact: true })).toBeVisible()
       const platform = conversation.getByRole('button', { name: 'Tool call Web search', exact: true })
       await expect(platform).toHaveAttribute('aria-expanded', 'false')
       await platform.press('Enter')
-      await conversation.getByRole('button', { name: 'Tool result · Web search', exact: true }).press('Enter')
       await expect(conversation.getByText('Tool result', { exact: true })).toBeVisible()
       await expect(conversation.getByText(/platform-output-sentinel/)).toBeVisible()
       await thinking.click()
@@ -4049,6 +4043,232 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector).toBeHidden()
   })
 
+  test.describe('credential hit highlight', () => {
+    const hitEvent = (
+      sequence: number,
+      kind: 'credential_mappings_created' | 'credential_mappings_reused',
+      discoveries: unknown[],
+    ): ObservationEvent => ({
+      sequence,
+      occurred_at: startedAt + sequence,
+      interaction_id: 'interaction-atlas',
+      run_id: 'run-interaction-atlas',
+      rejection_id: null,
+      kind,
+      payload: { discoveries },
+    })
+    const located = (...locators: Array<Record<string, unknown>>) => ({
+      rule_ids: [...new Set(locators.map((locator) => locator.rule_id))],
+      source_types: [...new Set(locators.map((locator) => locator.source_type))],
+      locators,
+    })
+    const toolEvents = (): ObservationEvent[] =>
+      (
+        [
+          ['platform_tool_started', { tool_id: 'call-a', name: 'Deploy', input: { query: 'hit-tool-input' } }],
+          ['platform_tool_finished', { tool_id: 'call-a', status: 'completed', content: 'hit-tool-result' }],
+          ['platform_tool_started', { tool_id: 'call-b', name: 'Lookup', input: { query: 'hit-lookup-input' } }],
+          ['platform_tool_finished', { tool_id: 'call-b', status: 'completed', content: 'hit-lookup-result' }],
+        ] as const
+      ).map(([kind, payload], index) => ({
+        sequence: 30 + index,
+        occurred_at: startedAt + 30 + index,
+        interaction_id: 'interaction-atlas',
+        run_id: 'run-interaction-atlas',
+        rejection_id: null,
+        kind,
+        payload,
+      }))
+    const withHits =
+      (events: ObservationEvent[]) =>
+      (detail: InteractionDetail): void => {
+        if (detail.interaction.id === 'interaction-atlas') detail.runs[0].events = events
+      }
+    const ruleCatalog = async (page: Page): Promise<void> => {
+      await page.route('**/api/v1/reversible-redaction/rules', (route) =>
+        route.fulfill({
+          json: {
+            data: {
+              rules: [
+                { id: 'github-pat', name: 'GitHub token' },
+                { id: 'aws-key', name: 'AWS key' },
+              ],
+              prefilter: '',
+              filter: '',
+            },
+          },
+        }),
+      )
+      await page.route('**/api/v1/reversible-redaction/custom-rules', (route) => route.fulfill({ json: { data: [] } }))
+    }
+    const mixedHits = [
+      hitEvent(20, 'credential_mappings_created', [
+        located(
+          { rule_id: 'github-pat', source_type: 'user_message', latest_input: true },
+          { rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'call-a' },
+        ),
+      ]),
+      hitEvent(21, 'credential_mappings_reused', [
+        located(
+          { rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-b' },
+          { rule_id: 'aws-key', source_type: 'system_or_history' },
+          { rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'earlier-interaction-call' },
+        ),
+      ]),
+      ...toolEvents(),
+    ]
+
+    test('marks new and reused blocks, opens the hit tool for the session and keeps the saved preference', async ({
+      page,
+    }) => {
+      await ruleCatalog(page)
+      const fixture = await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      const banner = inspector.getByRole('status').filter({ hasText: 'credential hits' })
+      await expect(banner).toContainText('5 credential hits (2 new / 3 reused)')
+      await expect(banner).toContainText('2 came from earlier history or have no retained text.')
+
+      const conversation = inspector.getByRole('log', { name: 'Conversation' })
+      await expect(conversation.locator('[data-credential-hit="created"]')).toHaveCount(2)
+      await expect(conversation.locator('[data-credential-hit="reused"]')).toHaveCount(1)
+      await expect(conversation.getByRole('button', { name: 'New: GitHub token', exact: true })).toHaveCount(2)
+      await expect(conversation.getByRole('button', { name: 'Reused: AWS key', exact: true })).toHaveCount(1)
+      // The user message holds the first new hit, so the reading position lands there rather than at the latest content.
+      await expect(conversation.locator('[data-credential-hit="created"]').first()).toBeInViewport()
+      await expect(conversation.locator('[data-credential-hit="created"]').first()).toContainText('Atlas user question')
+
+      // Hit tool blocks open without being asked and without touching the saved expansion preference.
+      await expect(conversation.getByText('hit-tool-input')).toBeVisible()
+      await expect(conversation.getByText('hit-tool-result')).toBeVisible()
+      await expect(conversation.getByText('hit-lookup-result')).toBeVisible()
+      expect(
+        await page.evaluate(() =>
+          Object.keys(localStorage).filter((key) => key.startsWith('stravia:observation-activity:')),
+        ),
+      ).toEqual([])
+
+      const detailRequests = fixture.detailRequests.length
+      await banner.getByRole('button', { name: 'Clear highlight' }).click()
+      await expect(conversation.locator('[data-credential-hit]')).toHaveCount(0)
+      await expect(banner).toHaveCount(0)
+      await expect.poll(() => new URL(page.url()).search).toBe('?interaction=interaction-atlas')
+      expect(fixture.detailRequests).toHaveLength(detailRequests)
+      await expect(inspector).toBeVisible()
+    })
+
+    test('shows a tool call hit and its result hit on the same block', async ({ page }) => {
+      await ruleCatalog(page)
+      const events = [
+        hitEvent(20, 'credential_mappings_created', [
+          located({ rule_id: 'github-pat', source_type: 'tool_arguments', tool_id: 'call-a' }),
+        ]),
+        hitEvent(21, 'credential_mappings_reused', [
+          located({ rule_id: 'aws-key', source_type: 'tool_result', tool_id: 'call-a' }),
+        ]),
+        ...toolEvents().slice(0, 2),
+      ]
+      await installObservationFixture(page, false, false, true, withHits(events))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const conversation = page
+        .getByRole('complementary', { name: 'Observation details' })
+        .getByRole('log', { name: 'Conversation' })
+      const block = conversation.locator('[data-credential-hit]')
+      await expect(block).toHaveCount(1)
+      await expect(block).toHaveAttribute('data-credential-hit', 'created')
+      await expect(block.getByRole('button', { name: 'New: GitHub token', exact: true })).toBeVisible()
+      await expect(block.getByRole('button', { name: 'Reused: AWS key', exact: true })).toBeVisible()
+      await expect(block.getByText('hit-tool-input')).toBeVisible()
+      await expect(block.getByText('hit-tool-result')).toBeVisible()
+    })
+
+    test('sends hits without a block to their run in diagnostics', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await inspector.getByRole('button', { name: 'Show in diagnostics' }).click()
+      await expect(inspector.getByRole('tab', { name: 'Diagnostics' })).toHaveAttribute('aria-selected', 'true')
+      await expect(inspector.locator('#obs-run-run-interaction-atlas')).toBeInViewport()
+    })
+
+    test('loads earlier events until the new hit appears', async ({ page }) => {
+      await ruleCatalog(page)
+      const filler: ObservationEvent[] = Array.from({ length: 250 }, (_, index) => ({
+        sequence: 100 + index,
+        occurred_at: startedAt + 100 + index,
+        interaction_id: 'interaction-atlas',
+        run_id: 'run-interaction-atlas',
+        rejection_id: null,
+        kind: 'checkpoint',
+        payload: { stage: `stage-${index}` },
+      }))
+      const events = [
+        hitEvent(20, 'credential_mappings_created', [
+          located({ rule_id: 'github-pat', source_type: 'user_message', latest_input: true }),
+        ]),
+        ...filler,
+        hitEvent(400, 'credential_mappings_reused', [
+          located({ rule_id: 'aws-key', source_type: 'system_or_history' }),
+        ]),
+      ]
+      const fixture = await installObservationFixture(page, false, false, true, withHits(events))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.getByRole('status').filter({ hasText: 'credential hits' })).toContainText(
+        '2 credential hits (1 new / 1 reused)',
+      )
+      await expect(inspector.locator('[data-credential-hit="created"]')).toHaveCount(1)
+      expect(fixture.eventRequests.some((url) => url.searchParams.has('before_sequence'))).toBe(true)
+    })
+
+    test('says so for records that predate locators and highlights nothing', async ({ page }) => {
+      await ruleCatalog(page)
+      const legacy = hitEvent(20, 'credential_mappings_created', [
+        { rule_ids: ['github-pat'], source_types: ['user_message'] },
+      ])
+      await installObservationFixture(page, false, false, true, withHits([legacy]))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(
+        inspector.getByRole('status').filter({ hasText: 'No credential hit in this request can be located' }),
+      ).toBeVisible()
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+    })
+
+    test('leaves ordinary browsing untouched even when events carry locators', async ({ page }) => {
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas user question')
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+      await expect(inspector.getByRole('status').filter({ hasText: 'credential hits' })).toHaveCount(0)
+    })
+
+    test('drops the highlight together with the inspector', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(3)
+      await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+      await expect(inspector).toHaveCount(0)
+      await expect.poll(() => new URL(page.url()).searchParams.has('highlight')).toBe(false)
+    })
+
+    test('drops the highlight when another interaction is selected', async ({ page }) => {
+      await ruleCatalog(page)
+      await installObservationFixture(page, false, false, true, withHits(mixedHits))
+      await page.goto('/logs?interaction=interaction-atlas&highlight=credential-hits')
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(3)
+      await node(page, 'Cinder', 'running').press('Enter')
+      await expect(inspector.getByRole('heading', { name: 'Cinder', exact: true, level: 2 })).toBeVisible()
+      await expect(inspector.locator('[data-credential-hit]')).toHaveCount(0)
+      expect(new URL(page.url()).searchParams.has('highlight')).toBe(false)
+    })
+  })
+
   test('downloads the bundle as a file without entering the application router', async ({ page }) => {
     await installObservationFixture(page)
     await page.route('**/api/v1/observations/interactions/interaction-atlas/debug-bundle-tickets', (route) =>
@@ -4617,5 +4837,118 @@ test.describe('Interaction Observation canvas', () => {
       await expect.poll(async () => (await viewportTransform(page)).zoom).not.toBe(beforePinch.zoom)
       await session.detach()
     })
+  })
+
+  test('lists failed upstream attempts with result filtering and attempt-level diagnostics', async ({ page }) => {
+    await installObservationFixture(page)
+    const started = startedAt + 120_000
+    const summary = {
+      id: 'attempt-1',
+      run_id: 'run-upstream',
+      interaction_id: null,
+      root_id: null,
+      request_id: 'req-upstream',
+      started_at: started,
+      duration_ms: 1_250,
+      provider_id: null,
+      provider_name: 'Ember Provider',
+      upstream_model: 'ember-upstream-v1',
+      model: 'ember-route',
+      model_display_name: 'Ember Pro',
+      api_key_id: null,
+      api_key_name: 'Ops key',
+      client: null,
+      error: {
+        source: 'upstream',
+        code: 'upstream_unavailable',
+        message: 'Upstream overloaded',
+        status_code: 529,
+        upstream_code: 'overloaded_error',
+      },
+      outcome: 'caused_failure',
+      debug_status: 'none',
+      observation_gap: false,
+    }
+    const upstreamRequests: URL[] = []
+    await page.route('**/api/v1/observations/upstream-errors**', async (route) => {
+      const url = new URL(route.request().url())
+      if (/\/upstream-errors\/[^/]+$/.test(url.pathname)) {
+        await route.fulfill({
+          json: {
+            data: {
+              error: summary,
+              attempts: [
+                {
+                  id: 'attempt-0',
+                  started_at: started - 5_000,
+                  duration_ms: 420,
+                  status: 'failed',
+                  provider_id: null,
+                  provider_name: 'Ember Provider',
+                  upstream_model: 'ember-upstream-v1',
+                  status_code: 503,
+                  error_code: 'overloaded',
+                  error_source: 'upstream',
+                },
+                {
+                  id: 'attempt-1',
+                  started_at: started,
+                  duration_ms: 1_250,
+                  status: 'failed',
+                  provider_id: null,
+                  provider_name: 'Ember Provider',
+                  upstream_model: 'ember-upstream-v1',
+                  status_code: 529,
+                  error_code: 'overloaded_error',
+                  error_source: 'upstream',
+                },
+              ],
+              events: [],
+              trace: null,
+              snapshot_sequence: 10,
+            },
+          },
+        })
+        return
+      }
+      upstreamRequests.push(url)
+      await route.fulfill({ json: { data: { items: [summary], total: 1, next_cursor: null, snapshot_sequence: 10 } } })
+    })
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Upstream Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Upstream Errors', exact: true })
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Time',
+      'Provider',
+      'Upstream model',
+      'Route model',
+      'Client / API Key',
+      'Status',
+      'Error',
+      'Result',
+      'Duration',
+    ])
+    const row = table.getByRole('button', { name: logTime(started), exact: true }).locator('xpath=ancestor::tr[1]')
+    await expect(row).toContainText('Ember Provider')
+    await expect(row).toContainText('ember-upstream-v1')
+    await expect(row).toContainText('Ember Pro')
+    await expect(row).toContainText('529')
+    await expect(row).toContainText('Upstream overloaded')
+    await expect(row).toContainText('Caused request failure')
+
+    await page.getByRole('button', { name: 'Filters' }).click()
+    await page.getByLabel('Result', { exact: true }).click()
+    await page.getByRole('option', { name: 'Caused request failure', exact: true }).click()
+    await page.getByRole('button', { name: 'Apply filters' }).click()
+    await expect.poll(() => upstreamRequests.at(-1)?.searchParams.get('outcome')).toBe('caused_failure')
+
+    await table.getByRole('button', { name: logTime(started), exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByText('Attempts in this run', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Attempt 1', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Attempt 2', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('overloaded_error', { exact: true }).first()).toBeVisible()
+    await expect(inspector.getByRole('button', { name: 'Open interaction', exact: true })).toHaveCount(0)
+    await expect(inspector.getByRole('button', { name: 'Debug bundle', exact: true })).toBeVisible()
   })
 })

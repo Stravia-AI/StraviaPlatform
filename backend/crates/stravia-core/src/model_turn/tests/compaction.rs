@@ -164,6 +164,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -180,6 +181,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![route.id.into()],
+            spend_limit: None,
         })
         .await
         .unwrap();

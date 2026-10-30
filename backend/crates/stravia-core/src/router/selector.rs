@@ -23,6 +23,8 @@ pub struct SelectedTarget {
     pub target_retry_budget: i32,
     pub target_cooldown_ms: i64,
     pub thinking_level_map: Vec<crate::thinking::ThinkingLevelMapping>,
+    /// Provider Model price snapshot for this attempt's cost and billing.
+    pub pricing: Option<Arc<crate::provider_models::ModelCost>>,
 }
 
 impl SelectedTarget {
@@ -79,6 +81,10 @@ pub struct TargetSchedulingSnapshot {
     pub(super) cost_output: Option<f64>,
     pub(super) cost_cache_read: Option<f64>,
     pub(super) cost_cache_write: Option<f64>,
+    /// Full Provider Model price snapshot for attempt cost/billing capture.
+    /// Usage statistics never supply it.
+    #[sqlx(skip)]
+    pub(super) pricing: Option<Arc<crate::provider_models::ModelCost>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,14 +215,12 @@ struct RoutePolicyStateInner {
     pricing_generation: u64,
 }
 
-/// Pricing fields `scheduling_snapshot` needs from one Provider Model record.
-/// Router-private: only ever produced and consumed inside `crate::router`.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+/// Full Provider Model price cached by `RoutePolicyState`. The scheduling
+/// weights derive from the same snapshot at selection time, so no second
+/// price cache exists.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct TargetPricing {
-    pub(super) cost_input: Option<f64>,
-    pub(super) cost_output: Option<f64>,
-    pub(super) cost_cache_read: Option<f64>,
-    pub(super) cost_cache_write: Option<f64>,
+    pub(super) cost: Option<Arc<crate::provider_models::ModelCost>>,
 }
 
 /// Result of a `RoutePolicyState::pricing` probe.
@@ -512,7 +516,7 @@ impl RoutePolicyState {
             return PricingProbe::Miss(current_generation);
         }
         match cached {
-            Some(pricing) => PricingProbe::Hit(*pricing),
+            Some(pricing) => PricingProbe::Hit(pricing.as_ref().clone()),
             None => PricingProbe::Miss(generation),
         }
     }
@@ -687,7 +691,7 @@ impl RouteAttemptPolicy {
                 let key = persisted_target_key(target);
                 let snapshot = snapshots.get(key.as_str()).copied();
                 RouteCandidate {
-                    target: to_selected(target),
+                    target: to_selected(target, snapshot.and_then(|item| item.pricing.clone())),
                     traffic: traffic_score(snapshot, weights),
                     latency: snapshot.and_then(latency_score),
                     key,
@@ -1181,7 +1185,10 @@ fn persisted_target_key(target: &TargetConfig) -> String {
     target_key(target.provider_id().as_str(), target.model().as_str())
 }
 
-fn to_selected(target: &TargetConfig) -> SelectedTarget {
+fn to_selected(
+    target: &TargetConfig,
+    pricing: Option<Arc<crate::provider_models::ModelCost>>,
+) -> SelectedTarget {
     SelectedTarget {
         destination: target.destination.clone(),
         priority: target.priority,
@@ -1189,6 +1196,7 @@ fn to_selected(target: &TargetConfig) -> SelectedTarget {
         target_retry_budget: target.target_retry_budget,
         target_cooldown_ms: target.target_cooldown_ms,
         thinking_level_map: target.thinking_level_map.clone(),
+        pricing,
     }
 }
 
@@ -2634,14 +2642,17 @@ mod tests {
     #[tokio::test]
     async fn stale_pricing_load_cannot_repopulate_after_invalidation() {
         let state = RoutePolicyState::default();
-        let stale = TargetPricing {
-            cost_input: Some(1.0),
-            ..Default::default()
+        let priced = |input: u64| TargetPricing {
+            cost: Some(Arc::new(crate::provider_models::ModelCost {
+                prices: crate::provider_models::PriceComponents {
+                    input: Some(rust_decimal::Decimal::from(input)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
         };
-        let fresh = TargetPricing {
-            cost_input: Some(9.0),
-            ..Default::default()
-        };
+        let stale = priced(1);
+        let fresh = priced(9);
 
         // A load that probed before invalidation must not reinsert afterwards.
         let PricingProbe::Miss(stale_generation) = state.pricing("p", "m").await else {
@@ -2672,7 +2683,10 @@ mod tests {
         };
         state.store_pricing(generation, "p", "m", Some(fresh)).await;
         match state.pricing("p", "m").await {
-            PricingProbe::Hit(Some(pricing)) => assert_eq!(pricing.cost_input, Some(9.0)),
+            PricingProbe::Hit(Some(pricing)) => assert_eq!(
+                pricing.cost.as_ref().and_then(|cost| cost.prices.input),
+                Some(rust_decimal::Decimal::from(9))
+            ),
             _ => panic!("stored price must hit"),
         }
         state.clear_pricing();

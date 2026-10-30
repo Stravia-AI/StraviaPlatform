@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use regex_automata::{
-    Input, MatchKind, PatternID, meta,
+    Input, MatchKind, meta,
     util::{captures, iter::Searcher, syntax},
 };
 
@@ -39,12 +39,11 @@ impl Drop for Lease<'_> {
 impl Regex {
     #[cfg(test)]
     pub(super) fn new(pattern: &str) -> Result<Self, Box<meta::BuildError>> {
-        Self::with_options(pattern, true, 10 * 1024 * 1024)
+        Self::with_size_limit(pattern, 10 * 1024 * 1024)
     }
 
-    pub(super) fn with_options(
+    pub(super) fn with_size_limit(
         pattern: &str,
-        unicode: bool,
         size_limit: usize,
     ) -> Result<Self, Box<meta::BuildError>> {
         let engine = meta::Regex::builder()
@@ -55,7 +54,7 @@ impl Regex {
                     .nfa_size_limit(Some(size_limit))
                     .hybrid_cache_capacity(2 * 1024 * 1024),
             )
-            .syntax(syntax::Config::new().utf8(false).unicode(unicode))
+            .syntax(syntax::Config::new().utf8(false))
             .build(pattern)
             .map_err(Box::new)?;
         Ok(Self(Arc::new(Compiled {
@@ -78,10 +77,6 @@ impl Regex {
 
     pub(super) fn captures_len(&self) -> usize {
         self.0.engine.captures_len()
-    }
-
-    pub(super) fn capture_names(&self) -> impl Iterator<Item = Option<&str>> {
-        self.0.engine.group_info().pattern_names(PatternID::ZERO)
     }
 
     pub(super) fn is_match(&self, haystack: &[u8]) -> bool {
@@ -187,13 +182,6 @@ impl<'h> Captures<'h> {
     }
     pub(super) fn get(&self, index: usize) -> Option<Match<'h>> {
         self.captures.get_group(index).map(|span| Match {
-            haystack: self.haystack,
-            start: span.start,
-            end: span.end,
-        })
-    }
-    pub(super) fn name(&self, name: &str) -> Option<Match<'h>> {
-        self.captures.get_group_by_name(name).map(|span| Match {
             haystack: self.haystack,
             start: span.start,
             end: span.end,

@@ -456,6 +456,87 @@ fn target_effort_maps_to_responses_shape() {
 }
 
 #[test]
+fn chat_text_precedes_tool_calls_and_their_results() {
+    for content in [
+        serde_json::json!("inspect repository"),
+        serde_json::json!([{"type": "text", "text": "inspect repository"}]),
+    ] {
+        let request = OpenAIDecoder
+            .decode_request(serde_json::json!({
+                "model": "gpt",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": content,
+                        "tool_calls": [
+                            {"id": "call_read", "type": "function", "function": {
+                                "name": "read", "arguments": "{\"path\":\"src/main.rs\"}"
+                            }},
+                            {"id": "call_glob", "type": "function", "function": {
+                                "name": "glob", "arguments": "{}"
+                            }}
+                        ]
+                    },
+                    {"role": "tool", "tool_call_id": "call_read", "content": "source"},
+                    {"role": "tool", "tool_call_id": "call_glob", "content": "paths"}
+                ]
+            }))
+            .expect("decode Chat text and tool history");
+
+        let (body, _) = ResponsesEncoder
+            .encode_request(request)
+            .expect("encode ordered Responses history");
+
+        assert_eq!(
+            body["input"],
+            serde_json::json!([
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "inspect repository"}
+                ]},
+                {"type": "function_call", "call_id": "call_read", "name": "read",
+                    "arguments": "{\"path\":\"src/main.rs\"}"},
+                {"type": "function_call", "call_id": "call_glob", "name": "glob",
+                    "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_read", "output": "source"},
+                {"type": "function_call_output", "call_id": "call_glob", "output": "paths"}
+            ])
+        );
+    }
+}
+
+#[test]
+fn assistant_tool_blocks_keep_text_between_calls() {
+    let request = AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude", "max_tokens": 128,
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_read", "name": "read", "input": {}},
+                    {"type": "text", "text": "inspect the remaining paths"},
+                    {"type": "tool_use", "id": "call_glob", "name": "glob", "input": {}}
+                ]
+            }]
+        }))
+        .expect("decode ordered assistant blocks");
+
+    let (body, _) = ResponsesEncoder
+        .encode_request(request)
+        .expect("encode ordered assistant blocks");
+
+    assert_eq!(
+        body["input"],
+        serde_json::json!([
+            {"type": "function_call", "call_id": "call_read", "name": "read", "arguments": "{}"},
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "inspect the remaining paths"}
+            ]},
+            {"type": "function_call", "call_id": "call_glob", "name": "glob", "arguments": "{}"}
+        ])
+    );
+}
+
+#[test]
 fn chat_reasoning_content_degrades_to_output_text_before_its_tool_call() {
     let request = OpenAIDecoder
         .decode_request(serde_json::json!({
@@ -1385,12 +1466,10 @@ fn mixed_assistant_media_omission_preserves_text_and_calls() {
             .unwrap();
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
-        assert!(
-            input
-                .iter()
-                .any(|item| item["type"] == "function_call" && item["call_id"] == "call_1")
-        );
-        let message = input.iter().find(|item| item["type"] == "message").unwrap();
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_1");
+        let message = &input[0];
+        assert_eq!(message["type"], "message");
         let parts = message["content"].as_array().unwrap();
         assert_eq!(parts.len(), if with_thinking { 2 } else { 1 });
         assert!(parts.iter().all(|part| part["type"] == "output_text"));

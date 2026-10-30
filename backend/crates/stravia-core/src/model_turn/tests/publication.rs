@@ -35,7 +35,7 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
     async fn intern(
         &self,
         principal: &Principal,
-        secrets: &[String],
+        secrets: &[stravia_credential_protection::store::DetectedSecret],
     ) -> Result<
         stravia_credential_protection::store::InternedMappings,
         stravia_runtime_contract::redaction::RedactionError,
@@ -91,6 +91,13 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         &self,
     ) -> Result<u64, stravia_runtime_contract::redaction::RedactionError> {
         self.inner.cleanup_expired().await
+    }
+
+    async fn plaintext(
+        &self,
+        reference: &str,
+    ) -> Result<Option<String>, stravia_runtime_contract::redaction::RedactionError> {
+        self.inner.plaintext(reference).await
     }
 }
 
@@ -162,6 +169,8 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         generation_root_id: None,
     });
     // Terminal delivery must not wait for the held mapping acknowledgement.
+    // Drain queued events so an empty page also excludes premature emission.
+    gateway.observation.flush().await.unwrap();
     let before_ack = gateway
         .observation
         .credential_discoveries(Default::default())
@@ -191,15 +200,16 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     // synchronous event emission. On the old implementation the cancelled
     // intern never acknowledges; the bounded wait then exposes the missing row.
     let _ = tokio::time::timeout(Duration::from_secs(1), held.acknowledged.notified()).await;
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].new_credential_count, 1);
-    assert_eq!(page.items[0].status, "interrupted");
-    assert_eq!(page.items[0].source_types, ["system_or_history"]);
+    assert!(page.items[0].linkable);
+    assert_eq!(page.items[0].hits.len(), 1);
+    assert_eq!(page.items[0].hits[0].source_type, "system_or_history");
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
     assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
@@ -210,15 +220,187 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         .protect(&principal, &mut request, Some(&reused_observer))
         .await
         .unwrap();
+    gateway.observation.flush().await.unwrap();
     let reused = gateway
         .observation
         .credential_discoveries(Default::default())
         .await
         .unwrap();
+    // 复用不新增行；它只出现在该映射的后续复用列表里。
     assert_eq!(reused.items.len(), 1);
-    assert_eq!(reused.items[0].new_credential_count, 1);
-    assert_eq!(reused.items[0].status, "interrupted");
+    assert_eq!(reused.items[0].id, page.items[0].id);
+    let (sequence, index) = reused.items[0].id.split_once('.').expect("discovery id");
+    let record = gateway
+        .observation
+        .credential_discovery_record(sequence.parse().unwrap(), index.parse().unwrap())
+        .await
+        .unwrap()
+        .expect("created discovery");
+    let marker = record.discovery.marker.clone().expect("recorded marker");
+    let reuses = gateway
+        .observation
+        .credential_discovery_reuses(&record, &marker)
+        .await
+        .unwrap();
+    assert_eq!(reuses.items.len(), 1);
+    assert_eq!(reuses.items[0].source_type, "system_or_history");
     assert_eq!(store.starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replayed_history() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
+
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    let principal = Principal::new("replay-owner");
+    let known = "api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"";
+    let fresh = "api_key = \"Z3m8Qp1Wd6Nf4Rk9Tb2Hy7Vc\"";
+    let user = |text: &str| AiItem {
+        role: Role::User,
+        content: MessageContent::Text(Arc::new(text.into())),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let call = || {
+        AiItem::function_call(ToolCall {
+            id: "call-1".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        })
+    };
+    let send = |items: Vec<AiItem>| {
+        let observer = credential_observer(&gateway, &principal);
+        let redaction = gateway.redaction.clone();
+        let principal = principal.clone();
+        async move {
+            let mut request = Arc::new(AiRequest::new("discovery-model", items));
+            redaction
+                .protect(&principal, &mut request, Some(&observer))
+                .await
+                .unwrap();
+        }
+    };
+    let rows = || async {
+        // 列表只读已落库事件；这些断言需要显式等待 writer 发布完成。
+        gateway.observation.flush().await.unwrap();
+        gateway
+            .observation
+            .credential_discoveries(Default::default())
+            .await
+            .unwrap()
+            .items
+    };
+    let reuses = || async {
+        gateway.observation.flush().await.unwrap();
+        let page = gateway
+            .observation
+            .credential_discoveries(Default::default())
+            .await
+            .unwrap();
+        let (sequence, index) = page.items[0].id.split_once('.').expect("discovery id");
+        let record = gateway
+            .observation
+            .credential_discovery_record(sequence.parse().unwrap(), index.parse().unwrap())
+            .await
+            .unwrap()
+            .expect("created discovery");
+        let marker = record.discovery.marker.clone().expect("recorded marker");
+        gateway
+            .observation
+            .credential_discovery_reuses(&record, &marker)
+            .await
+            .unwrap()
+    };
+
+    send(vec![user(known)]).await;
+    assert_eq!(rows().await.len(), 1);
+
+    // 客户端把同一段历史连同新问题再发一遍：凭据只出现在重放的历史里，不产生记录。
+    send(vec![user(known), AiItem::output_text("ok"), user("thanks")]).await;
+    assert_eq!(rows().await.len(), 1);
+    assert!(reuses().await.items.is_empty());
+
+    // 本次提交的新用户消息再次带上同一凭据：这是一次真实的使用。
+    send(vec![user(known), AiItem::output_text("ok"), user(known)]).await;
+    assert_eq!(rows().await.len(), 1);
+    let after_user = reuses().await;
+    assert_eq!(after_user.items.len(), 1);
+    assert_eq!(after_user.items[0].source_type, "user_message");
+    assert_eq!(after_user.items[0].latest_input, Some(true));
+
+    // 工具结果带回凭据：紧跟在最后一条 Assistant 之后的结果是本次提交的。
+    let result = AiItem::function_call_output("call-1", serde_json::Value::String(known.into()));
+    send(vec![user("read it"), call(), result.clone()]).await;
+    assert_eq!(rows().await.len(), 1);
+    let after_tool = reuses().await;
+    assert_eq!(after_tool.items.len(), 2);
+    assert!(
+        after_tool
+            .items
+            .iter()
+            .any(|item| item.source_type == "tool_result")
+    );
+
+    // 下一轮把这条工具结果当历史重放：不新增复用位置。
+    send(vec![
+        user("read it"),
+        call(),
+        result,
+        AiItem::output_text("done"),
+        user("next"),
+    ])
+    .await;
+    assert_eq!(rows().await.len(), 1);
+    assert_eq!(reuses().await.items.len(), 2);
+
+    // 已知凭据以裸值出现，没有检测器认得出的上下文：照样按实际发生的替换记录。
+    let bare = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
+    assert!(
+        gateway
+            .redaction
+            .test_text(bare.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    send(vec![
+        user("read it"),
+        call(),
+        AiItem::function_call_output("call-1", serde_json::Value::String(bare.into())),
+    ])
+    .await;
+    assert_eq!(rows().await.len(), 1);
+    let after_bare = reuses().await;
+    assert_eq!(after_bare.items.len(), 3, "{:?}", after_bare.items);
+    assert_eq!(
+        after_bare
+            .items
+            .iter()
+            .filter(|item| item.source_type == "tool_result")
+            .count(),
+        2
+    );
+
+    // 全新的凭据出现在重放的历史里时，它从未被记录过，仍然是一次新增发现。
+    send(vec![user(fresh), AiItem::output_text("ok"), user("go on")]).await;
+    let after_fresh = rows().await;
+    assert_eq!(after_fresh.len(), 2);
+    assert_eq!(after_fresh[0].rule_ids.len(), 1);
+    assert_eq!(after_fresh[0].hits[0].source_type, "user_message");
+    assert_eq!(after_fresh[0].hits[0].latest_input, Some(false));
 }
 
 #[tokio::test]
@@ -273,14 +455,15 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         generation_root_id: None,
     });
     drop(observer);
+    // Persist the discovery emitted asynchronously by the intern task.
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].new_credential_count, 1);
-    assert_eq!(page.items[0].status, "interrupted");
+    assert_eq!(page.items[0].rule_ids.len(), 1);
     assert_eq!(store.inner.active(&principal).await.unwrap().len(), 1);
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
@@ -302,6 +485,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     ));
     drop(observer);
     assert!(store.inner.active(&other).await.unwrap().is_empty());
+    gateway.observation.flush().await.unwrap();
     assert_eq!(
         gateway
             .observation
@@ -315,7 +499,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
 }
 
 #[tokio::test]
-async fn discovery_event_write_failure_does_not_change_protection_and_reports_gap() {
+async fn discovery_event_write_failure_does_not_change_protection_and_marks_interaction_gap() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.path().to_path_buf(),
@@ -331,11 +515,8 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
         .unwrap();
     let principal = Principal::new("discovery-gap-owner");
     let observer = credential_observer(&gateway, &principal);
-    gateway
-        .observation
-        .credential_discoveries(Default::default())
-        .await
-        .unwrap();
+    // 安装故障触发器前先排空准入事件。
+    gateway.observation.flush().await.unwrap();
     sqlx::query("CREATE TRIGGER reject_discovery_event BEFORE INSERT ON observation_events WHEN NEW.kind = 'credential_mappings_created' BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END").execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
@@ -363,13 +544,20 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
         generation_root_id: None,
     });
     drop(observer);
+    // Consume the injected write failure before asserting the gap.
+    gateway.observation.flush().await.unwrap();
     let page = gateway
         .observation
         .credential_discoveries(Default::default())
         .await
         .unwrap();
     assert!(page.items.is_empty());
-    assert!(page.observation_gap);
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .unwrap();
+    assert!(forest.roots[0].interactions[0].observation_gap);
 }
 
 async fn held_publication_turn(
@@ -603,9 +791,11 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
         .await
         .unwrap();
     assert_eq!(discoveries.items.len(), 1);
-    assert_eq!(discoveries.items[0].new_credential_count, 1);
-    assert_eq!(discoveries.items[0].source_types, ["system_or_history"]);
-    assert_ne!(discoveries.items[0].status, "completed");
+    assert_eq!(discoveries.items[0].hits.len(), 1);
+    assert_eq!(
+        discoveries.items[0].hits[0].source_type,
+        "system_or_history"
+    );
 }
 
 #[tokio::test]
@@ -709,4 +899,132 @@ async fn observation_writer_failure_does_not_change_canonical_publication_succes
     ));
     assert!(turn.output.next().await.is_none());
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+}
+
+#[tokio::test]
+async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() {
+    use crate::interaction_observation::CredentialDiscoveryHitDetail;
+
+    let secret = "ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH";
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let expires = now + 86_400_000;
+    let encode = |value: serde_json::Value| {
+        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
+    };
+    let pool = gateway._sqlite_pool.as_ref().unwrap();
+    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0,?)")
+        .bind(now - 100)
+        .bind(now - 50)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?,?)")
+        .bind(now - 100)
+        .bind(now - 50)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,updated_at,expires_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,?,?,?,'[\"github-pat\"]')")
+        .bind(secret)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(expires)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (sequence, kind, payload) in [
+        (
+            1,
+            "input_preview_recorded",
+            encode(serde_json::json!({
+                "kind": "input_preview_recorded",
+                "text": format!("please use {secret} now")
+            })),
+        ),
+        (
+            2,
+            "credential_mappings_created",
+            encode(serde_json::json!({
+                "kind": "credential_mappings_created",
+                "discoveries": [{
+                    "rule_ids": ["github-pat"],
+                    "source_types": ["user_message"],
+                    "locators": [{
+                        "rule_id": "github-pat",
+                        "source_type": "user_message",
+                        "latest_input": true
+                    }],
+                    "marker": "m-secret"
+                }]
+            })),
+        ),
+    ] {
+        sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,'hit-interaction','hit-run',?,?,?)")
+            .bind(sequence)
+            .bind(now - 10 + sequence)
+            .bind(kind)
+            .bind(payload)
+            .bind(expires)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    let detail = gateway
+        .admin()
+        .credential_protection_discovery_hit("2.0", "0")
+        .await
+        .unwrap();
+    match detail {
+        CredentialDiscoveryHitDetail::Available {
+            field,
+            text,
+            truncated,
+            hit_basis,
+            matches,
+        } => {
+            assert_eq!(field.source_type, "user_message");
+            assert_eq!(field.tool_id, None);
+            assert_eq!(field.tool_name, None);
+            assert!(!truncated);
+            assert!(text.contains(secret));
+            assert_eq!(hit_basis, "secret");
+            let hit = matches.iter().find(|item| item.hit).expect("secret match");
+            assert_eq!(hit.rule_id, "github-pat");
+        }
+        CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
+    }
+
+    sqlx::query("DELETE FROM reversible_redaction_mappings WHERE reference='m-secret'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let detail = gateway
+        .admin()
+        .credential_protection_discovery_hit("2.0", "0")
+        .await
+        .unwrap();
+    match detail {
+        CredentialDiscoveryHitDetail::Available {
+            hit_basis, matches, ..
+        } => {
+            assert_eq!(hit_basis, "rule");
+            assert!(
+                matches
+                    .iter()
+                    .any(|item| item.hit && item.rule_id == "github-pat")
+            );
+        }
+        CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
+    }
 }

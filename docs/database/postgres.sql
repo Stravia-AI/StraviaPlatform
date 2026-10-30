@@ -22,6 +22,42 @@ SET client_min_messages = warning;
 SET row_security = off;
 
 --
+-- Name: api_key_spend_credit(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.api_key_spend_credit() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.billing_state = 'charged'
+        AND (TG_OP = 'INSERT' OR OLD.billing_state IS DISTINCT FROM 'charged') THEN
+        INSERT INTO api_key_spend (
+            api_key_id,
+            spent_custom_nanos,
+            spent_usd_unconverted_nanos,
+            reset_at,
+            updated_at
+        )
+        SELECT
+            t.api_key_id,
+            CASE WHEN NEW.billing_custom_nanos IS NOT NULL THEN NEW.billing_custom_nanos ELSE 0 END,
+            CASE WHEN NEW.billing_custom_nanos IS NULL THEN COALESCE(NEW.billing_usd_nanos, 0) ELSE 0 END,
+            NULL,
+            to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        FROM model_turn_observations t
+        WHERE t.id = NEW.model_turn_id
+          AND t.api_key_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM api_keys k WHERE k.id = t.api_key_id)
+        ON CONFLICT(api_key_id) DO UPDATE SET
+            spent_custom_nanos = api_key_spend.spent_custom_nanos + excluded.spent_custom_nanos,
+            spent_usd_unconverted_nanos = api_key_spend.spent_usd_unconverted_nanos + excluded.spent_usd_unconverted_nanos,
+            updated_at = excluded.updated_at;
+    END IF;
+    RETURN NEW;
+END $$;
+
+
+--
 -- Name: retain_terminal_tool_execution(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -62,6 +98,10 @@ PERFORM 1 FROM inference_run_observations WHERE id = NEW.run_id FOR UPDATE;
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -80,7 +120,19 @@ UPDATE stats_usage_buckets SET
     successful_output_known_count = stats_usage_buckets.successful_output_known_count - c.successful_output_known_count,
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count - c.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum - c.successful_output_sum,
-    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum
+    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos - c.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos - c.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count - c.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count - c.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos - c.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos - c.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count - c.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count - c.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos - c.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos - c.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count - c.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count - c.billing_unknown_count
 FROM stats_usage_checkpoints AS c
 WHERE c.source_kind = 'attempt' AND c.source_id = NEW.id
   AND c.scope = stats_usage_buckets.scope
@@ -99,6 +151,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -117,7 +173,19 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
   AND stats_usage_buckets.successful_output_known_count = 0
   AND stats_usage_buckets.successful_duration_known_count = 0
   AND stats_usage_buckets.successful_output_sum = 0
-  AND stats_usage_buckets.successful_duration_sum = 0;
+  AND stats_usage_buckets.successful_duration_sum = 0
+  AND stats_usage_buckets.cost_custom_nanos = 0
+  AND stats_usage_buckets.cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.cost_known_count = 0
+  AND stats_usage_buckets.cost_unknown_count = 0
+  AND stats_usage_buckets.payg_cost_custom_nanos = 0
+  AND stats_usage_buckets.payg_cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.payg_cost_known_count = 0
+  AND stats_usage_buckets.payg_cost_unknown_count = 0
+  AND stats_usage_buckets.billing_custom_nanos = 0
+  AND stats_usage_buckets.billing_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.billing_charged_count = 0
+  AND stats_usage_buckets.billing_unknown_count = 0;
 DELETE FROM stats_usage_checkpoints
 WHERE source_kind = 'attempt' AND source_id = NEW.id;
 INSERT INTO stats_usage_checkpoints (
@@ -130,6 +198,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -149,7 +221,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) SELECT
     source_kind,
     source_id,
@@ -160,6 +244,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -179,13 +267,29 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 FROM stats_usage_attempt_source
 WHERE source_id = NEW.id;
 -- Drive the delta from this source checkpoint, never from the growing aggregate history.
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -204,7 +308,19 @@ UPDATE stats_usage_buckets SET
     successful_output_known_count = stats_usage_buckets.successful_output_known_count - c.successful_output_known_count,
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count - c.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum - c.successful_output_sum,
-    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum
+    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos - c.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos - c.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count - c.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count - c.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos - c.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos - c.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count - c.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count - c.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos - c.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos - c.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count - c.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count - c.billing_unknown_count
 FROM stats_usage_checkpoints AS c
 WHERE c.source_kind = 'run' AND c.source_id = NEW.run_id
   AND c.scope = stats_usage_buckets.scope
@@ -223,6 +339,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -241,7 +361,19 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
   AND stats_usage_buckets.successful_output_known_count = 0
   AND stats_usage_buckets.successful_duration_known_count = 0
   AND stats_usage_buckets.successful_output_sum = 0
-  AND stats_usage_buckets.successful_duration_sum = 0;
+  AND stats_usage_buckets.successful_duration_sum = 0
+  AND stats_usage_buckets.cost_custom_nanos = 0
+  AND stats_usage_buckets.cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.cost_known_count = 0
+  AND stats_usage_buckets.cost_unknown_count = 0
+  AND stats_usage_buckets.payg_cost_custom_nanos = 0
+  AND stats_usage_buckets.payg_cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.payg_cost_known_count = 0
+  AND stats_usage_buckets.payg_cost_unknown_count = 0
+  AND stats_usage_buckets.billing_custom_nanos = 0
+  AND stats_usage_buckets.billing_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.billing_charged_count = 0
+  AND stats_usage_buckets.billing_unknown_count = 0;
 DELETE FROM stats_usage_checkpoints
 WHERE source_kind = 'run' AND source_id = NEW.run_id;
 INSERT INTO stats_usage_checkpoints (
@@ -254,6 +386,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -273,7 +409,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) SELECT
     source_kind,
     source_id,
@@ -284,6 +432,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -303,7 +455,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 FROM stats_usage_run_source
 WHERE source_id = NEW.run_id;
     RETURN NEW;
@@ -326,6 +490,10 @@ INSERT INTO stats_usage_buckets (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -345,7 +513,19 @@ INSERT INTO stats_usage_buckets (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) VALUES (
     NEW.scope,
     NEW.identity,
@@ -354,6 +534,10 @@ INSERT INTO stats_usage_buckets (
     NEW.label,
     NEW.request_count,
     NEW.error_count,
+    NEW.terminal_request_count,
+    NEW.failed_request_count,
+    NEW.upstream_request_count,
+    NEW.upstream_error_count,
     NEW.input_tokens_sum,
     NEW.input_tokens_known,
     NEW.output_tokens_sum,
@@ -373,10 +557,26 @@ INSERT INTO stats_usage_buckets (
     NEW.successful_duration_known_count,
     NEW.successful_output_sum,
     NEW.successful_duration_sum,
-    NEW.last_used_at
+    NEW.last_used_at,
+    NEW.cost_custom_nanos,
+    NEW.cost_usd_unconverted_nanos,
+    NEW.cost_known_count,
+    NEW.cost_unknown_count,
+    NEW.payg_cost_custom_nanos,
+    NEW.payg_cost_usd_unconverted_nanos,
+    NEW.payg_cost_known_count,
+    NEW.payg_cost_unknown_count,
+    NEW.billing_custom_nanos,
+    NEW.billing_usd_unconverted_nanos,
+    NEW.billing_charged_count,
+    NEW.billing_unknown_count
 ) ON CONFLICT (scope, identity, bucket_start) DO UPDATE SET
     request_count = stats_usage_buckets.request_count + excluded.request_count,
     error_count = stats_usage_buckets.error_count + excluded.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count + excluded.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count + excluded.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count + excluded.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count + excluded.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum + excluded.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known + excluded.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum + excluded.output_tokens_sum,
@@ -396,6 +596,18 @@ INSERT INTO stats_usage_buckets (
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count + excluded.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum + excluded.successful_output_sum,
     successful_duration_sum = stats_usage_buckets.successful_duration_sum + excluded.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos + excluded.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos + excluded.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count + excluded.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count + excluded.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos + excluded.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos + excluded.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count + excluded.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count + excluded.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos + excluded.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos + excluded.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count + excluded.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count + excluded.billing_unknown_count,
     label = excluded.label,
     last_used_at = GREATEST(stats_usage_buckets.last_used_at, excluded.last_used_at);
     RETURN NEW;
@@ -420,6 +632,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -438,7 +654,19 @@ UPDATE stats_usage_buckets SET
     successful_output_known_count = stats_usage_buckets.successful_output_known_count - c.successful_output_known_count,
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count - c.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum - c.successful_output_sum,
-    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum
+    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos - c.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos - c.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count - c.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count - c.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos - c.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos - c.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count - c.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count - c.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos - c.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos - c.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count - c.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count - c.billing_unknown_count
 FROM stats_usage_checkpoints AS c
 WHERE c.source_kind = 'rejection' AND c.source_id = NEW.id
   AND c.scope = stats_usage_buckets.scope
@@ -457,6 +685,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -475,7 +707,19 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
   AND stats_usage_buckets.successful_output_known_count = 0
   AND stats_usage_buckets.successful_duration_known_count = 0
   AND stats_usage_buckets.successful_output_sum = 0
-  AND stats_usage_buckets.successful_duration_sum = 0;
+  AND stats_usage_buckets.successful_duration_sum = 0
+  AND stats_usage_buckets.cost_custom_nanos = 0
+  AND stats_usage_buckets.cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.cost_known_count = 0
+  AND stats_usage_buckets.cost_unknown_count = 0
+  AND stats_usage_buckets.payg_cost_custom_nanos = 0
+  AND stats_usage_buckets.payg_cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.payg_cost_known_count = 0
+  AND stats_usage_buckets.payg_cost_unknown_count = 0
+  AND stats_usage_buckets.billing_custom_nanos = 0
+  AND stats_usage_buckets.billing_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.billing_charged_count = 0
+  AND stats_usage_buckets.billing_unknown_count = 0;
 DELETE FROM stats_usage_checkpoints
 WHERE source_kind = 'rejection' AND source_id = NEW.id;
 INSERT INTO stats_usage_checkpoints (
@@ -488,6 +732,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -507,7 +755,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) SELECT
     source_kind,
     source_id,
@@ -518,6 +778,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -537,7 +801,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 FROM stats_usage_rejection_source
 WHERE source_id = NEW.id;
     RETURN NEW;
@@ -562,6 +838,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -580,7 +860,19 @@ UPDATE stats_usage_buckets SET
     successful_output_known_count = stats_usage_buckets.successful_output_known_count - c.successful_output_known_count,
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count - c.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum - c.successful_output_sum,
-    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum
+    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos - c.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos - c.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count - c.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count - c.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos - c.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos - c.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count - c.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count - c.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos - c.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos - c.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count - c.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count - c.billing_unknown_count
 FROM stats_usage_checkpoints AS c
 WHERE c.source_kind = 'run' AND c.source_id = NEW.id
   AND c.scope = stats_usage_buckets.scope
@@ -599,6 +891,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -617,7 +913,19 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
   AND stats_usage_buckets.successful_output_known_count = 0
   AND stats_usage_buckets.successful_duration_known_count = 0
   AND stats_usage_buckets.successful_output_sum = 0
-  AND stats_usage_buckets.successful_duration_sum = 0;
+  AND stats_usage_buckets.successful_duration_sum = 0
+  AND stats_usage_buckets.cost_custom_nanos = 0
+  AND stats_usage_buckets.cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.cost_known_count = 0
+  AND stats_usage_buckets.cost_unknown_count = 0
+  AND stats_usage_buckets.payg_cost_custom_nanos = 0
+  AND stats_usage_buckets.payg_cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.payg_cost_known_count = 0
+  AND stats_usage_buckets.payg_cost_unknown_count = 0
+  AND stats_usage_buckets.billing_custom_nanos = 0
+  AND stats_usage_buckets.billing_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.billing_charged_count = 0
+  AND stats_usage_buckets.billing_unknown_count = 0;
 DELETE FROM stats_usage_checkpoints
 WHERE source_kind = 'run' AND source_id = NEW.id;
 INSERT INTO stats_usage_checkpoints (
@@ -630,6 +938,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -649,7 +961,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) SELECT
     source_kind,
     source_id,
@@ -660,6 +984,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -679,7 +1007,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 FROM stats_usage_run_source
 WHERE source_id = NEW.id;
     RETURN NEW;
@@ -704,6 +1044,10 @@ BEGIN
 UPDATE stats_usage_buckets SET
     request_count = stats_usage_buckets.request_count - c.request_count,
     error_count = stats_usage_buckets.error_count - c.error_count,
+    terminal_request_count = stats_usage_buckets.terminal_request_count - c.terminal_request_count,
+    failed_request_count = stats_usage_buckets.failed_request_count - c.failed_request_count,
+    upstream_request_count = stats_usage_buckets.upstream_request_count - c.upstream_request_count,
+    upstream_error_count = stats_usage_buckets.upstream_error_count - c.upstream_error_count,
     input_tokens_sum = stats_usage_buckets.input_tokens_sum - c.input_tokens_sum,
     input_tokens_known = stats_usage_buckets.input_tokens_known - c.input_tokens_known,
     output_tokens_sum = stats_usage_buckets.output_tokens_sum - c.output_tokens_sum,
@@ -722,7 +1066,19 @@ UPDATE stats_usage_buckets SET
     successful_output_known_count = stats_usage_buckets.successful_output_known_count - c.successful_output_known_count,
     successful_duration_known_count = stats_usage_buckets.successful_duration_known_count - c.successful_duration_known_count,
     successful_output_sum = stats_usage_buckets.successful_output_sum - c.successful_output_sum,
-    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum
+    successful_duration_sum = stats_usage_buckets.successful_duration_sum - c.successful_duration_sum,
+    cost_custom_nanos = stats_usage_buckets.cost_custom_nanos - c.cost_custom_nanos,
+    cost_usd_unconverted_nanos = stats_usage_buckets.cost_usd_unconverted_nanos - c.cost_usd_unconverted_nanos,
+    cost_known_count = stats_usage_buckets.cost_known_count - c.cost_known_count,
+    cost_unknown_count = stats_usage_buckets.cost_unknown_count - c.cost_unknown_count,
+    payg_cost_custom_nanos = stats_usage_buckets.payg_cost_custom_nanos - c.payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos = stats_usage_buckets.payg_cost_usd_unconverted_nanos - c.payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count = stats_usage_buckets.payg_cost_known_count - c.payg_cost_known_count,
+    payg_cost_unknown_count = stats_usage_buckets.payg_cost_unknown_count - c.payg_cost_unknown_count,
+    billing_custom_nanos = stats_usage_buckets.billing_custom_nanos - c.billing_custom_nanos,
+    billing_usd_unconverted_nanos = stats_usage_buckets.billing_usd_unconverted_nanos - c.billing_usd_unconverted_nanos,
+    billing_charged_count = stats_usage_buckets.billing_charged_count - c.billing_charged_count,
+    billing_unknown_count = stats_usage_buckets.billing_unknown_count - c.billing_unknown_count
 FROM stats_usage_checkpoints AS c
 WHERE c.source_kind = 'turn' AND c.source_id = NEW.id
   AND c.scope = stats_usage_buckets.scope
@@ -741,6 +1097,10 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
 )
   AND stats_usage_buckets.request_count = 0
   AND stats_usage_buckets.error_count = 0
+  AND stats_usage_buckets.terminal_request_count = 0
+  AND stats_usage_buckets.failed_request_count = 0
+  AND stats_usage_buckets.upstream_request_count = 0
+  AND stats_usage_buckets.upstream_error_count = 0
   AND stats_usage_buckets.input_tokens_sum = 0
   AND stats_usage_buckets.input_tokens_known = 0
   AND stats_usage_buckets.output_tokens_sum = 0
@@ -759,7 +1119,19 @@ WHERE (stats_usage_buckets.scope, stats_usage_buckets.identity, stats_usage_buck
   AND stats_usage_buckets.successful_output_known_count = 0
   AND stats_usage_buckets.successful_duration_known_count = 0
   AND stats_usage_buckets.successful_output_sum = 0
-  AND stats_usage_buckets.successful_duration_sum = 0;
+  AND stats_usage_buckets.successful_duration_sum = 0
+  AND stats_usage_buckets.cost_custom_nanos = 0
+  AND stats_usage_buckets.cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.cost_known_count = 0
+  AND stats_usage_buckets.cost_unknown_count = 0
+  AND stats_usage_buckets.payg_cost_custom_nanos = 0
+  AND stats_usage_buckets.payg_cost_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.payg_cost_known_count = 0
+  AND stats_usage_buckets.payg_cost_unknown_count = 0
+  AND stats_usage_buckets.billing_custom_nanos = 0
+  AND stats_usage_buckets.billing_usd_unconverted_nanos = 0
+  AND stats_usage_buckets.billing_charged_count = 0
+  AND stats_usage_buckets.billing_unknown_count = 0;
 DELETE FROM stats_usage_checkpoints
 WHERE source_kind = 'turn' AND source_id = NEW.id;
 INSERT INTO stats_usage_checkpoints (
@@ -772,6 +1144,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -791,7 +1167,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 ) SELECT
     source_kind,
     source_id,
@@ -802,6 +1190,10 @@ INSERT INTO stats_usage_checkpoints (
     label,
     request_count,
     error_count,
+    terminal_request_count,
+    failed_request_count,
+    upstream_request_count,
+    upstream_error_count,
     input_tokens_sum,
     input_tokens_known,
     output_tokens_sum,
@@ -821,7 +1213,19 @@ INSERT INTO stats_usage_checkpoints (
     successful_duration_known_count,
     successful_output_sum,
     successful_duration_sum,
-    last_used_at
+    last_used_at,
+    cost_custom_nanos,
+    cost_usd_unconverted_nanos,
+    cost_known_count,
+    cost_unknown_count,
+    payg_cost_custom_nanos,
+    payg_cost_usd_unconverted_nanos,
+    payg_cost_known_count,
+    payg_cost_unknown_count,
+    billing_custom_nanos,
+    billing_usd_unconverted_nanos,
+    billing_charged_count,
+    billing_unknown_count
 FROM stats_usage_turn_source
 WHERE source_id = NEW.id;
     RETURN NEW;
@@ -901,6 +1305,19 @@ CREATE TABLE public.api_key_models (
 
 
 --
+-- Name: api_key_spend; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.api_key_spend (
+    api_key_id text NOT NULL,
+    spent_custom_nanos bigint DEFAULT 0 NOT NULL,
+    spent_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    reset_at text,
+    updated_at text NOT NULL
+);
+
+
+--
 -- Name: api_keys; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -918,7 +1335,9 @@ CREATE TABLE public.api_keys (
     inject_web_search boolean DEFAULT false NOT NULL,
     inject_media_generation boolean DEFAULT false NOT NULL,
     rpm_limit integer,
-    CONSTRAINT api_keys_rpm_limit_check CHECK (((rpm_limit IS NULL) OR (rpm_limit > 0)))
+    spend_limit_nanos bigint,
+    CONSTRAINT api_keys_rpm_limit_check CHECK (((rpm_limit IS NULL) OR (rpm_limit > 0))),
+    CONSTRAINT api_keys_spend_limit_nanos_check CHECK (((spend_limit_nanos IS NULL) OR (spend_limit_nanos > 0)))
 );
 
 
@@ -1002,6 +1421,21 @@ CREATE TABLE public.credential_custom_rules (
 
 
 --
+-- Name: credential_mapping_reuses; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.credential_mapping_reuses (
+    marker text NOT NULL,
+    interaction_id text NOT NULL,
+    run_id text,
+    source_type text NOT NULL,
+    tool_id text DEFAULT ''::text NOT NULL,
+    latest_input boolean DEFAULT false NOT NULL,
+    last_reused_at bigint NOT NULL
+);
+
+
+--
 -- Name: history_markers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1054,6 +1488,7 @@ CREATE TABLE public.inference_run_observations (
     failure_json text,
     request_model text,
     delivery_completed_at bigint,
+    rejected_before_target boolean DEFAULT false NOT NULL,
     CONSTRAINT inference_run_background_active_contract CHECK ((background_active >= 0))
 );
 
@@ -1077,11 +1512,6 @@ CREATE TABLE public.interaction_observations (
     started_at bigint NOT NULL,
     last_active_at bigint NOT NULL,
     visible_tail text DEFAULT ''::text NOT NULL,
-    input_tokens bigint,
-    output_tokens bigint,
-    cache_read_tokens bigint,
-    cache_write_tokens bigint,
-    reasoning_tokens bigint,
     observation_gap boolean DEFAULT false NOT NULL,
     last_event_sequence bigint DEFAULT 0 NOT NULL,
     expires_at bigint NOT NULL,
@@ -1166,11 +1596,6 @@ CREATE TABLE public.model_turn_observations (
     status text NOT NULL,
     started_at bigint NOT NULL,
     finished_at bigint,
-    input_tokens bigint,
-    output_tokens bigint,
-    cache_read_tokens bigint,
-    cache_write_tokens bigint,
-    reasoning_tokens bigint,
     last_event_sequence bigint NOT NULL,
     estimated_input_tokens bigint,
     CONSTRAINT model_turn_observations_estimated_input_tokens_check CHECK ((estimated_input_tokens >= 0))
@@ -1191,7 +1616,9 @@ CREATE TABLE public.models (
     display_name text,
     default_thinking_level text,
     output_modality text,
+    billing_json jsonb,
     CONSTRAINT models_balance_contract CHECK ((balance = ANY (ARRAY['traffic_equalization'::text, 'latency_preference'::text]))),
+    CONSTRAINT models_billing_json_check CHECK (((billing_json IS NULL) OR (jsonb_typeof(billing_json) = 'object'::text))),
     CONSTRAINT models_default_thinking_level_contract CHECK (((default_thinking_level IS NULL) OR (default_thinking_level = ANY (ARRAY['off'::text, 'minimal'::text, 'low'::text, 'medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))),
     CONSTRAINT models_output_modality_check CHECK (((output_modality IS NULL) OR (output_modality = ANY (ARRAY['text'::text, 'image'::text]))))
 );
@@ -1341,6 +1768,23 @@ CREATE TABLE public.provider_allowance_suspensions (
 
 
 --
+-- Name: provider_cost_plans; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.provider_cost_plans (
+    id text NOT NULL,
+    provider_id text NOT NULL,
+    effective_from bigint NOT NULL,
+    basis text NOT NULL,
+    period text,
+    price_usd_nanos bigint,
+    price_custom_nanos bigint,
+    price_currency text,
+    created_at text NOT NULL
+);
+
+
+--
 -- Name: provider_model_cost_rules; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1397,6 +1841,7 @@ CREATE TABLE public.provider_models (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     snapshot_state jsonb DEFAULT '{"type": "edited", "source": null}'::jsonb NOT NULL,
+    source_metadata_json jsonb,
     CONSTRAINT provider_models_lifecycle_status_check CHECK ((lifecycle_status = ANY (ARRAY['alpha'::text, 'beta'::text, 'deprecated'::text]))),
     CONSTRAINT provider_models_limit_context_check CHECK (((limit_context IS NULL) OR (limit_context >= 0))),
     CONSTRAINT provider_models_metadata_json_check CHECK ((jsonb_typeof(metadata_json) = 'object'::text)),
@@ -1422,7 +1867,8 @@ CASE (snapshot_state ->> 'type'::text)
     END), false))
     ELSE false
 END)),
-    CONSTRAINT provider_models_source_kind_check CHECK ((source_kind = ANY (ARRAY['discovered'::text, 'manual'::text])))
+    CONSTRAINT provider_models_source_kind_check CHECK ((source_kind = ANY (ARRAY['discovered'::text, 'manual'::text]))),
+    CONSTRAINT provider_models_source_metadata_json_check CHECK (((source_metadata_json IS NULL) OR (jsonb_typeof(source_metadata_json) = 'object'::text)))
 );
 
 
@@ -1546,7 +1992,8 @@ CREATE TABLE public.reversible_redaction_mappings (
     published_at bigint,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
-    expires_at bigint NOT NULL
+    expires_at bigint NOT NULL,
+    rule_ids text DEFAULT '[]'::text NOT NULL
 );
 
 
@@ -1588,7 +2035,16 @@ CREATE TABLE public.target_attempt_observations (
     cache_write_tokens bigint,
     reasoning_tokens bigint,
     usage_recorded boolean DEFAULT false NOT NULL,
-    last_event_sequence bigint NOT NULL
+    last_event_sequence bigint NOT NULL,
+    error_source text,
+    error_message text,
+    upstream_error_code text,
+    cost_basis text,
+    cost_usd_nanos bigint,
+    cost_custom_nanos bigint,
+    billing_state text,
+    billing_usd_nanos bigint,
+    billing_custom_nanos bigint
 );
 
 
@@ -1606,6 +2062,16 @@ CREATE VIEW public.stats_usage_attempt_source AS
     ''::text AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+        CASE
+            WHEN ((a.status = 'completed'::text) OR ((a.status = 'failed'::text) AND (a.error_source = 'upstream'::text))) THEN 1
+            ELSE 0
+        END AS upstream_request_count,
+        CASE
+            WHEN ((a.status = 'failed'::text) AND (a.error_source = 'upstream'::text)) THEN 1
+            ELSE 0
+        END AS upstream_error_count,
         CASE
             WHEN ((a.status = 'completed'::text) AND (a.input_tokens IS NOT NULL) AND (a.cache_read_tokens IS NOT NULL)) THEN
             CASE
@@ -1680,7 +2146,55 @@ CREATE VIEW public.stats_usage_attempt_source AS
             WHEN (a.status = 'completed'::text) THEN COALESCE(a.duration_ms, (0)::bigint)
             ELSE (0)::bigint
         END AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+        CASE
+            WHEN (a.cost_custom_nanos IS NOT NULL) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS cost_custom_nanos,
+        CASE
+            WHEN (a.cost_custom_nanos IS NULL) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS cost_usd_unconverted_nanos,
+        CASE
+            WHEN (a.cost_usd_nanos IS NOT NULL) THEN 1
+            ELSE 0
+        END AS cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis IS NOT NULL) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS cost_unknown_count,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NOT NULL)) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS payg_cost_custom_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NULL)) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS payg_cost_usd_unconverted_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NOT NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_unknown_count,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NOT NULL)) THEN a.billing_custom_nanos
+            ELSE (0)::bigint
+        END AS billing_custom_nanos,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NULL)) THEN COALESCE(a.billing_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS billing_usd_unconverted_nanos,
+        CASE
+            WHEN (a.billing_state = 'charged'::text) THEN 1
+            ELSE 0
+        END AS billing_charged_count,
+        CASE
+            WHEN (a.billing_state = 'unknown'::text) THEN 1
+            ELSE 0
+        END AS billing_unknown_count
    FROM (public.target_attempt_observations a
      JOIN public.model_turn_observations t ON ((t.id = a.model_turn_id)))
 UNION ALL
@@ -1693,6 +2207,10 @@ UNION ALL
     COALESCE(NULLIF(t.model_display_name, ''::text), t.route_id) AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
         CASE
             WHEN ((a.status = 'completed'::text) AND (a.input_tokens IS NOT NULL) AND (a.cache_read_tokens IS NOT NULL)) THEN
             CASE
@@ -1767,7 +2285,55 @@ UNION ALL
             WHEN (a.status = 'completed'::text) THEN COALESCE(a.duration_ms, (0)::bigint)
             ELSE (0)::bigint
         END AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+        CASE
+            WHEN (a.cost_custom_nanos IS NOT NULL) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS cost_custom_nanos,
+        CASE
+            WHEN (a.cost_custom_nanos IS NULL) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS cost_usd_unconverted_nanos,
+        CASE
+            WHEN (a.cost_usd_nanos IS NOT NULL) THEN 1
+            ELSE 0
+        END AS cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis IS NOT NULL) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS cost_unknown_count,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NOT NULL)) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS payg_cost_custom_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NULL)) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS payg_cost_usd_unconverted_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NOT NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_unknown_count,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NOT NULL)) THEN a.billing_custom_nanos
+            ELSE (0)::bigint
+        END AS billing_custom_nanos,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NULL)) THEN COALESCE(a.billing_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS billing_usd_unconverted_nanos,
+        CASE
+            WHEN (a.billing_state = 'charged'::text) THEN 1
+            ELSE 0
+        END AS billing_charged_count,
+        CASE
+            WHEN (a.billing_state = 'unknown'::text) THEN 1
+            ELSE 0
+        END AS billing_unknown_count
    FROM (public.target_attempt_observations a
      JOIN public.model_turn_observations t ON ((t.id = a.model_turn_id)))
 UNION ALL
@@ -1780,6 +2346,10 @@ UNION ALL
     COALESCE(NULLIF(t.api_key_name, ''::text), t.api_key_id, 'Unknown API Key'::text) AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
         CASE
             WHEN ((a.status = 'completed'::text) AND (a.input_tokens IS NOT NULL) AND (a.cache_read_tokens IS NOT NULL)) THEN
             CASE
@@ -1854,7 +2424,55 @@ UNION ALL
             WHEN (a.status = 'completed'::text) THEN COALESCE(a.duration_ms, (0)::bigint)
             ELSE (0)::bigint
         END AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+        CASE
+            WHEN (a.cost_custom_nanos IS NOT NULL) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS cost_custom_nanos,
+        CASE
+            WHEN (a.cost_custom_nanos IS NULL) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS cost_usd_unconverted_nanos,
+        CASE
+            WHEN (a.cost_usd_nanos IS NOT NULL) THEN 1
+            ELSE 0
+        END AS cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis IS NOT NULL) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS cost_unknown_count,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NOT NULL)) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS payg_cost_custom_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NULL)) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS payg_cost_usd_unconverted_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NOT NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_unknown_count,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NOT NULL)) THEN a.billing_custom_nanos
+            ELSE (0)::bigint
+        END AS billing_custom_nanos,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NULL)) THEN COALESCE(a.billing_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS billing_usd_unconverted_nanos,
+        CASE
+            WHEN (a.billing_state = 'charged'::text) THEN 1
+            ELSE 0
+        END AS billing_charged_count,
+        CASE
+            WHEN (a.billing_state = 'unknown'::text) THEN 1
+            ELSE 0
+        END AS billing_unknown_count
    FROM (public.target_attempt_observations a
      JOIN public.model_turn_observations t ON ((t.id = a.model_turn_id)))
 UNION ALL
@@ -1867,6 +2485,16 @@ UNION ALL
     COALESCE(NULLIF(a.provider_name, ''::text), a.provider_id) AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+        CASE
+            WHEN ((a.status = 'completed'::text) OR ((a.status = 'failed'::text) AND (a.error_source = 'upstream'::text))) THEN 1
+            ELSE 0
+        END AS upstream_request_count,
+        CASE
+            WHEN ((a.status = 'failed'::text) AND (a.error_source = 'upstream'::text)) THEN 1
+            ELSE 0
+        END AS upstream_error_count,
         CASE
             WHEN ((a.status = 'completed'::text) AND (a.input_tokens IS NOT NULL) AND (a.cache_read_tokens IS NOT NULL)) THEN
             CASE
@@ -1944,7 +2572,55 @@ UNION ALL
             WHEN (a.status = 'completed'::text) THEN COALESCE(a.duration_ms, (0)::bigint)
             ELSE (0)::bigint
         END AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+        CASE
+            WHEN (a.cost_custom_nanos IS NOT NULL) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS cost_custom_nanos,
+        CASE
+            WHEN (a.cost_custom_nanos IS NULL) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS cost_usd_unconverted_nanos,
+        CASE
+            WHEN (a.cost_usd_nanos IS NOT NULL) THEN 1
+            ELSE 0
+        END AS cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis IS NOT NULL) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS cost_unknown_count,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NOT NULL)) THEN a.cost_custom_nanos
+            ELSE (0)::bigint
+        END AS payg_cost_custom_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_custom_nanos IS NULL)) THEN COALESCE(a.cost_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS payg_cost_usd_unconverted_nanos,
+        CASE
+            WHEN ((a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NOT NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_known_count,
+        CASE
+            WHEN ((a.status <> 'running'::text) AND (a.cost_basis = 'usage'::text) AND (a.cost_usd_nanos IS NULL)) THEN 1
+            ELSE 0
+        END AS payg_cost_unknown_count,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NOT NULL)) THEN a.billing_custom_nanos
+            ELSE (0)::bigint
+        END AS billing_custom_nanos,
+        CASE
+            WHEN ((a.billing_state = 'charged'::text) AND (a.billing_custom_nanos IS NULL)) THEN COALESCE(a.billing_usd_nanos, (0)::bigint)
+            ELSE (0)::bigint
+        END AS billing_usd_unconverted_nanos,
+        CASE
+            WHEN (a.billing_state = 'charged'::text) THEN 1
+            ELSE 0
+        END AS billing_charged_count,
+        CASE
+            WHEN (a.billing_state = 'unknown'::text) THEN 1
+            ELSE 0
+        END AS billing_unknown_count
    FROM (public.target_attempt_observations a
      JOIN public.model_turn_observations t ON ((t.id = a.model_turn_id)));
 
@@ -1980,7 +2656,23 @@ CREATE TABLE public.stats_usage_buckets (
     successful_duration_known_count bigint DEFAULT 0 NOT NULL,
     successful_output_sum bigint DEFAULT 0 NOT NULL,
     successful_duration_sum bigint DEFAULT 0 NOT NULL,
-    last_used_at bigint NOT NULL
+    last_used_at bigint NOT NULL,
+    terminal_request_count bigint DEFAULT 0 NOT NULL,
+    failed_request_count bigint DEFAULT 0 NOT NULL,
+    upstream_request_count bigint DEFAULT 0 NOT NULL,
+    upstream_error_count bigint DEFAULT 0 NOT NULL,
+    cost_custom_nanos bigint DEFAULT 0 NOT NULL,
+    cost_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    cost_known_count bigint DEFAULT 0 NOT NULL,
+    cost_unknown_count bigint DEFAULT 0 NOT NULL,
+    payg_cost_custom_nanos bigint DEFAULT 0 NOT NULL,
+    payg_cost_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    payg_cost_known_count bigint DEFAULT 0 NOT NULL,
+    payg_cost_unknown_count bigint DEFAULT 0 NOT NULL,
+    billing_custom_nanos bigint DEFAULT 0 NOT NULL,
+    billing_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    billing_charged_count bigint DEFAULT 0 NOT NULL,
+    billing_unknown_count bigint DEFAULT 0 NOT NULL
 );
 
 
@@ -2017,7 +2709,23 @@ CREATE TABLE public.stats_usage_checkpoints (
     successful_duration_known_count bigint DEFAULT 0 NOT NULL,
     successful_output_sum bigint DEFAULT 0 NOT NULL,
     successful_duration_sum bigint DEFAULT 0 NOT NULL,
-    last_used_at bigint NOT NULL
+    last_used_at bigint NOT NULL,
+    terminal_request_count bigint DEFAULT 0 NOT NULL,
+    failed_request_count bigint DEFAULT 0 NOT NULL,
+    upstream_request_count bigint DEFAULT 0 NOT NULL,
+    upstream_error_count bigint DEFAULT 0 NOT NULL,
+    cost_custom_nanos bigint DEFAULT 0 NOT NULL,
+    cost_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    cost_known_count bigint DEFAULT 0 NOT NULL,
+    cost_unknown_count bigint DEFAULT 0 NOT NULL,
+    payg_cost_custom_nanos bigint DEFAULT 0 NOT NULL,
+    payg_cost_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    payg_cost_known_count bigint DEFAULT 0 NOT NULL,
+    payg_cost_unknown_count bigint DEFAULT 0 NOT NULL,
+    billing_custom_nanos bigint DEFAULT 0 NOT NULL,
+    billing_usd_unconverted_nanos bigint DEFAULT 0 NOT NULL,
+    billing_charged_count bigint DEFAULT 0 NOT NULL,
+    billing_unknown_count bigint DEFAULT 0 NOT NULL
 );
 
 
@@ -2038,6 +2746,10 @@ CREATE VIEW public.stats_usage_rejection_source AS
             WHEN ((status_code <> 499) AND (code <> ALL (ARRAY['request_aborted'::text, 'cancelled'::text, 'client_disconnected'::text]))) THEN 1
             ELSE 0
         END AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2057,7 +2769,19 @@ CREATE VIEW public.stats_usage_rejection_source AS
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    COALESCE(started_at, occurred_at) AS last_used_at
+    COALESCE(started_at, occurred_at) AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM public.rejected_request_observations r;
 
 
@@ -2078,6 +2802,16 @@ CREATE VIEW public.stats_usage_run_source AS
             WHEN ((r.status = 'failed'::text) AND (r.finished_at IS NOT NULL) AND ((r.failure_json IS NOT NULL) OR (COALESCE(r.terminal_reason, ''::text) <> ALL (ARRAY['cancelled'::text, 'client_disconnected'::text, 'websocket_delivery_dropped'::text, 'request_aborted'::text])))) THEN 1
             ELSE 0
         END AS error_count,
+        CASE
+            WHEN ((r.status = ANY (ARRAY['completed'::text, 'failed'::text, 'waiting_client'::text, 'superseded'::text])) AND (r.finished_at IS NOT NULL) AND ((r.failure_json IS NOT NULL) OR (COALESCE(r.terminal_reason, ''::text) <> ALL (ARRAY['cancelled'::text, 'client_disconnected'::text, 'websocket_delivery_dropped'::text, 'request_aborted'::text]))) AND (NOT r.rejected_before_target)) THEN 1
+            ELSE 0
+        END AS terminal_request_count,
+        CASE
+            WHEN ((r.status = 'failed'::text) AND (r.finished_at IS NOT NULL) AND ((r.failure_json IS NOT NULL) OR (COALESCE(r.terminal_reason, ''::text) <> ALL (ARRAY['cancelled'::text, 'client_disconnected'::text, 'websocket_delivery_dropped'::text, 'request_aborted'::text]))) AND (NOT r.rejected_before_target)) THEN 1
+            ELSE 0
+        END AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2097,7 +2831,19 @@ CREATE VIEW public.stats_usage_run_source AS
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    r.started_at AS last_used_at
+    r.started_at AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM public.inference_run_observations r
 UNION ALL
  SELECT 'run'::text AS source_kind,
@@ -2112,6 +2858,10 @@ UNION ALL
             WHEN ((r.status = 'failed'::text) AND (r.finished_at IS NOT NULL) AND ((r.failure_json IS NOT NULL) OR (COALESCE(r.terminal_reason, ''::text) <> ALL (ARRAY['cancelled'::text, 'client_disconnected'::text, 'websocket_delivery_dropped'::text, 'request_aborted'::text])))) THEN 1
             ELSE 0
         END AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2131,7 +2881,19 @@ UNION ALL
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    r.started_at AS last_used_at
+    r.started_at AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM (public.inference_run_observations r
      JOIN ( SELECT target_attempt_observations.run_id,
             target_attempt_observations.provider_id,
@@ -2154,6 +2916,10 @@ CREATE VIEW public.stats_usage_turn_source AS
     ''::text AS label,
     0 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2176,7 +2942,19 @@ CREATE VIEW public.stats_usage_turn_source AS
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM public.model_turn_observations t
 UNION ALL
  SELECT 'turn'::text AS source_kind,
@@ -2188,6 +2966,10 @@ UNION ALL
     COALESCE(NULLIF(t.model_display_name, ''::text), t.route_id) AS label,
     1 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2210,7 +2992,19 @@ UNION ALL
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM public.model_turn_observations t
 UNION ALL
  SELECT 'turn'::text AS source_kind,
@@ -2222,6 +3016,10 @@ UNION ALL
     COALESCE(NULLIF(t.api_key_name, ''::text), t.api_key_id, 'Unknown API Key'::text) AS label,
     1 AS request_count,
     0 AS error_count,
+    0 AS terminal_request_count,
+    0 AS failed_request_count,
+    0 AS upstream_request_count,
+    0 AS upstream_error_count,
     0 AS input_tokens_sum,
     0 AS input_tokens_known,
     0 AS output_tokens_sum,
@@ -2244,79 +3042,163 @@ UNION ALL
     0 AS successful_duration_known_count,
     0 AS successful_output_sum,
     0 AS successful_duration_sum,
-    t.started_at AS last_used_at
+    t.started_at AS last_used_at,
+    0 AS cost_custom_nanos,
+    0 AS cost_usd_unconverted_nanos,
+    0 AS cost_known_count,
+    0 AS cost_unknown_count,
+    0 AS payg_cost_custom_nanos,
+    0 AS payg_cost_usd_unconverted_nanos,
+    0 AS payg_cost_known_count,
+    0 AS payg_cost_unknown_count,
+    0 AS billing_custom_nanos,
+    0 AS billing_usd_unconverted_nanos,
+    0 AS billing_charged_count,
+    0 AS billing_unknown_count
    FROM public.model_turn_observations t;
 
 
 --
--- Name: turn_chain_contents; Type: TABLE; Schema: public; Owner: -
+-- Name: turn_content_gc; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.turn_chain_contents (
-    id bigint NOT NULL,
-    principal text NOT NULL,
-    content_key text NOT NULL,
-    content bytea NOT NULL
-);
-ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN content SET STORAGE EXTERNAL;
-
-
---
--- Name: turn_chain_contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.turn_chain_contents_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: turn_chain_contents_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.turn_chain_contents_id_seq OWNED BY public.turn_chain_contents.id;
-
-
---
--- Name: turn_chain_node_contents; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.turn_chain_node_contents (
-    node_id text NOT NULL,
-    principal text NOT NULL,
+CREATE TABLE public.turn_content_gc (
     content_id bigint NOT NULL
 );
 
 
 --
--- Name: turn_chain_nodes; Type: TABLE; Schema: public; Owner: -
+-- Name: turn_contents; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.turn_chain_nodes (
-    id text NOT NULL,
-    kind text NOT NULL,
-    parent_id text,
-    principal text NOT NULL,
-    payload_version bigint NOT NULL,
-    payload bytea NOT NULL,
-    created_at bigint NOT NULL,
+CREATE TABLE public.turn_contents (
+    id bigint NOT NULL,
+    scope_id bigint NOT NULL,
+    digest bytea NOT NULL,
+    content bytea NOT NULL,
+    CONSTRAINT turn_contents_digest_check CHECK ((octet_length(digest) = 32))
+);
+ALTER TABLE ONLY public.turn_contents ALTER COLUMN content SET STORAGE EXTERNAL;
+
+
+--
+-- Name: turn_contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.turn_contents ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME public.turn_contents_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: turn_node_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_contents (
+    node_pk bigint NOT NULL,
+    scope_id bigint NOT NULL,
+    ordinal bigint NOT NULL,
+    content_id bigint NOT NULL,
+    CONSTRAINT turn_node_contents_ordinal_check CHECK ((ordinal >= 0))
+);
+
+
+--
+-- Name: turn_node_gc; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_gc (
+    node_pk bigint NOT NULL
+);
+
+
+--
+-- Name: turn_node_payloads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_payloads (
+    node_pk bigint NOT NULL,
+    payload bytea NOT NULL
+);
+ALTER TABLE ONLY public.turn_node_payloads ALTER COLUMN payload SET STORAGE EXTERNAL;
+
+
+--
+-- Name: turn_node_retention; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_retention (
+    node_pk bigint NOT NULL,
     expires_at bigint NOT NULL,
+    deleting boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: turn_nodes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_nodes (
+    node_pk bigint NOT NULL,
+    id text NOT NULL,
+    scope_id bigint NOT NULL,
+    kind text NOT NULL,
+    parent_pk bigint,
+    payload_version bigint NOT NULL,
+    created_at bigint NOT NULL,
     prefix_namespace text,
     prefix_fingerprint text,
     prefix_item_count bigint,
     prefix_completed_at bigint,
-    storage_format integer DEFAULT 2 NOT NULL,
-    prefix_projection_version integer,
+    prefix_projection_version bigint,
     prefix_controls_fingerprint text,
     prefix_context_fingerprint text,
-    CONSTRAINT turn_chain_nodes_kind_check CHECK ((kind = ANY (ARRAY['response'::text, 'agent'::text, 'web_search'::text]))),
-    CONSTRAINT turn_chain_nodes_payload_version_check CHECK ((payload_version > 0)),
-    CONSTRAINT turn_chain_nodes_storage_format_v2 CHECK ((storage_format = ANY (ARRAY[0, 1, 2])))
+    CONSTRAINT turn_nodes_kind_check CHECK ((kind = ANY (ARRAY['response'::text, 'agent'::text, 'web_search'::text]))),
+    CONSTRAINT turn_nodes_payload_version_check CHECK ((payload_version > 0))
 );
-ALTER TABLE ONLY public.turn_chain_nodes ALTER COLUMN payload SET STORAGE EXTERNAL;
+
+
+--
+-- Name: turn_nodes_node_pk_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.turn_nodes ALTER COLUMN node_pk ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME public.turn_nodes_node_pk_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: turn_scopes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_scopes (
+    id bigint NOT NULL,
+    principal text NOT NULL
+);
+
+
+--
+-- Name: turn_scopes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.turn_scopes ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME public.turn_scopes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
 
 
 --
@@ -2385,13 +3267,6 @@ CREATE TABLE public.web_providers (
 
 
 --
--- Name: turn_chain_contents id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_chain_contents ALTER COLUMN id SET DEFAULT nextval('public.turn_chain_contents_id_seq'::regclass);
-
-
---
 -- Name: admin_identity admin_identity_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2456,6 +3331,14 @@ ALTER TABLE ONLY public.api_key_models
 
 
 --
+-- Name: api_key_spend api_key_spend_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.api_key_spend
+    ADD CONSTRAINT api_key_spend_pkey PRIMARY KEY (api_key_id);
+
+
+--
 -- Name: api_keys api_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2509,6 +3392,14 @@ ALTER TABLE ONLY public.artifacts
 
 ALTER TABLE ONLY public.credential_custom_rules
     ADD CONSTRAINT credential_custom_rules_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: credential_mapping_reuses credential_mapping_reuses_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credential_mapping_reuses
+    ADD CONSTRAINT credential_mapping_reuses_pkey PRIMARY KEY (marker, interaction_id, source_type, tool_id, latest_input);
 
 
 --
@@ -2648,6 +3539,14 @@ ALTER TABLE ONLY public.provider_allowance_suspensions
 
 
 --
+-- Name: provider_cost_plans provider_cost_plans_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_cost_plans
+    ADD CONSTRAINT provider_cost_plans_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: provider_model_cost_rules provider_model_cost_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2752,51 +3651,123 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_chain_contents turn_chain_contents_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_content_gc turn_content_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_contents
-    ADD CONSTRAINT turn_chain_contents_pkey1 PRIMARY KEY (id);
-
-
---
--- Name: turn_chain_contents turn_chain_contents_principal_content_key_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_chain_contents
-    ADD CONSTRAINT turn_chain_contents_principal_content_key_key UNIQUE (principal, content_key);
+ALTER TABLE ONLY public.turn_content_gc
+    ADD CONSTRAINT turn_content_gc_pkey PRIMARY KEY (content_id);
 
 
 --
--- Name: turn_chain_contents turn_chain_contents_principal_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_contents turn_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_contents
-    ADD CONSTRAINT turn_chain_contents_principal_id_key UNIQUE (principal, id);
-
-
---
--- Name: turn_chain_node_contents turn_chain_node_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_chain_node_contents
-    ADD CONSTRAINT turn_chain_node_contents_pkey PRIMARY KEY (node_id, content_id);
+ALTER TABLE ONLY public.turn_contents
+    ADD CONSTRAINT turn_contents_pkey PRIMARY KEY (id);
 
 
 --
--- Name: turn_chain_nodes turn_chain_nodes_id_principal_kind_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_contents turn_contents_scope_id_digest_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_nodes
-    ADD CONSTRAINT turn_chain_nodes_id_principal_kind_key UNIQUE (id, principal, kind);
+ALTER TABLE ONLY public.turn_contents
+    ADD CONSTRAINT turn_contents_scope_id_digest_key UNIQUE (scope_id, digest);
 
 
 --
--- Name: turn_chain_nodes turn_chain_nodes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_contents turn_contents_scope_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_nodes
-    ADD CONSTRAINT turn_chain_nodes_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.turn_contents
+    ADD CONSTRAINT turn_contents_scope_id_id_key UNIQUE (scope_id, id);
+
+
+--
+-- Name: turn_node_contents turn_node_contents_node_pk_content_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_contents
+    ADD CONSTRAINT turn_node_contents_node_pk_content_id_key UNIQUE (node_pk, content_id);
+
+
+--
+-- Name: turn_node_contents turn_node_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_contents
+    ADD CONSTRAINT turn_node_contents_pkey PRIMARY KEY (node_pk, ordinal);
+
+
+--
+-- Name: turn_node_gc turn_node_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_gc
+    ADD CONSTRAINT turn_node_gc_pkey PRIMARY KEY (node_pk);
+
+
+--
+-- Name: turn_node_payloads turn_node_payloads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_payloads
+    ADD CONSTRAINT turn_node_payloads_pkey PRIMARY KEY (node_pk);
+
+
+--
+-- Name: turn_node_retention turn_node_retention_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_retention
+    ADD CONSTRAINT turn_node_retention_pkey PRIMARY KEY (node_pk);
+
+
+--
+-- Name: turn_nodes turn_nodes_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_id_key UNIQUE (id);
+
+
+--
+-- Name: turn_nodes turn_nodes_node_pk_scope_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_node_pk_scope_id_key UNIQUE (node_pk, scope_id);
+
+
+--
+-- Name: turn_nodes turn_nodes_node_pk_scope_id_kind_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_node_pk_scope_id_kind_key UNIQUE (node_pk, scope_id, kind);
+
+
+--
+-- Name: turn_nodes turn_nodes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_pkey PRIMARY KEY (node_pk);
+
+
+--
+-- Name: turn_scopes turn_scopes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_scopes
+    ADD CONSTRAINT turn_scopes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: turn_scopes turn_scopes_principal_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_scopes
+    ADD CONSTRAINT turn_scopes_principal_key UNIQUE (principal);
 
 
 --
@@ -2837,6 +3808,13 @@ ALTER TABLE ONLY public.web_providers
 
 ALTER TABLE ONLY public.web_providers
     ADD CONSTRAINT web_providers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: credential_mapping_reuses_interaction_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX credential_mapping_reuses_interaction_idx ON public.credential_mapping_reuses USING btree (interaction_id);
 
 
 --
@@ -3029,55 +4007,6 @@ CREATE INDEX idx_reversible_redaction_mappings_principal_expiry ON public.revers
 
 
 --
--- Name: idx_turn_chain_expiry; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_expiry ON public.turn_chain_nodes USING btree (expires_at);
-
-
---
--- Name: idx_turn_chain_node_contents_content_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_node_contents_content_id ON public.turn_chain_node_contents USING btree (principal, content_id);
-
-
---
--- Name: idx_turn_chain_node_contents_node; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_node_contents_node ON public.turn_chain_node_contents USING btree (node_id, principal);
-
-
---
--- Name: idx_turn_chain_node_principal; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX idx_turn_chain_node_principal ON public.turn_chain_nodes USING btree (id, principal);
-
-
---
--- Name: idx_turn_chain_parent; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_parent ON public.turn_chain_nodes USING btree (parent_id, principal, kind);
-
-
---
--- Name: idx_turn_chain_principal_kind; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_principal_kind ON public.turn_chain_nodes USING btree (principal, kind);
-
-
---
--- Name: idx_turn_chain_reusable_prefix; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_turn_chain_reusable_prefix ON public.turn_chain_nodes USING btree (principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC, prefix_completed_at DESC, expires_at, id DESC) WHERE (prefix_namespace IS NOT NULL);
-
-
---
 -- Name: idx_vendor_private_state_vendor; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3102,7 +4031,7 @@ CREATE INDEX inference_runs_failed_window_idx ON public.inference_run_observatio
 -- Name: inference_runs_generation_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX inference_runs_generation_idx ON public.inference_run_observations USING btree (generation_node_id, generation_parent_id);
+CREATE INDEX inference_runs_generation_idx ON public.inference_run_observations USING btree (generation_node_id);
 
 
 --
@@ -3141,13 +4070,6 @@ CREATE INDEX interaction_observations_filter_idx ON public.interaction_observati
 
 
 --
--- Name: interaction_observations_generation_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX interaction_observations_generation_idx ON public.interaction_observations USING btree (generation_root_id, last_active_at);
-
-
---
 -- Name: interaction_observations_parent_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3183,13 +4105,6 @@ CREATE INDEX model_changes_provider_order ON public.model_changes USING btree (p
 
 
 --
--- Name: model_turns_analytics_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX model_turns_analytics_idx ON public.model_turn_observations USING btree (started_at, route_id, api_key_id, status);
-
-
---
 -- Name: model_turns_interaction_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3201,6 +4116,27 @@ CREATE INDEX model_turns_interaction_idx ON public.model_turn_observations USING
 --
 
 CREATE INDEX model_turns_run_status_idx ON public.model_turn_observations USING btree (run_id, status);
+
+
+--
+-- Name: native_compactions_generation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX native_compactions_generation_idx ON public.native_compactions USING btree (source_generation_id) WHERE (source_generation_id IS NOT NULL);
+
+
+--
+-- Name: observation_events_context_kinds_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_context_kinds_idx ON public.observation_events USING btree (interaction_id, sequence) WHERE (kind = ANY (ARRAY['compaction_operation'::text, 'native_compaction_associated'::text, 'retained_tail_associated'::text]));
+
+
+--
+-- Name: observation_events_credential_hit_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_credential_hit_idx ON public.observation_events USING btree (kind, sequence DESC) WHERE (kind = 'credential_mappings_created'::text);
 
 
 --
@@ -3288,6 +4224,13 @@ CREATE INDEX observation_tail_sources_interaction_idx ON public.observation_tail
 
 
 --
+-- Name: provider_cost_plans_effective; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX provider_cost_plans_effective ON public.provider_cost_plans USING btree (provider_id, effective_from);
+
+
+--
 -- Name: public_tool_executions_expiry; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3302,17 +4245,17 @@ CREATE INDEX public_tool_executions_source ON public.public_tool_executions USIN
 
 
 --
+-- Name: rejected_requests_client_error_window_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rejected_requests_client_error_window_idx ON public.rejected_request_observations USING btree (COALESCE(started_at, occurred_at) DESC, id) WHERE ((status_code <> 499) AND (code <> ALL (ARRAY['request_aborted'::text, 'cancelled'::text, 'client_disconnected'::text])));
+
+
+--
 -- Name: rejected_requests_expiry_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX rejected_requests_expiry_idx ON public.rejected_request_observations USING btree (expires_at, id);
-
-
---
--- Name: rejected_requests_started_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX rejected_requests_started_idx ON public.rejected_request_observations USING btree (started_at DESC, id);
 
 
 --
@@ -3358,6 +4301,55 @@ CREATE INDEX target_attempts_turn_idx ON public.target_attempt_observations USIN
 
 
 --
+-- Name: target_attempts_upstream_error_window_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX target_attempts_upstream_error_window_idx ON public.target_attempt_observations USING btree (started_at DESC, id) WHERE ((status = 'failed'::text) AND (error_source = 'upstream'::text));
+
+
+--
+-- Name: turn_node_contents_content_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_node_contents_content_idx ON public.turn_node_contents USING btree (content_id);
+
+
+--
+-- Name: turn_node_retention_expiry_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_node_retention_expiry_idx ON public.turn_node_retention USING btree (expires_at, node_pk);
+
+
+--
+-- Name: turn_nodes_parent_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_nodes_parent_idx ON public.turn_nodes USING btree (parent_pk, scope_id, kind);
+
+
+--
+-- Name: turn_nodes_prefix_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_nodes_prefix_idx ON public.turn_nodes USING btree (scope_id, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC, prefix_completed_at DESC, id DESC) WHERE (prefix_namespace IS NOT NULL);
+
+
+--
+-- Name: turn_nodes_scope_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_nodes_scope_idx ON public.turn_nodes USING btree (scope_id);
+
+
+--
+-- Name: target_attempt_observations api_key_spend_credit; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER api_key_spend_credit AFTER INSERT OR UPDATE OF billing_state ON public.target_attempt_observations FOR EACH ROW EXECUTE FUNCTION public.api_key_spend_credit();
+
+
+--
 -- Name: history_markers retain_terminal_tool_execution; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3375,7 +4367,7 @@ CREATE TRIGGER stats_usage_attempt_change AFTER INSERT OR DELETE ON public.targe
 -- Name: target_attempt_observations stats_usage_attempt_update; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER stats_usage_attempt_update AFTER UPDATE OF id, model_turn_id, run_id, provider_id, provider_name, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, first_token_ms, duration_ms ON public.target_attempt_observations FOR EACH ROW WHEN (((old.id IS DISTINCT FROM new.id) OR (old.model_turn_id IS DISTINCT FROM new.model_turn_id) OR (old.run_id IS DISTINCT FROM new.run_id) OR (old.provider_id IS DISTINCT FROM new.provider_id) OR (old.provider_name IS DISTINCT FROM new.provider_name) OR (old.status IS DISTINCT FROM new.status) OR (old.input_tokens IS DISTINCT FROM new.input_tokens) OR (old.output_tokens IS DISTINCT FROM new.output_tokens) OR (old.cache_read_tokens IS DISTINCT FROM new.cache_read_tokens) OR (old.cache_write_tokens IS DISTINCT FROM new.cache_write_tokens) OR (old.reasoning_tokens IS DISTINCT FROM new.reasoning_tokens) OR (old.first_token_ms IS DISTINCT FROM new.first_token_ms) OR (old.duration_ms IS DISTINCT FROM new.duration_ms))) EXECUTE FUNCTION public.stats_usage_attempt_change();
+CREATE TRIGGER stats_usage_attempt_update AFTER UPDATE OF id, model_turn_id, run_id, provider_id, provider_name, status, error_source, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, first_token_ms, duration_ms, cost_basis, cost_usd_nanos, cost_custom_nanos, billing_state, billing_usd_nanos, billing_custom_nanos ON public.target_attempt_observations FOR EACH ROW WHEN (((old.id IS DISTINCT FROM new.id) OR (old.model_turn_id IS DISTINCT FROM new.model_turn_id) OR (old.run_id IS DISTINCT FROM new.run_id) OR (old.provider_id IS DISTINCT FROM new.provider_id) OR (old.provider_name IS DISTINCT FROM new.provider_name) OR (old.status IS DISTINCT FROM new.status) OR (old.error_source IS DISTINCT FROM new.error_source) OR (old.input_tokens IS DISTINCT FROM new.input_tokens) OR (old.output_tokens IS DISTINCT FROM new.output_tokens) OR (old.cache_read_tokens IS DISTINCT FROM new.cache_read_tokens) OR (old.cache_write_tokens IS DISTINCT FROM new.cache_write_tokens) OR (old.reasoning_tokens IS DISTINCT FROM new.reasoning_tokens) OR (old.first_token_ms IS DISTINCT FROM new.first_token_ms) OR (old.duration_ms IS DISTINCT FROM new.duration_ms) OR (old.cost_basis IS DISTINCT FROM new.cost_basis) OR (old.cost_usd_nanos IS DISTINCT FROM new.cost_usd_nanos) OR (old.cost_custom_nanos IS DISTINCT FROM new.cost_custom_nanos) OR (old.billing_state IS DISTINCT FROM new.billing_state) OR (old.billing_usd_nanos IS DISTINCT FROM new.billing_usd_nanos) OR (old.billing_custom_nanos IS DISTINCT FROM new.billing_custom_nanos))) EXECUTE FUNCTION public.stats_usage_attempt_change();
 
 
 --
@@ -3410,7 +4402,7 @@ CREATE TRIGGER stats_usage_run_change AFTER INSERT OR DELETE ON public.inference
 -- Name: inference_run_observations stats_usage_run_update; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER stats_usage_run_update AFTER UPDATE OF id, started_at, status, finished_at, failure_json, terminal_reason ON public.inference_run_observations FOR EACH ROW WHEN (((old.id IS DISTINCT FROM new.id) OR (old.started_at IS DISTINCT FROM new.started_at) OR (old.status IS DISTINCT FROM new.status) OR (old.finished_at IS DISTINCT FROM new.finished_at) OR (old.failure_json IS DISTINCT FROM new.failure_json) OR (old.terminal_reason IS DISTINCT FROM new.terminal_reason))) EXECUTE FUNCTION public.stats_usage_run_change();
+CREATE TRIGGER stats_usage_run_update AFTER UPDATE OF id, started_at, status, finished_at, failure_json, terminal_reason, rejected_before_target ON public.inference_run_observations FOR EACH ROW WHEN (((old.id IS DISTINCT FROM new.id) OR (old.started_at IS DISTINCT FROM new.started_at) OR (old.status IS DISTINCT FROM new.status) OR (old.finished_at IS DISTINCT FROM new.finished_at) OR (old.failure_json IS DISTINCT FROM new.failure_json) OR (old.terminal_reason IS DISTINCT FROM new.terminal_reason) OR (old.rejected_before_target IS DISTINCT FROM new.rejected_before_target))) EXECUTE FUNCTION public.stats_usage_run_change();
 
 
 --
@@ -3460,6 +4452,14 @@ ALTER TABLE ONLY public.api_key_models
 
 
 --
+-- Name: api_key_spend api_key_spend_api_key_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.api_key_spend
+    ADD CONSTRAINT api_key_spend_api_key_id_fkey FOREIGN KEY (api_key_id) REFERENCES public.api_keys(id) ON DELETE CASCADE;
+
+
+--
 -- Name: artifact_download_grants artifact_download_grants_artifact_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3481,6 +4481,14 @@ ALTER TABLE ONLY public.artifact_upload_parts
 
 ALTER TABLE ONLY public.artifact_uploads
     ADD CONSTRAINT artifact_uploads_artifact_id_fkey FOREIGN KEY (artifact_id) REFERENCES public.artifacts(id) ON DELETE CASCADE;
+
+
+--
+-- Name: credential_mapping_reuses credential_mapping_reuses_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.credential_mapping_reuses
+    ADD CONSTRAINT credential_mapping_reuses_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
 
 
 --
@@ -3592,7 +4600,7 @@ ALTER TABLE ONLY public.native_compaction_states
 --
 
 ALTER TABLE ONLY public.native_compactions
-    ADD CONSTRAINT native_compactions_source_generation_id_fkey FOREIGN KEY (source_generation_id) REFERENCES public.turn_chain_nodes(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT native_compactions_source_generation_id_fkey FOREIGN KEY (source_generation_id) REFERENCES public.turn_nodes(id) ON DELETE RESTRICT;
 
 
 --
@@ -3732,27 +4740,75 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_chain_node_contents turn_chain_node_contents_node_id_principal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_content_gc turn_content_gc_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_node_contents
-    ADD CONSTRAINT turn_chain_node_contents_node_id_principal_fkey FOREIGN KEY (node_id, principal) REFERENCES public.turn_chain_nodes(id, principal) ON DELETE CASCADE;
-
-
---
--- Name: turn_chain_node_contents turn_chain_node_contents_principal_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_chain_node_contents
-    ADD CONSTRAINT turn_chain_node_contents_principal_content_id_fkey FOREIGN KEY (principal, content_id) REFERENCES public.turn_chain_contents(principal, id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.turn_content_gc
+    ADD CONSTRAINT turn_content_gc_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.turn_contents(id) ON DELETE CASCADE;
 
 
 --
--- Name: turn_chain_nodes turn_chain_nodes_parent_principal_kind_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_contents turn_contents_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_chain_nodes
-    ADD CONSTRAINT turn_chain_nodes_parent_principal_kind_fkey FOREIGN KEY (parent_id, principal, kind) REFERENCES public.turn_chain_nodes(id, principal, kind) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.turn_contents
+    ADD CONSTRAINT turn_contents_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.turn_scopes(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: turn_node_contents turn_node_contents_node_pk_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_contents
+    ADD CONSTRAINT turn_node_contents_node_pk_scope_id_fkey FOREIGN KEY (node_pk, scope_id) REFERENCES public.turn_nodes(node_pk, scope_id) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_contents turn_node_contents_scope_id_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_contents
+    ADD CONSTRAINT turn_node_contents_scope_id_content_id_fkey FOREIGN KEY (scope_id, content_id) REFERENCES public.turn_contents(scope_id, id) ON DELETE RESTRICT;
+
+
+--
+-- Name: turn_node_gc turn_node_gc_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_gc
+    ADD CONSTRAINT turn_node_gc_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_payloads turn_node_payloads_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_payloads
+    ADD CONSTRAINT turn_node_payloads_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_retention turn_node_retention_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_retention
+    ADD CONSTRAINT turn_node_retention_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_nodes turn_nodes_parent_pk_scope_id_kind_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_parent_pk_scope_id_kind_fkey FOREIGN KEY (parent_pk, scope_id, kind) REFERENCES public.turn_nodes(node_pk, scope_id, kind) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: turn_nodes turn_nodes_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_nodes
+    ADD CONSTRAINT turn_nodes_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.turn_scopes(id) ON DELETE RESTRICT;
 
 
 --

@@ -1,10 +1,16 @@
 use std::collections::HashSet;
-pub(super) mod failed;
+pub(super) mod client_errors;
+pub(super) mod upstream;
 
 use futures::TryStreamExt;
 use sqlx::{FromRow, QueryBuilder, Row};
 
 use super::{store::ObservationStore, types::*};
+
+/// 取消类终止原因：既不是失败的请求也不是错误的请求；客户端错误据此排除，
+/// 上游错误据此把所属运行判为“请求已中断”。
+pub(super) const CANCELLED_TERMINAL_REASONS: &str =
+    "'cancelled','client_disconnected','websocket_delivery_dropped','request_aborted'";
 
 pub(super) struct BundleRunRecord {
     pub id: String,
@@ -447,32 +453,180 @@ struct RejectionRow {
 }
 
 impl super::InteractionObservation {
+    /// 读取已落库的命中记录；排队中的命中可能暂不可见，不等待无关观测写入或 Debug 刷盘。
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
-        self.flush().await?;
-        let mut page = self.inner.store.credential_discoveries(query).await?;
-        page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
-            chrono::Utc::now().timestamp_millis(),
-            self.inner
-                .retention_days
-                .load(std::sync::atomic::Ordering::Acquire),
-        );
-        Ok(page)
+        self.inner.store.credential_discoveries(query).await
+    }
+
+    pub(crate) async fn credential_discovery_record(
+        &self,
+        sequence: i64,
+        index: usize,
+    ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
+        self.inner
+            .store
+            .credential_discovery_record(sequence, index)
+            .await
+    }
+
+    pub(crate) async fn credential_discovery_hit_context(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        hit: &CredentialDiscoveryHit,
+    ) -> anyhow::Result<CredentialDiscoveryHitContext> {
+        self.inner
+            .store
+            .credential_discovery_hit_context(record, hit)
+            .await
+    }
+
+    pub(crate) async fn credential_discovery_reuses(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        marker: &str,
+    ) -> anyhow::Result<CredentialDiscoveryReuses> {
+        self.inner
+            .store
+            .credential_discovery_reuses(record, marker)
+            .await
     }
 }
 
 #[derive(FromRow)]
-struct DiscoveryRow {
+struct DiscoveryEventRow {
+    sequence: i64,
+    occurred_at: i64,
     interaction_id: String,
+    run_id: Option<String>,
     api_key_name: Option<String>,
-    discovered_at: i64,
-    status: String,
-    observation_gap: bool,
+    payload: Vec<u8>,
 }
 
-const DISCOVERY_SELECT: &str = "SELECT i.id AS interaction_id,i.api_key_name,MAX(e.occurred_at) AS discovered_at,i.status,i.observation_gap FROM interaction_observations i JOIN observation_events e ON e.interaction_id=i.id WHERE e.kind='credential_mappings_created' AND i.expires_at>";
+#[derive(serde::Deserialize)]
+struct DiscoveryPayload {
+    discoveries: Vec<CredentialDiscovery>,
+}
+
+const DISCOVERY_EVENT_BATCH: i64 = 200;
+/// 侧栏最多展示的复用位置；多出一个用于判断是否截断。
+const REUSE_ITEM_LIMIT: usize = 200;
+
+fn decode_discovery_payload(payload: &[u8]) -> anyhow::Result<DiscoveryPayload> {
+    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+        payload,
+    )?)?)
+}
+
+/// 一行映射的「规则 ← 来源」配对。升级前的事件没有逐项位置，用规则集合与来源集合合成。
+fn discovery_hits(discovery: &CredentialDiscovery) -> Vec<CredentialDiscoveryHit> {
+    let mut hits = std::collections::BTreeSet::new();
+    if discovery.locators.is_empty() {
+        for rule_id in &discovery.rule_ids {
+            for source_type in &discovery.source_types {
+                hits.insert(CredentialDiscoveryHit {
+                    rule_id: rule_id.clone(),
+                    source_type: source_type.clone(),
+                    tool_id: None,
+                    latest_input: None,
+                });
+            }
+        }
+    }
+    for locator in &discovery.locators {
+        hits.insert(CredentialDiscoveryHit {
+            rule_id: locator.rule_id.clone(),
+            source_type: locator.source_type.clone(),
+            tool_id: locator.tool_id.clone(),
+            latest_input: locator.latest_input,
+        });
+    }
+    hits.into_iter().collect()
+}
+
+fn discovery_rule_sets(rule_ids: &std::collections::BTreeSet<String>) -> Vec<String> {
+    rule_ids
+        .iter()
+        .map(|rule_id| {
+            if rule_id.starts_with(stravia_credential_protection::CUSTOM_RULE_ID_PREFIX) {
+                "custom".to_owned()
+            } else {
+                "builtin".to_owned()
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn discovery_item(
+    sequence: i64,
+    occurred_at: i64,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    api_key_name: Option<&str>,
+    discovery: &CredentialDiscovery,
+    index: usize,
+) -> CredentialDiscoveryItem {
+    let rule_ids: std::collections::BTreeSet<_> = discovery.rule_ids.iter().cloned().collect();
+    CredentialDiscoveryItem {
+        id: format!("{sequence}.{index}"),
+        created_at: occurred_at,
+        interaction_id: interaction_id.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        api_key_name: api_key_name.map(str::to_owned),
+        rule_sets: discovery_rule_sets(&rule_ids),
+        rule_ids: rule_ids.into_iter().collect(),
+        hits: discovery_hits(discovery),
+        omitted_hits: discovery.omitted_locators,
+        linkable: discovery
+            .marker
+            .as_deref()
+            .is_some_and(|marker| !marker.is_empty()),
+    }
+}
+
+fn parse_discovery_cursor(cursor: Option<&str>) -> anyhow::Result<Option<(i64, usize)>> {
+    cursor
+        .map(|cursor| {
+            anyhow::ensure!(cursor.len() <= 64, CredentialDiscoveryError::InvalidCursor);
+            let parsed: (i64, usize) = serde_json::from_str(cursor)
+                .map_err(|_| CredentialDiscoveryError::InvalidCursor)?;
+            anyhow::ensure!(parsed.0 >= 0, CredentialDiscoveryError::InvalidCursor);
+            Ok(parsed)
+        })
+        .transpose()
+}
+
+fn encode_discovery_cursor(sequence: i64, index: usize) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&(sequence, index))?)
+}
+
+fn discovery_event_sql(builder: &mut QueryBuilder<sqlx::Sqlite>, now: i64, upper: i64) {
+    builder
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+        .push_bind(now)
+        .push(" AND i.expires_at>")
+        .push_bind(now)
+        .push(" AND e.sequence<=")
+        .push_bind(upper)
+        .push(" ORDER BY e.sequence DESC LIMIT ")
+        .push_bind(DISCOVERY_EVENT_BATCH);
+}
+
+fn discovery_event_sql_postgres(builder: &mut QueryBuilder<sqlx::Postgres>, now: i64, upper: i64) {
+    builder
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
+        .push_bind(now)
+        .push(" AND i.expires_at>")
+        .push_bind(now)
+        .push(" AND e.sequence<=")
+        .push_bind(upper)
+        .push(" ORDER BY e.sequence DESC LIMIT ")
+        .push_bind(DISCOVERY_EVENT_BATCH);
+}
 
 impl ObservationStore {
     pub(super) async fn observation_root_id(
@@ -495,139 +649,431 @@ impl ObservationStore {
         })
     }
 
-    pub(super) async fn contains_gap_run(&self, run_id: &str) -> anyhow::Result<bool> {
-        Ok(match self {
-            Self::Sqlite(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=?)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-            Self::Postgres(pool, _) => {
-                sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM inference_run_observations WHERE id=$1)",
-                )
-                .bind(run_id)
-                .fetch_one(pool)
-                .await?
-            }
-        })
-    }
-
+    /// 按 `(event sequence DESC, discovery index DESC)` 翻页；一行对应一次新建映射。
     pub async fn credential_discoveries(
         &self,
         query: CredentialDiscoveryQuery,
     ) -> anyhow::Result<CredentialDiscoveryPage> {
-        let cursor: Option<(i64, String)> = query
-            .cursor
-            .as_deref()
-            .map(|cursor| {
-                anyhow::ensure!(cursor.len() <= 512, "凭据发现游标过长");
-                serde_json::from_str(cursor).map_err(|_| anyhow::anyhow!("凭据发现游标无效"))
-            })
-            .transpose()?;
+        let cursor = parse_discovery_cursor(query.cursor.as_deref())?;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
         let now = chrono::Utc::now().timestamp_millis();
-        let (mut rows, observation_gap): (Vec<DiscoveryRow>, bool) = match self {
-            Self::Sqlite(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=1 AND expires_at>?)")
-                    .bind(now).fetch_one(pool).await?;
-                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(DISCOVERY_SELECT);
-                builder
-                    .push_bind(now)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" GROUP BY i.id,i.api_key_name,i.status,i.observation_gap");
-                if let Some((time, id)) = &cursor {
-                    builder
-                        .push(" HAVING (MAX(e.occurred_at),i.id)<(")
-                        .push_bind(*time)
-                        .push(",")
-                        .push_bind(id)
-                        .push(")");
+        let mut items = Vec::with_capacity(limit + 1);
+        let mut upper = cursor.map_or(i64::MAX, |(sequence, _)| sequence);
+        'scan: loop {
+            let rows: Vec<DiscoveryEventRow> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+                    discovery_event_sql(&mut builder, now, upper);
+                    builder.build_query_as().fetch_all(pool).await?
                 }
-                builder
-                    .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
-                    .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
-            }
-            Self::Postgres(pool, _) => {
-                let gap: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM interaction_observations WHERE observation_gap=TRUE AND expires_at>$1)")
-                    .bind(now).fetch_one(pool).await?;
-                let mut builder = QueryBuilder::<sqlx::Postgres>::new(DISCOVERY_SELECT);
-                builder
-                    .push_bind(now)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" GROUP BY i.id,i.api_key_name,i.status,i.observation_gap");
-                if let Some((time, id)) = &cursor {
-                    builder
-                        .push(" HAVING (MAX(e.occurred_at),i.id)<(")
-                        .push_bind(*time)
-                        .push(",")
-                        .push_bind(id)
-                        .push(")");
+                Self::Postgres(pool, _) => {
+                    let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+                    discovery_event_sql_postgres(&mut builder, now, upper);
+                    builder.build_query_as().fetch_all(pool).await?
                 }
-                builder
-                    .push(" ORDER BY discovered_at DESC,i.id DESC LIMIT ")
-                    .push_bind((limit + 1) as i64);
-                (builder.build_query_as().fetch_all(pool).await?, gap)
+            };
+            let Some(last) = rows.last() else {
+                break;
+            };
+            upper = last.sequence.saturating_sub(1);
+            for row in rows {
+                let payload = decode_discovery_payload(&row.payload)?;
+                for (index, discovery) in payload.discoveries.iter().enumerate().rev() {
+                    if cursor.is_some_and(|(sequence, index_cursor)| {
+                        (row.sequence, index) >= (sequence, index_cursor)
+                    }) {
+                        continue;
+                    }
+                    items.push(discovery_item(
+                        row.sequence,
+                        row.occurred_at,
+                        &row.interaction_id,
+                        row.run_id.as_deref(),
+                        row.api_key_name.as_deref(),
+                        discovery,
+                        index,
+                    ));
+                    if items.len() > limit {
+                        break 'scan;
+                    }
+                }
             }
-        };
-        let next_cursor = if rows.len() > limit {
-            let last = &rows[limit - 1];
-            Some(serde_json::to_string(&(
-                last.discovered_at,
-                &last.interaction_id,
-            ))?)
+        }
+        let next_cursor = if items.len() > limit {
+            let last = &items[limit - 1];
+            let (sequence, index) = last
+                .id
+                .split_once('.')
+                .and_then(|(sequence, index)| {
+                    Some((sequence.parse::<i64>().ok()?, index.parse::<usize>().ok()?))
+                })
+                .ok_or_else(|| anyhow::anyhow!("命中记录行标识无效"))?;
+            Some(encode_discovery_cursor(sequence, index)?)
         } else {
             None
         };
-        rows.truncate(limit);
-        let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
-            // 只读取普通发现事件的安全元数据，不读取请求正文或秘密映射。
-            let payloads: Vec<Vec<u8>> = match self {
-                Self::Sqlite(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=? AND kind='credential_mappings_created' AND expires_at>? AND occurred_at<=?")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-                Self::Postgres(pool, _) => sqlx::query_scalar("SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='credential_mappings_created' AND expires_at>$2 AND occurred_at<=$3")
-                    .bind(&row.interaction_id).bind(now).bind(row.discovered_at).fetch_all(pool).await?,
-            };
-            let mut count = 0i64;
-            let mut rule_ids = std::collections::BTreeSet::new();
-            let mut source_types = std::collections::BTreeSet::new();
-            for payload in payloads {
-                #[derive(serde::Deserialize)]
-                struct Payload {
-                    discoveries: Vec<CredentialDiscovery>,
-                }
-                let payload: Payload =
-                    serde_json::from_slice(&crate::storage_codec::decode(&payload)?)?;
-                count += payload.discoveries.len() as i64;
-                for discovery in payload.discoveries {
-                    rule_ids.extend(discovery.rule_ids);
-                    source_types.extend(discovery.source_types);
-                }
+        items.truncate(limit);
+        Ok(CredentialDiscoveryPage { items, next_cursor })
+    }
+
+    /// 读取一行新建映射的落库事实；行不存在或已过期时返回 `None`。
+    pub(super) async fn credential_discovery_record(
+        &self,
+        sequence: i64,
+        index: usize,
+    ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
+        let now = chrono::Utc::now().timestamp_millis();
+        type DiscoveryRow = (i64, String, Option<String>, String, Option<String>, Vec<u8>);
+        let row: Option<DiscoveryRow> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=? AND e.kind='credential_mappings_created' AND e.expires_at>? AND i.expires_at>?"
+            )
+            .bind(sequence)
+            .bind(now)
+            .bind(now)
+            .fetch_optional(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=$1 AND e.kind='credential_mappings_created' AND e.expires_at>$2 AND i.expires_at>$2"
+            )
+            .bind(sequence)
+            .bind(now)
+            .fetch_optional(pool)
+            .await?,
+        };
+        let Some((_occurred_at, interaction_id, run_id, principal, _api_key_name, payload)) = row
+        else {
+            return Ok(None);
+        };
+        let payload = decode_discovery_payload(&payload)?;
+        let Some(discovery) = payload.discoveries.get(index) else {
+            return Ok(None);
+        };
+        Ok(Some(CredentialDiscoveryRecord {
+            sequence,
+            interaction_id,
+            run_id,
+            principal,
+            hits: discovery_hits(discovery),
+            discovery: discovery.clone(),
+        }))
+    }
+
+    /// 解析命中正文：工具来源按 `tool_id` 回溯，用户消息取输入预览；其余来源不保留。
+    pub(super) async fn credential_discovery_hit_context(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        hit: &CredentialDiscoveryHit,
+    ) -> anyhow::Result<CredentialDiscoveryHitContext> {
+        const TOOL_NAME_KINDS: &str = "'platform_tool_started','client_tool_handoff'";
+        const TOOL_RESULT_KINDS: &str = "'client_tool_result','platform_tool_finished'";
+        let now = chrono::Utc::now().timestamp_millis();
+        match hit.source_type.as_str() {
+            "tool_arguments" | "tool_result" => {
+                let Some(tool_id) = hit.tool_id.as_deref() else {
+                    return Ok(CredentialDiscoveryHitContext {
+                        tool_name: None,
+                        body: CredentialDiscoveryBody::NotRetained,
+                    });
+                };
+                let (body_kinds, field) = if hit.source_type == "tool_arguments" {
+                    (TOOL_NAME_KINDS, "input")
+                } else {
+                    (TOOL_RESULT_KINDS, "content")
+                };
+                let body_event = self
+                    .credential_tool_event(record, body_kinds, tool_id, now)
+                    .await?;
+                let tool_name = if body_kinds == TOOL_NAME_KINDS {
+                    body_event
+                        .as_ref()
+                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
+                } else {
+                    self.credential_tool_event(record, TOOL_NAME_KINDS, tool_id, now)
+                        .await?
+                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
+                };
+                let body = match body_event {
+                    None => CredentialDiscoveryBody::Missing,
+                    Some(payload) => match payload.get(field) {
+                        Some(value) if !value.is_null() => {
+                            CredentialDiscoveryBody::Retained(value.clone())
+                        }
+                        _ => CredentialDiscoveryBody::NotRetained,
+                    },
+                };
+                Ok(CredentialDiscoveryHitContext { tool_name, body })
             }
-            if count > 0 {
-                items.push(CredentialDiscoverySummary {
-                    interaction_id: row.interaction_id,
-                    api_key_name: row.api_key_name,
-                    discovered_at: row.discovered_at,
-                    new_credential_count: count,
-                    rule_ids: rule_ids.into_iter().collect(),
-                    source_types: source_types.into_iter().collect(),
-                    status: row.status,
-                    observation_gap: row.observation_gap,
-                });
+            "user_message" if hit.latest_input == Some(true) => {
+                let body = match self.credential_input_preview(record, now).await? {
+                    None => CredentialDiscoveryBody::Missing,
+                    Some(payload) => {
+                        match payload.get("text").and_then(serde_json::Value::as_str) {
+                            Some(text) => CredentialDiscoveryBody::Retained(text.into()),
+                            None => CredentialDiscoveryBody::NotRetained,
+                        }
+                    }
+                };
+                Ok(CredentialDiscoveryHitContext {
+                    tool_name: None,
+                    body,
+                })
             }
+            _ => Ok(CredentialDiscoveryHitContext {
+                tool_name: None,
+                body: CredentialDiscoveryBody::NotRetained,
+            }),
         }
-        Ok(CredentialDiscoveryPage {
+    }
+
+    async fn credential_tool_event(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        kinds: &'static str,
+        tool_id: &str,
+        now: i64,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let payload = match self {
+            Self::Sqlite(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                );
+                builder
+                    .push_bind(&record.interaction_id)
+                    .push(" AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                let payload: Option<Vec<u8>> = builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?;
+                if let Some(payload) = payload {
+                    return Ok(Some(serde_json::from_slice(
+                        &crate::storage_codec::decode(&payload)?,
+                    )?));
+                }
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                );
+                builder
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND e.sequence<=")
+                    .push_bind(record.sequence)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Self::Postgres(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                );
+                builder
+                    .push_bind(&record.interaction_id)
+                    .push(" AND e.kind IN (")
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                let payload: Option<Vec<u8>> = builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?;
+                if let Some(payload) = payload {
+                    return Ok(Some(serde_json::from_slice(
+                        &crate::storage_codec::decode(&payload)?,
+                    )?));
+                }
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                );
+                builder
+                    .push(kinds)
+                    .push(") AND e.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND e.sequence<=")
+                    .push_bind(record.sequence)
+                    .push(" AND e.expires_at>")
+                    .push_bind(now)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now)
+                    .push(" ORDER BY e.sequence DESC LIMIT 1");
+                builder
+                    .build_query_scalar::<Vec<u8>>()
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        payload
+            .map(|payload| {
+                Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                    &payload,
+                )?)?)
+            })
+            .transpose()
+    }
+
+    async fn credential_input_preview(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        now: i64,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let payload = match self {
+            Self::Sqlite(pool, _) => {
+                if let Some(run_id) = &record.run_id {
+                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
+                        "SELECT payload FROM observation_events WHERE interaction_id=? AND run_id=? AND kind='input_preview_recorded' AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .bind(&record.interaction_id)
+                    .bind(run_id)
+                    .bind(now)
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(payload) = payload {
+                        return Ok(Some(serde_json::from_slice(
+                            &crate::storage_codec::decode(&payload)?,
+                        )?));
+                    }
+                }
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT payload FROM observation_events WHERE interaction_id=? AND kind='input_preview_recorded' AND sequence<? AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                )
+                .bind(&record.interaction_id)
+                .bind(record.sequence)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+            }
+            Self::Postgres(pool, _) => {
+                if let Some(run_id) = &record.run_id {
+                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
+                        "SELECT payload FROM observation_events WHERE interaction_id=$1 AND run_id=$2 AND kind='input_preview_recorded' AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .bind(&record.interaction_id)
+                    .bind(run_id)
+                    .bind(now)
+                    .fetch_optional(pool)
+                    .await?;
+                    if let Some(payload) = payload {
+                        return Ok(Some(serde_json::from_slice(
+                            &crate::storage_codec::decode(&payload)?,
+                        )?));
+                    }
+                }
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='input_preview_recorded' AND sequence<$2 AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                )
+                .bind(&record.interaction_id)
+                .bind(record.sequence)
+                .bind(now)
+                .fetch_optional(pool)
+                .await?
+            }
+        };
+        payload
+            .map(|payload| {
+                Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                    &payload,
+                )?)?)
+            })
+            .transpose()
+    }
+
+    /// 按占位符读取写入时登记的复用位置；登记行已按位置去重，只保留最新一次复用。
+    pub(super) async fn credential_discovery_reuses(
+        &self,
+        record: &CredentialDiscoveryRecord,
+        marker: &str,
+    ) -> anyhow::Result<CredentialDiscoveryReuses> {
+        if marker.is_empty() {
+            return Ok(CredentialDiscoveryReuses {
+                linkable: false,
+                items: Vec::new(),
+                truncated: false,
+            });
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        // 多取一行判断是否截断；上限只约束展示的位置数，与登记量无关。
+        let limit = REUSE_ITEM_LIMIT as i64 + 1;
+        type ReuseStoreRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            bool,
+            i64,
+        );
+        let rows: Vec<ReuseStoreRow> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>? ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ?",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3 ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT $4",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
+        };
+        let truncated = rows.len() > REUSE_ITEM_LIMIT;
+        let items = rows
+            .into_iter()
+            .take(REUSE_ITEM_LIMIT)
+            .map(
+                |(
+                    interaction_id,
+                    run_id,
+                    api_key_name,
+                    source_type,
+                    tool_id,
+                    latest_input,
+                    last_reused_at,
+                )| {
+                    // 登记表按去重键归一：工具来源只有 `tool_id`，用户消息只有是否本次输入。
+                    let latest_input = (source_type == "user_message").then_some(latest_input);
+                    let tool_id = (!tool_id.is_empty()).then_some(tool_id);
+                    CredentialDiscoveryReuse {
+                        interaction_id,
+                        run_id,
+                        api_key_name,
+                        source_type,
+                        tool_id,
+                        latest_input,
+                        last_reused_at,
+                    }
+                },
+            )
+            .collect();
+        Ok(CredentialDiscoveryReuses {
+            linkable: true,
             items,
-            next_cursor,
-            observation_gap,
+            truncated,
         })
     }
 
@@ -1847,7 +2293,7 @@ mod tests {
     use crate::interaction_observation::store::Admission;
 
     #[tokio::test]
-    async fn failed_requests_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
+    async fn client_errors_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
         use crate::interaction_observation::store::{Admission, Rejection};
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1909,6 +2355,7 @@ mod tests {
                     },
                     at + 20,
                     i64::MAX,
+                    false,
                 )
                 .await?;
             store
@@ -1938,7 +2385,7 @@ mod tests {
         let mut seen = Vec::new();
         loop {
             let page = store
-                .failed_requests(FailedRequestQuery {
+                .client_errors(ClientErrorQuery {
                     start_at: Some(at),
                     end_at: Some(at + 1),
                     cursor,
@@ -2062,6 +2509,7 @@ mod tests {
                     },
                     at + 10,
                     i64::MAX,
+                    false,
                 )
                 .await?;
         }
@@ -2105,31 +2553,48 @@ mod tests {
     ) -> anyhow::Result<()> {
         admit_chain_run_profile(
             store,
+            ChainRunProfile {
+                id,
+                run_id,
+                root_id,
+                parent,
+                now,
+                debug_enabled,
+                api_key_name: None,
+                route_id: "route",
+                model_display_name: None,
+            },
+        )
+        .await
+    }
+
+    struct ChainRunProfile<'a> {
+        id: &'a str,
+        run_id: &'a str,
+        root_id: &'a str,
+        parent: Option<&'a str>,
+        now: i64,
+        debug_enabled: bool,
+        api_key_name: Option<&'a str>,
+        route_id: &'a str,
+        model_display_name: Option<&'a str>,
+    }
+
+    async fn admit_chain_run_profile(
+        store: &ObservationStore,
+        profile: ChainRunProfile<'_>,
+    ) -> anyhow::Result<()> {
+        let ChainRunProfile {
             id,
             run_id,
             root_id,
             parent,
             now,
             debug_enabled,
-            None,
-            "route",
-            None,
-        )
-        .await
-    }
-
-    async fn admit_chain_run_profile(
-        store: &ObservationStore,
-        id: &str,
-        run_id: &str,
-        root_id: &str,
-        parent: Option<&str>,
-        now: i64,
-        debug_enabled: bool,
-        api_key_name: Option<&str>,
-        route_id: &str,
-        model_display_name: Option<&str>,
-    ) -> anyhow::Result<()> {
+            api_key_name,
+            route_id,
+            model_display_name,
+        } = profile;
         store
             .admit(Admission {
                 metadata: None,
@@ -2176,33 +2641,51 @@ mod tests {
     ) -> anyhow::Result<()> {
         confirm_tokens_profile(
             store,
-            id,
-            "route",
-            None,
-            "provider",
-            "provider",
-            input,
-            output,
-            cache_read,
-            cache_write,
-            at,
+            TokenProfile {
+                id,
+                route_id: "route",
+                model_display_name: None,
+                provider_id: "provider",
+                provider_name: "provider",
+                input,
+                output,
+                cache_read,
+                cache_write,
+                at,
+            },
         )
         .await
     }
 
-    async fn confirm_tokens_profile(
-        store: &ObservationStore,
-        id: &str,
-        route_id: &str,
-        model_display_name: Option<&str>,
-        provider_id: &str,
-        provider_name: &str,
+    struct TokenProfile<'a> {
+        id: &'a str,
+        route_id: &'a str,
+        model_display_name: Option<&'a str>,
+        provider_id: &'a str,
+        provider_name: &'a str,
         input: i64,
         output: i64,
         cache_read: i64,
         cache_write: i64,
         at: i64,
+    }
+
+    async fn confirm_tokens_profile(
+        store: &ObservationStore,
+        profile: TokenProfile<'_>,
     ) -> anyhow::Result<()> {
+        let TokenProfile {
+            id,
+            route_id,
+            model_display_name,
+            provider_id,
+            provider_name,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            at,
+        } = profile;
         let turn_id = format!("{id}-turn");
         let attempt_id = format!("{id}-attempt");
         store
@@ -2233,6 +2716,7 @@ mod tests {
                     upstream_model: "model".into(),
                     protocol: "responses".into(),
                     upstream_url: "http://localhost".into(),
+                    cost_basis: None,
                 },
                 at,
                 i64::MAX,
@@ -2405,6 +2889,7 @@ mod tests {
                 upstream_model: "model".into(),
                 protocol: "responses".into(),
                 upstream_url: "http://localhost".into(),
+                cost_basis: None,
             },
         ] {
             store
@@ -2429,6 +2914,7 @@ mod tests {
                         output_tokens: Some(896),
                         ..Default::default()
                     }),
+                    amounts: None,
                 },
                 3,
                 i64::MAX,
@@ -2649,6 +3135,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     5,
                     i64::MAX,
@@ -2772,6 +3259,7 @@ mod tests {
                 },
                 2,
                 i64::MAX,
+                false,
             )
             .await?;
         let filters = ForestQuery {
@@ -3187,6 +3675,7 @@ mod tests {
                 },
                 150,
                 i64::MAX,
+                false,
             )
             .await?;
         let historical = store
@@ -3532,6 +4021,7 @@ mod tests {
                 },
                 13,
                 i64::MAX,
+                false,
             )
             .await?;
         store.mark_clear_tombstones().await?;
@@ -3703,29 +4193,33 @@ mod tests {
     async fn combined_filter_scenario(store: &ObservationStore) -> anyhow::Result<()> {
         admit_chain_run_profile(
             store,
-            "combo-a",
-            "combo-a",
-            "combo",
-            None,
-            20_010,
-            false,
-            Some("alpha"),
-            "route-a",
-            Some("model-a"),
+            ChainRunProfile {
+                id: "combo-a",
+                run_id: "combo-a",
+                root_id: "combo",
+                parent: None,
+                now: 20_010,
+                debug_enabled: false,
+                api_key_name: Some("alpha"),
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-a",
-            "route-a",
-            Some("model-a"),
-            "provider-a",
-            "provider-a",
-            4_000,
-            0,
-            0,
-            0,
-            20_011,
+            TokenProfile {
+                id: "combo-a",
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+                provider_id: "provider-a",
+                provider_name: "provider-a",
+                input: 4_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_011,
+            },
         )
         .await?;
         store
@@ -3756,60 +4250,69 @@ mod tests {
                 },
                 20_012,
                 i64::MAX,
+                false,
             )
             .await?;
         admit_chain_run_profile(
             store,
-            "combo-b",
-            "combo-b",
-            "combo",
-            None,
-            20_020,
-            false,
-            Some("beta"),
-            "route-b",
-            Some("model-b"),
+            ChainRunProfile {
+                id: "combo-b",
+                run_id: "combo-b",
+                root_id: "combo",
+                parent: None,
+                now: 20_020,
+                debug_enabled: false,
+                api_key_name: Some("beta"),
+                route_id: "route-b",
+                model_display_name: Some("model-b"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-b",
-            "route-b",
-            Some("model-b"),
-            "provider-b",
-            "provider-b",
-            6_000,
-            0,
-            0,
-            0,
-            20_021,
+            TokenProfile {
+                id: "combo-b",
+                route_id: "route-b",
+                model_display_name: Some("model-b"),
+                provider_id: "provider-b",
+                provider_name: "provider-b",
+                input: 6_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_021,
+            },
         )
         .await?;
         admit_chain_run_profile(
             store,
-            "combo-2-a",
-            "combo-2-a",
-            "combo-2",
-            None,
-            20_030,
-            false,
-            Some("alpha"),
-            "route-a",
-            Some("model-a"),
+            ChainRunProfile {
+                id: "combo-2-a",
+                run_id: "combo-2-a",
+                root_id: "combo-2",
+                parent: None,
+                now: 20_030,
+                debug_enabled: false,
+                api_key_name: Some("alpha"),
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+            },
         )
         .await?;
         confirm_tokens_profile(
             store,
-            "combo-2-a",
-            "route-a",
-            Some("model-a"),
-            "provider-a",
-            "provider-a",
-            15_000,
-            0,
-            0,
-            0,
-            20_031,
+            TokenProfile {
+                id: "combo-2-a",
+                route_id: "route-a",
+                model_display_name: Some("model-a"),
+                provider_id: "provider-a",
+                provider_name: "provider-a",
+                input: 15_000,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                at: 20_031,
+            },
         )
         .await?;
 

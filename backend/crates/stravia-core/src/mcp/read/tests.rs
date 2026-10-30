@@ -72,6 +72,7 @@ async fn document_fixture() -> (
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

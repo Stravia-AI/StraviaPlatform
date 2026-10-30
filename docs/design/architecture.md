@@ -186,7 +186,7 @@ stravia/
 │   ├── stravia-sql/              # SQLite/PostgreSQL 统一池、连接、事务与诊断执行边界
 │   ├── stravia-media/            # 完整媒体理解、预处理、bridge、Derivative、报告与配置策略
 │   ├── stravia-web-search/       # Runner、Backend、报告/证据、公开工具与配置策略
-│   ├── stravia-credential-protection/ # Betterleaks/Kingfisher 规则、检测、替换/还原与 SQL 映射实现
+│   ├── stravia-credential-protection/ # Betterleaks 规则、检测、替换/还原与 SQL 映射实现
 │   ├── stravia-web-access/       # 联网 Adapter、浏览器与静态地址策略
 │   ├── stravia-web-access-contract/ # search/fetch 契约、域名规范化与内部工具 ID
 │   └── stravia-devtools/
@@ -384,7 +384,8 @@ stravia-server::start_http_server() → 绑定 listener 并提供优雅关闭
 - **统一错误 taxonomy**：`GatewayError` 覆盖 15 种错误类型，每个错误有稳定 code、HTTP status、user message、internal detail 和 retryable 标志。
 - **请求生命周期追踪**：`RequestContext` 携带 request_id、deadline、cancellation token、outcome，以及请求范围扩展，端到端贯穿 dispatcher 与 handler。
 - **确定性协议协商**：`negotiate()`（`proxy/planner/negotiator.rs`）实现三级 egress 解析（Exact → Same-family → Provider Default），`ProtocolRegistry` 只暴露 endpoint identity、capabilities、alias 与 ingress route 查询。
-- **Pair-bound Protocol Conversion**：crate-private `ProtocolTransform::bind(ingress, egress)` 返回 `ProtocolPair`；调用方只通过 `decode_request` / `encode_request`、`decode_response` / `encode_response` 和有状态 stream session 转换 wire 与 canonical IR，不能直接取得 codec。
+- **协议与平台 IR 双向适配**：每个 codec 只实现自身 wire 与 canonical IR 的双向映射，不为「Responses → Chat」等协议对编写独立转换规则。`ProtocolTransform::bind(ingress, egress)` 返回的 `ProtocolPair` 只组合入口解码和出口编码；请求、响应与有状态 stream session 都经过平台 IR，目标编码器不依据客户端来源协议猜测历史消息边界。
+- **完整模型响应回放**：一次完整同步响应或累积完成的 SSE 响应以 `AiResponse` 为事实单元。Generation Chain 恢复、隐藏平台工具轮次和 Agent 循环把响应追加到历史时，保留原有序 item graph，并记录平台生成的响应归属；不以可能重复的上游 ID、item 邻接、角色或 phase 推断归组。Chat 出口将同一响应的可表示思考、正文和并行工具调用投影为一条 assistant，再按历史顺序追加工具结果或用户消息；不同响应与未经归组的原生 Chat 消息保持独立。History Marker 展开的 assistant 条目仅继承载体已有的可信响应归属，不复制条目 ID 或受保护载荷的来源证明，也不覆盖恢复项已有的归属。item ID、phase、真实签名、密文及来源证据仍留在原 IR，不为合并消息而丢弃。内部归属不接受客户端自报、不出现在上游 wire，也不改变 prompt 指纹；已有持久化节点中的完整 `effective_output` 足以恢复边界，无数据库迁移。只有纯平铺历史且无完整响应事实时不猜测归组。
 - **请求编码所有权**：Rust 请求编码接口消费 `AiRequest`，编码入口先按目标能力形成保留可表达部分、省略不可表达部分的此次编码视图；标准协议共用准备入口，私有 wire 由所属插件准备。四类标准 codec 取出唯一归属的文本、移入已拥有的 JSON 子树；共享文本、历史快照、工具关联、原生字段优先级和 metadata 隔离语义保持不变，不提供旧借用编码兼容路径。
 - **内容解码所有权**：Canonical `MessageContent` 与 Chat 文本/parts 通过直接 Serde visitor 接收已有 `String` 或 typed sequence，避免 untagged 缓冲再借用复制。来自 wire 字节的文本仍按需要拥有缓冲；保留现有 JSON 形状、原生工具 JSON、任意精度 wire 数字和非法内容拒绝行为，不更换 JSON backend。
 - **Compatibility-first representability**：request、response 与 stream delta encode 保留目标可表达的内容、控制与扩展，默认省略无法表达的部分，不因语义损失整体拒绝、不提供严格模式开关。同协议可承载字段保持；此次编码的准备视图不改写共享 canonical 历史。非法源 wire、解析错误、安全与凭据校验及网络错误仍报错。
@@ -517,7 +518,7 @@ Canonical 请求不保存供应商原生上下文。Model Turn 只把统一 sess
 
 Devin Connect 的 `delta_text`、`delta_thinking` 与 `delta_signature` 是同一响应内的字段增量，不是独立内容块。Decoder 为正文与 thinking 各保留一个稳定的 canonical 索引；即使正文、thinking 与工具调用交错到达，仍分别追加原始字节，不插入分隔符，也不因正文或工具调用新建签名块。晚到的签名归属同一响应，并在 trailer 后封口；不同响应使用不同 parser 实例，签名不会跨轮拼接。
 
-Devin 请求编码只在目标协议边界恢复连续助手段，不改写 canonical 历史。Responses 分开的正文、单个带签名思考项和并行工具调用合入同一 `ChatMessagePrompt`；用户输入和工具结果截断合并。已经独立存在于历史中的签名项仍保留各自 prompt 边界，不拼接或相互覆盖。响应的 `output_id` 保留在 opaque 历史载荷中，但与原生 CLI 一致，不编码到历史 prompt 的 `#15` 字段；`thinking`、`signature` 与 `signature_type` 继续回放。调用结果仍按 call ID 紧跟对应的调用 prompt。
+Devin 请求编码只在目标协议边界恢复连续助手段，不改写 canonical 历史。Responses 分开的正文、单个思考项（签名可选）和并行工具调用合入同一 `ChatMessagePrompt`；用户输入和工具结果截断合并。已经独立存在于历史中的思考项仍保留各自 prompt 边界，不拼接或相互覆盖。无签名思考与原生 CLI 一样写入 `#11 thinking`，不得降级到 `#3 prompt` 冒充助手正文；缺省签名不制造 `#12` 或签名类型。响应的 `output_id` 保留在 opaque 历史载荷中，但与原生 CLI 一致，不编码到历史 prompt 的 `#15` 字段；`thinking`、`signature` 与 `signature_type` 继续回放。调用结果仍按 call ID 紧跟对应的调用 prompt。
 
 工具顶层说明在 system prompt 的工具说明区按自然语言句子和列表条目连续编号，代码围栏与完整 JSON 段保留结构，最后执行 XML 转义。此处理不补回参数 schema 内的说明；原有 ToolDef 名称占位和 schema 注释剥离策略保持不变。
 
@@ -648,6 +649,8 @@ Client Projection／Delivery 保持 Marker 持久化、实际交付、Sent 确�
 
 ### 4.8 Generation Chain 与 Responses response-chain
 
+Client Projection 优先使用能够无损回传的原生思考字段：已知无保护载荷的单段标量思考不再额外添加 Preview Delimiter、创建或发布 Thinking History Marker，原始空白和客户端编辑保留。同协议非 Chat 的受保护思考沿用原生载体；Chat 只有一个标量 reasoning 字段，首个正文前独立思考块可原生交付，后续独立块及正文后的思考仍投影以保留边界和顺序。已知跨协议的 indexed 或可能追加签名／密文的载体继续按既有方式投影，即使最终未追加保护载荷，也不为事后省略 Marker 而缓冲整轮输出；流式与非流式采用相同判定。隐藏平台工具及已保存 Marker 的恢复契约不变，旧历史不重写。
+
 Responses 的跨协议 Thinking Preview 与其 History Marker 属于同一个合成 reasoning carrier。流式交付与非流式交付生成相同的客户端 Item 边界，Generation Chain 保存的客户端历史必须与实际交付一致；独立 reasoning Item、原生 summary/content part 的身份及受保护载荷仍分别保存。该规则不合并全局相邻消息、不放宽严格前缀核验，也不重写已保存的节点或 Observation。回放时 Marker 恢复权威原始载荷，Preview 不再重复进入执行历史。
 
 `stage` 在进程内登记待提交屏障，按 Principal、精确客户端历史前缀、显式父 ID 或 item reference 匹配后续请求。父发现与物化先等待相关写入结束，再读取 durable history，避免客户端已收到终止事件而 SQL 尚未提交时错连旧父。屏障不是历史事实源，不提前发布节点；失败和取消释放等待但不形成可续接历史。无关分支与其他 Principal 不等待，dispatcher 的既有取消和 deadline 覆盖真实的 begin/compaction 等待。该机制不提供跨进程的提交协调。
@@ -664,7 +667,7 @@ Generation 准备阶段将已经核验的 Principal、父 ID、最终 Target、�
 
 SQLite 与 PostgreSQL 的候选查询仍将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，保留 Principal、kind、namespace、期限过滤及按 canonical 单元数、完成时间、节点 ID 的原排序。迁移 `0017_history_candidate_projection` 在节点表增加可空的投影版本、controls 指纹与客户端 context 指纹；提交从实际客户端投影 `client_items` 计算，旧索引升级到 Generation history v3 namespace 时从 retained client items 重放重建，不借用 Provider 脱敏视图的证明。查询在 SQL 中用版本匹配的 controls 与 `(context fingerprint, canonical unit count)` 配对否决确定不匹配的候选；缺失字段、未知版本或没有查询证明时保守保留。指纹只能否决，不能证明匹配：其余候选仍按顺序读取并执行完整 canonical 历史核验，session hint 不能替代语义一致性。确定不匹配的分支不读取，因此该分支的 payload 或祖先损坏不会影响当前请求；可能匹配的分支保持原有错误与 TTL 语义。自动父发现先查询并严格核验 session 层，只有该层没有可用父链时才查询 controls 层；`candidate_count` 只统计实际 SQL 返回的候选，不能再用于推断被投影排除的分支也经过了读链。
 
-外置内容恢复从 immutable 节点 envelope 提取 slot 路径与 content key，不再读取节点引用表来恢复正文。它先在当前节点批次内去重，再查询请求上下文中的已校验内容，只对缺失的唯一 `(Principal, content_key)` 按最多 400 项分批读取。新读内容校验摘要并解码后恢复到引用位置；缺失正文、损坏摘要或非法 slot 仍按原错误返回，不能以部分成功污染请求上下文。内容接纳与节点完整重放共用前述预算和成功边界；不同 Principal 不共享内容。跨候选复用避免的是重复数据库读取、解压与解析，不承诺消除恢复 JSON slot 所需的全部复制。
+外置内容恢复从 immutable descriptor 提取 JSON Pointer 与 ordinal，以 `turn_node_contents` 的数值映射作为唯一内容引用权威；descriptor 不再保存摘要或内容 ID 副本。经过 Principal/kind 过滤的节点查询同时投影 scope 与整数引用映射，不另查一次关联，也不重复携带正文；恢复器按 ordinal 排序并检查连续、完整和同 scope，不依赖聚合输出顺序。先在当前节点批次内去重，再查询请求上下文中的已校验内容，只对缺失的数值 content_id 按最多 256 项分批读取。内容解码后验证带域 SHA-256 再恢复 slot；缺失正文、损坏归属/摘要或非法 slot 明确失败，不能以部分成功污染上下文。内容接纳与节点完整重放共用前述预算和成功边界；不同 Principal 不共享内容。跨候选复用避免重复数据库读取、解压与解析，不承诺消除 JSON slot 恢复所需的全部复制。
 
 历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或过期历史撤销不可用索引，不重写原始节点或父边。
 
@@ -699,7 +702,7 @@ Codex HTTP 推理实际发送 `stream=true` 时，Vendor 显式选择既有 SSE 
 
 SQLite 与 PostgreSQL 的 Interaction usage 汇总从该 Interaction 的索引 Run 集合关联 Target attempts，避免每次确认 usage 扫描全局历史。仍对全部所属 attempts 执行 `SUM`，保留未知值、显式零、失败 attempt 和仅首次确认入账的语义；这一诊断汇总与长期管理统计是不同读取边界。
 
-**存储局部故障验收边界：** `tests/e2e/storage/test_storage_failures.py` 已通过真实宿主/HTTP 验收，使用 Server SQLite/PostgreSQL 与真实 Desktop SQLite。覆盖所属同步请求错误、Observation durable gap/Debug partial、在途与后续请求成功、已交付后的真实后台 Media 任务、队列/Trace 限额对照，以及双库 Stats 写失败后清理返回 503 且应计事实保留。真实错误与类型注入证据分开记录，不以进程存活或假的继续服务函数代替实际行为证据；该专项与完整本地测试矩阵均已通过，运行记录见[本地规格](../../.scratch/independent-usage-statistics/spec.md)。以下隔离控制仅用于测试，不作为生产配置或公开管理 API，不填满开发机磁盘，也不调用外部上游。
+**存储局部故障验收边界：** [存储故障测试](../../tests/e2e/storage/test_storage_failures.py) 使用 Server SQLite/PostgreSQL 与真实 Desktop SQLite 做宿主/HTTP 验收。覆盖所属同步请求错误、Observation durable gap/Debug partial、在途与后续请求成功、已交付后的真实后台 Media 任务、队列/Trace 限额对照，以及双库 Stats 写失败后清理返回 503 且应计事实保留。真实错误与类型注入证据分开记录，不以进程存活或假的继续服务函数代替实际行为证据。以下隔离控制仅用于测试，不作为生产配置或公开管理 API，不填满开发机磁盘，也不调用外部上游。
 
 |测试控制|实际边界与限制|
 |---|---|
@@ -714,13 +717,15 @@ SQLite 与 PostgreSQL 的 Interaction usage 汇总从该 Interaction 的索引 R
 
 长期汇总保存指标的已知计数、有效样本和分子/分母，保留未知、明确零、净输入及成功 attempt Token 口径；跨桶重新计算平均值和加权 TPS，不平均均值。全局与 Provider 保留请求级去重，模型和 API Key 保留 Model Turn 级计数；跨 Provider 分类不必可加为全局请求数。维度以稳定内部身份和非秘密展示快照归属，无配置级联外键；更名不拆分、同名重建不合并，删除后标记 `deleted`，历史 `model_id`/`provider_id` 可空，不保留凭据或失效编辑能力。无法证明旧实体归属时不按名称猜测。
 
+ADR-0083 起统计另存四个可用率计数：全局的已终结请求数与失败的请求数按运行终态计算，排除取消、断线与上游发送前被平台校验拒绝的错误请求，即使已创建 Target 尝试记录也不例外；无可用 Target、额度暂停等服务失败仍计入客户端可用率。全局与供应商的上游请求数与上游错误数按 Target attempt 计算（上游请求 = 已完成尝试 + 来源为上游的失败尝试，上游错误 = 来源为上游的失败尝试）。本地准备失败、未发送、取消与来源未知的尝试既不进上游分子也不进上游分母。供应商统计只暴露上游请求与上游错误，旧 `request_count`/`error_count` 存储列保留但不再对外；粗化展示桶对四个计数求和，比率由前端用总量相除。上游尝试沿用所属 Model Turn 的起点分桶。
+
 升级在同一 SQLx 迁移事务安装结构并回填仍存在且可判定的事实，迁移成功后才开放统计源；中断回滚后可重入，不存在异步补账窗口。已删除或从未保存的历史不可恢复，不能补零、解析 Debug 或调用上游重放；清理后不能由汇总追溯已删对话或恢复秒级分布。详细来源/checkpoint 生命周期与统计页操作见 [Interaction Observation 设计](interaction-observation.md#611-独立长期-stats-usage)。
 
 管理 `StatsWindow` 采用正的 Unix 毫秒 `[start_at, end_at)`，边界成对且对齐 `900000` 毫秒，省略两者表示全部累计；移除 `hours`/`tz_offset`。统计页保留 6h/24h/3d/7d 预设，实时模式包括当前未满桶，固定历史按跨度翻页，本地自定义范围要求整刻钟且可超过 24 小时。序列 `bucket` 为 900 倍数的秒数，自动粗化保证最多 512 点，响应 `bucket_ms` 是实际粒度；粗化不改变所选范围总数。该长期契约不替代下述请求记录的精确秒级 24 小时筛选，也不替代 Route Scheduling 原始 1h 短窗口。
 
-Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest、Rejected Requests 与 Failed Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 不进入 Debug Trace；原始应用协议 payload 只通过 Debug Bundle 提供，不在 Run inspector 中展开。
+Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest、Rejected Requests、客户端错误与上游错误共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 不进入 Debug Trace；原始应用协议 payload 只通过 Debug Bundle 提供，不在 Run inspector 中展开。
 
-失败的请求列表是同一核心的查询投影，不建立第二套执行记录：合并准入前 `rejected_request_observations` 与终态 `failed` 且已结束的 `inference_run_observations`，按 `started_at` DESC、`kind`、`id` 排序并以不透明 keyset 游标分批加载；排除单纯取消、断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）与内部重试或切换模型服务后最终成功的请求。失败 Run 的开始时间取 ingress 接收时间，结束在终止方截取，不使用 writer 入队时间；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 的失败 Run 仍保留在原链路，详情提供对应节点跳转；准入前失败不伪造 Principal、Interaction 或 Generation Chain 关联。查询由 `GET /api/v1/observations/failed-requests` 与 `GET /api/v1/observations/failed-requests/{kind}/{id}` 提供，详情的 `trace` 只是既有 Debug manifest 元数据，诊断包沿用既有 ticket 与下载入口，不新增 Debug 捕获。0045 之前的记录缺少开始时间、耗时与来源快照，按 `occurred_at` 回退排序并报告 `observation_gap`；缺失诊断保持未知，不能补回。
+客户端错误列表与上游错误列表都是同一核心的查询投影，不建立第二套执行记录。客户端错误列表合并准入前 `rejected_request_observations` 与终态 `failed` 且已结束的 `inference_run_observations`，按 `started_at` DESC、`kind`、`id` 排序并以不透明 keyset 游标分批加载；`type` 取 `failed | rejected`，与记录种类正交：未进入 Target 选择即终止的运行（模型不存在、API Key 不允许该模型、请求 Hook 拒绝）为 `rejected`，其余失败为 `failed`。列表排除单纯取消、断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）与内部重试或切换模型服务后最终成功的请求。客户端错误的开始时间取 ingress 接收时间，结束在终止方截取，不使用 writer 入队时间；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 的失败 Run 仍保留在原链路，详情提供对应节点跳转；准入前失败不伪造 Principal、Interaction 或 Generation Chain 关联。上游错误列表按 `status=failed AND error_source='upstream'` 的 Target 尝试一行，联表读取运行、Interaction 与 API Key 快照，按 `started_at` DESC、`id` 排序；`outcome` 在查询时从所属运行派生（`recovered | caused_failure | in_progress | interrupted`），保留期跟随所属运行，本地准备失败、未发送、取消、中断、观察丢失与来源未知的尝试不出现。查询由 `GET /api/v1/observations/client-errors`、`GET /api/v1/observations/client-errors/{kind}/{id}`、`GET /api/v1/observations/upstream-errors` 与 `GET /api/v1/observations/upstream-errors/{attempt_id}` 提供，详情的 `trace` 只是既有 Debug manifest 元数据，诊断包沿用既有 ticket 与下载入口，不新增 Debug 捕获。0045 之前的记录缺少开始时间、耗时与来源快照，按 `occurred_at` 回退排序并报告 `observation_gap`；缺失诊断保持未知，不能补回。
 
 Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度与保留期。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 只保存 client↔platform↔upstream 四方向观察到的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层原始 Wire 顺序及必要关联元数据，不保存 canonical、Hook 或 Client Projection 中间阶段，也不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。只有 HTTP `Authorization` header 值在进入队列前永久替换；其他 header、URL、query、body、prompt、工具参数、工具结果与媒体可能原样保留。
 
@@ -732,9 +737,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 `reversible_redaction_enabled` 是高级功能中的实例级持久化开关，默认关闭；开启后适用于全部有效 API Key，不依赖 Transparent Injection。`model_turn::execute` 在每个真实模型回合处理 Hook、历史恢复和工具循环产生的当前 canonical 请求，因而普通 Inference Run、隐藏回合和 Agent Runner 共用同一保护边界。Target 重试与 failover 复用已经替换的请求，不另设协议旁路。工具权限、连接认证、Client Output Commit、Delivery 与 Generation Chain 的所有权保持不变。
 
-管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、交互新增发现查询及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
+管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、按新增映射逐条列出的命中记录查询（含条目详情与后续复用两个只读端点）及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
 
-映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；每个新映射只携带规则 ID 集合及最小来源类型。已有有效映射复用、续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
+映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时，`protect` 在替换完成后发送 `CredentialMappingsReused`：位置取自出站替换实际发生之处（含检测器认不出上下文的已知凭据），只限本次请求新提交的文本（最后一条 Assistant 之后的条目），客户端重放的历史不重复记录；模型响应里工具调用参数的引用被还原时，`restore_stream` 在完整响应处同样发送一次，来源为 `tool_arguments`，块标识是该调用 ID。新建事件记录该秘密出现过的全部位置，由检测器逐处标注规则；复用事件的规则取自映射的 `rule_ids`（创建时写入、不再改写，迁移前创建的映射为空，只受保护、不产生复用命中）。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；所有 Run 另带不透明占位符 `marker`（= 映射 `reference`），用于把复用事件关联回创建它的命中记录，不进入列表接口；写入 `CredentialMappingsReused` 事件的同一事务同时按占位符与位置 upsert `credential_mapping_reuses`，命中记录侧栏的「后续复用」据此做索引查找而不扫描事件。复用不产生命中记录行，只作为创建行的后续使用列出；续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
 
 映射预留与发现投递共用一个独立任务，覆盖数据库提交与调用方收到确认之间的取消窗口。调用方取消后不等待该任务；任务只能完成已启动的预留及诊断投递，不调用 Provider、不执行替换或发布，预留仍按既有 pending 保留期过期。
 
@@ -742,11 +747,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 检测器内置 Betterleaks 提交 `95237cf8eb4d8e9f67409595b245e674832992cf` 的 462 条规则、上游词表及许可证。Rust 编译器启动检测时核对完整快照并编译本地正则、过滤表达式、熵与组合条件；token efficiency 使用内置 `cl100k_base`。模型文本没有受信文件路径，因此文件专属条件以空路径求值。`validate` 仅保留在原始快照中，不编译、不执行；运行时不下载规则或词表。先扫描全部可读文本、补齐新秘密映射，再统一执行最长优先的单次精确替换；工具 JSON 以解码后的字符串参加检测与替换，不改写协议标识、媒体或不透明载荷。
 
-补充的 Kingfisher v1.109.0 快照固定于提交 `9ffb8969c4ad5a5c6c24e686cb252c434bc8adce`，包含全部 1,013 条规则，其中 861 条可报告、152 条隐藏辅助规则。其正则使用上游 Rust 字节模式及注释清理，秘密选择优先级为命中的 `TOKEN` 命名组、首个命名组、组 1、完整匹配。字节 Shannon 熵必须严格大于规则阈值；字符数量、排除子串、18 条内置安全列表及 14 条规则的校验和均在本地执行。校验和模板被编译为封闭的类型化运算，不引入 Liquid 或网络执行器。隐藏规则只列入目录，不产生映射；置信度不阻断保护。Betterleaks 的全局过滤仅作用于自身规则，两组规则共享最终位置报告与秘密去重，但不相互抑制命中。
+上面的条数是完整来源快照，不是有效执行目录。编译规则正则前仅折叠经过审阅且解析后策略完全相同的身份：`bittrex-secret-key` → `bittrex-access-key`。规范身份保留上游首次出现的位置与扫描优先级；当前有效目录为 461 条。比较包括正则、路径、secret group、关键词、过滤、`validate` 来源、组件、skipReport、specificity 与 confidence。组件引用随被移除身份迁移，但同时依赖这对身份的父规则不自动折叠；任何策略差异都保留两条规则。不提供运行时别名、不重写历史事件。
 
-上面的条数是完整来源快照，不是有效执行目录。编译规则正则前仅折叠经过审阅且解析后策略完全相同的身份：`bittrex-secret-key` → `bittrex-access-key`、`kingfisher.jfrog.1` → `kingfisher.artifactory.2`、`kingfisher.plaid.3` → `kingfisher.plaid.2`。规范身份保留上游首次出现的位置与扫描优先级；当前有效目录为 Betterleaks 461 条、Kingfisher 1,011 条（860 条可报告、151 条隐藏），合计 1,472 条。原始资产、导入器及散列仍完整保留来源证据。比较包括缺省值、捕获模式、过滤、熵、requirements/checksum、可见性、specificity 与 confidence；Kingfisher 比较前采用同一注释清理。组件引用随被移除身份迁移，但同时依赖一对身份的父规则不自动折叠；任何策略差异都保留两条规则。不提供运行时别名、不重写历史事件。`kingfisher.brevo.1` 与 `kingfisher.sendinblue.1` 虽模式相同但 confidence 不同，继续保留；跨来源规则的 Unicode、全局过滤和安全列表策略不同，不作正则等价推断或跨源合并。
-
-Kingfisher 移植范围是模型文本的离线规则检测，不包含其文件发现、可选解码、Tree-sitter、数据库 URI 解析、用户安全列表、内联忽略指令或联网验证。字节正则产生的非 UTF-8 字符边界片段不作文本替换。离线快照不保留 `validation`、`revocation` 或用于联网验证的依赖绑定。开发期导入方式、来源逐文件散列和许可记录见 `backend/crates/stravia-credential-protection/tools/import_kingfisher.py` 与 `src/detection/UPSTREAM.kingfisher.json`；管理规则目录、匹配测试与正式保护使用同一个合并检测器。
+内置检测只使用 Betterleaks；不再内置 Kingfisher 补充规则。迁移 `0035_credential_hit_records` 与其启动升级从映射归因和命中事件中移除存量 `kingfisher.*` 规则 ID，界面没有「已移除规则集」的特殊分支。管理规则目录、匹配测试与正式保护使用同一个检测器。
 
 SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 
@@ -995,7 +998,7 @@ API Token ──── (授权绑定) ──── Route
 
 Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
 
-### 8.3 代理请求鉴权与 RPM 准入流程
+### 8.3 代理请求鉴权、消费上限与 RPM 准入流程
 
 ```
 1. 从请求头提取 `api_token`
@@ -1005,17 +1008,22 @@ Token 格式：`sk-<32位hex>`（存储字段名 `token`）。
    a. 不存在 → 401 invalid token
    b. `is_enabled == false` → 403 token revoked
    c. `expires_at < now` → 401 token expired
-4. 认证成功后，在 Request Hook 前原子检查并计入根请求 RPM
+4. 认证成功后读取该 Key 的已消费，检查消费上限
+   ├── 已消费 ≥ 上限 → `ApiKeySpendLimitReached` (429)，不带 Retry-After
+   └── 读取失败 → 内部错误，不放行、不占用 RPM
+5. 在 Request Hook 前原子检查并计入根请求 RPM
    └── 已达 `rpm_limit` → `PrincipalRpmExceeded` (429) + Retry-After
-5. 执行 Request Hook，再按最终 `model` 精确匹配 `models.model_id`
+6. 执行 Request Hook，再按最终 `model` 精确匹配 `models.model_id`
    └── 未匹配 → `GatewayError::ModelNotFound` (404)
-6. 最终模型不在 API Key 绑定列表（`api_key_models`）→ 403 forbidden
-7. 执行路由转发 → `model_backends` → 健康感知 target 选择
+7. 最终模型不在 API Key 绑定列表（`api_key_models`）→ 403 forbidden
+8. 执行路由转发 → `model_backends` → 健康感知 target 选择
 
 MCP tools/call、Proxy inference 与 remote compaction 共用同一 Key 窗口；
 MCP session、discovery、工具列表等非执行入口不计数。
 内部轮次及工具共享 RootRequest；独立客户端续接或重发各计新根请求。
 ```
+
+消费上限只约束新的根请求，不取消已准入请求，也不停止其隐藏轮次、工具调用或故障切换。金额异步落库及并发准入允许超额；达到上限不禁用 Key，调高上限或清零后立即恢复。每次完成且归属 API Key 的模型尝试按被调用 Route 计费，Chat 使用所选 API Key 的相同规则。清零不重写历史计费或统计，在途金额之后落库时计入清零后的累计值。币种、冻结金额与订阅摊销规则见[成本与计费](cost-and-billing.md)。
 
 窗口为单调时间的 `(t - 60s, t]`，恰好满 60 秒的记录已离窗；允许瞬时使用剩余额度，不使用固定发送间隔或令牌桶。`rpm_limit` 缺省／`null` 为不限，正整数为上限，零及负数无效；更新省略保持、`null` 清除、正数设置。入口超限不排队、不运行 Hook 或工具，不增加记录。已准入后失败、取消或完成不退回记录；流仍活跃时记录也会在 60 秒离窗，chunk、token、心跳不重复计数。WebSocket upgrade 不作为执行请求计数，每次独立生成事件分别计根请求；复用客户端或上游连接都不合并请求。配置更新影响后续准入而不取消活跃流；已有受限窗口在改限后保留，从不限改为有限不重建未记录历史。
 
@@ -1058,7 +1066,7 @@ SQLite/PostgreSQL `0014_remove_shared_rpm_pools` 删除已保存的池额度与�
 
 `ProviderCatalog` 是管理面选择 Provider 与 channel、下载与校验 Catalog、缓存 generation 与 Provider scope 的唯一 seam。唯一远端源是 revisioned `https://models.stravia.cn`：`/version.json` 是 revision gate，`/providers.json` 与 `/models.json` 分别提供轻量 Provider 索引和 Canonical Model 索引，`/providers/{provider_id}/models.json` 按需提供完整的 Provider Catalog Entry。
 
-进程先加载只含 Provider 与 Canonical Model 索引的内嵌 bootstrap，再异步检查远端 revision。新 revision 会下载、校验并规范化两个全局索引，写入同一不可变 generation；仅在复查 revision 未变化后才切换 active manifest。任一下载或校验失败时继续使用完整的 last-known-good generation。自动刷新间隔为一小时，同一时刻只允许一个刷新任务。Provider scope 以 `(revision, provider_id)` 隔离：同 revision 的已验证 cache 可在重启后复用，缺失时才加载；当前 revision 的 scope 失败会使同步或 re-import 失败，而不会把旧 scope 冒充为最新结果。
+进程先加载只含 Provider 与 Canonical Model 索引的内嵌 bootstrap，再异步检查远端 revision。新 revision 会下载、校验并规范化两个全局索引，写入同一不可变 generation；仅在复查 revision 未变化后才切换 active manifest。任一下载或校验失败时继续使用完整的 last-known-good generation。自动刷新间隔为一小时，同一时刻只允许一个刷新任务。Provider scope 以 `(revision, provider_id)` 隔离：同 revision 的已验证 cache 可在重启后复用，缺失时才加载；当前 revision 的 scope 失败会明确报告，不会把旧 scope 冒充为最新结果。恢复字段同步只使用已保存的来源快照，不触发目录读取。
 
 `GET /api/v1/catalog/providers` 与 `GET /api/v1/catalog/models` 分别返回 Provider/channel 和 Canonical Model summary，并以 active revision 作为 ETag；`POST /api/v1/catalog/refresh` 触发手动刷新。`GET /api/v1/catalog/providers/{provider_id}/logo` 只代理 Catalog 的公开 SVG，因此无需管理 token；浏览器不必在图片 URL 中暴露 bearer token。远端 Provider 数据与本地受版本控制的 protocol/channel、OAuth、URL 和模型过滤规则合并后再暴露给管理面。
 
@@ -1068,41 +1076,41 @@ SQLite/PostgreSQL `0014_remove_shared_rpm_pools` 删除已保存的池额度与�
 
 Provider discovery 提供当前可见的模型 ID，以及发现通道明确声明的规格和生命周期。动态端点响应包含 `visibility` 时只保留 `list` 项；Core 再以相同 Provider Catalog scope 中的精确 upstream model ID 补齐来源 metadata。Catalog 独有模型不会扩充动态 discovery 集合，端点独有且未声明规格的模型则以最小 metadata 创建。没有可靠账号 discovery 的 Catalog Provider 直接使用其按需加载的 scoped inventory。
 
-`provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。`snapshot_state` 区分 `unregistered`、带来源的 `imported` 和保留可知来源的 `edited`；来源可为 Provider Catalog、Canonical Model 或 Discovery。ID-only discovery 不填充虚假的能力、模态或上下文默认值；未登记快照可在普通同步中首次获取真实规格，Imported 且未被人工接管的整条规格继续跟随来源刷新。Edited 保留管理员接管的完整规格，插件拥有的执行 metadata、presence 与生命周期仍按各自契约刷新；显式 re-import 可重新整体导入规格。手动添加的模型不被 discovery 覆盖或因未出现而标记 missing。对账写入使用发现前的连接快照及 expected revision 防止覆盖并发编辑；旧行保守迁移为来源未知的 edited，不重写 `metadata_json`。未知字段仍保存在完整 metadata 中，常用查询列与分档成本规则继续规范化到关系列。
+`provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。`snapshot_state` 区分 `unregistered`、带来源及 `pinned` 字段集合的 `imported`，以及没有同步来源的本地规格（JSON 为 `edited/source:null`）。来源可为 Provider Catalog、Canonical Model 或 Discovery。普通同步保留固定字段，更新未固定字段与最后有效的 `source_metadata_json`；失败或 ID-only 发现不能清空有效来源。显式提交 `null` 表示取消登记并固定，不表示恢复同步。峰谷定价只属于本地，来源不能覆盖它或注入自定义币种标记。手动模型不因 discovery 缺席变为 missing。连接快照与 expected revision 防止并发覆盖；旧的带来源 edited 行在可重入的 100 行批次迁移中固定全部 11 个托管字段，下一次有效同步后才能恢复。未知字段仍保存在完整 metadata 中，查询列与成本规则继续规范化到关系列。
 
 模型价格只登记 `input`、`output`、`cache_read` 与 `cache_write`，基础价格、`context_over_200k` 和 `tiers` 使用相同字段集合。推理、音频输入和音频输出不再分别登记单价；目录导入与管理写入不会保留这些退休价格。SQLite 与 PostgreSQL 的 `0013_remove_extra_model_prices` 增量迁移清理已保存快照中的三项价格及对应投影列，保留其他价格的十进制精度、快照身份、revision、推理强度和音频模态，不修改用量记录。升级前备份数据库；恢复这些已删除的价格需要升级前备份。
 
-调度所需的 input/output/cache-read/cache-write 基础价格投影由当前 Gateway 的 `RoutePolicyState` 通过统一派生缓存复用，按 Provider 与 Target 请求的 upstream Model ID 隔离，同时缓存缺失或无价结果，TTL 为 24 小时且可提前淘汰。用量与凭据失效信息仍在每次选择时向存储读取，沿用原有 stale 标记。本地 `RoutePolicyState` 保留配置失效代次与协调状态；创建、编辑、删除、同步、选择策略修改与 re-import 在本实例成功返回前推进定价失效代次，本地 Route 缓存刷新也失效价格，覆盖 Provider 级联删除。启用配置 epoch 轮询时，既有机制在观测到新 epoch 时失效价格，即使后续 Route 重载失败也不使用旧值；这不使 Redis 成为多实例配置发布机制，也不承诺跨实例同时刷新。禁用轮询不承诺跨实例刷新。缓存代次阻止失效前启动的旧读取回填，读取失败不进入缓存。
+调度所需的 input/output/cache-read/cache-write 基础价格投影由当前 Gateway 的 `RoutePolicyState` 通过统一派生缓存复用，按 Provider 与 Target 请求的 upstream Model ID 隔离，同时缓存缺失或无价结果，TTL 为 24 小时且可提前淘汰。用量与凭据失效信息仍在每次选择时向存储读取，沿用原有 stale 标记。本地 `RoutePolicyState` 保留配置失效代次与协调状态；创建、编辑、删除、同步、选择策略修改与恢复字段同步在本实例成功返回前推进定价失效代次，本地 Route 缓存刷新也失效价格，覆盖 Provider 级联删除。启用配置 epoch 轮询时，既有机制在观测到新 epoch 时失效价格，即使后续 Route 重载失败也不使用旧值；这不使 Redis 成为多实例配置发布机制，也不承诺跨实例同时刷新。禁用轮询不承诺跨实例刷新。缓存代次阻止失效前启动的旧读取回填，读取失败不进入缓存。
 
 SQLite 与 PostgreSQL 的 Provider Model 创建、规格编辑、选择策略修改、手工删除及实际对账写入都在原事务内更新 `config_epoch`。创建与编辑在提交前读回完整记录；读回失败时一并回滚规格、成本规则与 epoch，提交后不再执行可失败的读回。
 
-显式 re-import 由 Route module 统一协调。新快照、规范化成本规则、全部关联 Target 的 Generated Mapping 与 `config_epoch` 在同一存储原子操作中提交，禁用的 Route / Target 也在范围内。事务读取最新绑定与映射，只替换仍为 Generated 的行，保留 Overridden、Target ID 与其他策略字段。旧 revision、不可写的手工映射或最终 Vendor 写许可失效均阻止提交；提交前的持久化错误回滚整笔变更。映射未发生变化也不能跳过新规格下的可写性校验。数据库提交确认丢失时不推断已经回滚，调用方应重新读取状态，不自动重试。
+逐字段编辑与恢复同步由 Route module 统一协调。恢复要求有效来源快照与已固定字段；来源没有该字段时恢复为未登记，并移除固定标记。新快照、规范化成本规则与 `config_epoch` 原子提交；修改 `reasoning_efforts` 时，同一事务更新全部关联 Target 的 Generated Mapping，禁用的 Route / Target 也在范围内。事务读取最新绑定与映射，只替换 Generated 行，保留 Overridden、Target ID 与其他策略字段。旧 revision、不可写的手工映射或最终 Vendor 写许可失效阻止提交，持久化错误回滚整笔变更。映射未变化也不能跳过可写性校验。数据库提交确认丢失时不推断已回滚，应重新读取状态，不自动重试。整条 reimport 接口已删除，不保留别名。
 
 Catalog 读取与 Generated Mapping 的准备在事务前完成，事务中的校验回调不重新进入 Storage。SQLite 使用 `BEGIN IMMEDIATE`；PostgreSQL 按 `models` → `model_backends` 顺序获取事务级 `SHARE ROW EXCLUSIVE` 表锁，串行化期间的 Route 写入，避免漏掉并发新绑定的 Target；Memory 在统一锁序下先准备再写回。存储在提交前准备完整启用 Route 快照。Route module 跨存储调用持有当前实例的缓存写锁，提交后不再执行可失败的读取或逐条发布：成功返回后，新请求使用完整的新配置。其他实例仍通过 epoch 异步刷新，不承诺同时切换，也不把数据库与内存描述为同一事务。
 
 管理列表的每个 Provider Model 返回 `specification`。Core 从已保存 metadata 投影仅含 `context` 的 `limit`、`modalities`（`input`、`output`）与 `reasoning_efforts` 明确字符串列表；模态缺失或为 `null` 时，列表、详情、手动模型准备、能力查询和运行时统一回退为 `input: ["text"]`、`output: ["text"]`。显式模态列表（包括空列表）保持不变；其他缺失规格保持未知，Effort 列表不含 `default` 或 `null` 默认选项。回退不改写已保存 metadata、revision 或 snapshot state，也不使 ID-only discovery 被误判为已经导入规格；既有记录无需迁移或重新同步。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata 及有效模态。通用模型规格不再登记五项支持功能、`interleaved`、`limit.input`／`limit.output` 或开关／预算推理规格；退休键不作为未知扩展保留。
 
-Vendor 可以保留执行必需的原生 metadata。Anthropic 的模型发现保留顶层 `max_tokens`，仅用于补齐 Messages 必填字段，不恢复通用 `limit.output`，不加入列表规格、Route 或客户端配置。已有快照缺少该原生值时按上方回退规则发送；重新同步尚未人工接管的快照，或显式 re-import 已编辑快照，才能取得发现源新提供的值。
+Vendor 可以保留执行必需的原生 metadata。Anthropic 的模型发现保留顶层 `max_tokens`，仅用于补齐 Messages 必填字段，不恢复通用 `limit.output`，不加入列表规格、Route 或客户端配置。已有快照缺少该原生值时按上方回退规则发送；普通同步刷新插件拥有的执行 metadata，不因管理员固定其他规格字段而停止更新。
 
 WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开模态、Effort 和结构化价格。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格筛选在既有状态中保存上下文下限、输入模态、输出模态和 Effort 的 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中值存在于 Core 返回的有效规格中，其中缺失模态的模型可以匹配文本输入和文本输出；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
 
 模型元数据删除不关闭协议中的附件、推理、工具调用、结构化输出或采样控制。Web Search、Media 与模型轮次不再以模型 `tool_call` 声明判断工具资格；服务启用、有效可用状态、模态、平台权限及真实协议可表达性仍按各自执行路径校验，目标协议不能表达的部分按转换政策省略，上游实际错误仍明确返回，不伪造模型支持声明。请求 `max_tokens` / `max_output_tokens` 与 `reasoning_content` 编解码继续存在。Route 和客户端配置不再派生或导出模型最大输出上限，也不以 context 代替输出上限。
 
-`0006_model_specification` 在 SQLite 与 PostgreSQL 上保数据增量升级：删除旧投影列和 JSON 键，只从旧 Effort 规格提取明确值；已存在的新 Effort 列表优先。迁移不改 Provider、Route 绑定或任何现有 Target 映射，包括旧 Generated 开关／预算映射。显式 re-import 才按新规格刷新 Generated，仍保留 Overridden。升级前按部署流程备份数据库，不修改冻结基线或重置历史。
+`0006_model_specification` 在 SQLite 与 PostgreSQL 上保数据增量升级：删除旧投影列和 JSON 键，只从旧 Effort 规格提取明确值；已存在的新 Effort 列表优先。迁移不改 Provider、Route 绑定或任何现有 Target 映射，包括旧 Generated 开关／预算映射。后续编辑、恢复或同步使 `reasoning_efforts` 改变时按新规格刷新 Generated，仍保留 Overridden。升级前按部署流程备份数据库，不修改冻结基线或重置历史。
 
-Canonical Model 只用作一次性模板：客户端 Route ID 落在 `models.model_id`，与存储主键 `models.id` 分离；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。手动创建可提交同一可选 `template_id`，Core 验证模板存在后保存为带已知来源的 edited 快照；客户端不能直接指定 `snapshot_state`。这保留来源而不推断 metadata 是否被改过，也不形成持续继承的 Canonical Model binding。
+Canonical Model 只用作手动创建模板：客户端 Route ID 落在 `models.model_id`，与存储主键 `models.id` 分离；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。手动创建可提交同一可选 `template_id`，Core 验证模板并记录来源，客户端不能直接指定 `snapshot_state`。这不形成持续继承的 Canonical Model binding；字段固定与恢复遵循上述来源快照合同。
 
 `stravia-core` 通过 crate-private Provider connection 与 Route 两个深模块收口管理写入。Provider connection 负责 Catalog/custom 解析、Adapter Credentials、Base URL、OAuth、连通性与删除；Route 负责 Provider Model snapshot、discovery、Selection Policy、Canonical Model 一次性模板、Route ID 与 Target。Admin HTTP 只做 DTO adapter：`POST /api/v1/models/bind` 执行一键或指定 Route ID 的 Target 绑定，`POST /api/v1/models/unbind` 摘除 Target，并在最后一个 Target 被摘除时删除 Route。
 
-`GET/POST /api/v1/providers/{provider_id}/models` 分别列出 Provider Model 与创建手动模型，`POST /models/sync` 执行 discovery 对账。单模型详情、编辑、选择策略、re-import 和手动删除使用 `/api/v1/providers/{provider_id}/model` 及其子资源，并通过 `model` query 或 `model_id` body 字段传递可包含 `/` 的模型 ID。`SelectionPolicy` 的 `auto`、`force_enabled`、`force_disabled` 与 discovery presence、生命周期共同计算 Effective Availability，既影响新 Target 资格，也校验已有 Target 的后续上游发送；已有 Target 不因 missing 或 deprecated 被自动删除。ForceEnabled 保留本地覆盖，但不绕过 Provider 停用、凭据或其他执行限制。删除 Provider 会在存储事务内摘除其 Target、删除空 Route，并把仍有 Target 的 Route 主目标更新为剩余的第一项。
+`GET/POST /api/v1/providers/{provider_id}/models` 分别列出 Provider Model 与创建手动模型，`POST /models/sync` 执行 discovery 对账。单模型详情、编辑、选择策略、恢复同步和手动删除使用 `/api/v1/providers/{provider_id}/model` 及其子资源，并通过 `model` query 或 `model_id` body 字段传递可包含 `/` 的模型 ID。编辑请求为 `{model_id, revision, changes}`，恢复请求向 `/model/restore-sync` 提交 `{model_id, revision, fields}`。`SelectionPolicy` 的 `auto`、`force_enabled`、`force_disabled` 与 discovery presence、生命周期共同计算 Effective Availability，既影响新 Target 资格，也校验已有 Target 的后续上游发送；已有 Target 不因 missing 或 deprecated 被自动删除。ForceEnabled 保留本地覆盖，但不绕过 Provider 停用、凭据或其他执行限制。删除 Provider 会在存储事务内摘除其 Target、删除空 Route，并把仍有 Target 的 Route 主目标更新为剩余的第一项。
 
 ### 9.3 Provider Model Editing
 
-WebUI 的 `frontend/stravia-webui/src/lib/provider-model-editing.ts` 是 Provider Model Editing 的深模块。它只拥有一个当前编辑上下文：详情读取归属、尚未保存的手动模型、规格脏状态与待确认离开动作，以及保存、Selection Policy、re-import、删除和相关刷新编排。`.svelte.ts` adapter 发布单一响应式快照；页面和抽屉调用操作 interface，不维护可写的详情副本、读取代次或另一套写入锁。这个上下文不持久化、不缓存跨模型草稿，也不改变 Core 的 revision、Model Snapshot State 或事务规则。
+WebUI 的 `frontend/stravia-webui/src/lib/provider-model-editing.ts` 是 Provider Model Editing 的深模块。它只拥有一个当前编辑上下文：详情读取归属、尚未保存的手动模型、规格脏状态与待确认离开动作，以及保存、Selection Policy、逐字段恢复同步、删除和相关刷新编排。`.svelte.ts` adapter 发布单一响应式快照；页面和抽屉调用操作 interface，不维护可写的详情副本、读取代次或另一套写入锁。这个上下文不持久化、不缓存跨模型草稿，也不改变 Core 的 revision、Model Snapshot State 或事务规则。编辑器只提交实际触及字段；Provider Model 与 Route 共用价格编辑器，前端不计算成本或计费金额。
 
 切换模型立即移除上一模型的表单并进入新模型的加载或错误状态。切换 Provider、关闭、取消准备和组件销毁均废弃旧读取；迟到的成功、失败和结束回调不能覆盖当前详情、清除当前加载状态或报告过时错误。手动模板准备失败保留目录与模板选择，允许用户选择另一个模板；若准备出的 ID 已存在，读取该 Provider Model 的已保存详情与 revision，不用模板覆盖已保存规格。
 
-未提交规格离开前统一确认，覆盖模型切换、关闭手动抽屉、页内 URL 导航、浏览器 Back/Forward 和需要丢弃规格的 re-import。保留编辑不执行待定动作；确认丢弃先用已确认 metadata 的新副本重置表单，等待 editor 更新，再执行唯一待定动作。视图仍拥有 `goto`、浏览器历史恢复、焦点、对话框、toast 和 DOM；字段编辑、验证及 metadata 序列化继续由已有 editor 负责，不引入通用编辑框架。
+未提交规格离开前统一确认，覆盖模型切换、关闭手动抽屉、页内 URL 导航、浏览器 Back/Forward 和需要丢弃草稿的恢复同步。保留编辑不执行待定动作；确认丢弃先用已确认 metadata 的新副本重置表单，等待 editor 更新，再执行唯一待定动作。视图仍拥有 `goto`、浏览器历史恢复、焦点、对话框、toast 和 DOM；字段编辑、验证及 changes 序列化继续由已有 editor 负责，不引入通用编辑框架。
 
 模型写入和相关刷新收敛前，禁止重复写入、规格编辑、关闭和页内导航。重新加载页面或卸载只能使用浏览器原生离开提示，不能取消后端已经接受的写入。写入成功先接受返回详情与 revision，再刷新相关列表；刷新失败明确表示更改已保存，Retry 只重读，不重复提交写入。删除成功后先清空编辑上下文，刷新或导航失败不能复活已删除详情。Selection Policy 独立生效，更新可用状态、策略和 revision，但保留规格 metadata 引用与未提交字段；Destination RPM 表单和目录内联编辑仍使用各自既有 seam，不并入这个写入上下文。
 
@@ -1116,9 +1124,9 @@ Server/Desktop 关闭时先停止接收新请求并通过 `Gateway::request_shut
 
 每个 Provider 配置实例的模型发现独享 60 秒固定 deadline，凭据准备、全部 discovery 分页与发布围栏取得共用剩余预算；自动与手动同步使用相同预算，不按页重新计时，手动加入在途同步也不重新起表，不增加失败重试。该预算不包含取得发布围栏后可选目录富化及库存协调的独立工作。超时仍明确失败并保留上次确认的库存，不用静态清单代替未完成的上游响应。
 
-变更事实由 Core 在协调时生成。同步库存、检查摘要和成功变更批次在同一个存储事务中提交；手动添加及 Selection Policy 修改也与独立记录原子提交，重复设置相同策略不制造记录。普通人工规格编辑、re-import 和内部插件字段变化不进入此时间线。失败 discovery、空清单、非法或不完整响应保留上次有效库存；失败历史仅在存储确认后可查询，历史保存失败显式报告且不终止其他请求。提交后的插件恢复写入失败返回 `partial_success`，保留已提交的模型事实、原记录身份和差异，不宣称整次回滚。
+变更事实由 Core 在协调时生成。同步库存、检查摘要和成功变更批次在同一个存储事务中提交；手动添加及 Selection Policy 修改也与独立记录原子提交，重复设置相同策略不制造记录。普通人工规格编辑、恢复字段同步和内部插件字段变化不进入此时间线。失败 discovery、空清单、非法或不完整响应保留上次有效库存；失败历史仅在存储确认后可查询，历史保存失败显式报告且不终止其他请求。提交后的插件恢复写入失败返回 `partial_success`，保留已提交的模型事实、原记录身份和差异，不宣称整次回滚。
 
-账号级 discovery 已完整成功时，可选 Provider Catalog 富化失败按 ADR-0073 明确告警，但不把已确认库存判成失败或扩大成员集合。已有 Imported／Edited 的有效目录规格、名称与可重导入来源保留；新模型和未登记规格仍可使用 Canonical／bare metadata。缺少明确上游 `status` 的失败富化不能清除旧 deprecated；只有 discovery 明确声明的合法生命周期（`alpha`、`beta`、`deprecated`）或 `null` 才更新该事实，随后据同一个有效状态生成计数、历史与发送资格。此回退不把失败的目录刷新标为成功。
+账号级 discovery 已完整成功时，可选 Provider Catalog 富化失败按 ADR-0073 明确告警，但不把已确认库存判成失败或扩大成员集合。已有有效目录规格、名称、固定字段与最后有效来源快照保留；新模型和未登记规格仍可使用 Canonical／bare metadata。缺少明确上游 `status` 的失败富化不能清除旧 deprecated；只有 discovery 明确声明的合法生命周期（`alpha`、`beta`、`deprecated`）或 `null` 才更新该事实，随后据同一个有效状态生成计数、历史与发送资格。此回退不把失败的目录刷新标为成功。
 
 管理接口沿用既有鉴权、CSRF 和响应包装，Server 与 Desktop 共享 AdminService：
 
@@ -1170,9 +1178,19 @@ Redis 至少 6.2，部署使用 `noeviction`，`maxmemory` 须为实际容器与
 
 #### Wasmtime 编译缓存
 
-持久存储实例通过 `DataPaths::wasmtime_cache()` 使用 `<data-dir>/cache/wasmtime`，交给 Wasmtime 官方缓存保存编译产物。内置组件保留进程级共享，只在首次加载时编译并使用该实例的缓存；后续实例直接复用已验证的不可变组件。本地插件的编译引擎与缓存仍按实例隔离，内存存储共享无持久缓存的编译引擎。执行时 Store 与 Linker 绑定组件自身的引擎，每次调用仍创建独立 Store，并注入当前实例的宿主服务，不共享连接或私有状态。缓存键与产物兼容性由 Wasmtime 管理，不自行保存或反序列化原生模块。插件仍在启动期间加载并校验导入与描述符，不延后到首次请求。此缓存独立于上述 `RuntimeCache`，沿用 Wasmtime 默认软容量与清理策略，不是进程 RSS 或磁盘硬配额。
+持久存储实例通过 `DataPaths::wasmtime_cache()` 使用 `<data-dir>/cache/wasmtime-images`，保存可直接文件映射的不可变原生编译镜像，不再从 Wasmtime 的压缩缓存解压到匿名执行映射。旧 `<data-dir>/cache/wasmtime` 不读取、不迁移、不自动删除，避免旧清理器干扰新格式；升级后首次使用需要重新编译。镜像执行仍会占用 RAM，但干净文件页可由操作系统回收，不必写入 swap；文件页缓存、组件映射 RSS 与宿主堆不是同一个指标。未压缩镜像的逻辑文件大小更大，不能把此改动理解为整个进程不再占用内存。
 
-编译缓存目录必须是当前用户拥有的真实目录，Unix 权限收紧为 `0700`；末级符号链接、其他用户拥有或允许组及其他用户写入的目录均不可信，不通过修复权限后继续信任其中的产物。引擎使用解析后的真实路径；其祖先目录须由当前用户或 root 拥有，且不可供其他用户替换子目录，系统 sticky 目录除外。目录不可用时记录警告并使用无持久缓存的引擎，插件本身的加载或校验错误仍使启动失败。停机后可删除此缓存；下次启动重新编译，不影响插件文件、配置或数据库。
+镜像由当前 Engine 的 `CodeBuilder::compile_component_serialized` 从二进制 Wasm 生成，键包含完整源字节 SHA-256 与 `Engine::precompile_compatibility_hash()` 的摘要。命中时以固定大小缓冲区核对镜像长度与完整 SHA-256，再调用 `Component::deserialize_file`；校验会读取整个镜像，不是零 I/O 装载。目录级文件锁串行化跨 Engine、跨进程的校验、冷编译、发布与清理；镜像和校验记录分别写入临时文件、同步后原子替换目录项，绝不原地改写已映射的内容。缺失、截断、损坏或不兼容的可信产物从源 Wasm 重建；不可信目录项不能通过覆盖或修权限恢复信任。已驻留组件的每次操作不重新扫描磁盘镜像。
+
+此缓存独立于上述 `RuntimeCache`，沿用原缓存的 512 MiB、65,536 个镜像软上限；新镜像发布后按校验记录的最近使用时间淘汰至两项上限的 70%，保留刚发布的镜像，同时清理崩溃遗留的编译临时文件。这不是进程 RSS 或磁盘硬配额：单个大镜像可以超过预算；Unix 已删除但仍被映射的文件要等最后一个引用释放才回收，Windows 仍被映射的文件可能无法删除，会跳过并等待后续清理。
+
+内置组件保留进程级共享，只在首次加载时编译并使用该实例的缓存；后续实例直接复用已验证的不可变组件。本地插件的编译引擎与缓存仍按实例隔离，内存存储共享无持久缓存的编译引擎。执行时 Store 与 Linker 绑定组件自身的引擎，每次调用仍创建独立 Store，并注入当前实例的宿主服务，不共享连接或私有状态。新增或变更的插件仍在启动期间加载并校验导入与描述符，不延后到首次请求；此前已通过完整校验的插件见下文。
+
+带持久编译缓存的实例中，已安装插件的编译产物不再永久占用内存：装入后连续 60 分钟未被任何操作使用即释放，再次使用时按内容摘要重新读取字节并通过同一文件映射路径恢复，耗时随产物大小、存储与页缓存状态变化。启动阶段内部同步（如 base 的目录引导）同样算作使用。描述符、版本与内容身份始终保留，插件列表与路由元数据不触发恢复。恢复要求字节摘要与已准入身份一致，并受操作的取消与截止时间约束；同一插件的并发恢复只执行一次。缓存被删除时恢复退化为一次完整编译，代价是延迟与短时内存峰值，不影响正确性。无持久缓存的实例（内存存储或启动时因目录不可用而禁用缓存）无法廉价恢复，插件保持常驻。
+
+通过完整校验的插件会在 `DataPaths::plugin_admissions()`（`<data-dir>/cache/plugin-admissions`，独立于编译镜像目录）写入以内容摘要命名的准入记录，内容是组件自身报告的原始 descriptor 与宿主构建标识（版本与可执行文件大小、修改时间）。下次启动凭记录直接得到 descriptor 和身份，不读取字节、不编译、不实例化，因此既不付出校验时间，也不装入内存；启动只检查 artifact 文件存在且大小合规，内容摘要推迟到装入时校验。记录不是信任锚：第一次使用时仍完整检查 imports，并要求组件当场报告的 descriptor 与记录完全一致，否则该次操作失败并作废记录，下次启动重新完整校验。读取 artifact 失败等瞬时错误不作废记录。记录缺失、损坏、结构非法、属于其他宿主构建，或实例没有持久编译缓存时都视为未校验，走完整加载并重写记录。记录是可重建的派生数据，删除后只是下次启动变慢。本地插件在确认安装时、内置组件在首次完整加载后写入记录；写入失败只记录警告。
+
+编译缓存必须位于运行账号控制的真实私有目录，不能从不可信来源复制原生镜像。末级符号链接不被接受；Unix 还要求目录与文件由当前用户拥有、不可供组及其他用户写入，目录权限收紧为 `0700`，镜像发布为 `0400`，缓存文件不能有额外硬链接。引擎使用解析后的真实路径；Unix 祖先目录须由当前用户或 root 拥有，且不可供其他用户替换子目录，系统 sticky 目录除外。SHA-256 用于完整性检查，不是认证，不能防御能够改写本用户私有文件的攻击者。目录不可用、发布失败或文件无法执行映射（例如存储挂载为 `noexec`）时记录警告，并回退到从源 Wasm 编译的内存产物；插件本身的加载或校验错误仍使启动失败。停机后可删除新旧编译缓存；下次使用重新编译，不影响插件文件、配置或数据库。
 
 #### 迁移与启动准备
 
@@ -1181,6 +1199,8 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 迁移历史已覆盖当前列表时，在迁移连接上完成历史与 checksum 校验后直接返回，不探测或重跑已完成的数据转换；SQLite 仍显式启用并确认 `PRAGMA foreign_keys`，但普通重启不执行全库 `foreign_key_check`。仍有待应用迁移时保留分阶段转换及 SQLite 迁移前、后的全量外键检查。启动就绪不代表完成全库完整性审计；离线复制优化仍保留完整性与外键检查。
 
 `Gateway::prepare(config)` 解析数据根并建立存储、迁移及连接池，返回持有这些资源的 `PreparedGateway`，尚不启动 Gateway 后台任务。宿主通过 `storage()` 检查管理员和完成初始化，再消费同一个对象调用 `start()`；`Gateway::new` 也组合这两个阶段。Server 的正常启动和首次设置完成都沿用同一份准备结果，不再次建池或执行迁移。
+
+Core 的共享 SQLite 连接池在每条新连接初始化时读取实际 `page_size`，把自动 checkpoint 触发窗口设为 32 MiB 对应的页数；默认 4 KiB 页为 8,192 页。这样让有界小事务对相同索引页的修改合并回写，不扩大写事务或延后其 WAL 提交同步。页缓存、`synchronous`、写协调和 `busy_timeout` 保持不变。32 MiB 是页负载触发阈值，不是缓存容量或 WAL 文件硬上限：事务可以越过阈值，长期 reader 也可能阻止回收。离线复制与维护的专用连接池不因此改变。测量与代价见[存储性能设计](data-layout-performance.md#sqlite-checkpoint-窗口决策)。
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 
@@ -1209,13 +1229,21 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-Turn Chain format 2 在同一 Principal 内按 raw JSON 内容项摘要去重，至少 256B 的指定历史槽外置为内容行；节点 envelope 的 `slots` 保存路径与重复位置，`contents` 保存唯一摘要，`turn_chain_node_contents` 只保存不同内容的引用集合而非每个路径一行。复合外键约束节点与内容归属；写入先查已有项再插缺失项，物化按链批量读取并核验正文摘要，持锁 GC 维持引用安全。节点 envelope、内容及普通 Observation payload 使用同一二进制 codec，压缩门槛仍为 128B。精确的 14 字节 trailer、启动分阶段转换钩子、备份恢复与无可重复性能回退验收见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 状态不再进入关系表：`diagnostics/observation-debug/<trace_id>/manifest.json` 配合进程内 `DebugTraceIndex` 提供详情、失败请求列表与 Bundle 状态，单实例文件可见性不变；事件收敛见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+`0030_cost_and_billing` 增加 `models.billing_json`、`api_keys.spend_limit_nanos`、`provider_models.source_metadata_json`、追加式 `provider_cost_plans` 与独立累计表 `api_key_spend`。随后按 100 行独立事务迁移旧 edited 来源模型，失败保留已提交批次，重启从剩余记录继续；全部完成后执行 `0031_cost_and_billing_stats`。尝试结束事实冻结成本、计费状态与 USD/custom nanos，由同一事务内触发器累加到统计桶和 Key 已消费；清理观测先进入 checkpoint，不重复入账，也不清零 Key 累计。Provider 删除以按量记录终止订阅段并保留成本历史；Key 删除后的在途尝试不重建其累计行。历史尝试没有金额事实，不追溯计价，也不计入已知或未知尝试数。金额使用整数 nanos 与 Decimal 运算，最终舍入采用 MidpointAwayFromZero；溢出保持未知或明确失败，不饱和或伪造为零。
 
-普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 envelope，再查询内容存在性提示；查询释放连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 保留 `ROW EXCLUSIVE` 表锁及既有行的 `FOR KEY SHARE`；SQLite 仍在共享 gate 内裁决。若 GC 在提示查询与事务之间删除内容，则使用保留的 raw JSON 在 blocking worker 中补做压缩，此异常路径保持写/GC 互斥，不释放锁后重试。缺失内容批量 `INSERT ... DO NOTHING RETURNING`，冲突后仅定向取号；节点与去重引用仍在同一事务提交。两后端使用相同准备与重查流程，不改变 SQL schema、格式版本或保留期。
+详情见[成本与计费](cost-and-billing.md)，最终结构见生成的 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql) 参考 schema。
+
+`0032_normalized_turn_storage` / `0033_finalize_normalized_history` 将 Turn Chain 切换为规范化存储 v3。`turn_scopes` 字典化 Principal，`turn_nodes` 保留公开 ID、kind、数值父边与前缀，正文与可变期限分别进入 `turn_node_payloads` / `turn_node_retention`。所有非 null 语义内容单元统一以 `SHA256(b"stravia.turn-content.v1\0" + raw_compact_json)` 的完整 32 字节寻址，不再有 256B 分流；空值类型仍精确保留，opaque Item 不拆成标量 EAV。`turn_contents` 仅在 scope 内共享，`turn_node_contents` 以 ordinal 映射数值 ID，复合外键保证 scope/kind 隔离。descriptor 只有 data/slots，关联表是唯一内容引用权威。
+
+迁移先建立新结构，再按阶段/游标验证旧正文、引用集合并转换，全部完成后才切换 native compaction 外键、删除旧表与工作表；0001–0031 checksum 保持不变，已完成库重启不访问旧表。升级需备份完整数据根和外部数据库，预留新旧结构并存空间；回退必须恢复配套备份。节点 descriptor、内容及普通 Observation payload 继续共用二进制 codec，128B 压缩门槛与内容寻址规则无关。14 字节 trailer、锁序、候选 GC、deleting 恢复与验收边界见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 仍由 `diagnostics/observation-debug/<trace_id>/manifest.json` 与本实例 `DebugTraceIndex` 提供，不进入共享数据库；事件契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+
+普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 descriptor，再查询内容存在性提示；释放查询连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 按 nodes→contents 取得 `ROW EXCLUSIVE` 表锁并按稳定摘要顺序锁定已有内容；SQLite 在共享 gate 与 BEGIN IMMEDIATE 内裁决。若 GC 删除了提示中的内容，则以保留的 raw JSON 补做压缩，保持写/GC 互斥，不释放锁后重试。缺失内容批量插入，冲突后定向取号；节点、payload、retention、ordinal 关联和前缀同事务提交。祖先续期仍为 O(depth)，只更新确实增长的窄 retention 行，不改变保留期语义。
 
 锁内确认内容存在后，立即释放已不再需要的恢复正文。缺失内容的压缩缓冲按所有权交给 SQLx 参数：SQLite 复用原 `Vec<u8>`，避免借用 slice 的绑定副本；PostgreSQL 仍需将 BYTEA 编码进协议参数区，但源缓冲在编码后释放，不再跨数据库等待重复驻留。启动迁移保留共享 prepared map 的借用路径，不改变其数据复用与原子提交。
 
-每个可外置历史值先对原始 compact JSON 流同时计数和散列，重复内容不分配第二份 raw body，首次内容才按精确长度写入正文。内容 key 仍取原始 JSON bytes 而不是语义指纹；256-byte 边界、逐 occurrence 的 slot、未知字段及完整恢复保持不变。
+内容抽取复用 compact JSON 序列化 scratch 和摘要去重，内容身份仍取确切 JSON bytes 而不是语义指纹；逐 occurrence 的 slot、未知字段、精确数字及完整恢复不变。解码后的 `FrozenItem(Arc<AiItem>)` 在 client/effective/mutation/catalog 窗口间共享，真正改写才 COW；已有 owned canonical 结果直接接管，准备好的客户端投影在提交时消费而非复制。缓存按唯一 Item allocation、深层 metadata 与完整 effective_request 控制估重；请求工作区还计入解码节点保留的响应扩展与容器，不再为准入序列化整节点。JSON 估重与 precommit 共用 `memory` 的借用遍历，计入任意精度数字词法及保守容器开销，内容条目另计 Arc 头和槽位；不为计量构造第二棵 DOM。PostgreSQL 的 payload/content BYTEA 列保持 `STORAGE EXTERNAL`，避免对 storage codec 帧重复尝试 TOAST 压缩。
+
+0033 同时移除 interaction/model-turn 各五个无生产读者的 Token 副本，以 attempt 为查询权威，保留 estimated_input_tokens 和全部金额事实。Observation 批内复用 usage、按需读取 durable attempt，并把 finish 的状态/金额/usage 合并更新；不重写事件顺序、迟到修订、stats 触发器或长期 spend。Client Errors 的拒绝分支用匹配 `COALESCE(started_at,occurred_at)` 与排除取消条件的部分表达式索引，普通列表和 expiry 索引仍各司其职。
 
 本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
@@ -1418,7 +1446,7 @@ Observation metadata、文件 manifest 与 Trace segment 共用 `log_retention_d
 
 `task dev:web` 及桌面开发前端的 Vite 默认显式监听 `127.0.0.1:5173`；`task dev:server` 使用 `server.host: true`（等效 CLI `--host`）监听全部接口，支持从局域网访问。两者端口占用时均由 Vite 递增选择可用端口。不要以 `localhost` 作为默认监听地址：Windows 上的 Bun 可能在 IPv6 回环地址占用后改绑 IPv4，令不同实例以相同的 `localhost` 端口对外显示；Server 联调采用通配监听并额外打印明确的 `127.0.0.1` Local URL。`task dev:server` 将 Vite 实际打印的全部 Local / Network URL 的 origin 精确传给后端，仍只信任本地 Vite 代理，并保留管理入口、Host 与 CSRF 校验。开发服务经 HTTP 暴露源码与管理入口，只在可信网络使用，不要直接暴露公网。既有前端进程需重启才能应用新绑定；访问控制台实际打印的 URL。不同主机入口的 Cookie 不共享，需要时重新登录，不影响已保存的实例数据。
 
-Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}`、`/rejections`、`/rejections/{id}`、`/failed-requests`、`/failed-requests/{kind}/{id}` 和 authenticated fetch SSE `/events?after=<sequence>`；`GET|PUT /debug` 读取或确认切换进程状态，`DELETE /history` 清理非 active 历史。Interaction/Rejection 的 `POST .../debug-bundle-tickets` 固定 snapshot；公开导航路径 `GET /api/v1/observations/debug-bundles/{ticket}` 只消费 60 秒单次 ticket，并返回 `no-store` / `no-referrer`。旧 logs collection/detail 与 flat CSV surface 不保留。
+Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}`、`/rejections`、`/rejections/{id}`、`/client-errors`、`/client-errors/{kind}/{id}`、`/upstream-errors`、`/upstream-errors/{attempt_id}` 和 authenticated fetch SSE `/events?after=<sequence>`；`GET|PUT /debug` 读取或确认切换进程状态，`DELETE /history` 清理非 active 历史。Interaction/Rejection 的 `POST .../debug-bundle-tickets` 固定 snapshot；公开导航路径 `GET /api/v1/observations/debug-bundles/{ticket}` 只消费 60 秒单次 ticket，并返回 `no-store` / `no-referrer`。旧 logs collection/detail 与 flat CSV surface 不保留。
 
 **技术栈：**
 

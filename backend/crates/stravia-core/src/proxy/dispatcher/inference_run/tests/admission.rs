@@ -159,6 +159,7 @@ async fn principal_rpm_atomic_burst_isolates_keys_and_retains_cancelled_admissio
             inject_web_search: false,
             inject_media_generation: false,
             model_ids: Vec::new(),
+            spend_limit: None,
         })
         .await
         .unwrap();

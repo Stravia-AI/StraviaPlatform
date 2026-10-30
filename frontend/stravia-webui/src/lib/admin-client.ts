@@ -6,12 +6,18 @@ import type { Locale } from '#lib/paraglide/runtime.js'
 import type { UpdateStatus } from '#lib/product-update.js'
 import type {
   ApiKey,
+  ApiKeySpend,
+  CustomCurrency,
+  NewProviderCostPlan,
+  ProviderCostPlan,
   CredentialRuleCatalog,
   CredentialMatch,
   CustomCredentialRule,
   CustomCredentialRuleInput,
   CredentialDiscoveryQuery,
   CredentialDiscoveryPage,
+  CredentialHitDetail,
+  CredentialHitReuses,
   ProviderModelDetail,
   PreparedProviderModel,
   ProviderModelList,
@@ -34,10 +40,13 @@ import type {
   ForestQuery,
   RootChangesQuery,
   RootChangesPage,
-  FailedRequestQuery,
-  FailedRequestPage,
-  FailedRequestDetail,
-  FailedRequestSummary,
+  ClientErrorQuery,
+  ClientErrorPage,
+  ClientErrorDetail,
+  ClientErrorSummary,
+  UpstreamErrorQuery,
+  UpstreamErrorPage,
+  UpstreamErrorDetail,
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
@@ -154,6 +163,13 @@ async function uploadWasm<T>(path: string, file: File): Promise<T> {
 }
 
 export const admin = {
+  currency: {
+    /** `null` means the instance still uses USD. */
+    get: async (): Promise<CustomCurrency | null> =>
+      (await request<{ custom: CustomCurrency | null }>('GET', '/currency')).custom,
+    save: async (input: { symbol: string; usd_rate: string }): Promise<CustomCurrency | null> =>
+      (await request<{ custom: CustomCurrency | null }>('PUT', '/currency', input)).custom,
+  },
   vendorPlugins: {
     list: () => request<PluginSummary[]>('GET', '/vendor-plugins'),
     import: (file: File) => uploadWasm<PluginPreview>('/vendor-plugins/import', file),
@@ -166,6 +182,13 @@ export const admin = {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
       request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
+    hit: (id: string, index: number) =>
+      request<CredentialHitDetail>(
+        'GET',
+        `/reversible-redaction/discoveries/${encodeURIComponent(id)}/hits/${encodeURIComponent(String(index))}`,
+      ),
+    reuses: (id: string) =>
+      request<CredentialHitReuses>('GET', `/reversible-redaction/discoveries/${encodeURIComponent(id)}/reuses`),
     test: (text: string) => request<{ matches: CredentialMatch[] }>('POST', '/reversible-redaction/test', { text }),
     customRules: {
       list: () => request<CustomCredentialRule[]>('GET', '/reversible-redaction/custom-rules'),
@@ -199,6 +222,9 @@ export const admin = {
       request<ProviderConnectionCheckResult>('POST', `/providers/${id}/test`, input),
     testModels: (id: string) => request<string[]>('GET', `/providers/${id}/test-models`),
     capabilityDrifts: () => request<ImageCapabilityDrift[]>('GET', '/providers/image-capability-drifts'),
+    costPlans: (id: string) => request<ProviderCostPlan[]>('GET', `/providers/${id}/cost-plans`),
+    appendCostPlan: (id: string, input: NewProviderCostPlan) =>
+      request<ProviderCostPlan>('POST', `/providers/${id}/cost-plans`, input),
     models: (id: string) => request<ProviderModelList>('GET', `/providers/${id}/models`),
     syncModels: (id: string) => request<ProviderModelSyncSummary>('POST', `/providers/${id}/models/sync`),
     syncState: (id: string) => request<ProviderModelSyncState>('GET', `/providers/${id}/models/sync-state`),
@@ -217,16 +243,16 @@ export const admin = {
         `/providers/${id}/models`,
         `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson},"template_id":${JSON.stringify(templateId ?? null)}}`,
       ),
-    updateModel: (id: string, modelId: string, metadataJson: string, revision: number) =>
-      request<ProviderModelDetail>(
-        'PUT',
-        `/providers/${id}/model`,
-        `{"model_id":${JSON.stringify(modelId)},"metadata":${metadataJson},"revision":${revision}}`,
-      ),
+    updateModel: (id: string, modelId: string, changes: Record<string, unknown>, revision: number) =>
+      request<ProviderModelDetail>('PUT', `/providers/${id}/model`, { model_id: modelId, revision, changes }),
     updateModelSelection: (id: string, modelId: string, policy: ProviderModelSelectionPolicy, revision: number) =>
       request<ProviderModelDetail>('PUT', `/providers/${id}/model/selection`, { model_id: modelId, policy, revision }),
-    reimportModel: (id: string, modelId: string, revision: number) =>
-      request<ProviderModelDetail>('POST', `/providers/${id}/model/reimport`, { model_id: modelId, revision }),
+    restoreModelSync: (id: string, modelId: string, fields: string[], revision: number) =>
+      request<ProviderModelDetail>('POST', `/providers/${id}/model/restore-sync`, {
+        model_id: modelId,
+        revision,
+        fields,
+      }),
     deleteManualModel: (id: string, modelId: string) =>
       request<void>('DELETE', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
     capabilities: (providerId: string, model: string) =>
@@ -328,15 +354,20 @@ export const admin = {
     create: (input: CreateApiKey) => request<ApiKey>('POST', '/api-keys', input),
     update: (id: string, input: UpdateApiKey) => request<ApiKey>('PUT', `/api-keys/${id}`, input),
     delete: (id: string) => request<void>('DELETE', `/api-keys/${id}`),
+    resetSpend: (id: string) => request<ApiKeySpend>('POST', `/api-keys/${id}/spend/reset`),
   },
   observations: {
-    failures: (query: FailedRequestQuery) =>
-      request<FailedRequestPage>('GET', `/observations/failed-requests${queryString(query)}`),
-    failure: (kind: FailedRequestSummary['kind'], id: string) =>
-      request<FailedRequestDetail>(
+    clientErrors: (query: ClientErrorQuery) =>
+      request<ClientErrorPage>('GET', `/observations/client-errors${queryString(query)}`),
+    clientError: (kind: ClientErrorSummary['kind'], id: string) =>
+      request<ClientErrorDetail>(
         'GET',
-        `/observations/failed-requests/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
+        `/observations/client-errors/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,
       ),
+    upstreamErrors: (query: UpstreamErrorQuery) =>
+      request<UpstreamErrorPage>('GET', `/observations/upstream-errors${queryString(query)}`),
+    upstreamError: (attemptId: string) =>
+      request<UpstreamErrorDetail>('GET', `/observations/upstream-errors/${encodeURIComponent(attemptId)}`),
     forest: (query: ForestQuery) => request<ForestPage>('GET', `/observations/interactions${queryString(query)}`),
     changes: (query: RootChangesQuery) => request<RootChangesPage>('POST', '/observations/interactions/changes', query),
     interaction: (id: string, query: ForestQuery = {}) =>
@@ -427,6 +458,12 @@ export const admin = {
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
+}
+
+export const currencyQueryKey = ['currency'] as const
+
+export function currencyQueryOptions() {
+  return { queryKey: currencyQueryKey, queryFn: admin.currency.get, staleTime: 60_000 }
 }
 
 export async function proxyBase(): Promise<string> {

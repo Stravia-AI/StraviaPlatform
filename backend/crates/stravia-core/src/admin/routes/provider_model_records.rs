@@ -1,16 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::provider_model_pricing::OfficialPriceResolver;
 use super::*;
 use crate::provider_models::{
     CreateManualProviderModel, ModelChangeItem, ModelChangeOutcome, ModelChangePage,
     ModelChangeQuery, ModelChangeRecord, ModelChangeSource, ModelChangeType, ModelModalities,
-    ModelSpecificationDiff, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
-    ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
-    ProviderModelReconciliation, ProviderModelReimport, ProviderModelSelectionPolicy,
-    ProviderModelSourceKind, ProviderModelSummary, ProviderModelSyncFailure,
-    ProviderModelSyncState, ProviderModelSyncSummary, ReimportProviderModel, SnapshotState,
-    SourceStamp, UpdateProviderModel, UpdateProviderModelSelection, UpdateProviderModelSyncState,
-    normalize_model_id, same_discovery_provider,
+    ModelSpecificationDiff, NewProviderModelRecord, ProviderModelDetail, ProviderModelField,
+    ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
+    ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelRestore,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelSummary,
+    ProviderModelSyncFailure, ProviderModelSyncState, ProviderModelSyncSummary,
+    RestoreProviderModel, RestoreProviderModelSync, SnapshotState, SourceStamp,
+    UpdateProviderModel, UpdateProviderModelSelection, UpdateProviderModelSyncState,
+    apply_provider_model_changes, change_fields, merge_source_specification, normalize_model_id,
+    restore_source_fields, same_discovery_provider,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,14 +93,14 @@ impl AdminService {
             .await
     }
 
-    pub async fn reimport_provider_model(
+    pub async fn restore_provider_model_sync(
         &self,
         provider_id: &str,
         model_id: &str,
-        revision: i64,
+        input: RestoreProviderModelSync,
     ) -> anyhow::Result<ProviderModelDetail> {
         RouteModule::new(&self.gw)
-            .reimport_provider_model(provider_id, model_id, revision)
+            .restore_provider_model_sync(provider_id, model_id, input)
             .await
     }
 
@@ -249,6 +252,7 @@ impl RouteModule<'_> {
                         source: SourceStamp::Canonical {
                             model_id: canonical_id,
                         },
+                        pinned: std::collections::BTreeSet::new(),
                     },
                 )
             }
@@ -266,6 +270,7 @@ impl RouteModule<'_> {
                             source: SourceStamp::Canonical {
                                 model_id: canonical_id,
                             },
+                            pinned: std::collections::BTreeSet::new(),
                         },
                     )
                 }
@@ -275,6 +280,13 @@ impl RouteModule<'_> {
                 ),
             },
         };
+        let canonical_id = match snapshot_state.source() {
+            Some(SourceStamp::Canonical { model_id }) => Some(model_id.as_str()),
+            _ => None,
+        };
+        OfficialPriceResolver::new(self.gw)
+            .enrich(&model_id, &mut metadata, canonical_id)
+            .await?;
         let extensions = metadata.extension_value();
         metadata
             .modalities
@@ -300,20 +312,18 @@ impl RouteModule<'_> {
             .ok_or_else(|| anyhow::anyhow!("provider vendor is missing"))?;
         let _permit = self.gw.vendor_plugins.write_permit(vendor).await?;
         let model_id = normalize_model_id(model_id)?;
-        let metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
-        let source = match input.template_id {
-            Some(template_id) => {
-                let template = self
-                    .gw
-                    .provider_catalog
-                    .canonical_model(&template_id)
-                    .await?;
-                Some(SourceStamp::Canonical {
-                    model_id: canonical_template_id(&template)?,
-                })
-            }
-            None => None,
-        };
+        let mut metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
+        self.ensure_cost_currency(&metadata).await?;
+        // 模板选择仍须有效，但手动规格不保留可恢复的同步来源。
+        if let Some(template_id) = input.template_id.as_deref() {
+            self.gw
+                .provider_catalog
+                .canonical_model(template_id)
+                .await?;
+        }
+        OfficialPriceResolver::new(self.gw)
+            .enrich(&model_id, &mut metadata, input.template_id.as_deref())
+            .await?;
         let change = manual_record(
             &provider,
             change_item(
@@ -336,7 +346,8 @@ impl RouteModule<'_> {
                         provider_id: provider_id.to_string(),
                         model_id: model_id.clone(),
                         source_kind: ProviderModelSourceKind::Manual,
-                        snapshot_state: SnapshotState::Edited { source },
+                        snapshot_state: SnapshotState::Local,
+                        source_metadata: None,
                         metadata_source_provider_id: None,
                         presence: ProviderModelPresence::Present,
                         selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -370,11 +381,28 @@ impl RouteModule<'_> {
             .get(provider_id, &model_id)
             .await?
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
-        let mut metadata = ProviderModelMetadata::from_value(&model_id, input.metadata)?;
-        metadata.provider = existing.metadata.provider;
-        metadata.experimental = existing.metadata.experimental;
-        metadata.status = existing.metadata.status;
-        metadata.extensions = existing.metadata.extensions;
+        let changed_fields = change_fields(&input.changes).map_err(invalid_changes)?;
+        if changed_fields.is_empty() && !input.changes.contains_key("cost.peak") {
+            return self.get_provider_model(provider_id, &model_id).await;
+        }
+        let metadata = apply_provider_model_changes(&existing.metadata, &input.changes)
+            .map_err(invalid_changes)?;
+        self.ensure_cost_currency(&metadata).await?;
+        let snapshot_state = match &existing.snapshot_state {
+            SnapshotState::Imported { source, pinned } => {
+                let mut pinned = pinned.clone();
+                pinned.extend(changed_fields);
+                SnapshotState::Imported {
+                    source: source.clone(),
+                    pinned,
+                }
+            }
+            SnapshotState::Unregistered if !changed_fields.is_empty() => SnapshotState::Imported {
+                source: SourceStamp::Discovery,
+                pinned: changed_fields,
+            },
+            state => state.clone(),
+        };
         apply_provider_model_mutation(
             self.gw,
             self.gw
@@ -384,9 +412,7 @@ impl RouteModule<'_> {
                     provider_id,
                     &model_id,
                     metadata,
-                    SnapshotState::Edited {
-                        source: existing.snapshot_state.source().cloned(),
-                    },
+                    snapshot_state,
                     input.revision,
                 )
                 .await?,
@@ -447,16 +473,16 @@ impl RouteModule<'_> {
         )
     }
 
-    /// ADR-0057：一次显式 reimport 把 Provider Model 快照与全部关联 Target 的
-    /// Generated Mapping 原子提交。目录读取与 Generated Map 的可写性处理在
-    /// 事务前完成；事务读取提交时的最新 Route/Target，仅重算 Generated 行并
-    /// 保留 Overridden。`model_cache` 写锁跨存储调用持有，提交与本机发布之间
-    /// 没有可失败的等待；`before_commit` 在最终提交前复检 Vendor 写许可。
-    pub(crate) async fn reimport_provider_model(
+    /// ADR-0084：把来源规格写回选定的已固定字段并取消固定，离线执行。
+    /// 目录读取、来源值与 Generated Map 的可写性处理在事务前完成；事务读取
+    /// 提交时的最新 Route/Target，仅重算 Generated 行并保留 Overridden。
+    /// `model_cache` 写锁跨存储调用持有，`before_commit` 在最终提交前复检
+    /// Vendor 写许可。
+    pub(crate) async fn restore_provider_model_sync(
         &self,
         provider_id: &str,
         model_id: &str,
-        revision: i64,
+        input: RestoreProviderModelSync,
     ) -> anyhow::Result<ProviderModelDetail> {
         let provider = self.get_provider(provider_id).await?;
         let vendor = provider
@@ -472,28 +498,65 @@ impl RouteModule<'_> {
             .get(provider_id, &model_id)
             .await?
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
-        let source_provider_id = existing
-            .metadata_source_provider_id
-            .ok_or_else(|| anyhow::anyhow!("Provider Model has no Provider Catalog source"))?;
-        let source = self
-            .gw
-            .catalog_sync
-            .catalog_model_source(&source_provider_id, &model_id)
-            .await?;
-        let metadata = ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
-        let mut generated = generate_thinking_level_map(&metadata);
-        super::thinking_map::hide_unwritable_generated_controls(
-            self.gw,
-            &provider,
-            &metadata,
-            &mut generated,
-        );
+        let SnapshotState::Imported { source, pinned } = &existing.snapshot_state else {
+            return Err(provider_model_source_unavailable(provider_id, &model_id));
+        };
+        let source_metadata = existing
+            .source_metadata
+            .as_ref()
+            .ok_or_else(|| provider_model_source_unavailable(provider_id, &model_id))?;
+        let mut fields = Vec::new();
+        for field in &input.fields {
+            let field = ProviderModelField::parse(field)
+                .ok_or_else(|| invalid_restore_fields(&input.fields))?;
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+        if fields.is_empty() {
+            return self.get_provider_model(provider_id, &model_id).await;
+        }
+        let unpinned = fields
+            .iter()
+            .copied()
+            .filter(|field| !pinned.contains(field))
+            .collect::<Vec<_>>();
+        if !unpinned.is_empty() {
+            return Err(provider_model_field_not_pinned(
+                provider_id,
+                &model_id,
+                &unpinned,
+            ));
+        }
+        let metadata = restore_source_fields(&existing.metadata, source_metadata, &fields)?;
+        let mut pinned = pinned.clone();
+        for field in &fields {
+            pinned.remove(field);
+        }
+        let snapshot_state = SnapshotState::Imported {
+            source: source.clone(),
+            pinned,
+        };
+        let generated = (fields.contains(&ProviderModelField::ReasoningEfforts)
+            && metadata.reasoning_efforts != existing.metadata.reasoning_efforts)
+            .then(|| {
+                let mut generated = generate_thinking_level_map(&metadata);
+                super::thinking_map::hide_unwritable_generated_controls(
+                    self.gw,
+                    &provider,
+                    &metadata,
+                    &mut generated,
+                );
+                generated
+            });
 
         let mut cache = self.gw.model_cache.write().await;
         let validate_map =
-            |metadata: &ProviderModelMetadata, map: &[crate::thinking::ThinkingLevelMapping]| {
+            |model_id: &str,
+             metadata: &ProviderModelMetadata,
+             map: &[crate::thinking::ThinkingLevelMapping]| {
                 super::thinking_map::ensure_thinking_map_representable(
-                    self.gw, &provider, &model_id, metadata, map,
+                    self.gw, &provider, model_id, metadata, map,
                 )
             };
         let before_commit = || permit.ensure_current();
@@ -501,13 +564,13 @@ impl RouteModule<'_> {
             .gw
             .storage
             .provider_models()
-            .reimport(
+            .restore(
                 provider_id,
                 &model_id,
-                ReimportProviderModel {
+                RestoreProviderModel {
                     metadata,
-                    source_provider_id,
-                    expected_revision: revision,
+                    snapshot_state,
+                    expected_revision: input.revision,
                     generated_thinking_level_map: generated,
                 },
                 &validate_map,
@@ -515,7 +578,7 @@ impl RouteModule<'_> {
             )
             .await?;
         let mut detail = match outcome {
-            ProviderModelReimport::Applied {
+            ProviderModelRestore::Applied {
                 model,
                 active_routes,
             } => {
@@ -525,10 +588,10 @@ impl RouteModule<'_> {
                 self.gw.route_policy_state.clear_pricing();
                 ProviderModelDetail::from(*model)
             }
-            ProviderModelReimport::NotFound => {
+            ProviderModelRestore::NotFound => {
                 return Err(provider_model_not_found(provider_id, &model_id));
             }
-            ProviderModelReimport::Conflict => {
+            ProviderModelRestore::Conflict => {
                 return Err(provider_model_conflict(provider_id, &model_id));
             }
         };
@@ -671,9 +734,7 @@ impl RouteModule<'_> {
                     summary.deprecation_cleared += 1;
                     types.push(ModelChangeType::DeprecationCleared);
                 }
-                // 上游声明的规格对未被用户接管的记录保持权威：Unregistered 首次
-                // 导入、Imported 持续跟随来源刷新；Edited 记录由用户接管，仅更新
-                // 插件托管的运行时字段与既有 provenance。
+                // 上游声明的规格决定未固定字段；已固定字段沿用生效规格。
                 // Failed catalog enrichment is not evidence that its last valid
                 // specification disappeared or changed to a Canonical fallback.
                 let retain_catalog_specification = source.catalog_metadata_unavailable
@@ -686,18 +747,36 @@ impl RouteModule<'_> {
                 } else {
                     source.metadata_source_provider_id
                 };
+                let incoming_has_specification =
+                    matches!(incoming_state, SnapshotState::Imported { .. });
                 let follows_upstream = !retain_catalog_specification
-                    && (matches!(incoming_state, SnapshotState::Imported { .. })
-                        || matches!(current.snapshot_state, SnapshotState::Unregistered))
-                    && !matches!(current.snapshot_state, SnapshotState::Edited { .. });
-                let refresh_source = follows_upstream && current.snapshot_state != incoming_state;
+                    && (incoming_has_specification
+                        || matches!(current.snapshot_state, SnapshotState::Unregistered));
+                if source.official_pricing_unavailable
+                    && !metadata
+                        .cost
+                        .as_ref()
+                        .is_some_and(crate::provider_catalog::has_model_prices)
+                {
+                    metadata.cost = current
+                        .source_metadata
+                        .as_ref()
+                        .and_then(|source| source.cost.clone());
+                }
                 let mut merged = if follows_upstream {
-                    metadata.clone()
+                    merge_source_specification(
+                        &current.metadata,
+                        &metadata,
+                        current.snapshot_state.pinned(),
+                    )?
                 } else {
                     current.metadata.clone()
                 };
                 if !retain_catalog_specification
-                    && !matches!(current.snapshot_state, SnapshotState::Edited { .. })
+                    && !current
+                        .snapshot_state
+                        .pinned()
+                        .contains(&ProviderModelField::Name)
                 {
                     merged.name = metadata.name.clone();
                 }
@@ -705,6 +784,39 @@ impl RouteModule<'_> {
                 merged.provider = metadata.provider.clone();
                 merged.experimental = metadata.experimental.clone();
                 merged.extensions = metadata.extensions.clone();
+                let metadata_changed = merged != current.metadata;
+                let source_metadata = (!retain_catalog_specification && incoming_has_specification)
+                    .then(|| metadata.clone());
+                let source_metadata_changed = source_metadata
+                    .as_ref()
+                    .is_some_and(|source| current.source_metadata.as_ref() != Some(source));
+                let snapshot_state = if !retain_catalog_specification && incoming_has_specification
+                {
+                    match &incoming_state {
+                        SnapshotState::Imported { source, .. } => Some(SnapshotState::Imported {
+                            source: source.clone(),
+                            pinned: current.snapshot_state.pinned().clone(),
+                        }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let snapshot_changed = snapshot_state
+                    .as_ref()
+                    .is_some_and(|state| state != &current.snapshot_state);
+                let generated_thinking_level_map = (metadata_changed
+                    && current.metadata.reasoning_efforts != merged.reasoning_efforts)
+                    .then(|| {
+                        let mut generated = generate_thinking_level_map(&merged);
+                        super::thinking_map::hide_unwritable_generated_controls(
+                            self.gw,
+                            provider,
+                            &merged,
+                            &mut generated,
+                        );
+                        generated
+                    });
                 let specification = specification_diff(&current.metadata, &merged)?;
                 if !specification.is_empty() {
                     summary.specification_updated += 1;
@@ -721,21 +833,23 @@ impl RouteModule<'_> {
                         specification,
                     ));
                 }
-                let refreshed_metadata =
-                    (refresh_source || merged != current.metadata).then_some(merged);
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
                     || current.metadata_source_provider_id != metadata_source_provider_id
-                    || refreshed_metadata.is_some()
+                    || metadata_changed
+                    || source_metadata_changed
+                    || snapshot_changed
                 {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
                         expected_revision: current.revision,
-                        snapshot_state: refresh_source.then_some(incoming_state),
+                        snapshot_state,
                         metadata_source_provider_id,
                         presence: ProviderModelPresence::Present,
                         lifecycle_status: metadata.status.clone(),
-                        metadata: refreshed_metadata,
+                        metadata: metadata_changed.then_some(merged),
+                        source_metadata: source_metadata.filter(|_| source_metadata_changed),
+                        generated_thinking_level_map,
                     });
                 }
                 continue;
@@ -755,11 +869,14 @@ impl RouteModule<'_> {
                 types,
                 vec![],
             ));
+            let source_metadata =
+                matches!(incoming_state, SnapshotState::Imported { .. }).then(|| metadata.clone());
             reconciliation.inserts.push(NewProviderModelRecord {
                 provider_id: provider_id.to_string(),
                 model_id,
                 source_kind: ProviderModelSourceKind::Discovered,
                 snapshot_state: incoming_state,
+                source_metadata,
                 metadata_source_provider_id: source.metadata_source_provider_id,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -792,6 +909,8 @@ impl RouteModule<'_> {
                     presence: ProviderModelPresence::Missing,
                     lifecycle_status: current.metadata.status.clone(),
                     metadata: None,
+                    source_metadata: None,
+                    generated_thinking_level_map: None,
                 });
             }
         }
@@ -810,10 +929,18 @@ impl RouteModule<'_> {
         }
         reconciliation.sync_summary = Some(summary.clone());
         let committed_record = reconciliation.change_record.clone();
+        let validate_map =
+            |model_id: &str,
+             metadata: &ProviderModelMetadata,
+             map: &[crate::thinking::ThinkingLevelMapping]| {
+                super::thinking_map::ensure_thinking_map_representable(
+                    self.gw, provider, model_id, metadata, map,
+                )
+            };
         self.gw
             .storage
             .provider_models()
-            .apply_reconciliation(provider_id, reconciliation)
+            .apply_reconciliation(provider_id, reconciliation, &validate_map)
             .await?;
         if reconciled {
             self.gw.route_policy_state.clear_pricing();
@@ -871,10 +998,16 @@ impl RouteModule<'_> {
         let publication_guard = discovered.write_fence().await?;
         let mut catalog_sources = BTreeMap::new();
         let mut catalog_metadata_unavailable = false;
-        if let Some(catalog_provider_id) = provider
-            .preset_key
+        if let Some(catalog_provider_id) = discovered
+            .catalog_id
             .as_deref()
-            .or(discovered.catalog_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                provider
+                    .preset_key
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
         {
             let scope = match self
                 .gw
@@ -923,6 +1056,7 @@ impl RouteModule<'_> {
         }
 
         let mut sources = BTreeMap::new();
+        let mut official_prices = OfficialPriceResolver::new(self.gw);
         for model in discovered.models {
             let model_id = normalize_model_id(&model.id)?;
             let discovery_declares_lifecycle = model.metadata.contains_key("status");
@@ -955,9 +1089,19 @@ impl RouteModule<'_> {
                     None => (None, None, SourceStamp::Discovery),
                 },
             };
-            let metadata = metadata_from_discovered_model(&model_id, model, template)?;
+            let mut metadata = metadata_from_discovered_model(&model_id, model, template)?;
+            let canonical_id = match &stamp {
+                SourceStamp::Canonical { model_id } => Some(model_id.as_str()),
+                _ => None,
+            };
+            let official_pricing_unavailable = official_prices
+                .enrich(&model_id, &mut metadata, canonical_id)
+                .await?;
             let snapshot_state = if metadata.has_specification() {
-                SnapshotState::Imported { source: stamp }
+                SnapshotState::Imported {
+                    source: stamp,
+                    pinned: BTreeSet::new(),
+                }
             } else {
                 SnapshotState::Unregistered
             };
@@ -969,6 +1113,7 @@ impl RouteModule<'_> {
                     snapshot_state,
                     catalog_metadata_unavailable,
                     discovery_declares_lifecycle,
+                    official_pricing_unavailable,
                 },
             );
         }
@@ -982,6 +1127,7 @@ struct DiscoveredModelSource {
     snapshot_state: SnapshotState,
     catalog_metadata_unavailable: bool,
     discovery_declares_lifecycle: bool,
+    official_pricing_unavailable: bool,
 }
 
 fn canonical_template_id(template: &Value) -> anyhow::Result<String> {
@@ -1126,6 +1272,14 @@ fn metadata_from_discovered_model(
     mut model: stravia_vendor_sdk::DiscoveredModel,
     canonical: Option<Value>,
 ) -> anyhow::Result<ProviderModelMetadata> {
+    if let Some(value) = model.metadata.get("cost")
+        && (value.is_null()
+            || !crate::provider_catalog::has_model_prices(
+                &crate::provider_models::ModelCost::deserialize(value)?,
+            ))
+    {
+        model.metadata.remove("cost");
+    }
     let has_canonical = canonical.is_some();
     if has_canonical && model.display_name.trim() == model_id {
         model.metadata.remove("name");
@@ -1250,6 +1404,65 @@ fn apply_provider_model_mutation(
         ProviderModelMutation::NotFound => Err(provider_model_not_found(&provider.id, model_id)),
         ProviderModelMutation::Conflict => Err(provider_model_conflict(&provider.id, model_id)),
     }
+}
+
+impl RouteModule<'_> {
+    async fn ensure_cost_currency(&self, metadata: &ProviderModelMetadata) -> anyhow::Result<()> {
+        let Some(cost) = &metadata.cost else {
+            return Ok(());
+        };
+        if cost.custom_currency_fields.is_empty() {
+            return Ok(());
+        }
+        let currency = self.gw.storage.money().custom_currency().await?;
+        cost.validate_currency(currency.as_ref()).map_err(|error| {
+            coded_error(
+                "PROVIDER_MODEL_CUSTOM_CURRENCY_REQUIRED",
+                "Provider Model cost currency is invalid",
+                serde_json::json!({ "error": error.to_string() }),
+            )
+        })
+    }
+}
+
+fn invalid_changes(error: anyhow::Error) -> anyhow::Error {
+    coded_error(
+        "PROVIDER_MODEL_INVALID_CHANGES",
+        "Provider Model changes are invalid",
+        serde_json::json!({ "error": error.to_string() }),
+    )
+}
+
+fn invalid_restore_fields(fields: &[String]) -> anyhow::Error {
+    coded_error(
+        "PROVIDER_MODEL_INVALID_CHANGES",
+        "Provider Model restore fields are invalid",
+        serde_json::json!({ "fields": fields }),
+    )
+}
+
+fn provider_model_source_unavailable(provider_id: &str, model_id: &str) -> anyhow::Error {
+    coded_error(
+        "PROVIDER_MODEL_SOURCE_UNAVAILABLE",
+        "Provider Model has no synchronized source specification",
+        serde_json::json!({ "provider_id": provider_id, "model_id": model_id }),
+    )
+}
+
+fn provider_model_field_not_pinned(
+    provider_id: &str,
+    model_id: &str,
+    fields: &[ProviderModelField],
+) -> anyhow::Error {
+    coded_error(
+        "PROVIDER_MODEL_FIELD_NOT_PINNED",
+        "Provider Model fields are not pinned",
+        serde_json::json!({
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "fields": fields.iter().map(|field| field.as_str()).collect::<Vec<_>>(),
+        }),
+    )
 }
 
 fn provider_model_not_found(provider_id: &str, model_id: &str) -> anyhow::Error {

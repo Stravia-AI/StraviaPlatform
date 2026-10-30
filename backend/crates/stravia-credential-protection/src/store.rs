@@ -15,6 +15,48 @@ pub struct Mapping {
     pub reference: String,
     pub secret: String,
     pub expires_at: i64,
+    /// 创建映射时检测出它的规则；创建之前的映射为空，无法归因。
+    #[sqlx(try_from = "String")]
+    pub rule_ids: RuleIds,
+}
+
+/// 映射表里以 JSON 数组文本保存的规则 ID。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RuleIds(Vec<String>);
+
+impl RuleIds {
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl From<Vec<String>> for RuleIds {
+    fn from(rule_ids: Vec<String>) -> Self {
+        Self(rule_ids)
+    }
+}
+
+impl TryFrom<String> for RuleIds {
+    type Error = serde_json::Error;
+
+    fn try_from(encoded: String) -> Result<Self, Self::Error> {
+        serde_json::from_str(&encoded).map(Self)
+    }
+}
+
+/// 待登记的秘密及检测出它的规则；规则只在新建映射时写入，已有映射保持原样。
+pub struct DetectedSecret {
+    pub secret: String,
+    pub rule_ids: Vec<String>,
+}
+
+impl From<&str> for DetectedSecret {
+    fn from(secret: &str) -> Self {
+        Self {
+            secret: secret.to_owned(),
+            rule_ids: Vec::new(),
+        }
+    }
 }
 
 // 新建下标只在事务成功提交后返回；调用者不能用扫描前状态推断创建归属。
@@ -29,7 +71,7 @@ pub trait MappingStore: Send + Sync {
     async fn intern(
         &self,
         principal: &Principal,
-        secrets: &[String],
+        secrets: &[DetectedSecret],
     ) -> Result<InternedMappings, RedactionError>;
     async fn publish(
         &self,
@@ -44,6 +86,9 @@ pub trait MappingStore: Send + Sync {
         retention: Duration,
     ) -> Result<(), RedactionError>;
     async fn cleanup_expired(&self) -> Result<u64, RedactionError>;
+    /// 按占位符读取未过期映射的明文。占位符是映射的唯一标识，观察事件的 principal
+    /// 只保存 API Key ID，与映射表的 `api-key:<id>` 存储键并不相同。
+    async fn plaintext(&self, reference: &str) -> Result<Option<String>, RedactionError>;
 }
 
 #[derive(Clone)]
@@ -200,7 +245,7 @@ impl MappingStore for SqlMappingStore {
         let principal = principal.continuation_key();
         match self {
             Self::Sqlite(pool) => sqlx::query_as::<_, Mapping>(
-                "SELECT reference, secret, expires_at FROM reversible_redaction_mappings \
+                "SELECT reference, secret, expires_at, rule_ids FROM reversible_redaction_mappings \
                  WHERE principal = ? AND expires_at > ? ORDER BY reference",
             )
             .bind(principal)
@@ -209,7 +254,7 @@ impl MappingStore for SqlMappingStore {
             .await
             .map_err(|error| self.storage(error)),
             Self::Postgres(pool) => sqlx::query_as::<_, Mapping>(
-                "SELECT reference, secret, expires_at FROM reversible_redaction_mappings \
+                "SELECT reference, secret, expires_at, rule_ids FROM reversible_redaction_mappings \
                  WHERE principal = $1 AND expires_at > $2 ORDER BY reference",
             )
             .bind(principal)
@@ -223,7 +268,7 @@ impl MappingStore for SqlMappingStore {
     async fn intern(
         &self,
         principal: &Principal,
-        secrets: &[String],
+        secrets: &[DetectedSecret],
     ) -> Result<InternedMappings, RedactionError> {
         if secrets.is_empty() {
             return Ok(InternedMappings {
@@ -249,11 +294,11 @@ impl MappingStore for SqlMappingStore {
                 let now = now();
                 for secret in secrets {
                     let existing = sqlx::query_as::<_, Mapping>(
-                        "SELECT reference, secret, expires_at FROM reversible_redaction_mappings \
+                        "SELECT reference, secret, expires_at, rule_ids FROM reversible_redaction_mappings \
                          WHERE principal = ? AND secret = ? AND expires_at > ?",
                     )
                     .bind(&principal)
-                    .bind(secret)
+                    .bind(&secret.secret)
                     .bind(now)
                     .fetch_optional(&mut *transaction)
                     .await
@@ -263,17 +308,20 @@ impl MappingStore for SqlMappingStore {
                         None => {
                             created.push(mappings.len());
                             let reference = super::marker::new_reference();
+                            let rule_ids = serde_json::to_string(&secret.rule_ids)
+                                .map_err(|_| RedactionError::Storage)?;
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
-                                 (reference, principal, secret, created_at, updated_at, expires_at) \
-                                 VALUES (?, ?, ?, ?, ?, ?)",
-                            ).bind(&reference).bind(&principal).bind(secret).bind(now).bind(now)
+                                 (reference, principal, secret, rule_ids, created_at, updated_at, expires_at) \
+                                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            ).bind(&reference).bind(&principal).bind(&secret.secret).bind(&rule_ids).bind(now).bind(now)
                                 .bind(after(now, PENDING_RETENTION))
                                 .execute(&mut *transaction).await.map_err(|error| self.storage(error))?;
                             Mapping {
                                 reference,
-                                secret: secret.clone(),
+                                secret: secret.secret.clone(),
                                 expires_at: after(now, PENDING_RETENTION),
+                                rule_ids: secret.rule_ids.clone().into(),
                             }
                         }
                     };
@@ -298,11 +346,11 @@ impl MappingStore for SqlMappingStore {
                 let now = now();
                 for secret in secrets {
                     let existing = sqlx::query_as::<_, Mapping>(
-                        "SELECT reference, secret, expires_at FROM reversible_redaction_mappings \
+                        "SELECT reference, secret, expires_at, rule_ids FROM reversible_redaction_mappings \
                          WHERE principal = $1 AND secret = $2 AND expires_at > $3",
                     )
                     .bind(&principal)
-                    .bind(secret)
+                    .bind(&secret.secret)
                     .bind(now)
                     .fetch_optional(&mut *transaction)
                     .await
@@ -312,17 +360,20 @@ impl MappingStore for SqlMappingStore {
                         None => {
                             created.push(mappings.len());
                             let reference = super::marker::new_reference();
+                            let rule_ids = serde_json::to_string(&secret.rule_ids)
+                                .map_err(|_| RedactionError::Storage)?;
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
-                                 (reference, principal, secret, created_at, updated_at, expires_at) \
-                                 VALUES ($1, $2, $3, $4, $4, $5)",
-                            ).bind(&reference).bind(&principal).bind(secret).bind(now)
+                                 (reference, principal, secret, rule_ids, created_at, updated_at, expires_at) \
+                                 VALUES ($1, $2, $3, $4, $5, $5, $6)",
+                            ).bind(&reference).bind(&principal).bind(&secret.secret).bind(&rule_ids).bind(now)
                                 .bind(after(now, PENDING_RETENTION))
                                 .execute(&mut *transaction).await.map_err(|error| self.storage(error))?;
                             Mapping {
                                 reference,
-                                secret: secret.clone(),
+                                secret: secret.secret.clone(),
                                 expires_at: after(now, PENDING_RETENTION),
+                                rule_ids: secret.rule_ids.clone().into(),
                             }
                         }
                     };
@@ -353,6 +404,29 @@ impl MappingStore for SqlMappingStore {
         retention: Duration,
     ) -> Result<(), RedactionError> {
         self.retain(principal, references, retention, false).await
+    }
+
+    async fn plaintext(&self, reference: &str) -> Result<Option<String>, RedactionError> {
+        match self {
+            Self::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT secret FROM reversible_redaction_mappings \
+                 WHERE reference = ? AND expires_at > ?",
+            )
+            .bind(reference)
+            .bind(now())
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| self.storage(error)),
+            Self::Postgres(pool) => sqlx::query_scalar(
+                "SELECT secret FROM reversible_redaction_mappings \
+                 WHERE reference = $1 AND expires_at > $2",
+            )
+            .bind(reference)
+            .bind(now())
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| self.storage(error)),
+        }
     }
 
     async fn cleanup_expired(&self) -> Result<u64, RedactionError> {

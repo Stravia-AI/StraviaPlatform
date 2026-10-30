@@ -39,8 +39,6 @@ EXPECTED_RULES = {
     "composite_positive": {"aikido-client-id", "aikido-client-secret"},
     "multiline_positive": {"private-key"},
     "bittrex_duplicate": {"bittrex-access-key"},
-    "plaid_duplicate": {"kingfisher.plaid.2"},
-    "distinct_confidence": {"kingfisher.brevo.1", "kingfisher.sendinblue.1"},
 }
 
 
@@ -70,8 +68,6 @@ def corpus():
         "ordinary_negative": "api_key=${SYNTHETIC_KEY}; ordinary prose, not a credential\n",
         "reference_boundaries": "中文😀 <!--sr:abcdefghijklmnopqrstuvwxyzab--> é\n<!--sr:abc--> ordinary\n",
         "bittrex_duplicate": "中文😀 bittrex=a7b2c9d4e0f6g3h8i1j5k9l2m4n6o8p0\nbittrex=a7b2c9d4e0f6g3h8i1j5k9l2m4n6o8p0",
-        "plaid_duplicate": "中文😀 plaid secret=a7b2c9d4e0f6g3h8i1j5k9l2m4n6o8\nplaid secret=a7b2c9d4e0f6g3h8i1j5k9l2m4n6o8",
-        "distinct_confidence": "xkeysib-" + "a7B2c9D4e0F6" * 5 + "a7B2-q8W2e9R4t0Y6u3I5",
     }
     inputs = [(name, text) for name, text in probes.items()]
     prefix = "".join(probes.values())

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, types::Json};
 use stravia_vendor_sdk::{ConnectionCheckVerification, ValidationIssue};
 
+use crate::pricing::{DisplayCurrency, DisplayMoney};
 use crate::thinking::ThinkingLevelMapping;
 use crate::thinking::mapping_control;
 use stravia_runtime_contract::thinking::ThinkingLevel;
@@ -41,6 +42,10 @@ pub struct Provider {
     pub auth_mode: String,
     #[serde(default)]
     pub use_proxy: bool,
+    /// Latest effective Provider cost basis; read-only runtime projection.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub cost_basis: crate::pricing::CostBasis,
     pub last_test_success: Option<bool>,
     pub last_test_at: Option<String>,
     pub is_enabled: bool,
@@ -166,6 +171,8 @@ pub struct RouteConfig {
     /// 客户端未表达任何推理意图时应用的 Canonical Thinking Level；
     /// `None` 表示不加控制，由上游模型自行决定。
     pub default_thinking_level: Option<String>,
+    /// `None` disables billing for this Route.
+    pub billing: Option<crate::pricing::BillingConfig>,
     pub balance: String,
     pub is_enabled: bool,
     pub created_at: String,
@@ -224,6 +231,7 @@ pub struct RouteView<'a> {
     pub output_modality: Option<RouteOutputModality>,
     pub image_generation_bound: bool,
     pub default_thinking_level: Option<&'a str>,
+    pub billing: Option<&'a crate::pricing::BillingConfig>,
     pub balance: &'a str,
     pub target_provider: &'a str,
     pub target_model: Option<&'a str>,
@@ -253,6 +261,7 @@ impl<'a> From<&'a RouteConfig> for RouteView<'a> {
             output_modality: route.output_modality,
             image_generation_bound: route.image_generation_bound,
             default_thinking_level: route.default_thinking_level.as_deref(),
+            billing: route.billing.as_ref(),
             balance: &route.balance,
             target_provider: primary.map_or("", |target| target.provider_id().as_str()),
             target_model: primary.map(|target| target.model().as_str()),
@@ -397,6 +406,8 @@ pub struct ApiKey {
     pub token: String,
     pub name: String,
     pub rpm_limit: Option<i32>,
+    /// Display-currency nanos; `None` means unlimited.
+    pub spend_limit_nanos: Option<i64>,
     pub is_enabled: bool,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -420,6 +431,12 @@ pub struct ApiKeyWithBindings {
     pub token: String,
     pub name: String,
     pub rpm_limit: Option<i32>,
+    /// Display-currency nanos; `None` means unlimited.
+    #[serde(skip)]
+    pub spend_limit_nanos: Option<i64>,
+    /// Raw cumulative spend; HTTP adapters format it into the display currency.
+    #[serde(skip)]
+    pub spend: crate::storage::traits::ApiKeySpend,
     pub is_enabled: bool,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -598,6 +615,12 @@ pub struct UpdateRoute {
         deserialize_with = "deserialize_double_option"
     )]
     pub default_thinking_level: Option<Option<ThinkingLevel>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub billing: Option<Option<crate::pricing::BillingConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,6 +634,8 @@ pub struct CreateRoute {
     pub targets: Vec<CreateTarget>,
     #[serde(default)]
     pub default_thinking_level: Option<ThinkingLevel>,
+    #[serde(default)]
+    pub billing: Option<crate::pricing::BillingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +664,8 @@ pub struct PutRoute {
     /// `None` leaves existing Target rows untouched, including their IDs and timestamps.
     pub targets: Option<Vec<CreateTarget>>,
     pub default_thinking_level: Option<ThinkingLevel>,
+    /// Omitted preserves the existing billing config; `Some(None)` clears it.
+    pub billing: Option<Option<crate::pricing::BillingConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -649,6 +676,9 @@ pub struct CreateApiKey {
     pub name: String,
     #[serde(default)]
     pub rpm_limit: Option<i32>,
+    /// Decimal string in the current display currency; `None` means unlimited.
+    #[serde(default)]
+    pub spend_limit: Option<String>,
     pub expires_at: Option<String>,
     #[serde(default)]
     pub mcp_access_enabled: bool,
@@ -670,6 +700,10 @@ pub struct UpdateApiKey {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub rpm_limit: Option<Option<i32>>,
+    /// Decimal string in the current display currency; omitted preserves,
+    /// `null` clears, a string replaces.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub spend_limit: Option<Option<String>>,
     pub is_enabled: Option<bool>,
     pub mcp_access_enabled: Option<bool>,
     pub transparent_injection_enabled: Option<bool>,
@@ -908,6 +942,36 @@ impl StatsWindow {
     }
 }
 
+/// 统计桶与检查点携带的金额累计列。金额以纳单位保存；
+/// 有自定义金额的记录计入 `*_custom_nanos`，否则计入 `*_usd_unconverted_nanos`。
+#[derive(Debug, Clone, Copy, Default, FromRow)]
+pub struct UsageMoneyTotals {
+    pub cost_custom_nanos: i64,
+    pub cost_usd_unconverted_nanos: i64,
+    pub cost_known_count: i64,
+    pub cost_unknown_count: i64,
+    pub payg_cost_custom_nanos: i64,
+    pub payg_cost_usd_unconverted_nanos: i64,
+    pub payg_cost_known_count: i64,
+    pub payg_cost_unknown_count: i64,
+    pub billing_custom_nanos: i64,
+    pub billing_usd_unconverted_nanos: i64,
+    pub billing_charged_count: i64,
+    pub billing_unknown_count: i64,
+}
+
+/// 订阅价值对比：窗口内的摊销订阅费用与同窗口的等价按量成本。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionValue {
+    /// 订阅费用：窗口内按生效段线性摊销，`known_count` / `unknown_count` 为 0；
+    /// 摊销溢出时 `unknown_count` 为 1。
+    pub cost: DisplayMoney,
+    /// 同窗口内按订阅基准完成的尝试的按量成本。
+    pub usage_equivalent_cost: DisplayMoney,
+    /// 等价按量成本 / 订阅费用，4 位小数；订阅费用为零或任一侧不可表示时为 null。
+    pub multiple: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, FromRow)]
 pub struct StatsOverview {
     /// 所选窗口内的客户端请求数，包括准入前拒绝；内部轮次和重试不重复计数。
@@ -923,8 +987,25 @@ pub struct StatsOverview {
     /// 成功 attempt 的 Σ输出 Token / Σ完整耗时（tok/s），包含首字等待。
     /// 无成功样本、任一输出或耗时未知、或总耗时不为正时为 null。
     pub avg_output_tps: Option<f64>,
-    /// 与「失败的请求」相同的最终失败请求数，不包含恢复成功、取消或中断。
-    pub error_count: i64,
+    /// 已终结请求：完成或最终失败、非客户端取消，排除未发送上游的请求校验拒绝。
+    pub terminal_request_count: i64,
+    /// 已终结请求中最终失败的数量；取消、断线与进行中不计入。
+    pub failed_request_count: i64,
+    /// 上游请求：已完成尝试 + 上游错误；本地失败与未知来源不计入。
+    pub upstream_request_count: i64,
+    /// 上游错误：失败且错误来源为上游的 Target 尝试。
+    pub upstream_error_count: i64,
+    #[sqlx(flatten)]
+    #[serde(skip)]
+    pub money: UsageMoneyTotals,
+    /// 实际成本：按量尝试成本 + 订阅摊销（含已删除 Provider）。
+    #[sqlx(skip)]
+    pub actual_cost: DisplayMoney,
+    /// 订阅价值对比；窗口内没有订阅段重叠时为 null。
+    #[sqlx(skip)]
+    pub subscription: Option<SubscriptionValue>,
+    #[sqlx(skip)]
+    pub currency: DisplayCurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -935,8 +1016,14 @@ pub struct StatsSeries {
     pub bucket_ms: i64,
     /// 按客户端请求开始时间分桶的请求数，包括准入前拒绝。
     pub request_count: i64,
-    /// 本桶内最终失败的客户端请求数；同一请求的内部轮次和重试只计一次。
-    pub error_count: i64,
+    /// 本桶内已终结请求数；取消、断线与进行中不计入。
+    pub terminal_request_count: i64,
+    /// 本桶内已终结请求中最终失败的数量。
+    pub failed_request_count: i64,
+    /// 本桶内上游请求数（已完成尝试 + 上游错误）。
+    pub upstream_request_count: i64,
+    /// 本桶内失败且来源为上游的 Target 尝试数。
+    pub upstream_error_count: i64,
     /// 已完成 attempt 的已知净输入合计；逐次扣 cache-read 并截为零，不扣 cache-write。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
@@ -947,6 +1034,14 @@ pub struct StatsSeries {
     pub avg_first_token_ms: Option<f64>,
     /// 本桶成功 attempt 的加权输出速率（tok/s）；完整性规则与 overview 相同。
     pub avg_output_tps: Option<f64>,
+    #[sqlx(flatten)]
+    #[serde(skip)]
+    pub money: UsageMoneyTotals,
+    /// 本桶实际成本：按量尝试成本 + 订阅摊销在该桶内的重叠部分。
+    #[sqlx(skip)]
+    pub actual_cost: DisplayMoney,
+    #[sqlx(skip)]
+    pub currency: DisplayCurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -960,6 +1055,16 @@ pub struct ModelStats {
     pub total_output_tokens: Option<i64>,
     pub total_reasoning_tokens: Option<i64>,
     pub avg_duration_ms: Option<f64>,
+    #[sqlx(flatten)]
+    #[serde(skip)]
+    pub money: UsageMoneyTotals,
+    /// 按量成本：全部尝试（订阅 Provider 为等价按量成本）。
+    #[sqlx(skip)]
+    pub cost: DisplayMoney,
+    #[sqlx(skip)]
+    pub billing: DisplayMoney,
+    #[sqlx(skip)]
+    pub currency: DisplayCurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -967,14 +1072,26 @@ pub struct ProviderStats {
     pub provider_id: Option<String>,
     pub deleted: bool,
     pub provider: String,
-    /// 涉及该服务的客户端请求数，不按内部轮次或尝试重复计数。
-    pub request_count: i64,
-    /// 涉及该服务的最终失败请求数；跨服务失败可分别计入多个服务。
-    pub error_count: i64,
+    /// 该 Provider 的上游请求数：已完成尝试 + 上游错误；重试会重复计入。
+    pub upstream_request_count: i64,
+    /// 该 Provider 的上游错误数：失败且来源为上游的尝试。
+    pub upstream_error_count: i64,
     pub avg_duration_ms: Option<f64>,
     /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ完整上游耗时。
     /// 不扣首 Token 等待；任一已完成 attempt 未报告输出或耗时，或总耗时为零时为 null。
     pub avg_output_tps: Option<f64>,
+    #[sqlx(flatten)]
+    #[serde(skip)]
+    pub money: UsageMoneyTotals,
+    /// 窗口内该 Provider 全部受追踪尝试的成本：按量尝试为实际按量成本，
+    /// 订阅尝试为等价按量成本。既无受追踪尝试也无订阅段重叠时为 null。
+    #[sqlx(skip)]
+    pub cost: Option<DisplayMoney>,
+    /// 该 Provider 的订阅价值对比；窗口内没有订阅段重叠时为 null。
+    #[sqlx(skip)]
+    pub subscription: Option<SubscriptionValue>,
+    #[sqlx(skip)]
+    pub currency: DisplayCurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -990,6 +1107,16 @@ pub struct ApiKeyStats {
     pub cache_write_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
     pub last_used_at: i64,
+    #[sqlx(flatten)]
+    #[serde(skip)]
+    pub money: UsageMoneyTotals,
+    /// 按量成本：全部尝试（订阅 Provider 为等价按量成本）。
+    #[sqlx(skip)]
+    pub cost: DisplayMoney,
+    #[sqlx(skip)]
+    pub billing: DisplayMoney,
+    #[sqlx(skip)]
+    pub currency: DisplayCurrency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

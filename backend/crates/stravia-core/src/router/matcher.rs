@@ -43,6 +43,7 @@ mod tests {
             supports_image_input: false,
             targets: Vec::new(),
             default_thinking_level: None,
+            billing: None,
         }
     }
 

@@ -55,6 +55,8 @@ pub(crate) struct AuthenticatedPrincipal {
     pub(crate) principal: stravia_runtime_contract::Principal,
     pub(crate) api_key_name: String,
     pub(crate) rpm_limit: Option<i32>,
+    /// Display-currency nanos; `None` means unlimited.
+    pub(crate) spend_limit_nanos: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +102,7 @@ impl<'a> Security<'a> {
             principal: stravia_runtime_contract::Principal::new(key.id),
             api_key_name: key.name,
             rpm_limit: key.rpm_limit,
+            spend_limit_nanos: key.spend_limit_nanos,
         })
     }
 
@@ -435,6 +438,7 @@ mod tests {
                     is_enabled: true,
                     expires_at: None,
                     rpm_limit: None,
+                    spend_limit_nanos: None,
                     inject_media_understanding: false,
                     transparent_injection_enabled: true,
                     inject_web_search: true,
@@ -501,6 +505,7 @@ mod tests {
             context_window: None,
             supports_image_input: false,
             default_thinking_level: None,
+            billing: None,
         }
     }
 

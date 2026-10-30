@@ -15,7 +15,7 @@ use crate::Gateway;
 use crate::db::models::Provider;
 
 use super::artifacts::{MAX_COMPONENT_BYTES, PluginArtifacts};
-use super::builtin::BundledPlugins;
+use super::builtin::{BundledPlugins, CompileCache, record_admission};
 use super::lifecycle::{VendorOperation, VendorOperationTracker, WritePermit};
 use super::permissions::resolve_permissions;
 use super::store::{
@@ -92,22 +92,22 @@ impl VendorPlugins {
     pub(crate) async fn open(
         store: PluginStore,
         plugin_directory: PathBuf,
-        wasmtime_cache: Option<PathBuf>,
+        compile_cache: Option<CompileCache>,
     ) -> anyhow::Result<Arc<Self>> {
         // 内置组件跨实例共享；内存存储共享无缓存运行时，持久存储的本地插件
-        // 则各自使用 data_dir 下的官方编译缓存，不写入其他实例的目录。
-        let wasmtime_cache = wasmtime_cache.filter(|_| store.is_persistent());
-        let (bundled, runtime) = match BundledPlugins::load(wasmtime_cache.as_deref()).await {
+        // 则各自使用 data_dir 下的文件映射编译缓存，不写入其他实例的目录。
+        let compile_cache = compile_cache.filter(|_| store.is_persistent());
+        let (bundled, runtime) = match BundledPlugins::load(compile_cache.as_ref()).await {
             Ok(loaded) => loaded,
             Err(error)
-                if wasmtime_cache.is_some()
+                if compile_cache.is_some()
                     && matches!(
                         error.downcast_ref::<stravia_vendor_runtime::LoadError>(),
                         Some(stravia_vendor_runtime::LoadError::CompilationCache(_))
                     ) =>
             {
                 tracing::warn!(
-                    cache_directory = ?wasmtime_cache,
+                    cache_directory = ?compile_cache.as_ref().map(|cache| &cache.wasmtime),
                     %error,
                     "persistent plugin compilation cache is unavailable; continuing without it"
                 );
@@ -120,43 +120,33 @@ impl VendorPlugins {
             .then(|| PluginArtifacts::new(plugin_directory));
         let mut entries = HashMap::new();
         for mut record in store.list().await? {
-            let component = match bundled
+            let embedded = bundled
                 .plugins
                 .get(&record.vendor_id)
-                .filter(|_| record.source == PluginSource::Builtin.as_str())
-            {
-                Some(bundle) => {
-                    let digest = stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-                        &Sha256::digest(bundle.component).into(),
-                    );
-                    if digest == record.digest {
-                        Ok(Bytes::from_static(bundle.component))
-                    } else {
-                        // 记录标为 builtin，但安装的是旧发行版内嵌字节或同版本
-                        // 不同构建；artifact 按 digest 校验完整性，回退读取即可，
-                        // 不能因与当前内嵌字节不同就判为不可用。
-                        match &artifacts {
-                            Some(artifacts) => artifacts.read(&record.digest).await,
-                            None => Ok(record.component.clone()),
-                        }
-                    }
+                .filter(|bundle| bundle.digest == record.digest);
+            let package = match embedded {
+                // 内置记录与当前二进制内嵌字节相同：直接复用，无需读取任何文件。
+                // 记录标为 builtin 但摘要不同时（旧发行版内嵌字节或同版本不同构建），
+                // 与其他安装一样按 digest 读取 artifact，不能因与当前内嵌字节不同
+                // 就判为不可用。
+                Some(bundle) if record.source == PluginSource::Builtin.as_str() => {
+                    Ok(bundle.loaded.clone())
                 }
-                None => match &artifacts {
-                    Some(artifacts) => artifacts.read(&record.digest).await,
-                    None => Ok(record.component.clone()),
-                },
-            };
-            let package = match component {
-                Ok(component) => match bundled.plugins.get(&record.vendor_id) {
-                    Some(bundle) if bundle.component == component.as_ref() => {
-                        Ok(bundle.loaded.clone())
+                _ => match &artifacts {
+                    Some(artifacts) if !artifacts.is_available(&record.digest).await => {
+                        let error = anyhow::anyhow!("plugin artifact is missing or has an invalid size");
+                        tracing::warn!(vendor_id = %record.vendor_id, %error, "installed plugin artifact is unavailable");
+                        Err(error)
                     }
-                    _ => runtime.load(&component).await.map_err(anyhow::Error::from),
+                    _ => match embedded {
+                        Some(bundle) => Ok(bundle.loaded.clone()),
+                        None => load_recorded(&runtime, artifacts.as_ref(), &record)
+                            .await
+                            .inspect_err(|error| {
+                                tracing::warn!(vendor_id = %record.vendor_id, %error, "installed plugin artifact is unavailable");
+                            }),
+                    },
                 },
-                Err(error) => {
-                    tracing::warn!(vendor_id = %record.vendor_id, %error, "installed plugin artifact is unavailable");
-                    Err(error)
-                }
             };
             let loaded = match package {
                 Ok(package)
@@ -192,6 +182,7 @@ impl VendorPlugins {
         }))
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn bundled(&self) -> &BundledPlugins {
         &self.bundled
     }
@@ -850,6 +841,8 @@ impl VendorPlugins {
             artifacts
                 .store(&pending.record.digest, pending.record.component.clone())
                 .await?;
+            // 预览期已完整校验；记录让下次启动不必再实例化它。
+            record_admission(&self.runtime, &pending.loaded).await;
         }
         let quiescent = if pending.data_incompatible {
             let quiescent = futures::future::try_join_all(
@@ -885,13 +878,21 @@ impl VendorPlugins {
             .install(&pending.record, pending.expected_revision, &pending.resets)
             .await?;
         let vendor_id = vendor_id.clone();
+        // 本地插件已落盘；预览期编译的产物沿用，空闲后释放并按摘要恢复。
+        // 内置版本沿用内嵌来源的句柄。
+        let loaded = match &self.artifacts {
+            Some(artifacts) if pending.preview.target_source == PluginSource::Local => pending
+                .loaded
+                .with_source(artifacts.source(&pending.record.digest)),
+            _ => pending.loaded,
+        };
         let mut record = pending.record;
         record.component = Bytes::new();
         self.entries.write().insert(
             vendor_id,
             Entry {
                 record,
-                loaded: Some(pending.loaded),
+                loaded: Some(loaded),
                 retired_profiles: BTreeSet::new(),
             },
         );
@@ -971,10 +972,7 @@ impl VendorPlugins {
                 && Version::parse(&old.version).is_ok_and(|version| {
                     let bundled_version = &bundle.loaded.descriptor().version;
                     bundled_version < &version
-                        || (bundled_version == &version
-                            && stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-                                &Sha256::digest(bundle.component).into(),
-                            ) == old.digest)
+                        || (bundled_version == &version && bundle.digest == old.digest)
                 })
             {
                 continue;
@@ -1108,6 +1106,30 @@ impl VendorPlugins {
             icon_svg: descriptor.as_ref().and_then(descriptor_icon_svg),
         })
     }
+}
+
+/// 启动时取得已安装记录对应的插件。此前通过完整校验的组件凭准入记录直接得到
+/// descriptor，不读取也不编译；其余读取 artifact 并完整校验后记录准入。两种
+/// 结果都绑定 artifact 来源，空闲 60 分钟后释放编译产物，再次使用时按摘要读取
+/// 并从持久编译缓存恢复。
+async fn load_recorded(
+    runtime: &VendorRuntime,
+    artifacts: Option<&PluginArtifacts>,
+    record: &InstalledPlugin,
+) -> anyhow::Result<LoadedPlugin> {
+    let Some(artifacts) = artifacts else {
+        return Ok(runtime.load(&record.component).await?);
+    };
+    if let Some(restored) = runtime
+        .restore(&record.digest, artifacts.source(&record.digest))
+        .await
+    {
+        return Ok(restored);
+    }
+    let component = artifacts.read(&record.digest).await?;
+    let loaded = runtime.load(&component).await?;
+    record_admission(runtime, &loaded).await;
+    Ok(loaded.with_source(artifacts.source(&record.digest)))
 }
 
 fn descriptor_icon_svg(descriptor: &stravia_vendor_sdk::VendorDescriptor) -> Option<String> {

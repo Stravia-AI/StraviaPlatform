@@ -1,28 +1,24 @@
 import { describe, expect, test } from 'bun:test'
 
-import {
-  buildProviderModelMetadataJson,
-  emptyProviderModelCost,
-  providerModelCostFromMetadata,
-} from '../src/lib/components/provider-model-form'
+import { buildProviderModelMetadataJson } from '../src/lib/components/provider-model-form'
+import { emptyPriceForm, priceFormFromCost } from '../src/lib/components/price-form'
 
 describe('provider model form', () => {
   test('preserves decimal price text without floating-point conversion', () => {
     const metadata = { cost: { input: 0, tiers: [] } }
-    const cost = providerModelCostFromMetadata(metadata)
-    cost.base.input = '0.000000000000000000123'
+    const cost = priceFormFromCost(metadata.cost)
+    cost.base.input.amount = '0.000000000000000000123'
 
     const result = buildProviderModelMetadataJson('model-id', metadata, cost)
 
     expect(result.errors).toEqual([])
-    expect(result.json).toContain('"input":0.000000000000000000123')
-    expect(JSON.parse(result.json!)).toMatchObject({ id: 'model-id' })
+    expect(JSON.parse(result.json!)).toMatchObject({ id: 'model-id', cost: { input: '0.000000000000000000123' } })
   })
 
-  test('rejects negative tier thresholds', () => {
+  test('rejects invalid tier thresholds', () => {
     const metadata = { cost: { tiers: [] } }
-    const cost = emptyProviderModelCost()
-    cost.tiers.push({ ...cost.base, threshold: '-1' })
+    const cost = emptyPriceForm()
+    cost.tiers.push({ threshold: '-1', prices: { input: '', output: '', cache_read: '', cache_write: '' } })
 
     const result = buildProviderModelMetadataJson('model-id', metadata, cost)
 
@@ -56,7 +52,7 @@ describe('provider model form', () => {
         'high',
       ],
     }
-    const result = buildProviderModelMetadataJson('model-id', metadata, emptyProviderModelCost())
+    const result = buildProviderModelMetadataJson('model-id', metadata, emptyPriceForm())
 
     expect(result.errors).toEqual([])
     expect(JSON.parse(result.json!)).toEqual({
@@ -67,7 +63,7 @@ describe('provider model form', () => {
     })
   })
 
-  test('serializes only supported prices across base, extended context, and tiers', () => {
+  test('serializes prices, tier block, per-field currency markers, and peak pricing', () => {
     const metadata = {
       cost: {
         input: 2,
@@ -86,18 +82,41 @@ describe('provider model form', () => {
         tiers: [{ tier: { type: 'context', size: 200000 }, input: 4, reasoning: 7, input_audio: 8, output_audio: 9 }],
       },
     }
-    const cost = providerModelCostFromMetadata(metadata)
-    cost.base.input = '3'
-    cost.tiers[0].output = '9'
+    const cost = priceFormFromCost(metadata.cost)
+    cost.base.input.amount = '3'
+    cost.base.output.amount = '2'
+    cost.base.output.currency = 'custom'
+    cost.tiers[0].prices.output = '9'
+    cost.tiersCurrency = 'custom'
+    cost.peak = {
+      timezone: 'Asia/Shanghai',
+      weekdays: [1, 2, 3, 4, 5],
+      ranges: [
+        { start: '09:00', end: '12:00' },
+        { start: '14:00', end: '18:00' },
+      ],
+      multiplier: '2',
+    }
     const result = buildProviderModelMetadataJson('model-id', metadata, cost)
 
     expect(result.errors).toEqual([])
     expect(JSON.parse(result.json!)).toEqual({
       id: 'model-id',
       cost: {
-        input: 3,
-        context_over_200k: { input: 4, output: 8, cache_read: 0, cache_write: 2 },
-        tiers: [{ tier: { type: 'context', size: 200000 }, input: 4, output: 9 }],
+        input: '3',
+        output: '2',
+        context_over_200k: { input: '4', output: '8', cache_read: '0', cache_write: '2' },
+        tiers: [{ tier: { type: 'context', size: 200000 }, input: '4', output: '9' }],
+        custom_currency_fields: ['output', 'tiers'],
+        peak: {
+          timezone: 'Asia/Shanghai',
+          weekdays: [1, 2, 3, 4, 5],
+          ranges: [
+            { start: '09:00', end: '12:00' },
+            { start: '14:00', end: '18:00' },
+          ],
+          multiplier: '2',
+        },
       },
     })
   })
@@ -105,7 +124,7 @@ describe('provider model form', () => {
   test('preserves an explicit null cost', () => {
     const metadata = { cost: null }
 
-    const result = buildProviderModelMetadataJson('model-id', metadata, providerModelCostFromMetadata(metadata))
+    const result = buildProviderModelMetadataJson('model-id', metadata, priceFormFromCost(metadata.cost))
 
     expect(result.errors).toEqual([])
     expect(JSON.parse(result.json!)).toMatchObject({ id: 'model-id', cost: null })

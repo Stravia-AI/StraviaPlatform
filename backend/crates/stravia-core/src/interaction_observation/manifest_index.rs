@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
+use tracing::Instrument as _;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FileTraceManifest {
@@ -176,58 +177,98 @@ impl DebugTraceIndex {
             .map(FileTraceManifest::trace)
     }
     async fn write_entry(&self, entry: &FileTraceManifest) -> anyhow::Result<()> {
-        anyhow::ensure!(self.available, "trace manifest index unavailable");
-        anyhow::ensure!(
-            stravia_runtime_contract::identifier::valid_id(&entry.trace_id),
-            "invalid trace id"
+        let span = tracing::info_span!(
+            target: "stravia::perf",
+            "observation.manifest.persist",
+            status = tracing::field::Empty
         );
-        let directory = self.root.join(&entry.trace_id);
-        let indexed = self.entries.read().traces.contains_key(&entry.trace_id);
-        let bytes = serde_json::to_vec(entry)?;
-        // 校验、落盘和关闭共用一个 blocking 任务，避免逐操作调度及执行器上的句柄关闭。
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            std::fs::create_dir_all(&directory)?;
+        let result = async {
+            anyhow::ensure!(self.available, "trace manifest index unavailable");
             anyhow::ensure!(
-                !std::fs::symlink_metadata(&directory)?
-                    .file_type()
-                    .is_symlink(),
-                "trace directory is a symlink"
+                stravia_runtime_contract::identifier::valid_id(&entry.trace_id),
+                "invalid trace id"
             );
-            anyhow::ensure!(
-                std::fs::canonicalize(&directory)?.parent() == directory.parent(),
-                "trace directory escaped root"
-            );
-            let target = directory.join("manifest.json");
-            match std::fs::symlink_metadata(&target) {
-                Ok(metadata) => {
+            let directory = self.root.join(&entry.trace_id);
+            let indexed = self.entries.read().traces.contains_key(&entry.trace_id);
+            let bytes = serde_json::to_vec(entry)?;
+            // 校验、落盘和关闭共用一个 blocking 任务，避免逐操作调度及执行器上的句柄关闭。
+            // persist 覆盖 spawn_blocking 调度等待；write 只测闭包实际执行；
+            // sync 单独标出 fsync。闭包只复制内部因果身份，不保留请求 tracing span。
+            let causal = crate::performance::current_context();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let span = tracing::info_span!(
+                    target: "stravia::perf",
+                    parent: None,
+                    "observation.manifest.write",
+                    causal_parent_id = causal.span_id(),
+                    causal_epoch = causal.epoch(),
+                    status = tracing::field::Empty
+                );
+                let _entered = span.enter();
+                let result = (|| -> anyhow::Result<()> {
+                    std::fs::create_dir_all(&directory)?;
                     anyhow::ensure!(
-                        metadata.is_file() && !metadata.file_type().is_symlink(),
-                        "trace manifest is not a regular file"
+                        !std::fs::symlink_metadata(&directory)?
+                            .file_type()
+                            .is_symlink(),
+                        "trace directory is a symlink"
                     );
-                    anyhow::ensure!(indexed, "unindexed trace manifest cannot be overwritten");
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            let temporary = directory.join(format!(
-                ".manifest-{}.tmp",
-                stravia_runtime_contract::identifier::new_id()
-            ));
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            use std::io::Write;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            // std rename atomically replaces the destination, including on Windows.
-            std::fs::rename(&temporary, target)?;
+                    anyhow::ensure!(
+                        std::fs::canonicalize(&directory)?.parent() == directory.parent(),
+                        "trace directory escaped root"
+                    );
+                    let target = directory.join("manifest.json");
+                    match std::fs::symlink_metadata(&target) {
+                        Ok(metadata) => {
+                            anyhow::ensure!(
+                                metadata.is_file() && !metadata.file_type().is_symlink(),
+                                "trace manifest is not a regular file"
+                            );
+                            anyhow::ensure!(
+                                indexed,
+                                "unindexed trace manifest cannot be overwritten"
+                            );
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                    let temporary = directory.join(format!(
+                        ".manifest-{}.tmp",
+                        stravia_runtime_contract::identifier::new_id()
+                    ));
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary)?;
+                    use std::io::Write;
+                    file.write_all(&bytes)?;
+                    let synced = {
+                        let sync = tracing::info_span!(
+                            target: "stravia::perf",
+                            "observation.manifest.sync",
+                            status = tracing::field::Empty
+                        );
+                        let synced = sync.in_scope(|| file.sync_all());
+                        sync.record("status", if synced.is_ok() { "completed" } else { "error" });
+                        synced
+                    };
+                    synced?;
+                    drop(file);
+                    // std rename atomically replaces the destination, including on Windows.
+                    std::fs::rename(&temporary, target)?;
+                    Ok(())
+                })();
+                span.record("status", if result.is_ok() { "completed" } else { "error" });
+                result
+            })
+            .await??;
+            self.entries.write().insert(entry.clone());
             Ok(())
-        })
-        .await??;
-        self.entries.write().insert(entry.clone());
-        Ok(())
+        }
+        .instrument(span.clone())
+        .await;
+        span.record("status", if result.is_ok() { "completed" } else { "error" });
+        result
     }
     /// Mutations of already-indexed manifests (tombstone, retention, recovery)
     /// always advance the in-memory index so queries, counts and later erasure

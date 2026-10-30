@@ -3,7 +3,7 @@
 pub mod account;
 pub mod common;
 pub mod connection_check;
-pub mod icons;
+pub mod gemini;
 pub mod plan;
 pub mod thinking;
 

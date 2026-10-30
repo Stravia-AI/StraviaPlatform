@@ -14,7 +14,7 @@ use tracing::Instrument;
 mod lifecycle;
 use lifecycle::OutputLifecycle;
 
-use super::provider::AttemptObservation;
+use super::provider::{AttemptCostContext, AttemptObservation};
 use super::{
     CanonicalEvent, ModelTurn, ModelTurnAuthorization, ModelTurnError, ModelTurnExecutor,
     TargetIdentity, TurnInput, VendorPublication,
@@ -58,6 +58,7 @@ impl LiveModelTurnExecutor {
             gateway.cache_affinity.clone(),
             continuation.clone(),
             gateway.route_policy_state.clone(),
+            gateway.custom_currency.clone(),
         );
         Self {
             gateway,
@@ -177,7 +178,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     };
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
-                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone(), observer.as_ref());
                     let thinking_source = turn.target.thinking_source();
                     {
                         use futures::StreamExt;
@@ -989,6 +990,12 @@ const UPSTREAM_LOCAL_DEADLINE: u8 = 8;
 const UPSTREAM_FAILURE_MASK: u8 =
     UPSTREAM_STARTED | UPSTREAM_FINISHED | UPSTREAM_LOCAL_WORK | UPSTREAM_LOCAL_DEADLINE;
 
+/// 首 token 超时的 Drop 收尾没有 AttemptFailure 可带；用传输状态位判断
+/// 上游请求是否真的发出过，避免把本地准备超时计成上游错误。
+pub(super) fn upstream_request_started(state: &AtomicU8) -> bool {
+    state.load(Ordering::Acquire) & UPSTREAM_STARTED == UPSTREAM_STARTED
+}
+
 struct UpstreamLocalWork<'a> {
     state: &'a AtomicU8,
     deadline: Deadline,
@@ -1016,6 +1023,12 @@ struct PreparedAttempt {
     authorization: ModelTurnAuthorization,
     route: RouteContext,
     provider_name: String,
+    /// Frozen price, cost basis, billing settings, root API Key and rate for
+    /// this attempt's cost and billing calculation.
+    pricing: Option<Arc<crate::provider_models::ModelCost>>,
+    cost_basis: crate::pricing::CostBasis,
+    billing: Option<crate::pricing::BillingConfig>,
+    api_key_id: String,
     compact: bool,
     preserve_upstream_error: bool,
     observer: Option<crate::interaction_observation::RunObserver>,
@@ -1584,6 +1597,10 @@ async fn prepare_attempt(
             egress,
         },
         provider_name: provider.name,
+        pricing: target.pricing.clone(),
+        cost_basis: provider.cost_basis,
+        billing: route.billing.clone(),
+        api_key_id: input.principal.api_key_id().to_owned(),
         compact,
         preserve_upstream_error: compact || native_compaction_requested,
         observer: input.observer.clone(),
@@ -2047,7 +2064,15 @@ async fn drive_vendor_attempt(
             prepared.protocol_hint.clone(),
             prepared.egress_base_url.clone(),
             prepared.first_token_timed_out.clone(),
+            AttemptCostContext {
+                pricing: prepared.pricing.clone(),
+                cost_basis: prepared.cost_basis,
+                billing: prepared.billing.clone(),
+                api_key_id: Some(prepared.api_key_id.clone()),
+                currency: gateway.custom_currency_snapshot(),
+            },
         )
+        .with_upstream_state(prepared.upstream_state.clone())
         .with_usage_ledger(prepared.root_request.confirmed_usage.clone());
         // 每次派发都从实际请求重建事实；恢复、续传回退与凭据恢复不能沿用旧声明。
         update_protected_reasoning_metadata(

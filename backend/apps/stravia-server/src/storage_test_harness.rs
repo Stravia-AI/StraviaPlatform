@@ -184,9 +184,14 @@ INSERT INTO rejected_request_observations(id,occurred_at,method,path,ingress_pro
 
 async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
     ensure!(
-        matches!(fixture, "retained" | "empty"),
+        matches!(fixture, "retained" | "empty" | "cost-and-billing"),
         "invalid upgrade fixture"
     );
+    let last_migration = if fixture == "cost-and-billing" {
+        29
+    } else {
+        17
+    };
     let backend = env::var("STRAVIA_STORAGE_BACKEND").context("STRAVIA_STORAGE_BACKEND")?;
     match backend.as_str() {
         "sqlite" => {
@@ -204,7 +209,7 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
             let prefix = sqlx::migrate::Migrator::with_migrations(
                 migrations
                     .iter()
-                    .filter(|m| m.version <= 17)
+                    .filter(|m| m.version <= last_migration)
                     .cloned()
                     .collect(),
             );
@@ -224,7 +229,7 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
             let prefix = sqlx::migrate::Migrator::with_migrations(
                 migrations
                     .iter()
-                    .filter(|m| m.version <= 17)
+                    .filter(|m| m.version <= last_migration)
                     .cloned()
                     .collect(),
             );
@@ -452,12 +457,6 @@ async fn main() -> anyhow::Result<()> {
                 .bind(&schema)
                 .fetch_one(&pool)
                 .await?;
-                let indexes: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('interaction_observations_window_idx', 'model_turns_analytics_idx', 'target_attempts_analytics_idx')",
-                )
-                .bind(&schema)
-                .fetch_one(&pool)
-                .await?;
                 let removed_indexes: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('observation_events_expiry_idx')",
                 )
@@ -467,7 +466,6 @@ async fn main() -> anyhow::Result<()> {
                 println!("observation_tables={tables}");
                 println!("removed_tables={removed}");
                 println!("legacy_tables={legacy}");
-                println!("observation_indexes={indexes}");
                 println!("removed_indexes={removed_indexes}");
             }
             other => anyhow::bail!("unknown schema action: {other}"),
@@ -585,6 +583,7 @@ async fn main() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -600,6 +599,7 @@ async fn main() -> anyhow::Result<()> {
             inject_media_generation: false,
             expires_at: None,
             model_ids: vec![route.id.clone().into()],
+            spend_limit: None,
         })
         .await?;
 
@@ -721,6 +721,7 @@ async fn main() -> anyhow::Result<()> {
                 target_cooldown_ms: Some(120_000),
                 thinking_level_map: vec![],
             }]),
+            billing: None,
         })
         .await;
     ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");

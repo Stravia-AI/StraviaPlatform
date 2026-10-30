@@ -403,7 +403,10 @@ pub fn descriptor() -> VendorDescriptor {
         providers: vec![ProviderDescriptor {
             provider_id: ID.into(),
             catalog_id: Some("meta".into()),
-            icon_svg: stravia_vendor_common::icons::provider_svg("meta").map(str::to_owned),
+            icon_svg: Some(
+                include_str!("../../../../frontend/stravia-webui/src/assets/icons/meta.svg")
+                    .to_owned(),
+            ),
             display_name: "Muse Code".into(),
             description: Some(messages::compatibility().english_text().to_owned()),
             channels: vec![channel],

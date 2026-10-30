@@ -925,7 +925,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
                 Request::post(format!("/api/v1/providers/{}/models", provider.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"model_id":"private/model","metadata":{"id":"private/model","name":"Private Model","cost":{"input":0.123456789012345678}}}"#,
+                        r#"{"model_id":"private/model","metadata":{"id":"private/model","name":"Private Model","cost":{"input":"0.123456789012345678"}}}"#,
                     ))?,
             )
             .await?;
@@ -957,7 +957,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
                 Request::put(format!("/api/v1/providers/{}/model", provider.id))
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
-                        r#"{{"model_id":"private/model","revision":{revision},"metadata":{{"id":"private/model","name":"Private Model","cost":{{"input":0.987654321098765432}}}}}}"#
+                        r#"{{"model_id":"private/model","revision":{revision},"changes":{{"cost.input":{{"amount":"0.987654321098765432","currency":"usd"}}}}}}"#
                     )))?,
             )
             .await?;
@@ -1025,6 +1025,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
@@ -1678,6 +1679,178 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     // canonical 目录补齐上游未提供的上下文。
     let deepseek = &entries[2];
     assert_eq!(deepseek["specification"]["limit"]["context"], 1000000);
+
+    // 发现来源的模型默认没有固定字段，也没有可恢复字段。
+    let detail = app
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/providers/{provider_id}/model?model=deepseek%2Fdeepseek-v4-pro"
+            ))
+            .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail_body = to_bytes(detail.into_body(), usize::MAX).await?;
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body)?;
+    assert_eq!(detail_json["data"]["pinned_fields"], serde_json::json!([]));
+    assert_eq!(
+        detail_json["data"]["restorable_fields"],
+        serde_json::json!([])
+    );
+    let revision = detail_json["data"]["revision"]
+        .as_i64()
+        .expect("model revision");
+    let source_description = detail_json["data"]["metadata"]["description"].clone();
+
+    // 只固定本次明确修改的字段。
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/v1/providers/{provider_id}/model"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "model_id": "deepseek/deepseek-v4-pro",
+                    "revision": revision,
+                    "changes": {
+                        "description": "Locally pinned description",
+                        "cost.input": {"amount": "9.5", "currency": "usd"}
+                    }
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = to_bytes(updated.into_body(), usize::MAX).await?;
+    let updated_json: serde_json::Value = serde_json::from_slice(&updated_body)?;
+    assert_eq!(
+        updated_json["data"]["pinned_fields"],
+        serde_json::json!(["description", "cost.input"])
+    );
+    assert_eq!(
+        updated_json["data"]["restorable_fields"],
+        serde_json::json!(["description", "cost.input"])
+    );
+    let revision = updated_json["data"]["revision"]
+        .as_i64()
+        .expect("updated revision");
+
+    // 再次同步只更新未固定字段，固定值保持。
+    let resynced = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/providers/{provider_id}/models/sync"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(resynced.status(), StatusCode::OK);
+    let resynced = app
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/providers/{provider_id}/model?model=deepseek%2Fdeepseek-v4-pro"
+            ))
+            .body(Body::empty())?,
+        )
+        .await?;
+    let resynced_body = to_bytes(resynced.into_body(), usize::MAX).await?;
+    let resynced_json: serde_json::Value = serde_json::from_slice(&resynced_body)?;
+    assert_eq!(
+        resynced_json["data"]["metadata"]["description"],
+        "Locally pinned description"
+    );
+    assert_eq!(resynced_json["data"]["metadata"]["cost"]["input"], "9.5");
+
+    // 恢复一个字段后仅解除该固定，并还原来源值。
+    let restored = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/providers/{provider_id}/model/restore-sync"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "model_id": "deepseek/deepseek-v4-pro",
+                "revision": revision,
+                "fields": ["description"]
+            }))?))?,
+        )
+        .await?;
+    assert_eq!(restored.status(), StatusCode::OK);
+    let restored_body = to_bytes(restored.into_body(), usize::MAX).await?;
+    let restored_json: serde_json::Value = serde_json::from_slice(&restored_body)?;
+    assert_eq!(
+        restored_json["data"]["pinned_fields"],
+        serde_json::json!(["cost.input"])
+    );
+    assert_eq!(
+        restored_json["data"]["restorable_fields"],
+        serde_json::json!(["cost.input"])
+    );
+    assert_eq!(
+        restored_json["data"]["metadata"]["description"],
+        source_description,
+    );
+
+    // 未固定的字段不可恢复。
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/providers/{provider_id}/model/restore-sync"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "model_id": "deepseek/deepseek-v4-pro",
+                "revision": restored_json["data"]["revision"],
+                "fields": ["description"]
+            }))?))?,
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let rejected_body = to_bytes(rejected.into_body(), usize::MAX).await?;
+    let rejected_json: serde_json::Value = serde_json::from_slice(&rejected_body)?;
+    assert_eq!(rejected_json["code"], "PROVIDER_MODEL_FIELD_NOT_PINNED");
+
+    // 本地手工模型没有来源规格，不提供恢复。
+    let manual = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/providers/{provider_id}/models"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                    "model_id": "manual/local",
+                    "metadata": {"id": "manual/local", "name": "Local"}
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(manual.status(), StatusCode::CREATED);
+    let manual_body = to_bytes(manual.into_body(), usize::MAX).await?;
+    let manual_json: serde_json::Value = serde_json::from_slice(&manual_body)?;
+    assert_eq!(
+        manual_json["data"]["restorable_fields"],
+        serde_json::json!([])
+    );
+    let unavailable = app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/providers/{provider_id}/model/restore-sync"
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "model_id": "manual/local",
+                "revision": manual_json["data"]["revision"],
+                "fields": []
+            }))?))?,
+        )
+        .await?;
+    assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+    let unavailable_body = to_bytes(unavailable.into_body(), usize::MAX).await?;
+    let unavailable_json: serde_json::Value = serde_json::from_slice(&unavailable_body)?;
+    assert_eq!(
+        unavailable_json["code"],
+        "PROVIDER_MODEL_SOURCE_UNAVAILABLE"
+    );
 
     server.abort();
 

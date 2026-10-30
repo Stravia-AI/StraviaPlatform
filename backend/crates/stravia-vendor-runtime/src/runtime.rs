@@ -12,7 +12,7 @@ use stravia_vendor_sdk::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Cache, CacheConfig, Config, Engine, Store};
+use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
@@ -23,26 +23,44 @@ use crate::host::{
     WebSocketMessage, WebSocketResource, WsRequest,
 };
 
+mod admission;
+mod compilation_cache;
+mod residency;
+
+use admission::AdmissionRecords;
+use compilation_cache::CompilationCache;
+pub use residency::{ComponentBytes, ComponentSource, SourceError};
+use residency::{IDLE_UNLOAD, Residency, Resident};
+
 #[derive(Clone)]
 pub struct LoadedPlugin {
     inner: Arc<LoadedVersion>,
 }
 
 struct LoadedVersion {
-    /// Strong reference that keeps the runtime's Engine-local `Weak<Component>`
-    /// compilation entry upgradeable for as long as this plugin is pinned.
-    /// Instantiation uses `prepared`, which is bound to this component's
-    /// Engine, so a plugin driven by another runtime never switches to the
-    /// caller's Engine.
-    component: Arc<Component>,
-    /// Import-resolved, export-indexed blueprint bound to `component`'s Engine.
-    /// Shared by `with_descriptor`, never by different loads.
-    prepared: bindings::VendorPre<StoreState>,
+    /// Compiled component and import-resolved blueprint. Shared by
+    /// `with_descriptor`, never by different loads. May be released after an
+    /// idle period and restored on demand; descriptor and identity never are.
+    residency: Arc<Residency>,
     descriptor: VendorDescriptor,
     identity: String,
 }
 
 impl LoadedPlugin {
+    fn from_parts(
+        residency: Arc<Residency>,
+        descriptor: VendorDescriptor,
+        identity: String,
+    ) -> Self {
+        Self {
+            inner: Arc::new(LoadedVersion {
+                residency,
+                descriptor,
+                identity,
+            }),
+        }
+    }
+
     pub fn descriptor(&self) -> &VendorDescriptor {
         &self.inner.descriptor
     }
@@ -58,14 +76,11 @@ impl LoadedPlugin {
     /// produced by `sync-catalog` without recompiling or repinning the
     /// component itself.
     pub fn with_descriptor(&self, descriptor: VendorDescriptor) -> LoadedPlugin {
-        LoadedPlugin {
-            inner: Arc::new(LoadedVersion {
-                component: self.inner.component.clone(),
-                prepared: self.inner.prepared.clone(),
-                descriptor,
-                identity: self.inner.identity.clone(),
-            }),
-        }
+        Self::from_parts(
+            Arc::clone(&self.inner.residency),
+            descriptor,
+            self.inner.identity.clone(),
+        )
     }
 }
 
@@ -96,8 +111,12 @@ impl OperationScope {
 pub struct VendorRuntime {
     engine: Engine,
     compiled: Arc<Mutex<VecDeque<CompiledEntry>>>,
-    #[cfg(test)]
-    cache: Option<Cache>,
+    /// 绑定了来源的插件空闲多久后释放编译产物。仅在有持久编译缓存时设置：
+    /// 恢复是缓存反序列化；没有缓存的恢复是完整编译，代价高于保留内存。
+    idle_unload: Option<Duration>,
+    /// 已通过准入校验的组件记录，让启动可以跳过对这些组件的实例化校验。
+    admissions: Option<Arc<AdmissionRecords>>,
+    cache: Option<Arc<CompilationCache>>,
 }
 
 struct CompiledEntry {
@@ -113,14 +132,16 @@ impl VendorRuntime {
         Self::build(None)
     }
 
-    /// 使用 Wasmtime 官方持久编译缓存（版本、目标 CPU、编译特性与组件内容
-    /// 的失效由 Wasmtime 负责）。目录必须为绝对路径；目录及其上层按需创建，
-    /// Unix 上权限收紧为 0700，真实路径的祖先不得受不可信用户控制，且必须可写。
+    /// 使用不可变的文件映射编译缓存。Wasmtime 提供引擎兼容身份，组件以完整
+    /// 内容摘要区分；损坏产物从源字节重建。目录必须是可写绝对路径；Unix 上
+    /// 权限收紧为 0700，真实路径的祖先不得受不可信用户控制。不要与旧版
+    /// Wasmtime 压缩缓存共用目录，旧清理器不认识此格式。
     pub fn with_cache(directory: impl Into<PathBuf>) -> Result<Self, LoadError> {
         Self::build(Some(directory.into()))
     }
 
     fn build(cache_directory: Option<PathBuf>) -> Result<Self, LoadError> {
+        let idle_unload = cache_directory.is_some().then_some(IDLE_UNLOAD);
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true);
         // Owned host calls release lowered payloads before awaiting the guest.
@@ -131,38 +152,29 @@ impl VendorRuntime {
         engine_config.wasm_component_model_async_stackful(false);
         engine_config.wasm_component_model_threading(false);
         engine_config.consume_fuel(true);
-        let cache = match cache_directory {
-            Some(directory) => {
-                let directory = prepare_cache_directory(&directory)?;
-                let mut cache_config = CacheConfig::new();
-                cache_config.with_directory(directory);
-                let cache = Cache::new(cache_config).map_err(|error| {
-                    LoadError::CompilationCache(format!(
-                        "initialize persistent compilation cache: {error}"
-                    ))
-                })?;
-                Some(cache)
-            }
-            None => None,
-        };
-        #[cfg(test)]
-        let measured_cache = cache.clone();
-        engine_config.cache(cache);
         let engine = Engine::new(&engine_config)
             .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
+        let cache = cache_directory
+            .map(|directory| CompilationCache::new(&directory, &engine).map(Arc::new))
+            .transpose()?;
         Ok(Self {
             engine,
             compiled: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_COMPILED_ENTRIES))),
-            #[cfg(test)]
-            cache: measured_cache,
+            idle_unload,
+            admissions: None,
+            cache,
         })
     }
 
-    async fn compiled_component(
+    async fn compiled_component<Compile, Compiling>(
         &self,
         digest: &[u8; 32],
-        bytes: &[u8],
-    ) -> Result<Arc<Component>, LoadError> {
+        compile: Compile,
+    ) -> Result<Arc<Component>, LoadError>
+    where
+        Compile: FnOnce() -> Compiling,
+        Compiling: Future<Output = Result<Arc<Component>, LoadError>>,
+    {
         let slot = {
             let mut entries = self
                 .compiled
@@ -196,7 +208,7 @@ impl VendorRuntime {
             }
         };
         let Some(slot) = slot else {
-            return self.compile_component(bytes);
+            return compile().await;
         };
         // Only callers compiling the same identity wait here. The Engine-local
         // metadata lock is released before compilation; other bytes run independently.
@@ -204,15 +216,22 @@ impl VendorRuntime {
         if let Some(component) = cached.upgrade() {
             return Ok(component);
         }
-        let component = self.compile_component(bytes)?;
+        let component = compile().await?;
         *cached = Arc::downgrade(&component);
         Ok(component)
     }
 
-    fn compile_component(&self, bytes: &[u8]) -> Result<Arc<Component>, LoadError> {
-        Component::from_binary(&self.engine, bytes)
-            .map(Arc::new)
-            .map_err(|error| LoadError::InvalidComponent(error.to_string()))
+    fn compile_component(
+        &self,
+        bytes: &[u8],
+        digest: &[u8; 32],
+    ) -> Result<Arc<Component>, LoadError> {
+        match &self.cache {
+            Some(cache) => cache.load(&self.engine, bytes, digest),
+            None => Component::from_binary(&self.engine, bytes)
+                .map_err(|error| LoadError::InvalidComponent(error.to_string())),
+        }
+        .map(Arc::new)
     }
 
     /// Compile (or reuse a live Engine-local compilation), import-check,
@@ -224,10 +243,30 @@ impl VendorRuntime {
     pub async fn load(&self, bytes: &[u8]) -> Result<LoadedPlugin, LoadError> {
         let digest = stravia_runtime_contract::protocol::ir::canonical::hash_bytes(bytes);
         let identity = stravia_runtime_contract::identifier::encode_digest(&digest);
-        let component = self.compiled_component(&digest, bytes).await?;
+        let component = self
+            .compiled_component(&digest, || async { self.compile_component(bytes, &digest) })
+            .await?;
         self.validate_imports(&component)?;
         let prepared = Self::prepare(&component)?;
-        let descriptor = self.read_descriptor(&prepared).await?;
+        let descriptor = self.admit_descriptor(&prepared).await?;
+        Ok(LoadedPlugin::from_parts(
+            Residency::pinned(
+                self.clone(),
+                digest,
+                descriptor.clone(),
+                Resident::new(component, prepared),
+            ),
+            descriptor,
+            identity,
+        ))
+    }
+
+    /// 组件当场报告的 descriptor，须通过结构与 canonical 格式版本校验。
+    async fn admit_descriptor(
+        &self,
+        prepared: &bindings::VendorPre<StoreState>,
+    ) -> Result<VendorDescriptor, LoadError> {
+        let descriptor = self.read_descriptor(prepared).await?;
         descriptor
             .validate()
             .map_err(|error| LoadError::DescriptorInvalid(error.to_string()))?;
@@ -237,14 +276,7 @@ impl VendorRuntime {
                 expected: CANONICAL_FORMAT_VERSION,
             });
         }
-        Ok(LoadedPlugin {
-            inner: Arc::new(LoadedVersion {
-                component,
-                prepared,
-                descriptor,
-                identity,
-            }),
-        })
+        Ok(descriptor)
     }
 
     /// Ask the pinned guest component to choose the egress protocol for one
@@ -287,17 +319,18 @@ impl VendorRuntime {
         let wit_provider = convert_provider(sdk_provider);
         let wit_request = convert_payload(sdk_request);
 
+        let resident = residency::lease(plugin, &cancellation, &deadline).await?;
         let scope = OperationScope {
             services: Arc::new(DenyServices),
             cancellation,
             deadline,
             generation: 0,
         };
-        let engine = plugin.inner.prepared.engine();
+        let engine = resident.prepared.engine();
         let mut store = Self::new_store(engine, scope, None, false);
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
+        let instantiate = resident.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -373,11 +406,12 @@ impl VendorRuntime {
 
         let wit_operation = convert_operation(operation.into());
         let wit_input = convert_input(sdk_input);
-        let engine = plugin.inner.prepared.engine();
+        let resident = residency::lease(plugin, &scope.cancellation, &scope.deadline).await?;
+        let engine = resident.prepared.engine();
         let mut store = Self::new_store(engine, scope, Some(operation), false);
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
+        let instantiate = resident.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -455,11 +489,12 @@ impl VendorRuntime {
             format: CANONICAL_FORMAT_VERSION,
             body: input,
         };
-        let engine = plugin.inner.prepared.engine();
+        let resident = residency::lease(plugin, &scope.cancellation, &scope.deadline).await?;
+        let engine = resident.prepared.engine();
         let mut store = Self::new_store(engine, scope, None, true);
         let cancel = store.data().cancellation.clone();
         let deadline = store.data().deadline.clone();
-        let instantiate = plugin.inner.prepared.instantiate_async(&mut store);
+        let instantiate = resident.prepared.instantiate_async(&mut store);
         let instance = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
@@ -1305,7 +1340,7 @@ fn ensure_format(format: u32) -> Result<(), HostFailure> {
     }
 }
 
-/// 创建并验证官方编译缓存目录。只接受绝对路径，拒绝末级符号链接/非目录，
+/// 创建并验证编译缓存目录。只接受绝对路径，拒绝末级符号链接/非目录，
 /// Unix 上收紧到仅属主可访问，并用写入探针尽早暴露只读或空间错误。
 fn prepare_cache_directory(directory: &Path) -> Result<PathBuf, LoadError> {
     if directory.as_os_str().is_empty() || !directory.is_absolute() {
@@ -1493,6 +1528,10 @@ impl HostServices for DenyServices {
 #[cfg(test)]
 #[path = "compilation_cache_tests.rs"]
 mod compilation_cache_tests;
+
+#[cfg(test)]
+#[path = "residency_tests.rs"]
+mod residency_tests;
 
 #[cfg(test)]
 mod deadline_tests {

@@ -605,7 +605,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   {@const plugin = context.row.original}
   <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
     <ProviderMark
-      class="size-10 shrink-0 rounded-lg p-1.5 text-base"
+      class="size-10 shrink-0 rounded-lg text-base"
       name={plugin.name}
       svg={plugin.icon_svg}
       logo={plugin.vendor_id} />
@@ -754,7 +754,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
           <li class="flex flex-col gap-3 border-b py-4">
             <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
               <ProviderMark
-                class="size-10 shrink-0 rounded-lg p-1.5 text-base"
+                class="size-10 shrink-0 rounded-lg text-base"
                 name={plugin.name}
                 svg={plugin.icon_svg}
                 logo={plugin.vendor_id} />
@@ -815,7 +815,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       <Sheet.Header class="pr-12">
         <Sheet.Title class="flex items-center gap-2.5">
           <ProviderMark
-            class="size-8 rounded-lg p-1 text-xs"
+            class="size-8 rounded-lg text-xs"
             name={plugin.name}
             svg={plugin.icon_svg}
             logo={plugin.vendor_id} />
@@ -1002,7 +1002,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
             <ProviderMark
-              class="size-7 rounded-md p-0.5 text-xs"
+              class="size-7 rounded-md text-xs"
               name={preview.name}
               svg={preview.icon_svg}
               logo={preview.vendor_id} />

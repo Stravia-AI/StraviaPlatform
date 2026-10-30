@@ -313,6 +313,37 @@ test('320px history keeps error, empty and no-match distinct and restores keyboa
   await expect(trigger).toBeFocused()
 })
 
+test('narrow history rows grow with their content instead of overlapping', async ({ page }) => {
+  await prepareApp(page)
+  await page.setViewportSize({ width: 320, height: 740 })
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  const rows: ModelChangeRecord[] = ['One', 'Two', 'Three'].map((name, index) => ({
+    ...exact,
+    id: `row-${index}`,
+    provider_name: `${name} Service With A Long Display Name`,
+    changes: [
+      { ...exact.changes[0], model_id: `m-${index}-a`, name: 'First Updated Model' },
+      { ...exact.changes[0], model_id: `m-${index}-b`, name: 'Second Updated Model' },
+    ],
+  }))
+  await page.route('**/api/v1/model-changes?*', (route) =>
+    route.fulfill({ json: { data: { records: rows, next_cursor: null } } }),
+  )
+  await page.goto('/providers')
+  await page.getByRole('button', { name: 'Change history', exact: true }).filter({ visible: true }).click()
+  const articles = page.getByRole('dialog').locator('article')
+  await expect(articles).toHaveCount(rows.length)
+  const boxes = await articles.evaluateAll((elements) =>
+    elements.map((element) => {
+      const row = element.querySelector('button')!
+      const { top, bottom } = element.getBoundingClientRect()
+      return { top, bottom, clipped: row.scrollHeight > row.clientHeight }
+    }),
+  )
+  expect(boxes.every((box) => !box.clipped)).toBe(true)
+  for (const [index, box] of boxes.slice(1).entries()) expect(box.top).toBeGreaterThanOrEqual(boxes[index].bottom - 1)
+})
+
 test('manual no-change, saved partial result and saved failure expose truthful recovery', async ({ page }) => {
   await prepareApp(page)
   await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))

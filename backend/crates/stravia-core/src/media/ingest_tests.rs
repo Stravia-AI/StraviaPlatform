@@ -447,6 +447,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -462,6 +463,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             inject_media_generation: false,
             model_ids: vec![route.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();
@@ -733,6 +735,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .unwrap();
@@ -750,6 +753,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 inject_media_generation: false,
                 model_ids: vec![route.id.clone().into()],
                 inject_media_understanding: false,
+                spend_limit: None,
             })
             .await
             .unwrap();
@@ -762,12 +766,13 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         // Each mode has its own Principal, so a missing stream commit cannot
         // pass by finding the preceding unary request's saved Artifact.
         let rows = gateway._sqlite_pool.as_ref().unwrap();
-        let nodes: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, kind FROM turn_chain_nodes WHERE principal = ?")
-                .bind(Principal::new(key.id.clone()).continuation_key())
-                .fetch_all(rows)
-                .await
-                .unwrap();
+        let nodes: Vec<(String, String)> = sqlx::query_as(
+            "SELECT n.id, n.kind FROM turn_nodes n JOIN turn_scopes s ON s.id = n.scope_id WHERE s.principal = ?",
+        )
+        .bind(Principal::new(key.id.clone()).continuation_key())
+        .fetch_all(rows)
+        .await
+        .unwrap();
         let owner = Principal::new(key.id.clone());
         let mut payloads = Vec::new();
         for (id, kind) in nodes {

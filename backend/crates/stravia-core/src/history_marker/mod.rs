@@ -18,9 +18,9 @@ pub use syntax::{
     history_marker_references, render_history_marker, resolve_request_markers,
 };
 pub(crate) use syntax::{
-    client_shaped_request, mark_current_run_projected, new_reference,
-    render_preview_projection_end, render_preview_projection_span, render_preview_projection_start,
-    request_needs_marker_resolution, valid_reference,
+    client_shaped_request, history_marker_references_iter, mark_current_run_projected,
+    new_reference, render_preview_projection_end, render_preview_projection_span,
+    render_preview_projection_start, request_needs_marker_resolution, valid_reference,
 };
 #[cfg(test)]
 pub(crate) use syntax::{render_history_marker_reference, render_text_projection_span};

@@ -239,7 +239,7 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
     await expect
       .poll(async () => {
         const failed = await api(
-          `/observations/failed-requests?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
+          `/observations/client-errors?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
         )
         return failed.items.map((item: { model: string | null }) => item.model)
       })
@@ -249,7 +249,7 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
       if (request.url().includes('/observations/')) observationRequests.push(request.url())
     })
     await page.goto(`${ready.origin}/logs`)
-    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Client Errors', exact: true }).click()
     const table = page.getByRole('table')
     await expect(table).toContainText('browser-rejected-a')
     await expect(table).toContainText('browser-rejected-b')

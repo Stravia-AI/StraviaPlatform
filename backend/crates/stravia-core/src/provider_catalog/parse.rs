@@ -1,3 +1,7 @@
+use std::str::FromStr;
+
+use rust_decimal::Decimal;
+
 use super::*;
 
 pub(super) fn parse_version(body: &[u8]) -> anyhow::Result<CatalogVersion> {
@@ -227,10 +231,10 @@ pub(super) fn parse_catalog_model(
             context: optional_u64(limit.and_then(|item| item.get("context")))?,
         }),
         cost: Some(CatalogCost {
-            input: optional_f64(cost.and_then(|item| item.get("input")))?,
-            output: optional_f64(cost.and_then(|item| item.get("output")))?,
-            cache_read: optional_f64(cost.and_then(|item| item.get("cache_read")))?,
-            cache_write: optional_f64(cost.and_then(|item| item.get("cache_write")))?,
+            input: optional_decimal(cost.and_then(|item| item.get("input")))?,
+            output: optional_decimal(cost.and_then(|item| item.get("output")))?,
+            cache_read: optional_decimal(cost.and_then(|item| item.get("cache_read")))?,
+            cache_write: optional_decimal(cost.and_then(|item| item.get("cache_write")))?,
         }),
         reasoning_efforts: source_reasoning_efforts(object)?,
     })
@@ -337,20 +341,25 @@ pub(super) fn optional_u64(value: Option<&Value>) -> anyhow::Result<Option<u64>>
     }
 }
 
-pub(super) fn optional_f64(value: Option<&Value>) -> anyhow::Result<Option<f64>> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(value)) => {
-            let value = value
-                .as_f64()
-                .ok_or_else(|| anyhow!("expected a finite number"))?;
-            if !value.is_finite() || value < 0.0 {
-                bail!("expected a finite non-negative number");
-            }
-            Ok(Some(value))
-        }
-        Some(_) => bail!("expected a number or null"),
+/// Prices arrive as JSON numbers from the source catalog and as decimal
+/// strings from persisted, normalized Provider Model metadata. Both are read
+/// exactly, without an intermediate `f64`.
+pub(super) fn optional_decimal(value: Option<&Value>) -> anyhow::Result<Option<Decimal>> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let text = match value {
+        Value::String(text) => text.trim(),
+        Value::Number(number) => number.as_str(),
+        _ => bail!("expected a decimal number, string, or null"),
+    };
+    let value = Decimal::from_str(text)
+        .or_else(|_| Decimal::from_scientific(text))
+        .map_err(|_| anyhow!("expected a finite non-negative decimal number"))?;
+    if value < Decimal::ZERO {
+        bail!("expected a finite non-negative decimal number");
     }
+    Ok(Some(value))
 }
 
 pub(super) fn string_array(value: Option<&Value>) -> anyhow::Result<Vec<String>> {

@@ -225,6 +225,7 @@ async fn failed_background_search_is_a_successful_status_read_and_owner_is_not_d
             inject_media_generation: false,
             model_ids: vec![],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .unwrap();

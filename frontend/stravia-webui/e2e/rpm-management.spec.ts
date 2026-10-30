@@ -401,7 +401,7 @@ test('real management persists root and destination RPM limits and queue setting
   const concurrent = await readModel()
   await api(page, `/providers/${provider.id}/model`, 'PUT', {
     model_id: 'rpm-upstream',
-    metadata: { ...concurrent.metadata, description: 'Changed by another administrator' },
+    changes: { description: 'Changed by another administrator' },
     revision: concurrent.revision,
   })
   await cellEditor.getByRole('button', { name: 'Save', exact: true }).click()

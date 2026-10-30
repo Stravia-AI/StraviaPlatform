@@ -100,6 +100,10 @@ async function openSettingsGroup(group: 'general' | 'network' | 'data' | 'advanc
   await expect(browser).toHaveUrl(expect.stringContaining(`/settings?view=${group}`))
 }
 
+function observationDetails() {
+  return $('aside[aria-label="Observation details"], [role="dialog"][data-slot="sheet-content"]')
+}
+
 async function refreshDesktop(): Promise<void> {
   const previousTimeOrigin = await browser.execute(() => performance.timeOrigin)
   // 同步求值把结果留在页面全局，刷新会销毁它；原生通道直接返回结果，不依赖旧文档。
@@ -456,7 +460,7 @@ describe('Stravia desktop smoke', () => {
         expect(selected).toBeDefined()
         await $('button[aria-label="Load and show all chains"]').click()
         await $(`.svelte-flow__node[data-id="${selected!.id}"] h3`).click()
-        const reopened = await $('[aria-label="Observation details"]')
+        const reopened = await observationDetails()
         await expect(reopened.$('[role="log"]')).toHaveText(expect.stringContaining(content))
         await browser.waitUntil(
           () =>
@@ -485,7 +489,7 @@ describe('Stravia desktop smoke', () => {
         }
         previous = selected
       }
-      const selectedDetails = await $('[aria-label="Observation details"]')
+      const selectedDetails = await observationDetails()
       await selectedDetails.$('button[aria-label="Close"]').click()
       await browser.waitUntil(
         () =>
@@ -509,18 +513,18 @@ describe('Stravia desktop smoke', () => {
         async () => {
           const failures = (await adminRequest(
             port,
-            `/observations/failed-requests?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
+            `/observations/client-errors?start_at=${Date.now() - 60_000}&end_at=${Date.now() + 60_000}&limit=30`,
           )) as { items: Array<{ model: string | null }> }
           return models.every((model) => failures.items.some((item) => item.model === model))
         },
         { timeoutMsg: 'Native rejected requests did not persist both diagnostic records' },
       )
       await $('a[href="/logs"]').click()
-      await $('button=Failed Requests').click()
+      await $('button=Client Errors').click()
       for (const model of models) {
         const row = await $(`//tr[contains(normalize-space(), "${model}")]`)
         await row.$('button').click()
-        const inspector = await $('[aria-label="Observation details"]')
+        const inspector = await observationDetails()
         await expect(inspector).toHaveText(expect.stringContaining(model))
         await inspector.$('button[aria-label="Close"]').click()
         await expect(inspector).not.toExist()
@@ -877,8 +881,9 @@ describe('Stravia desktop smoke', () => {
       await expect(address).toHaveValue(configuration.client_base_url)
       await address.setValue('https://desktop.example:9443/client/prefix')
       // 失焦不提交：只有「保存」才写入。
-      await $('#artifacts button=Save').click()
-      await expect($('#artifacts button=Save')).not.toExist()
+      const artifacts = await $('#artifacts')
+      await artifacts.$('button=Save').click()
+      await expect(artifacts.$('button=Save')).not.toExist()
       await refreshDesktop()
       await expect($('#artifact-client-base-url')).toHaveValue('https://desktop.example:9443/client/prefix')
       const persisted = JSON.parse((await adminRequest(port, '/settings/artifact_settings')) as string)
@@ -1005,7 +1010,11 @@ describe('Stravia desktop smoke', () => {
     await expectPortSwitch(previousTimeOrigin, replacementPort)
     await expectProtectedStatus(replacementPort, nativeSession.access_token)
 
-    await expect($('//h2[normalize-space()="Updates"]')).toBeDisplayed()
+    expect(await adminRequest(replacementPort, '/updates')).toMatchObject({
+      download_supported: true,
+      available_update: { version: '9.9.9', download_available: true },
+    })
+    await openSettingsGroup('general')
     await expect($('button=Download update')).toBeDisplayed()
     await $('button=Download update').click()
     await expect($('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '50')
@@ -1257,12 +1266,12 @@ describe('Stravia desktop smoke', () => {
     expect(rejected.status).toBe(401)
     await $('a[href="/logs"]').click()
     await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
-    await $('button=Failed Requests').click()
-    const request = await $('table[aria-label="Failed Requests"] tbody tr')
+    await $('button=Client Errors').click()
+    const request = await $('table[aria-label="Client Errors"] tbody tr')
     await expect(request).toHaveText(expect.stringContaining('Unauthenticated'))
     await expect(request).toHaveText(expect.stringContaining('HTTP 401'))
     await request.$('button').click()
-    const inspector = await $('[aria-label="Observation details"]')
+    const inspector = await observationDetails()
     await expect(inspector).toBeDisplayed()
     await expect(inspector.$('button=Debug records')).not.toExist()
     await expect(inspector.$('button=Debug bundle')).toBeEnabled()
@@ -1277,7 +1286,7 @@ describe('Stravia desktop smoke', () => {
     await $('button[aria-label="More actions"]').click()
     await $('[role="menuitem"]=Clear history').click()
     await (await $('[role="alertdialog"]')).$('button=Clear history').click()
-    await expect($('table[aria-label="Failed Requests"]')).not.toExist()
+    await expect($('table[aria-label="Client Errors"]')).not.toExist()
   })
 
   it('persists reversible redaction changes through the native management interface', async () => {

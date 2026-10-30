@@ -13,11 +13,7 @@ import ReasoningEffortSelect from '#lib/components/reasoning-effort-select.svelt
 import { providerModelSelectionPolicyLabel } from '#lib/provider-model-labels.js'
 import { inputValue } from '#lib/utils.js'
 import type { ProviderModelDetail, ProviderModelSelectionPolicy, ProviderModelSummary } from '#lib/types.js'
-import {
-  buildProviderModelMetadataJson,
-  normalizeProviderModelEfforts,
-  providerModelCostFromMetadata,
-} from '../provider-model-form.js'
+import { normalizeProviderModelEfforts } from '../provider-model-form.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
@@ -122,23 +118,32 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
       if (!selection) return
       await admin.providers.updateModelSelection(id, snapshot.id, selection, snapshot.revision)
     } else {
-      const metadata = structuredClone(snapshot.metadata)
-      const key =
-        currentField === 'context' ? 'limit' : currentField === 'modalities' ? 'modalities' : 'reasoning_efforts'
-      if (currentField === 'context')
-        metadata.limit = { ...metadata.limit, context: context === '' ? null : Number(context) }
-      else if (currentField === 'modalities') metadata.modalities = { input: [...input], output: [...output] }
-      else metadata.reasoning_efforts = normalizeProviderModelEfforts(efforts)
-      const result = buildProviderModelMetadataJson(snapshot.id, metadata, providerModelCostFromMetadata(metadata))
-      if (!result.json) {
-        error = result.errors.join('\n')
+      // 单元格保存只提交实际变化的字段；出现的字段由服务端固定。
+      const changes: Record<string, unknown> = {}
+      if (currentField === 'context') {
+        const next = context === '' ? null : Number(context)
+        if (next !== (snapshot.metadata.limit?.context ?? null)) changes['limit.context'] = next
+      } else if (currentField === 'modalities') {
+        if (JSON.stringify(input) !== JSON.stringify(snapshot.metadata.modalities?.input ?? [])) {
+          changes['modalities.input'] = [...input]
+        }
+        if (JSON.stringify(output) !== JSON.stringify(snapshot.metadata.modalities?.output ?? [])) {
+          changes['modalities.output'] = [...output]
+        }
+      } else {
+        const next = normalizeProviderModelEfforts(efforts)
+        if (
+          JSON.stringify(next) !==
+          JSON.stringify(normalizeProviderModelEfforts(snapshot.metadata.reasoning_efforts ?? []))
+        ) {
+          changes.reasoning_efforts = next
+        }
+      }
+      if (Object.keys(changes).length === 0) {
+        if (isCurrent(request, id, modelId, currentField)) open = false
         return
       }
-      // 完整编辑器会规范化其他字段；单元格保存只能替换当前编辑字段。
-      const edited = JSON.parse(result.json) as Record<string, unknown>
-      const preserved = { ...snapshot.metadata, [key]: edited[key] }
-      if (currentField === 'context') preserved.limit = metadata.limit
-      await admin.providers.updateModel(id, snapshot.id, JSON.stringify(preserved), snapshot.revision)
+      await admin.providers.updateModel(id, snapshot.id, changes, snapshot.revision)
     }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['provider-models', id] }),

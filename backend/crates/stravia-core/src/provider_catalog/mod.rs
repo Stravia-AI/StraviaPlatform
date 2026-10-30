@@ -20,6 +20,7 @@ pub use types::*;
 
 mod parse;
 mod persist;
+mod pricing;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ mod tests;
 pub(crate) use parse::source_reasoning_efforts;
 use parse::*;
 use persist::*;
+pub(crate) use pricing::{OfficialPriceIdentity, has_model_prices};
 pub(crate) use source::icon_content_type;
 pub use source::{CatalogSource, HttpCatalogSource};
 
@@ -414,26 +416,6 @@ impl ProviderCatalog {
             revision: scope.revision,
             models,
         })
-    }
-
-    pub fn model_source(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-        scope: CatalogProviderScope,
-    ) -> anyhow::Result<CatalogModelSource> {
-        let model_id = model_id.trim();
-        scope
-            .models
-            .into_iter()
-            .find(|source| source.metadata.get("id").and_then(Value::as_str) == Some(model_id))
-            .ok_or_else(|| {
-                CatalogError::EntryNotFound {
-                    provider_id: provider_id.to_string(),
-                    model_id: model_id.to_string(),
-                }
-                .into()
-            })
     }
 
     /// Catalog logo for one stable provider identity (`catalog_id` or

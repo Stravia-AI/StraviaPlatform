@@ -71,10 +71,16 @@ impl<'a> DataPaths<'a> {
         self.root.join("cache")
     }
 
-    /// Wasmtime 官方持久编译缓存目录，位于数据目录内、与 Provider Catalog
-    /// 共用 `cache` 根；目录创建与权限由运行时负责。
+    /// 不可变编译镜像目录；与旧 Wasmtime 压缩缓存分开，避免旧清理器删除新格式。
+    /// 目录创建与权限由运行时负责。
     pub fn wasmtime_cache(&self) -> PathBuf {
-        self.catalog_root().join("wasmtime")
+        self.catalog_root().join("wasmtime-images")
+    }
+
+    /// 插件准入记录目录，与可淘汰的编译镜像分开。内容是可重建的派生数据，
+    /// 删除后下次启动重新校验。
+    pub fn plugin_admissions(&self) -> PathBuf {
+        self.catalog_root().join("plugin-admissions")
     }
 
     pub fn desktop_port(&self) -> PathBuf {

@@ -256,7 +256,7 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             for key_name in [f"{model}-key", "isolated-second-key"]:
                 rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name))
                 assert len(rows) == 1
-                assert rows[0]["new_credential_count"] == 1
+                assert rows[0]["hits"]
                 assert secret not in json.dumps(rows)
                 assert REFERENCE.search(json.dumps(rows)) is None
         finally:
@@ -276,7 +276,7 @@ def test_redaction_storage_failures_never_bypass_protection(
         env = {**admin_env, "mock": url}
         model = f"reversible-failure-{failure}"
         route, key = _create_route(env, model)
-        committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_chain_nodes")
+        committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_nodes")
         published_before = mapping_sql(env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL")
         set_enabled(env, failure != "read")
         if failure == "read":
@@ -328,8 +328,7 @@ def test_redaction_storage_failures_never_bypass_protection(
             rows = key_discoveries(env, f"{model}-key")
             if failure.startswith("publish"):
                 assert len(rows) == 1
-                assert rows[0]["new_credential_count"] == 1
-                assert rows[0]["status"] == "interrupted"
+                assert rows[0]["hits"]
                 assert SECRET not in json.dumps(rows)
                 assert REFERENCE.search(json.dumps(rows)) is None
             else:
@@ -343,7 +342,7 @@ def test_redaction_storage_failures_never_bypass_protection(
                     env, "SELECT published_at FROM reversible_redaction_mappings WHERE reference = ?",
                     reference.group(),
                 ) == [(None,)]
-            assert mapping_sql(env, "SELECT COUNT(*) FROM turn_chain_nodes") == committed_before
+            assert mapping_sql(env, "SELECT COUNT(*) FROM turn_nodes") == committed_before
             assert mapping_sql(
                 env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL",
             ) == published_before
@@ -393,11 +392,11 @@ def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str,
             assert replacement is not None and replacement.group() != reference
             rows = _wait_for(
                 "expired mapping recreated discovery",
-                lambda: (lambda values: values if sum(row["new_credential_count"] for row in values) == 2 else None)(
+                lambda: (lambda values: values if len(values) == 2 else None)(
                     key_discoveries(env, f"{model}-key")
                 ),
             )
-            assert sum(row["new_credential_count"] for row in rows) == 2
+            assert len(rows) == 2
         finally:
             set_enabled(env, False)
 

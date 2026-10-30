@@ -2,6 +2,8 @@
 import { untrack } from 'svelte'
 import BrainIcon from '@lucide/svelte/icons/brain'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
+import CircleMinusIcon from '@lucide/svelte/icons/circle-minus'
+import CircleXIcon from '@lucide/svelte/icons/circle-x'
 import WrenchIcon from '@lucide/svelte/icons/wrench'
 import { toast } from 'svelte-sonner'
 import * as m from '#lib/paraglide/messages.js'
@@ -19,8 +21,8 @@ let {
   expansionPolicy = 'manual',
   followed = false,
   minimumHeadingLevel = 1,
-  resultOnly = false,
   virtualized = false,
+  revealed = false,
 }: {
   activity: ObservationActivity
   liveActive?: boolean
@@ -29,11 +31,13 @@ let {
   /** 聊天策略：其后已开始正文或工具块。只有此信号变为 true 时才收起自动展开的思考。 */
   followed?: boolean
   minimumHeadingLevel?: 1 | 2
-  resultOnly?: boolean
   /** Observation conversation bodies can release offscreen Markdown while keeping disclosure controls mounted. */
   virtualized?: boolean
+  /** 外部要求展开（如凭据命中高亮）：只改本次会话的展开状态，不写入本地偏好。 */
+  revealed?: boolean
 } = $props()
 const contentId = $props.id()
+const statusId = $derived(`${contentId}-status`)
 const storageKey = $derived(`stravia:observation-activity:${activity.id}`)
 const expandable = $derived(activity.kind === 'thinking' || activity.input !== undefined || activity.results.length > 0)
 const label = $derived(
@@ -41,9 +45,7 @@ const label = $derived(
     ? activity.live
       ? m.observation_activity_thinking()
       : m.observation_activity_thought()
-    : resultOnly
-      ? `${activity.results[0]?.source === 'client' ? m.observation_activity_client_result() : m.observation_activity_platform_result()} · ${activity.name}`
-      : m.observation_activity_tool({ tool: activity.name }),
+    : m.observation_activity_tool({ tool: activity.name }),
 )
 let open = $state(false)
 let observedIdentity = ''
@@ -74,7 +76,6 @@ const toolStatus = $derived.by(() => {
     case 'running':
       return m.observation_activity_running()
     case 'waiting':
-      return m.observation_activity_waiting_client()
     case 'returned':
       return ''
     case 'error':
@@ -114,6 +115,10 @@ $effect(() => {
   })
 })
 
+$effect(() => {
+  if (revealed) untrack(() => (open = true))
+})
+
 function changeOpen(next: boolean): void {
   open = next
   if (expansionPolicy === 'chat') return
@@ -131,16 +136,16 @@ function formatContent(content: unknown): string {
 </script>
 
 {#snippet markerContents()}
-  <Marker.Icon>
+  <Marker.Icon title={toolStatus || undefined}>
     {#if activity.live}<Spinner />
     {:else if activity.kind === 'thinking'}<BrainIcon />
+    {:else if activity.status === 'error'}<CircleXIcon class="text-destructive" />
+    {:else if activity.status === 'missing-result'}<CircleMinusIcon class="text-warning" />
     {:else}<WrenchIcon />{/if}
   </Marker.Icon>
   <Marker.Content class="flex-1 [overflow-wrap:anywhere]">
     {label}
-    {#if activity.kind === 'tool' && toolStatus}
-      <span class="activity-state">{toolStatus}</span>
-    {/if}
+    {#if toolStatus}<span id={statusId} class="sr-only">{toolStatus}</span>{/if}
   </Marker.Content>
   {#if expandable}
     <ChevronRightIcon aria-hidden="true" class={open ? 'shrink-0 rotate-90' : 'shrink-0'} />
@@ -150,7 +155,8 @@ function formatContent(content: unknown): string {
 <div
   class="activity"
   data-activity-id={activity.id}
-  data-activity-kind={resultOnly ? 'result' : activity.kind}
+  data-activity-kind={activity.kind}
+  data-activity-status={activity.kind === 'tool' ? activity.status : undefined}
   aria-busy={activity.live}>
   {#if expandable}
     <Collapsible.Root {open} onOpenChange={changeOpen} class="min-w-0 w-full">
@@ -160,6 +166,7 @@ function formatContent(content: unknown): string {
             <Collapsible.Trigger
               {...props}
               aria-controls={contentId}
+              aria-describedby={toolStatus ? statusId : undefined}
               aria-label={label}
               class={cn(props.class as string, 'activity-trigger')}>
               {@render markerContents()}
@@ -190,7 +197,15 @@ function formatContent(content: unknown): string {
                     {result.source === 'client'
                       ? m.observation_activity_client_result()
                       : m.observation_activity_platform_result()}
-                    {#if result.isError}<span class="activity-error">{m.observation_activity_error()}</span>{/if}
+                    {#if result.isError}
+                      <span
+                        class="activity-error"
+                        role="img"
+                        aria-label={m.observation_activity_error()}
+                        title={m.observation_activity_error()}>
+                        <CircleXIcon class="size-3.5" aria-hidden="true" />
+                      </span>
+                    {/if}
                   </h4>
                   <pre class="font-technical">{formatContent(result.content)}</pre>
                 </div>
@@ -248,7 +263,7 @@ function formatContent(content: unknown): string {
 h4 {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5rem;
   color: var(--muted-foreground);
   font-size: 0.75rem;
@@ -260,11 +275,7 @@ pre {
   overflow-wrap: anywhere;
 }
 .activity-error {
+  display: inline-flex;
   color: var(--destructive);
-}
-.activity-state {
-  margin-inline-start: 0.5rem;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
 }
 </style>

@@ -138,6 +138,9 @@ impl RouteModule<'_> {
         let display_name = normalize_display_name(input.display_name.as_deref());
         let selection_strategy = normalize_model_balance(input.balance.as_deref())?;
         ensure_route_targets_valid(&input.targets)?;
+        if let Some(billing) = input.billing.as_ref() {
+            billing.validate(self.gw.custom_currency_snapshot().as_deref())?;
+        }
         let route = self
             .gw
             .storage
@@ -151,6 +154,7 @@ impl RouteModule<'_> {
                 is_enabled: true,
                 targets: Some(input.targets),
                 default_thinking_level: input.default_thinking_level,
+                billing: Some(input.billing),
             })
             .await?;
         self.after_write().await?;
@@ -183,6 +187,9 @@ impl RouteModule<'_> {
         if let Some(targets) = input.targets.as_deref() {
             ensure_route_targets_valid(targets)?;
         }
+        if let Some(Some(billing)) = input.billing.as_ref() {
+            billing.validate(self.gw.custom_currency_snapshot().as_deref())?;
+        }
         let route = self
             .gw
             .storage
@@ -196,6 +203,7 @@ impl RouteModule<'_> {
                 is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
                 targets: input.targets,
                 default_thinking_level,
+                billing: input.billing,
             })
             .await?;
         self.after_write().await?;

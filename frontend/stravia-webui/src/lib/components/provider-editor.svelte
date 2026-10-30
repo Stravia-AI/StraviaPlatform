@@ -2,6 +2,7 @@
 import * as m from '#lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import PuzzleIcon from '@lucide/svelte/icons/puzzle'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { onDestroy, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
@@ -17,6 +18,7 @@ import {
   defaultProviderName,
   optionDescription,
   optionDirectoryId,
+  optionExternalPlugin,
   optionLabel,
   optionPluginSource,
   providerNameAfterOptionChange,
@@ -41,6 +43,7 @@ import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
+import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 
 interface Props {
   open?: boolean
@@ -50,7 +53,6 @@ interface Props {
 let { open = $bindable(false), onSaved }: Props = $props()
 let step = $state<'select' | 'configure'>('select')
 let search = $state('')
-let focusedOptionKey = $state('')
 let selectedOptionKey = $state('')
 let refreshingServices = $state(false)
 
@@ -234,37 +236,46 @@ function saveProvider(): void {
 </script>
 
 {#snippet providerOptionSource(option: ProviderOption)}
-  <p
-    class="mt-auto flex w-full min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs leading-relaxed text-muted-foreground">
+  <p class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs leading-relaxed text-muted-foreground">
     <span class="font-technical break-all">{optionDirectoryId(option)}</span>
     <span class="min-w-0 break-words">{optionPluginSource(option, localeState.current)}</span>
   </p>
 {/snippet}
 
 {#snippet providerOptionCard(option: ProviderOption)}
+  {@const label = optionLabel(option, localeState.current)}
+  {@const directoryId = optionDirectoryId(option)}
+  {@const plugin = optionExternalPlugin(option)}
   <button
     type="button"
     data-provider-option
-    data-active={focusedOptionKey === option.key}
-    aria-current={focusedOptionKey === option.key ? 'true' : undefined}
-    class="group flex h-full flex-col items-start rounded-xl border bg-card p-3 text-left transition-[border-color,box-shadow,background-color] hover:border-primary/45 hover:bg-muted/30 hover:shadow-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 data-[active=true]:border-primary/45 data-[active=true]:bg-muted/30 data-[active=true]:shadow-sm"
-    onfocus={() => (focusedOptionKey = option.key)}
+    class="flex min-h-14 min-w-0 items-center gap-3 rounded-lg border bg-card px-3 py-2 text-left transition-colors hover:border-primary/45 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
     onkeydown={handleProviderOptionKeydown}
     onclick={() => void chooseOption(option)}>
-    <div class="flex w-full items-start gap-3">
-      <ProviderMark
-        icon={optionDirectoryId(option)}
-        name={optionLabel(option, localeState.current)}
-        svg={option.metadata.icon_svg}
-        logo={optionDirectoryId(option)} />
-      <div class="min-w-0 flex-1">
-        <p class="line-clamp-2 text-pretty font-medium leading-snug">{optionLabel(option, localeState.current)}</p>
-        <p class="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-          {optionDescription(option, localeState.current)}
-        </p>
-      </div>
-    </div>
-    {@render providerOptionSource(option)}
+    <!-- 自定义入口固定用 Plug：目录里同名的 logo 是通用图形，不代表任何服务。 -->
+    <ProviderMark
+      icon={directoryId}
+      name={label}
+      svg={option.metadata.icon_svg}
+      logo={directoryId === 'custom' ? undefined : directoryId} />
+    <span class="min-w-0 flex-1">
+      <span class="block truncate font-medium" title={label}>{label}</span>
+      <span class="block truncate text-xs text-muted-foreground">{optionDescription(option, localeState.current)}</span>
+    </span>
+    {#if plugin}
+      {@const source = optionPluginSource(option, localeState.current)}
+      <Tooltip.Root>
+        <Tooltip.Trigger tabindex={-1}>
+          {#snippet child({ props })}
+            <span {...props} class="shrink-0 text-muted-foreground">
+              <PuzzleIcon class="size-3.5" aria-hidden="true" />
+              <span class="sr-only">{source}</span>
+            </span>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>{source}</Tooltip.Content>
+      </Tooltip.Root>
+    {/if}
   </button>
 {/snippet}
 

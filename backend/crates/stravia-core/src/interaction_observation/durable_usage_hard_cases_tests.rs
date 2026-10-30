@@ -3,14 +3,20 @@
 // Observation retention/clear transactions, and both migrated databases remain real.
 use std::sync::Arc;
 
-use super::{manifest_index::DebugTraceIndex, store::ObservationStore};
+use super::{
+    manifest_index::DebugTraceIndex,
+    store::ObservationStore,
+    types::{ConfirmedUsage, ForestQuery, RunEvent, UsageCoverage},
+};
 use crate::{
     db::models::StatsWindow,
+    pricing::{Amount, AttemptAmounts, BillingOutcome, CostBasis},
     storage::{Storage, UsageStatsStore, postgres::PostgresStorage, sqlite::SqliteStorage},
 };
 
 const QUARTER: i64 = 900_000;
 const START: i64 = 1_800_000;
+const BATCH: i64 = START + 10 * QUARTER;
 
 // All interpolated SQL values below are test-owned literals, never external input.
 enum Database {
@@ -38,6 +44,21 @@ impl Database {
         Ok(match self {
             Self::Sqlite(pool) => sqlx::query_scalar(sql).fetch_one(pool).await?,
             Self::Postgres(pool) => sqlx::query_scalar(sql).fetch_one(pool).await?,
+        })
+    }
+    async fn scalar_with(&self, sql: impl Into<String>) -> anyhow::Result<i64> {
+        let sql = sql.into();
+        Ok(match self {
+            Self::Sqlite(pool) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(pool)
+                    .await?
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(pool)
+                    .await?
+            }
         })
     }
     fn observation(&self, directory: &std::path::Path) -> anyhow::Result<ObservationStore> {
@@ -87,6 +108,18 @@ fn window(start: i64, end: i64) -> StatsWindow {
     }
 }
 
+async fn purge_expired(observation: &ObservationStore, cutoff: i64) -> anyhow::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for _ in 0..1024 {
+        let batch = observation.purge_expired_batch(cutoff).await?;
+        removed.extend(batch.removed_interactions);
+        if !batch.has_more {
+            return Ok(removed);
+        }
+    }
+    anyhow::bail!("retention did not finish the bounded fixture")
+}
+
 async fn cross_quarter_and_weighted_metrics(
     db: &Database,
     stats: &dyn UsageStatsStore,
@@ -107,13 +140,14 @@ async fn cross_quarter_and_weighted_metrics(
         .stats_by_provider(window(START, START + QUARTER))
         .await?;
     assert_eq!(provider_request.len(), 1);
-    assert_eq!(provider_request[0].request_count, 1);
+    assert_eq!(provider_request[0].upstream_request_count, 0);
     assert_eq!(provider_request[0].avg_output_tps, None);
     let provider_turn = stats
         .stats_by_provider(window(START + QUARTER, START + 2 * QUARTER))
         .await?;
     assert_eq!(provider_turn.len(), 1);
-    assert_eq!(provider_turn[0].request_count, 0);
+    // 上游尝试按所属 Model Turn 起点入桶，运行来源不贡献上游计数。
+    assert_eq!(provider_turn[0].upstream_request_count, 1);
     assert_eq!(provider_turn[0].avg_output_tps, Some(20.0));
     assert!(
         stats
@@ -212,9 +246,7 @@ async fn retention_and_failed_clear(
         .await?;
     assert!(batch.removed_interactions.is_empty());
     assert!(!batch.has_more);
-    let batch = observation.purge_expired_batch(cutoff).await?;
-    assert!(!batch.has_more);
-    let mut removed = batch.removed_interactions;
+    let mut removed = purge_expired(observation, cutoff).await?;
     removed.sort();
     assert_eq!(removed, vec!["cross", "short"]);
     assert_eq!(
@@ -245,7 +277,10 @@ async fn retention_and_failed_clear(
         stats.stats_by_api_key(selected).await?[0].total_output_tokens,
         Some(60)
     );
-    assert_eq!(stats.stats_by_provider(selected).await?[0].request_count, 3);
+    assert_eq!(
+        stats.stats_by_provider(selected).await?[0].upstream_request_count,
+        3
+    );
     let batch = observation.purge_expired_batch(cutoff).await?;
     assert!(batch.removed_interactions.is_empty());
     assert!(!batch.has_more);
@@ -318,7 +353,7 @@ async fn retention_across_batches(
     stats: &dyn UsageStatsStore,
     observation: &ObservationStore,
 ) -> anyhow::Result<()> {
-    // 同时覆盖两种批次上限，以及 interaction 耗尽后仅剩 rejection 的续批。
+    // 两类 owner 均须清完，不能把任一类的耗尽误当作整个清理结束。
     for index in 0..205 {
         db.seed(&format!("batch-{index:04}"), START, START, 1000, 2, 0)
             .await?;
@@ -339,25 +374,26 @@ UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
     }
     let before = stats.stats_overview(StatsWindow::default()).await?;
     let mut removed = Vec::new();
-    for (expected_removed, expected_more, expected_rejected) in [
-        (100, true, 205),
-        (100, true, 105),
-        (6, true, 5),
-        (0, false, 0),
-    ] {
+    let mut finished = false;
+    for _ in 0..1024 {
         let batch = observation.purge_expired_batch(1).await?;
-        assert_eq!(batch.removed_interactions.len(), expected_removed);
-        assert_eq!(batch.has_more, expected_more);
         removed.extend(batch.removed_interactions);
-        assert_eq!(
-            db.scalar("SELECT COUNT(*) FROM rejected_request_observations WHERE id LIKE 'batch-rejected-%'")
-                .await?,
-            expected_rejected
-        );
         let after = stats.stats_overview(StatsWindow::default()).await?;
         assert_eq!(after.total_requests, before.total_requests);
         assert_eq!(after.total_output_tokens, before.total_output_tokens);
+        if !batch.has_more {
+            finished = true;
+            break;
+        }
     }
+    assert!(finished, "retention did not finish the bounded fixture");
+    assert_eq!(
+        db.scalar(
+            "SELECT COUNT(*) FROM rejected_request_observations WHERE id LIKE 'batch-rejected-%'"
+        )
+        .await?,
+        0
+    );
     removed.sort();
     let mut expected: Vec<_> = (0..205).map(|index| format!("batch-{index:04}")).collect();
     expected.push("batch-waiting".to_owned());
@@ -382,6 +418,328 @@ UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
     Ok(())
 }
 
+async fn failed_parent_delete_restores_children_and_usage(
+    db: &Database,
+    stats: &dyn UsageStatsStore,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    db.seed("atomic-retention", START, START, 1000, 11, 0)
+        .await?;
+    let payload = match db {
+        Database::Sqlite(_) => "X'7b7d'",
+        Database::Postgres(_) => "decode('7b7d','hex')",
+    };
+    db.execute(format!(
+        "UPDATE interaction_observations SET expires_at=0 WHERE id='atomic-retention';
+INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (900000,0,'atomic-retention','atomic-retention','fixture',{payload},0);
+INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES ('owner','atomic-tool','atomic-retention','atomic-retention',0);
+INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ('atomic-retention','atomic-retention','owner','fixture',0);"
+    ))
+    .await?;
+    let before = stats.stats_overview(StatsWindow::default()).await?;
+    // 父记录删除失败时，前面显式删除的叶子和统计 checkpoint 必须一起回滚。
+    db.install_fault("interaction_observations", "DELETE")
+        .await?;
+    assert!(observation.purge_expired_batch(1).await.is_err());
+    for sql in [
+        "SELECT COUNT(*) FROM interaction_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM inference_run_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM model_turn_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM target_attempt_observations WHERE id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_events WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_pending_tools WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_tail_sources WHERE interaction_id='atomic-retention'",
+    ] {
+        assert_eq!(db.scalar(sql).await?, 1);
+    }
+    assert_eq!(
+        stats
+            .stats_overview(StatsWindow::default())
+            .await?
+            .total_output_tokens,
+        before.total_output_tokens
+    );
+    db.remove_fault("interaction_observations").await?;
+    assert_eq!(
+        purge_expired(observation, 1).await?,
+        vec!["atomic-retention"]
+    );
+    for sql in [
+        "SELECT COUNT(*) FROM observation_events WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_pending_tools WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM observation_tail_sources WHERE interaction_id='atomic-retention'",
+        "SELECT COUNT(*) FROM stats_usage_checkpoints WHERE source_id='atomic-retention'",
+    ] {
+        assert_eq!(db.scalar(sql).await?, 0);
+    }
+    let after = stats.stats_overview(StatsWindow::default()).await?;
+    assert_eq!(after.total_requests, before.total_requests);
+    assert_eq!(after.total_output_tokens, before.total_output_tokens);
+    Ok(())
+}
+
+fn confirmed_usage(
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
+) -> ConfirmedUsage {
+    ConfirmedUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens: None,
+        coverage: None,
+    }
+}
+
+fn attempt_finished(
+    turn: &str,
+    attempt: &str,
+    usage: Option<ConfirmedUsage>,
+    amounts: Option<AttemptAmounts>,
+) -> RunEvent {
+    RunEvent::TargetAttemptFinished {
+        model_turn_id: turn.into(),
+        attempt_id: attempt.into(),
+        status: "completed".into(),
+        status_code: None,
+        error_code: None,
+        error: None,
+        duration_ms: 1000,
+        first_token_ms: None,
+        usage,
+        amounts,
+    }
+}
+
+fn usage_confirmed(turn: &str, attempt: &str, usage: ConfirmedUsage) -> RunEvent {
+    RunEvent::UsageConfirmed {
+        model_turn_id: turn.into(),
+        attempt_id: attempt.into(),
+        usage,
+    }
+}
+
+fn charged_amounts() -> AttemptAmounts {
+    AttemptAmounts {
+        cost_basis: CostBasis::Usage,
+        cost: Some(Amount {
+            usd_nanos: 100,
+            custom_nanos: None,
+        }),
+        billing: Some(BillingOutcome::Charged(Amount {
+            usd_nanos: 40,
+            custom_nanos: None,
+        })),
+    }
+}
+
+async fn persist_batch(
+    observation: &ObservationStore,
+    run: &str,
+    events: Vec<RunEvent>,
+) -> anyhow::Result<()> {
+    let batch: Vec<_> = events
+        .into_iter()
+        .map(|event| (event, None, BATCH))
+        .collect();
+    observation
+        .persist_ordered_run_events(run, run, &batch, &[], i64::MAX)
+        .await?;
+    Ok(())
+}
+
+async fn seed_batch_interaction(db: &Database, interaction: &str) -> anyhow::Result<()> {
+    db.seed(interaction, BATCH, BATCH, 1000, 20, 0).await?;
+    db.execute(format!(
+        "INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES ('{interaction}-b','{interaction}','{interaction}','{interaction}','target','provider','Provider','upstream','responses','running',{BATCH},0)"
+    ))
+    .await
+}
+
+async fn ordered_batch_usage_and_billing(
+    db: &Database,
+    stats: &dyn UsageStatsStore,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    db.execute("INSERT INTO api_keys (id,token,name) VALUES ('key','sk-test','Test key')")
+        .await?;
+    let spend_before: i64 = db
+        .scalar("SELECT COALESCE(CAST(SUM(spent_usd_unconverted_nanos) AS BIGINT),0) FROM api_key_spend WHERE api_key_id='key'")
+        .await?;
+    let selected = window(BATCH, BATCH + QUARTER);
+    let before = stats.stats_overview(selected).await?;
+    assert_eq!(before.total_requests, 0);
+    assert_eq!(before.total_input_tokens, None);
+    seed_batch_interaction(db, "batch-one").await?;
+    seed_batch_interaction(db, "batch-split").await?;
+
+    // One batch: a confirmation precedes its finish, a late revision follows the
+    // finish, and a second attempt's finish absorbs its own confirmation.
+    persist_batch(
+        observation,
+        "batch-one",
+        vec![
+            usage_confirmed(
+                "batch-one",
+                "batch-one",
+                confirmed_usage(Some(10), Some(7), Some(0), None),
+            ),
+            attempt_finished(
+                "batch-one",
+                "batch-one",
+                Some(confirmed_usage(Some(10), Some(7), Some(0), None)),
+                Some(charged_amounts()),
+            ),
+            usage_confirmed(
+                "batch-one",
+                "batch-one",
+                confirmed_usage(Some(15), Some(9), None, Some(2)),
+            ),
+            attempt_finished("batch-one", "batch-one-b", None, None),
+            usage_confirmed(
+                "batch-one",
+                "batch-one-b",
+                confirmed_usage(Some(5), Some(3), Some(1), None),
+            ),
+        ],
+    )
+    .await?;
+
+    // The same facts across three ordered batches must converge identically and
+    // turn the late confirmation into a durable terminal revision.
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![
+            usage_confirmed(
+                "batch-split",
+                "batch-split",
+                confirmed_usage(Some(10), Some(7), Some(0), None),
+            ),
+            attempt_finished(
+                "batch-split",
+                "batch-split",
+                Some(confirmed_usage(Some(10), Some(7), Some(0), None)),
+                Some(charged_amounts()),
+            ),
+        ],
+    )
+    .await?;
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![usage_confirmed(
+            "batch-split",
+            "batch-split",
+            confirmed_usage(Some(15), Some(9), None, Some(2)),
+        )],
+    )
+    .await?;
+    persist_batch(
+        observation,
+        "batch-split",
+        vec![
+            attempt_finished("batch-split", "batch-split-b", None, None),
+            usage_confirmed(
+                "batch-split",
+                "batch-split-b",
+                confirmed_usage(Some(5), Some(3), Some(1), None),
+            ),
+        ],
+    )
+    .await?;
+
+    let one = observation
+        .get_interaction("batch-one", ForestQuery::default())
+        .await?
+        .unwrap();
+    let split = observation
+        .get_interaction("batch-split", ForestQuery::default())
+        .await?
+        .unwrap();
+    let expected = ConfirmedUsage {
+        // Attempt A: 15 input, 0 cache-read => 15 net. Attempt B: 5 input,
+        // 1 cache-read => 4 net. Known zero cache-read must overwrite the seed.
+        input_tokens: Some(19),
+        output_tokens: Some(12),
+        cache_read_tokens: Some(1),
+        cache_write_tokens: Some(2),
+        reasoning_tokens: None,
+        coverage: Some(UsageCoverage {
+            attempt_count: 2,
+            missing_input_tokens: 0,
+            missing_output_tokens: 0,
+            missing_cache_read_tokens: 0,
+            missing_cache_write_tokens: 1,
+            missing_reasoning_tokens: 2,
+        }),
+    };
+    assert_eq!(one.interaction.usage, expected);
+    assert_eq!(split.interaction.usage, expected);
+    assert_eq!(one.interaction.usage, split.interaction.usage);
+
+    let revisions = split.runs[0]
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
+        })
+        .count();
+    assert_eq!(revisions, 2, "late confirmation must persist a revision");
+    let revised = split.runs[0]
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
+        })
+        .unwrap();
+    // Management reads project input to net input, which needs a known cache
+    // read; this revision leaves cache read unknown and keeps the prior zero.
+    assert!(revised.payload["usage"]["input_tokens"].is_null());
+    assert_eq!(revised.payload["usage"]["output_tokens"], 9);
+    assert_eq!(revised.payload["usage"]["cache_write_tokens"], 2);
+
+    let after = stats.stats_overview(selected).await?;
+    assert_eq!(after.total_requests, 2);
+    assert_eq!(after.total_input_tokens, Some(38));
+    assert_eq!(after.total_output_tokens, Some(24));
+    assert_eq!(after.total_cache_read_tokens, Some(2));
+    assert_eq!(after.total_cache_write_tokens, Some(4));
+    assert_eq!(after.total_reasoning_tokens, None);
+    assert_eq!(after.upstream_request_count, 4);
+    let billing: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(billing_usd_unconverted_nanos) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(billing, 80, "each charged finish contributes once");
+    let charged: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(billing_charged_count) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(charged, 2);
+    let cost: i64 = db
+        .scalar_with(format!(
+            "SELECT COALESCE(CAST(SUM(cost_usd_unconverted_nanos) AS BIGINT),0) FROM stats_usage_buckets WHERE scope='global' AND bucket_start={BATCH}"
+        ))
+        .await?;
+    assert_eq!(cost, 200);
+    let spend_after: i64 = db
+        .scalar("SELECT COALESCE(CAST(SUM(spent_usd_unconverted_nanos) AS BIGINT),0) FROM api_key_spend WHERE api_key_id='key'")
+        .await?;
+    assert_eq!(
+        spend_after - spend_before,
+        80,
+        "usage revisions must not recharge frozen billing"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -392,7 +750,10 @@ async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let result = async {
         cross_quarter_and_weighted_metrics(&db, storage.usage_stats()).await?;
         retention_and_failed_clear(&db, storage.usage_stats(), &observation).await?;
-        retention_across_batches(&db, storage.usage_stats(), &observation).await
+        retention_across_batches(&db, storage.usage_stats(), &observation).await?;
+        failed_parent_delete_restores_children_and_usage(&db, storage.usage_stats(), &observation)
+            .await?;
+        ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
     }
     .await;
     pool.close().await;
@@ -443,7 +804,14 @@ async fn postgres_durable_usage_hard_cases() -> anyhow::Result<()> {
             let observation = db.observation(directory.path())?;
             cross_quarter_and_weighted_metrics(&db, storage.usage_stats()).await?;
             retention_and_failed_clear(&db, storage.usage_stats(), &observation).await?;
-            retention_across_batches(&db, storage.usage_stats(), &observation).await
+            retention_across_batches(&db, storage.usage_stats(), &observation).await?;
+            failed_parent_delete_restores_children_and_usage(
+                &db,
+                storage.usage_stats(),
+                &observation,
+            )
+            .await?;
+            ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
         }
         .await;
         pool.close().await;

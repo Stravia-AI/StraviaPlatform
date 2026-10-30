@@ -225,7 +225,7 @@ impl AnthropicResponseFormatter {
                 }
             }
             if let Some((reasoning, signature)) = item.thinking_ref() {
-                if reasoning.trim().is_empty() {
+                if reasoning.is_empty() {
                     continue;
                 }
                 let mut block = serde_json::json!({

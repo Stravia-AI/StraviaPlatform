@@ -1,8 +1,15 @@
+import type { ApiKeySpend } from './money'
+
 export interface ApiKey {
   id: string
   key: string
   name: string
   rpm_limit: number | null
+  /** Decimal string in the current display currency; null means unlimited. */
+  spend_limit?: string | null
+  spend?: ApiKeySpend
+  /** 剩余可消费金额（展示币种，已消费超出上限时为 "0"）；不限时为 null。 */
+  spend_available?: string | null
   is_enabled: boolean
   mcp_access_enabled: boolean
   transparent_injection_enabled: boolean
@@ -19,6 +26,7 @@ export interface CreateApiKey {
   key?: string
   name: string
   rpm_limit?: number | null
+  spend_limit?: string | null
   mcp_access_enabled: boolean
   transparent_injection_enabled: boolean
   inject_web_search: boolean
@@ -32,6 +40,7 @@ export interface UpdateApiKey {
   key?: string
   name?: string
   rpm_limit?: number | null
+  spend_limit?: string | null
   is_enabled?: boolean
   mcp_access_enabled?: boolean
   transparent_injection_enabled?: boolean

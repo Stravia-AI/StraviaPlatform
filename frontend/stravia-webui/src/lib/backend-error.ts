@@ -173,6 +173,10 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.credential_custom_error_unavailable({}, options)
     case 'WEB_ACCESS_BROWSER_REQUIRED':
       return m.web_access_browser_required({}, options)
+    case 'PROVIDER_MODEL_INVALID_CHANGES': {
+      const detail = extractString(payload.params, 'error')
+      return m.backend_error_unknown({ message: detail || payload.message || raw }, options)
+    }
     case 'PROVIDER_NAME_CONFLICT':
       return m.backend_error_provider_name_conflict({ name }, options)
     case 'ROUTE_ID_CONFLICT':
@@ -276,8 +280,6 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.backend_error_provider_allowance_unavailable({}, options)
     case 'CATALOG_MODEL_NOT_FOUND':
       return m.backend_error_catalog_model_not_found({}, options)
-    case 'CATALOG_ENTRY_NOT_FOUND':
-      return m.backend_error_catalog_entry_not_found({}, options)
     case 'CATALOG_PROVIDER_NOT_FOUND':
       return m.backend_error_catalog_provider_not_found({}, options)
     case 'CATALOG_CHANNEL_NOT_FOUND':

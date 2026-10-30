@@ -1,3 +1,9 @@
+import type { CurrencyKind } from './money'
+import type { ProviderModelCost } from './provider'
+
+export type RouteBilling =
+  { mode: 'per_call'; amount: string; currency: CurrencyKind } | { mode: 'per_token'; price: ProviderModelCost }
+
 export interface Route {
   id: string
   output_modality: RouteOutputModality | null
@@ -8,6 +14,7 @@ export interface Route {
   target_provider: string
   target_model: string | null
   is_enabled: boolean
+  billing?: RouteBilling | null
   created_at: string
   default_thinking_level?: ThinkingLevel | null
   supported_thinking_levels: ThinkingLevel[]
@@ -60,6 +67,7 @@ export interface CreateRoute {
   balance?: RouteSelectionStrategy
   targets: CreateTarget[]
   default_thinking_level?: ThinkingLevel | null
+  billing?: RouteBilling | null
 }
 
 export interface BindRouteInput {
@@ -86,6 +94,7 @@ export interface UpdateRoute {
   targets?: CreateTarget[]
   is_enabled?: boolean
   default_thinking_level?: ThinkingLevel | null
+  billing?: RouteBilling | null
 }
 
 export interface CreateTarget {

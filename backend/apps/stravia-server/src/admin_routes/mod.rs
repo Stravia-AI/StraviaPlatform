@@ -17,8 +17,8 @@ use stravia_core::auth::{
 use stravia_core::provider_catalog::CatalogError;
 use stravia_core::provider_models::{
     CreateManualProviderModel, ModelChangeQuery, ProviderModelSelectionPolicy,
-    ProviderModelSyncFailure, UpdateProviderModel, UpdateProviderModelSelection,
-    UpdateProviderModelSyncState,
+    ProviderModelSyncFailure, RestoreProviderModelSync, UpdateProviderModel,
+    UpdateProviderModelSelection, UpdateProviderModelSyncState,
 };
 use stravia_media::admin::MediaUnderstandingConfigUpdate;
 use stravia_web_search::WebSearchConfig;
@@ -27,6 +27,7 @@ use crate::oauth_callback::OAuthCallbackManager;
 use stravia_core::db::models::*;
 
 mod connect_clients;
+mod money;
 mod performance;
 mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
@@ -109,8 +110,16 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             post(preview_provider_configuration_handler),
         )
         .route("/providers/{id}/copy", post(copy_provider_handler))
+        .route(
+            "/providers/{id}/cost-plans",
+            get(money::list_cost_plans).post(money::append_cost_plan),
+        )
         .route("/providers/{id}", providers_item)
         .route("/providers/{id}/test", post(test_provider_handler))
+        .route(
+            "/currency",
+            get(money::get_currency).put(money::put_currency),
+        )
         .route(
             "/web-providers",
             get(list_web_providers_handler).post(create_web_provider_handler),
@@ -170,8 +179,8 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             put(update_provider_model_selection_handler),
         )
         .route(
-            "/providers/{id}/model/reimport",
-            post(reimport_provider_model_handler),
+            "/providers/{id}/model/restore-sync",
+            post(restore_provider_model_sync_handler),
         )
         .route(
             "/providers/{id}/model-capabilities",
@@ -240,6 +249,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             "/api-keys",
             get(list_api_keys_handler).post(create_api_key_handler),
         )
+        .route(
+            "/api-keys/{id}/spend/reset",
+            post(reset_api_key_spend_handler),
+        )
         .route("/api-keys/{id}", api_keys_item)
         .route("/reversible-redaction/rules", get(credential_rules))
         .route("/reversible-redaction/test", post(test_credentials))
@@ -255,6 +268,14 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             "/reversible-redaction/discoveries",
             get(credential_discoveries),
         )
+        .route(
+            "/reversible-redaction/discoveries/{id}/hits/{index}",
+            get(credential_discovery_hit),
+        )
+        .route(
+            "/reversible-redaction/discoveries/{id}/reuses",
+            get(credential_discovery_reuses),
+        )
         .route("/observations/interactions", get(interaction_forest))
         .route("/observations/interactions/{id}", get(interaction_detail))
         .route(
@@ -266,10 +287,15 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             post(interaction_changes),
         )
         .route("/observations/rejections", get(rejection_list))
-        .route("/observations/failed-requests", get(failed_request_list))
+        .route("/observations/client-errors", get(client_error_list))
         .route(
-            "/observations/failed-requests/{kind}/{id}",
-            get(failed_request_detail),
+            "/observations/client-errors/{kind}/{id}",
+            get(client_error_detail),
+        )
+        .route("/observations/upstream-errors", get(upstream_error_list))
+        .route(
+            "/observations/upstream-errors/{id}",
+            get(upstream_error_detail),
         )
         .route("/observations/rejections/{id}", get(rejection_detail))
         .route("/observations/events", get(observation_events))

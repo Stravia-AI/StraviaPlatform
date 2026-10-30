@@ -464,6 +464,49 @@ async fn discovery_workspace_budget_overflow_keeps_prior_evidence_without_partia
 }
 
 #[tokio::test]
+async fn discovery_workspace_rejects_structurally_large_response_metadata() {
+    let owner = principal("workspace-structured-metadata-owner");
+    let backend = Arc::new(ControlledDiscoveryTurnChainStore::new(
+        crate::turn_chain::test_store().await,
+    ));
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        crate::runtime_cache::RuntimeCache::tinyufo(1),
+    );
+    let mut payload = observation_payload(vec![user_message("root")], None, None, "answer");
+    payload["effective_output"]["vendor"]["ingress"]["dense"] =
+        serde_json::json!(vec![serde_json::json!({}); 4096]);
+    commit_observation_node(
+        backend.as_ref(),
+        &owner,
+        "structured-metadata-root",
+        None,
+        payload,
+        Duration::from_secs(60),
+    )
+    .await;
+    let mut workspace = DiscoveryWorkspace::with_budget(&owner, 64 * 1024);
+    let id = TurnNodeId::new("structured-metadata-root");
+    let first = store
+        .materialize_discovery_generation(&owner, &id, &mut workspace)
+        .await
+        .unwrap();
+    assert!(items_equal(
+        &first.client_items,
+        &[user_message("root"), AiItem::output_text("answer")],
+    ));
+    backend.block(id.as_str());
+    assert!(
+        store
+            .materialize_discovery_generation(&owner, &id, &mut workspace)
+            .await
+            .is_err(),
+        "decoded metadata above the workspace budget must require another authoritative read"
+    );
+}
+
+#[tokio::test]
 async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
     let owner = principal("workspace-deadline-owner");
     let backend = Arc::new(ControlledDiscoveryTurnChainStore::new(
@@ -1054,11 +1097,11 @@ async fn shared_discovery_replay_preserves_mutations_reasoning_and_media_boundar
         let input = vec![user_message("boundary input")];
         let mutation = if replace {
             EffectiveHistoryMutation::Replace {
-                items: Cow::Owned(input.clone()),
+                items: freeze_items(input.clone()).into(),
             }
         } else {
             EffectiveHistoryMutation::Append {
-                items: Cow::Owned(input.clone()),
+                items: freeze_items(input.clone()).into(),
             }
         };
         let mut root = observation_payload(vec![user_message("root")], None, None, "root answer");
@@ -1082,11 +1125,15 @@ async fn shared_discovery_replay_preserves_mutations_reasoning_and_media_boundar
         child["effective_system"] = serde_json::json!("effective child system");
         child["effective_request"] =
             serde_json::to_value(EffectiveRequestConfig::from_request(&request)).unwrap();
-        let mut persisted: PersistedResponseNode<'static> = serde_json::from_value(child).unwrap();
-        persisted.effective_output.vendor.ingress.insert(
-            stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META.into(),
-            reasoning_field,
-        );
+        child["effective_output"]["vendor"]["ingress"]
+            .as_object_mut()
+            .expect("effective output vendor ingress")
+            .insert(
+                stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META
+                    .into(),
+                reasoning_field,
+            );
+        let persisted: PersistedResponseNode<'static> = serde_json::from_value(child).unwrap();
         let child = serde_json::to_value(persisted).unwrap();
         let nodes = vec![
             stravia_runtime_contract::turn_chain::TurnNode {
@@ -1386,7 +1433,7 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
         observation_payload(
             vec![user_message("edited question")],
             Some(EffectiveHistoryMutation::Replace {
-                items: Cow::Owned(vec![user_message("edited question")]),
+                items: freeze_items(vec![user_message("edited question")]).into(),
             }),
             Some(vec![AiItem::output_text("new answer")]),
             "private new answer",
@@ -1760,12 +1807,12 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
         let mut parent = seed.materialize_parent(&owner, &mut request).await.unwrap();
         if replace {
             parent.replace_effective_history = true;
-            parent.replacement_client_items = Some(vec![user_message(input)]);
+            parent.replacement_client_items = Some(freeze_items(vec![user_message(input)]));
         }
         let delta = responses_request(vec![user_message(input)]);
         let mut output = AiResponse::new(id, "model");
         output.push_output_text(answer);
-        seed.save_with_effective(GenerationChainCommit {
+        seed.save(GenerationChainCommit {
             principal: owner.clone(),
             id: id.into(),
             parent: &parent,
@@ -1935,7 +1982,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     };
     {
         let mut writer = pool.acquire_write().await.unwrap();
-        sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99, prefix_projection_version = 999, prefix_controls_fingerprint = 'stale-controls', prefix_context_fingerprint = 'stale-context' WHERE id = ?")
+        sqlx::query("UPDATE turn_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99, prefix_projection_version = 999, prefix_controls_fingerprint = 'stale-controls', prefix_context_fingerprint = 'stale-context' WHERE id = ?")
             .bind(b.id()).execute(&mut *writer).await.unwrap();
         writer.finish().await.unwrap();
     }
@@ -1960,7 +2007,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     ));
     replay.push(user_message("continue"));
     let projection: (Option<i64>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT prefix_projection_version, prefix_controls_fingerprint, prefix_context_fingerprint FROM turn_chain_nodes WHERE id = ?",
+        "SELECT prefix_projection_version, prefix_controls_fingerprint, prefix_context_fingerprint FROM turn_nodes WHERE id = ?",
     )
     .bind(b.id())
     .fetch_one(pool)
@@ -2046,20 +2093,19 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         })
         .await
         .unwrap();
-    sqlx::query("UPDATE turn_chain_nodes SET expires_at = 0 WHERE id = ?")
+    sqlx::query("UPDATE turn_node_retention SET expires_at = 0 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(a.id())
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls' WHERE id = ?")
+    sqlx::query("UPDATE turn_nodes SET prefix_namespace = 'old-controls' WHERE id = ?")
         .bind(b.id())
         .execute(pool)
         .await
         .unwrap();
-    // The stored payload is the binary format-2 envelope; rebuilds must leave
-    // it byte-identical.
+    // Prefix rebuilds must leave the immutable stored payload byte-identical.
     let payload_before: Vec<u8> =
-        sqlx::query_scalar("SELECT payload FROM turn_chain_nodes WHERE id = ?")
+        sqlx::query_scalar("SELECT payload FROM turn_node_payloads WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
             .bind(b.id())
             .fetch_one(pool)
             .await
@@ -2072,7 +2118,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .await
         .unwrap();
     let unavailable: (Option<String>, Option<String>, Vec<u8>) = sqlx::query_as(
-        "SELECT prefix_namespace, parent_id, payload FROM turn_chain_nodes WHERE id = ?",
+        "SELECT n.prefix_namespace, parent.id, p.payload FROM turn_nodes n LEFT JOIN turn_nodes parent ON parent.node_pk = n.parent_pk JOIN turn_node_payloads p ON p.node_pk = n.node_pk WHERE n.id = ?",
     )
     .bind(b.id())
     .fetch_one(pool)
@@ -2308,6 +2354,231 @@ async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_m
     );
 }
 
+async fn save_generation_with_effective_request(
+    store: &GenerationChainStore,
+    owner: &Principal,
+    id: &TurnNodeId,
+    effective: &AiRequest,
+) {
+    let mut response = AiResponse::new("upstream", "model");
+    response.push_output_text("ok");
+    store
+        .save(GenerationChainCommit {
+            principal: owner.clone(),
+            id: id.to_string(),
+            parent: &ActiveGenerationChain::default(),
+            request_delta: &responses_request(vec![user_message("q")]),
+            effective_request: Some(effective),
+            response,
+            upstream_response_id: None,
+            effective_state: GenerationChainState::default(),
+        })
+        .await
+        .expect("save generation with effective request controls");
+}
+
+#[tokio::test]
+async fn materialization_cache_admits_small_effective_request_controls() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        cache.clone(),
+    );
+    let owner = principal("effective-weight-small");
+    let id = TurnNodeId::new("resp_effective_weight_small");
+    let mut effective = responses_request(Vec::new());
+    effective.instructions = Some("be brief".into());
+    effective.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
+        name: "lookup".into(),
+        description: Some("look something up".into()),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+        }),
+        strict: None,
+        defer_loading: None,
+    }]);
+    effective.response_format = Some(
+        stravia_runtime_contract::protocol::ir::ResponseFormat::JsonSchema {
+            name: "answer".into(),
+            description: None,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            }),
+            strict: Some(true),
+        },
+    );
+    effective.parameters.metadata = Some(std::collections::BTreeMap::from([(
+        "key".into(),
+        "value".into(),
+    )]));
+    save_generation_with_effective_request(&store, &owner, &id, &effective).await;
+
+    let first = store.materialize_generation(&owner, &id).await.unwrap();
+    let warm = store.materialize_generation(&owner, &id).await.unwrap();
+    assert_eq!(
+        backend.reads(),
+        1,
+        "small effective request controls must stay within the materialization budget"
+    );
+    assert!(
+        Arc::ptr_eq(&first, &warm),
+        "an admitted materialization must be served from the shared cache"
+    );
+    let encoded = serde_json::to_vec(first.as_ref()).unwrap();
+    let decoded: MaterializedGeneration = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded.effective_request.as_ref()).unwrap(),
+        serde_json::to_value(first.effective_request.as_ref()).unwrap(),
+        "estimating retained bytes must not change effective request serde behavior"
+    );
+}
+
+#[tokio::test]
+async fn materialization_cache_rejects_oversized_effective_request_controls() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        cache.clone(),
+    );
+    let owner = principal("effective-weight-oversized");
+
+    // 32 KiB of serialized JSON, but 16K retained empty schema objects.
+    let structural_schema = serde_json::json!({
+        "type": "array",
+        "prefixItems": (0..16 * 1024).map(|_| serde_json::json!({})).collect::<Vec<_>>(),
+    });
+    assert!(
+        serde_json::to_vec(&structural_schema).unwrap().len() < 64 * 1024,
+        "the structural schema case must not be detected only by serialized length"
+    );
+
+    let mut instructions = responses_request(Vec::new());
+    instructions.instructions = Some("i".repeat(300 * 1024));
+
+    let mut tool_parameters = responses_request(Vec::new());
+    tool_parameters.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
+        name: "lookup".into(),
+        description: None,
+        parameters: structural_schema.clone(),
+        strict: None,
+        defer_loading: None,
+    }]);
+
+    let mut native_tools = responses_request(Vec::new());
+    native_tools.parameters.native_tools = vec![
+        stravia_runtime_contract::protocol::ir::NativeTool::ToolSearch(
+            stravia_runtime_contract::protocol::ir::ToolSearchTool {
+                execution: None,
+                description: None,
+                parameters: Some(structural_schema.clone()),
+            },
+        ),
+    ];
+
+    let mut response_format = responses_request(Vec::new());
+    response_format.response_format = Some(
+        stravia_runtime_contract::protocol::ir::ResponseFormat::JsonSchema {
+            name: "answer".into(),
+            description: Some("d".repeat(300 * 1024)),
+            schema: serde_json::json!({"type": "object"}),
+            strict: None,
+        },
+    );
+
+    let mut parameters = responses_request(Vec::new());
+    parameters.parameters.metadata = Some(std::collections::BTreeMap::from([(
+        "key".into(),
+        "m".repeat(300 * 1024),
+    )]));
+
+    for (case, effective) in [
+        ("instructions", instructions),
+        ("tool_parameters", tool_parameters),
+        ("native_tools", native_tools),
+        ("response_format", response_format),
+        ("parameters", parameters),
+    ] {
+        let id = TurnNodeId::new(format!("resp_effective_weight_{case}"));
+        save_generation_with_effective_request(&store, &owner, &id, &effective).await;
+        let reads = backend.reads();
+        let first = store.materialize_generation(&owner, &id).await.unwrap();
+        let key = super::super::store::generation_cache_key(&owner.continuation_key(), &id, None);
+        assert!(
+            cache
+                .get::<MaterializedGeneration>("generation.materialized", &key)
+                .await
+                .is_none(),
+            "{case}: oversized effective request controls must not enter TinyUFO"
+        );
+        let warm = store.materialize_generation(&owner, &id).await.unwrap();
+        assert_eq!(
+            backend.reads(),
+            reads + 2,
+            "{case}: an oversized materialization must be rebuilt instead of cached"
+        );
+        assert!(!Arc::ptr_eq(&first, &warm));
+    }
+}
+
+#[tokio::test]
+async fn materialization_cache_rejects_structurally_large_item_metadata() {
+    let backend = Arc::new(CountingParentTurnChainStore {
+        inner: crate::turn_chain::test_store().await,
+        materializations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        Duration::from_secs(60),
+        cache.clone(),
+    );
+    let owner = principal("item-metadata-weight");
+    let id = TurnNodeId::new("resp_item_metadata_weight");
+    let metadata = serde_json::Value::Object(
+        (0..3072)
+            .map(|index| (format!("extension_{index}"), serde_json::Value::Null))
+            .collect(),
+    );
+    let mut item = user_message("metadata");
+    item.meta =
+        Some(stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(metadata.clone()));
+    let effective = responses_request(vec![item]);
+    save_generation_with_effective_request(&store, &owner, &id, &effective).await;
+
+    let first = store.materialize_generation(&owner, &id).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(first.effective_items[0].meta.as_deref()).unwrap(),
+        metadata
+    );
+    let key = super::super::store::generation_cache_key(&owner.continuation_key(), &id, None);
+    assert!(
+        cache
+            .get::<MaterializedGeneration>("generation.materialized", &key)
+            .await
+            .is_none(),
+        "many small metadata fields must include map storage in the cache budget"
+    );
+    let warm = store.materialize_generation(&owner, &id).await.unwrap();
+    assert_eq!(
+        backend.reads(),
+        2,
+        "oversized metadata must require authoritative reads"
+    );
+    assert!(!Arc::ptr_eq(&first, &warm));
+}
+
 #[tokio::test]
 async fn materialization_cache_does_not_outlive_the_generation_ttl() {
     let pool = crate::test_support::migrated_sqlite_pool()
@@ -2343,7 +2614,7 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
     let after_save = chrono::Utc::now().timestamp_millis();
     let id = TurnNodeId::new("resp_expiring");
     let committed_expiry: i64 =
-        sqlx::query_scalar("SELECT expires_at FROM turn_chain_nodes WHERE id = ?")
+        sqlx::query_scalar("SELECT r.expires_at FROM turn_node_retention r JOIN turn_nodes n ON n.node_pk = r.node_pk WHERE n.id = ?")
             .bind(id.as_str())
             .fetch_one(&pool)
             .await
@@ -2353,7 +2624,7 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
     // Control the durable fixture deadline before filling the cache; initial
     // materialization must not race the configured one-second retention window.
     let durable_expiry = chrono::Utc::now().timestamp_millis() + 60_000;
-    let live_rows = sqlx::query("UPDATE turn_chain_nodes SET expires_at = ? WHERE id = ?")
+    let live_rows = sqlx::query("UPDATE turn_node_retention SET expires_at = ? WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(durable_expiry)
         .bind(id.as_str())
         .execute(&pool)
@@ -2405,8 +2676,8 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
         payload_version: materialized.payload_version,
         expires_at: std::time::Instant::now(),
     };
-    let bytes = super::super::materialize::serialized_size_bytes(&expired_materialization);
-    let expired_rows = sqlx::query("UPDATE turn_chain_nodes SET expires_at = 0 WHERE id = ?")
+    let bytes = stravia_runtime_contract::json::serialized_len(&expired_materialization).unwrap();
+    let expired_rows = sqlx::query("UPDATE turn_node_retention SET expires_at = 0 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(id.as_str())
         .execute(&pool)
         .await
@@ -2745,7 +3016,7 @@ async fn replacement_mutation_replays_the_effective_history_without_a_hook() {
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
     store
-        .save_with_effective(GenerationChainCommit {
+        .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_rewritten".into(),
             parent: &ActiveGenerationChain::default(),
@@ -3699,10 +3970,7 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         &mut fallback
     ));
     let fallback = fallback.expect("successful continuation retains full replay");
-    assert!(super::super::project::items_equal(
-        &fallback.items,
-        &full_items
-    ));
+    assert!(items_equal(&fallback.items, &full_items));
     assert!(crate::router::parent_id_from_request(&fallback).is_none());
     let mut incompatible = fallback;
     let incompatible_state = GenerationChainState::from_request(
@@ -3721,10 +3989,7 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         &mut miss_fallback,
     ));
     assert!(miss_fallback.is_none());
-    assert!(super::super::project::items_equal(
-        &incompatible.items,
-        &full_items
-    ));
+    assert!(items_equal(&incompatible.items, &full_items));
     assert_eq!(next.items.len(), 1);
     assert_eq!(
         next.parameters
@@ -3825,15 +4090,15 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
     })
     .collect();
     let mut client_items = root.items.clone();
-    let client_output = project_client_output(
-        Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
+    let client_output = project_client_history(
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         &response,
         &mut client_items,
     )
     .expect("project chat response");
 
     store
-        .save_with_effective(GenerationChainCommit {
+        .save(GenerationChainCommit {
             principal: owner.clone(),
             id: "resp_parallel_tools".into(),
             parent: &ActiveGenerationChain::default(),
@@ -3883,6 +4148,40 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
             .filter_map(|item| item.tool_call_id.as_deref())
             .collect::<Vec<_>>(),
         vec!["call_existing", "call_a", "call_b", "call_c", "call_d"]
+    );
+
+    let wire = stravia_protocol_codec::transform::ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap()
+        .encode_request(Arc::unwrap_or_clone(next))
+        .unwrap()
+        .body;
+    let response_call_groups = wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .filter(|calls| {
+            calls.iter().any(|call| {
+                matches!(
+                    call["id"].as_str(),
+                    Some("call_a" | "call_b" | "call_c" | "call_d")
+                )
+            })
+        })
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|call| call["id"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        response_call_groups,
+        vec![vec!["call_a", "call_b", "call_c", "call_d"]]
     );
 }
 
@@ -4201,15 +4500,15 @@ fn observation_payload(
     effective_output.push_output_text(effective_output_text);
     serde_json::to_value(PersistedResponseNode {
         client_delta: RequestDelta {
-            messages: Cow::Owned(client_delta),
+            messages: Cow::Owned(freeze_items(client_delta)),
             system: None,
         },
-        client_output,
+        client_output: client_output.map(freeze_items),
         client_history_mutation,
         compaction_record_ids: Vec::new(),
         effective_history_mutation: None,
         effective_system: None,
-        effective_output,
+        effective_output: FrozenResponse::new(effective_output),
         client_history: None,
         trusted_media_turn_ids: Vec::new(),
         upstream_response_id: None,
@@ -4275,7 +4574,7 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
         observation_payload(
             Vec::new(),
             Some(EffectiveHistoryMutation::Append {
-                items: Cow::Owned(vec![user_message("follow up")]),
+                items: freeze_items(vec![user_message("follow up")]).into(),
             }),
             None,
             "fallback answer",
@@ -4291,7 +4590,7 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
         observation_payload(
             Vec::new(),
             Some(EffectiveHistoryMutation::Replace {
-                items: Cow::Owned(vec![user_message("edited question")]),
+                items: freeze_items(vec![user_message("edited question")]).into(),
             }),
             Some(vec![AiItem::output_text("public replacement")]),
             "private replacement",

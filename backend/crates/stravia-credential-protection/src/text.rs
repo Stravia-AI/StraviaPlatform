@@ -1,5 +1,8 @@
 //! The readable canonical surface. Protocol identities and opaque payloads never enter it.
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde_json::Value;
 
@@ -9,6 +12,101 @@ use stravia_runtime_contract::protocol::ir::{
     MessageContent, NamespaceMember, NativeTool, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META,
     ToolResultContentKind, ToolSpec,
 };
+
+/// 一段可读文本在请求中的位置：来源类别加块标识。
+///
+/// 只描述“在哪里”，不含文本、偏移或片段；块标识是客户端已知的工具调用 ID。
+/// 偏移相对于被扫描文本，而请求在保护前已被历史还原改写，无法映射回客户端条目。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Origin<'a> {
+    pub source: &'static str,
+    /// 仅 `tool_arguments` 与 `tool_result` 携带。
+    pub tool_id: Option<&'a str>,
+    /// 仅 `user_message` 有意义。`None` 表示无法判定（例如供应商原始副本）。
+    pub latest_input: Option<bool>,
+    /// 本次请求新提交的内容；为假表示客户端重放的历史，或无法与历史区分的整请求副本。
+    pub fresh: bool,
+}
+
+impl<'a> Origin<'a> {
+    pub(super) const fn of(source: &'static str) -> Self {
+        Self {
+            source,
+            tool_id: None,
+            latest_input: None,
+            fresh: true,
+        }
+    }
+
+    /// 同一来源保留块标识；切换来源则丢弃，避免把一个工具的标识带到别处。
+    pub(super) fn with_source(self, source: &'static str) -> Origin<'a> {
+        Origin {
+            source,
+            tool_id: if self.source == source {
+                self.tool_id
+            } else {
+                None
+            },
+            latest_input: self.latest_input,
+            fresh: self.fresh,
+        }
+    }
+
+    pub(super) fn with_tool<'b>(self, source: &'static str, id: &'b str) -> Origin<'b> {
+        Origin {
+            source,
+            tool_id: Some(id),
+            latest_input: self.latest_input,
+            fresh: self.fresh,
+        }
+    }
+
+    pub(super) fn with_tool_if_known<'b>(
+        self,
+        source: &'static str,
+        id: Option<&'b str>,
+    ) -> Origin<'b> {
+        match id {
+            Some(id) => self.with_tool(source, id),
+            None => Origin {
+                source,
+                tool_id: None,
+                latest_input: self.latest_input,
+                fresh: self.fresh,
+            },
+        }
+    }
+
+    pub(super) fn with_latest_input(self, latest: bool) -> Origin<'a> {
+        Origin {
+            latest_input: Some(latest),
+            ..self
+        }
+    }
+
+    pub(super) fn with_fresh(self, fresh: bool) -> Origin<'a> {
+        Origin { fresh, ..self }
+    }
+
+    /// 遍历回调里的块标识只在回调内有效；检测之后才用到它，所以转成自有数据保存。
+    fn to_owned(self) -> TextOrigin {
+        TextOrigin {
+            source: self.source,
+            tool_id: self.tool_id.map(str::to_owned),
+            latest_input: self.latest_input,
+            fresh: self.fresh,
+        }
+    }
+}
+
+/// [`Origin`] 的自有形式，与 `request_text_origins` 返回的文本一一对应。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct TextOrigin {
+    pub source: &'static str,
+    pub tool_id: Option<String>,
+    pub latest_input: Option<bool>,
+    pub fresh: bool,
+}
 
 pub(super) fn active(mapping: &Mapping) -> bool {
     mapping.expires_at > chrono::Utc::now().timestamp_millis()
@@ -363,7 +461,7 @@ fn tool_result(
     match result_kind(value, kind, reject_ambiguous)? {
         Some(ToolResultContentKind::Json) => json_values(value, None, visit),
         Some(ToolResultContentKind::ContentBlocks) => {
-            write_surface::wire_text(value, "tool_result", &mut |text, context, _| {
+            write_surface::wire_text(value, Origin::of("tool_result"), &mut |text, context, _| {
                 visit(text, context)
             })
         }
@@ -408,23 +506,23 @@ macro_rules! readable_surface {
     ($module:ident, $json:ident, $arguments:ident, $result:ident, $encoded:ident, $iter:ident, $get:ident, $values:ident, $slice:ident, $shared_text:path, $shared_encoded:path, $apply:path, $text_type:ty, $($qualifier:tt)*) => {
         mod $module {
             use super::*;
-            fn json_values(value: & $($qualifier)* Value, context: Option<&str>, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+            fn json_values(value: & $($qualifier)* Value, context: Option<&str>, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     super::$json(value, context, &mut |text, context| visit(text, context, location))
 }
-fn arguments_text(value: $text_type, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
-    super::$arguments(value, &mut |text, context| visit(text, context, "tool_arguments"))
+fn arguments_text(value: $text_type, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$arguments(value, &mut |text, context| visit(text, context, location.with_source("tool_arguments")))
 }
-fn tool_result(value: & $($qualifier)* Value, kind: Option<ToolResultContentKind>, reject: bool, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
-    super::$result(value, kind, reject, &mut |text, context| visit(text, context, "tool_result"))
+fn tool_result(value: & $($qualifier)* Value, kind: Option<ToolResultContentKind>, reject: bool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$result(value, kind, reject, &mut |text, context| visit(text, context, location.with_source("tool_result")))
 }
-fn encoded_tool_result(value: $text_type, kind: ToolResultContentKind, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
-    super::$encoded(value, kind, &mut |text, context| visit(text, context, "tool_result"))
+fn encoded_tool_result(value: $text_type, kind: ToolResultContentKind, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$encoded(value, kind, &mut |text, context| visit(text, context, location.with_source("tool_result")))
 }
-            pub(super) type Visitor<'a> = dyn for<'text> FnMut(&'text str, Option<&str>, &'static str) -> Result<Cow<'text, str>, RedactionError> + 'a;
-fn apply(text: $text_type, context: Option<&str>, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+            pub(super) type Visitor<'a> = dyn for<'text> FnMut(&'text str, Option<&str>, Origin<'_>) -> Result<Cow<'text, str>, RedactionError> + 'a;
+fn apply(text: $text_type, context: Option<&str>, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     $apply(text, context, location, visit)
 }
-pub(super) fn schema(value: & $($qualifier)* Value, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn schema(value: & $($qualifier)* Value, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     match value {
         Value::Object(values) => for (key, value) in values {
             match key.as_str() {
@@ -440,7 +538,7 @@ pub(super) fn schema(value: & $($qualifier)* Value, location: &'static str, visi
 }
 
 
-pub(super) fn wire_text(value: & $($qualifier)* Value, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn wire_text(value: & $($qualifier)* Value, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     match value {
         Value::Array(values) => for value in values { wire_text(value, location, visit)?; },
         Value::Object(values) => {
@@ -450,7 +548,7 @@ pub(super) fn wire_text(value: & $($qualifier)* Value, location: &'static str, v
             let search = kind == "search_result";
             let embedded_resource = kind == "resource";
             let tool_input = matches!(kind, "tool_use" | "server_tool_use");
-            let location = if tool_input { "tool_arguments" } else if matches!(kind, "tool_result" | "server_tool_result" | "codeExecutionResult") { "tool_result" } else { match values.get("role").and_then(Value::as_str) { Some("user") => "user_message", Some("tool") => "tool_result", Some("assistant" | "system" | "developer") => "system_or_history", _ => location } };
+            let location = if tool_input { location.with_source("tool_arguments") } else if matches!(kind, "tool_result" | "server_tool_result" | "codeExecutionResult") { location.with_source("tool_result") } else { match values.get("role").and_then(Value::as_str) { Some("user") => location.with_source("user_message"), Some("tool") => location.with_source("tool_result"), Some("assistant" | "system" | "developer") => location.with_source("system_or_history"), _ => location } };
             if search && let Some(Value::String(source)) = values.$get("source") { apply(source, None, location, visit)?; }
             if document && let Some(source) = values.$get("source") {
                 match source.get("type").and_then(Value::as_str) {
@@ -462,11 +560,11 @@ pub(super) fn wire_text(value: & $($qualifier)* Value, location: &'static str, v
             for (key, value) in values {
                 match key.as_str() {
                     "text" | "refusal" | "thinking" | "cited_text" | "title" | "description" | "code" | "stdout" | "stderr" | "query" | "queries" | "prompt" => json_values(value, Some(key), location, visit)?,
-                    "arguments" => if let Value::String(arguments) = value { arguments_text(arguments, location, visit)?; } else { json_values(value, None, "tool_arguments", visit)?; },
+                    "arguments" => if let Value::String(arguments) = value { arguments_text(arguments, location, visit)?; } else { json_values(value, None, location.with_source("tool_arguments"), visit)?; },
                     "input" if tool_input => json_values(value, None, location, visit)?,
                     "input" | "output" | "variables" | "json" => json_values(value, None, location, visit)?,
-                    "functionCall" => if let Some(arguments) = value.$get("args") { json_values(arguments, None, "tool_arguments", visit)?; },
-                    "functionResponse" => if let Some(result) = value.$get("response") { json_values(result, None, "tool_result", visit)?; },
+                    "functionCall" => if let Some(arguments) = value.$get("args") { json_values(arguments, None, location.with_source("tool_arguments"), visit)?; },
+                    "functionResponse" => if let Some(result) = value.$get("response") { json_values(result, None, location.with_source("tool_result"), visit)?; },
                     "resource" if embedded_resource => if let Some(Value::String(text)) = value.$get("text") { apply(text, None, location, visit)?; },
                     "format" | "json_schema" | "parts" | "functionDeclarations" | "executableCode" | "codeExecutionResult" | "citations" => wire_text(value, location, visit)?,
                     "content" | "summary" | "results" | "context" => if let Value::String(text) = value { apply(text, Some(key), location, visit)?; } else { wire_text(value, location, visit)?; },
@@ -483,19 +581,14 @@ pub(super) fn wire_text(value: & $($qualifier)* Value, location: &'static str, v
 }
 
 
-pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: bool, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: bool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     for block in blocks {
-        let location = match block {
-            ContentBlock::ToolUse { .. } | ContentBlock::ServerToolUse { .. } => "tool_arguments",
-            ContentBlock::ToolResult { .. } | ContentBlock::ServerToolResult { .. } | ContentBlock::CodeExecutionResult { .. } => "tool_result",
-            _ => location,
-        };
         match block {
             ContentBlock::Text { text, .. } => $shared_text(text, None, location, visit)?,
             ContentBlock::Thinking { thinking, .. } => apply(thinking, None, location, visit)?,
             ContentBlock::Reasoning { summary, content, .. } => for text in summary.$iter().chain(content) { apply(text, None, location, visit)?; },
-            ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => json_values(input, None, location, visit)?,
-            ContentBlock::ToolResult { content, content_kind, .. } | ContentBlock::ServerToolResult { content, content_kind, .. } => tool_result(content, *content_kind, reject_ambiguous, location, visit)?,
+            ContentBlock::ToolUse { id, input, .. } | ContentBlock::ServerToolUse { id, input, .. } => json_values(input, None, location.with_tool("tool_arguments", id), visit)?,
+            ContentBlock::ToolResult { tool_use_id, content, content_kind, .. } | ContentBlock::ServerToolResult { tool_use_id, content, content_kind, .. } => tool_result(content, *content_kind, reject_ambiguous, location.with_tool("tool_result", tool_use_id), visit)?,
             ContentBlock::Document { source, title, context, .. } => {
                 for text in title.$iter().chain(context) { apply(text, None, location, visit)?; }
                 match source { DocumentSource::PlainText { data } => apply(data, None, location, visit)?, DocumentSource::Blocks { content } => self::blocks(content, reject_ambiguous, location, visit)?, _ => {} }
@@ -503,7 +596,7 @@ pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: 
             ContentBlock::SearchResult { content, title, source, .. } => { apply(title, None, location, visit)?; apply(source, None, location, visit)?; self::blocks(content, reject_ambiguous, location, visit)?; }
             ContentBlock::Citation { cited_text, .. } => apply(cited_text, None, location, visit)?,
             ContentBlock::ExecutableCode { code, .. } => apply(code, None, location, visit)?,
-            ContentBlock::CodeExecutionResult { stdout, stderr, .. } => { apply(stdout, None, location, visit)?; apply(stderr, None, location, visit)?; }
+            ContentBlock::CodeExecutionResult { stdout, stderr, .. } => { let location = location.with_source("tool_result"); apply(stdout, None, location, visit)?; apply(stderr, None, location, visit)?; }
             ContentBlock::Refusal { refusal } => apply(refusal, None, location, visit)?,
             ContentBlock::Unknown { raw } => wire_text(raw, location, visit)?,
             ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::File { .. } | ContentBlock::Video { .. } | ContentBlock::RedactedThinking { .. } | ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {} | ContentBlock::ContainerUpload { .. } => {}
@@ -513,11 +606,11 @@ pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: 
 }
 
 
-pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, _location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     let location = match item.role {
-        stravia_runtime_contract::protocol::ir::Role::User => "user_message",
-        stravia_runtime_contract::protocol::ir::Role::Tool => "tool_result",
-        _ => "system_or_history",
+        stravia_runtime_contract::protocol::ir::Role::User => location.with_source("user_message"),
+        stravia_runtime_contract::protocol::ir::Role::Tool => location.with_tool_if_known("tool_result", item.tool_call_id.as_deref()),
+        _ => location.with_source("system_or_history"),
     };
     let encoded_kind = if item.role == stravia_runtime_contract::protocol::ir::Role::Tool {
         item.meta.as_ref().and_then(|meta| meta.get(TOOL_RESULT_CONTENT_KIND_META))
@@ -550,14 +643,26 @@ pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, _
         },
         MessageContent::Blocks(content) => blocks(content, reject_ambiguous, location, visit)?,
     }
-    if let Some(calls) = & $($qualifier)* item.tool_calls { for call in calls { arguments_text(& $($qualifier)* call.arguments, location, visit)?; } }
+    if let Some(calls) = & $($qualifier)* item.tool_calls { for call in calls { arguments_text(& $($qualifier)* call.arguments, location.with_tool("tool_arguments", &call.id), visit)?; } }
     Ok(())
 }
 
 
-pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: bool, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
-    if let Some(text) = & $($qualifier)* request.instructions { apply(text, None, "system_or_history", visit)?; }
-    for item in & $($qualifier)* request.items { item_text(item, reject_ambiguous, location, visit)?; }
+pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: bool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    // 本次提交的内容是最后一条 Assistant 之后的条目（新用户消息或工具结果）；更早的是客户端重放的历史。
+    // 末尾若只剩 Assistant（预填），其前的条目才是本次输入，故边界在最后一条非 Assistant 条目之前找。
+    let history_end = request.items.iter().rposition(|item| item.role != stravia_runtime_contract::protocol::ir::Role::Assistant)
+        .and_then(|end| request.items[..end].iter().rposition(|item| item.role == stravia_runtime_contract::protocol::ir::Role::Assistant))
+        .map(|boundary| boundary + 1);
+    // 指令、工具定义、元数据和供应商整请求副本每轮都会重发，无法单独判定新旧：有历史就一律不算新输入。
+    let location = location.with_fresh(history_end.is_none());
+    if let Some(text) = & $($qualifier)* request.instructions { apply(text, None, location.with_source("system_or_history"), visit)?; }
+    // 只有请求窗口内最后一条 User 条目才是本次输入；其余 User 条目是客户端重放的历史。
+    let latest_input = request.items.iter().rposition(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User);
+    for (index, item) in (& $($qualifier)* request.items).into_iter().enumerate() {
+        let origin = location.with_latest_input(Some(index) == latest_input).with_fresh(index >= history_end.unwrap_or(0));
+        item_text(item, reject_ambiguous, origin, visit)?;
+    }
     if let Some(embedding) = & $($qualifier)* request.embedding { match & $($qualifier)* embedding.input { EmbeddingInput::Text(text) => apply(text, None, location, visit)?, EmbeddingInput::Texts(texts) => for text in texts { apply(text, None, location, visit)?; }, _ => {} } }
     if let Some(tools) = & $($qualifier)* request.tools { for tool in tools { function_tool(tool, location, visit)?; } }
     if let Some(ResponseFormat::JsonSchema { schema: value, description, .. }) = & $($qualifier)* request.response_format {
@@ -569,7 +674,7 @@ pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: boo
     // authentication, identities, media and opaque signatures must stay intact.
     for (key, value) in & $($qualifier)* request.meta.vendor.ingress {
         match key.as_str() {
-            "__anthropic_raw_system" | "__google_raw_system_instruction" => wire_text(value, "system_or_history", visit)?,
+            "__anthropic_raw_system" | "__google_raw_system_instruction" => wire_text(value, location.with_source("system_or_history"), visit)?,
             "__anthropic_raw_messages" | "__anthropic_raw_tools"
             | "__google_raw_tools" | "__google_generation_config"
             | "prediction" | "response_format" => wire_text(value, location, visit)?,
@@ -601,12 +706,12 @@ pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: boo
     Ok(())
 }
 
-fn function_tool(tool: & $($qualifier)* ToolSpec, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+fn function_tool(tool: & $($qualifier)* ToolSpec, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     if let Some(text) = & $($qualifier)* tool.description { apply(text, None, location, visit)?; }
     schema(& $($qualifier)* tool.parameters, location, visit)
 }
 
-fn custom_tool(tool: & $($qualifier)* CustomTool, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+fn custom_tool(tool: & $($qualifier)* CustomTool, location: Origin<'_>, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     if let Some(text) = & $($qualifier)* tool.description { apply(text, None, location, visit)?; }
     if let Some(grammar) = & $($qualifier)* tool.grammar { apply(& $($qualifier)* grammar.definition, None, location, visit)?; }
     Ok(())
@@ -651,7 +756,7 @@ readable_surface!(
 fn apply_read(
     text: &str,
     context: Option<&str>,
-    location: &'static str,
+    location: Origin<'_>,
     visit: &mut read_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     visit(text, context, location)?;
@@ -661,7 +766,7 @@ fn apply_read(
 fn apply_write(
     text: &mut String,
     context: Option<&str>,
-    location: &'static str,
+    location: Origin<'_>,
     visit: &mut write_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     if let Cow::Owned(replaced) = visit(text, context, location)? {
@@ -673,7 +778,7 @@ fn apply_write(
 fn read_shared(
     text: &std::sync::Arc<String>,
     context: Option<&str>,
-    location: &'static str,
+    location: Origin<'_>,
     visit: &mut read_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     apply_read(text, context, location, visit)
@@ -682,7 +787,7 @@ fn read_shared(
 fn write_shared(
     text: &mut std::sync::Arc<String>,
     context: Option<&str>,
-    location: &'static str,
+    location: Origin<'_>,
     visit: &mut write_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     if let Cow::Owned(replaced) = visit(text, context, location)? {
@@ -702,22 +807,22 @@ fn set_shared(text: &mut std::sync::Arc<String>, replaced: String) {
 fn read_shared_encoded(
     text: &std::sync::Arc<String>,
     kind: ToolResultContentKind,
-    _location: &'static str,
+    location: Origin<'_>,
     visit: &mut read_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     read_encoded_tool_result(text, kind, &mut |text, context| {
-        visit(text, context, "tool_result")
+        visit(text, context, location.with_source("tool_result"))
     })
 }
 
 fn write_shared_encoded(
     text: &mut std::sync::Arc<String>,
     kind: ToolResultContentKind,
-    _location: &'static str,
+    location: Origin<'_>,
     visit: &mut write_surface::Visitor<'_>,
 ) -> Result<(), RedactionError> {
     if let Some(replaced) = encoded_tool_result_replacement(text, kind, &mut |text, context| {
-        visit(text, context, "tool_result")
+        visit(text, context, location.with_source("tool_result"))
     })? {
         set_shared(text, replaced);
     }
@@ -827,7 +932,7 @@ fn read_tool_result(
             })?
         }
         Some(ToolResultContentKind::ContentBlocks) => {
-            read_surface::wire_text(value, "tool_result", &mut |text, context, _| {
+            read_surface::wire_text(value, Origin::of("tool_result"), &mut |text, context, _| {
                 append_context(&mut readable, text, context)?;
                 Ok(Cow::Borrowed(text))
             })?
@@ -849,18 +954,38 @@ fn read_encoded_tool_result(
     read_tool_result(&value, Some(kind), true, visit)
 }
 
+/// 检测与引用核对读到的全部文本，顺序与 [`request_text_origins`] 一致。
 pub fn request_texts(
     value: &AiRequest,
     reject_ambiguous: bool,
-) -> Result<(Vec<String>, Vec<&'static str>), RedactionError> {
+) -> Result<Vec<String>, RedactionError> {
+    collect_texts(value, reject_ambiguous, None)
+}
+
+/// 同 [`request_texts`]，并按同样的下标返回每段文本的来源；只有需要定位命中时才付出复制工具 ID 的代价。
+pub fn request_text_origins(
+    value: &AiRequest,
+    reject_ambiguous: bool,
+) -> Result<(Vec<String>, Vec<TextOrigin>), RedactionError> {
+    let mut origins = Vec::new();
+    let texts = collect_texts(value, reject_ambiguous, Some(&mut origins))?;
+    Ok((texts, origins))
+}
+
+fn collect_texts(
+    value: &AiRequest,
+    reject_ambiguous: bool,
+    mut origins: Option<&mut Vec<TextOrigin>>,
+) -> Result<Vec<String>, RedactionError> {
     let mut texts = Vec::new();
-    let mut sources = Vec::new();
     read_surface::request(
         value,
         reject_ambiguous,
-        "other_text",
-        &mut |text, context, source| {
-            sources.push(source);
+        Origin::of("other_text"),
+        &mut |text, context, origin| {
+            if let Some(origins) = origins.as_deref_mut() {
+                origins.push(origin.to_owned());
+            }
             if let Some(key) = context {
                 let mut readable = String::new();
                 append_context(&mut readable, text, Some(key))?;
@@ -871,24 +996,53 @@ pub fn request_texts(
             Ok(Cow::Borrowed(text))
         },
     )?;
-    Ok((texts, sources))
+    Ok(texts)
+}
+
+/// 出站改写的结果。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Redacted {
+    /// 请求里被替换过的全部引用。
+    pub references: Vec<String>,
+    /// 每个引用在哪些本次新提交的位置被替换；客户端重放的历史不在其中。
+    pub placements: BTreeMap<String, BTreeSet<TextOrigin>>,
 }
 
 pub fn redact_request(
     value: &mut AiRequest,
     mappings: &[Mapping],
-) -> Result<Vec<String>, RedactionError> {
+) -> Result<Redacted, RedactionError> {
     let mut used = BTreeSet::new();
-    write_surface::request(value, true, "other_text", &mut |text, _, _| {
-        Ok(replace(text, mappings, false, &mut used))
-    })?;
+    let mut placements: BTreeMap<String, BTreeSet<TextOrigin>> = BTreeMap::new();
+    write_surface::request(
+        value,
+        true,
+        Origin::of("other_text"),
+        &mut |text, _, origin| {
+            let mut here = BTreeSet::new();
+            let replaced = replace(text, mappings, false, &mut here);
+            if origin.fresh {
+                for reference in &here {
+                    placements
+                        .entry(reference.clone())
+                        .or_default()
+                        .insert(origin.to_owned());
+                }
+            }
+            used.extend(here);
+            Ok(replaced)
+        },
+    )?;
     if mappings
         .iter()
         .any(|mapping| used.contains(&mapping.reference) && !active(mapping))
     {
         return Err(RedactionError::InvalidText);
     }
-    Ok(used.into_iter().collect())
+    Ok(Redacted {
+        references: used.into_iter().collect(),
+        placements,
+    })
 }
 
 // 还原与出站保护共用同一遍历：转义损坏区域对引用同样不可判定（引用也可能
@@ -898,7 +1052,7 @@ pub(super) fn restore_item(
     mappings: &[Mapping],
     used: &mut BTreeSet<String>,
 ) -> Result<(), RedactionError> {
-    write_surface::item_text(item, false, "other_text", &mut |text, _, _| {
+    write_surface::item_text(item, false, Origin::of("other_text"), &mut |text, _, _| {
         Ok(replace(text, mappings, true, used))
     })
 }
@@ -932,7 +1086,7 @@ pub(super) fn restore_unknown(
         .get("__google_response_metadata")
         .is_some_and(Value::is_object);
     let mut changed = false;
-    write_surface::wire_text(&mut value, "other_text", &mut |text, _, _| {
+    write_surface::wire_text(&mut value, Origin::of("other_text"), &mut |text, _, _| {
         let replaced = replace(text, mappings, true, used);
         changed |= matches!(replaced, Cow::Owned(_));
         Ok(replaced)
@@ -953,7 +1107,7 @@ pub(super) fn restore_compaction(
     }
     if let Some(output) = value.wire.get_mut("output").and_then(Value::as_array_mut) {
         for item in output {
-            write_surface::wire_text(item, "other_text", &mut |text, _, _| {
+            write_surface::wire_text(item, Origin::of("other_text"), &mut |text, _, _| {
                 Ok(replace(text, mappings, true, &mut used))
             })?;
         }
@@ -961,15 +1115,43 @@ pub(super) fn restore_compaction(
     Ok(used.into_iter().collect())
 }
 
-pub fn restore_response(
+/// 还原模型响应的结果。
+pub(super) struct Restored {
+    /// 响应里被还原过的全部引用。
+    pub references: Vec<String>,
+    /// 工具调用 ID 到该调用参数里被还原的引用。
+    pub tool_calls: BTreeMap<String, BTreeSet<String>>,
+}
+
+pub(super) fn restore_response(
     value: &mut AiResponse,
     mappings: &[Mapping],
-) -> Result<Vec<String>, RedactionError> {
+) -> Result<Restored, RedactionError> {
     let mut used = BTreeSet::new();
+    let mut tool_calls: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for item in &mut value.items {
-        restore_item(item, mappings, &mut used)?;
+        write_surface::item_text(
+            item,
+            false,
+            Origin::of("other_text"),
+            &mut |text, _, origin| {
+                let mut here = BTreeSet::new();
+                let restored = replace(text, mappings, true, &mut here);
+                if let (Some(id), "tool_arguments") = (origin.tool_id, origin.source) {
+                    tool_calls
+                        .entry(id.to_owned())
+                        .or_default()
+                        .extend(here.iter().cloned());
+                }
+                used.extend(here);
+                Ok(restored)
+            },
+        )?;
     }
-    Ok(used.into_iter().collect())
+    Ok(Restored {
+        references: used.into_iter().collect(),
+        tool_calls,
+    })
 }
 
 #[cfg(test)]
@@ -984,11 +1166,13 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "密钥-long".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let second = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "密钥".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mappings = [second, first];
         let mut used = BTreeSet::new();
@@ -1020,6 +1204,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "not-present".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         }];
         for original in [
             " { \"key\" : \"前缀\\u003c-no-reference\", \"number\": 1.00e+02 } ",
@@ -1042,6 +1227,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: identifier.into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut used = BTreeSet::new();
         let input = format!("{reference} {identifier}");
@@ -1060,6 +1246,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1100,6 +1287,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1147,6 +1335,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let payload = serde_json::json!([{"type": "image", "value": mapping.secret}]).to_string();
         let item = AiItem::function_call_output("call-json", Value::String(payload.clone()));
@@ -1175,6 +1364,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "synthetic snapshot secret".into(),
             expires_at: 0,
+            rule_ids: Default::default(),
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.instructions = Some(mapping.secret.clone());
@@ -1195,7 +1385,7 @@ mod tests {
         assert!(used.is_empty());
         request.instructions = Some("ordinary text".into());
         assert_eq!(
-            redact_request(&mut request, &[mapping]).unwrap(),
+            redact_request(&mut request, &[mapping]).unwrap().references,
             Vec::<String>::new()
         );
         assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
@@ -1207,6 +1397,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = format!("{{\"key\":\"{}\"", mapping.secret);
 
@@ -1221,7 +1412,7 @@ mod tests {
                 },
             )],
         );
-        let (texts, _) = request_texts(&request, true)
+        let texts = request_texts(&request, true)
             .expect("malformed arguments are still readable for detection");
         assert!(texts.iter().any(|text| text.contains(&mapping.secret)));
         redact_request(&mut request, std::slice::from_ref(&mapping))
@@ -1251,6 +1442,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"sk\\u002dlive\\u002d7f3a9c\",\"t\":".to_string();
         let mut request = AiRequest::new(
@@ -1263,7 +1455,7 @@ mod tests {
                 },
             )],
         );
-        let (texts, _) = request_texts(&request, true).expect("readable");
+        let texts = request_texts(&request, true).expect("readable");
         assert!(texts.iter().any(|text| text.contains(&escaped.secret)));
         redact_request(&mut request, std::slice::from_ref(&escaped)).expect("redact");
         let redacted = &request.items[0].tool_calls.as_ref().unwrap()[0].arguments;
@@ -1289,6 +1481,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "a\"b".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"a\\\"b\",\"t\":".to_string();
         let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
@@ -1311,6 +1504,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "sk-native-prompt-secret".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.parameters.session.id = Some(mapping.secret.clone());
@@ -1331,7 +1525,7 @@ mod tests {
                 ]}
         ]))
         .unwrap();
-        let (texts, _) = request_texts(&request, true).unwrap();
+        let texts = request_texts(&request, true).unwrap();
         assert_eq!(
             texts
                 .iter()
@@ -1363,7 +1557,7 @@ mod tests {
             tools[2]["tools"][1]["grammar"]["definition"],
             mapping.reference
         );
-        read_surface::request(&request, true, "request", &mut |text, _, _| {
+        read_surface::request(&request, true, Origin::of("request"), &mut |text, _, _| {
             assert!(!text.contains(&mapping.secret));
             Ok(Cow::Borrowed(text))
         })
@@ -1378,6 +1572,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             expires_at: i64::MAX,
+            rule_ids: Default::default(),
         };
         for malformed in ["{\"k\":\"sk\\live", "{\"k\":\"a\\qb\",\"t\":"] {
             let request = |malformed: &str| {
@@ -1419,5 +1614,95 @@ mod tests {
                 Err(RedactionError::InvalidText)
             ));
         }
+    }
+
+    fn known_mapping(letter: &str, rule_ids: &[&str]) -> Mapping {
+        Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", letter.repeat(IDENTIFIER_LEN)),
+            secret: "sk-known-9f2c41".into(),
+            expires_at: i64::MAX,
+            rule_ids: rule_ids
+                .iter()
+                .map(|rule| (*rule).to_owned())
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+
+    #[test]
+    fn redaction_places_a_known_secret_only_where_the_request_submits_it() {
+        use stravia_runtime_contract::protocol::ir::{Role, ToolCall};
+
+        let mapping = known_mapping("e", &["github-pat"]);
+        let user = |text: &str| AiItem {
+            role: Role::User,
+            content: MessageContent::Text(std::sync::Arc::new(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let call = AiItem::function_call(ToolCall {
+            id: "call-9".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        });
+        let result = AiItem::function_call_output("call-9", Value::String(mapping.secret.clone()));
+
+        // 密钥只在客户端重放的历史里：替换了，但没有本次提交的位置。
+        let mut replayed = AiRequest::new(
+            "model",
+            vec![
+                user(&mapping.secret),
+                AiItem::output_text("ok"),
+                user("thanks"),
+            ],
+        );
+        let outcome = redact_request(&mut replayed, std::slice::from_ref(&mapping)).unwrap();
+        assert_eq!(outcome.references, vec![mapping.reference.clone()]);
+        assert!(outcome.placements.is_empty());
+
+        // 同一密钥出现在最后一条 Assistant 之后的工具结果里：那是本次提交的位置，不是裸文本位置。
+        let mut submitted = AiRequest::new("model", vec![user(&mapping.secret), call, result]);
+        let outcome = redact_request(&mut submitted, std::slice::from_ref(&mapping)).unwrap();
+        let places = &outcome.placements[&mapping.reference];
+        assert_eq!(places.len(), 1);
+        let place = places.iter().next().unwrap();
+        assert_eq!(place.source, "tool_result");
+        assert_eq!(place.tool_id.as_deref(), Some("call-9"));
+    }
+
+    #[test]
+    fn restoring_a_response_attributes_references_to_the_tool_call_that_carried_them() {
+        use stravia_runtime_contract::protocol::ir::ToolCall;
+
+        let mapping = known_mapping("f", &["github-pat"]);
+        let mut response = AiResponse::new("resp", "model");
+        response
+            .items
+            .push(AiItem::output_text(format!("saw {}", mapping.reference)));
+        response.items.push(AiItem::function_call(ToolCall {
+            id: "call-a".into(),
+            name: "run".into(),
+            arguments: format!("{{\"token\":\"{}\"}}", mapping.reference),
+        }));
+        response.items.push(AiItem::function_call(ToolCall {
+            id: "call-b".into(),
+            name: "run".into(),
+            arguments: "{}".into(),
+        }));
+
+        let restored = restore_response(&mut response, std::slice::from_ref(&mapping)).unwrap();
+
+        assert_eq!(restored.references, vec![mapping.reference.clone()]);
+        // 助手文本里的还原不是工具调用；没有引用的调用不出现。
+        assert_eq!(
+            restored.tool_calls,
+            BTreeMap::from([(
+                "call-a".to_owned(),
+                BTreeSet::from([mapping.reference.clone()])
+            )])
+        );
+        let calls = response.items[1].tool_calls.as_ref().unwrap();
+        assert!(calls[0].arguments.contains(&mapping.secret));
     }
 }

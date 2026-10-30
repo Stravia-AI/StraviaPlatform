@@ -227,7 +227,7 @@ for (const path of standardPages) {
       route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),
     )
     await page.route('**/api/v1/reversible-redaction/discoveries**', (route) =>
-      route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+      route.fulfill({ json: { data: { items: [], next_cursor: null } } }),
     )
     await page.goto(path)
     const title = page.getByRole('heading', { level: 1 })
@@ -246,7 +246,7 @@ test('Credential Protection keeps the enable switch and one-sentence data flow i
     route.fulfill({ json: { data: { rules: [], prefilter: '', filter: '' } } }),
   )
   await page.route('**/api/v1/reversible-redaction/discoveries**', (route) =>
-    route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: false } } }),
+    route.fulfill({ json: { data: { items: [], next_cursor: null } } }),
   )
   await page.goto('/reversible-redaction')
   const title = page.getByRole('heading', { level: 1, name: 'Credential Protection' })

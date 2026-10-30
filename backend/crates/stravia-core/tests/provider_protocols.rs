@@ -31,6 +31,7 @@ fn provider_with_protocol(protocol: &str, base_url: &str) -> Provider {
         vendor_options: "{}".to_string(),
         auth_mode: "apikey".to_string(),
         use_proxy: false,
+        cost_basis: stravia_core::pricing::CostBasis::Usage,
         last_test_success: None,
         last_test_at: None,
         is_enabled: true,

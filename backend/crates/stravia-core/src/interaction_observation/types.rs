@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stravia_protocol_codec::accumulator::CanonicalPartIndex;
 
+use crate::pricing::{AttemptAmounts, CostBasis};
+
 pub type BundleStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 pub type ObservationStream = Pin<Box<dyn Stream<Item = ObservationUpdate> + Send>>;
 
@@ -200,7 +202,7 @@ pub(crate) fn upstream_body_code(body: &serde_json::Value) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FailedRequestQuery {
+pub struct ClientErrorQuery {
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
     pub anchor_at: Option<i64>,
@@ -210,18 +212,25 @@ pub struct FailedRequestQuery {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    /// 客户端错误的类型（`failed` / `rejected`）；缺省为全部，非法值 400。
+    /// 与记录种类（拒绝记录 / 运行）正交。
+    #[serde(rename = "type")]
+    pub request_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestService {
+pub struct ClientErrorService {
     pub id: String,
     pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestSummary {
+pub struct ClientErrorSummary {
     pub id: String,
     pub kind: String,
+    /// 客户端视角的分类：未进入 Target 选择即终止为 `rejected`，其余失败为 `failed`。
+    #[serde(rename = "type")]
+    pub request_type: String,
     pub request_id: String,
     pub started_at: i64,
     pub duration_ms: Option<i64>,
@@ -230,7 +239,7 @@ pub struct FailedRequestSummary {
     pub client: Option<String>,
     pub model: Option<String>,
     pub model_display_name: Option<String>,
-    pub services: Vec<FailedRequestService>,
+    pub services: Vec<ClientErrorService>,
     pub error: FailureDiagnostic,
     pub interaction_id: Option<String>,
     pub root_id: Option<String>,
@@ -240,16 +249,91 @@ pub struct FailedRequestSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestPage {
-    pub items: Vec<FailedRequestSummary>,
+pub struct ClientErrorPage {
+    pub items: Vec<ClientErrorSummary>,
     pub total: i64,
     pub next_cursor: Option<String>,
     pub snapshot_sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedRequestDetail {
-    pub request: FailedRequestSummary,
+pub struct ClientErrorDetail {
+    pub request: ClientErrorSummary,
+    pub events: Vec<ObservationEvent>,
+    pub trace: Option<TraceManifest>,
+    pub snapshot_sequence: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpstreamErrorQuery {
+    pub start_at: Option<i64>,
+    pub end_at: Option<i64>,
+    pub anchor_at: Option<i64>,
+    pub window_index: Option<u32>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    /// 查询时派生的结果（`recovered` / `caused_failure` / `in_progress` / `interrupted`）。
+    pub outcome: Option<String>,
+}
+
+/// 一次失败的上游 Target 尝试（含 capability 尝试）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorSummary {
+    /// Target attempt id。
+    pub id: String,
+    pub run_id: String,
+    pub interaction_id: Option<String>,
+    pub root_id: Option<String>,
+    /// 与 `ClientErrorSummary.request_id` 同义：所属运行的请求标识。
+    pub request_id: String,
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    pub provider_id: Option<String>,
+    pub provider_name: String,
+    /// 实际发往上游的模型。
+    pub upstream_model: Option<String>,
+    /// 客户端请求的路由模型（run.request_model）。
+    pub model: Option<String>,
+    pub model_display_name: Option<String>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub client: Option<String>,
+    pub error: FailureDiagnostic,
+    pub outcome: String,
+    pub debug_status: String,
+    pub observation_gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorPage {
+    pub items: Vec<UpstreamErrorSummary>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
+    pub snapshot_sequence: i64,
+}
+
+/// 同一运行内的一次尝试时序；详情按开始时间升序返回。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UpstreamAttemptTiming {
+    pub id: String,
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    pub status: String,
+    pub provider_id: Option<String>,
+    pub provider_name: String,
+    pub upstream_model: Option<String>,
+    pub status_code: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamErrorDetail {
+    pub error: UpstreamErrorSummary,
+    pub attempts: Vec<UpstreamAttemptTiming>,
     pub events: Vec<ObservationEvent>,
     pub trace: Option<TraceManifest>,
     pub snapshot_sequence: i64,
@@ -277,10 +361,56 @@ pub(crate) struct RunOutcome {
     pub generation_root_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 一个映射在一次请求里的命中。`marker` 对所有 Run 记录，但永不进入列表接口。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct CredentialDiscovery {
     pub rule_ids: Vec<String>,
     pub source_types: Vec<String>,
+    /// 旧事件没有该字段，按空处理。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locators: Vec<CredentialLocator>,
+    /// 超出上限而未记录的位置数。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_locators: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+}
+
+/// 块级位置：不含偏移、片段或条目下标。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CredentialLocator {
+    pub rule_id: String,
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_input: Option<bool>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+impl CredentialDiscovery {
+    /// 写入队列的容量估算；与其他事件一样只计变长内容。
+    pub(super) fn bytes(&self) -> usize {
+        let locators: usize = self
+            .locators
+            .iter()
+            .map(|locator| {
+                locator.rule_id.len()
+                    + locator.source_type.len()
+                    + locator.tool_id.as_ref().map_or(0, String::len)
+            })
+            .sum();
+        self.rule_ids
+            .iter()
+            .chain(&self.source_types)
+            .map(String::len)
+            .sum::<usize>()
+            + locators
+            + self.marker.as_ref().map_or(0, String::len)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -289,23 +419,124 @@ pub struct CredentialDiscoveryQuery {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialDiscoverySummary {
-    pub interaction_id: String,
-    pub api_key_name: Option<String>,
-    pub discovered_at: i64,
-    pub new_credential_count: i64,
-    pub rule_ids: Vec<String>,
-    pub source_types: Vec<String>,
-    pub status: String,
-    pub observation_gap: bool,
+/// 命中记录列表里的一个「规则 ← 来源」配对；顺序由载荷排序确定，`hits/{index}` 依赖它。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CredentialDiscoveryHit {
+    pub rule_id: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    /// 仅用户消息有意义：`true` 是本次输入，`false` 是客户端重放的历史。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_input: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 命中记录列表的一行：一次新建映射。
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryItem {
+    /// `{event.sequence}.{discovery index}`。
+    pub id: String,
+    /// 创建事件的发生时间（毫秒）。
+    pub created_at: i64,
+    pub interaction_id: String,
+    pub run_id: Option<String>,
+    pub api_key_name: Option<String>,
+    /// 由规则 ID 前缀推导，按字典序去重；`rule_ids` 为空时同样为空。
+    pub rule_sets: Vec<String>,
+    pub rule_ids: Vec<String>,
+    pub hits: Vec<CredentialDiscoveryHit>,
+    pub omitted_hits: usize,
+    /// 载荷携带非空占位符，才能关联后续复用。
+    pub linkable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CredentialDiscoveryPage {
-    pub items: Vec<CredentialDiscoverySummary>,
+    pub items: Vec<CredentialDiscoveryItem>,
     pub next_cursor: Option<String>,
-    pub observation_gap: bool,
+}
+
+/// 命中字段与来源事件；不含正文。
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryField {
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+/// 命中详情；正文含明文，响应类型不得实现 `Debug`。
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CredentialDiscoveryHitDetail {
+    Available {
+        field: CredentialDiscoveryField,
+        text: String,
+        truncated: bool,
+        /// `secret`：按映射明文命中；`rule`：退化为按所选规则命中。
+        hit_basis: String,
+        matches: Vec<stravia_credential_protection::CredentialTextMatch>,
+    },
+    Unavailable {
+        field: CredentialDiscoveryField,
+        /// `not_retained` 或 `missing`。
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryReuse {
+    pub interaction_id: String,
+    pub run_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub source_type: String,
+    pub tool_id: Option<String>,
+    pub latest_input: Option<bool>,
+    pub last_reused_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialDiscoveryReuses {
+    pub linkable: bool,
+    pub items: Vec<CredentialDiscoveryReuse>,
+    pub truncated: bool,
+}
+
+/// 命中记录的行引用、游标与索引错误；服务端据此区分 400/404。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialDiscoveryError {
+    #[error("invalid credential discovery cursor")]
+    InvalidCursor,
+    #[error("invalid credential discovery reference")]
+    InvalidReference,
+    #[error("credential discovery not found")]
+    NotFound,
+}
+
+/// 一条新建映射的落库事实；只在内核与服务端适配层之间使用。
+#[derive(Debug, Clone)]
+pub(crate) struct CredentialDiscoveryRecord {
+    pub sequence: i64,
+    pub interaction_id: String,
+    pub run_id: Option<String>,
+    pub principal: String,
+    pub discovery: CredentialDiscovery,
+    pub hits: Vec<CredentialDiscoveryHit>,
+}
+
+/// 命中正文的解析结果；正文只在可用时携带。
+pub(crate) enum CredentialDiscoveryBody {
+    /// 来源事件不在库中或已过期。
+    Missing,
+    /// 该来源不保留正文，或来源事件没有正文。
+    NotRetained,
+    Retained(serde_json::Value),
+}
+
+pub(crate) struct CredentialDiscoveryHitContext {
+    pub tool_name: Option<String>,
+    pub body: CredentialDiscoveryBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +564,14 @@ pub(crate) enum RunEvent {
     },
     CredentialMappingsCreated {
         discoveries: Vec<CredentialDiscovery>,
+        /// 超出单事件上限而未记录的映射数。
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted_discoveries: usize,
+    },
+    CredentialMappingsReused {
+        discoveries: Vec<CredentialDiscovery>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted_discoveries: usize,
     },
     CompactionOperation {
         operation_id: String,
@@ -389,6 +628,10 @@ pub(crate) enum RunEvent {
         upstream_model: String,
         protocol: String,
         upstream_url: String,
+        /// Cost basis frozen when the attempt starts; recovery keeps it so an
+        /// interrupted terminal records an unknown cost instead of dropping it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_basis: Option<CostBasis>,
     },
     TargetAttemptFinished {
         model_turn_id: String,
@@ -402,6 +645,8 @@ pub(crate) enum RunEvent {
         first_token_ms: Option<i64>,
         #[serde(default)]
         usage: Option<ConfirmedUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amounts: Option<AttemptAmounts>,
     },
     UsageConfirmed {
         model_turn_id: String,
@@ -531,6 +776,10 @@ pub struct ObservationChange {
     pub rejection_id: Option<String>,
     pub kind: String,
     pub boundary: bool,
+    /// 仅 `target_attempt_finished` 且尝试带错误时取事件载荷中的 `error.source`；
+    /// 上游错误列表据此判断是否需要静默刷新，读取载荷不额外查询存储。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_source: Option<String>,
 }
 
 impl ObservationChange {
@@ -544,6 +793,16 @@ impl ObservationChange {
                 | "model_thinking"
                 | "request_rejected"
         );
+        let error_source = (event.kind == "target_attempt_finished")
+            .then(|| {
+                event
+                    .payload
+                    .get("error")
+                    .and_then(|error| error.get("source"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
         Self {
             sequence: event.sequence,
             occurred_at: event.occurred_at,
@@ -553,6 +812,7 @@ impl ObservationChange {
             rejection_id: event.rejection_id,
             kind: event.kind,
             boundary,
+            error_source,
         }
     }
 }
@@ -581,6 +841,8 @@ pub enum ObservationQueryError {
     InvalidWindow,
     #[error("invalid observation event page")]
     InvalidEventPage,
+    #[error("invalid observation filter")]
+    InvalidFilter,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -619,8 +881,8 @@ pub struct InteractionSummary {
     /// Opening text of the normalized initiating user message; absent for uncaptured input.
     pub input_preview: Option<String>,
     pub visible_tail: String,
-    /// The interaction contains at least one run qualifying as a Failed Request
-    /// (same predicate as the failed-requests view).
+    /// The interaction contains at least one terminal-error run that the client-errors view
+    /// lists as a run record (failed request, or request rejected before Target selection).
     pub failed_request: bool,
     /// Any run in this interaction committed client-visible output, i.e. the client
     /// received at least one visible byte (text, public tool call, or thinking preview).

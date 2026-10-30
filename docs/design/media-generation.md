@@ -139,7 +139,7 @@ Codex 模型发现只接受来源明确的 `media_image`、`output_modalities` /
 
 公开 [Codex ModelInfo](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs) 的 `input_modalities`、`supports_image_detail_original` 仅说明输入，不能作为图片输出证明；未找到可替代上述明确声明的动态账号图片资格接口。OMP 的 [hosted-image 规则](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/compat/rules/classes/openai.kdl) 仍包含静态 lineage/version 推断，不能冒充上游动态能力。缺少证明表示资格未知，不表示服务端一定不支持；先前按名称登记的候选可能在同步后退出图片列表。仅含模型 ID 的静态清单也不自动授予图片输出，需要来源或管理员明确配置模型能力。
 
-更新并重新导入 Codex 插件后，已从来源导入且未经人工编辑的 Provider Model 在下次同步时刷新登记；人工编辑的规格继续由管理员接管，不强制覆盖。目录声明、历史成功调用与当前账号授权是不同事实，不以固定名单维持过时资格。
+更新并重新导入 Codex 插件后，Provider Model 的未固定规格字段在下次同步时刷新；人工修改的字段保持固定，可逐字段恢复同步，不强制覆盖。目录声明、历史成功调用与当前账号授权是不同事实，不以固定名单维持过时资格。
 
 不运行 Codex CLI，不采用独立的 `images/generations` 或 `images/edits` 调用链，不切换为另行配置的 OpenAI API Key。实际支持的模型、参数映射及错误分类须以选定链路的源码与协议证据核定；目录声明不能代替接入资格验证，保存配置也不代表已经执行过真实生图验证。
 
@@ -153,7 +153,7 @@ Antigravity 参考 OMP 的 [原生图片适配器](https://github.com/can1357/oh
 4. 原生请求使用 `responseModalities: ["IMAGE"]`、`candidateCount: 1`；有序参考图编码为 `inlineData`，比例与分辨率直映射到 `imageConfig.aspectRatio` 和 `imageConfig.imageSize`，省略的偏好不补默认值。普通推理的参数白名单保持不变。
 5. 消费 SSE 的图片 `inlineData`，要求成功终态及恰好一张图片，限制解码图片为 32 MiB；空图、非法编码、非图片 MIME、多图、截断或上游错误均不报告成功。Core 继续完整解码图片、校验实际规格并收存为 Artifact；HTTP 和流内错误沿用 Route 错误分类与重试策略。
 
-已安装实例须重新构建并导入独立 `antigravity` 插件，再同步账号模型，随后将发现的图片模型绑定到图片 Route 并在媒体生成中选择该 Route。来源托管的规格可随同步刷新，人工编辑的规格不被强制覆盖；不自动创建、改绑或启用 Route。账号是否广告图片模型、配额与真实生图资格仍由上游决定，本地合约验证不能代替真实账号验证。
+已安装实例须重新构建并导入独立 `antigravity` 插件，再同步账号模型，随后将发现的图片模型绑定到图片 Route 并在媒体生成中选择该 Route。未固定的规格字段随同步刷新，人工固定字段不被强制覆盖；不自动创建、改绑或启用 Route。账号是否广告图片模型、配额与真实生图资格仍由上游决定，本地合约验证不能代替真实账号验证。
 
 ## 5. 失败与重试
 

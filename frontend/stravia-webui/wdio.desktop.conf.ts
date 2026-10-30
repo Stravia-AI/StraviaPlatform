@@ -58,6 +58,8 @@ try {
 process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT = runRoot
 process.env.STRAVIA_DESKTOP_E2E_OWNS_RUN_ROOT = ownsRunRoot ? '1' : '0'
 process.env.CODEX_HOME = codexHome
+// 原生夹具的 manifest 属于此来源；不继承生产源，否则 Core 会按来源校验禁用下载。
+process.env.STRAVIA_UPDATER_URL = 'https://updates.example.com'
 // 恢复窗口不依赖业务数据根；测试仍将 WebView2 配置隔离到可清理的临时目录。
 process.env.WEBVIEW2_USER_DATA_FOLDER = join(runRoot, 'webview')
 

@@ -3,6 +3,9 @@
 //! call boundary. No test reaches the production network — the catalog origin
 //! is injected through `GatewayConfig::catalog_base_url`.
 
+#[path = "vendor_catalog_pricing/mod.rs"]
+mod vendor_catalog_pricing;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -401,12 +404,19 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
                     model_id: model_id.to_owned(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: if edited {
-                        SnapshotState::Edited {
-                            source: Some(source),
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::from([
+                                stravia_core::provider_models::ProviderModelField::ReasoningEfforts,
+                            ]),
                         }
                     } else {
-                        SnapshotState::Imported { source }
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::new(),
+                        }
                     },
+                    source_metadata: None,
                     metadata_source_provider_id: None,
                     presence: ProviderModelPresence::Present,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -425,13 +435,15 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
         stravia_core::thinking::visible_levels(&model.thinking_level_map),
         [ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max]
     );
-    assert!(model.can_reimport);
+    assert!(model.pinned_fields.is_empty());
+    assert!(model.restorable_fields.is_empty());
     assert_eq!(
         model.snapshot_state,
         SnapshotState::Imported {
             source: SourceStamp::ProviderCatalog {
                 provider_id: "zhipuai-coding-plan".to_owned()
-            }
+            },
+            pinned: std::collections::BTreeSet::new(),
         }
     );
     let edited = gw
@@ -447,7 +459,7 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
 }
 
 #[tokio::test]
-async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source()
+async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_restore_source()
 -> anyhow::Result<()> {
     let catalog = reasoning_catalog().await?;
     {
@@ -511,12 +523,19 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
                     model_id: model_id.to_owned(),
                     source_kind: ProviderModelSourceKind::Discovered,
                     snapshot_state: if edited {
-                        SnapshotState::Edited {
-                            source: Some(source),
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::from([
+                                stravia_core::provider_models::ProviderModelField::ReasoningEfforts,
+                            ]),
                         }
                     } else {
-                        SnapshotState::Imported { source }
+                        SnapshotState::Imported {
+                            source,
+                            pinned: std::collections::BTreeSet::new(),
+                        }
                     },
+                    source_metadata: None,
                     metadata_source_provider_id: Some("zhipuai-coding-plan".to_owned()),
                     presence: ProviderModelPresence::Missing,
                     selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -552,7 +571,10 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
         assert_eq!(after.metadata.cost, before.metadata.cost);
         assert_eq!(after.metadata.status.as_deref(), Some("deprecated"));
         assert!(!after.available);
-        assert!(after.can_reimport);
+        assert!(matches!(
+            after.snapshot_state,
+            SnapshotState::Imported { .. }
+        ));
     }
     assert!(
         gw.admin()
@@ -573,7 +595,10 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_reimport_source
             .get_provider_model(&provider.id, model_id)
             .await?;
         assert!(model.available);
-        assert!(model.can_reimport);
+        assert!(matches!(
+            model.snapshot_state,
+            SnapshotState::Imported { .. }
+        ));
     }
     gw.shutdown().await;
     Ok(())
@@ -969,8 +994,11 @@ async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Re
         index
     };
     catalog.set_index("rev-1", zen_index(None)).await;
+    let mut scoped = scope_body();
+    scoped["zen-1"]["cost"] =
+        serde_json::from_str(r#"{"input":1e-7,"output":0.123456789012345678}"#)?;
     for id in ["zen-a", "zen-b", "zen-c"] {
-        catalog.set_scope(id, 200, scope_body()).await;
+        catalog.set_scope(id, 200, scoped.clone()).await;
     }
 
     let directory = tempfile::tempdir()?;
@@ -979,7 +1007,19 @@ async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Re
     assert_eq!(catalog.index_requests().await, 1);
 
     // 同一 revision 下，多个 Provider 的 scope 缺失与定时刷新都只复用已落盘的索引。
-    gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    let first = gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    let cached = gw.catalog_sync.catalog_models("zen-a", "default").await?;
+    assert_eq!(first, cached);
+    let encoded = serde_json::to_value(&cached)?;
+    assert!(encoded["models"][0]["cost"]["input"].is_number());
+    assert_eq!(
+        encoded["models"][0]["cost"]["input"].to_string(),
+        "0.0000001"
+    );
+    assert_eq!(
+        encoded["models"][0]["cost"]["output"].to_string(),
+        "0.123456789012345678"
+    );
     gw.catalog_sync.catalog_models("zen-b", "default").await?;
     let unchanged = gw.catalog_sync.refresh().await?;
     assert_eq!(unchanged.revision, "rev-1");
@@ -1001,5 +1041,93 @@ async fn unchanged_revision_never_redownloads_the_provider_index() -> anyhow::Re
     assert_eq!(catalog.index_requests().await, 2);
     gw.catalog_sync.catalog_models("zen-c", "default").await?;
     assert_eq!(catalog.index_requests().await, 2);
+    Ok(())
+}
+
+/// 旧连接在插件采用新的 `catalog_id` 之前把 vendor 身份存成了 `preset_key`。
+/// 目录作用域必须由当前 descriptor 的 `catalog_id` 决定，渠道目录价格不能被
+/// Canonical 官方参考价替换。
+#[tokio::test]
+async fn legacy_preset_key_syncs_commandcode_channel_catalog_prices() -> anyhow::Result<()> {
+    let catalog = FakeCatalog::start().await?;
+    catalog
+        .set_index(
+            "rev-legacy-commandcode",
+            json!({
+                "commandcode": catalog_entry(
+                    "commandcode", "CommandCode", "@ai-sdk/openai-compatible",
+                    Some(&format!("{}/v1", catalog.base_url()))
+                )
+            }),
+        )
+        .await;
+    catalog.state.write().await.canonical = json!({
+        "acme/glm-5.3": {
+            "id": "acme/glm-5.3",
+            "name": "GLM-5.3",
+            "cost": {"input": 0.1, "output": 0.2}
+        }
+    });
+    catalog
+        .set_scope(
+            "commandcode",
+            200,
+            json!({
+                "glm-5.3": {
+                    "id": "glm-5.3",
+                    "name": "GLM-5.3",
+                    "cost": {"input": 1.0, "output": 2.0}
+                }
+            }),
+        )
+        .await;
+
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+
+    // 当前创建契约保存 descriptor 的目录身份，而不是可选择的 vendor 身份。
+    let created = gw
+        .admin()
+        .create_provider(editor_provider(&catalog, "commandcode"))
+        .await?;
+    assert_eq!(created.preset_key.as_deref(), Some("commandcode"));
+
+    // 旧版本保存的连接：vendor 相同，但 preset_key 仍是旧的目录身份。
+    let legacy = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "legacy command code".to_owned(),
+            vendor: Some("commandcode".to_owned()),
+            protocol: "openai-compatible".to_owned(),
+            base_url: format!("{}/v1", catalog.base_url()),
+            preset_key: Some("command-code".to_owned()),
+            channel: Some("default".to_owned()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".to_owned(),
+            vendor_options: "{}".to_owned(),
+            auth_mode: "apikey".to_owned(),
+            use_proxy: false,
+        })
+        .await?;
+    let summary = gw.admin().sync_provider_models(&legacy.id).await?;
+    assert_eq!(summary.added, 1);
+    let model = gw.admin().get_provider_model(&legacy.id, "glm-5.3").await?;
+    let cost = model.metadata.cost.expect("channel catalog price");
+    assert_eq!(cost.prices.input, Some(rust_decimal::Decimal::new(1, 0)));
+    assert_eq!(cost.prices.output, Some(rust_decimal::Decimal::new(2, 0)));
+    assert_eq!(
+        model.snapshot_state,
+        SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog {
+                provider_id: "commandcode".to_owned()
+            },
+            pinned: std::collections::BTreeSet::new(),
+        }
+    );
+    gw.shutdown().await;
     Ok(())
 }

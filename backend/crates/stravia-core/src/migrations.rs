@@ -202,6 +202,77 @@ pub async fn run_sqlite_migrator(
         )
         .await?;
     }
+    if runner.version_exists(26) {
+        report(
+            "usage_backfill",
+            "Preparing request classification counters",
+            0,
+            None,
+        );
+        // 0026 先建立新列、视图与触发器；尝试错误详情必须在其后、计数回填 0027 之前写入。
+        runner
+            .run_direct(Some(26), &mut *pinned.connection, false)
+            .await?;
+        report(
+            "usage_backfill",
+            "Backfilling attempt error details",
+            0,
+            None,
+        );
+        crate::interaction_observation::upgrade::backfill_attempt_error_details_sqlite(
+            &mut pinned.connection,
+        )
+        .await?;
+    }
+    if runner.version_exists(30) {
+        runner
+            .run_direct(Some(30), &mut *pinned.connection, false)
+            .await?;
+        report(
+            "model_pinning",
+            "Converting edited Provider Model snapshots",
+            0,
+            None,
+        );
+        crate::provider_models::pinning_migration::run_sqlite(&mut pinned.connection).await?;
+    }
+    if runner.version_exists(32) {
+        runner
+            .run_direct(Some(32), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=33 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report("history_data", "Normalizing history storage", 0, None);
+            crate::turn_chain::upgrade::normalize_sqlite(&mut pinned.connection).await?;
+        }
+    }
+    if runner.version_exists(35) {
+        // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
+        runner
+            .run_direct(Some(34), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=35 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "credential_cleanup",
+                "Removing retired credential rules",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade::retire_kingfisher_discoveries_sqlite(
+                &mut pinned.connection,
+            )
+            .await?;
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -310,6 +381,69 @@ pub async fn run_postgres_migrator(
         );
         crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
             .await?;
+    }
+    if runner.version_exists(26) {
+        report(
+            "usage_backfill",
+            "Preparing request classification counters",
+            0,
+            None,
+        );
+        // 0026 先建立新列、视图与触发器；尝试错误详情必须在其后、计数回填 0027 之前写入。
+        runner.run_direct(Some(26), &mut *connection, false).await?;
+        report(
+            "usage_backfill",
+            "Backfilling attempt error details",
+            0,
+            None,
+        );
+        crate::interaction_observation::upgrade::backfill_attempt_error_details_postgres(
+            &mut connection,
+        )
+        .await?;
+    }
+    if runner.version_exists(30) {
+        runner.run_direct(Some(30), &mut *connection, false).await?;
+        report(
+            "model_pinning",
+            "Converting edited Provider Model snapshots",
+            0,
+            None,
+        );
+        crate::provider_models::pinning_migration::run_postgres(&mut connection).await?;
+    }
+    if runner.version_exists(32) {
+        runner.run_direct(Some(32), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=33 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report("history_data", "Normalizing history storage", 0, None);
+            crate::turn_chain::upgrade::normalize_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(35) {
+        // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
+        runner.run_direct(Some(34), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=35 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "credential_cleanup",
+                "Removing retired credential rules",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade::retire_kingfisher_discoveries_postgres(
+                &mut connection,
+            )
+            .await?;
+        }
     }
     report(
         "schema_migrations",
@@ -809,6 +943,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_context_index_v34_upgrades_without_rewriting_history() {
+        let pool = sqlite_pool().await;
+        let mut migrations: Vec<_> = SQLITE_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 33)
+            .cloned()
+            .collect();
+        let mut context_index = SQLITE_MIGRATOR
+            .iter()
+            .find(|migration| migration.description == "observation context events index")
+            .unwrap()
+            .clone();
+        // 已有实例在版本 34 安装了上下文索引，不能随当前目录重新编号其历史。
+        context_index.version = 34;
+        migrations.push(context_index);
+        super::run_sqlite_migrator(&pool, &Migrator::with_migrations(migrations), None)
+            .await
+            .unwrap();
+        let history: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let payload = serde_json::json!({
+            "kind": "credential_mappings_created",
+            "discoveries": [{
+                "rule_ids": ["kingfisher.retired", "custom.kept"],
+                "source_types": ["user_message"],
+                "marker": "retained-marker"
+            }]
+        });
+        let encoded =
+            crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();
+        sqlx::query("INSERT INTO observation_events(sequence, occurred_at, kind, payload, expires_at) VALUES (1, 1, 'credential_mappings_created', ?, 9999999999999)")
+            .bind(encoded)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        migrate_sqlite(&pool, None).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+
+        let retained: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE version <= 34 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, history);
+        let credential_migration: (String, bool) =
+            sqlx::query_as("SELECT description, success FROM _sqlx_migrations WHERE version=35")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            credential_migration,
+            ("credential hit records".into(), true)
+        );
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let actual: serde_json::Value =
+            serde_json::from_slice(&crate::storage_codec::decode(&stored).unwrap()).unwrap();
+        let mut expected = payload;
+        expected["discoveries"][0]["rule_ids"] = serde_json::json!(["custom.kept"]);
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
     async fn sqlite_baseline_applies_to_empty_database_and_is_idempotent() {
         let pool = sqlite_pool().await;
         migrate_sqlite(&pool, None).await.expect("fresh baseline");
@@ -1073,7 +1278,7 @@ mod tests {
                 .unwrap();
         assert_eq!(stored_segment, segment_bytes);
         assert!(
-            sqlx::query("DELETE FROM turn_chain_nodes WHERE id='child'")
+            sqlx::query("DELETE FROM turn_nodes WHERE id='child'")
                 .execute(&pool)
                 .await
                 .is_err()
@@ -1121,16 +1326,14 @@ mod tests {
                 .await
                 .is_err()
         );
-        let valid_payload = crate::storage_codec::encode(
-            br#"{"data":{},"slots":[],"contents":[]}"#.as_slice().into(),
-        )
-        .unwrap();
+        sqlx::query("INSERT INTO turn_scopes(principal) VALUES('api-key:bob') ON CONFLICT(principal) DO NOTHING")
+            .execute(&pool).await.unwrap();
         for (id, kind, principal) in [
             ("foreign", "response", "api-key:bob"),
             ("wrong-kind", "agent", "api-key:alice"),
         ] {
-            let error = sqlx::query("INSERT INTO turn_chain_nodes (id, kind, parent_id, principal, payload_version, payload, created_at, expires_at, storage_format) VALUES (?, ?, 'parent', ?, 1, ?, 1, 100, 2)")
-                .bind(id).bind(kind).bind(principal).bind(&valid_payload).execute(&pool).await.unwrap_err();
+            let error = sqlx::query("INSERT INTO turn_nodes(id,kind,parent_pk,scope_id,payload_version,created_at) SELECT $1,$2,p.node_pk,s.id,1,1 FROM turn_nodes p CROSS JOIN turn_scopes s WHERE p.id='parent' AND s.principal=$3")
+                .bind(id).bind(kind).bind(principal).execute(&pool).await.unwrap_err();
             assert!(
                 error
                     .as_database_error()
@@ -1172,13 +1375,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(version, SQLITE_MIGRATOR.iter().last().unwrap().version);
-        let legacy_columns: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pragma_table_info('turn_chain_nodes') WHERE name='legacy_payload'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(legacy_columns, 0);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
         let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
             .materialize(
@@ -1230,13 +1426,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(legacy_tables, 0);
-        let legacy_columns: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pragma_table_info('turn_chain_nodes') WHERE name='legacy_payload'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(legacy_columns, 0);
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await
@@ -1582,16 +1771,83 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        // 0017 added prefix_projection_version as INT4 on the legacy table, so a
+        // real 0031 database can hold a non-NULL value. Reach 0031 through the
+        // production runner (including the 0007 data hook), seed the legacy
+        // prefix projection, then run 0032's data hook and 0033 over it.
+        let mut to_0031 = super::unlocked_runner(&super::POSTGRES_MIGRATOR);
+        to_0031
+            .migrations
+            .to_mut()
+            .retain(|migration| migration.version <= 31);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::run_postgres_migrator(&pool, &to_0031, None),
+        )
+        .await
+        .expect("failed migration leaked advisory lock")
+        .expect("v1 upgrade through 0031");
+        sqlx::query(
+            "UPDATE turn_chain_nodes SET prefix_namespace='fixture-prefix', \
+             prefix_fingerprint='fixture-fingerprint', prefix_item_count=3, \
+             prefix_completed_at=1, prefix_projection_version=7, \
+             prefix_controls_fingerprint='fixture-controls', \
+             prefix_context_fingerprint='fixture-context' WHERE id='pg-child'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             migrate_postgres(&pool, None),
         )
         .await
-        .expect("failed migration leaked advisory lock")
-        .expect("v1 upgrade");
+        .expect("0032 history conversion hung")
+        .expect("0031 upgrade");
         migrate_postgres(&pool, None)
             .await
             .expect("upgrade re-run is a no-op");
+        #[derive(sqlx::FromRow)]
+        struct PrefixProjection {
+            prefix_namespace: Option<String>,
+            prefix_fingerprint: Option<String>,
+            prefix_item_count: Option<i64>,
+            prefix_completed_at: Option<i64>,
+            prefix_projection_version: Option<i64>,
+            prefix_controls_fingerprint: Option<String>,
+            prefix_context_fingerprint: Option<String>,
+        }
+        let prefix: PrefixProjection = sqlx::query_as(
+            "SELECT prefix_namespace, prefix_fingerprint, prefix_item_count, \
+             prefix_completed_at, prefix_projection_version, \
+             prefix_controls_fingerprint, prefix_context_fingerprint \
+             FROM turn_nodes WHERE id='pg-child'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(prefix.prefix_namespace.as_deref(), Some("fixture-prefix"));
+        assert_eq!(prefix.prefix_fingerprint.as_deref(), Some("fixture-fingerprint"));
+        assert_eq!(prefix.prefix_item_count, Some(3));
+        assert_eq!(prefix.prefix_completed_at, Some(1));
+        assert_eq!(prefix.prefix_projection_version, Some(7));
+        assert_eq!(prefix.prefix_controls_fingerprint.as_deref(), Some("fixture-controls"));
+        assert_eq!(prefix.prefix_context_fingerprint.as_deref(), Some("fixture-context"));
+        let parent_id: String = sqlx::query_scalar(
+            "SELECT p.id FROM turn_nodes c JOIN turn_nodes p ON p.node_pk=c.parent_pk \
+             WHERE c.id='pg-child'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent_id, "pg-parent");
+        let parent_projection: Option<i64> = sqlx::query_scalar(
+            "SELECT prefix_projection_version FROM turn_nodes WHERE id='pg-parent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parent_projection, None);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
         let principal = stravia_runtime_contract::Principal::new("alice");
         let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone())
@@ -1604,7 +1860,7 @@ mod tests {
             .unwrap();
         assert_eq!(restored[0].payload, parent_payload);
         assert_eq!(restored[1].payload, serde_json::json!({"items": [item]}));
-        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_chain_contents")
+        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_contents")
             .fetch_one(&pool)
             .await
             .unwrap();

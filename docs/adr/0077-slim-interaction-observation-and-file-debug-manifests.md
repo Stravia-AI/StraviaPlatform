@@ -28,6 +28,14 @@ manifest 每批最多 200 条，在最多 8 个、随可用处理器确定的 bl
 - `client_tool_result` 首先以 Generation Chain 的核验结果为准：父节点已核验时只从该节点的 client delta 捕获本次新增的工具结果，不再回放保存整段窗口；不复制父节点完整窗口；没有已核验父节点时不从父历史推断工具结果。客户端省略 thinking-only 输出导致父节点退回时，Observation 还可用同 Principal、未过期的工具收据和完整收到输入的 canonical 严格前缀证明旧结果回放，新增后缀必须只有普通 User 输入；User 内的 ToolResult 不满足此条件。成立时跳过该 Run 的重复结果捕获并排除当前工具／pending-tool 归并优先级，不改变模型输入或 Generation 父边。收到输入摘要使用有界易失索引，重启后仅从已保存 Generation 的输入边界恢复证明；完整证据不可用时不猜测。独立 sibling、结果变化和已有输入变化的分支仍保留各自收据，不按工具 ID 全局消费。
 - `observation_events.payload` 与 Turn Chain 存储共用同一二进制 storage codec（布局见 [ADR-0076](0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)：固定 14 字节 trailer，codec、零 dict_id、原始长度与版本；至少 128B 且 body 更小时采用带 checksum 的 zstd-1，线程本地上下文复用，存量 level 3 帧继续读取），SQL 查询用到的 JSON 字段提升为列：`tool_id`（client_tool_handoff/client_tool_result）与 `operation_id`（compaction_operation），其余内容不留列。旧 zip 文本编码在转换时一次性解码，不再产生。索引同步收敛：删除未被查询使用的 `observation_events_expiry_idx`；`observation_events_rejection_idx` 改为 `WHERE rejection_id IS NOT NULL` 部分索引；工具调用索引由 `json_extract` 表达式改为 `(run_id, tool_id, sequence DESC)` 部分索引。
 
+## Attempt 用量与窄投影
+
+0033 删除 `interaction_observations` 和 `model_turn_observations` 各五个无生产读者的 Token 汇总副本，保留 `estimated_input_tokens`；attempt 的已确认用量仍是查询权威，长期 stats 与费用累计不因删除这些副本而改变。写路径不再逐 confirmation 重新 SUM 并回写 turn/interaction。
+
+同批已有 usage 时直接复用，只有缺失的 finish 才查询 durable attempt；finish 一次更新状态、冻结金额和已知 usage。符合既有事件合并规则的后续同批 confirmation 只在该 UPDATE 成功后吸收，未知字段不覆盖既有已知值。保留原有 sequence、kind、payload、迟到终态修订、覆盖率、unknown/zero 区分及 at-most-once 金额累计，不把诊断队列改造成可靠结算账本。
+
+本次没有实施 root 投影表、terminal-event locator、stats 差额替代触发器或 Observation tombstone 工作流。既有单 Interaction 原子清理、手动 clear、生命周期与文件 manifest 边界保持不变；历史链的有界候选 GC 不能视为 Observation 清理也已改成逐事件有界事务。
+
 ## 有界实时通信补充决策
 
 本补充明确替代原「未收口内容立即实时发布」的每次中间修订即时承诺：后端以固定首次截止的最多 100ms 窗口发布变化 block 的最新累计修订，第一段及完成、失败、取消边界立即处理；连续输入不能滚动延后截止。只替换易失预览，慢消费者的旧 block 修订可由最新修订替代，持久变化通知和 gap/恢复信号不得被正文积压吞掉。全文构造与发送编码不在每个原始 delta 上执行，推理和下游转发不等待观察调度。

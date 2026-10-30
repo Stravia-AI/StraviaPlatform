@@ -236,17 +236,20 @@ def test_model_sync_records_detailed_transitions_and_source_owned_specifications
     assert spec_only["added"] == spec_only["missing"] == spec_only["deprecated"] == 0
     alpha = _model(env, path, "alpha")
     metadata = {**alpha["metadata"], "name": "Administrator Alpha", "limit": {"context": 4096}}
-    _api(env, f"{path}/model", "PUT", {"model_id": "alpha", "revision": alpha["revision"], "metadata": metadata})
+    _api(env, f"{path}/model", "PUT", {"model_id": "alpha", "revision": alpha["revision"], "changes": {"name": "Administrator Alpha", "limit.context": 4096}})
     before_edit_history = _history(env, provider)["records"]
     upstream["body"] = {"data": [
         {"id": "alpha", "limit": {"context": 65536}}, {"id": "beta"}, {"id": "gamma"},
     ]}
     restored = _api(env, f"{path}/models/sync", "POST", {})
     assert restored["restored"] == 1 and restored["deprecation_cleared"] == 2
-    assert restored["specification_updated"] == 0
+    # name/limit are pinned, but the sparse source no longer declares
+    # modalities: unpinned fields follow the source and unregister.
+    assert restored["specification_updated"] == 1
     alpha = _model(env, path, "alpha")
     assert alpha["metadata"]["name"] == "Administrator Alpha"
     assert alpha["metadata"]["limit"]["context"] == 4096
+    assert alpha["metadata"]["modalities"]["input"] == ["text"]
     assert len(_history(env, provider)["records"]) == len(before_edit_history) + 1
     # Historical differences remain the actual old/new values, not today's edit.
     assert _api(env, f"/model-changes/{record['id']}")["changes"] == record["changes"]
@@ -359,7 +362,7 @@ def test_manual_model_actions_history_filters_and_keyset_keep_complete_batches(s
     })
     _api(env, f"{path}/model", "PUT", {
         "model_id": manual["id"], "revision": manual["revision"],
-        "metadata": {**manual["metadata"], "name": "Edited Local Needle"},
+        "changes": {"name": "Edited Local Needle"},
     })
     assert _history(env, provider)["records"] == prior
     _api(env, f"{path}/models/sync", "POST", {})
@@ -488,7 +491,7 @@ def test_inflight_discovery_rejects_stale_connection_or_manual_model_edit(sync_e
                 alpha = _model(env, path, "alpha")
                 _api(env, f"{path}/model", "PUT", {
                     "model_id": "alpha", "revision": alpha["revision"],
-                    "metadata": {**alpha["metadata"], "name": "Concurrent administrator value"},
+                    "changes": {"name": "Concurrent administrator value"},
                 })
         finally:
             release.set()

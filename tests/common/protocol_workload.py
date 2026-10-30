@@ -17,30 +17,6 @@ import tiktoken
 PROTOCOLS = ("openai-chat", "open-responses", "anthropic-messages", "google-content")
 
 
-def expected_observation_text(text: str, secrets=()) -> str:
-    """Apply the credential-text contract for this ASCII-word workload only.
-
-    Registered synthetic secrets are masked before the bare scheme policy.
-    Bare credential schemes still trigger permanent ordinary-Observation
-    redaction. This is not a general replacement for the product redactor.
-    """
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        if secret:
-            text = text.replace(secret, "***")
-    parts = re.split(r"(\s+)", text)
-    mask_next = False
-    for index in range(0, len(parts), 2):
-        token = parts[index]
-        if not token:
-            continue
-        if token.lower() in ("bearer", "basic"):
-            mask_next = True
-        elif mask_next:
-            parts[index] = "***"
-            mask_next = False
-    return "".join(parts)
-
-
 @lru_cache(maxsize=1)
 def _vocabulary() -> tuple[str, ...]:
     """Prepare diverse, independently roundtripping ASCII word tokens once."""
@@ -107,7 +83,6 @@ class Plan:
 
     def metadata(self) -> dict:
         output_sha256 = hashlib.sha256(self.output_text.encode()).hexdigest()
-        observation = expected_observation_text(self.output_text, self.credential_secrets)
         return {"nonce": self.nonce, "input_tokens": self.input_tokens,
                 "image_count": self.image_count, "image_tokens": None,
                 "images": [{"sha256": i.sha256, "width": i.width, "height": i.height,
@@ -116,8 +91,6 @@ class Plan:
                 "tokens_per_second": self.tokens_per_second, "duration": self.duration,
                 "output_tokens": self.output_tokens, "reserve_tokens": self.reserve_tokens,
                 "output_sha256": output_sha256,
-                "expected_observation_output_sha256": hashlib.sha256(observation.encode()).hexdigest(),
-                "observation_redaction_applied": observation != self.output_text,
                 "credential_protection_enabled": bool(self.new_credential_secrets),
                 "expected_new_mappings": len(self.new_credential_secrets)}
 

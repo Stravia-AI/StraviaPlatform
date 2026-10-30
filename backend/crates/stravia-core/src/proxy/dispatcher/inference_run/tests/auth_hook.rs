@@ -132,6 +132,7 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
             inject_media_generation: false,
             model_ids: vec![final_route.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("expired API key");
@@ -242,6 +243,7 @@ async fn hook_rewrite_checks_the_final_model_binding() {
             inject_media_generation: false,
             model_ids: vec![initial_model_id],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

@@ -460,12 +460,17 @@ impl Gateway {
                     .as_deref()
                     .is_none_or(|value| value.trim().is_empty())
             {
-                let catalog_id = connection
-                    .provider
-                    .preset_key
+                let catalog_id = descriptor
+                    .catalog_id
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
-                    .or(descriptor.catalog_id.as_deref())
+                    .or_else(|| {
+                        connection
+                            .provider
+                            .preset_key
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                    })
                     .unwrap_or(vendor_id);
                 match self.catalog_sync.provider_scope(catalog_id).await {
                     Ok(scope) => Some(

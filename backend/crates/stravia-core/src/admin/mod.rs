@@ -22,6 +22,7 @@ pub mod identity;
 mod media;
 mod media_generation;
 mod model_data;
+mod money;
 mod oauth;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
@@ -34,17 +35,21 @@ mod web_access;
 mod web_search;
 
 pub use crate::interaction_observation::{
-    BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
-    CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState,
-    DownloadTicket, FailedRequestDetail, FailedRequestPage, FailedRequestQuery,
-    FailedRequestSummary, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
-    InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot, InteractionSummary,
-    KnownInteraction, ObservationChange, ObservationEvent, ObservationQueryError,
-    ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery,
-    RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery,
-    RunDetail, TraceManifest, UsageCoverage,
+    BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ClientErrorDetail,
+    ClientErrorPage, ClientErrorQuery, ClientErrorSummary, ConfirmedUsage,
+    CredentialDiscoveryError, CredentialDiscoveryField, CredentialDiscoveryHit,
+    CredentialDiscoveryHitDetail, CredentialDiscoveryItem, CredentialDiscoveryPage,
+    CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuses, DebugState,
+    DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage,
+    InteractionEventsQuery, InteractionSnapshot, InteractionSummary, KnownInteraction,
+    ObservationChange, ObservationEvent, ObservationQueryError, ObservationStream,
+    ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery, RejectionSummary,
+    RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery, RunDetail, TraceManifest,
+    UpstreamAttemptTiming, UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorQuery,
+    UpstreamErrorSummary, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
+pub use money::{ProviderCostPlanInput, provider_cost_plan_value};
 pub use provider_connection::{
     ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderConnectionCheckInput,
     ProviderNetworkPermission,

@@ -258,17 +258,28 @@ pub(super) fn model_turn_error_response(
             }
             _ => error.message,
         };
-        (
+        let code = error.code;
+        let mut response = (
             status,
             axum::Json(serde_json::json!({
                 "error": {
-                    "type": error.code,
+                    "type": code,
                     "code": status.as_u16(),
                     "message": message,
                 }
             })),
         )
-            .into_response()
+            .into_response();
+        // 运行收口按稳定错误码集合区分错误的请求（模型不存在、无权使用模型）；
+        // 本分支此前不落诊断，导致这些 Run 永远无法归类。
+        response.extensions_mut().insert(
+            crate::interaction_observation::FailureDiagnostic::platform(
+                code,
+                message.clone(),
+                status.as_u16(),
+            ),
+        );
+        response
     } else {
         coded_error_response(status, &error.code, &error.message)
     }

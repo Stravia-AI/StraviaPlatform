@@ -12,12 +12,16 @@ import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
-import { admin } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
+import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
 import { formatList } from '#lib/format.js'
+import { currencyForKind } from '#lib/money.js'
 import { specificationModality } from '#lib/model-specification.js'
 import { inputValue } from '#lib/utils.js'
+import PriceEditor from '#lib/components/price-editor.svelte'
+import { buildModelCostJson, emptyPriceForm, priceFormFromCost, type PriceForm } from '#lib/components/price-form.js'
 
 import {
   thinkingControlContext,
@@ -27,9 +31,11 @@ import {
   type ThinkingControlKind,
 } from '#lib/thinking-control.js'
 import type {
+  CurrencyKind,
   Provider,
   ProviderModelSummary,
   Route,
+  RouteBilling,
   RouteSelectionStrategy,
   TargetRuntimeStatus,
   TargetThinkingControl,
@@ -97,6 +103,26 @@ let form = $state({
   defaultThinkingLevel: initialModel?.default_thinking_level ?? UNSPECIFIED_THINKING_LEVEL,
 })
 
+type BillingMode = 'none' | 'per_call' | 'per_token'
+
+const initialBilling = untrack(() => initialModel?.billing ?? null)
+let billingMode = $state<BillingMode>(initialBilling?.mode ?? 'none')
+let billingAmount = $state(initialBilling?.mode === 'per_call' ? initialBilling.amount : '')
+let billingCurrency = $state<CurrencyKind>(initialBilling?.mode === 'per_call' ? initialBilling.currency : 'usd')
+let billingPrice = $state<PriceForm>(
+  initialBilling?.mode === 'per_token' ? priceFormFromCost(initialBilling.price) : emptyPriceForm(),
+)
+let billingErrors = $state<string[]>([])
+const billingCurrencyQuery = createQuery(() => currencyQueryOptions())
+const customCurrency = $derived(billingCurrencyQuery.data ?? null)
+const billingAmountIssue = $derived.by(() => {
+  if (billingMode !== 'per_call') return ''
+  const value = billingAmount.trim()
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value) && Number(value) >= 0
+    ? ''
+    : m.billing_amount_invalid()
+})
+
 let targets = $state<RouteTargetForm[]>(
   untrack(() => createRouteTargetForms(initialModel, initialProviderId, initialModelId)),
 )
@@ -130,6 +156,12 @@ function draftSnapshot() {
   const editedTarget = targetEditorOpen ? targetEditorTarget : undefined
   return {
     form: { ...form },
+    billing: {
+      mode: billingMode,
+      amount: billingAmount,
+      currency: billingCurrency,
+      price: $state.snapshot(billingPrice),
+    },
     targets: targets
       .map((target) => draftTarget(editedTarget?.key === target.key ? editedTarget : target))
       .toSorted((left, right) => left.key.localeCompare(right.key)),
@@ -159,6 +191,11 @@ const availableProviders = $derived(providers)
 const targetLanes = $derived(priorityLanes(targets))
 const disabledTargets = $derived(targets.filter((target) => !target.enabled))
 const isDraggingTarget = $derived(Boolean(draggedTargetKey))
+
+// 目标卡片拖到视口外的层或停用区时，页面需随指针滚动；浏览器自带的边缘滚动圈太窄，且被底部固定操作栏盖住。
+$effect(() => {
+  if (isDraggingTarget) return startDragAutoscroll()
+})
 
 const canonicalModelsQuery = createQuery(() => ({
   queryKey: ['catalog', 'canonical-models'],
@@ -658,6 +695,23 @@ async function regenerateThinkingMap(target: RouteTargetForm): Promise<void> {
 
 async function saveModel(): Promise<void> {
   saveError = ''
+  billingErrors = []
+  let billing: RouteBilling | null = null
+  if (billingMode === 'per_call') {
+    if (billingAmountIssue) {
+      saveError = billingAmountIssue
+      return
+    }
+    billing = { mode: 'per_call', amount: billingAmount.trim(), currency: billingCurrency }
+  } else if (billingMode === 'per_token') {
+    const result = buildModelCostJson($state.snapshot(billingPrice))
+    if (!result.value) {
+      billingErrors = result.errors
+      saveError = result.errors[0] ?? m.billing_price_invalid()
+      return
+    }
+    billing = { mode: 'per_token', price: result.value }
+  }
   if (!form.outputModality) {
     saveError = m.route_output_reconfigure()
     return
@@ -719,6 +773,7 @@ async function saveModel(): Promise<void> {
       balance: form.balance,
       default_thinking_level:
         form.defaultThinkingLevel === UNSPECIFIED_THINKING_LEVEL ? null : (form.defaultThinkingLevel as ThinkingLevel),
+      billing,
     }
 
     if (initialModel) {
@@ -937,6 +992,92 @@ async function saveModel(): Promise<void> {
         </p>
       {/if}
       {#if saveError}<p class="mt-3 text-sm text-destructive" role="alert">{saveError}</p>{/if}
+    </section>
+
+    <section class="route-section" aria-labelledby="route-billing-title">
+      <div class="route-section-header">
+        <div class="flex min-w-0 items-center gap-2">
+          <h2 id="route-billing-title" class="route-section-title">{m.billing_section()}</h2>
+          <Field.Help hint={m.billing_help()} />
+        </div>
+      </div>
+      <Field.Group>
+        <Field.Field size="setting">
+          <Field.FieldLabel for="route-billing-mode">{m.billing_mode()}</Field.FieldLabel>
+          <Select.Root
+            type="single"
+            value={billingMode}
+            onValueChange={(value: string) => value && (billingMode = value as BillingMode)}>
+            <Select.Trigger id="route-billing-mode" class="w-full" aria-label={m.billing_mode()}>
+              {billingMode === 'per_call'
+                ? m.billing_mode_per_call()
+                : billingMode === 'per_token'
+                  ? m.billing_mode_per_token()
+                  : m.billing_mode_none()}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value="none">{m.billing_mode_none()}</Select.Item>
+                <Select.Item value="per_call">{m.billing_mode_per_call()}</Select.Item>
+                <Select.Item value="per_token">{m.billing_mode_per_token()}</Select.Item>
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </Field.Field>
+      </Field.Group>
+      <p class="mt-3 text-sm text-muted-foreground">{m.billing_charged_to_key_help()}</p>
+      {#if billingMode === 'per_call'}
+        <div class="mt-4 grid gap-4 @2xl/model-contract:grid-cols-2 @2xl/model-contract:gap-x-6">
+          <Field.Field data-invalid={billingAmountIssue ? true : undefined}>
+            <Field.FieldLabel for="route-billing-amount">{m.billing_amount()}</Field.FieldLabel>
+            <InputGroup.Root>
+              <InputGroup.Addon align="inline-start">
+                <InputGroup.Text class="font-technical"
+                  >{currencyForKind(billingCurrency, customCurrency).symbol}</InputGroup.Text>
+              </InputGroup.Addon>
+              <InputGroup.Input
+                id="route-billing-amount"
+                bind:value={billingAmount}
+                inputmode="decimal"
+                class="font-technical"
+                placeholder="0.00"
+                autocomplete="off" />
+            </InputGroup.Root>
+            <Field.FieldDescription>{m.billing_per_call_help()}</Field.FieldDescription>
+            {#if billingAmountIssue && billingAmount.length > 0}
+              <Field.FieldError>{billingAmountIssue}</Field.FieldError>
+            {/if}
+          </Field.Field>
+          {#if customCurrency}
+            <Field.Field size="setting">
+              <Field.FieldLabel for="route-billing-currency">{m.billing_currency()}</Field.FieldLabel>
+              <Select.Root
+                type="single"
+                value={billingCurrency}
+                onValueChange={(value: string) => value && (billingCurrency = value as CurrencyKind)}>
+                <Select.Trigger id="route-billing-currency" class="w-full" aria-label={m.billing_currency()}>
+                  {billingCurrency === 'custom' ? customCurrency.symbol : m.pricing_currency_usd()}
+                </Select.Trigger>
+                <Select.Content>
+                  <Select.Group>
+                    <Select.Item value="usd">{m.pricing_currency_usd()}</Select.Item>
+                    <Select.Item value="custom">{customCurrency.symbol}</Select.Item>
+                  </Select.Group>
+                </Select.Content>
+              </Select.Root>
+            </Field.Field>
+          {/if}
+        </div>
+      {:else if billingMode === 'per_token'}
+        <div class="mt-4">
+          <PriceEditor bind:value={billingPrice} {customCurrency} idPrefix="route-billing-price" disabled={saving} />
+          {#if billingErrors.length > 0}
+            <ul class="mt-3 list-disc pl-5 text-sm text-destructive" role="alert">
+              {#each billingErrors as issue (issue)}<li>{issue}</li>{/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
     </section>
 
     <section class="route-section" aria-labelledby="route-targets-title">

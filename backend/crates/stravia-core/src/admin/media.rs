@@ -155,6 +155,7 @@ mod tests {
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("Model");
@@ -187,6 +188,7 @@ mod tests {
                     },
                 ],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("mixed Model");
@@ -238,6 +240,7 @@ mod tests {
                 balance: Some("traffic_equalization".into()),
                 targets: vec![target("listener")],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("audio Model");
@@ -249,6 +252,7 @@ mod tests {
                 balance: Some("traffic_equalization".into()),
                 targets: vec![target("painter")],
                 default_thinking_level: None,
+                billing: None,
             })
             .await
             .expect("image-output Model");

@@ -1,3 +1,4 @@
+import type { ProviderCostPlan } from './money'
 import type { ProviderOAuthStatus } from './oauth'
 import type { RouteOutputModality, ThinkingLevelMapping } from './route'
 
@@ -24,6 +25,8 @@ export interface Provider {
   credential_status?: string
   credential_invalid_at?: string | null
   allowance_suspension?: import('./provider-allowance').AllowanceSuspension | null
+  /** Current effective cost plan; null means usage-based (default). */
+  cost_plan?: ProviderCostPlan | null
   created_at: string
   updated_at: string
 }
@@ -110,7 +113,9 @@ export type SourceStamp =
   { type: 'provider_catalog'; provider_id: string } | { type: 'canonical'; model_id: string } | { type: 'discovery' }
 
 export type SnapshotState =
-  { type: 'unregistered' } | { type: 'imported'; source: SourceStamp } | { type: 'edited'; source: SourceStamp | null }
+  | { type: 'unregistered' }
+  | { type: 'imported'; source: SourceStamp; pinned: string[] }
+  | { type: 'edited'; source: SourceStamp | null }
 
 export type ProviderModelSelectionPolicy = 'auto' | 'force_enabled' | 'force_disabled'
 
@@ -130,19 +135,41 @@ export interface ModelSpecification {
 }
 
 export interface ProviderModelPrices {
-  input?: number
-  output?: number
-  cache_read?: number
-  cache_write?: number
+  /** Decimal string in API responses and writes; numbers are tolerated for legacy/source catalog input. */
+  input?: number | string | null
+  output?: number | string | null
+  cache_read?: number | string | null
+  cache_write?: number | string | null
 }
 
 export interface ProviderModelCostTier extends ProviderModelPrices {
   tier: { type: string; size: number }
 }
 
+/** Price fields that can be recorded in the custom currency. `tiers` covers every tier, including `context_over_200k`. */
+export type PriceFieldName = 'input' | 'output' | 'cache_read' | 'cache_write' | 'tiers'
+
+export interface PeakPricingWindow {
+  /** `HH:MM`; start is inclusive. */
+  start: string
+  /** `HH:MM` or `24:00`; end is exclusive. Windows never cross midnight. */
+  end: string
+}
+
+export interface PeakPricing {
+  timezone: string
+  /** ISO weekdays, Monday = 1. */
+  weekdays: number[]
+  ranges: PeakPricingWindow[]
+  /** Decimal string. */
+  multiplier: string | number
+}
+
 export interface ProviderModelCost extends ProviderModelPrices {
   context_over_200k?: ProviderModelPrices | null
   tiers: ProviderModelCostTier[]
+  custom_currency_fields?: PriceFieldName[]
+  peak?: PeakPricing | null
 }
 
 export interface ProviderModelMetadata extends ModelSpecification {
@@ -182,8 +209,9 @@ export interface ProviderModelDetail {
   route_output_modalities: RouteOutputModality[]
   available: boolean
   source_kind: ProviderModelSourceKind
-  can_reimport: boolean
   snapshot_state: SnapshotState
+  pinned_fields: string[]
+  restorable_fields: string[]
   selection_policy: ProviderModelSelectionPolicy
   metadata: ProviderModelMetadata
   thinking_level_map?: ThinkingLevelMapping[]

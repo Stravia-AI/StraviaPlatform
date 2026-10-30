@@ -1,3 +1,5 @@
+use rust_decimal::Decimal;
+
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -9,11 +11,6 @@ pub enum CatalogError {
     },
     #[error("Canonical Model was not found: {id}")]
     ModelNotFound { id: String },
-    #[error("Provider Catalog Entry was not found: {provider_id}/{model_id}")]
-    EntryNotFound {
-        provider_id: String,
-        model_id: String,
-    },
     #[error("catalog provider not found: {provider_id}")]
     ProviderNotFound { provider_id: String },
     #[error("catalog channel not found: {provider_id}/{channel_id}")]
@@ -134,10 +131,16 @@ pub struct CatalogLimits {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct CatalogCost {
-    pub input: Option<f64>,
-    pub output: Option<f64>,
-    pub cache_read: Option<f64>,
-    pub cache_write: Option<f64>,
+    /// Source-catalog prices retain their JSON number contract without passing
+    /// through `f64`; normalized Provider Model metadata uses decimal strings.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub input: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub output: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub cache_read: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub cache_write: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

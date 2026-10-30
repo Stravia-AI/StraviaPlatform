@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Instant;
 
@@ -125,6 +125,30 @@ fn retain_diagnostic_metadata(item: &mut serde_json::Value) {
     }
 }
 
+/// Frozen facts used to price one Target attempt. Everything is captured when
+/// the attempt starts; later price, billing, or exchange-rate changes never
+/// rewrite it.
+pub(crate) struct AttemptCostContext {
+    pub(crate) pricing: Option<Arc<crate::provider_models::ModelCost>>,
+    pub(crate) cost_basis: crate::pricing::CostBasis,
+    pub(crate) billing: Option<crate::pricing::BillingConfig>,
+    /// Root Principal's API Key; `None` never bills.
+    pub(crate) api_key_id: Option<String>,
+    pub(crate) currency: Option<Arc<crate::pricing::CustomCurrency>>,
+}
+
+impl Default for AttemptCostContext {
+    fn default() -> Self {
+        Self {
+            pricing: None,
+            cost_basis: crate::pricing::CostBasis::Usage,
+            billing: None,
+            api_key_id: None,
+            currency: None,
+        }
+    }
+}
+
 /// Observation state for one Wasm Vendor operation.
 ///
 /// Wire capture belongs to the controlled host transport. Model Turn observes
@@ -134,6 +158,9 @@ pub(crate) struct AttemptObservation {
     pub(crate) id: String,
     model_turn_id: String,
     started_at: Instant,
+    /// Wall clock at attempt start; peak-pricing evaluates against it.
+    started_wall: chrono::DateTime<chrono::Utc>,
+    cost: AttemptCostContext,
     duration_span: Mutex<Option<tracing::Span>>,
     first_token_span: Mutex<Option<tracing::Span>>,
     finished: AtomicBool,
@@ -144,6 +171,9 @@ pub(crate) struct AttemptObservation {
     thinking_active: AtomicBool,
     thinking_items: Mutex<ObservedThinkingItems>,
     first_token_timed_out: Option<Arc<AtomicBool>>,
+    /// 上游传输状态位；仅 live Model Turn 提供，用于在 Drop 收尾时区分
+    /// 「上游已开始的首 token 超时」与本地准备超时。
+    upstream_state: Option<Arc<AtomicU8>>,
 }
 
 impl AttemptObservation {
@@ -158,6 +188,7 @@ impl AttemptObservation {
         protocol: String,
         upstream_base_url: String,
         first_token_timed_out: Option<Arc<AtomicBool>>,
+        cost: AttemptCostContext,
     ) -> Self {
         let id = observer
             .as_ref()
@@ -173,6 +204,7 @@ impl AttemptObservation {
                 upstream_model: actual_model,
                 protocol,
                 upstream_url: upstream_base_url,
+                cost_basis: cost.cost_basis.attempt_basis(),
             });
         }
         let observed = observer.is_some();
@@ -187,6 +219,8 @@ impl AttemptObservation {
                 String::new()
             },
             started_at: Instant::now(),
+            started_wall: chrono::Utc::now(),
+            cost,
             duration_span: Mutex::new(Some(duration_span)),
             first_token_span: Mutex::new(Some(first_token_span)),
             finished: AtomicBool::new(false),
@@ -197,7 +231,13 @@ impl AttemptObservation {
             thinking_active: AtomicBool::new(false),
             thinking_items: Mutex::new(ObservedThinkingItems::default()),
             first_token_timed_out,
+            upstream_state: None,
         }
+    }
+
+    pub(crate) fn with_upstream_state(mut self, state: Arc<AtomicU8>) -> Self {
+        self.upstream_state = Some(state);
+        self
     }
 
     pub(crate) fn with_usage_ledger(
@@ -412,6 +452,35 @@ impl AttemptObservation {
             }
         }
         if let Some(observer) = &self.observer {
+            let usage = self.confirmed_usage.lock().clone();
+            let currency = self.cost.currency.as_deref();
+            // A finished attempt carries a cost basis unless the Provider is
+            // untracked; a missing price or unknown usage records unknown
+            // rather than zero. Billing exists only for completed attempts of
+            // an API-Key-scoped Principal.
+            // 不计算成本的 Provider 不估算也不记录金额，尝试不写成本基准。
+            let cost = match (
+                self.cost.cost_basis.attempt_basis(),
+                self.cost.pricing.as_deref(),
+                usage.as_ref(),
+            ) {
+                (Some(_), Some(pricing), Some(usage)) => {
+                    crate::pricing::estimate_cost(pricing, usage, self.started_wall, currency)
+                }
+                _ => None,
+            };
+            let billing = if status == "completed" && self.cost.api_key_id.is_some() {
+                self.cost.billing.as_ref().map(|billing| {
+                    crate::pricing::bill(billing, usage.as_ref(), self.started_wall, currency)
+                })
+            } else {
+                None
+            };
+            let amounts = crate::pricing::AttemptAmounts {
+                cost_basis: self.cost.cost_basis,
+                cost,
+                billing,
+            };
             let error = diagnostic.map(|diagnostic| FailureDiagnostic {
                 source: diagnostic.source.clone(),
                 code: error_code.clone(),
@@ -428,7 +497,8 @@ impl AttemptObservation {
                 error,
                 duration_ms: self.started_at.elapsed().as_millis() as i64,
                 first_token_ms,
-                usage: self.confirmed_usage.lock().clone(),
+                usage,
+                amounts: Some(amounts),
             });
         }
     }
@@ -443,16 +513,44 @@ impl Drop for AttemptObservation {
         if let Some(span) = self.first_token_span.get_mut().take() {
             span.record("status", "abandoned");
         }
-        let reason = if self
+        let timed_out = self
             .first_token_timed_out
             .as_ref()
-            .is_some_and(|signal| signal.load(Ordering::Acquire))
-        {
+            .is_some_and(|signal| signal.load(Ordering::Acquire));
+        let reason = if timed_out {
             "first_token_timeout"
         } else {
             "attempt_aborted"
         };
-        self.finish("failed", None, Some(reason.into()), None, None);
+        // 首 token 超时的收尾发生在 driver 被取消之后，普通 finish 路径不会
+        // 再带诊断。上游已发出请求时它是上游错误；本地准备超时仍是 platform。
+        let diagnostic = timed_out.then(|| {
+            let upstream = self
+                .upstream_state
+                .as_ref()
+                .is_some_and(|state| super::live::upstream_request_started(state));
+            FailureDiagnostic {
+                source: Some(if upstream { "upstream" } else { "platform" }.into()),
+                code: Some(reason.into()),
+                message: Some(
+                    if upstream {
+                        "Target did not produce a First Token before its timeout"
+                    } else {
+                        "Local Provider preparation exceeded the First Token timeout"
+                    }
+                    .into(),
+                ),
+                status_code: None,
+                upstream_code: None,
+            }
+        });
+        self.finish(
+            "failed",
+            None,
+            Some(reason.into()),
+            None,
+            diagnostic.as_ref(),
+        );
     }
 }
 
@@ -583,6 +681,7 @@ mod diagnostic_tests {
                 "responses".into(),
                 "http://localhost".into(),
                 None,
+                super::AttemptCostContext::default(),
             );
             for usage in deltas {
                 attempt.observe_delta(&AiStreamDelta::Usage(usage));

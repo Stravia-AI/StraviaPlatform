@@ -55,6 +55,38 @@ export function failureOriginLabel(source: unknown): string | undefined {
   return raw?.trim() ? raw : undefined
 }
 
+export function clientErrorTypeLabel(type: string): string {
+  if (type === 'failed') return m.observation_client_error_type_failed()
+  if (type === 'rejected') return m.observation_client_error_type_rejected()
+  return type
+}
+
+// 错误的请求不是失败的请求（GLOSSARY.md），详情标题不能沿用“请求失败”。
+export function clientErrorTitle(type: string): string {
+  return type === 'rejected' ? m.observation_client_error_type_rejected() : m.observation_request_failed()
+}
+
+export function clientErrorTypeTone(type: string): 'destructive' | 'outline' {
+  return type === 'failed' ? 'destructive' : 'outline'
+}
+
+const UPSTREAM_OUTCOME_LABELS: Record<string, LabelMessage> = {
+  recovered: m.observation_upstream_outcome_recovered,
+  caused_failure: m.observation_upstream_outcome_caused_failure,
+  in_progress: m.observation_upstream_outcome_in_progress,
+  interrupted: m.observation_upstream_outcome_interrupted,
+}
+
+export function upstreamErrorOutcomeLabel(outcome: string): string {
+  return (UPSTREAM_OUTCOME_LABELS[outcome] ?? (() => outcome))()
+}
+
+export function upstreamErrorOutcomeTone(outcome: string): 'destructive' | 'secondary' | 'outline' {
+  if (outcome === 'caused_failure') return 'destructive'
+  if (outcome === 'recovered') return 'secondary'
+  return 'outline'
+}
+
 export function observationContextStatusLabel(kind: string, payload: unknown): string {
   if (!payload || typeof payload !== 'object') return ''
   const value = payloadRecord(payload)

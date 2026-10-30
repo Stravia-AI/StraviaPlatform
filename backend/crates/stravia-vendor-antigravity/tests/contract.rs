@@ -86,6 +86,7 @@ struct Fixture {
     received: Mutex<Vec<(String, HeaderMap, Vec<u8>)>>,
     truncated: AtomicBool,
     error_stream: AtomicBool,
+    require_call_signature: AtomicBool,
     image_refusal: Mutex<Option<Value>>,
 }
 async fn upstream(
@@ -149,9 +150,9 @@ async fn upstream(
                 "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true,"thinkingBudget":-1},
                 "gemini-3.1-pro-high":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
                 "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","supportsThinking":true,"thinkingBudget":1024},
-                "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true,"thinkingBudget":-1},
-                "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true,"thinkingBudget":4000},
-                "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true,"thinkingBudget":1024},
+                "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true,"thinkingLevel":3,"minThinkingBudget":32},
+                "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true,"thinkingLevel":2,"minThinkingBudget":32},
+                "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true,"thinkingLevel":1,"minThinkingBudget":32},
                 "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
                 "account-image":{"displayName":"Account image","supportsImages":true},
                 "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
@@ -182,6 +183,25 @@ async fn upstream(
                     .into_response();
             }
             let request: Value = serde_json::from_slice(&body).unwrap();
+            if fixture.require_call_signature.load(Ordering::Relaxed) {
+                for content in request["request"]["contents"].as_array().unwrap() {
+                    if content["role"] != "model" {
+                        continue;
+                    }
+                    if let Some(call) = content["parts"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|part| part.get("functionCall").is_some())
+                        && call["thoughtSignature"].as_str().is_none_or(str::is_empty)
+                    {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({"error":{"code":400,"message":"Function call is missing a thought_signature"}})),
+                        ).into_response();
+                    }
+                }
+            }
             if request.pointer("/request/generationConfig/responseModalities")
                 == Some(&json!(["IMAGE"]))
             {
@@ -233,7 +253,11 @@ impl HostServices for Services {
         let url = url::Url::parse(&request.url).unwrap();
         assert!(matches!(
             url.host_str(),
-            Some("daily-cloudcode-pa.googleapis.com" | "oauth2.googleapis.com")
+            Some(
+                "daily-cloudcode-pa.googleapis.com"
+                    | "oauth2.googleapis.com"
+                    | "unverified.example"
+            )
         ));
         let mut local = format!("{}{}", self.root, url.path());
         if let Some(query) = url.query() {
@@ -582,6 +606,94 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
         if kind.model_error_kind() == Some(AiErrorKind::RateLimitError))
     );
     assert_eq!(error.retry_after(), Some(Duration::from_secs(9)));
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn imported_tool_history_continues_without_replacing_native_signatures() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new()
+        .fallback(upstream)
+        .with_state(Arc::clone(&fixture));
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    for (signature, unverified) in [
+        (None, false),
+        (Some("opaque-native+/=="), false),
+        (None, true),
+    ] {
+        fixture
+            .require_call_signature
+            .store(!unverified, Ordering::Relaxed);
+        let mut provider = provider();
+        provider.model = Some("gemini-3.8-flash".into());
+        if unverified {
+            provider.base_url = "https://unverified.example".into();
+        }
+        provider.credentials = BTreeMap::from([
+            ("access_token".into(), json!("test-token")),
+            ("project_id".into(), json!("test-project")),
+        ]);
+        let mut body = json!({
+            "model": "gemini-3.8-flash",
+            "contents": [
+                {"role":"user","parts":[{"text":"Add both lookup results."}]},
+                {"role":"model","parts":[
+                    {"functionCall":{"id":"a","name":"lookup","args":{"key":"A"}}},
+                    {"functionCall":{"id":"b","name":"lookup","args":{"key":"B"}}}
+                ]},
+                {"role":"user","parts":[
+                    {"functionResponse":{"id":"a","name":"lookup","response":{"value":1}}},
+                    {"functionResponse":{"id":"b","name":"lookup","response":{"value":2}}}
+                ]}
+            ],
+            "tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"OBJECT"}}]}]
+        });
+        if let Some(signature) = signature {
+            body["contents"][1]["parts"][0]["thoughtSignature"] = json!(signature);
+        }
+        let mut expected = body["contents"].clone();
+        if !unverified {
+            expected[1]["parts"][0]["thoughtSignature"] =
+                json!(signature.unwrap_or("skip_thought_signature_validator"));
+        }
+        let request = ProtocolTransform::global()
+            .bind(
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            )
+            .unwrap()
+            .decode_request(body)
+            .unwrap();
+        let result = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await;
+        let OperationOutput::Infer(output) = result.unwrap() else {
+            panic!("inference output")
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let envelope: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
+        assert_eq!(envelope["request"]["contents"], expected);
+    }
     server.abort();
 }
 
@@ -1030,6 +1142,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             "gemini-3.8-flash-high",
             false,
         ),
+        ("gemini-3.8-flash", None, "gemini-3.8-flash-high", true),
     ] {
         let model = catalog
             .models
@@ -1049,6 +1162,9 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             ..Default::default()
         });
         let mut selected_request = request.clone();
+        selected_request.reasoning.mode = None;
+        selected_request.reasoning.level = None;
+        selected_request.reasoning.budget_tokens = None;
         if !summary {
             selected_request.reasoning.summary =
                 Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None);
@@ -1085,7 +1201,22 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
             Some(&serde_json::json!(summary))
         );
-        if let Some(effort) = effort {
+        if family == "gemini-3.8-flash" {
+            assert!(
+                envelope
+                    .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
+                    .is_none()
+            );
+            assert_eq!(
+                envelope.pointer("/request/generationConfig/thinkingConfig/thinkingLevel"),
+                Some(&json!(match effort {
+                    Some("low") => 1,
+                    Some("medium") => 2,
+                    Some("high") | None => 3,
+                    _ => unreachable!(),
+                }))
+            );
+        } else {
             assert!(
                 envelope
                     .pointer("/request/generationConfig/thinkingConfig/thinkingLevel")
@@ -1094,26 +1225,47 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             assert_eq!(
                 envelope.pointer("/request/generationConfig/thinkingConfig/thinkingBudget"),
                 Some(&json!(match effort {
-                    "medium" => 4000,
-                    "low" => 1024,
-                    "high" => -1,
+                    Some("low") => 1024,
+                    Some("high") | None => -1,
                     _ => unreachable!(),
                 }))
             );
         }
     }
-    for (level, control, expected_level, expected_budget, summary) in [
-        (json!("MEDIUM"), None, Some(json!("MEDIUM")), None, true),
-        (json!("HIGH"), None, Some(json!("HIGH")), None, false),
+    for (level, budget, control, expected_level, expected_budget, summary) in [
         (
-            json!("HIGH"),
+            Some("MEDIUM"),
+            None,
+            None,
+            Some(json!("MEDIUM")),
+            None,
+            true,
+        ),
+        (Some("HIGH"), None, None, Some(json!("HIGH")), None, false),
+        (None, Some(2048), None, None, Some(json!(2048)), true),
+        (
+            Some("HIGH"),
+            None,
+            Some(
+                stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                    value: "medium".into(),
+                },
+            ),
+            Some(json!(2)),
+            None,
+            true,
+        ),
+        (
+            Some("HIGH"),
+            None,
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 7777 }),
             None,
             Some(json!(7777)),
             true,
         ),
         (
-            json!("HIGH"),
+            Some("HIGH"),
+            None,
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled),
             None,
             Some(json!(0)),
@@ -1122,26 +1274,24 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     ] {
         let mut selected_request = request.clone();
         let mut selected_provider = provider.clone();
-        if control.is_some() {
-            let model = catalog
-                .models
-                .iter()
-                .find(|model| model.id == "gemini-3.8-flash")
-                .unwrap();
-            selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
-                extensions: BTreeMap::from([(
-                    "antigravity".into(),
-                    model.metadata["antigravity"].clone(),
-                )]),
-                ..Default::default()
-            });
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == "gemini-3.8-flash")
+            .unwrap();
+        let mut table = model.metadata["antigravity"].clone();
+        for variant in table["variants"].as_array_mut().unwrap() {
+            variant["metadata"]["thinkingBudget"] = json!(4000);
         }
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([("antigravity".into(), table)]),
+            ..Default::default()
+        });
         selected_request.reasoning.mode = None;
-        selected_request.reasoning.budget_tokens = None;
-        selected_request.reasoning.level = Some(
-            stravia_runtime_contract::thinking::ThinkingLevel::from_wire(level.as_str().unwrap())
-                .unwrap(),
-        );
+        selected_request.reasoning.budget_tokens = budget;
+        selected_request.reasoning.level = level.map(|level| {
+            stravia_runtime_contract::thinking::ThinkingLevel::from_wire(level).unwrap()
+        });
         selected_request.reasoning.target_control = control;
         selected_request.reasoning.summary =
             (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None);
@@ -1180,8 +1330,14 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     }
     for metadata in [
         json!({}),
+        json!({"minThinkingBudget":32}),
         json!({"thinkingBudget":"4000"}),
         json!({"thinkingBudget":-2}),
+        json!({"thinkingLevel":null}),
+        json!({"thinkingLevel":-1}),
+        json!({"thinkingLevel":7}),
+        json!({"thinkingLevel":"MEDIUM"}),
+        json!({"thinkingLevel":7,"thinkingBudget":4000}),
     ] {
         let mut selected_provider = provider.clone();
         selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {

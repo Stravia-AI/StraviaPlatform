@@ -23,6 +23,8 @@ export interface ActivityToolResult {
 export interface ToolActivity {
   kind: 'tool'
   id: string
+  /** 协议里的工具调用 ID；凭据命中按它定位到调用与结果块。 */
+  callId: string
   at: number
   name: string
   live: boolean
@@ -93,6 +95,7 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
           id: calls.some((entry) => entry.callId === id)
             ? identity(...prefix, 'tool', id, modelTurnId, source)
             : identity(...prefix, 'tool', id),
+          callId: id,
           at,
           name,
           live: true,

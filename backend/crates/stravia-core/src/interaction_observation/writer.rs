@@ -25,6 +25,7 @@ pub(super) struct AdmitPayload {
     pub start: RunStart,
     pub facts: super::attribution::PreparedAdmission,
     pub received_at: i64,
+    pub occurred_at: i64,
     pub metadata: super::RequestMetadata,
     pub debug_enabled: bool,
     pub trace: Option<super::trace::TraceHandle>,
@@ -79,14 +80,16 @@ pub(super) struct WriterPermit {
 
 pub(super) struct QueuedText {
     pub(super) event: Option<RunEvent>,
+    pub(super) occurred_at: i64,
     lease: Option<ResourceLease>,
     base_bytes: usize,
 }
 
 impl QueuedText {
-    pub(super) fn new(event: RunEvent) -> Self {
+    pub(super) fn new(event: RunEvent, occurred_at: i64) -> Self {
         Self {
             event: Some(event),
+            occurred_at,
             lease: None,
             base_bytes: 0,
         }
@@ -268,18 +271,21 @@ pub(super) enum WriterCommand {
     },
     ClientDisconnected {
         runs: Vec<String>,
+        occurred_at: i64,
     },
     ClientToolResults {
         run_id: String,
         events: Vec<RunEvent>,
+        occurred_at: i64,
     },
     InputPreview {
         run_id: String,
         preview: String,
+        occurred_at: i64,
     },
     Purge {
         expired_before: Option<i64>,
-        done: oneshot::Sender<anyhow::Result<()>>,
+        done: oneshot::Sender<anyhow::Result<bool>>,
     },
     ClientCompletion {
         run_id: String,
@@ -292,6 +298,7 @@ pub(super) enum WriterCommand {
     Event {
         run_id: String,
         event: RunEvent,
+        occurred_at: i64,
     },
     Text {
         run_id: String,
@@ -302,6 +309,8 @@ pub(super) enum WriterCommand {
         run_id: String,
         outcome: RunOutcome,
         finished_at: i64,
+        /// 请求阶段 Hook 拒绝或上游发送前的请求校验拒绝。
+        rejected_before_target: bool,
     },
     Reject {
         ingress: IngressStart,
@@ -310,13 +319,15 @@ pub(super) enum WriterCommand {
         debug_enabled: bool,
         started_at: i64,
         duration_ms: i64,
+        occurred_at: i64,
     },
     Finalize {
         run_id: Option<String>,
         rejection_id: Option<String>,
         trace: Option<super::trace::TraceHandle>,
-        pending_finish: Option<(RunOutcome, i64)>,
+        pending_finish: Option<(RunOutcome, i64, bool)>,
         gap: bool,
+        occurred_at: i64,
     },
     FlushInteraction {
         interaction_id: String,
@@ -361,16 +372,10 @@ fn event_bytes(event: &RunEvent) -> usize {
     use RunEvent::*;
     let payload = match event {
         RequestFailed { error } => failure_bytes(error),
-        CredentialMappingsCreated { discoveries } => discoveries
-            .iter()
-            .map(|d| {
-                d.rule_ids
-                    .iter()
-                    .chain(&d.source_types)
-                    .map(String::len)
-                    .sum::<usize>()
-            })
-            .sum(),
+        CredentialMappingsCreated { discoveries, .. }
+        | CredentialMappingsReused { discoveries, .. } => {
+            discoveries.iter().map(CredentialDiscovery::bytes).sum()
+        }
         CompactionOperation {
             operation_id,
             model_turn_id,
@@ -432,6 +437,7 @@ fn event_bytes(event: &RunEvent) -> usize {
             upstream_model,
             protocol,
             upstream_url,
+            ..
         } => [
             model_turn_id,
             attempt_id,
@@ -584,11 +590,13 @@ impl WriterCommand {
             | Self::Purge { .. }
             | Self::Barrier(_)
             | Self::Shutdown(_) => 0,
-            Self::ClientDisconnected { runs } => runs.iter().map(String::len).sum(),
-            Self::ClientToolResults { run_id, events } => {
+            Self::ClientDisconnected { runs, .. } => runs.iter().map(String::len).sum(),
+            Self::ClientToolResults { run_id, events, .. } => {
                 run_id.len() + events.iter().map(event_bytes).sum::<usize>()
             }
-            Self::InputPreview { run_id, preview } => run_id.len() + preview.len(),
+            Self::InputPreview {
+                run_id, preview, ..
+            } => run_id.len() + preview.len(),
             Self::ClientCompletion {
                 run_id,
                 principal,
@@ -614,7 +622,7 @@ impl WriterCommand {
                     + payload.facts.logical_bytes()
                     + metadata_bytes(&payload.metadata)
             }
-            Self::Event { run_id, event } => run_id.len() + event_bytes(event),
+            Self::Event { run_id, event, .. } => run_id.len() + event_bytes(event),
             Self::Text { run_id, event, .. } => {
                 run_id.len() + event.lock().event.as_ref().map_or(0, event_bytes)
             }
@@ -646,11 +654,34 @@ impl WriterCommand {
                     + optional_len(rejection_id)
                     + pending_finish
                         .as_ref()
-                        .map_or(0, |(outcome, _)| outcome_bytes(outcome))
+                        .map_or(0, |(outcome, _, _)| outcome_bytes(outcome))
             }
             Self::FlushInteraction { interaction_id, .. } => interaction_id.len(),
         };
         std::mem::size_of_val(self) + payload
+    }
+}
+
+/// 静态命令分类，只用于观测命令处理墙钟；不携带任何请求内容或运行标识。
+fn command_kind(command: Option<&WriterCommand>) -> &'static str {
+    match command {
+        Some(WriterCommand::ClearTail) => "clear_tail",
+        Some(WriterCommand::ClearDebug { .. }) => "clear_debug",
+        Some(WriterCommand::ClientDisconnected { .. }) => "client_disconnected",
+        Some(WriterCommand::ClientToolResults { .. }) => "client_tool_results",
+        Some(WriterCommand::InputPreview { .. }) => "input_preview",
+        Some(WriterCommand::Purge { .. }) => "purge",
+        Some(WriterCommand::ClientCompletion { .. }) => "client_completion",
+        Some(WriterCommand::Admit(_)) => "admit",
+        Some(WriterCommand::Event { .. }) => "event",
+        Some(WriterCommand::Text { .. }) => "text",
+        Some(WriterCommand::Finish { .. }) => "finish",
+        Some(WriterCommand::Reject { .. }) => "reject",
+        Some(WriterCommand::Finalize { .. }) => "finalize",
+        Some(WriterCommand::FlushInteraction { .. }) => "flush_interaction",
+        Some(WriterCommand::Barrier(_)) => "barrier",
+        Some(WriterCommand::Shutdown(_)) => "shutdown",
+        None => "closed",
     }
 }
 
@@ -669,7 +700,6 @@ pub(super) struct WriterDeps {
     pub traces: super::trace::TraceManager,
     pub active_traces: Arc<Mutex<HashMap<String, super::trace::TraceHandle>>>,
     pub partial_trace_count: Arc<AtomicU64>,
-    pub unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
     pub live: Arc<super::live::LiveState>,
     pub generation_chains: crate::generation_chain::GenerationChain,
 }
@@ -693,7 +723,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         traces,
         active_traces,
         partial_trace_count,
-        unpersisted_gaps,
         live,
         generation_chains,
     } = deps;
@@ -718,7 +747,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: Arc::clone(&live),
-            gaps: unpersisted_gaps.clone(),
         };
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut terminal_facts: HashMap<String, (Option<DeliveryOutcome>, bool)> = HashMap::new();
@@ -765,8 +793,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         continue;
                     },
                     _ = interval.tick() => {
-                        unpersisted_gaps.lock()
-                            .expire(now(), retention_days.load(Ordering::Acquire));
                         attribution.sweep(now());
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
@@ -795,15 +821,22 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             let processing = tracing::info_span!(
                 target: "stravia::perf", "observation.command.process",
                 causal_parent_id = perf_context.span_id(),
-                causal_epoch = perf_context.epoch()
+                causal_epoch = perf_context.epoch(),
+                command_kind = command_kind(command.as_ref())
             );
             let stop = async {
             let command = match command {
                 Some(WriterCommand::Text { run_id, event, .. }) => {
-                    let Some(event) = event.lock().event.take() else {
+                    let mut text = event.lock();
+                    let Some(event) = text.event.take() else {
                         return false;
                     };
-                    Some(WriterCommand::Event { run_id, event })
+                    let occurred_at = text.occurred_at;
+                    Some(WriterCommand::Event {
+                        run_id,
+                        event,
+                        occurred_at,
+                    })
                 }
                 command => command,
             };
@@ -837,30 +870,33 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     let _ = response.send(result);
                 }
-                Some(WriterCommand::ClientDisconnected { runs }) => {
+                Some(WriterCommand::ClientDisconnected { runs, occurred_at }) => {
                     for run_id in runs {
-                        match store.disconnect_waiting_client(&run_id, now()).await {
+                        match store.disconnect_waiting_client(&run_id, occurred_at).await {
                             Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                             Ok(None) => {}
                             Err(error) => {
-                                unpersisted_gaps.lock().record(&run_id, now());
                                 if let Some(interaction) = attribution.interaction_for_run(&run_id)
                                 {
-                                    pending_gaps.insert(interaction.to_owned(), now());
+                                    pending_gaps.insert(interaction.to_owned(), occurred_at);
                                 }
                                 tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client disconnect persistence failed");
                             }
                         }
                     }
                 }
-                Some(WriterCommand::ClientToolResults { run_id, events }) => {
+                Some(WriterCommand::ClientToolResults {
+                    run_id,
+                    events,
+                    occurred_at,
+                }) => {
                     if replayed_tool_results.remove(&run_id) {
                         return false;
                     }
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
                     };
-                    let at = now();
+                    let at = occurred_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     let result = async {
                         let events = store
@@ -880,20 +916,23 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     .await;
                     if let Err(error) = result {
-                        unpersisted_gaps.lock().record(&run_id, at);
                         pending_gaps.insert(interaction.to_owned(), at);
                         // SQL errors may include result bind values; never log payloads.
                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
                     }
                 }
-                Some(WriterCommand::InputPreview { run_id, preview }) => {
+                Some(WriterCommand::InputPreview {
+                    run_id,
+                    preview,
+                    occurred_at,
+                }) => {
                     if !attribution.has_new_user(&run_id) {
                         return false;
                     }
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
                     };
-                    let at = now();
+                    let at = occurred_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
                         .persist_input_preview(interaction, &run_id, &preview, at, expiry)
@@ -919,38 +958,33 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     }
                     let result = async {
-                        loop {
-                            let (removed, has_more) = match expired_before {
-                                Some(at) => {
-                                    let batch = store.purge_expired_batch(at).await?;
-                                    (batch.removed_interactions, batch.has_more)
-                                }
-                                None => (store.purge_clear_rows().await?, false),
-                            };
-                            // 每批提交后立即失效；后批失败不能遗失已提交批次的内存进度。
-                            live.invalidate(&removed);
-                            if !removed.is_empty() || expired_before.is_none() {
-                                let _ = updates.send(ObservationUpdate::ResetRequired {
-                                    snapshot_sequence: trace_sequence.load(Ordering::Acquire),
-                                });
+                        let (removed, has_more) = match expired_before {
+                            Some(at) => {
+                                let batch = store.purge_expired_batch(at).await?;
+                                (batch.removed_interactions, batch.has_more)
                             }
-                            attribution.forget_interactions(&removed);
-                            pending_gaps.retain(|interaction, _| !removed.contains(interaction));
-                            pending_text
-                                .retain(|run| attribution.interaction_for_run(run).is_some());
-                            persisted_manifests
-                                .retain(|run, _| attribution.interaction_for_run(run).is_some());
-                            if expired_before.is_none() {
-                                attribution.clear_tail();
-                            }
-                            if !has_more {
-                                break;
-                            }
+                            None => (store.purge_clear_rows().await?, false),
+                        };
+                        // 每批提交后立即失效；续批由调用方重新排队，不能独占 writer。
+                        live.invalidate(&removed);
+                        if !removed.is_empty() || expired_before.is_none() {
+                            let _ = updates.send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: trace_sequence.load(Ordering::Acquire),
+                            });
                         }
-                        if expired_before.is_some() {
+                        attribution.forget_interactions(&removed);
+                        pending_gaps.retain(|interaction, _| !removed.contains(interaction));
+                        pending_text
+                            .retain(|run| attribution.interaction_for_run(run).is_some());
+                        persisted_manifests
+                            .retain(|run, _| attribution.interaction_for_run(run).is_some());
+                        if expired_before.is_none() {
+                            attribution.clear_tail();
+                        }
+                        if !has_more && expired_before.is_some() {
                             store.remove_orphan_manifests().await?;
                         }
-                        Ok::<_, anyhow::Error>(())
+                        Ok::<_, anyhow::Error>(has_more)
                     }
                     .await;
                     let _ = done.send(result);
@@ -962,7 +996,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     delivered_at,
                     waiting_client,
                 }) => {
-                    let at = now();
+                    let at = delivered_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
@@ -1017,12 +1051,13 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         start,
                         mut facts,
                         received_at,
+                        occurred_at,
                         metadata,
                         debug_enabled,
                         trace,
                         discarded_trace,
                     } = *payload;
-                    let now = now();
+                    let now = occurred_at;
                     // Run Attribution owns the placement decision end to end; the
                     // writer only persists the outcome and publishes it.
                     let mut decision = attribution
@@ -1034,7 +1069,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         trace.mark_partial("observation_gap", false);
                     }
                     if let Some(error) = &decision.parent_evidence_error {
-                        unpersisted_gaps.lock().record(&start.id, now);
                         tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
                     }
                     // 无关请求不应切碎活跃流；只刷新可能被本次准入中断的父链。
@@ -1126,7 +1160,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                     Ok(None) => {}
                                     Err(error) => {
-                                        unpersisted_gaps.lock().record(&start.id, now);
                                         pending_gaps.insert(decision.interaction_id.clone(), now);
                                         tracing::warn!(run_id=%start.id, %error, "parent observation gap persistence failed");
                                     }
@@ -1161,7 +1194,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             attribution.abandon_admission(&start.id);
                             replayed_tool_results.remove(&start.id);
                             incomplete_usage = true;
-                            unpersisted_gaps.lock().record(&start.id, now);
                             tracing::warn!(run_id=%start.id, %error, "observation admission persistence failed")
                         }
                     }
@@ -1177,7 +1209,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     event:
                         event @ (RunEvent::ClientVisibleContentDelta { .. }
                         | RunEvent::ModelThinkingDelta { .. }),
-                    ..
+                    occurred_at,
                 }) => {
                     let Some(interaction) =
                         attribution.interaction_for_run(&run_id).map(str::to_owned)
@@ -1192,7 +1224,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let incoming = std::mem::take(text_mut(&mut event).expect("text event"));
                     let retained_bytes = pending_text.retained_bytes;
                     let block = pending_text.blocks.entry(id).or_insert_with(|| {
-                        let mut block = TextBlock::new(event, interaction.clone(), run_id.clone());
+                        let mut block = TextBlock::new(
+                            event,
+                            interaction.clone(),
+                            run_id.clone(),
+                            occurred_at,
+                        );
                         block.receive_order = Some(receive_order);
                         block
                     });
@@ -1247,20 +1284,26 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         );
                     }
                 }
-                Some(WriterCommand::Event { run_id, event }) => {
+                Some(WriterCommand::Event {
+                    run_id,
+                    event,
+                    occurred_at,
+                }) => {
                     receive_order += 1;
                     let block_id = canonical_block_id(&event);
                     // Optional diagnostic writes must not roll back usage facts in
                     // the same transaction and poison their durability barrier.
                     let usage_bearing = affects_usage(&event);
-                    let mut batch = vec![(event, block_id, now())];
-                    let mut received = vec![(batch[0].2, receive_order)];
+                    let mut latest_at = occurred_at;
+                    let mut batch = vec![(event, block_id, occurred_at)];
+                    let mut received = vec![(occurred_at, receive_order)];
                     let mut batch_spans = Vec::new();
                     while batch.len() < 64 {
                         match rx.try_recv().map(CommandEnvelope::dequeue) {
                             Ok((WriterCommand::Event {
                                 run_id: next_run,
                                 event,
+                                occurred_at: next_occurred_at,
                             }, context)) if next_run == run_id
                                 && affects_usage(&event) == usage_bearing
                                 && !matches!(
@@ -1275,12 +1318,14 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     parent: None,
                                     "observation.command.process",
                                     causal_parent_id = context.span_id(),
-                                    causal_epoch = context.epoch()
+                                    causal_epoch = context.epoch(),
+                                    command_kind = "event"
                                 ));
                                 let block_id = canonical_block_id(&event);
                                 receive_order += 1;
-                                received.push((now(), receive_order));
-                                batch.push((event, block_id, now()))
+                                received.push((next_occurred_at, receive_order));
+                                batch.push((event, block_id, next_occurred_at));
+                                latest_at = latest_at.max(next_occurred_at);
                             }
                             Ok(command) => {
                                 deferred = Some(command);
@@ -1324,7 +1369,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         }
                     }
                     if let Some(interaction) = attribution.interaction_for_run(&run_id) {
-                        let at = now();
+                        let at = latest_at;
                         match store
                             .persist_ordered_run_events(
                                 interaction,
@@ -1344,7 +1389,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 if batch.iter().any(|(event, _, _)| affects_usage(event)) {
                                     incomplete_usage = true;
                                 }
-                                unpersisted_gaps.lock().record(&run_id, at);
                                 pending_gaps.insert(interaction.to_owned(), at);
                                 live.emit(ObservationUpdate::LiveGap {
                                     interaction_id: interaction.to_owned(),
@@ -1360,6 +1404,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     run_id,
                     mut outcome,
                     finished_at,
+                    rejected_before_target,
                 }) => {
                     replayed_tool_results.remove(&run_id);
                     if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
@@ -1371,7 +1416,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let trace = active_traces.lock().get(&run_id).cloned();
                     if let Some(trace) = trace {
                         let manifest = trace.finish().await;
-                        let at = now();
+                        let at = finished_at;
                         match debug_trace_index
                             .save_manifest(
                                 Some(&run_id),
@@ -1399,7 +1444,10 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &mut pending_text,
                         &run_id,
                         &outcome,
-                        finished_at,
+                        FinishFacts {
+                            at: finished_at,
+                            rejected_before_target,
+                        },
                     )
                     .await;
                 }
@@ -1410,8 +1458,9 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     debug_enabled,
                     started_at,
                     duration_ms,
+                    occurred_at,
                 }) => {
-                    let at = now();
+                    let at = occurred_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
                         .reject(super::store::Rejection {
@@ -1441,6 +1490,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     trace,
                     pending_finish,
                     gap,
+                    occurred_at,
                 }) => {
                     if let Some(run_id) = run_id.as_deref() {
                         replayed_tool_results.remove(run_id);
@@ -1449,7 +1499,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 trace.mark_partial("writer_overflow", false);
                             }
                             if let Some(interaction) = attribution.interaction_for_run(run_id) {
-                                let at = now();
+                                let at = occurred_at;
                                 let event = RunEvent::ObservationGap {
                                     reason: "writer_overflow".into(),
                                 };
@@ -1468,7 +1518,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        unpersisted_gaps.lock().record(run_id, at);
                                         pending_gaps.insert(interaction.to_owned(), at);
                                         tracing::warn!(%run_id,%error,"observation gap persistence failed")
                                     }
@@ -1479,7 +1528,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             && let Some(trace) = &trace
                         {
                             let manifest = trace.finish().await;
-                            let at = now();
+                            let at = occurred_at;
                             match debug_trace_index
                                 .save_manifest(
                                     Some(run_id),
@@ -1500,7 +1549,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 }
                             }
                         }
-                        if let Some((mut outcome, finished_at)) = pending_finish {
+                        if let Some((mut outcome, finished_at, rejected_before_target)) = pending_finish {
                             if let Some((delivery, committed)) = terminal_facts.remove(run_id) {
                                 outcome.client_output_committed |= committed;
                                 if outcome.delivery.is_none() {
@@ -1514,12 +1563,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 &mut pending_text,
                                 run_id,
                                 &outcome,
-                                finished_at,
+                                FinishFacts {
+                                    at: finished_at,
+                                    rejected_before_target,
+                                },
                             )
                             .await;
                         }
                         if let Some(interaction) = attribution.interaction_for_run(run_id) {
-                            let at = now();
+                            let at = occurred_at;
                             match store
                                 .finalize_activity(
                                     interaction,
@@ -1532,7 +1584,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    unpersisted_gaps.lock().record(run_id, at);
                                     pending_gaps.insert(interaction.to_owned(), at);
                                     tracing::warn!(%run_id, %error, "observation activity finalization failed");
                                 }
@@ -1544,7 +1595,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         // Producer capture already entered Trace's own queue; finish drains it
                         // before publishing the terminal durable manifest boundary.
                         let manifest = trace.finish().await;
-                        let at = now();
+                        let at = occurred_at;
                         let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                         // The index retains terminal manifests in memory even when
                         // the durable write fails, so the finalized partial count
@@ -1764,6 +1815,12 @@ fn ensure_usage_complete(incomplete_usage: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 收口时与 `RunOutcome` 一起写入的运行级事实；独立成组以免 `persist_finish` 参数继续膨胀。
+struct FinishFacts {
+    at: i64,
+    rejected_before_target: bool,
+}
+
 async fn persist_finish(
     incomplete_usage: &mut bool,
     context: &WriterContext<'_>,
@@ -1771,8 +1828,12 @@ async fn persist_finish(
     pending_text: &mut TextBuffer,
     run_id: &str,
     outcome: &RunOutcome,
-    at: i64,
+    finish: FinishFacts,
 ) {
+    let FinishFacts {
+        at,
+        rejected_before_target,
+    } = finish;
     flush_one(pending_text, run_id);
     pending_text.retain(|run| run != run_id);
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
@@ -1781,7 +1842,14 @@ async fn persist_finish(
         let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
         let result = context
             .store
-            .finish_run(interaction, run_id, outcome, at, expiry)
+            .finish_run(
+                interaction,
+                run_id,
+                outcome,
+                at,
+                expiry,
+                rejected_before_target,
+            )
             .instrument(span.clone())
             .await;
         span.record("status", if result.is_ok() { "completed" } else { "error" });
@@ -1797,7 +1865,6 @@ async fn persist_finish(
             }
             Err(error) => {
                 *incomplete_usage = true;
-                pending_text.gaps.lock().record(run_id, at);
                 if let Err(error) = context.store.mark_observation_gap(interaction).await {
                     tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
                 }
@@ -1850,13 +1917,13 @@ struct TextBlock {
     allocated_bytes: usize,
 }
 impl TextBlock {
-    fn new(event: RunEvent, interaction: String, run: String) -> Self {
+    fn new(event: RunEvent, interaction: String, run: String, at: i64) -> Self {
         Self {
             id: delta_block_id(&event, &run),
             interaction,
             run,
             event,
-            at: now(),
+            at,
             receive_order: None,
             revision: 0,
             published: 0,
@@ -1945,7 +2012,6 @@ struct TextBuffer {
     retained_bytes: usize,
     blocks: HashMap<String, TextBlock>,
     live: Arc<super::live::LiveState>,
-    gaps: Arc<Mutex<super::UnpersistedGaps>>,
 }
 impl TextBuffer {
     fn publish_block(
@@ -2069,6 +2135,7 @@ mod block_tests {
                     part_index: (false, 0),
                     text: "first".into(),
                 },
+                1,
             )));
             let command = WriterCommand::Text {
                 run_id: "run".into(),
@@ -2143,7 +2210,6 @@ mod block_tests {
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: mirror.clone(),
-            gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
         };
         let mut receiver = mirror.subscribe("interaction".into());
         assert!(
@@ -2157,6 +2223,7 @@ mod block_tests {
             },
             "interaction".into(),
             "run".into(),
+            1,
         );
         block.append("first");
         mirror.replace(block.live());
@@ -2196,7 +2263,6 @@ mod block_tests {
             retained_bytes: 0,
             blocks: HashMap::new(),
             live: live.clone(),
-            gaps: Arc::new(Mutex::new(super::super::UnpersistedGaps::default())),
         };
         let mut block = TextBlock::new(
             RunEvent::ClientVisibleContentDelta {
@@ -2206,6 +2272,7 @@ mod block_tests {
             },
             "interaction".into(),
             "run".into(),
+            1,
         );
         block.append("actual partial");
         live.replace(block.live());
@@ -2254,8 +2321,8 @@ mod block_tests {
             part_index: (false, 0),
             text: String::new(),
         };
-        let mut first = TextBlock::new(delta(3), "interaction".into(), "run".into());
-        let second = TextBlock::new(delta(4), "interaction".into(), "run".into());
+        let mut first = TextBlock::new(delta(3), "interaction".into(), "run".into(), 1);
+        let second = TextBlock::new(delta(4), "interaction".into(), "run".into(), 1);
         assert!(!same_scope(&first.event, &second.event));
         assert_ne!(first.id, second.id);
         first.append_part((false, 1), "tail");

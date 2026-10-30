@@ -281,3 +281,35 @@ mod projection;
 mod store_discovery;
 #[cfg(test)]
 mod write_markers;
+
+#[test]
+fn shared_window_weight_counts_deep_item_metadata() {
+    use stravia_runtime_contract::protocol::ir::AiItemMetadata;
+
+    let large = "reasoning-content-".repeat(16 * 1024);
+    let baseline = freeze_items(vec![AiItem::output_text("body")]);
+    let baseline_bytes = super::materialize::shared_window_bytes(&[baseline.as_slice()]);
+    let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
+    assert!(cache.can_admit::<()>("generation.materialized", "small", baseline_bytes));
+    let deep = (0..70).fold(
+        serde_json::json!(large.clone()),
+        |value, _| serde_json::json!({"nested": value}),
+    );
+    let number: serde_json::Value = serde_json::from_str(&"8".repeat(300 * 1024)).unwrap();
+    for metadata in [
+        serde_json::json!({"reasoning_content": large.clone()}),
+        serde_json::json!([large.clone()]),
+        serde_json::Value::Array(vec![serde_json::json!({}); 16 * 1024]),
+        serde_json::json!({"deep": deep}),
+        serde_json::json!({"number": number}),
+    ] {
+        let mut item = AiItem::output_text("body");
+        item.meta = Some(AiItemMetadata::boxed(metadata));
+        let item = FrozenItem::new(item);
+        let bytes = super::materialize::shared_window_bytes(&[std::slice::from_ref(&item)]);
+        assert!(
+            !cache.can_admit::<()>("generation.materialized", "large", bytes),
+            "metadata above the cache budget must not be admitted",
+        );
+    }
+}

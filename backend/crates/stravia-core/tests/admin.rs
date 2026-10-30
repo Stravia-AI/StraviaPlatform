@@ -7,9 +7,10 @@ use stravia_core::config::GatewayConfig;
 use stravia_core::db::models::*;
 use stravia_core::provider_catalog::{CatalogError, CatalogSource, CatalogVersion};
 use stravia_core::provider_models::{
-    CreateManualProviderModel, NewProviderModelRecord, ProviderModelMetadata,
-    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
-    SourceStamp, UpdateProviderModel, UpdateProviderModelSelection,
+    CreateManualProviderModel, NewProviderModelRecord, ProviderModelField, ProviderModelMetadata,
+    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    RestoreProviderModelSync, SnapshotState, SourceStamp, UpdateProviderModel,
+    UpdateProviderModelSelection,
 };
 use stravia_core::storage::{MemoryStorage, Storage as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -499,41 +500,39 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
         .admin()
         .get_provider_model(&provider.id, &model.id)
         .await?;
-    let mut metadata = serde_json::to_value(&original.metadata)?;
-    let object = metadata.as_object_mut().expect("metadata object");
-    object.insert(
-        "description".to_string(),
-        serde_json::Value::String("Locally curated description".to_string()),
-    );
-    object.insert(
-        "limit".to_string(),
-        serde_json::json!({"context": 256 * 1024}),
-    );
-    object.insert(
-        "reasoning_efforts".to_string(),
-        serde_json::json!(["none", "low", "medium", "high", "xhigh"]),
-    );
-    object.insert(
-        "cost".to_string(),
-        serde_json::from_str(
-            r#"{
-                "input": 0.123456789012345678,
-                "output": 2.5,
-                "tiers": [{
-                    "tier": {"type": "context", "size": 200000},
-                    "input": 0.25,
-                    "output": 5
-                }]
-            }"#,
-        )?,
-    );
+    let changes = std::collections::BTreeMap::from([
+        (
+            "description".to_string(),
+            serde_json::json!("Locally curated description"),
+        ),
+        ("limit.context".to_string(), serde_json::json!(256 * 1024)),
+        (
+            "reasoning_efforts".to_string(),
+            serde_json::json!(["none", "low", "medium", "high", "xhigh"]),
+        ),
+        (
+            "cost.input".to_string(),
+            serde_json::json!({"amount": "0.123456789012345678", "currency": "usd"}),
+        ),
+        (
+            "cost.output".to_string(),
+            serde_json::json!({"amount": "2.5", "currency": "usd"}),
+        ),
+        (
+            "cost.tiers".to_string(),
+            serde_json::json!({
+                "currency": "usd",
+                "tiers": [{"threshold": 200000, "prices": {"input": "0.25", "output": "5"}}]
+            }),
+        ),
+    ]);
     let updated = gw
         .admin()
         .update_provider_model(
             &provider.id,
             &model.id,
             UpdateProviderModel {
-                metadata: metadata.clone(),
+                changes: changes.clone(),
                 revision: original.revision,
             },
         )
@@ -562,10 +561,25 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
     assert_eq!(stored.cost_rules[0].threshold_tokens, 200_000);
     assert!(matches!(
         stored.snapshot_state,
-        SnapshotState::Edited {
-            source: Some(SourceStamp::ProviderCatalog { .. })
+        SnapshotState::Imported {
+            source: SourceStamp::ProviderCatalog { .. },
+            ..
         }
     ));
+    assert!(stored.source_metadata.is_some());
+    for field in [
+        ProviderModelField::Description,
+        ProviderModelField::LimitContext,
+        ProviderModelField::ReasoningEfforts,
+        ProviderModelField::CostInput,
+        ProviderModelField::CostOutput,
+        ProviderModelField::CostTiers,
+    ] {
+        assert!(
+            stored.snapshot_state.pinned().contains(&field),
+            "{field} must be pinned after an explicit edit"
+        );
+    }
 
     let synced_again = gw.admin().sync_provider_models(&provider.id).await?;
     assert_eq!(synced_again.added, 0);
@@ -587,8 +601,19 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
     );
     assert!(matches!(
         frozen.snapshot_state,
-        SnapshotState::Edited { .. }
+        SnapshotState::Imported { .. }
     ));
+    assert_eq!(
+        frozen.pinned_fields,
+        vec![
+            ProviderModelField::Description,
+            ProviderModelField::LimitContext,
+            ProviderModelField::ReasoningEfforts,
+            ProviderModelField::CostInput,
+            ProviderModelField::CostOutput,
+            ProviderModelField::CostTiers,
+        ]
+    );
 
     let stale = gw
         .admin()
@@ -596,7 +621,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
             &provider.id,
             &model.id,
             UpdateProviderModel {
-                metadata,
+                changes,
                 revision: original.revision,
             },
         )
@@ -649,6 +674,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,
+                billing: None,
             })
             .await?;
         let mut mappings = route.targets[0].thinking_level_map.clone();
@@ -687,22 +713,30 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
             .read()
             .await
             .match_model("snapshot-active")
-            .expect("active Route before reimport")
+            .expect("active Route before restore")
             .supported_thinking_levels
             .contains(&ThinkingLevel::Medium)
     );
-    let reimported = gw
+    let restored = gw
         .admin()
-        .reimport_provider_model(&provider.id, &model.id, enabled.revision)
+        .restore_provider_model_sync(
+            &provider.id,
+            &model.id,
+            RestoreProviderModelSync {
+                revision: enabled.revision,
+                fields: vec!["description".into(), "reasoning_efforts".into()],
+            },
+        )
         .await?;
     assert_ne!(
-        reimported.metadata.description.as_deref(),
+        restored.metadata.description.as_deref(),
         Some("Locally curated description")
     );
     assert!(matches!(
-        reimported.snapshot_state,
+        restored.snapshot_state,
         SnapshotState::Imported {
-            source: SourceStamp::ProviderCatalog { .. }
+            source: SourceStamp::ProviderCatalog { .. },
+            ..
         }
     ));
     let routes = gw.admin().list_models().await?;
@@ -749,7 +783,7 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
             !route
                 .supported_thinking_levels
                 .contains(&ThinkingLevel::Medium),
-            "reimport must publish the complete runtime configuration before returning"
+            "restore must publish the complete runtime configuration before returning"
         );
         assert!(runtime.match_model("snapshot-disabled").is_none());
     }
@@ -839,14 +873,8 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
         from_template.metadata.description.as_deref(),
         Some("Manually curated from template")
     );
-    assert_eq!(
-        from_template.snapshot_state,
-        SnapshotState::Edited {
-            source: Some(SourceStamp::Canonical {
-                model_id: "openai/gpt-3.5-turbo".into()
-            }),
-        }
-    );
+    assert_eq!(from_template.snapshot_state, SnapshotState::Local);
+    assert!(from_template.restorable_fields.is_empty());
     let invalid_source = gw
         .admin()
         .create_manual_provider_model(
@@ -883,17 +911,13 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
                     "modalities": {"input": ["text"], "output": ["text"]},
                     "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
                     "vendor_extension": {"mode": "private"},
-                    "snapshot_state": {"type": "imported", "source": {"type": "discovery"}}
                 }),
                 template_id: None,
             },
         )
         .await?;
     assert_eq!(created.metadata.name.as_deref(), Some("Private Model"));
-    assert_eq!(
-        created.snapshot_state,
-        SnapshotState::Edited { source: None }
-    );
+    assert_eq!(created.snapshot_state, SnapshotState::Local);
     assert_eq!(created.extensions["vendor_extension"]["mode"], "private");
 
     let route = gw
@@ -914,6 +938,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     gw.admin()
@@ -1058,7 +1083,8 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
         glm.metadata.limit.as_ref().and_then(|limit| limit.context),
         Some(200_000)
     );
-    assert!(!glm.can_reimport);
+    assert!(glm.pinned_fields.is_empty());
+    assert!(glm.restorable_fields.is_empty());
 
     let unknown = gw
         .admin()
@@ -1124,6 +1150,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
                 model_id: "glm-5.1".to_string(),
                 source_kind: ProviderModelSourceKind::Discovered,
                 snapshot_state: SnapshotState::Unregistered,
+                source_metadata: None,
                 metadata_source_provider_id: None,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1145,7 +1172,8 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
                 provider_id: provider.id.clone(),
                 model_id: "legacy-unmatched".to_string(),
                 source_kind: ProviderModelSourceKind::Discovered,
-                snapshot_state: SnapshotState::Edited { source: None },
+                snapshot_state: SnapshotState::Local,
+                source_metadata: None,
                 metadata_source_provider_id: None,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
@@ -1193,7 +1221,8 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
     assert!(matches!(
         filled.snapshot_state,
         SnapshotState::Imported {
-            source: SourceStamp::Canonical { .. }
+            source: SourceStamp::Canonical { .. },
+            ..
         }
     ));
 
@@ -1202,10 +1231,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         .admin()
         .get_provider_model(&provider.id, "legacy-unmatched")
         .await?;
-    assert_eq!(
-        upgraded.snapshot_state,
-        SnapshotState::Edited { source: None }
-    );
+    assert_eq!(upgraded.snapshot_state, SnapshotState::Local);
     assert!(upgraded.metadata.limit.is_none());
     gw.shutdown().await;
     drop(gw);
@@ -1414,6 +1440,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                 },
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -1505,6 +1532,7 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2032,8 +2060,14 @@ async fn inventory_runtime_stale_edit_preserves_manual_specification() -> anyhow
             &id,
             "runtime-edited",
             UpdateProviderModel {
-                metadata: serde_json::json!({"id":"runtime-edited","name":"My owned specification",
-            "limit":{"context":4096},"reasoning_efforts":["low"]}),
+                changes: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        serde_json::json!("My owned specification"),
+                    ),
+                    ("limit.context".to_string(), serde_json::json!(4096)),
+                    ("reasoning_efforts".to_string(), serde_json::json!(["low"])),
+                ]),
                 revision: detail.revision,
             },
         )
@@ -2074,7 +2108,7 @@ async fn inventory_runtime_stale_edit_preserves_manual_specification() -> anyhow
     );
     assert!(matches!(
         retained.snapshot_state,
-        SnapshotState::Edited { .. }
+        SnapshotState::Imported { .. }
     ));
     let history = gw
         .admin()
@@ -2174,6 +2208,7 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2222,6 +2257,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2466,10 +2502,9 @@ async fn saved_icon_provider(
 #[tokio::test]
 async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    assert!(gw.admin().vendor_metadata("custom")?.icon_svg.is_none());
-    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
+    seed_catalog_logo(&gw.config.data_dir, "alibaba-token-plan-cn", ICON_TEST_SVG)?;
 
-    let icon = gw.provider_icon("custom").await?;
+    let icon = gw.provider_icon("alibaba-token-plan-cn").await?;
 
     assert_eq!(icon.content_type, "image/svg+xml");
     assert_eq!(icon.body, ICON_TEST_SVG);
@@ -2482,8 +2517,9 @@ async fn provider_icon_serves_the_catalog_logo_for_a_descriptor_identity() -> an
 #[tokio::test]
 async fn provider_icon_resolves_a_saved_connection_to_its_catalog_logo() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let provider = saved_icon_provider(&gw, "custom", "https://icon-test.invalid/v1").await?;
-    seed_catalog_logo(&gw.config.data_dir, "custom", ICON_TEST_SVG)?;
+    let provider =
+        saved_icon_provider(&gw, "alibaba-token-plan-cn", "https://icon-test.invalid/v1").await?;
+    seed_catalog_logo(&gw.config.data_dir, "alibaba-token-plan-cn", ICON_TEST_SVG)?;
 
     let icon = gw.provider_icon(&provider.id).await?;
 
@@ -2553,23 +2589,19 @@ async fn provider_icon_prefers_embedded_svg_for_provider_and_catalog_identities(
         .as_deref()
         .expect("Codex declares a catalog identity");
     let catalog_descriptor = gw.admin().vendor_metadata(catalog_id)?;
-    let catalog_svg = catalog_descriptor
-        .icon_svg
-        .as_deref()
-        .expect("OpenAI embeds its brand SVG");
+    assert!(catalog_descriptor.icon_svg.is_none());
     assert_ne!(descriptor.provider_id, catalog_id);
     seed_catalog_logo(&gw.config.data_dir, &descriptor.provider_id, ICON_TEST_SVG)?;
     seed_catalog_logo(&gw.config.data_dir, catalog_id, ICON_TEST_SVG)?;
 
     // Exact provider identity wins over a different profile sharing its catalog id.
     for (key, expected) in [
-        (descriptor.provider_id.as_str(), svg),
-        (catalog_id, catalog_svg),
+        (descriptor.provider_id.as_str(), svg.as_bytes()),
+        (catalog_id, ICON_TEST_SVG),
     ] {
         let icon = gw.provider_icon(key).await?;
         assert_eq!(icon.content_type, "image/svg+xml");
-        assert_eq!(icon.body, expected.as_bytes());
-        assert_ne!(icon.body, ICON_TEST_SVG);
+        assert_eq!(icon.body, expected);
     }
     gw.shutdown().await;
     drop(gw);
@@ -2580,12 +2612,13 @@ async fn provider_icon_prefers_embedded_svg_for_provider_and_catalog_identities(
 #[tokio::test]
 async fn provider_icon_prefers_embedded_svg_for_a_saved_connection() -> anyhow::Result<()> {
     let (data_dir, gw) = build_gateway().await?;
-    let descriptor = gw.admin().vendor_metadata("openai")?;
+    install_distributed_vendor_plugin(&gw, "openai-codex").await?;
+    let descriptor = gw.admin().vendor_metadata("openai-codex")?;
     let svg = descriptor
         .icon_svg
         .as_deref()
-        .expect("OpenAI embeds its brand SVG");
-    let provider = saved_icon_provider(&gw, "openai", "https://icon-test.invalid/v1").await?;
+        .expect("Codex embeds its brand SVG");
+    let provider = saved_icon_provider(&gw, "openai-codex", "https://icon-test.invalid/v1").await?;
     seed_catalog_logo(&gw.config.data_dir, "openai", ICON_TEST_SVG)?;
     seed_catalog_favicon(
         &gw.config.data_dir,

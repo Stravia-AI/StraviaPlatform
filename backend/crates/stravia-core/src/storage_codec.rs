@@ -80,14 +80,27 @@ pub(crate) fn encode(bytes: Cow<'_, [u8]>) -> anyhow::Result<Vec<u8>> {
     Ok(encoded)
 }
 
+/// 读取固定尾部中的逻辑长度，仅用于预分配前的工作集预算。
+/// 该提示不证明正文完整；实际读取仍须经 `decode` 校验帧边界和解压结果。
+pub(crate) fn decoded_size_hint(trailer: &[u8]) -> anyhow::Result<usize> {
+    ensure!(trailer.len() == TRAILER_BYTES, "truncated storage payload");
+    ensure!(trailer[13] == VERSION, "unsupported storage codec version");
+    ensure!(trailer[1..5] == [0; 4], "unsupported storage dictionary");
+    ensure!(
+        matches!(trailer[0], RAW | ZSTD),
+        "unsupported storage codec"
+    );
+    Ok(usize::try_from(u64::from_le_bytes(
+        trailer[5..13].try_into()?,
+    ))?)
+}
+
 /// 还原一条载荷；拒绝未知版本、字典、长度不一致与损坏帧。
 /// RAW rows borrow their validated body; compressed frames require new storage.
 pub(crate) fn decode(bytes: &[u8]) -> anyhow::Result<Cow<'_, [u8]>> {
     ensure!(bytes.len() >= TRAILER_BYTES, "truncated storage payload");
     let (body, trailer) = bytes.split_at(bytes.len() - TRAILER_BYTES);
-    ensure!(trailer[13] == VERSION, "unsupported storage codec version");
-    ensure!(trailer[1..5] == [0; 4], "unsupported storage dictionary");
-    let expected = usize::try_from(u64::from_le_bytes(trailer[5..13].try_into()?))?;
+    let expected = decoded_size_hint(trailer)?;
     match trailer[0] {
         RAW => {
             ensure!(body.len() == expected, "storage payload length mismatch");

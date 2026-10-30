@@ -1,13 +1,19 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 import { prepareApp } from './prepare-app'
 
 const HOUR = 3_600_000
 const NOW = Date.UTC(2026, 9, 11, 12, 7)
 const LIVE_END = Date.UTC(2026, 9, 11, 12, 15)
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const emptyMoney = { amount: '0', known_count: 0, unknown_count: 0 }
+const knownMoney = { amount: '0.01', known_count: 1, unknown_count: 0 }
 const overview = (requests = 12) => ({
   total_requests: requests,
-  error_count: 0,
+  terminal_request_count: requests,
+  failed_request_count: 0,
+  upstream_request_count: requests,
+  upstream_error_count: 0,
   total_input_tokens: 600,
   total_output_tokens: 86,
   total_cache_read_tokens: 320,
@@ -16,6 +22,8 @@ const overview = (requests = 12) => ({
   avg_duration_ms: 120,
   avg_first_token_ms: 40,
   avg_output_tps: 25,
+  currency: CURRENCY,
+  actual_cost: knownMoney,
 })
 
 type Window = { start: number; end: number }
@@ -39,7 +47,10 @@ async function fixture(page: Page, intercept?: (route: Route, url: URL) => Promi
               bucket_ms: bucketMs,
               bucket_start: Number(url.searchParams.get('start_at')),
               request_count: 12,
-              error_count: 0,
+              terminal_request_count: 12,
+              failed_request_count: 0,
+              upstream_request_count: 12,
+              upstream_error_count: 0,
               total_input_tokens: 600,
               total_output_tokens: 86,
               total_cache_read_tokens: 320,
@@ -48,6 +59,8 @@ async function fixture(page: Page, intercept?: (route: Route, url: URL) => Promi
               avg_duration_ms: 120,
               avg_first_token_ms: 40,
               avg_output_tps: 25,
+              currency: CURRENCY,
+              actual_cost: knownMoney,
             },
           ],
         },
@@ -273,7 +286,10 @@ test.describe('statistics absolute time windows', () => {
             bucket_start,
             bucket_ms: bucketMs,
             request_count: tokens,
-            error_count: 0,
+            terminal_request_count: tokens,
+            failed_request_count: 0,
+            upstream_request_count: tokens,
+            upstream_error_count: 0,
             total_input_tokens: tokens,
             total_output_tokens: tokens,
             total_cache_read_tokens: 0,
@@ -282,6 +298,8 @@ test.describe('statistics absolute time windows', () => {
             avg_duration_ms: 1000,
             avg_first_token_ms: 500,
             avg_output_tps: 1,
+            currency: CURRENCY,
+            actual_cost: { amount: '0.01', known_count: tokens, unknown_count: 0 },
           })),
         },
       })
@@ -343,15 +361,21 @@ test.describe('statistics absolute time windows', () => {
           total_output_tokens: requests,
           total_reasoning_tokens: null,
           avg_duration_ms: 1000,
+          currency: CURRENCY,
+          cost: knownMoney,
+          billing: emptyMoney,
         }))
       } else if (endpoint === 'providers') {
         data = identities.map(({ suffix, deleted, requests }) => ({
           provider_id: `provider-${suffix}`,
           provider: 'Reused service name',
           deleted,
-          request_count: requests,
-          error_count: 0,
+          upstream_request_count: requests,
+          upstream_error_count: 0,
           avg_output_tps: 1,
+          currency: CURRENCY,
+          cost: knownMoney,
+          subscription: null,
         }))
       } else if (endpoint === 'api-keys') {
         data = identities.map(({ suffix, deleted, requests }) => ({
@@ -365,6 +389,9 @@ test.describe('statistics absolute time windows', () => {
           cache_write_tokens: 0,
           reasoning_tokens: null,
           last_used_at: NOW,
+          currency: CURRENCY,
+          cost: knownMoney,
+          billing: emptyMoney,
         }))
       } else return false
       await route.fulfill({ json: { data } })
@@ -525,10 +552,13 @@ const providerRows = Array.from({ length: resourceTotal }, (_, index) => ({
   provider: `Service ${String(index + 1).padStart(2, '0')}`,
   deleted: false,
   // Backend order is by volume, so the smallest rows sit outside the default top eight.
-  request_count: (resourceTotal - index) * 100,
-  error_count: index === 0 ? 3 : 0,
+  upstream_request_count: (resourceTotal - index) * 100,
+  upstream_error_count: index === 0 ? 3 : 0,
   avg_duration_ms: 100,
   avg_output_tps: 10 + index,
+  currency: CURRENCY,
+  cost: knownMoney,
+  subscription: null,
 }))
 const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
   api_key_id: `key-${index + 1}`,
@@ -541,10 +571,14 @@ const keyRows = Array.from({ length: resourceTotal }, (_, index) => ({
   cache_write_tokens: 5,
   reasoning_tokens: null,
   last_used_at: NOW - index * HOUR,
+  currency: CURRENCY,
+  cost: knownMoney,
+  billing: emptyMoney,
 }))
 
-async function resourceFixture(page: Page) {
+async function resourceFixture(page: Page, intercept?: (route: Route, url: URL) => Promise<boolean>) {
   return fixture(page, async (route, url) => {
+    if (intercept && (await intercept(route, url))) return true
     const endpoint = url.pathname.split('/').at(-1)
     if (endpoint === 'providers') await route.fulfill({ json: { data: providerRows } })
     else if (endpoint === 'api-keys') await route.fulfill({ json: { data: keyRows } })
@@ -629,30 +663,91 @@ test.describe('statistics resource breakdowns', () => {
     })
   }
 
-  test('zero error counts are neutral and only real errors are destructive', async ({ page }) => {
+  test('only real upstream errors are destructive and zero upstream requests stay unknown', async ({ page }) => {
     await page.clock.setFixedTime(NOW)
     await page.setViewportSize({ width: 1600, height: 1000 })
-    await resourceFixture(page)
+    await resourceFixture(page, async (route, url) => {
+      if (url.pathname.split('/').at(-1) !== 'providers') return false
+      await route.fulfill({
+        json: {
+          data: [
+            {
+              provider_id: 'p-failing',
+              provider: 'Service 01',
+              deleted: false,
+              upstream_request_count: 100,
+              upstream_error_count: 3,
+              avg_duration_ms: 100,
+              avg_output_tps: 10,
+              currency: CURRENCY,
+              cost: knownMoney,
+              subscription: null,
+            },
+            {
+              provider_id: 'p-healthy',
+              provider: 'Service 02',
+              deleted: false,
+              upstream_request_count: 100,
+              upstream_error_count: 0,
+              avg_duration_ms: 100,
+              avg_output_tps: 11,
+              currency: CURRENCY,
+              cost: knownMoney,
+              subscription: null,
+            },
+            {
+              provider_id: 'p-idle',
+              provider: 'Service 03',
+              deleted: false,
+              upstream_request_count: 0,
+              upstream_error_count: 0,
+              avg_duration_ms: null,
+              avg_output_tps: null,
+              currency: CURRENCY,
+              cost: emptyMoney,
+              subscription: null,
+            },
+          ],
+        },
+      })
+      return true
+    })
     await page.goto('/stats')
     const providers = page.getByRole('region', { name: 'Providers', exact: true })
-    const colorOf = (locator: ReturnType<Page['locator']>) => locator.evaluate((el) => getComputedStyle(el).color)
+    const colorOf = (locator: Locator) => locator.evaluate((el) => getComputedStyle(el).color)
+    for (const header of ['Upstream Requests', 'Upstream Errors', 'Upstream Error Rate']) {
+      // 列头必须字面写出“上游”，排序按钮的可访问名称以它开头。
+      await expect(providers.getByRole('columnheader', { name: new RegExp(`^Sort ${header} `) })).toBeVisible()
+    }
     const failing = providers.getByRole('row').filter({ hasText: 'Service 01' })
     const healthy = providers.getByRole('row').filter({ hasText: 'Service 02' })
+    const idle = providers.getByRole('row').filter({ hasText: 'Service 03' })
     const errorsColumn = 2
+    const rateColumn = 3
     const failingColor = await colorOf(failing.getByRole('cell').nth(errorsColumn))
     const healthyColor = await colorOf(healthy.getByRole('cell').nth(errorsColumn))
     await expect(failing.getByRole('cell').nth(errorsColumn)).toHaveText('3')
     await expect(healthy.getByRole('cell').nth(errorsColumn)).toHaveText('0')
     expect(healthyColor).toBe(await colorOf(healthy.getByRole('cell').nth(1)))
     expect(failingColor).not.toBe(healthyColor)
+    await expect(failing.getByRole('cell').nth(rateColumn)).toHaveText('3%')
+    await expect(healthy.getByRole('cell').nth(rateColumn)).toHaveText('0%')
+    // 没有上游请求时错误率未知，保持中性的“—”，不能读成 0% 的健康。
+    await expect(idle.getByRole('cell').nth(rateColumn)).toHaveText('—')
+    expect(await colorOf(idle.getByRole('cell').nth(rateColumn))).toBe(await colorOf(healthy.getByRole('cell').nth(1)))
 
     await page.setViewportSize({ width: 390, height: 900 })
     const failingList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 01' })
     const healthyList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 02' })
-    const failingError = failingList.getByText('3 errors', { exact: true })
-    const healthyError = healthyList.getByText('0 errors', { exact: true })
+    const idleList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 03' })
+    const failingError = failingList.getByText('3 upstream errors', { exact: true })
+    const healthyError = healthyList.getByText('0 upstream errors', { exact: true })
     expect(await colorOf(failingError)).toBe(failingColor)
     expect(await colorOf(healthyError)).not.toBe(failingColor)
+    await expect(failingList).toContainText('3%')
+    await expect(healthyList).toContainText('0%')
+    await expect(idleList).toContainText('—')
+    await expect(idleList.getByText('0', { exact: true })).toBeVisible()
   })
 })
 
@@ -661,7 +756,10 @@ test.describe('statistics report without traffic', () => {
 
   const emptyOverview = {
     total_requests: 0,
-    error_count: 0,
+    terminal_request_count: 0,
+    failed_request_count: 0,
+    upstream_request_count: 0,
+    upstream_error_count: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
     total_cache_read_tokens: 0,
@@ -670,6 +768,8 @@ test.describe('statistics report without traffic', () => {
     avg_duration_ms: null,
     avg_first_token_ms: null,
     avg_output_tps: null,
+    currency: CURRENCY,
+    actual_cost: emptyMoney,
   }
   const emptyReport = async (route: Route, url: URL) => {
     const endpoint = url.pathname.split('/').at(-1)
@@ -696,7 +796,7 @@ test.describe('statistics report without traffic', () => {
     // Every other section keeps only a short state line: no repeated bordered empty cards.
     for (const [region, text] of [
       ['Latency and speed', 'No latency or speed data.'],
-      ['Errors', 'No error data.'],
+      ['Availability', 'No availability data.'],
       ['Token breakdown', 'No token data.'],
       ['Models', 'No model traffic.'],
       ['Providers', 'No provider traffic.'],

@@ -1,4 +1,6 @@
-import type { StatsSeries } from '#lib/types.js'
+import type { StatsOverview, StatsSeries } from '#lib/types.js'
+import type { MoneyAmount } from '#lib/types/money.js'
+import { isMoneyUnknown } from '#lib/money.js'
 
 type LatencyStats = Pick<StatsSeries, 'bucket_start' | 'avg_first_token_ms' | 'avg_output_tps'>
 type TokenStats = Pick<
@@ -31,6 +33,97 @@ export function buildLatencyChart(rows: readonly LatencyStats[], bucketMs: numbe
       bucket: new Date(start),
       firstToken: row.avg_first_token_ms == null ? null : row.avg_first_token_ms / 1000,
       outputTps: row.avg_output_tps,
+    })
+    previousStart = Number.isFinite(start) ? start : undefined
+  }
+
+  return points
+}
+
+type AvailabilityStats = Pick<
+  StatsSeries,
+  'bucket_start' | 'terminal_request_count' | 'failed_request_count' | 'upstream_request_count' | 'upstream_error_count'
+>
+
+interface AvailabilityCounts {
+  /** 已完成或最终失败、非取消、且不是错误的请求。 */
+  terminalRequests: number
+  /** 已终结请求中最终失败的请求。 */
+  failedRequests: number
+  /** 已得到上游判定结果的 Target 尝试。 */
+  upstreamRequests: number
+  /** 上游来源的终态失败尝试。 */
+  upstreamErrors: number
+}
+
+export interface AvailabilityChartPoint extends AvailabilityCounts {
+  /** Bucket 起点的真实时刻；显示文案由轴刻度与 tooltip 按需本地化格式化。 */
+  bucket: Date
+  /** 0–1 的客户端可用率；分母为零表示未知，保持 null 让折线断开。 */
+  client: number | null
+  /** 0–1 的上游可用率；分母为零表示未知，保持 null 让折线断开。 */
+  upstream: number | null
+}
+
+export interface AvailabilitySummary {
+  /** 0–1 的窗口客户端可用率；分母为零表示未知。 */
+  client: number | null
+  /** 0–1 的窗口上游可用率；分母为零表示未知。 */
+  upstream: number | null
+}
+
+type AvailabilityTotals = Pick<
+  StatsOverview,
+  'terminal_request_count' | 'failed_request_count' | 'upstream_request_count' | 'upstream_error_count'
+>
+
+/** 可用率 = 1 − 错误 ÷ 分母。零分母表示没有可判定的流量，不能补成 100%。 */
+function availabilityRatio(errors: number, total: number): number | null {
+  return total > 0 ? 1 - errors / total : null
+}
+
+/**
+ * 窗口聚合取概览的总量相除；概览与折线同一窗口，但聚合不经过桶边界。
+ * 任一总量为 0 时返回 null，由界面显示为中性的“—”。
+ */
+export function buildAvailabilitySummary(totals: AvailabilityTotals): AvailabilitySummary {
+  return {
+    client: availabilityRatio(totals.failed_request_count, totals.terminal_request_count),
+    upstream: availabilityRatio(totals.upstream_error_count, totals.upstream_request_count),
+  }
+}
+
+/** 缺桶点：两个分母都为零，两条线都在此断开。 */
+const ZERO_AVAILABILITY: AvailabilityCounts = {
+  terminalRequests: 0,
+  failedRequests: 0,
+  upstreamRequests: 0,
+  upstreamErrors: 0,
+}
+
+/** 从 series 构造客户端与上游两条可用率折线；缺桶补 null（断线），不插值。 */
+export function buildAvailabilityChart(rows: readonly AvailabilityStats[], bucketMs: number): AvailabilityChartPoint[] {
+  const points: AvailabilityChartPoint[] = []
+  let previousStart: number | undefined
+
+  for (const row of rows) {
+    const start = row.bucket_start
+    if (previousStart != null && Number.isFinite(start)) {
+      for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
+        points.push({ bucket: new Date(missing), ...ZERO_AVAILABILITY, client: null, upstream: null })
+      }
+    }
+    const counts: AvailabilityCounts = {
+      terminalRequests: row.terminal_request_count,
+      failedRequests: row.failed_request_count,
+      upstreamRequests: row.upstream_request_count,
+      upstreamErrors: row.upstream_error_count,
+    }
+    points.push({
+      bucket: new Date(start),
+      ...counts,
+      client: availabilityRatio(counts.failedRequests, counts.terminalRequests),
+      upstream: availabilityRatio(counts.upstreamErrors, counts.upstreamRequests),
     })
     previousStart = Number.isFinite(start) ? start : undefined
   }
@@ -183,4 +276,41 @@ export function buildActivityGrid(
         : (Math.min(4, Math.ceil((cell.tokens / max) * 4)) as 1 | 2 | 3 | 4),
   }))
   return { cells, colStarts, colCount: colStarts.length, rowCount, bucketMs }
+}
+
+type CostStats = Pick<StatsSeries, 'bucket_start' | 'actual_cost'>
+
+export interface CostChartPoint {
+  bucket: Date
+  /** Display-currency amount; null means no cost records in the bucket and breaks the line. */
+  amount: number | null
+  amountLabel: string
+  cost: MoneyAmount | null
+}
+
+/** Cost series uses the same missing-bucket gaps as the other time series; no interpolation. */
+export function buildCostChart(rows: readonly CostStats[], bucketMs: number): CostChartPoint[] {
+  const points: CostChartPoint[] = []
+  let previousStart: number | undefined
+
+  for (const row of rows) {
+    const start = row.bucket_start
+    if (previousStart != null && Number.isFinite(start)) {
+      for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
+        points.push({ bucket: new Date(missing), amount: null, amountLabel: '—', cost: null })
+      }
+    }
+    // Unknown attempts do not contribute a plotted amount; the tooltip reports Unknown.
+    const known = !isMoneyUnknown(row.actual_cost)
+    const amount = known ? Number(row.actual_cost.amount) : null
+    points.push({
+      bucket: new Date(start),
+      amount: amount != null && Number.isFinite(amount) ? amount : null,
+      amountLabel: known ? row.actual_cost.amount : '—',
+      cost: row.actual_cost,
+    })
+    previousStart = Number.isFinite(start) ? start : undefined
+  }
+
+  return points
 }

@@ -16,6 +16,10 @@ base 离线启动供应商清单时，优先使用本地最后一次成功清单
 
 供应商模型目录是对应 Provider Profile 的一部分，由 base 在运行时获取 `https://models.stravia.cn/providers/{provider_id}/models.json`；这里的 Provider 指供应商接入身份，不是已保存连接的 UUID。内嵌 bootstrap 不包含全部供应商模型数据。Core 继续持有 `https://models.stravia.cn/models.json` 的 Canonical Model 数据，并只在供应商模型目录没有数据时作为回退来源。模型集合仅由供应商发现或管理员明确添加确定；Core 不通过回退增加成员或声明模型可用，只为其中缺失元数据的模型补充 Canonical Model 数据。
 
+目录作用域以当前 `ProviderDescriptor.catalog_id` 的非空值为权威，已保存的 `preset_key` 只在 descriptor 没有目录身份时兜底。发现前的目录注入与发现后的快照同步遵守同一顺序，因此旧 Command Code 连接保存的 `command-code` 不会遮蔽当前插件声明的 `commandcode`，无需修改连接数据或增加目录别名。
+
+整组缺价允许独立的价格富化：在渠道元数据保持原样的前提下，通过唯一确认的 Canonical 身份读取同名模型厂商 Provider scope 的官方 API 参考价。该例外只补价格，不将厂商全规格叠加到渠道，也不放宽下文的全规格 Canonical 匹配或模型集合边界；优先级、匹配限制与故障保留见[成本与计费设计 §4.4](../design/cost-and-billing.md#44-provider-model-的来源价格)。
+
 模型集合已经由上游发现或管理员添加，但 base 获取供应商模型目录元数据发生超时、HTTP 500 等失败时，允许使用 Core Canonical Model 补充元数据。该回退必须明确报告供应商模型目录获取失败，不得把本次目录刷新标为成功，不得覆盖已有有效数据，也不得扩大模型集合；真正的上游账号级模型发现失败不在此授权范围内，不能用全局目录冒充成功。
 
 base 的供应商目录与 Core 的全局 Canonical Model 目录独立刷新，不再要求跨模块等待并同时切换到同一 revision。base 新增兼容供应商不受 Core 下载失败阻塞，Core 刷新也不等待 base；接受两边短时处于不同 revision。两边分别校验各自下载的一致性，失败不得标记成功，并保留已有有效数据。

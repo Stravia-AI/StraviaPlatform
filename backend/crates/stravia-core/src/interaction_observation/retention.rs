@@ -1,7 +1,7 @@
 use super::{store::ObservationStore, types::ClearHistoryResult};
 use std::collections::HashSet;
 
-const RETENTION_BATCH_SIZE: i64 = 100;
+const REJECTION_BATCH_SIZE: i64 = 100;
 
 pub(super) struct RetentionBatch {
     pub(super) removed_interactions: Vec<String>,
@@ -56,49 +56,76 @@ impl ObservationStore {
     pub(super) async fn purge_expired_batch(&self, now: i64) -> anyhow::Result<RetentionBatch> {
         match self {
             Self::Sqlite(p, _) => {
-                // 每批单独持有协调器与事务，避免一次清理长期阻塞其他写入。
+                // 一个交互可能拥有大量 Run；不把多个交互的级联工作并入同一写租约。
                 let mut connection = p.acquire_write().await?;
                 let mut tx = connection.begin().await?;
                 let rejected = sqlx::query("DELETE FROM rejected_request_observations WHERE expires_at<=?1 AND id IN (SELECT id FROM rejected_request_observations WHERE expires_at<=?1 ORDER BY expires_at,id LIMIT ?2)")
                     .bind(now)
-                    .bind(RETENTION_BATCH_SIZE)
+                    .bind(REJECTION_BATCH_SIZE)
                     .execute(&mut *tx)
                     .await?
                     .rows_affected();
-                let removed_interactions: Vec<String> = sqlx::query_scalar("DELETE FROM interaction_observations WHERE expires_at<=?1 AND status<>'running' AND id IN (SELECT id FROM interaction_observations WHERE expires_at<=?1 AND status<>'running' ORDER BY expires_at,id LIMIT ?2) RETURNING id")
+                let interaction: Option<String> = sqlx::query_scalar("SELECT id FROM interaction_observations WHERE expires_at<=? AND status<>'running' ORDER BY expires_at,id LIMIT 1")
                     .bind(now)
-                    .bind(RETENTION_BATCH_SIZE)
-                    .fetch_all(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await?;
+                if let Some(id) = &interaction {
+                    // 先集合删除叶子，避免父级逐 Run 重复触发多层外键查找。
+                    // 仍在同一事务中收口，不能向续接或详情读取暴露半个交互。
+                    for sql in [
+                        "DELETE FROM observation_events WHERE interaction_id=?",
+                        "DELETE FROM credential_mapping_reuses WHERE interaction_id=?",
+                        "DELETE FROM observation_pending_tools WHERE interaction_id=?",
+                        "DELETE FROM observation_tail_sources WHERE interaction_id=?",
+                        "DELETE FROM target_attempt_observations WHERE interaction_id=?",
+                        "DELETE FROM model_turn_observations WHERE interaction_id=?",
+                        "DELETE FROM inference_run_observations WHERE interaction_id=?",
+                        "DELETE FROM interaction_observations WHERE id=?",
+                    ] {
+                        sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+                    }
+                }
                 tx.commit().await?;
                 connection.finish().await?;
 
                 Ok(RetentionBatch {
-                    has_more: rejected == RETENTION_BATCH_SIZE as u64
-                        || removed_interactions.len() == RETENTION_BATCH_SIZE as usize,
-                    removed_interactions,
+                    has_more: rejected == REJECTION_BATCH_SIZE as u64 || interaction.is_some(),
+                    removed_interactions: interaction.into_iter().collect(),
                 })
             }
             Self::Postgres(p, _) => {
                 let mut tx = p.begin().await?;
                 let rejected = sqlx::query("DELETE FROM rejected_request_observations WHERE expires_at<=$1 AND id IN (SELECT id FROM rejected_request_observations WHERE expires_at<=$1 ORDER BY expires_at,id LIMIT $2)")
                     .bind(now)
-                    .bind(RETENTION_BATCH_SIZE)
+                    .bind(REJECTION_BATCH_SIZE)
                     .execute(&mut *tx)
                     .await?
                     .rows_affected();
-                // PostgreSQL 等待行锁后仍须重查资格，不能删除已被续接恢复为 running 的记录。
-                let removed_interactions: Vec<String> = sqlx::query_scalar("DELETE FROM interaction_observations WHERE expires_at<=$1 AND status<>'running' AND id IN (SELECT id FROM interaction_observations WHERE expires_at<=$1 AND status<>'running' ORDER BY expires_at,id LIMIT $2) RETURNING id")
+                // 锁住通过资格核验的父记录，直到子记录与父记录一起提交；
+                // 等待行锁后的 READ COMMITTED 重查保留已经续接的交互。
+                let interaction: Option<String> = sqlx::query_scalar("SELECT id FROM interaction_observations WHERE expires_at<=$1 AND status<>'running' ORDER BY expires_at,id LIMIT 1 FOR UPDATE")
                     .bind(now)
-                    .bind(RETENTION_BATCH_SIZE)
-                    .fetch_all(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await?;
+                if let Some(id) = &interaction {
+                    for sql in [
+                        "DELETE FROM observation_events WHERE interaction_id=$1",
+                        "DELETE FROM credential_mapping_reuses WHERE interaction_id=$1",
+                        "DELETE FROM observation_pending_tools WHERE interaction_id=$1",
+                        "DELETE FROM observation_tail_sources WHERE interaction_id=$1",
+                        "DELETE FROM target_attempt_observations WHERE interaction_id=$1",
+                        "DELETE FROM model_turn_observations WHERE interaction_id=$1",
+                        "DELETE FROM inference_run_observations WHERE interaction_id=$1",
+                        "DELETE FROM interaction_observations WHERE id=$1",
+                    ] {
+                        sqlx::query(sql).bind(id).execute(&mut *tx).await?;
+                    }
+                }
                 tx.commit().await?;
 
                 Ok(RetentionBatch {
-                    has_more: rejected == RETENTION_BATCH_SIZE as u64
-                        || removed_interactions.len() == RETENTION_BATCH_SIZE as usize,
-                    removed_interactions,
+                    has_more: rejected == REJECTION_BATCH_SIZE as u64 || interaction.is_some(),
+                    removed_interactions: interaction.into_iter().collect(),
                 })
             }
         }
@@ -178,6 +205,10 @@ impl ObservationStore {
                     sqlx::query("DELETE FROM rejected_request_observations")
                         .execute(&mut *tx)
                         .await?;
+                    // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
+                    sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
+                        .execute(&mut *tx)
+                        .await?;
                     let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
                     tx.commit().await?;
                     connection.finish().await?;
@@ -190,6 +221,10 @@ impl ObservationStore {
             Self::Postgres(p, _) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations")
+                    .execute(&mut *tx)
+                    .await?;
+                // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
+                sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
                     .execute(&mut *tx)
                     .await?;
                 let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;

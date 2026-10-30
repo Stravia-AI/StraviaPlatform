@@ -302,6 +302,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let key = gateway
@@ -317,6 +318,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: vec![route.id.clone().into()],
+            spend_limit: None,
         })
         .await?;
     Ok(Connection {

@@ -149,14 +149,16 @@ fn prepare_reasoning_history(vendor_id: &str, model: &str, request: &mut AiReque
         return;
     }
 
-    // DeepSeek requires every assistant history item to carry this field when
-    // tools are present. Empty means that foreign reasoning was not captured.
+    // DeepSeek accepts empty reasoning, but rejects null from streamed terminal
+    // deltas when it is replayed as a complete assistant message.
     for item in &mut request.items {
         if item.role != Role::Assistant {
             continue;
         }
         let meta = item.meta.get_or_insert_with(Default::default);
-        if meta.object_extensions().is_some() && meta.get("reasoning_content").is_none() {
+        if meta.object_extensions().is_some()
+            && meta.get("reasoning_content").is_none_or(Value::is_null)
+        {
             meta.insert_extension("reasoning_content", Value::String(String::new()))
                 .expect("reasoning content is not reserved");
         }
@@ -570,6 +572,61 @@ mod tests {
         assert_eq!(body["messages"][0]["reasoning_content"], "");
         assert_eq!(body["messages"][1]["reasoning_content"], "native reasoning");
         assert!(body["messages"][2].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn deepseek_parallel_tool_continuation_normalizes_null_reasoning() {
+        let pair = ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .unwrap();
+        let mut request = pair
+            .decode_request(json!({
+                "model": "deepseek-flash",
+                "messages": [
+                    {"role": "user", "content": "Look up both keys and add their values."},
+                    {
+                        "role": "assistant", "content": "Checking both keys.", "reasoning_content": null,
+                        "tool_calls": [
+                            {"id": "lookup-a", "type": "function", "function": {"name": "lookup", "arguments": "{\"key\":\"A\"}"}},
+                            {"id": "lookup-b", "type": "function", "function": {"name": "lookup", "arguments": "{\"key\":\"B\"}"}}
+                        ]
+                    },
+                    {"role": "tool", "tool_call_id": "lookup-a", "content": "1"},
+                    {"role": "tool", "tool_call_id": "lookup-b", "content": "2"}
+                ],
+                "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+            }))
+            .unwrap();
+        apply(
+            "deepseek",
+            "default",
+            &provider("deepseek-flash", false),
+            &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+            &mut request,
+        )
+        .unwrap();
+        let body = pair.encode_request(request).unwrap().body;
+        let messages = body["messages"].as_array().unwrap();
+        for message in messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+        {
+            assert_eq!(message["reasoning_content"], "", "{message}");
+        }
+        let results = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| {
+                (
+                    message["tool_call_id"].as_str().unwrap(),
+                    message["content"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results, [("lookup-a", "1"), ("lookup-b", "2")]);
     }
 
     #[test]

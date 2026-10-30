@@ -8,10 +8,12 @@ const END = Date.UTC(2026, 8, 17, 8, 15)
 const PEAK = END - 9 * HOUR
 const UNKNOWN = END - 2 * QUARTER
 const MISSING = END - 3 * QUARTER
+const CURRENCY = { kind: 'usd' as const, symbol: '$' }
+const emptyMoney = { amount: '0', known_count: 0, unknown_count: 0 }
 
 test.use({ timezoneId: 'UTC' })
 
-async function stubStats(page: Page) {
+async function stubStats(page: Page, actualCost?: { amount: string; known_count: number; unknown_count: number }) {
   await page.clock.setFixedTime(END - 8 * 60_000)
   const requests: URL[] = []
   await page.route('**/api/v1/stats/**', async (route) => {
@@ -24,7 +26,10 @@ async function stubStats(page: Page) {
         json: {
           data: {
             total_requests: 128,
-            error_count: 2,
+            terminal_request_count: 128,
+            failed_request_count: 2,
+            upstream_request_count: 128,
+            upstream_error_count: 2,
             total_input_tokens: 600,
             total_output_tokens: 86,
             total_cache_read_tokens: 320,
@@ -33,6 +38,8 @@ async function stubStats(page: Page) {
             avg_duration_ms: 120,
             avg_first_token_ms: 40,
             avg_output_tps: 25,
+            currency: CURRENCY,
+            actual_cost: actualCost ?? { amount: '1.28', known_count: 128, unknown_count: 0 },
           },
         },
       })
@@ -56,7 +63,10 @@ async function stubStats(page: Page) {
           bucket_start: at,
           bucket_ms: bucket,
           request_count: 1,
-          error_count: 0,
+          terminal_request_count: 1,
+          failed_request_count: 0,
+          upstream_request_count: 1,
+          upstream_error_count: 0,
           total_input_tokens: known ? tokens : null,
           total_output_tokens: known ? 0 : null,
           total_cache_read_tokens: 80,
@@ -65,6 +75,12 @@ async function stubStats(page: Page) {
           avg_duration_ms: 120,
           avg_first_token_ms: 40,
           avg_output_tps: 25,
+          currency: CURRENCY,
+          actual_cost: actualCost ?? {
+            amount: known ? '0.01' : '0',
+            known_count: known ? 1 : 0,
+            unknown_count: known ? 0 : 1,
+          },
         })
       }
       await route.fulfill({ json: { data } })
@@ -73,6 +89,33 @@ async function stubStats(page: Page) {
     }
   })
   return requests
+}
+
+for (const scenario of [
+  {
+    name: 'subscription without attempts',
+    cost: { amount: '12.5', known_count: 0, unknown_count: 0 },
+    shown: '$12.50',
+  },
+  {
+    name: 'subscription plus unknown usage',
+    cost: { amount: '12.5', known_count: 0, unknown_count: 1 },
+    shown: '$12.50',
+  },
+  { name: 'entirely unknown usage', cost: { amount: '0', known_count: 0, unknown_count: 1 }, shown: 'Unknown' },
+]) {
+  test(`cost summary and timeline preserve ${scenario.name}`, async ({ page }) => {
+    await prepareApp(page)
+    await stubStats(page, scenario.cost)
+    await page.goto('/stats')
+    const metric = page
+      .locator('.route-metric-strip__item')
+      .filter({ has: page.getByText('Actual cost', { exact: true }) })
+    await expect(metric.locator('p').nth(1)).toHaveText(scenario.shown)
+    const chart = page.getByRole('slider', { name: 'Cost trend chart' })
+    await expect(chart).toBeVisible()
+    await expect(chart).toHaveAttribute('aria-valuetext', new RegExp(scenario.shown.replace('$', '\\$')))
+  })
 }
 
 async function expectCoverage(page: Page, selectedStart: number, end: number, requests: URL[]) {
@@ -265,6 +308,10 @@ for (const scenario of [
         json: {
           data: {
             total_requests: 1,
+            terminal_request_count: 1,
+            failed_request_count: 0,
+            upstream_request_count: 1,
+            upstream_error_count: 0,
             total_input_tokens: scenario.input,
             total_output_tokens: scenario.output,
             total_cache_read_tokens: scenario.read,
@@ -273,7 +320,8 @@ for (const scenario of [
             avg_duration_ms: 1000,
             avg_first_token_ms: 500,
             avg_output_tps: 20,
-            error_count: 0,
+            currency: CURRENCY,
+            actual_cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
           },
         },
       })
@@ -302,10 +350,13 @@ async function populateResources(page: Page, total = 12) {
           provider_id: `provider-${index + 1}`,
           provider: `Service ${String(index + 1).padStart(2, '0')}`,
           deleted: false,
-          request_count: (total - index) * 100,
-          error_count: index === 0 ? 3 : 0,
+          upstream_request_count: (total - index) * 100,
+          upstream_error_count: index === 0 ? 3 : 0,
           avg_duration_ms: 100,
           avg_output_tps: 10 + index,
+          currency: CURRENCY,
+          cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
+          subscription: index === 0 ? { cost: emptyMoney, usage_equivalent_cost: emptyMoney, multiple: null } : null,
         })),
       },
     })
@@ -324,6 +375,9 @@ async function populateResources(page: Page, total = 12) {
           cache_write_tokens: 4_321,
           reasoning_tokens: null,
           last_used_at: END - index * HOUR,
+          currency: CURRENCY,
+          cost: { amount: '0.02', known_count: 1, unknown_count: 0 },
+          billing: emptyMoney,
         })),
       },
     })
@@ -340,6 +394,9 @@ async function populateResources(page: Page, total = 12) {
           total_output_tokens: 10,
           total_reasoning_tokens: null,
           avg_duration_ms: 100,
+          currency: CURRENCY,
+          cost: { amount: '0.01', known_count: 1, unknown_count: 0 },
+          billing: emptyMoney,
         })),
       },
     })
@@ -354,7 +411,7 @@ async function usageBoxes(page: Page) {
     page: (await page.locator('.route-page').boundingBox())!,
     activity: await box('Token activity'),
     latency: await box('Latency and speed'),
-    errors: await box('Errors'),
+    availability: await box('Availability'),
     breakdown: await box('Token breakdown'),
     models: await box('Models'),
     providers: await box('Providers'),
@@ -393,7 +450,7 @@ test.describe('usage workspace layout', () => {
       .evaluate((el) => el.getBoundingClientRect().width)
     expect(cellSize).toBeLessThanOrEqual(16)
 
-    // Breakdown donuts stay 10-12rem; the error trend takes the width instead.
+    // Breakdown donuts stay 10-12rem; the availability trend takes the width instead.
     for (const [name, label] of [
       ['Token breakdown', 'Token breakdown'],
       ['Models', 'Share of all requests.'],
@@ -404,21 +461,19 @@ test.describe('usage workspace layout', () => {
       expect(donutBox.width).toBeLessThanOrEqual(12 * rem + 1)
       expect(Math.abs(donutBox.width - donutBox.height)).toBeLessThanOrEqual(1)
     }
-    expect(boxes.errors.width).toBeGreaterThan(boxes.breakdown.width * 2)
+    const availabilityChart = page.getByLabel('Availability chart', { exact: true })
+    await expect(availabilityChart).toBeVisible()
+    expect(Math.abs((await availabilityChart.boundingBox())!.height - 10 * rem)).toBeLessThanOrEqual(1)
+    expect(boxes.availability.width).toBeGreaterThan(boxes.breakdown.width * 2)
     expect(boxes.breakdown.width).toBeLessThanOrEqual(24 * rem)
     expect(boxes.models.width).toBeLessThanOrEqual(24 * rem)
 
-    // Provider and key tables sit side by side only because the 7-column key table stays readable.
-    expect(Math.abs(boxes.providers.y - boxes.keys.y)).toBeLessThanOrEqual(1)
-    expect(boxes.keys.x).toBeGreaterThan(boxes.providers.x + boxes.providers.width - 1)
-    expect(boxes.keys.width).toBeGreaterThanOrEqual(46 * rem)
     await expect(async () => {
       const headers = await keyTable
         .getByRole('columnheader')
         .evaluateAll((els) =>
           els.map((el) => ({ text: el.textContent?.trim(), clipped: el.scrollWidth > el.clientWidth + 1 })),
         )
-      expect(headers).toHaveLength(7)
       expect(headers.filter((header) => header.clipped)).toEqual([])
       const scrolls = await keyTable.evaluate((table) => {
         for (let el = table.parentElement; el; el = el.parentElement) {
@@ -435,7 +490,7 @@ test.describe('usage workspace layout', () => {
     expect(nameColumn.width).toBeGreaterThan(requestColumn.width * 1.5)
   })
 
-  test('1440 stacks the provider and key tables instead of squeezing the 7-column table', async ({ page }) => {
+  test('1440 keeps resource tables and analyses readable in one column', async ({ page }) => {
     await prepareApp(page)
     await stubStats(page)
     await populateResources(page)
@@ -464,7 +519,7 @@ test.describe('usage workspace layout', () => {
         width: boxes.page.width,
         paired: Math.abs(boxes.activity.y - boxes.latency.y) <= 1 && boxes.latency.x > boxes.activity.x,
         breakdownRow:
-          Math.abs(boxes.errors.y - boxes.breakdown.y) <= 1 && Math.abs(boxes.breakdown.y - boxes.models.y) <= 1,
+          Math.abs(boxes.availability.y - boxes.breakdown.y) <= 1 && Math.abs(boxes.breakdown.y - boxes.models.y) <= 1,
       }
     }
     await expect(page.locator('[data-activity-start]').locator('.token-activity-cell').first()).toBeVisible()
@@ -509,7 +564,9 @@ test.describe('usage workspace layout', () => {
         await expect(page.locator('html')).toHaveAttribute('lang', locale)
         const wrapper = page.locator('[data-activity-start]')
         await expect(wrapper.locator('.token-activity-cell').first()).toBeVisible()
-        const latency = page.locator('[role="slider"]').filter({ has: page.locator('path[aria-label]') })
+        const latency = page
+          .getByRole('region', { name: locale === 'zh-CN' ? '延迟与速度' : 'Latency and speed', exact: true })
+          .getByRole('slider')
         await expect(latency).toBeVisible()
         await expect(async () => {
           const activityBox = (await wrapper.boundingBox())!

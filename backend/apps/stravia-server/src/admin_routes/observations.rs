@@ -10,8 +10,8 @@ use futures::StreamExt;
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
-    BundleRequest, BundleResourceKind, FailedRequestQuery, ForestQuery, InteractionEventsQuery,
-    ObservationQueryError, ObservationUpdate, RejectionQuery, RootChangesQuery,
+    BundleRequest, BundleResourceKind, ClientErrorQuery, ForestQuery, InteractionEventsQuery,
+    ObservationQueryError, ObservationUpdate, RejectionQuery, RootChangesQuery, UpstreamErrorQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -90,21 +90,42 @@ pub(super) async fn rejection_list(
     }
 }
 
-pub(super) async fn failed_request_list(
+pub(super) async fn client_error_list(
     State(gateway): State<Gateway>,
-    Query(query): Query<FailedRequestQuery>,
+    Query(query): Query<ClientErrorQuery>,
 ) -> Response {
-    match gateway.admin().failed_requests(query).await {
+    match gateway.admin().client_errors(query).await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
         Err(error) => observation_query_error(error),
     }
 }
 
-pub(super) async fn failed_request_detail(
+pub(super) async fn client_error_detail(
     State(gateway): State<Gateway>,
     Path((kind, id)): Path<(String, String)>,
 ) -> Response {
-    match gateway.admin().failed_request_detail(&kind, &id).await {
+    match gateway.admin().client_error_detail(&kind, &id).await {
+        Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
+pub(super) async fn upstream_error_list(
+    State(gateway): State<Gateway>,
+    Query(query): Query<UpstreamErrorQuery>,
+) -> Response {
+    match gateway.admin().upstream_errors(query).await {
+        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
+pub(super) async fn upstream_error_detail(
+    State(gateway): State<Gateway>,
+    Path(id): Path<String>,
+) -> Response {
+    match gateway.admin().upstream_error_detail(&id).await {
         Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
         Ok(None) => not_found(),
         Err(error) => observation_query_error(error),
@@ -336,7 +357,13 @@ fn observation_query_error(error: anyhow::Error) -> Response {
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": error.to_string(),
-                "code": if matches!(error, ObservationQueryError::InvalidEventPage) { "invalid_observation_event_page" } else { "invalid_observation_window" },
+                "code": match error {
+                    ObservationQueryError::InvalidEventPage => "invalid_observation_event_page",
+                    ObservationQueryError::InvalidFilter => "invalid_observation_filter",
+                    ObservationQueryError::IncompleteWindow | ObservationQueryError::InvalidWindow => {
+                        "invalid_observation_window"
+                    }
+                },
             })),
         )
             .into_response();

@@ -1,11 +1,13 @@
 use super::manifest_index::DebugTraceIndex;
 use serde_json::Value;
 use sqlx::{PgPool, Row, SqlitePool};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use super::types::{
-    ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome, RunStart,
+    ConfirmedUsage, CredentialDiscovery, IngressStart, ObservationEvent, RejectedOutcome, RunEvent,
+    RunOutcome, RunStart,
 };
+use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
 
 /// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
 pub(super) const TURN_SEPARATOR: &str = "\n\n";
@@ -582,7 +584,7 @@ impl ObservationStore {
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
                     .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=?,last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
@@ -643,7 +645,7 @@ impl ObservationStore {
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
                     .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=$1,last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,$13)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
@@ -1030,10 +1032,24 @@ impl ObservationStore {
                 crate::storage_test_faults::inject_postgres(pool, "observation").await?;
             }
         }
+        struct PreparedEvent<'a> {
+            source_index: usize,
+            event: &'a RunEvent,
+            at: i64,
+            kind: String,
+            payload: Value,
+            /// Usage written by this event's single attempt UPDATE. A finish with
+            /// `None` here keeps the durable row's already recorded usage.
+            finish_usage: Option<Cow<'a, ConfirmedUsage>>,
+            /// A finish whose folded usage came from same-batch confirmations;
+            /// those confirmations must not write the attempt row a second time.
+            absorbs_batch_usage: bool,
+        }
         let mut prepared = Vec::with_capacity(events.len());
+        let mut absorbed_usage = std::collections::HashSet::new();
         for (index, (run_event, block_id, now)) in events.iter().enumerate() {
             let now = *now;
-            if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries } if discoveries.is_empty())
+            if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries, .. } | RunEvent::CredentialMappingsReused { discoveries, .. } if discoveries.is_empty())
             {
                 continue;
             }
@@ -1047,25 +1063,70 @@ impl ObservationStore {
                 continue;
             }
             let mut payload = serde_json::to_value(run_event)?;
+            let mut finish_usage = None;
+            let mut absorbs_batch_usage = false;
             if let RunEvent::TargetAttemptFinished {
-                attempt_id,
-                usage: None,
-                ..
+                attempt_id, usage, ..
             } = run_event
-                && let Some(usage) = events
-                    .iter()
-                    .rev()
-                    .find_map(|(event, _, _)| match event {
-                        RunEvent::UsageConfirmed {
+            {
+                if let Some(usage) = usage {
+                    // The confirmation already preceded the finish; write both
+                    // facts with the same attempt UPDATE.
+                    finish_usage = Some(Cow::Borrowed(usage));
+                } else {
+                    // A same-batch confirmation is newer than the durable row, so
+                    // only fall back to the database when the batch has none.
+                    let batch_usage =
+                        events
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(index, (event, _, _))| match event {
+                                RunEvent::UsageConfirmed {
+                                    attempt_id: id,
+                                    usage,
+                                    ..
+                                } if id == attempt_id => Some((index, usage)),
+                                _ => None,
+                            });
+                    let durable_usage = if batch_usage.is_none() {
+                        self.attempt_usage(attempt_id).await?
+                    } else {
+                        None
+                    };
+                    if let Some(usage) = batch_usage
+                        .map(|(_, usage)| usage)
+                        .or(durable_usage.as_ref())
+                    {
+                        payload["usage"] = serde_json::to_value(usage)?;
+                    }
+                    // Fold confirmations that precede this attempt's next finish.
+                    // Later confirmations keep their own revision order, and the
+                    // fold coalesces fields exactly like per-event COALESCE writes.
+                    let end = events[index + 1..]
+                        .iter()
+                        .position(|(event, _, _)| {
+                            matches!(
+                                event,
+                                RunEvent::TargetAttemptFinished { attempt_id: id, .. }
+                                    if id == attempt_id
+                            )
+                        })
+                        .map_or(events.len(), |offset| index + 1 + offset);
+                    for (offset, (event, _, _)) in events[index + 1..end].iter().enumerate() {
+                        if let RunEvent::UsageConfirmed {
                             attempt_id: id,
                             usage,
                             ..
-                        } if id == attempt_id => Some(usage.clone()),
-                        _ => None,
-                    })
-                    .or(self.attempt_usage(attempt_id).await?)
-            {
-                payload["usage"] = serde_json::to_value(usage)?;
+                        } = event
+                            && id == attempt_id
+                        {
+                            merge_confirmed_usage(&mut finish_usage, usage);
+                            absorbed_usage.insert(index + 1 + offset);
+                        }
+                    }
+                    absorbs_batch_usage = finish_usage.is_some();
+                }
             }
             if let RunEvent::UsageConfirmed {
                 attempt_id, usage, ..
@@ -1154,15 +1215,33 @@ impl ObservationStore {
             {
                 continue;
             }
-            prepared.push((run_event, now, kind, payload));
+            prepared.push(PreparedEvent {
+                source_index: index,
+                event: run_event,
+                at: now,
+                kind,
+                payload,
+                finish_usage,
+                absorbs_batch_usage,
+            });
         }
         if prepared.is_empty() {
             return Ok(Vec::new());
         }
-        let durable_count = prepared
+        let is_usage_absorbed =
+            |source_index: usize,
+             event: &RunEvent,
+             folded_attempts: &std::collections::HashSet<&str>| {
+                absorbed_usage.contains(&source_index)
+                    && matches!(event, RunEvent::UsageConfirmed { attempt_id, .. }
+                    if folded_attempts.contains(attempt_id.as_str()))
+            };
+        let (durable_count, latest_at) = prepared
             .iter()
-            .filter(|(_, _, kind, _)| kind != "usage_confirmed")
-            .count();
+            .filter(|prepared| prepared.kind != "usage_confirmed")
+            .fold((0, i64::MIN), |(count, latest), prepared| {
+                (count + 1, latest.max(prepared.at))
+            });
         let mut result = Vec::with_capacity(durable_count);
         match self {
             Self::Sqlite(pool, _) => {
@@ -1184,7 +1263,23 @@ impl ObservationStore {
                 };
                 let mut status_changed = false;
                 let mut visible = String::new();
-                for (run_event, at, mut kind, mut payload) in prepared {
+                let mut folded_attempts = std::collections::HashSet::new();
+                for PreparedEvent {
+                    source_index,
+                    event: run_event,
+                    at,
+                    mut kind,
+                    mut payload,
+                    finish_usage,
+                    absorbs_batch_usage,
+                } in prepared
+                {
+                    let attempt_id = match run_event {
+                        RunEvent::TargetAttemptFinished { attempt_id, .. }
+                        | RunEvent::UsageConfirmed { attempt_id, .. } => Some(attempt_id.as_str()),
+                        _ => None,
+                    };
+                    let absorbed = is_usage_absorbed(source_index, run_event, &folded_attempts);
                     // 有界队列可能丢失父 Turn 开始；不能捏造父事实，也不能让子事件外键回滚整批。
                     let gap;
                     let run_event = if let RunEvent::TargetAttemptStarted {
@@ -1207,15 +1302,18 @@ impl ObservationStore {
                         run_event
                     };
                     if kind == "usage_confirmed" {
-                        apply_sqlite(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            run_event,
-                            current_sequence,
-                            at,
-                        )
-                        .await?;
+                        if !absorbed {
+                            apply_sqlite(
+                                &mut tx,
+                                interaction_id,
+                                run_id,
+                                run_event,
+                                current_sequence,
+                                at,
+                                None,
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     let sequence = next_sequence;
@@ -1231,8 +1329,26 @@ impl ObservationStore {
                                 visible.push_str(TURN_SEPARATOR);
                             }
                         }
-                        apply_sqlite(&mut tx, interaction_id, run_id, run_event, sequence, at)
-                            .await?;
+                        let wrote_usage = if absorbed {
+                            false
+                        } else {
+                            apply_sqlite(
+                                &mut tx,
+                                interaction_id,
+                                run_id,
+                                run_event,
+                                sequence,
+                                at,
+                                finish_usage.as_deref(),
+                            )
+                            .await?
+                        };
+                        if wrote_usage
+                            && absorbs_batch_usage
+                            && let Some(attempt_id) = attempt_id
+                        {
+                            folded_attempts.insert(attempt_id);
+                        }
                     }
                     status_changed |= status_event(run_event);
                     {
@@ -1248,6 +1364,17 @@ impl ObservationStore {
                                 payload: &payload,
                                 expires_at,
                             },
+                        )
+                        .await?;
+                    }
+                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
+                        upsert_credential_mapping_reuses_sqlite(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            at,
+                            discoveries,
                         )
                         .await?;
                     }
@@ -1268,8 +1395,8 @@ impl ObservationStore {
                     if !visible.is_empty() {
                         sqlx::query("UPDATE interaction_observations SET visible_tail=substr(visible_tail || ?, -4096) WHERE id=?").bind(&visible).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,expires_at=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;
@@ -1296,7 +1423,23 @@ impl ObservationStore {
                 let mut sequences = sequences.into_iter();
                 let mut status_changed = false;
                 let mut visible = String::new();
-                for (run_event, at, mut kind, mut payload) in prepared {
+                let mut folded_attempts = std::collections::HashSet::new();
+                for PreparedEvent {
+                    source_index,
+                    event: run_event,
+                    at,
+                    mut kind,
+                    mut payload,
+                    finish_usage,
+                    absorbs_batch_usage,
+                } in prepared
+                {
+                    let attempt_id = match run_event {
+                        RunEvent::TargetAttemptFinished { attempt_id, .. }
+                        | RunEvent::UsageConfirmed { attempt_id, .. } => Some(attempt_id.as_str()),
+                        _ => None,
+                    };
+                    let absorbed = is_usage_absorbed(source_index, run_event, &folded_attempts);
                     // 与 SQLite 使用同一缺口语义，检查位于事务内以观察本批已写入的父 Turn。
                     let gap;
                     let run_event = if let RunEvent::TargetAttemptStarted {
@@ -1319,15 +1462,18 @@ impl ObservationStore {
                         run_event
                     };
                     if kind == "usage_confirmed" {
-                        apply_postgres(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            run_event,
-                            current_sequence,
-                            at,
-                        )
-                        .await?;
+                        if !absorbed {
+                            apply_postgres(
+                                &mut tx,
+                                interaction_id,
+                                run_id,
+                                run_event,
+                                current_sequence,
+                                at,
+                                None,
+                            )
+                            .await?;
+                        }
                         continue;
                     }
                     let sequence = sequences.next().expect("allocated durable event sequence");
@@ -1342,8 +1488,26 @@ impl ObservationStore {
                                 visible.push_str(TURN_SEPARATOR);
                             }
                         }
-                        apply_postgres(&mut tx, interaction_id, run_id, run_event, sequence, at)
-                            .await?;
+                        let wrote_usage = if absorbed {
+                            false
+                        } else {
+                            apply_postgres(
+                                &mut tx,
+                                interaction_id,
+                                run_id,
+                                run_event,
+                                sequence,
+                                at,
+                                finish_usage.as_deref(),
+                            )
+                            .await?
+                        };
+                        if wrote_usage
+                            && absorbs_batch_usage
+                            && let Some(attempt_id) = attempt_id
+                        {
+                            folded_attempts.insert(attempt_id);
+                        }
                     }
                     status_changed |= status_event(run_event);
                     {
@@ -1359,6 +1523,17 @@ impl ObservationStore {
                                 payload: &payload,
                                 expires_at,
                             },
+                        )
+                        .await?;
+                    }
+                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
+                        upsert_credential_mapping_reuses_postgres(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            at,
+                            discoveries,
                         )
                         .await?;
                     }
@@ -1379,8 +1554,8 @@ impl ObservationStore {
                     if !visible.is_empty() {
                         sqlx::query("UPDATE interaction_observations SET visible_tail=RIGHT(visible_tail || $1,4096) WHERE id=$2").bind(&visible).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(last.occurred_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(latest_at).bind(last.sequence).bind(expires_at).bind(run_id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(latest_at).bind(last.sequence).bind(expires_at).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
             }
@@ -1702,6 +1877,7 @@ impl ObservationStore {
                         duration_ms: finished_at.saturating_sub(attempt.try_get("started_at")?),
                         first_token_ms: attempt.try_get("first_token_ms")?,
                         usage,
+                        amounts: None,
                     };
                     let mut terminal_payload = serde_json::to_value(terminal)?;
                     terminal_payload["finished_at"] = Value::from(finished_at);
@@ -1777,6 +1953,7 @@ impl ObservationStore {
                         duration_ms: finished_at.saturating_sub(attempt.try_get("started_at")?),
                         first_token_ms: attempt.try_get("first_token_ms")?,
                         usage,
+                        amounts: None,
                     };
                     let mut terminal_payload = serde_json::to_value(terminal)?;
                     terminal_payload["finished_at"] = Value::from(finished_at);
@@ -1847,6 +2024,7 @@ impl ObservationStore {
         outcome: &RunOutcome,
         now: i64,
         expires_at: i64,
+        rejected_before_target: bool,
     ) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool, _) => {
@@ -1854,7 +2032,7 @@ impl ObservationStore {
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
                 // 耗时采用实际结束时刻；终态事件不能排到延迟记录的前序事件之前。
-                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6 WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6,rejected_before_target=MAX(rejected_before_target,?8) WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,?),client_output_committed=MAX(client_output_committed,?),terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=? RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at")
                         .bind(outcome.delivery_completed_at)
                         .bind(outcome.client_output_committed)
@@ -1899,7 +2077,7 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6,rejected_before_target=rejected_before_target OR $8 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,$1),client_output_committed=client_output_committed OR $2,terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=$3 RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at").bind(outcome.delivery_completed_at).bind(outcome.client_output_committed).bind(run_id).fetch_one(&mut *tx).await?;
                 let mut payload = finish_payload(outcome, interrupted)?;
                 payload["finished_at"] = Value::from(now);
@@ -2475,6 +2653,199 @@ async fn insert_event_postgres(
     Ok(())
 }
 
+/// 一个复用事件最多 50 个映射 × 50 个位置；按块写入，绑定参数数留有余量。
+const REUSE_ROW_BATCH: usize = 100;
+
+struct ReuseRow<'a> {
+    marker: &'a str,
+    interaction_id: &'a str,
+    run_id: Option<&'a str>,
+    source_type: &'a str,
+    tool_id: &'a str,
+    latest_input: bool,
+    last_reused_at: i64,
+}
+
+/// 把复用事件展开成登记行。没有占位符的映射无法关联回创建行，不登记；
+/// `tool_id` 与 `latest_input` 按去重键归一，与读取侧返回的来源字段一致。
+/// 位置携带 `rule_id`，不同规则可以在同一位置命中同一秘密，归一后就会落到同一主键；
+/// 一条 INSERT 不能对同一行执行两次 `ON CONFLICT`（PostgreSQL 直接报错），
+/// 而同一事件的登记行共享时间与 Run，所以这里按主键先取第一条。
+fn reuse_rows<'a>(
+    interaction_id: &'a str,
+    run_id: Option<&'a str>,
+    occurred_at: i64,
+    discoveries: &'a [CredentialDiscovery],
+) -> Vec<ReuseRow<'a>> {
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for discovery in discoveries {
+        let Some(marker) = discovery
+            .marker
+            .as_deref()
+            .filter(|marker| !marker.is_empty())
+        else {
+            continue;
+        };
+        for locator in &discovery.locators {
+            let source_type = locator.source_type.as_str();
+            let tool_id = locator.tool_id.as_deref().unwrap_or_default();
+            let latest_input = locator.tool_id.is_none() && locator.latest_input.unwrap_or(false);
+            if !seen.insert((marker, interaction_id, source_type, tool_id, latest_input)) {
+                continue;
+            }
+            rows.push(ReuseRow {
+                marker,
+                interaction_id,
+                run_id,
+                source_type,
+                tool_id,
+                latest_input,
+                last_reused_at: occurred_at,
+            });
+        }
+    }
+    rows
+}
+
+/// 登记行的写入语句；两种后端只差绑定风格，冲突处理必须完全一致。
+const REUSE_INSERT: &str = "INSERT INTO credential_mapping_reuses(marker,interaction_id,run_id,source_type,tool_id,latest_input,last_reused_at)";
+/// 只有更晚的复用能覆盖时间与 Run：乱序到达的旧事件不得回退最新事实，时间相同时保留先写入的 Run。
+const REUSE_CONFLICT: &str = " ON CONFLICT(marker,interaction_id,source_type,tool_id,latest_input) DO UPDATE SET run_id=excluded.run_id,last_reused_at=excluded.last_reused_at WHERE excluded.last_reused_at>credential_mapping_reuses.last_reused_at";
+
+fn insert_reuse_sql(builder: &mut sqlx::QueryBuilder<sqlx::Sqlite>, rows: &[ReuseRow<'_>]) {
+    builder.push(REUSE_INSERT);
+    builder.push_values(rows, |mut values, row| {
+        values
+            .push_bind(row.marker)
+            .push_bind(row.interaction_id)
+            .push_bind(row.run_id)
+            .push_bind(row.source_type)
+            .push_bind(row.tool_id)
+            .push_bind(row.latest_input)
+            .push_bind(row.last_reused_at);
+    });
+    builder.push(REUSE_CONFLICT);
+}
+
+fn insert_reuse_sql_postgres(
+    builder: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    rows: &[ReuseRow<'_>],
+) {
+    builder.push(REUSE_INSERT);
+    builder.push_values(rows, |mut values, row| {
+        values
+            .push_bind(row.marker)
+            .push_bind(row.interaction_id)
+            .push_bind(row.run_id)
+            .push_bind(row.source_type)
+            .push_bind(row.tool_id)
+            .push_bind(row.latest_input)
+            .push_bind(row.last_reused_at);
+    });
+    builder.push(REUSE_CONFLICT);
+}
+
+/// 与复用事件同一事务登记，任何一步失败都会连同事件一起回滚。
+pub(super) async fn upsert_credential_mapping_reuses_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    occurred_at: i64,
+    discoveries: &[CredentialDiscovery],
+) -> anyhow::Result<()> {
+    for chunk in
+        reuse_rows(interaction_id, run_id, occurred_at, discoveries).chunks(REUSE_ROW_BATCH)
+    {
+        let mut insert = sqlx::QueryBuilder::<sqlx::Sqlite>::new("");
+        insert_reuse_sql(&mut insert, chunk);
+        insert.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn upsert_credential_mapping_reuses_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    interaction_id: &str,
+    run_id: Option<&str>,
+    occurred_at: i64,
+    discoveries: &[CredentialDiscovery],
+) -> anyhow::Result<()> {
+    for chunk in
+        reuse_rows(interaction_id, run_id, occurred_at, discoveries).chunks(REUSE_ROW_BATCH)
+    {
+        let mut insert = sqlx::QueryBuilder::<sqlx::Postgres>::new("");
+        insert_reuse_sql_postgres(&mut insert, chunk);
+        insert.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+fn cost_basis_column(basis: Option<CostBasis>) -> Option<&'static str> {
+    match basis?.attempt_basis()? {
+        CostBasis::Usage => Some("usage"),
+        CostBasis::Subscription => Some("subscription"),
+        // attempt_basis 已把不计算成本的 Provider 归为 None。
+        CostBasis::Untracked => None,
+    }
+}
+
+type AttemptAmountColumns = (
+    Option<&'static str>,
+    Option<i64>,
+    Option<i64>,
+    Option<&'static str>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// Recovery terminals preserve the start-time basis without fabricating amounts.
+fn attempt_amount_columns(amounts: &AttemptAmounts) -> AttemptAmountColumns {
+    // 不计算成本的 Provider 不写基准也不写金额；Route 计费与成本基准无关，照常记录。
+    let basis = cost_basis_column(Some(amounts.cost_basis));
+    let (cost_usd, cost_custom) = match amounts
+        .cost_basis
+        .attempt_basis()
+        .and(amounts.cost.as_ref())
+    {
+        Some(amount) => (Some(amount.usd_nanos), amount.custom_nanos),
+        None => (None, None),
+    };
+    let (billing_state, billing_usd, billing_custom) = match &amounts.billing {
+        Some(BillingOutcome::Charged(amount)) => {
+            (Some("charged"), Some(amount.usd_nanos), amount.custom_nanos)
+        }
+        Some(BillingOutcome::Unknown) => (Some("unknown"), None, None),
+        None => (None, None, None),
+    };
+    (
+        basis,
+        cost_usd,
+        cost_custom,
+        billing_state,
+        billing_usd,
+        billing_custom,
+    )
+}
+
+/// 批内合并与逐事件 `COALESCE` 同义：后到的已知字段覆盖先前值，未知字段保留先前已知值。
+fn merge_confirmed_usage<'a>(
+    into: &mut Option<Cow<'a, ConfirmedUsage>>,
+    usage: &'a ConfirmedUsage,
+) {
+    match into {
+        Some(current) => {
+            let current = current.to_mut();
+            current.input_tokens = usage.input_tokens.or(current.input_tokens);
+            current.output_tokens = usage.output_tokens.or(current.output_tokens);
+            current.cache_read_tokens = usage.cache_read_tokens.or(current.cache_read_tokens);
+            current.cache_write_tokens = usage.cache_write_tokens.or(current.cache_write_tokens);
+            current.reasoning_tokens = usage.reasoning_tokens.or(current.reasoning_tokens);
+        }
+        None => *into = Some(Cow::Borrowed(usage)),
+    }
+}
+
 async fn apply_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     iid: &str,
@@ -2482,7 +2853,9 @@ async fn apply_sqlite(
     e: &RunEvent,
     seq: i64,
     now: i64,
-) -> anyhow::Result<()> {
+    finish_usage: Option<&ConfirmedUsage>,
+) -> anyhow::Result<bool> {
+    let mut wrote_usage = false;
     match e {
         RunEvent::RequestFailed { error } => {
             sqlx::query("UPDATE inference_run_observations SET failure_json=? WHERE id=?")
@@ -2527,28 +2900,83 @@ async fn apply_sqlite(
             provider_name,
             upstream_model,
             protocol,
+            cost_basis,
             ..
         } => {
-            sqlx::query("INSERT OR IGNORE INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,?,?,'running',?,?)").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT OR IGNORE INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,cost_basis,status,started_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?)").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(cost_basis_column(*cost_basis)).bind(now).bind(seq).execute(&mut **tx).await?;
         }
         RunEvent::TargetAttemptFinished {
             attempt_id,
             status,
             status_code,
             error_code,
+            error,
             duration_ms,
             first_token_ms,
             usage,
+            amounts,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
-            if let Some(usage) = usage {
-                usage_sqlite(tx, iid, attempt_id, usage, seq).await?;
+            let usage = finish_usage.or(usage.as_ref());
+            let sql = match (amounts.is_some(), usage.is_some()) {
+                (true, true) => {
+                    "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,cost_basis=?,cost_usd_nanos=?,cost_custom_nanos=?,billing_state=?,billing_usd_nanos=?,billing_custom_nanos=?,input_tokens=COALESCE(?,input_tokens),output_tokens=COALESCE(?,output_tokens),cache_read_tokens=COALESCE(?,cache_read_tokens),cache_write_tokens=COALESCE(?,cache_write_tokens),reasoning_tokens=COALESCE(?,reasoning_tokens),usage_recorded=1,last_event_sequence=? WHERE id=?"
+                }
+                (true, false) => {
+                    "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,cost_basis=?,cost_usd_nanos=?,cost_custom_nanos=?,billing_state=?,billing_usd_nanos=?,billing_custom_nanos=?,last_event_sequence=? WHERE id=?"
+                }
+                (false, true) => {
+                    "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,input_tokens=COALESCE(?,input_tokens),output_tokens=COALESCE(?,output_tokens),cache_read_tokens=COALESCE(?,cache_read_tokens),cache_write_tokens=COALESCE(?,cache_write_tokens),reasoning_tokens=COALESCE(?,reasoning_tokens),usage_recorded=1,last_event_sequence=? WHERE id=?"
+                }
+                (false, false) => {
+                    "UPDATE target_attempt_observations SET status=?,status_code=?,error_code=?,error_source=?,error_message=?,upstream_error_code=?,finished_at=?,duration_ms=?,first_token_ms=?,last_event_sequence=? WHERE id=?"
+                }
+            };
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(status)
+                .bind(status_code.map(i64::from))
+                .bind(error_code)
+                .bind(error.as_ref().and_then(|error| error.source.as_deref()))
+                .bind(error.as_ref().and_then(|error| error.message.as_deref()))
+                .bind(
+                    error
+                        .as_ref()
+                        .and_then(|error| error.upstream_code.as_deref()),
+                )
+                .bind(now)
+                .bind(duration_ms)
+                .bind(first_token_ms);
+            if let Some(amounts) = amounts {
+                let (cost_basis, cost_usd, cost_custom, billing_state, billing_usd, billing_custom) =
+                    attempt_amount_columns(amounts);
+                query = query
+                    .bind(cost_basis)
+                    .bind(cost_usd)
+                    .bind(cost_custom)
+                    .bind(billing_state)
+                    .bind(billing_usd)
+                    .bind(billing_custom);
             }
+            if let Some(usage) = usage {
+                query = query
+                    .bind(usage.input_tokens)
+                    .bind(usage.output_tokens)
+                    .bind(usage.cache_read_tokens)
+                    .bind(usage.cache_write_tokens)
+                    .bind(usage.reasoning_tokens);
+            }
+            let changed = query
+                .bind(seq)
+                .bind(attempt_id)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected()
+                > 0;
+            wrote_usage = changed && usage.is_some();
         }
         RunEvent::UsageConfirmed {
             attempt_id, usage, ..
-        } => usage_sqlite(tx, iid, attempt_id, usage, seq).await?,
+        } => wrote_usage = usage_sqlite(tx, attempt_id, usage, seq).await?,
         RunEvent::PlatformToolStarted { .. } => {
             sqlx::query("UPDATE inference_run_observations SET background_active=background_active+1 WHERE id=?").bind(rid).execute(&mut **tx).await?;
         }
@@ -2569,7 +2997,7 @@ async fn apply_sqlite(
         }
         _ => {}
     }
-    Ok(())
+    Ok(wrote_usage)
 }
 
 async fn apply_postgres(
@@ -2579,7 +3007,9 @@ async fn apply_postgres(
     e: &RunEvent,
     seq: i64,
     now: i64,
-) -> anyhow::Result<()> {
+    finish_usage: Option<&ConfirmedUsage>,
+) -> anyhow::Result<bool> {
+    let mut wrote_usage = false;
     match e {
         RunEvent::RequestFailed { error } => {
             sqlx::query("UPDATE inference_run_observations SET failure_json=$1 WHERE id=$2")
@@ -2624,28 +3054,83 @@ async fn apply_postgres(
             provider_name,
             upstream_model,
             protocol,
+            cost_basis,
             ..
         } => {
-            sqlx::query("INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'running',$10,$11) ON CONFLICT (id) DO NOTHING").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(now).bind(seq).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,cost_basis,status,started_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12) ON CONFLICT (id) DO NOTHING").bind(attempt_id).bind(model_turn_id).bind(rid).bind(iid).bind(target_id).bind(provider_id).bind(provider_name).bind(upstream_model).bind(protocol).bind(cost_basis_column(*cost_basis)).bind(now).bind(seq).execute(&mut **tx).await?;
         }
         RunEvent::TargetAttemptFinished {
             attempt_id,
             status,
             status_code,
             error_code,
+            error,
             duration_ms,
             first_token_ms,
             usage,
+            amounts,
             ..
         } => {
-            sqlx::query("UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,finished_at=$4,duration_ms=$5,first_token_ms=$6,last_event_sequence=$7 WHERE id=$8").bind(status).bind(status_code.map(i64::from)).bind(error_code).bind(now).bind(duration_ms).bind(first_token_ms).bind(seq).bind(attempt_id).execute(&mut **tx).await?;
-            if let Some(usage) = usage {
-                usage_postgres(tx, iid, attempt_id, usage, seq).await?;
+            let usage = finish_usage.or(usage.as_ref());
+            let sql = match (amounts.is_some(), usage.is_some()) {
+                (true, true) => {
+                    "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,cost_basis=$10,cost_usd_nanos=$11,cost_custom_nanos=$12,billing_state=$13,billing_usd_nanos=$14,billing_custom_nanos=$15,input_tokens=COALESCE($16,input_tokens),output_tokens=COALESCE($17,output_tokens),cache_read_tokens=COALESCE($18,cache_read_tokens),cache_write_tokens=COALESCE($19,cache_write_tokens),reasoning_tokens=COALESCE($20,reasoning_tokens),usage_recorded=TRUE,last_event_sequence=$21 WHERE id=$22"
+                }
+                (true, false) => {
+                    "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,cost_basis=$10,cost_usd_nanos=$11,cost_custom_nanos=$12,billing_state=$13,billing_usd_nanos=$14,billing_custom_nanos=$15,last_event_sequence=$16 WHERE id=$17"
+                }
+                (false, true) => {
+                    "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,input_tokens=COALESCE($10,input_tokens),output_tokens=COALESCE($11,output_tokens),cache_read_tokens=COALESCE($12,cache_read_tokens),cache_write_tokens=COALESCE($13,cache_write_tokens),reasoning_tokens=COALESCE($14,reasoning_tokens),usage_recorded=TRUE,last_event_sequence=$15 WHERE id=$16"
+                }
+                (false, false) => {
+                    "UPDATE target_attempt_observations SET status=$1,status_code=$2,error_code=$3,error_source=$4,error_message=$5,upstream_error_code=$6,finished_at=$7,duration_ms=$8,first_token_ms=$9,last_event_sequence=$10 WHERE id=$11"
+                }
+            };
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(status)
+                .bind(status_code.map(i64::from))
+                .bind(error_code)
+                .bind(error.as_ref().and_then(|error| error.source.as_deref()))
+                .bind(error.as_ref().and_then(|error| error.message.as_deref()))
+                .bind(
+                    error
+                        .as_ref()
+                        .and_then(|error| error.upstream_code.as_deref()),
+                )
+                .bind(now)
+                .bind(duration_ms)
+                .bind(first_token_ms);
+            if let Some(amounts) = amounts {
+                let (cost_basis, cost_usd, cost_custom, billing_state, billing_usd, billing_custom) =
+                    attempt_amount_columns(amounts);
+                query = query
+                    .bind(cost_basis)
+                    .bind(cost_usd)
+                    .bind(cost_custom)
+                    .bind(billing_state)
+                    .bind(billing_usd)
+                    .bind(billing_custom);
             }
+            if let Some(usage) = usage {
+                query = query
+                    .bind(usage.input_tokens)
+                    .bind(usage.output_tokens)
+                    .bind(usage.cache_read_tokens)
+                    .bind(usage.cache_write_tokens)
+                    .bind(usage.reasoning_tokens);
+            }
+            let changed = query
+                .bind(seq)
+                .bind(attempt_id)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected()
+                > 0;
+            wrote_usage = changed && usage.is_some();
         }
         RunEvent::UsageConfirmed {
             attempt_id, usage, ..
-        } => usage_postgres(tx, iid, attempt_id, usage, seq).await?,
+        } => wrote_usage = usage_postgres(tx, attempt_id, usage, seq).await?,
         RunEvent::PlatformToolStarted { .. } => {
             sqlx::query("UPDATE inference_run_observations SET background_active=background_active+1 WHERE id=$1").bind(rid).execute(&mut **tx).await?;
         }
@@ -2668,51 +3153,26 @@ async fn apply_postgres(
         }
         _ => {}
     }
-    Ok(())
+    Ok(wrote_usage)
 }
 
+// attempt 明细是唯一用量事实；interaction/model_turn 的汇总列按读取时聚合，
+// 写路径不再重算，避免每次确认都跨表 SUM 并刷新无读者的投影。
 async fn usage_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    iid: &str,
     aid: &str,
     u: &ConfirmedUsage,
     seq: i64,
-) -> anyhow::Result<()> {
-    let changed=sqlx::query("UPDATE target_attempt_observations SET input_tokens=COALESCE(?,input_tokens),output_tokens=COALESCE(?,output_tokens),cache_read_tokens=COALESCE(?,cache_read_tokens),cache_write_tokens=COALESCE(?,cache_write_tokens),reasoning_tokens=COALESCE(?,reasoning_tokens),usage_recorded=1,last_event_sequence=? WHERE id=?").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected();
-    if changed > 0 {
-        sqlx::query("UPDATE model_turn_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=?)").bind(aid).execute(&mut **tx).await?;
-        recompute_usage_sqlite(tx, iid).await?;
-    }
-    Ok(())
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query("UPDATE target_attempt_observations SET input_tokens=COALESCE(?,input_tokens),output_tokens=COALESCE(?,output_tokens),cache_read_tokens=COALESCE(?,cache_read_tokens),cache_write_tokens=COALESCE(?,cache_write_tokens),reasoning_tokens=COALESCE(?,reasoning_tokens),usage_recorded=1,last_event_sequence=? WHERE id=?").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected() > 0)
 }
 async fn usage_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    iid: &str,
     aid: &str,
     u: &ConfirmedUsage,
     seq: i64,
-) -> anyhow::Result<()> {
-    let changed=sqlx::query("UPDATE target_attempt_observations SET input_tokens=COALESCE($1,input_tokens),output_tokens=COALESCE($2,output_tokens),cache_read_tokens=COALESCE($3,cache_read_tokens),cache_write_tokens=COALESCE($4,cache_write_tokens),reasoning_tokens=COALESCE($5,reasoning_tokens),usage_recorded=TRUE,last_event_sequence=$6 WHERE id=$7").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected();
-    if changed > 0 {
-        sqlx::query("UPDATE model_turn_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE model_turn_id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)").bind(aid).execute(&mut **tx).await?;
-        recompute_usage_postgres(tx, iid).await?;
-    }
-    Ok(())
-}
-async fn recompute_usage_sqlite(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    iid: &str,
-) -> anyhow::Result<()> {
-    // 从 interaction 的索引 run 集合开始，避免每次 usage 扫描全部历史 attempt。
-    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(a.input_tokens),SUM(a.output_tokens),SUM(a.cache_read_tokens),SUM(a.cache_write_tokens),SUM(a.reasoning_tokens) FROM inference_run_observations r CROSS JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=? AND a.interaction_id=?) WHERE id=?").bind(iid).bind(iid).bind(iid).execute(&mut **tx).await?;
-    Ok(())
-}
-async fn recompute_usage_postgres(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    iid: &str,
-) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(a.input_tokens),SUM(a.output_tokens),SUM(a.cache_read_tokens),SUM(a.cache_write_tokens),SUM(a.reasoning_tokens) FROM inference_run_observations r JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=$1 AND a.interaction_id=$1) WHERE id=$1").bind(iid).execute(&mut **tx).await?;
-    Ok(())
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query("UPDATE target_attempt_observations SET input_tokens=COALESCE($1,input_tokens),output_tokens=COALESCE($2,output_tokens),cache_read_tokens=COALESCE($3,cache_read_tokens),cache_write_tokens=COALESCE($4,cache_write_tokens),reasoning_tokens=COALESCE($5,reasoning_tokens),usage_recorded=TRUE,last_event_sequence=$6 WHERE id=$7").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected() > 0)
 }
 fn resolved_evidence(
     events: &[(i64, String, Option<String>, bool)],
@@ -2897,7 +3357,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::interaction_observation::types::{FailedRequestQuery, ForestQuery};
+    use crate::interaction_observation::types::{ClientErrorQuery, ForestQuery};
 
     #[tokio::test]
     async fn confirmed_usage_aggregates_all_runs_without_foreign_interactions() -> anyhow::Result<()>
@@ -2957,6 +3417,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     3,
                     i64::MAX,
@@ -3058,6 +3519,7 @@ mod tests {
                         upstream_model: "model".into(),
                         protocol: "responses".into(),
                         upstream_url: "http://localhost".into(),
+                        cost_basis: None,
                     },
                     3,
                     i64::MAX,
@@ -3120,6 +3582,7 @@ mod tests {
                         duration_ms: 10,
                         first_token_ms: None,
                         usage: None,
+                        amounts: None,
                     },
                     6,
                     i64::MAX,
@@ -3215,22 +3678,6 @@ mod tests {
                 Some(raw_input)
             );
         }
-        let persisted: (Option<i64>, Option<i64>) = match store {
-            ObservationStore::Sqlite(pool, _) => sqlx::query_as(
-                "SELECT input_tokens,(SELECT input_tokens FROM model_turn_observations WHERE id=?) FROM interaction_observations WHERE id=?",
-            )
-            .bind(id)
-            .bind(id)
-            .fetch_one(pool)
-            .await?,
-            ObservationStore::Postgres(pool, _) => sqlx::query_as(
-                "SELECT input_tokens,(SELECT input_tokens FROM model_turn_observations WHERE id=$1) FROM interaction_observations WHERE id=$1",
-            )
-            .bind(id)
-            .fetch_one(pool)
-            .await?,
-        };
-        assert_eq!(persisted, (Some(23), Some(23)));
         Ok(())
     }
 
@@ -3262,12 +3709,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw["usage"]["input_tokens"], 12);
         assert_eq!(raw["usage"]["cache_read_tokens"], 5);
-        // 旧版本持久化的未知总计不能遮住仍然存在的 attempt 用量。
-        sqlx::query(
-            "UPDATE interaction_observations SET input_tokens=NULL WHERE id='partial-usage'",
-        )
-        .execute(&pool)
-        .await?;
+        // 公共读取只从 attempt 明细派生，不依赖任何持久化汇总投影。
         assert_eq!(
             store
                 .get_interaction("partial-usage", ForestQuery::default())
@@ -3530,12 +3972,13 @@ mod tests {
                 },
                 10,
                 i64::MAX,
+                false,
             )
             .await?;
         assert!(finished.sequence > failure.sequence);
         assert!(finished.occurred_at >= failure.occurred_at);
         let page = store
-            .failed_requests(FailedRequestQuery {
+            .client_errors(ClientErrorQuery {
                 start_at: Some(0),
                 end_at: Some(30),
                 ..Default::default()
@@ -3585,11 +4028,12 @@ mod tests {
                     },
                     3,
                     i64::MAX,
+                    false,
                 )
                 .await?;
         }
         let page = store
-            .failed_requests(FailedRequestQuery {
+            .client_errors(ClientErrorQuery {
                 start_at: Some(0),
                 end_at: Some(10),
                 ..Default::default()
@@ -3663,6 +4107,7 @@ mod tests {
                 },
                 3,
                 i64::MAX,
+                false,
             )
             .await?;
         Ok(())
@@ -3776,6 +4221,7 @@ mod tests {
                         },
                         6,
                         i64::MAX,
+                        false,
                     )
                     .await?;
             }
@@ -3845,6 +4291,7 @@ mod tests {
                 },
                 3,
                 i64::MAX,
+                false,
             )
             .await?;
         assert!(
@@ -4751,6 +5198,7 @@ mod tests {
         };
         let empty_credentials = || RunEvent::CredentialMappingsCreated {
             discoveries: Vec::new(),
+            omitted_discoveries: 0,
         };
         admit_tool_run(store, "interleaved", None, "alice").await?;
 
@@ -4903,6 +5351,59 @@ mod tests {
             .await?,
         };
         assert_eq!(last_sequence, after.sequence);
+
+        // 生产者时间可以与入队顺序不同：保留原事件时间和序号，但活跃时间取最大值。
+        let reordered = store
+            .persist_run_events(
+                "interleaved",
+                "interleaved",
+                &[
+                    (
+                        RunEvent::ObservationGap {
+                            reason: "newer".into(),
+                        },
+                        None,
+                        10,
+                    ),
+                    (
+                        RunEvent::ObservationGap {
+                            reason: "older".into(),
+                        },
+                        None,
+                        9,
+                    ),
+                ],
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(
+            (reordered[0].occurred_at, reordered[1].occurred_at),
+            (10, 9)
+        );
+        assert!(reordered[0].sequence < reordered[1].sequence);
+        let sql = "SELECT i.last_active_at,r.last_active_at FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id WHERE r.id='interleaved'";
+        let activity: (i64, i64) = match store {
+            ObservationStore::Sqlite(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+            ObservationStore::Postgres(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+        };
+        assert_eq!(activity, (10, 10), "late events cannot hide newer activity");
+
+        admit_waiting_scenario_run(
+            store,
+            "interleaved",
+            "delayed-admission",
+            Some("interleaved"),
+        )
+        .await?;
+        let activity: (i64, i64) = match store {
+            ObservationStore::Sqlite(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+            ObservationStore::Postgres(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
+        };
+        assert_eq!(
+            activity,
+            (10, 10),
+            "late admission cannot move interaction activity backwards"
+        );
         Ok(())
     }
 

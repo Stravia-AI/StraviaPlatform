@@ -289,17 +289,75 @@ test('Provider detail checks the current draft, separates stages, and never save
   expect(saves).toHaveLength(0)
 })
 
-test('service cards filter sign-in methods and use local logos before remote fallback', async ({ page }) => {
+test('service cards filter sign-in methods and use host logos before letter fallback', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
+  const pluginSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><circle cx=".5" cy=".5" r=".5"/></svg>'
+  const descriptors = [
+    {
+      provider_id: 'openai',
+      plugin: { id: 'base', name: 'Stravia Base Providers' },
+      catalog_id: 'openai',
+      display_name: 'OpenAI',
+      description: 'OpenAI API connections.',
+      channels: [
+        {
+          id: 'default',
+          name: { 'en-US': 'OpenAI API', 'zh-CN': 'OpenAI API' },
+          description: { 'en-US': 'API key', 'zh-CN': 'API 密钥' },
+          auth: null,
+          protocol: 'openai-compatible',
+          default_base_url: 'https://api.openai.com/v1',
+          capabilities: ['infer'],
+          model_capabilities: [],
+        },
+      ],
+      capabilities: ['infer'],
+      config_fields: [],
+      config_groups: [],
+      network: { base_url_field: null, extra_origins: [], field_origins: [] },
+      data_compat: {
+        config_fields_format: 1,
+        private_state_format: 1,
+        credentials_format: 1,
+        model_metadata_format: 1,
+      },
+    },
+    {
+      provider_id: 'openai-codex',
+      plugin: { id: 'openai-codex', name: 'OpenAI Codex' },
+      catalog_id: 'openai',
+      icon_svg: pluginSvg,
+      display_name: 'OpenAI Codex',
+      description: 'Codex OAuth account connections.',
+      channels: [
+        {
+          id: 'codex',
+          name: { 'en-US': 'Codex', 'zh-CN': 'Codex' },
+          description: { 'en-US': 'OAuth account', 'zh-CN': 'OAuth 账号' },
+          auth: { flow: 'authorization_code' },
+          protocol: 'open-responses',
+          default_base_url: 'https://chatgpt.com/backend-api/codex',
+          capabilities: ['infer', 'auth_oauth'],
+          model_capabilities: [],
+        },
+      ],
+      capabilities: ['infer', 'auth_oauth'],
+      config_fields: [],
+      config_groups: [],
+      network: { base_url_field: null, extra_origins: [], field_origins: [] },
+      data_compat: {
+        config_fields_format: 1,
+        private_state_format: 1,
+        credentials_format: 1,
+        model_metadata_format: 1,
+      },
+    },
+  ] satisfies ProviderMetadata[]
+  await page.route('**/api/v1/vendors*', (route) => route.fulfill({ json: { data: descriptors } }))
   let failLogo = false
-  let localLogoRequests = 0
-  let remoteLogoRequests = 0
-  await page.route('**/api/v1/catalog/providers/openai/logo', async (route) => {
-    localLogoRequests += 1
-    await route.fulfill({ status: 404, body: '' })
-  })
-  await page.route('**/api/v1/catalog/providers/openai-compatible/logo', async (route) => {
-    remoteLogoRequests += 1
+  const logoRequests: string[] = []
+  await page.route('**/api/v1/catalog/providers/*/logo', async (route) => {
+    logoRequests.push(new URL(route.request().url()).pathname.split('/').at(-2) ?? '')
     if (failLogo) {
       await route.fulfill({ status: 404, body: '' })
     } else {
@@ -312,40 +370,38 @@ test('service cards filter sign-in methods and use local logos before remote fal
   await page.goto('/providers')
   await page.getByRole('button', { name: /添加.*供应商/ }).click()
   const grid = page.locator('[data-provider-grid]')
-  const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥 / })
-  const compatible = grid.getByRole('button', { name: /^OpenAI Compatible API 密钥 / })
-  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  const openAi = grid.getByRole('button', { name: /^OpenAI API 密钥$/ })
+  const codex = grid.getByRole('button', { name: /Codex · OAuth 账号/ })
+  await expect(openAi.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai\/logo$/)
   await expect
     .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
     .toBeGreaterThan(0)
-  await expect(compatible.locator('img')).toHaveAttribute('src', /\/catalog\/providers\/openai-compatible\/logo$/)
-  await expect
-    .poll(() => compatible.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
-    .toBeGreaterThan(0)
-  expect(remoteLogoRequests).toBeGreaterThan(0)
-  expect(localLogoRequests).toBe(0)
+  await expect(codex.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  await expect.poll(() => codex.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
+  // 专属插件的 icon_svg 直接渲染，不再请求同一个目录 logo。
+  await expect.poll(() => logoRequests.toSorted()).toEqual(['openai'])
 
   const search = page.locator('[data-provider-toolbar] input')
+  // 内置 base 的卡片不重复标注来源；外部插件的入口保留来源名称与 ID。
+  await expect(openAi).not.toContainText('Stravia Base Providers')
+  await expect(codex).toContainText('插件：OpenAI Codex（openai-codex）')
   await search.fill('账号')
   await expect(grid.getByRole('button')).toHaveCount(1)
-  await expect(grid.getByRole('button', { name: /Codex · OAuth 账号/ })).toBeVisible()
+  await expect(codex).toBeVisible()
   await search.fill('API 密钥')
   await expect(openAi).toBeVisible()
   await expect(grid.getByRole('button', { name: /OAuth 账号/ })).toHaveCount(0)
 
   failLogo = true
-  const successfulLogoRequests = remoteLogoRequests
+  logoRequests.length = 0
   await page.reload()
   await page.getByRole('button', { name: /添加.*供应商/ }).click()
-  await expect.poll(() => remoteLogoRequests).toBeGreaterThan(successfulLogoRequests)
-  await expect(compatible.locator('img')).toHaveCount(0)
-  await expect(compatible.locator('.route-provider-mark')).toHaveText('O')
-  await expect(compatible.locator('.route-provider-mark')).toBeVisible()
-  await expect(openAi.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
-  await expect
-    .poll(() => openAi.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth))
-    .toBeGreaterThan(0)
-  expect(localLogoRequests).toBe(0)
+  await expect.poll(() => logoRequests.toSorted()).toEqual(['openai'])
+  await expect(openAi.locator('img')).toHaveCount(0)
+  await expect(openAi.locator('.route-provider-mark')).toHaveText('O')
+  await expect(openAi.locator('.route-provider-mark')).toBeVisible()
+  await expect(codex.locator('img')).toHaveAttribute('src', /^data:image\/svg\+xml,/)
+  await expect.poll(() => codex.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
 })
 
 test('model ID suggestions preserve arbitrary text, composition, and form focus', async ({ page }) => {
@@ -482,14 +538,14 @@ test('provider editor selects a service before validating its configuration', as
   await expect(refreshButton).toBeVisible()
   await refreshButton.click()
   await expect(page.getByRole('button', { name: /^OpenAI Compatible / })).toBeVisible()
-  await expect(page.getByRole('button', { name: /^OpenAI API key / })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
 
   await searchInput.fill('OpenAI')
-  await expect(page.getByRole('button', { name: /^OpenAI API key / })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^OpenAI API key$/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Choose provider' })).toHaveAttribute('aria-selected', 'true')
-  const openAiOption = page.getByRole('button', { name: /^OpenAI API key / })
+  const openAiOption = page.getByRole('button', { name: /^OpenAI API key$/ })
   const codexOption = page.getByRole('button', { name: /OpenAI.*Codex.*OAuth account/ })
   await openAiOption.focus()
   await openAiOption.press('ArrowRight')
@@ -635,7 +691,7 @@ test('editing a Provider keeps saved credentials write-only', async ({ page }) =
                 name: 'GPT Test',
                 available: true,
                 source_kind: 'discovered',
-                snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+                snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
                 selection_policy: 'auto',
                 specification: { limit: { context: 128000 }, modalities: null },
                 revision: 1,
@@ -1055,7 +1111,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     name: 'Precision Model',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: {
       limit: { context: 1050000 },
@@ -1198,7 +1254,7 @@ test('Model specification filters combine all conditions and compose with catalo
     snapshot_state:
       overrides.source_kind === 'manual'
         ? { type: 'edited', source: null }
-        : { type: 'imported', source: { type: 'discovery' } },
+        : { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification,
     revision: 1,
@@ -1386,7 +1442,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
@@ -1463,7 +1519,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
           data: {
             id: body.model_id,
             snapshot_state: body.template_id
-              ? { type: 'imported', source: { type: 'canonical', model_id: body.template_id } }
+              ? { type: 'imported', source: { type: 'canonical', model_id: body.template_id }, pinned: [] }
               : { type: 'unregistered' },
             available: true,
             source_kind: 'manual',
@@ -1507,7 +1563,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   const extensionPreview = extensionFields.locator('..').locator('pre')
   await expect(extensionPreview).toContainText('"vendor_extension"')
   await expect(extensionPreview).toContainText('"private"')
-  await expect(page.locator('#provider-model-tier-0')).toHaveValue('272000')
+  await expect(page.locator('#provider-model-cost-tier-0')).toHaveValue('272000')
   const inputModalities = page.locator('[data-modality-select="input"]')
   await expect(inputModalities.getByRole('listitem')).toHaveText(['Text', 'Image', 'binary'])
   await inputModalities.click()
@@ -1541,23 +1597,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await page.getByRole('button', { name: 'Save model' }).click()
 
   await expect.poll(() => updateBody).toContain('0.123456789012345678')
-  expect(updateBody).toContain('"vendor_extension":{"mode":"private"}')
-  expect(updateBody).toContain('"family":"gpt"')
-  expect(updateBody).toContain('"knowledge":"2025-01"')
-  expect(updateBody).toContain('"release_date":"2026-01-01"')
-  expect(updateBody).toContain('"last_updated":"2026-02-01"')
-  const savedMetadata = JSON.parse(updateBody).metadata
-  expect(savedMetadata.open_weights).toBe(true)
-  expect(savedMetadata.modalities).toEqual({ input: ['text', 'image', 'audio', 'binary'], output: ['text', 'image'] })
-  expect(savedMetadata.cost).toEqual({
-    input: Number('0.123456789012345678'),
-    output: 1,
-    cache_read: 0.025,
-    cache_write: 0.5,
-    context_over_200k: detail.metadata.cost.context_over_200k,
-    tiers: detail.metadata.cost.tiers,
+  const savedChanges = JSON.parse(updateBody).changes
+  expect(savedChanges).toEqual({
+    'modalities.input': ['text', 'image', 'audio', 'binary'],
+    'modalities.output': ['text', 'image'],
+    reasoning_efforts: ['none', 'low', 'medium', 'high', 'future', 'custom-effort'],
+    'cost.input': { amount: '0.123456789012345678', currency: 'usd' },
   })
-  expect(savedMetadata.reasoning_efforts).toEqual(['none', 'low', 'medium', 'high', 'future', 'custom-effort'])
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
@@ -1965,7 +2011,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     name: 'GPT Test',
     available: true,
     source_kind: 'discovered',
-    snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+    snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
     specification: { limit: { context: 128000 }, modalities: null },
     revision: 1,
@@ -1980,7 +2026,8 @@ test('Provider detail separates connection, inventory, references, and guarded m
   }
   const detail = {
     ...available,
-    can_reimport: true,
+    pinned_fields: ['name'],
+    restorable_fields: ['name'],
     metadata: {
       id: available.id,
       name: available.name,
@@ -2014,6 +2061,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     ],
   }
   let selectionBody: Record<string, unknown> | undefined
+  let restoreBody: Record<string, unknown> | undefined
   let routeQueryFails = false
 
   await page.route('**/api/v1/providers**', async (route) => {
@@ -2038,7 +2086,8 @@ test('Provider detail separates connection, inventory, references, and guarded m
             source_kind: modelId === unavailable.id ? unavailable.source_kind : detail.source_kind,
             snapshot_state: modelId === unavailable.id ? unavailable.snapshot_state : detail.snapshot_state,
             available: modelId === unavailable.id ? unavailable.available : detail.available,
-            can_reimport: modelId === unavailable.id ? false : detail.can_reimport,
+            pinned_fields: modelId === unavailable.id ? [] : detail.pinned_fields,
+            restorable_fields: modelId === unavailable.id ? [] : detail.restorable_fields,
             metadata: {
               ...detail.metadata,
               id: modelId,
@@ -2059,14 +2108,9 @@ test('Provider detail separates connection, inventory, references, and guarded m
       })
       return
     }
-    if (path === `/providers/${provider.id}/model/reimport` && request.method() === 'POST') {
-      await route.fulfill({
-        status: 404,
-        json: {
-          code: 'CATALOG_ENTRY_NOT_FOUND',
-          error: 'Provider Catalog Entry was not found in the active catalog revision.',
-        },
-      })
+    if (path === `/providers/${provider.id}/model/restore-sync` && request.method() === 'POST') {
+      restoreBody = request.postDataJSON()
+      await route.fulfill({ json: { data: { ...detail, revision: 2 } } })
       return
     }
     if (path === `/providers/${provider.id}/model/selection` && request.method() === 'PUT') {
@@ -2130,15 +2174,12 @@ test('Provider detail separates connection, inventory, references, and guarded m
     .filter({ hasText: /GPT Test.*openai\/gpt-test/ })
     .click()
   await expect(page).toHaveURL(/view=models&model=openai%2Fgpt-test/)
-  await page.getByRole('button', { name: 'Model actions' }).click()
-  await page.getByRole('menuitem', { name: 'Restore details from provider…' }).click()
-  await expect(
-    page.getByText(
-      'This catalog entry is no longer available. Your saved model is unchanged. Refresh the catalog or update it manually.',
-    ),
-  ).toBeVisible()
-  await expect(page.getByText('openai/gpt-test', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter')
+  await expect(page.getByText('Pinned', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Restore sync Name', exact: true }).click()
+  await expect(page.getByText('Field restored to its synced value.')).toBeVisible()
+  expect(restoreBody).toMatchObject({ model_id: 'openai/gpt-test', revision: 1, fields: ['name'] })
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(modelTable).toBeVisible()
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   let availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
   await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
@@ -2462,7 +2503,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT Existing',
       available: true,
       source_kind: 'discovered',
-      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+      snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
       selection_policy: 'auto',
       specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
@@ -2472,7 +2513,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
       name: 'GPT New',
       available: true,
       source_kind: 'discovered',
-      snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+      snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
       selection_policy: 'auto',
       specification: { limit: { context: 128000 }, modalities: null },
       revision: 1,
@@ -2820,7 +2861,23 @@ test('Add provider draft asks before every close path', async ({ page }) => {
 
 const detailTimestamp = '2026-01-01T00:00:00Z'
 
-function detailProvider(id: string, overrides: Record<string, unknown> = {}) {
+interface DetailProvider {
+  id: string
+  name: string
+  vendor: string
+  channel: string
+  protocol: string
+  base_url: string
+  use_proxy: boolean
+  vendor_options: Record<string, unknown>
+  configured_credential_fields: string[]
+  is_enabled: boolean
+  created_at: string
+  updated_at: string
+  [key: string]: unknown
+}
+
+function detailProvider(id: string, overrides: Record<string, unknown> = {}): DetailProvider {
   return {
     id,
     name: `Provider ${id}`,
@@ -2840,8 +2897,15 @@ function detailProvider(id: string, overrides: Record<string, unknown> = {}) {
 
 async function mockProviderDetail(
   page: Page,
-  providers: Array<ReturnType<typeof detailProvider>>,
-  options: { updates?: unknown[]; models?: unknown[]; routes?: unknown[]; syncState?: unknown } = {},
+  providers: DetailProvider[],
+  options: {
+    updates?: unknown[]
+    models?: unknown[]
+    routes?: unknown[]
+    syncState?: unknown
+    costPlans?: unknown[]
+    costPlanPosts?: unknown[]
+  } = {},
 ) {
   await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: options.routes ?? [] } }))
   await page.route('**/api/v1/providers**', async (route) => {
@@ -2854,9 +2918,30 @@ async function mockProviderDetail(
     } else if (path.endsWith('/models/sync-state') && request.method() === 'GET') {
       if (options.syncState) await route.fulfill({ json: { data: options.syncState } })
       else await route.fulfill({ status: 404, json: { error: 'not found' } })
+    } else if (/^\/providers\/[^/]+\/cost-plans$/.test(path) && request.method() === 'GET') {
+      await route.fulfill({ json: { data: options.costPlans ?? [] } })
+    } else if (/^\/providers\/[^/]+\/cost-plans$/.test(path) && request.method() === 'POST') {
+      const body = request.postDataJSON() as {
+        basis: string
+        period?: string | null
+        price?: { amount: string; currency: string } | null
+      }
+      const created = {
+        id: `plan-${(options.costPlanPosts?.length ?? 0) + 1}`,
+        provider_id: path.split('/')[2],
+        effective_from: Date.now(),
+        basis: body.basis,
+        period: body.period ?? null,
+        price: body.price ?? null,
+        created_at: detailTimestamp,
+      }
+      options.costPlanPosts?.push(body)
+      options.costPlans = [created, ...(options.costPlans ?? [])]
+      await route.fulfill({ json: { data: created } })
     } else if (/^\/providers\/[^/]+$/.test(path) && request.method() === 'PUT') {
       options.updates?.push(request.postDataJSON())
-      await route.fulfill({ json: { data: providers.find((item) => path.endsWith(item.id)) } })
+      const saved = providers.find((item) => path.endsWith(item.id))
+      await route.fulfill({ json: { data: { ...saved, cost_plan: options.costPlans?.[0] ?? null } } })
     } else {
       await route.fallback()
     }
@@ -3082,6 +3167,117 @@ test('Provider connection form fills a centered 48rem column and shows the side 
   await expect(page.getByRole('complementary', { name: 'Connection status' })).toHaveCount(0)
 })
 
+test('Provider cost basis is the last connection form section and offers three modes', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-section-provider')
+  await mockProviderDetail(page, [provider])
+  await page.goto('/providers/cost-section-provider?view=connection')
+
+  const form = page.locator('form').filter({ has: page.getByRole('button', { name: 'Save connection' }) })
+  const sections = form.locator(':scope > section')
+  await expect(sections).toHaveCount(3)
+  await expect(sections.nth(1)).toContainText('Use proxy')
+  const costSection = sections.last()
+  await expect(costSection.getByRole('heading', { name: 'Cost basis' })).toBeVisible()
+  const networkBox = (await sections.nth(1).boundingBox())!
+  const costBox = (await costSection.boundingBox())!
+  expect(costBox.y).toBeGreaterThan(networkBox.y + networkBox.height)
+
+  const basis = page.getByRole('button', { name: 'Mode', exact: true })
+  await expect(basis).toContainText('Usage-based')
+  await expect(page.getByText('Calculated from model prices and recorded usage.')).toBeVisible()
+  await basis.click()
+  await expect(page.getByRole('option')).toHaveCount(3)
+  await expect(page.getByRole('option', { name: 'Not tracked' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'Usage-based' })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'Subscription-based' })).toBeVisible()
+  await page.keyboard.press('Escape')
+})
+
+test('Provider cost draft saves one subscription plan without resubmitting the connection', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-save-provider')
+  const updates: unknown[] = []
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { updates, costPlanPosts })
+  await page.goto('/providers/cost-save-provider?view=connection')
+
+  const save = page.getByRole('button', { name: 'Save connection' })
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  await expect(page.getByRole('button', { name: 'Billing period' })).toBeVisible()
+  const price = page.getByLabel('Subscription price')
+  await expect(price).toBeVisible()
+  await page.getByRole('button', { name: 'Billing period' }).click()
+  await page.getByRole('option', { name: 'Yearly' }).click()
+  await price.fill('120.50')
+
+  await save.click()
+  await expect.poll(() => costPlanPosts.length).toBe(1)
+  expect(costPlanPosts[0]).toEqual({
+    basis: 'subscription',
+    period: 'year',
+    price: { amount: '120.50', currency: 'usd' },
+  })
+  // 只改成本时不重发连接 PUT。
+  expect(updates).toEqual([])
+  await expect(page.getByText('Cost basis saved')).toBeVisible()
+
+  // 已保存且未变化：再次保存不会追加第二条记录。
+  await save.click()
+  await expect.poll(() => updates.length).toBe(1)
+  expect(costPlanPosts).toHaveLength(1)
+})
+
+test('Provider cost draft blocks saving an invalid subscription price', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-invalid-provider')
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { costPlanPosts })
+  await page.goto('/providers/cost-invalid-provider?view=connection')
+
+  const save = page.getByRole('button', { name: 'Save connection' })
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  const price = page.getByLabel('Subscription price')
+  await price.fill('abc')
+  await expect(save).toBeDisabled()
+  await expect(page.getByText('Enter a non-negative decimal amount.')).toBeVisible()
+  await price.fill('10')
+  await expect(save).toBeEnabled()
+  expect(costPlanPosts).toEqual([])
+})
+
+test('Provider cost append failure keeps the cost draft and reports it after the connection is saved', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const provider = detailProvider('cost-failure-provider')
+  const updates: unknown[] = []
+  const costPlanPosts: unknown[] = []
+  await mockProviderDetail(page, [provider], { updates, costPlanPosts })
+  await page.route('**/api/v1/providers/cost-failure-provider/cost-plans', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    costPlanPosts.push(route.request().postDataJSON())
+    await route.fulfill({ status: 500, json: { error: 'cost plan write failed' } })
+  })
+  await page.goto('/providers/cost-failure-provider?view=connection')
+
+  await page.getByLabel('Connection name').fill('Saved with cost failure')
+  await page.getByRole('button', { name: 'Mode', exact: true }).click()
+  await page.getByRole('option', { name: 'Subscription-based' }).click()
+  await page.getByLabel('Subscription price').fill('9.99')
+  await page.getByRole('button', { name: 'Save connection' }).click()
+
+  await expect.poll(() => updates.length).toBe(1)
+  await expect.poll(() => costPlanPosts.length).toBe(1)
+  await expect(page.getByRole('alert').filter({ hasText: 'cost plan write failed' })).toBeVisible()
+  // 连接已保存、成本未保存：成本草稿保持，可继续重试。
+  await expect(page.getByRole('button', { name: 'Mode', exact: true })).toContainText('Subscription-based')
+  await expect(page.getByLabel('Subscription price')).toHaveValue('9.99')
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
+})
+
 test('Provider upstream model table fills the 120rem container at 2560', async ({ page }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
   const provider = detailProvider('wide-provider')
@@ -3092,7 +3288,7 @@ test('Provider upstream model table fills the 120rem container at 2560', async (
         name: 'Wide Model',
         available: true,
         source_kind: 'discovered',
-        snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+        snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
         selection_policy: 'auto',
         specification: { limit: { context: 128000 }, modalities: null },
         revision: 1,
@@ -3116,7 +3312,7 @@ const compactModel = (id: string, name: string, specification: Record<string, un
   name,
   available: true,
   source_kind: 'discovered',
-  snapshot_state: { type: 'imported', source: { type: 'discovery' } },
+  snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
   selection_policy: 'auto',
   specification,
   revision: 1,

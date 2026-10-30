@@ -315,6 +315,11 @@ impl VendorNetwork {
                 ))
                 .await?;
         }
+        if self.attempt_id.is_some()
+            && let Some(observer) = &self.observer
+        {
+            observer.mark_upstream_started();
+        }
         Ok(())
     }
 

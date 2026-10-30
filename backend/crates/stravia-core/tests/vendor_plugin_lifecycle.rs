@@ -316,6 +316,7 @@ async fn connection(
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     Ok(Connection {
@@ -339,6 +340,7 @@ async fn api_key(gateway: &Gateway, routes: &[&str]) -> anyhow::Result<String> {
             inject_media_generation: false,
             inject_media_understanding: false,
             model_ids: routes.iter().map(|route| (*route).into()).collect(),
+            spend_limit: None,
         })
         .await?
         .token)
@@ -1002,7 +1004,7 @@ async fn protocol_selection_errors_preserve_diagnostics_but_protect_client_error
     assert!(live.contains(LICENSE));
     let admin = gateway.admin();
     admin.observation_flush().await?;
-    let failures = admin.failed_requests(Default::default()).await?;
+    let failures = admin.client_errors(Default::default()).await?;
     let persisted = serde_json::to_string(&failures)?;
     assert!(
         failures.items.iter().any(|failure| {

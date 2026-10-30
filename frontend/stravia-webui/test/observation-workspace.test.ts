@@ -7,9 +7,9 @@ import {
 } from '../src/lib/observation-workspace'
 import type {
   ConfirmedUsage,
-  FailedRequestDetail,
-  FailedRequestPage,
-  FailedRequestSummary,
+  ClientErrorDetail,
+  ClientErrorPage,
+  ClientErrorSummary,
   ForestPage,
   ForestRoot,
   InteractionDetail,
@@ -114,10 +114,11 @@ function eventRun(sequences: number[]): RunDetail {
   }
 }
 
-function failureSummary(id: string): FailedRequestSummary {
+function clientErrorSummary(id: string): ClientErrorSummary {
   return {
     id,
     kind: 'run',
+    type: 'failed',
     request_id: `req-${id}`,
     started_at: 2_000,
     duration_ms: 5,
@@ -136,8 +137,8 @@ function failureSummary(id: string): FailedRequestSummary {
   }
 }
 
-function failureDetail(id: string): FailedRequestDetail {
-  return { request: failureSummary(id), events: [], trace: null, snapshot_sequence: 0 }
+function clientErrorDetail(id: string): ClientErrorDetail {
+  return { request: clientErrorSummary(id), events: [], trace: null, snapshot_sequence: 0 }
 }
 
 function streamEvent(
@@ -228,10 +229,12 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
           removal_reason: null,
         })),
       }),
-    failures: () => Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 100 }),
+    clientErrors: () => Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 100 }),
+    upstreamErrors: () => Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 100 }),
     interaction: (id) => Promise.resolve(detailFor(id)),
     interactionEvents: () => Promise.resolve({ runs: [], snapshot_sequence: 10, next_cursor: null }),
-    failure: (_kind, id) => Promise.resolve(failureDetail(id)),
+    clientError: (_kind, id) => Promise.resolve(clientErrorDetail(id)),
+    upstreamError: () => Promise.reject(new Error('no upstream detail fixture')),
     ...apiOverrides,
   }
   const api: ObservationWorkspaceApi = {
@@ -243,9 +246,13 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
       calls.push({ method: 'forest', args: [query] })
       return impl.forest(query)
     },
-    failures: (query) => {
-      calls.push({ method: 'failures', args: [query] })
-      return impl.failures(query)
+    clientErrors: (query) => {
+      calls.push({ method: 'clientErrors', args: [query] })
+      return impl.clientErrors(query)
+    },
+    upstreamErrors: (query) => {
+      calls.push({ method: 'upstreamErrors', args: [query] })
+      return impl.upstreamErrors(query)
     },
     interaction: (id, query) => {
       calls.push({ method: 'interaction', args: [id, query] })
@@ -255,9 +262,13 @@ function harness(apiOverrides: Partial<ObservationWorkspaceApi> = {}): Harness {
       calls.push({ method: 'interactionEvents', args: [id, query] })
       return impl.interactionEvents(id, query)
     },
-    failure: (kind, id) => {
-      calls.push({ method: 'failure', args: [kind, id] })
-      return impl.failure(kind, id)
+    clientError: (kind, id) => {
+      calls.push({ method: 'clientError', args: [kind, id] })
+      return impl.clientError(kind, id)
+    },
+    upstreamError: (id) => {
+      calls.push({ method: 'upstreamError', args: [id] })
+      return impl.upstreamError(id)
     },
   }
 
@@ -560,7 +571,8 @@ describe('selection races', () => {
 describe('selected detail catch-up', () => {
   test('a notification beyond the detail snapshot still catches up from that snapshot', async () => {
     const h = harness({
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     await h.controller.selectInteraction(summary('i1'))
@@ -574,7 +586,8 @@ describe('selected detail catch-up', () => {
     const detail = deferred<InteractionDetail>()
     const h = harness({
       interaction: () => detail.promise,
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     const selection = h.controller.selectInteraction(summary('i1'))
@@ -589,7 +602,8 @@ describe('selected detail catch-up', () => {
     const detail = deferred<InteractionDetail>()
     const h = harness({
       interaction: () => detail.promise,
-      interactionEvents: () => Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
+      interactionEvents: () =>
+        Promise.resolve({ runs: [eventRun([11, 12])], snapshot_sequence: 12, next_cursor: null }),
     })
     await h.controller.start()
     const selection = h.controller.deepLinkInteraction('i1')
@@ -864,21 +878,21 @@ describe('bounded refresh orchestration', () => {
     let details = 0
     const unavailable = Object.assign(new Error('failure diagnostics unavailable'), { status: 503 })
     const h = harness({
-      failure: () => (++details === 2 ? Promise.reject(unavailable) : Promise.resolve(failureDetail('f1'))),
+      clientError: () => (++details === 2 ? Promise.reject(unavailable) : Promise.resolve(clientErrorDetail('f1'))),
     })
     await h.controller.start()
-    await h.controller.selectFailure(failureSummary('f1'))
+    await h.controller.selectClientError(clientErrorSummary('f1'))
     const error: unknown = await h
       .emit({ type: 'reset_required', snapshot_sequence: 0 })
       .catch((reason: unknown) => reason)
     expect(error).toBe(unavailable)
-    expect(h.snap().failureDetailError).toBe(unavailable)
-    expect(h.snap().failureDetail?.request.id).toBe('f1')
+    expect(h.snap().clientErrorDetailError).toBe(unavailable)
+    expect(h.snap().clientErrorDetail?.request.id).toBe('f1')
     expect(h.subscription.setCursorCalls).toEqual([])
     await h.controller.refreshSelectedDetail()
-    expect(h.snap().failureDetailError).toBeUndefined()
+    expect(h.snap().clientErrorDetailError).toBeUndefined()
     expect(h.snap().loadError).toBeUndefined()
-    expect(h.snap().failureDetail?.request.id).toBe('f1')
+    expect(h.snap().clientErrorDetail?.request.id).toBe('f1')
     expect(h.subscription.setCursorCalls).toEqual([10])
     h.controller.dispose()
   })
@@ -1139,23 +1153,23 @@ describe('bounded refresh orchestration', () => {
   })
 
   test('failures tab merges terminal notifications without querying hidden canvas roots', async () => {
-    const first = deferred<import('../src/lib/types/observation').FailedRequestPage>()
+    const first = deferred<import('../src/lib/types/observation').ClientErrorPage>()
     let failures = 0
     const h = harness({
-      failures: () =>
+      clientErrors: () =>
         ++failures === 1
           ? Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 10 })
           : failures === 2
             ? first.promise
             : Promise.resolve({
-                items: [failureSummary('failed')],
+                items: [clientErrorSummary('failed')],
                 total: 1,
                 next_cursor: null,
                 snapshot_sequence: 12,
               }),
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
+    await h.controller.tabChanged('client-errors')
     await h.emit(streamEvent(11, 'i1', 999_500))
     await h.emit(streamEvent(12, 'other', 999_500))
     expect(failures).toBe(2)
@@ -1163,107 +1177,127 @@ describe('bounded refresh orchestration', () => {
     first.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 11 })
     await h.advance(0)
     await h.advance(100)
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['failed'])
-    expect(h.snap().failureTotal).toBe(1)
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['failed'])
+    expect(h.snap().clientErrorTotal).toBe(1)
     h.controller.dispose()
   })
 
   test('live failure refresh keeps visible rows without entering the loading state', async () => {
-    const refresh = deferred<FailedRequestPage>()
+    const refresh = deferred<ClientErrorPage>()
     let failures = 0
     const h = harness({
-      failures: () =>
+      clientErrors: () =>
         ++failures === 1
-          ? Promise.resolve({ items: [failureSummary('old')], total: 1, next_cursor: null, snapshot_sequence: 10 })
+          ? Promise.resolve({ items: [clientErrorSummary('old')], total: 1, next_cursor: null, snapshot_sequence: 10 })
           : refresh.promise,
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
-    expect(h.snap().failureLoading).toBe(false)
+    await h.controller.tabChanged('client-errors')
+    expect(h.snap().clientErrorLoading).toBe(false)
     await h.emit(streamEvent(11, 'i1', 999_500))
     expect(failures).toBe(2)
-    expect(h.snap().failureLoading).toBe(false)
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['old'])
+    expect(h.snap().clientErrorLoading).toBe(false)
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['old'])
     refresh.resolve({
-      items: [failureSummary('new'), failureSummary('old')],
+      items: [clientErrorSummary('new'), clientErrorSummary('old')],
       total: 2,
       next_cursor: null,
       snapshot_sequence: 11,
     })
     await h.advance(0)
-    expect(h.snap().failureLoading).toBe(false)
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['new', 'old'])
+    expect(h.snap().clientErrorLoading).toBe(false)
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['new', 'old'])
     h.controller.dispose()
   })
 
   test('a failed live refresh keeps the error visible while the next refresh is in flight', async () => {
-    const retry = deferred<FailedRequestPage>()
+    const retry = deferred<ClientErrorPage>()
     let failures = 0
     const h = harness({
-      failures: () => {
+      clientErrors: () => {
         failures += 1
         if (failures === 2) return Promise.reject(new Error('offline'))
         if (failures === 3) return retry.promise
-        return Promise.resolve({ items: [failureSummary('old')], total: 1, next_cursor: null, snapshot_sequence: 10 })
+        return Promise.resolve({
+          items: [clientErrorSummary('old')],
+          total: 1,
+          next_cursor: null,
+          snapshot_sequence: 10,
+        })
       },
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
+    await h.controller.tabChanged('client-errors')
     await h.emit(streamEvent(11, 'i1', 999_500))
-    expect(h.snap().failureError).toBeInstanceOf(Error)
+    expect(h.snap().clientErrorError).toBeInstanceOf(Error)
     await h.emit(streamEvent(12, 'i1', 999_500))
     expect(failures).toBe(3)
-    expect(h.snap().failureError).toBeInstanceOf(Error)
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['old'])
-    retry.resolve({ items: [failureSummary('new')], total: 1, next_cursor: null, snapshot_sequence: 12 })
+    expect(h.snap().clientErrorError).toBeInstanceOf(Error)
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['old'])
+    retry.resolve({ items: [clientErrorSummary('new')], total: 1, next_cursor: null, snapshot_sequence: 12 })
     await h.advance(0)
-    expect(h.snap().failureError).toBeUndefined()
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['new'])
+    expect(h.snap().clientErrorError).toBeUndefined()
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['new'])
     h.controller.dispose()
   })
 
   test('load-more clicked during a live refresh runs after it from the refreshed cursor', async () => {
-    const refresh = deferred<FailedRequestPage>()
+    const refresh = deferred<ClientErrorPage>()
     let failures = 0
     const h = harness({
-      failures: (query) => {
+      clientErrors: (query) => {
         failures += 1
         if (failures === 2) return refresh.promise
         if (query.cursor === 'c3')
-          return Promise.resolve({ items: [failureSummary('f3')], total: 3, next_cursor: null, snapshot_sequence: 100 })
-        return Promise.resolve({ items: [failureSummary('f1')], total: 3, next_cursor: 'c2', snapshot_sequence: 100 })
+          return Promise.resolve({
+            items: [clientErrorSummary('f3')],
+            total: 3,
+            next_cursor: null,
+            snapshot_sequence: 100,
+          })
+        return Promise.resolve({
+          items: [clientErrorSummary('f1')],
+          total: 3,
+          next_cursor: 'c2',
+          snapshot_sequence: 100,
+        })
       },
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
+    await h.controller.tabChanged('client-errors')
     await h.emit(streamEvent(11, 'i1', 999_500))
-    const more = h.controller.loadFailures(false)
+    const more = h.controller.loadClientErrors(false)
     expect(failures).toBe(2)
     refresh.resolve({
-      items: [failureSummary('f0'), failureSummary('f1')],
+      items: [clientErrorSummary('f0'), clientErrorSummary('f1')],
       total: 3,
       next_cursor: 'c3',
       snapshot_sequence: 100,
     })
     await more
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['f0', 'f1', 'f3'])
-    expect(h.snap().failureCursor).toBeNull()
-    expect(h.snap().failureLoading).toBe(false)
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['f0', 'f1', 'f3'])
+    expect(h.snap().clientErrorCursor).toBeNull()
+    expect(h.snap().clientErrorLoading).toBe(false)
     h.controller.dispose()
   })
 
   test('a live refresh arriving during load-more runs after it instead of being merged into it', async () => {
-    const more = deferred<FailedRequestPage>()
+    const more = deferred<ClientErrorPage>()
     let failures = 0
     const h = harness({
-      failures: (query) => {
+      clientErrors: (query) => {
         failures += 1
         if (failures === 1)
-          return Promise.resolve({ items: [failureSummary('f1')], total: 2, next_cursor: 'c2', snapshot_sequence: 10 })
+          return Promise.resolve({
+            items: [clientErrorSummary('f1')],
+            total: 2,
+            next_cursor: 'c2',
+            snapshot_sequence: 10,
+          })
         if (failures === 2) return more.promise
         expect(query.cursor).toBeUndefined()
         return Promise.resolve({
-          items: [failureSummary('fresh'), failureSummary('f1'), failureSummary('f2')],
+          items: [clientErrorSummary('fresh'), clientErrorSummary('f1'), clientErrorSummary('f2')],
           total: 3,
           next_cursor: null,
           snapshot_sequence: 100,
@@ -1271,24 +1305,24 @@ describe('bounded refresh orchestration', () => {
       },
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
-    const pending = h.controller.loadFailures(false)
+    await h.controller.tabChanged('client-errors')
+    const pending = h.controller.loadClientErrors(false)
     await h.emit(streamEvent(11, 'i1', 999_500))
     expect(failures).toBe(2)
-    more.resolve({ items: [failureSummary('f2')], total: 2, next_cursor: null, snapshot_sequence: 10 })
+    more.resolve({ items: [clientErrorSummary('f2')], total: 2, next_cursor: null, snapshot_sequence: 10 })
     await pending
     for (let i = 0; i < 20; i += 1) await Promise.resolve()
     expect(failures).toBe(3)
-    expect(h.snap().failures.map((item) => item.id)).toEqual(['fresh', 'f1', 'f2'])
+    expect(h.snap().clientErrors.map((item) => item.id)).toEqual(['fresh', 'f1', 'f2'])
     h.controller.dispose()
   })
 
   test('live refresh re-queries every loaded row so earlier load-more pages survive', async () => {
     const rows = (from: number, count: number) =>
-      Array.from({ length: count }, (_, index) => failureSummary(`f${from + index}`))
+      Array.from({ length: count }, (_, index) => clientErrorSummary(`f${from + index}`))
     const limits: number[] = []
     const h = harness({
-      failures: (query) => {
+      clientErrors: (query) => {
         limits.push(query.limit ?? 30)
         return Promise.resolve(
           query.cursor === 'c2'
@@ -1303,13 +1337,13 @@ describe('bounded refresh orchestration', () => {
       },
     })
     await h.controller.start()
-    await h.controller.tabChanged('failures')
-    await h.controller.loadFailures(false)
-    expect(h.snap().failures).toHaveLength(40)
+    await h.controller.tabChanged('client-errors')
+    await h.controller.loadClientErrors(false)
+    expect(h.snap().clientErrors).toHaveLength(40)
     await h.emit(streamEvent(11, 'i1', 999_500))
     expect(limits).toEqual([30, 30, 40])
-    expect(h.snap().failures).toHaveLength(40)
-    expect(h.snap().failureCursor).toBeNull()
+    expect(h.snap().clientErrors).toHaveLength(40)
+    expect(h.snap().clientErrorCursor).toBeNull()
     h.controller.dispose()
   })
 })
@@ -1340,18 +1374,18 @@ describe('live window clock', () => {
 describe('failures paging', () => {
   test('replace resets the list and load-more appends through the cursor', async () => {
     const h = harness({
-      failures: (query) =>
+      clientErrors: (query) =>
         Promise.resolve(
           query.cursor === undefined
-            ? { items: [failureSummary('f1')], total: 2, next_cursor: 'c2', snapshot_sequence: 0 }
-            : { items: [failureSummary('f2')], total: 2, next_cursor: null, snapshot_sequence: 0 },
+            ? { items: [clientErrorSummary('f1')], total: 2, next_cursor: 'c2', snapshot_sequence: 0 }
+            : { items: [clientErrorSummary('f2')], total: 2, next_cursor: null, snapshot_sequence: 0 },
         ),
     })
-    await h.controller.loadFailures()
-    await h.controller.loadFailures(false)
-    expect(h.snap().failures.map((f) => f.id)).toEqual(['f1', 'f2'])
-    expect(h.snap().failureCursor).toBeNull()
-    const queries = h.calls.filter((c) => c.method === 'failures').map((c) => c.args[0] as { cursor?: string })
+    await h.controller.loadClientErrors()
+    await h.controller.loadClientErrors(false)
+    expect(h.snap().clientErrors.map((f) => f.id)).toEqual(['f1', 'f2'])
+    expect(h.snap().clientErrorCursor).toBeNull()
+    const queries = h.calls.filter((c) => c.method === 'clientErrors').map((c) => c.args[0] as { cursor?: string })
     expect(queries[0].cursor).toBeUndefined()
     expect(queries[1].cursor).toBe('c2')
   })

@@ -142,6 +142,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect("Model");
@@ -157,6 +158,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
             inject_media_generation: false,
             model_ids: vec![model.id.into()],
             inject_media_understanding: false,
+            spend_limit: None,
         })
         .await
         .expect("API key");

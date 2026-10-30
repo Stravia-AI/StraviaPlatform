@@ -367,14 +367,18 @@ test.describe('media generation switch guidance', () => {
     await expect(tooltip).toContainText('Choose and save an image route')
     await page.keyboard.press('Escape')
     await expect(tooltip).toHaveCount(0)
+    await gate.focus()
+    await expect(tooltip).toContainText('Choose and save an image route')
+    await expect(gate).toHaveAccessibleDescription(/Choose and save an image route/)
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toHaveCount(0)
+
+    // Exercise a new touch interaction, not an already-focused trigger's synthetic click.
+    await page.getByRole('button', { name: 'Image route', exact: true }).focus()
     const bounds = (await gate.boundingBox())!
     await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
     await expect(tooltip).toContainText('Choose and save an image route')
     expect(writes).toEqual([])
-
-    await gate.focus()
-    await expect(tooltip).toContainText('Choose and save an image route')
-    await expect(gate).toHaveAccessibleDescription(/Choose and save an image route/)
     await page.keyboard.press('Escape')
     await expect(tooltip).toHaveCount(0)
 

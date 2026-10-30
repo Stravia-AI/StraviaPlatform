@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument as _;
 
 use crate::performance::{ResourceLease, ResourceUsage};
 
@@ -540,35 +541,68 @@ impl TraceHandle {
     }
 
     pub(crate) async fn finish(&self) -> TraceManifest {
-        if !self.state.finished.swap(true, Ordering::AcqRel) {
-            let (response, receive) = oneshot::channel();
-            let sent = self
-                .manager
-                .inner
-                .send_barrier(WriterCommand::Finish {
-                    trace_id: Arc::clone(&self.trace_id),
-                    state: Arc::clone(&self.state),
-                    response,
-                })
-                .await;
-            if sent.is_err() || !matches!(receive.await, Ok(Ok(()))) {
-                self.mark_partial(STORAGE_ERROR, true);
+        let span = tracing::info_span!(
+            target: "stravia::perf",
+            "observation.trace.finish",
+            status = tracing::field::Empty
+        );
+        let (manifest, stored) = async {
+            let mut stored = true;
+            if !self.state.finished.swap(true, Ordering::AcqRel) {
+                let (response, receive) = oneshot::channel();
+                let sent = self
+                    .manager
+                    .inner
+                    .send_barrier(WriterCommand::Finish {
+                        trace_id: Arc::clone(&self.trace_id),
+                        state: Arc::clone(&self.state),
+                        response,
+                    })
+                    .await;
+                stored = sent.is_ok() && matches!(receive.await, Ok(Ok(())));
+                if !stored {
+                    self.mark_partial(STORAGE_ERROR, true);
+                }
             }
+            (self.manifest(), stored)
         }
-        self.manifest()
+        .instrument(span.clone())
+        .await;
+        // 屏障失败或记录未全部落盘（含此前写入失败）都不是成功的 finish。
+        span.record(
+            "status",
+            if stored && manifest.status == "complete" {
+                "completed"
+            } else {
+                "error"
+            },
+        );
+        manifest
     }
 
     /// Drain queued records without closing capture or copying trace segments.
     pub(crate) async fn flush(&self) -> io::Result<()> {
-        let (response, receive) = oneshot::channel();
-        self.manager
-            .inner
-            .send_barrier(WriterCommand::Flush {
-                trace_id: Arc::clone(&self.trace_id),
-                response,
-            })
-            .await?;
-        receive.await.map_err(|_| writer_unavailable())?
+        let span = tracing::info_span!(
+            target: "stravia::perf",
+            "observation.trace.flush",
+            status = tracing::field::Empty
+        );
+        let result: io::Result<()> = async {
+            let (response, receive) = oneshot::channel();
+            self.manager
+                .inner
+                .send_barrier(WriterCommand::Flush {
+                    trace_id: Arc::clone(&self.trace_id),
+                    response,
+                })
+                .await?;
+            receive.await.map_err(|_| writer_unavailable())?
+        }
+        .instrument(span.clone())
+        .await;
+        // writer 已移除时按既有契约返回 Ok；存储丢失由 finish/manifest reasons 体现。
+        span.record("status", if result.is_ok() { "completed" } else { "error" });
+        result
     }
 
     pub(crate) async fn snapshot(&self, through_sequence: i64) -> io::Result<TraceSnapshot> {

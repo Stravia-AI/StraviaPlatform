@@ -657,7 +657,8 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
         .items
         .iter()
         .find(|item| {
-            !crate::history_marker::history_marker_references(std::slice::from_ref(item)).is_empty()
+            !crate::history_marker::history_marker_references(std::slice::from_ref(*item))
+                .is_empty()
         })
         .expect("preserved History Marker item");
     assert!(
@@ -769,7 +770,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .materialize_generation(&owner, &TurnNodeId::new(id.clone()))
         .await
         .expect("materialize client history");
-    let mut exact_request = responses_request(materialized.client_items.clone());
+    let mut exact_request = responses_request(owned_items(&materialized.client_items));
     exact_request.items.push(user_message("follow-up"));
     let exact_write = chain
         .begin(owner.clone(), exact_request)
@@ -777,7 +778,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .expect("discover exact projected parent");
     assert_eq!(exact_write.parent.parent_id.as_deref(), Some(id.as_str()));
 
-    let mut edited_items = materialized.client_items.clone();
+    let mut edited_items = owned_items(&materialized.client_items);
     let edited_index = edited_items
         .iter()
         .position(|item| {

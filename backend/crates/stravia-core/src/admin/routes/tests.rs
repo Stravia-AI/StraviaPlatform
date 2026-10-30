@@ -380,7 +380,10 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
             "upstream-model",
             crate::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata: json!({"modalities":{"input":["text"],"output":["image"]}}),
+                changes: std::collections::BTreeMap::from([
+                    ("modalities.input".to_string(), json!(["text"])),
+                    ("modalities.output".to_string(), json!(["image"])),
+                ]),
             },
         )
         .await?;
@@ -428,7 +431,10 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
             "upstream-model",
             crate::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata: json!({"modalities":{"output":["text"]}}),
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["text"]),
+                )]),
             },
         )
         .await?;
@@ -499,7 +505,10 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
             "text",
             crate::provider_models::UpdateProviderModel {
                 revision: detail.revision,
-                metadata: json!({"modalities":{"output":["image"]}}),
+                changes: std::collections::BTreeMap::from([(
+                    "modalities.output".to_string(),
+                    json!(["image"]),
+                )]),
             },
         )
         .await?;
@@ -582,6 +591,7 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
                 modality_route_input("unused", &provider.id, Text, &[("a/model", true)]).targets,
             ),
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let saved = admin
@@ -650,6 +660,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
                 modality_route_input("unused", &provider.id, Text, &[("dual", true)]).targets,
             ),
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     for update in [
@@ -994,6 +1005,7 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: Some(ThinkingLevel::High),
+            billing: None,
         })
         .await?;
     assert_eq!(route.default_thinking_level.as_deref(), Some("high"));
@@ -1088,6 +1100,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 create_target("third-model", 0),
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     assert_eq!(route.balance, "traffic_equalization");
@@ -1110,6 +1123,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
 
                 targets: vec![create_target("upstream-model", valid)],
                 default_thinking_level: None,
+                billing: None,
             })
             .await?;
         assert_eq!(route.targets[0].priority, valid);
@@ -1123,6 +1137,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
 
             targets: vec![create_target("upstream-model", 0)],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect_err("unknown Scheduling Strategy must be rejected");
@@ -1172,6 +1187,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
                 target("standby-model", false),
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 2);
@@ -1203,6 +1219,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 
             targets: vec![target("upstream-model", false)],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect_err("Route without an enabled Target must be rejected");
@@ -1245,6 +1262,7 @@ async fn listed_routes_project_provider_model_names_for_every_target() -> anyhow
                 target("standby-model", false),
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -1389,6 +1407,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
 
             targets: vec![create_target("GLM-4.6")],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 1);
@@ -1418,6 +1437,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
             is_enabled: true,
             targets: Some(vec![historical_target]),
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let projected = admin.get_model("historical-glm").await?;
@@ -1487,6 +1507,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
 
         targets: vec![target],
         default_thinking_level: None,
+        billing: None,
     };
 
     // 两个清单 ID 的最右段相同，宽松匹配无法区分时保持报错而不是任意选择
@@ -1614,6 +1635,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
             thinking_level_map: Vec::new(),
         }],
         default_thinking_level: None,
+        billing: None,
     };
 
     let first = admin
@@ -1715,6 +1737,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect_err("Route change must enforce Effective Availability");
@@ -1745,6 +1768,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect_err("a Target requires a Provider Model snapshot");
@@ -1814,6 +1838,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -1922,6 +1947,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2024,6 +2050,7 @@ async fn create_toggle_route(
                 },
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
 }
@@ -2197,6 +2224,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
                 ],
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await
         .expect_err("explicitly submitted toggle controls must fail closed");
@@ -2282,6 +2310,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2362,6 +2391,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                 },
             ],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
 
@@ -2430,6 +2460,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
+            billing: None,
         })
         .await?;
     let mut targets = route_targets_for_update(&route);
