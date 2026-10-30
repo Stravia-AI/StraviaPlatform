@@ -102,9 +102,8 @@ pub fn descriptor() -> VendorDescriptor {
             provider_id: VENDOR_ID.into(),
             catalog_id: Some("xai".into()),
             icon_svg: Some(
-                stravia_vendor_common::icons::provider_svg("xai")
-                    .expect("xAI brand SVG is embedded")
-                    .into(),
+                include_str!("../../../../frontend/stravia-webui/src/assets/icons/xai.svg")
+                    .to_owned(),
             ),
             display_name: "xAI Grok".into(),
             description: Some("Grok OAuth access through the xAI CLI service".into()),

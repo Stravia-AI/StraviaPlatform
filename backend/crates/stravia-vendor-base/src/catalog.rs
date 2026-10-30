@@ -354,9 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_profiles_uses_catalog_brand_instead_of_shared_implementation() {
+    fn derive_profiles_preserves_catalog_identity_without_embedded_brand_overrides() {
         let body = r#"{
             "openai": {"id": "openai", "name": "OpenAI", "npm": "@ai-sdk/openai"},
+            "alibaba-token-plan-cn": {"id": "alibaba-token-plan-cn", "name": "Alibaba Token Plan (China)", "npm": "@ai-sdk/openai-compatible", "api": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"},
             "meta": {"id": "meta", "name": "Meta", "npm": "@ai-sdk/openai"},
             "perplexity-agent": {"id": "perplexity-agent", "name": "Perplexity Agent", "npm": "@ai-sdk/openai"},
             "unknown-openai": {"id": "unknown-openai", "name": "Unknown", "npm": "@ai-sdk/openai"},
@@ -364,22 +365,13 @@ mod tests {
             "thinkingmachines": {"id": "thinkingmachines", "name": "Thinking Machines", "npm": "@ai-sdk/anthropic"}
         }"#;
         let profiles = derive_profiles(body).expect("index parses");
-        let icon = |id: &str| {
-            profiles
-                .iter()
-                .find(|profile| profile.provider_id == id)
-                .expect("profile exists")
-                .icon_svg
-                .as_deref()
-        };
-        for id in ["openai", "meta", "perplexity-agent", "anthropic"] {
-            assert_eq!(icon(id), stravia_vendor_common::icons::provider_svg(id));
-            assert!(icon(id).is_some());
+        for profile in &profiles {
+            assert_eq!(
+                profile.catalog_id.as_deref(),
+                Some(profile.provider_id.as_str())
+            );
+            assert!(profile.icon_svg.is_none(), "{}", profile.provider_id);
         }
-        assert_ne!(icon("meta"), icon("openai"));
-        assert_ne!(icon("perplexity-agent"), icon("openai"));
-        assert_eq!(icon("unknown-openai"), None);
-        assert_eq!(icon("thinkingmachines"), None);
     }
 
     #[test]

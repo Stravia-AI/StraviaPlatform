@@ -1,15 +1,17 @@
 <script lang="ts">
 import PlugIcon from '@lucide/svelte/icons/plug'
-import { icons } from '../../assets/icons'
 import { catalogLogoUrl } from '#lib/admin-client.js'
 import { cn } from '#lib/utils.js'
 
 interface Props {
   class?: string
-  /** Stable provider identity used for the built-in SVG and name fallback. */
+  /** Stable provider identity; only the generic `custom` entry selects the Plug fallback. */
   icon?: string | null
   name: string
-  /** Standalone SVG source passed directly by caller (e.g. plugin-registered icon_svg) */
+  /**
+   * Standalone SVG source passed directly by caller (e.g. plugin-registered icon_svg);
+   * rendered instead of the host logo.
+   */
   svg?: string | null
   /**
    * Host icon request key: a descriptor/catalog identity for unsaved options
@@ -22,8 +24,7 @@ interface Props {
 let { class: className, icon, name, svg, logo }: Props = $props()
 let failedSource = $state<string>()
 const isCustom = $derived(icon?.toLowerCase() === 'custom')
-const resolvedSvg = $derived(svg ?? (icon && !isCustom ? icons[icon.toLowerCase()] : undefined))
-const svgSource = $derived(resolvedSvg ? `data:image/svg+xml,${encodeURIComponent(resolvedSvg)}` : undefined)
+const svgSource = $derived(svg ? `data:image/svg+xml,${encodeURIComponent(svg)}` : undefined)
 const remoteSource = $derived(logo ? catalogLogoUrl(logo) : undefined)
 const usingFallback = $derived(Boolean(failedSource) || (!svgSource && !remoteSource))
 </script>
