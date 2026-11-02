@@ -842,7 +842,10 @@ async fn main() -> anyhow::Result<()> {
         let forest: serde_json::Value = forest.json().await?;
         observation_roots = forest["data"]["root_total"].as_i64().unwrap_or(0);
         let stats = admin
-            .get_stats_overview(stravia_core::db::models::StatsWindow::default())
+            .get_stats_overview(
+                stravia_core::db::models::StatsWindow::default(),
+                stravia_core::db::models::StatsFilter::All,
+            )
             .await?;
         stats_requests = stats.total_requests;
         if observation_roots >= 1 && stats_requests >= 1 {

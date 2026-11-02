@@ -1,6 +1,7 @@
 <script lang="ts">
-import { Axis, Chart, Path, Svg, Tooltip, type ChartState } from 'layerchart'
+import { Axis, Chart, Circle, Path, Svg, Tooltip, type ChartState } from 'layerchart'
 
+import { chartMotion } from '#lib/chart-motion.svelte.js'
 import * as m from '#lib/paraglide/messages.js'
 import { formatCompactCount, formatNumber, formatPercent, formatTime } from '#lib/format.js'
 import type { AvailabilityChartPoint } from '#lib/stats-chart.js'
@@ -11,6 +12,9 @@ let {
   points,
   formatBucket = formatTime,
 }: { points: AvailabilityChartPoint[]; formatBucket?: (value: Date) => string } = $props()
+
+// 窗口、筛选或悬停区间切换时折线、差值带与圆点一起缓动；layerchart 只在创建时读取该配置。
+const motion = chartMotion()
 
 let context = $state<AvailabilityChartContext>()
 let keyboardIndex = $state(0)
@@ -202,36 +206,42 @@ function onkeydown(event: KeyboardEvent) {
           aria-hidden="true"
           fill="var(--chart-2)"
           fillOpacity={0.14}
-          stroke="none" />
+          stroke="none"
+          {motion} />
         <Path
           pathData={linePath(chart, 'firstPass')}
           aria-label={m.stats_first_pass_success_rate()}
           fill="none"
           stroke="var(--chart-2)"
           strokeWidth={2}
-          stroke-dasharray="6 4" />
+          stroke-dasharray="6 4"
+          {motion} />
         <Path
           pathData={linePath(chart, 'final')}
           aria-label={m.stats_final_success_rate()}
           fill="none"
           stroke="var(--chart-1)"
-          strokeWidth={2} />
-        {#each points as point (point.bucket.getTime())}
+          strokeWidth={2}
+          {motion} />
+        <!-- 圆点按序号对位，才能随折线一起移动；按时间作 key 会在切换区间时整批消失再出现。 -->
+        {#each points as point, index (index)}
           {#if point.firstPass != null && chart.yScale}
-            <circle
-              cx={chart.xScale(point.bucket)}
+            <Circle
+              cx={Number(chart.xScale(point.bucket))}
               cy={Number(chart.yScale(point.firstPass))}
-              r="2"
+              r={2}
               fill="var(--chart-2)"
-              aria-hidden="true" />
+              aria-hidden="true"
+              {motion} />
           {/if}
           {#if point.final != null && chart.yScale}
-            <circle
-              cx={chart.xScale(point.bucket)}
+            <Circle
+              cx={Number(chart.xScale(point.bucket))}
               cy={Number(chart.yScale(point.final))}
-              r="2"
+              r={2}
               fill="var(--chart-1)"
-              aria-hidden="true" />
+              aria-hidden="true"
+              {motion} />
           {/if}
         {/each}
       </Svg>

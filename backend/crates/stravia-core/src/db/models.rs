@@ -942,6 +942,65 @@ impl StatsWindow {
     }
 }
 
+/// 用量统计的服务端筛选范围：`All` 读取全局桶；过滤值只读取对应的边际桶
+/// （`provider` / `api_key` scope），因此请求级分类列在该口径下不可用。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StatsFilter {
+    #[default]
+    All,
+    Providers(Vec<String>),
+    ApiKeys(Vec<String>),
+}
+
+impl StatsFilter {
+    pub const MAX_IDS: usize = 100;
+
+    /// 解析互斥的 `provider_ids` / `api_key_ids` 查询参数（逗号分隔）。
+    pub fn from_query_params(
+        provider_ids: Option<&str>,
+        api_key_ids: Option<&str>,
+    ) -> Result<Self, StatsQueryError> {
+        match (provider_ids, api_key_ids) {
+            (Some(_), Some(_)) => Err(StatsQueryError(
+                "provider_ids and api_key_ids cannot be combined",
+            )),
+            (Some(raw), None) => Ok(Self::Providers(Self::parse_ids(raw)?)),
+            (None, Some(raw)) => Ok(Self::ApiKeys(Self::parse_ids(raw)?)),
+            (None, None) => Ok(Self::All),
+        }
+    }
+
+    /// 空列表、空元素或超过 [`Self::MAX_IDS`] 均为非法查询。
+    pub fn validate(&self) -> Result<(), StatsQueryError> {
+        match self {
+            Self::All => Ok(()),
+            Self::Providers(ids) | Self::ApiKeys(ids) => Self::validate_ids(ids),
+        }
+    }
+
+    fn validate_ids(ids: &[String]) -> Result<(), StatsQueryError> {
+        if ids.is_empty() {
+            return Err(StatsQueryError("stats filter must select at least one id"));
+        }
+        if ids.iter().any(String::is_empty) {
+            return Err(StatsQueryError("stats filter ids must not be empty"));
+        }
+        if ids.len() > Self::MAX_IDS {
+            return Err(StatsQueryError("stats filter accepts at most 100 ids"));
+        }
+        Ok(())
+    }
+
+    fn parse_ids(raw: &str) -> Result<Vec<String>, StatsQueryError> {
+        if raw.is_empty() {
+            return Err(StatsQueryError("stats filter must select at least one id"));
+        }
+        let ids: Vec<String> = raw.split(',').map(str::to_owned).collect();
+        Self::validate_ids(&ids)?;
+        Ok(ids)
+    }
+}
+
 /// 统计桶与检查点携带的金额累计列。金额以纳单位保存；
 /// 有自定义金额的记录计入 `*_custom_nanos`，否则计入 `*_usd_unconverted_nanos`。
 #[derive(Debug, Clone, Copy, Default, FromRow)]

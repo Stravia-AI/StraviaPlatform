@@ -1,4 +1,4 @@
-import type { StatsOverview, StatsSeries } from '#lib/types.js'
+import type { StatsOverview, StatsSeries, StatsWindow } from '#lib/types.js'
 
 type LatencyStats = Pick<StatsSeries, 'bucket_start' | 'avg_first_token_ms' | 'avg_output_tps'>
 type TokenStats = Pick<
@@ -284,6 +284,60 @@ function tokenTotal(row: TokenStats): number | null {
   // 管理输入已扣除缓存读取；缓存分项不再加回输入与输出的合计。
   if (row.total_input_tokens == null && row.total_output_tokens == null) return null
   return (row.total_input_tokens ?? 0) + (row.total_output_tokens ?? 0)
+}
+
+export type TokenCategoryKey = 'input' | 'output' | 'cache-read' | 'cache-write'
+
+/** 环形图的一个分项；`slot` 固定其颜色与补间位置。 */
+export interface DonutSlice {
+  key: string
+  label: string
+  value: number
+  /** 固定槽位；补间按槽位对齐，同一分项在数据切换前后应落在同一槽位。 */
+  slot: number
+}
+
+export interface TokenCategoryValue {
+  key: TokenCategoryKey
+  value: number
+}
+
+/**
+ * Token 构成的四个分项，顺序固定。未上报（null）的分项不出现，避免把“未报告”画成 0%。
+ * 总览与活动图的单个桶都是同一组 total_* 字段。
+ */
+export function tokenBreakdown(
+  totals: Pick<
+    TokenStats,
+    'total_input_tokens' | 'total_output_tokens' | 'total_cache_read_tokens' | 'total_cache_write_tokens'
+  >,
+): TokenCategoryValue[] {
+  const categories: [TokenCategoryKey, number | null][] = [
+    ['input', totals.total_input_tokens],
+    ['output', totals.total_output_tokens],
+    ['cache-read', totals.total_cache_read_tokens],
+    ['cache-write', totals.total_cache_write_tokens],
+  ]
+  return categories.flatMap(([key, value]) => (value == null ? [] : [{ key, value }]))
+}
+
+export interface HoverWindows {
+  /** 悬停格自身的时段，用于 Token 构成与模型占比。 */
+  period: StatsWindow
+  /** 与所选窗口等长、止于悬停格终点的区间，用于延迟与成功率。 */
+  view: StatsWindow
+}
+
+/**
+ * 悬停的活动格对应的两个查询区间。最后一格可能越过所选窗口终点，所以时段终点向内收；
+ * 区间起点必须为正，否则无法作为合法查询窗口，此时不提供悬停区间。
+ */
+export function hoverWindows(base: StatsWindow, cellStart: number, bucketMs: number): HoverWindows | null {
+  const end_at = Math.min(cellStart + bucketMs, base.end_at)
+  if (!(end_at > cellStart)) return null
+  const start_at = end_at - (base.end_at - base.start_at)
+  if (!(start_at > 0)) return null
+  return { period: { start_at: cellStart, end_at }, view: { start_at, end_at } }
 }
 
 /**

@@ -6,6 +6,12 @@ export interface StatsWindow {
   end_at: number
 }
 
+/**
+ * 总览与时间序列的维度筛选；二者互斥，因为长期汇总桶只按单一维度累计。
+ * 筛选后请求级分类（终结、失败、自动恢复）与模型占比不可得，页面据此显示不可用状态。
+ */
+export type StatsFilter = { provider_ids: readonly string[] } | { api_key_ids: readonly string[] }
+
 export interface GatewayStatus {
   status: string
   version: string

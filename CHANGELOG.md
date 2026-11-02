@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Usage: click rows in the Provider and API Key tables to select one or several; selected rows are highlighted and there is no checkbox column. Selecting rows filters the metric strip, Token activity, Latency and speed and Token breakdown to the selection; selecting API Keys clears any selected Providers and vice versa, and a status in the page header shows the selection with a Clear action. Request success rate and Model share are cross-dimension results that the per-Provider and per-API Key totals cannot reproduce, so they show an explanation instead of a number while a selection is active.
+- `GET /api/v1/stats/overview` and `GET /api/v1/stats/series` accept optional, mutually exclusive `provider_ids` / `api_key_ids` (comma-separated, at most 100). Provider totals count upstream requests; API Key totals count the key's own requests. Empty lists or elements, both parameters together, and more than 100 ids return `400 invalid_stats_query`.
+- Usage: hovering a Token activity cell shows that period in Token breakdown and Models, and the Latency and speed and Request success charts show a range of the selected length ending at that cell. The summary strip and the activity grid stay on the selected window. Hovering a legend item enlarges and highlights its slice, and the center shows its value.
+
+### Changed
+
+- Usage charts animate data changes (time range, selection, hover) with a 300 ms ease-out transition instead of redrawing; reduced-motion preferences turn it off. Token breakdown legend entries drop the trailing "Token" (for example "Cache write" instead of "Cache write Token").
+
 ### Fixed
 
 - Devin models now use the prices Devin itself quotes (input, cached input and output, USD per million tokens) as their cost; the quote takes priority over the vendor's official API reference price, which is only a fallback when Devin quotes none. The quote used to be kept only as the read-only `cost_per_million_tokens_usd` extension field, which is removed.

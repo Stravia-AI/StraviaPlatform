@@ -383,6 +383,8 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |用量统计|`routes/stats/+page.svelte`|只显示一个成本：顶部「总成本」（`overview.actual_cost`，全部订阅摊销加按量成本）与 Provider 表的「成本」列（`providers[].allocated_cost`，按所选时间窗口分摊，可排序，缺失显示「—」）。不显示成本趋势、订阅价值、Route 成本与计费、API Key 成本与计费；Provider 的预估成本、订阅费用与价值倍数见其详情页的「成本」页签。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
 |请求详情|`observation-inspector-content.svelte`|每个尝试显示成本（订阅 Provider 标注为等价按量）与计费；未知显示「未知」|
 
+用量统计的 Provider / API Key 勾选过滤同样作用于顶部「总成本」与趋势序列：过滤只读取所选对象的边际桶金额并据此重算成本。Provider 过滤只保留所选 Provider 的订阅计划，`actual_cost` 等于这些 Provider 的按量成本加订阅摊销（与服务端 Provider 行的 `allocated_cost` 同口径）；API key 无法归属订阅，过滤时 `subscription` 为 `null`，只展示按量成本，序列也不生成订阅网格。未过滤时的成本与订阅语义不变。过滤读取边际桶，因此请求成功／恢复分类与按模型占比在过滤口径下不可用。
+
 价格编辑器负责必填项与数字、时间的输入语法；时区、星期、时段顺序与重叠、倍率有效性由 Core 统一校验。保存失败时显示 Core 错误并保留草稿，取消编辑或切换模型后清除对应错误。
 
 订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。总成本卡片与 Provider 表的成本列使用同一规则，未知尝试不能被画成已知零成本。

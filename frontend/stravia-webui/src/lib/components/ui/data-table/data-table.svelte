@@ -104,6 +104,10 @@ interface Props {
   paginatorPosition?: DataTablePaginatorPosition
   pageSizeOptions?: readonly number[]
   selectionMode?: DataTableSelectionMode
+  /** 逐行决定能否被选中；返回 false 的行不渲染可用的复选框，也不会被全选选中。 */
+  rowSelectable?: (row: TData) => boolean
+  /** 多选模式下是否渲染复选框列与「已选 N 行」页脚；关闭后仅通过点击行或键盘选择。 */
+  showSelectionControl?: boolean
   metaKeySelection?: boolean
   selectOnRowClick?: boolean
   contextMenu?: boolean
@@ -215,6 +219,8 @@ let {
   paginatorPosition = 'bottom',
   pageSizeOptions = [10, 25, 50, 100],
   selectionMode = 'none',
+  rowSelectable,
+  showSelectionControl = true,
   metaKeySelection = true,
   selectOnRowClick = true,
   contextMenu = false,
@@ -513,7 +519,8 @@ const table = createTable({
     return removableSort
   },
   get enableRowSelection() {
-    return selectionMode !== 'none'
+    if (selectionMode === 'none') return false
+    return rowSelectable ? (row: DataTableRow<TData>) => rowSelectable(row.original) : true
   },
   get enableMultiRowSelection() {
     return selectionMode === 'multiple'
@@ -553,7 +560,7 @@ const table = createTable({
 
 const headerGroups = $derived(table.getHeaderGroups())
 const visibleLeafColumns = $derived(table.getVisibleLeafColumns())
-const hasSelectionControl = $derived(selectionMode === 'multiple')
+const hasSelectionControl = $derived(selectionMode === 'multiple' && showSelectionControl)
 const hasExpansionControl = $derived(Boolean(expandedContent))
 const hasEditControl = $derived(editMode === 'row' && Boolean(cellEditor))
 const controlColumnCount = $derived(
@@ -1345,9 +1352,9 @@ $effect(() => {
     {/if}
   </ScrollArea.Root>
 
-  {#if (paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')) || selectionMode === 'multiple' || footer}
+  {#if (paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')) || hasSelectionControl || footer}
     <div class="flex flex-wrap items-center gap-3" data-slot="data-table-footer">
-      {#if selectionMode === 'multiple'}
+      {#if hasSelectionControl}
         <p class="me-auto text-sm text-muted-foreground">
           {resolvedLabels.selectedRows(
             table.getFilteredSelectedRowModel().flatRows.length,
