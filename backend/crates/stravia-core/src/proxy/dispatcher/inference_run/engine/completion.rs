@@ -733,7 +733,10 @@ fn fill_canonical_defaults(context: &CompletionContext, response: &mut AiRespons
             if item.is_compaction() || item.is_compaction_trigger() {
                 continue;
             }
-            let prefix = if item.thinking_ref().is_some() || item.reasoning_ref().is_some() {
+            let prefix = if item.thinking_ref().is_some()
+                || item.reasoning_ref().is_some()
+                || item.redacted_thinking_ref().is_some()
+            {
                 "rs"
             } else if item.function_call_ref().is_some() {
                 "fc"

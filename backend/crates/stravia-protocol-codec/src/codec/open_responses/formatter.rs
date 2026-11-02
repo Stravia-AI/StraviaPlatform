@@ -471,6 +471,9 @@ pub fn stamp_output_graph_ids(resp: &AiResponse) -> Vec<AiItem> {
 }
 
 fn output_item_prefix(item: &AiItem) -> Option<&'static str> {
+    if item.redacted_thinking_ref().is_some() {
+        return Some("rs");
+    }
     if item.role == Role::Assistant
         && item
             .tool_calls

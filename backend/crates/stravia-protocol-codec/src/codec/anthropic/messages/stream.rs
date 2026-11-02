@@ -68,6 +68,16 @@ impl AnthropicResponseParser {
                             items.push(AiItem::thinking(thinking, signature));
                         }
                     }
+                    Some("redacted_thinking") => {
+                        // 密文是下一轮工具回合必须原样回传的凭据，缺失会令上游返回 400。
+                        if let Some(data) = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .filter(|data| !data.is_empty())
+                        {
+                            items.push(AiItem::redacted_thinking(data));
+                        }
+                    }
                     Some("tool_use") => {
                         if let (Some(tc_id), Some(name)) = (
                             block.get("id").and_then(|v| v.as_str()),
@@ -474,6 +484,20 @@ fn parse_anthropic_event(
                             id,
                             name,
                         });
+                    }
+                    // redacted_thinking 的 content_block_start 已带完整密文，没有后续 delta，
+                    // 因此直接作为已完成的类型化 item 交付，而不是 Unknown 透传。
+                    Some("redacted_thinking") => {
+                        if let Some(data) = block
+                            .get("data")
+                            .and_then(|v| v.as_str())
+                            .filter(|data| !data.is_empty())
+                        {
+                            deltas.push(AiStreamDelta::ItemDone {
+                                index: idx,
+                                item: AiItem::redacted_thinking(data),
+                            });
+                        }
                     }
                     // Empty text/thinking block starts carry no canonical
                     // content. Their subsequent deltas contain the semantic

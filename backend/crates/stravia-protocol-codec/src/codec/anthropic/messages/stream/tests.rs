@@ -1144,3 +1144,161 @@ fn test_roundtrip_zhipuai_input_tokens_from_message_delta() {
         "prompt_tokens=60 from message_delta must be captured in formatter state",
     );
 }
+
+// ── redacted_thinking 上游解析 ──
+
+fn anthropic_sse(events: &[serde_json::Value]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| make_sse_block(event["type"].as_str().unwrap(), &event.to_string()))
+        .collect()
+}
+
+#[test]
+fn parse_response_keeps_redacted_thinking_payload_in_block_order() {
+    let content = serde_json::json!([
+        {"type": "thinking", "thinking": "visible", "signature": "sig-visible"},
+        {"type": "redacted_thinking", "data": "opaque-redacted"},
+        {"type": "text", "text": "answer"},
+        {"type": "tool_use", "id": "toolu_1", "name": "read", "input": {"path": "a"}}
+    ]);
+    let parsed = AnthropicResponseParser
+        .parse_response(serde_json::json!({
+            "id": "msg_redacted",
+            "model": "claude",
+            "content": content,
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }))
+        .unwrap();
+
+    let replayed = AnthropicResponseFormatter.format_response(&parsed);
+    assert_eq!(replayed["content"], content);
+}
+
+#[test]
+fn parse_response_skips_redacted_thinking_without_payload() {
+    let parsed = AnthropicResponseParser
+        .parse_response(serde_json::json!({
+            "id": "msg_empty_redacted",
+            "model": "claude",
+            "content": [
+                {"type": "redacted_thinking", "data": ""},
+                {"type": "redacted_thinking"},
+                {"type": "text", "text": "answer"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }))
+        .unwrap();
+
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.output_text(), "answer");
+}
+
+fn redacted_between_thinking_and_text_stream() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({"type":"message_start","message":{"id":"msg_stream_redacted","model":"claude","usage":{"input_tokens":3,"output_tokens":0}}}),
+        serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"visible"}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-visible"}}),
+        serde_json::json!({"type":"content_block_stop","index":0}),
+        serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque-redacted"}}),
+        serde_json::json!({"type":"content_block_stop","index":1}),
+        serde_json::json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}),
+        serde_json::json!({"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"answer"}}),
+        serde_json::json!({"type":"content_block_stop","index":2}),
+        serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}),
+        serde_json::json!({"type":"message_stop"}),
+    ]
+}
+
+#[test]
+fn stream_redacted_thinking_is_a_typed_completed_item_not_unknown() {
+    let blocks = anthropic_sse(&redacted_between_thinking_and_text_stream());
+    for chunks in [vec![blocks.concat()], blocks] {
+        let mut parser = AnthropicStreamParser::new();
+        let mut deltas = Vec::new();
+        for chunk in chunks {
+            deltas.extend(parser.parse_chunk(&chunk).unwrap());
+        }
+
+        let redacted = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::ItemDone { item, .. } => match &item.content {
+                    MessageContent::Blocks(blocks) => match blocks.as_slice() {
+                        [ContentBlock::RedactedThinking { data }] => Some(data.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(redacted, vec!["opaque-redacted"]);
+        assert!(
+            !deltas.iter().any(|delta| matches!(
+                delta,
+                AiStreamDelta::Unknown { raw } if raw.contains("redacted_thinking")
+            )),
+            "redacted_thinking must not be forwarded as an opaque Unknown event: {deltas:?}"
+        );
+    }
+}
+
+#[test]
+fn stream_redacted_thinking_round_trips_through_anthropic_formatter_in_order() {
+    let blocks = anthropic_sse(&redacted_between_thinking_and_text_stream());
+    let mut parser = AnthropicStreamParser::new();
+    let mut formatter = AnthropicStreamFormatter::new();
+    let mut started = Vec::new();
+    for chunk in &blocks {
+        let deltas = parser.parse_chunk(chunk).unwrap();
+        for event in formatter.format_deltas(&deltas) {
+            if event.event.as_deref() != Some("content_block_start") {
+                continue;
+            }
+            let body: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+            let block = &body["content_block"];
+            started.push((
+                body["index"].as_u64().unwrap(),
+                block["type"].as_str().unwrap().to_owned(),
+                block["data"].as_str().map(str::to_owned),
+            ));
+        }
+    }
+
+    assert_eq!(
+        started,
+        vec![
+            (0, "thinking".to_owned(), None),
+            (
+                1,
+                "redacted_thinking".to_owned(),
+                Some("opaque-redacted".to_owned())
+            ),
+            (2, "text".to_owned(), None),
+        ]
+    );
+}
+
+#[test]
+fn stream_accumulator_keeps_redacted_thinking_in_block_order() {
+    let blocks = anthropic_sse(&redacted_between_thinking_and_text_stream());
+    let mut parser = AnthropicStreamParser::new();
+    let mut accumulator = crate::accumulator::StreamResponseAccumulator::default();
+    for chunk in &blocks {
+        accumulator.apply_all(&parser.parse_chunk(chunk).unwrap());
+    }
+
+    let replayed = AnthropicResponseFormatter.format_response(&accumulator.into_ai_response());
+    assert_eq!(
+        replayed["content"],
+        serde_json::json!([
+            {"type": "thinking", "thinking": "visible", "signature": "sig-visible"},
+            {"type": "redacted_thinking", "data": "opaque-redacted"},
+            {"type": "text", "text": "answer"}
+        ])
+    );
+}

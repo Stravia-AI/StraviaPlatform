@@ -100,6 +100,20 @@ pub(crate) fn render_history_marker_reference(reference: &str) -> String {
     format!("{HISTORY_MARKER_PREFIX}{reference}{HISTORY_MARKER_SUFFIX}\n")
 }
 
+/// Responses `reasoning.encrypted_content` is the one reasoning slot that stateless clients
+/// (Codex, AI SDK) return verbatim, while they drop or rewrite readable `content`. A projected
+/// Thinking Marker therefore rides there as a bare marker comment, whichever upstream
+/// produced the protected block.
+pub(crate) fn render_history_marker_token(reference: &str) -> String {
+    format!("{HISTORY_MARKER_PREFIX}{reference}{HISTORY_MARKER_SUFFIX}")
+}
+
+/// Provider ciphertext is opaque base64-like data and never begins with the private prefix,
+/// so the prefix alone separates Stravia-issued tokens from real protected payloads.
+pub(crate) fn is_history_marker_token(encrypted_content: &str) -> bool {
+    encrypted_content.starts_with(HISTORY_MARKER_PREFIX)
+}
+
 fn render_projection_delimiter(
     reference: &str,
     ordinal: usize,
@@ -374,6 +388,16 @@ pub(crate) fn history_marker_references_iter<'a>(
                                 references.extend(strip_markers(text).1);
                             }
                         }
+                        ContentBlock::Reasoning {
+                            summary,
+                            content,
+                            encrypted_content: Some(token),
+                        } if is_history_marker_token(token) => {
+                            for text in summary.iter().chain(content) {
+                                references.extend(strip_markers(text).1);
+                            }
+                            references.extend(strip_markers(token).1);
+                        }
                         _ => {}
                     }
                 }
@@ -500,6 +524,10 @@ fn block_needs_parsing(block: &ContentBlock) -> bool {
             .iter()
             .chain(content)
             .any(|text| contains_private_syntax(text)),
+        ContentBlock::Reasoning {
+            encrypted_content: Some(token),
+            ..
+        } => is_history_marker_token(token),
         _ => false,
     }
 }
@@ -554,7 +582,7 @@ fn parse_item(item: AiItem) -> ParsedItem {
                     ContentBlock::Reasoning {
                         summary,
                         content,
-                        encrypted_content: None,
+                        encrypted_content,
                     } => {
                         changed = true;
                         for text in summary {
@@ -562,6 +590,14 @@ fn parse_item(item: AiItem) -> ParsedItem {
                         }
                         for text in content {
                             atoms.extend(parse_scalar(text, ScalarKind::ReasoningContent));
+                        }
+                        // The token is the item's authoritative reference and follows its preview,
+                        // matching the order the projection emitted. A token that names no valid
+                        // reference contributes nothing, so malformed state is cleared, never forwarded.
+                        if let Some(token) = encrypted_content {
+                            atoms.extend(
+                                strip_markers(token).1.into_iter().map(CarrierAtom::Marker),
+                            );
                         }
                     }
                     _ => unreachable!("Only unsigned textual carriers need parsing"),

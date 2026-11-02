@@ -34,6 +34,18 @@ enum AccumulatedItem {
     },
     ToolCall(usize),
     Unknown(AiItem),
+    /// 只有完成事件、没有增量 delta 的 item（如 Anthropic `redacted_thinking`）。
+    /// 无索引流里它的位置就是到达位置，不能让它按 `ItemDone.index` 排到增量项之前。
+    Completed(AiItem),
+}
+
+/// 无增量载荷、仅以完成事件交付的受保护密文块。
+fn is_completion_only_protected_block(item: &AiItem) -> bool {
+    matches!(
+        &item.content,
+        MessageContent::Blocks(blocks)
+            if matches!(blocks.as_slice(), [ContentBlock::RedactedThinking { .. }])
+    )
 }
 
 #[derive(Default)]
@@ -135,7 +147,9 @@ impl StreamResponseAccumulator {
             AiStreamDelta::ProtectedThinkingStart { index } => Some((*index, 0)),
             // Completion-only items (including Gemini media) still own a source
             // index and must retain an ordinal through response materialization.
-            AiStreamDelta::ItemDone { index, .. } => Some((*index, 0)),
+            AiStreamDelta::ItemDone { index, .. } if !self.keeps_arrival_order(delta) => {
+                Some((*index, 0))
+            }
             _ => None,
         };
         if let Some((index, part)) = indexed {
@@ -185,8 +199,23 @@ impl StreamResponseAccumulator {
                     ),
                 )
             }),
+            AiStreamDelta::ItemDone { .. } => self
+                .items
+                .len()
+                .checked_sub(1)
+                .map(|index| (self.derived_ordinals[&index], (false, 0))),
             _ => None,
         }
+    }
+
+    /// 无索引流中，只有完成事件的受保护密文块按到达顺序落位；
+    /// 带索引的流（Responses/Gemini）仍由 `ItemDone.index` 决定位置。
+    fn keeps_arrival_order(&self, delta: &AiStreamDelta) -> bool {
+        !self.indexed_mode
+            && matches!(
+                delta,
+                AiStreamDelta::ItemDone { item, .. } if is_completion_only_protected_block(item)
+            )
     }
 
     fn apply_content(&mut self, delta: &AiStreamDelta) {
@@ -358,8 +387,12 @@ impl StreamResponseAccumulator {
             }
             AiStreamDelta::ItemDone { index, item } => {
                 self.item_closed = true;
-                self.completed_items
-                    .insert(*index, completed_item_semantic_shell(item));
+                if self.keeps_arrival_order(delta) {
+                    self.items.push(AccumulatedItem::Completed(item.clone()));
+                } else {
+                    self.completed_items
+                        .insert(*index, completed_item_semantic_shell(item));
+                }
             }
             AiStreamDelta::Usage(usage) => {
                 // 用量帧是快照而非增量；未知字段不抹掉已报告值，明确的零仍可修订。
@@ -892,7 +925,7 @@ fn accumulated_item_to_ai(
             .filter(|call| !call.name.is_empty())
             .cloned()
             .map(AiItem::function_call),
-        AccumulatedItem::Unknown(item) => Some(item),
+        AccumulatedItem::Unknown(item) | AccumulatedItem::Completed(item) => Some(item),
         AccumulatedItem::Text(_)
         | AccumulatedItem::Refusal(_)
         | AccumulatedItem::Thinking { .. }
