@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Devin models now use the prices Devin itself quotes (input, cached input and output, USD per million tokens) as their cost; the quote takes priority over the vendor's official API reference price, which is only a fallback when Devin quotes none. The quote used to be kept only as the read-only `cost_per_million_tokens_usd` extension field, which is removed.
+- Official API reference prices are now matched when the vendor's price catalog lists several aliases for one canonical model (for example `deepseek-flash` and `deepseek-v4-flash` both pointing at `deepseek/deepseek-v4.1-flash-1017`). The alias whose ID is closest to the model ID supplies the price; equally close aliases still leave the price unknown.
+
 ## [0.6.1] - 2026-11-02
 
 ### Verification

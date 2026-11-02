@@ -61,25 +61,79 @@ impl OfficialPriceIdentity {
         if let Some(model) = insensitive {
             return Some(&model.metadata);
         }
-        let canonical = unique(models().filter(|model| {
-            model
-                .metadata
-                .get("canonical_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.eq_ignore_ascii_case(&self.canonical_id))
-        }))
+        // 官方目录可以让多个别名条目（如 `deepseek-flash`、`deepseek-v4-flash`）声明
+        // 同一个 `canonical_id`；它们同属这个型号，取 ID 最接近型号 ID 的一个。
+        let canonical = closest(
+            models().filter(|model| {
+                model
+                    .metadata
+                    .get("canonical_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(&self.canonical_id))
+            }),
+            upstream_id,
+        )
         .ok()?;
         if let Some(model) = canonical {
             return Some(&model.metadata);
         }
         // 展示名称可能被不同日期版本复用；官方目录须有相同的模型版本身份。
-        unique(
+        closest(
             models().filter(|model| id(model).is_some_and(|id| same_price_name(id, upstream_id))),
+            upstream_id,
         )
         .ok()
         .flatten()
         .map(|model| &model.metadata)
     }
+}
+
+/// 在同一价格身份的候选中取 ID 与 `target` 编辑距离最小者；距离并列仍是歧义。
+fn closest<'a>(
+    candidates: impl Iterator<Item = &'a CatalogModelSource>,
+    target: &str,
+) -> Result<Option<&'a CatalogModelSource>, ()> {
+    let mut best: Option<(usize, &CatalogModelSource)> = None;
+    let mut tied = false;
+    for model in candidates {
+        let id = model
+            .metadata
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let distance = edit_distance(id, target);
+        match best {
+            Some((current, _)) if distance > current => {}
+            Some((current, _)) if distance == current => tied = true,
+            _ => {
+                best = Some((distance, model));
+                tied = false;
+            }
+        }
+    }
+    if tied {
+        Err(())
+    } else {
+        Ok(best.map(|(_, model)| model))
+    }
+}
+
+/// 忽略大小写的 Levenshtein 距离。
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().flat_map(char::to_lowercase).collect();
+    let mut row: Vec<usize> = (0..=right.len()).collect();
+    for left in left.chars().flat_map(char::to_lowercase) {
+        let mut diagonal = row[0];
+        row[0] += 1;
+        for (index, &right) in right.iter().enumerate() {
+            let above = row[index + 1];
+            row[index + 1] = (diagonal + usize::from(left != right))
+                .min(above + 1)
+                .min(row[index] + 1);
+            diagonal = above;
+        }
+    }
+    row[right.len()]
 }
 
 fn match_canonical<'a>(

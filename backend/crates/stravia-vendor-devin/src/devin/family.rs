@@ -245,15 +245,17 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
         if entry.supports_images == Some(true) {
             capabilities.push("image_input".into());
         }
+        // 渠道协议自己的报价（USD／百万 Token）；宿主以标准 `cost` 采用它，优先于目录价与官方参考价。
         if let Some(cost) = entry.cost {
-            metadata.insert(
-                "cost_per_million_tokens_usd".into(),
-                json!({
-                    "input": cost.input,
-                    "cache_read": cost.cache_read,
-                    "output": cost.output,
-                }),
-            );
+            let prices: serde_json::Map<String, Value> = [
+                ("input", cost.input),
+                ("output", cost.output),
+                ("cache_read", cost.cache_read),
+            ]
+            .into_iter()
+            .filter_map(|(field, price)| Some((field.to_owned(), json!(price?))))
+            .collect();
+            metadata.insert("cost".into(), Value::Object(prices));
         }
     }
 
@@ -270,6 +272,7 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::devin_connect::DevinModelCost;
 
     fn discover(selectors: &[&str], supports_images: Option<bool>) -> DiscoveredModel {
         let entries: Vec<_> = selectors
@@ -316,6 +319,31 @@ mod tests {
     fn discovery_exposes_toggle_without_inventing_efforts() {
         let model = discover(&["test-family", "test-family-thinking"], None);
         assert_eq!(model.metadata.get("reasoning_efforts"), Some(&json!([])));
+    }
+
+    #[test]
+    fn discovery_exposes_only_the_quoted_prices_as_model_cost() {
+        let entry = |cost| DevinModelConfig {
+            selector: "test-family".into(),
+            alias: Some("test-family".into()),
+            cost,
+            ..Default::default()
+        };
+        let quote = |cost| {
+            let entry = entry(cost);
+            let selectors = vec![entry.selector.clone()];
+            discovered_model(&group_families(&selectors, &[entry])[0])
+        };
+        let quoted = quote(Some(DevinModelCost {
+            input: Some(0.15),
+            output: Some(0.6),
+            cache_read: None,
+        }));
+        assert_eq!(
+            quoted.metadata.get("cost"),
+            Some(&json!({"input": 0.15, "output": 0.6}))
+        );
+        assert_eq!(quote(None).metadata.get("cost"), None);
     }
 
     #[test]

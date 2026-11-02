@@ -2884,6 +2884,12 @@ fn proto_u64(field: u32, value: u64) -> Vec<u8> {
     out
 }
 
+fn proto_f64(field: u32, price: f64) -> Vec<u8> {
+    let mut out = proto_key(field, 1);
+    out.extend_from_slice(&price.to_le_bytes());
+    out
+}
+
 fn devin_model_entry(selector: &str, label: &str, alias: &str, router: bool) -> Vec<u8> {
     let mut info = Vec::new();
     info.extend(proto_string(23, alias));
@@ -2900,6 +2906,11 @@ fn devin_model_entry(selector: &str, label: &str, alias: &str, router: bool) -> 
     entry.extend(proto_u64(18, 200_000));
     entry.extend(proto_string(22, selector));
     entry.extend(proto_len(23, &info));
+    for (component, price) in [("Input", 5.0), ("Cached input", 0.5), ("Output", 25.0)] {
+        let mut row = proto_string(1, component);
+        row.extend(proto_f64(2, price));
+        entry.extend(proto_len(32, &row));
+    }
     entry
 }
 
@@ -3043,6 +3054,14 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     );
     assert_eq!(family.metadata.extensions["upstream_provider"], "anthropic");
     assert_eq!(family.metadata.extensions["context_window"], 200_000);
+    // 渠道协议报价优先于目录与官方参考价，按美元／百万 Token 原样进入标准 cost。
+    let cost = family.metadata.cost.as_ref().expect("Devin quote");
+    assert_eq!(cost.prices.input, Some(rust_decimal::Decimal::from(5)));
+    assert_eq!(cost.prices.output, Some(rust_decimal::Decimal::from(25)));
+    assert_eq!(
+        cost.prices.cache_read,
+        Some(rust_decimal::Decimal::new(5, 1))
+    );
     let modalities = family.metadata.modalities.as_ref().unwrap();
     assert_eq!(modalities.input, ["text", "image"]);
     assert_eq!(modalities.output, ["text"]);

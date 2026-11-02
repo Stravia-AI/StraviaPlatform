@@ -1131,3 +1131,80 @@ async fn legacy_preset_key_syncs_commandcode_channel_catalog_prices() -> anyhow:
     gw.shutdown().await;
     Ok(())
 }
+
+/// 插件发现结果里声明的渠道自身价格永远优先于渠道目录价与官方参考价。
+#[tokio::test]
+async fn discovered_channel_cost_wins_over_catalog_and_official_prices() -> anyhow::Result<()> {
+    let catalog = FakeCatalog::start().await?;
+    catalog
+        .set_index(
+            "rev-channel-cost",
+            json!({
+                "commandcode": catalog_entry(
+                    "commandcode", "CommandCode", "@ai-sdk/openai-compatible",
+                    Some(&format!("{}/v1", catalog.base_url()))
+                )
+            }),
+        )
+        .await;
+    {
+        let mut state = catalog.state.write().await;
+        state.canonical = json!({
+            "acme/glm-5.3": {
+                "id": "acme/glm-5.3", "name": "GLM-5.3",
+                "cost": {"input": 0.1, "output": 0.2}
+            }
+        });
+        state.inventory = json!({"data": [
+            {"id": "glm-5.3", "cost": {"input": 7, "output": 8}}
+        ]});
+    }
+    catalog
+        .set_scope(
+            "commandcode",
+            200,
+            json!({
+                "glm-5.3": {
+                    "id": "glm-5.3",
+                    "name": "GLM-5.3",
+                    "cost": {"input": 1.0, "output": 2.0}
+                }
+            }),
+        )
+        .await;
+
+    let directory = tempfile::tempdir()?;
+    let gw = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gw.catalog_sync.refresh().await?;
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "channel quote".to_owned(),
+            vendor: Some("commandcode".to_owned()),
+            protocol: "openai-compatible".to_owned(),
+            base_url: format!("{}/v1", catalog.base_url()),
+            preset_key: Some("commandcode".to_owned()),
+            channel: Some("default".to_owned()),
+            models_source: Some(format!("{}/v1/models", catalog.base_url())),
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".to_owned(),
+            vendor_options: "{}".to_owned(),
+            auth_mode: "apikey".to_owned(),
+            use_proxy: false,
+        })
+        .await?;
+    gw.admin().sync_provider_models(&provider.id).await?;
+    let cost = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.3")
+        .await?
+        .metadata
+        .cost
+        .expect("channel quote");
+    assert_eq!(cost.prices.input, Some(rust_decimal::Decimal::from(7)));
+    assert_eq!(cost.prices.output, Some(rust_decimal::Decimal::from(8)));
+    gw.shutdown().await;
+    Ok(())
+}
