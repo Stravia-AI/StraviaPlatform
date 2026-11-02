@@ -706,17 +706,21 @@ impl UsageStatsStore for MemoryStorage {
     async fn stats_overview(
         &self,
         window: crate::db::models::StatsWindow,
+        filter: crate::db::models::StatsFilter,
     ) -> anyhow::Result<StatsOverview> {
         window.validate()?;
+        filter.validate()?;
         Ok(StatsOverview::default())
     }
 
     async fn stats_series(
         &self,
         window: crate::db::models::StatsWindow,
+        filter: crate::db::models::StatsFilter,
         bucket_ms: i64,
     ) -> anyhow::Result<Vec<StatsSeries>> {
         window.validate()?;
+        filter.validate()?;
         if bucket_ms < 900_000 || bucket_ms % 900_000 != 0 {
             return Err(crate::db::models::StatsQueryError(
                 "bucket must be a positive multiple of 900 seconds",

@@ -249,11 +249,22 @@ impl AdminService {
         group_cost_plans(&plans)
     }
 
-    pub async fn get_stats_overview(&self, window: StatsWindow) -> anyhow::Result<StatsOverview> {
+    pub async fn get_stats_overview(
+        &self,
+        window: StatsWindow,
+        filter: StatsFilter,
+    ) -> anyhow::Result<StatsOverview> {
         window.validate()?;
-        let mut stats = self.gw.storage.usage_stats().stats_overview(window).await?;
+        filter.validate()?;
         let currency = self.gw.custom_currency_snapshot();
-        let plans = self.provider_cost_plan_entries().await?;
+        let mut plans = self.provider_cost_plan_entries().await?;
+        filter_stats_plans(&mut plans, &filter);
+        let mut stats = self
+            .gw
+            .storage
+            .usage_stats()
+            .stats_overview(window, filter)
+            .await?;
         let now = Utc::now();
         let (start, end) = amortization_window(window);
         let subscription = sum_subscription_costs(&plans, start, end, now);
@@ -269,9 +280,11 @@ impl AdminService {
     pub async fn get_stats_series(
         &self,
         window: StatsWindow,
+        filter: StatsFilter,
         bucket_seconds: Option<i64>,
     ) -> anyhow::Result<Vec<StatsSeries>> {
         window.validate()?;
+        filter.validate()?;
         let seconds = bucket_seconds.unwrap_or(900);
         if seconds < 900 || seconds % 900 != 0 {
             return Err(
@@ -281,14 +294,15 @@ impl AdminService {
         let bucket_ms = seconds
             .checked_mul(1_000)
             .ok_or(StatsQueryError("bucket is too large"))?;
+        let currency = self.gw.custom_currency_snapshot();
+        let mut plans = self.provider_cost_plan_entries().await?;
+        filter_stats_plans(&mut plans, &filter);
         let mut rows = self
             .gw
             .storage
             .usage_stats()
-            .stats_series(window, bucket_ms)
+            .stats_series(window, filter, bucket_ms)
             .await?;
-        let currency = self.gw.custom_currency_snapshot();
-        let plans = self.provider_cost_plan_entries().await?;
         let now = Utc::now();
         let (window_start, window_end) = amortization_window(window);
         let has_subscription = plans
@@ -781,6 +795,20 @@ fn series_grid(
     ))
 }
 
+/// 过滤口径下的订阅计划：Provider 筛选只保留所选 Provider 的计划；
+/// API key 无法归属订阅成本，因此清空计划（只展示按量成本）。
+fn filter_stats_plans(plans: &mut BTreeMap<String, Vec<CostPlanEntry>>, filter: &StatsFilter) {
+    match filter {
+        StatsFilter::All => {}
+        StatsFilter::Providers(ids) => {
+            let selected: std::collections::BTreeSet<&str> =
+                ids.iter().map(String::as_str).collect();
+            plans.retain(|provider_id, _| selected.contains(provider_id.as_str()));
+        }
+        StatsFilter::ApiKeys(_) => plans.clear(),
+    }
+}
+
 fn group_cost_plans(
     plans: &[crate::storage::traits::ProviderCostPlan],
 ) -> anyhow::Result<BTreeMap<String, Vec<CostPlanEntry>>> {
@@ -955,5 +983,136 @@ fn project_attempt_amounts(events: &mut [ObservationEvent], currency: Option<&Cu
                 .map(|state| serde_json::Value::String(state.into()))
                 .unwrap_or(serde_json::Value::Null),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::SqliteStorage;
+    use std::sync::Arc;
+
+    async fn insert_bucket(
+        pool: &sqlx::SqlitePool,
+        scope: &str,
+        identity: &str,
+        bucket_start: i64,
+        request_count: i64,
+        upstream_request_count: i64,
+        payg_usd_unconverted_nanos: i64,
+        payg_known_count: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO stats_usage_buckets
+             (scope,identity,bucket_start,entity_id,label,request_count,upstream_request_count,
+              payg_cost_usd_unconverted_nanos,payg_cost_known_count,last_used_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(scope)
+        .bind(identity)
+        .bind(bucket_start)
+        .bind(identity)
+        .bind(identity)
+        .bind(request_count)
+        .bind(upstream_request_count)
+        .bind(payg_usd_unconverted_nanos)
+        .bind(payg_known_count)
+        .bind(bucket_start)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 订阅摊销只跟随所选 Provider；API key 无法归属订阅，只保留按量成本。
+    #[tokio::test]
+    async fn filtered_stats_include_only_selected_provider_subscriptions() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let end = Utc::now().timestamp_millis() / StatsWindow::BASE_BUCKET_MS
+            * StatsWindow::BASE_BUCKET_MS
+            - StatsWindow::BASE_BUCKET_MS;
+        let start = end - 3_600_000;
+        insert_bucket(
+            &pool,
+            "provider",
+            "provider-a",
+            start,
+            0,
+            1,
+            1_000_000_000,
+            1,
+        )
+        .await?;
+        insert_bucket(&pool, "provider", "provider-b", start, 0, 1, 0, 0).await?;
+        insert_bucket(&pool, "api_key", "key-a", start, 1, 0, 500_000_000, 1).await?;
+        // 365/12 天月价 2,628,000 USD 即每秒 1 USD；一小时窗口摊销 3,600 USD。
+        for (id, provider_id) in [("plan-a", "provider-a"), ("plan-b", "provider-b")] {
+            sqlx::query(
+                "INSERT INTO provider_cost_plans
+                 (id,provider_id,effective_from,basis,period,price_usd_nanos,price_custom_nanos,price_currency,created_at)
+                 VALUES (?,?,?,?,?,?,NULL,NULL,'2026-01-01T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(provider_id)
+            .bind(start - 1_000)
+            .bind("subscription")
+            .bind("month")
+            .bind(2_628_000_000_000_000_i64)
+            .execute(&pool)
+            .await?;
+        }
+        let directory = tempfile::tempdir()?;
+        let storage = Arc::new(SqliteStorage::from_pool(pool.clone()));
+        let gateway = Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            storage,
+        )
+        .await?;
+        let admin = gateway.admin();
+        let window = StatsWindow {
+            start_at: Some(start),
+            end_at: Some(end),
+        };
+
+        let selected = admin
+            .get_stats_overview(
+                window,
+                StatsFilter::Providers(vec!["provider-a".to_owned()]),
+            )
+            .await?;
+        assert_eq!(selected.total_requests, 1);
+        assert_eq!(
+            selected
+                .subscription
+                .as_ref()
+                .map(|value| value.cost.amount.as_str()),
+            Some("3600")
+        );
+        assert_eq!(selected.actual_cost.amount, "3601");
+
+        let all = admin.get_stats_overview(window, StatsFilter::All).await?;
+        assert_eq!(
+            all.subscription
+                .as_ref()
+                .map(|value| value.cost.amount.as_str()),
+            Some("7200")
+        );
+
+        let api_key = admin
+            .get_stats_overview(window, StatsFilter::ApiKeys(vec!["key-a".to_owned()]))
+            .await?;
+        assert_eq!(api_key.total_requests, 1);
+        assert!(api_key.subscription.is_none());
+        assert_eq!(api_key.actual_cost.amount, "0.5");
+
+        gateway.shutdown().await;
+        pool.close().await;
+        Ok(())
     }
 }

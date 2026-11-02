@@ -639,16 +639,18 @@ mod tests {
         async fn stats_overview(
             &self,
             window: crate::db::models::StatsWindow,
+            filter: crate::db::models::StatsFilter,
         ) -> anyhow::Result<crate::db::models::StatsOverview> {
-            self.delegate.stats_overview(window).await
+            self.delegate.stats_overview(window, filter).await
         }
 
         async fn stats_series(
             &self,
             window: crate::db::models::StatsWindow,
+            filter: crate::db::models::StatsFilter,
             bucket_ms: i64,
         ) -> anyhow::Result<Vec<crate::db::models::StatsSeries>> {
-            self.delegate.stats_series(window, bucket_ms).await
+            self.delegate.stats_series(window, filter, bucket_ms).await
         }
 
         async fn stats_by_model(

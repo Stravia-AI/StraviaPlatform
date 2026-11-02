@@ -1,5 +1,5 @@
 use crate::{
-    db::models::{StatsQueryError, StatsWindow},
+    db::models::{StatsFilter, StatsQueryError, StatsWindow},
     storage::RouteSchedulingUsage,
 };
 
@@ -26,6 +26,60 @@ const MONEY_TOTALS_COLUMNS: &str = "COALESCE(SUM(cost_custom_nanos), 0) AS cost_
        COALESCE(SUM(billing_usd_unconverted_nanos), 0) AS billing_usd_unconverted_nanos,
        COALESCE(SUM(billing_charged_count), 0) AS billing_charged_count,
        COALESCE(SUM(billing_unknown_count), 0) AS billing_unknown_count";
+
+const STATS_TOKEN_AND_RATE_COLUMNS: &str = "CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
+       CASE WHEN SUM(output_tokens_known) > 0 THEN SUM(output_tokens_sum) END AS total_output_tokens,
+       CASE WHEN SUM(cache_read_tokens_known) > 0 THEN SUM(cache_read_tokens_sum) END AS total_cache_read_tokens,
+       CASE WHEN SUM(cache_write_tokens_known) > 0 THEN SUM(cache_write_tokens_sum) END AS total_cache_write_tokens,
+       CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
+       SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
+       SUM(first_token_ms_sum) * 1.0 / NULLIF(SUM(first_token_ms_count), 0) AS avg_first_token_ms,
+       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps";
+
+/// 过滤口径的边际桶 scope；`All` 保持全局 SQL。
+fn filtered_scope(filter: &StatsFilter) -> Option<&'static str> {
+    match filter {
+        StatsFilter::All => None,
+        StatsFilter::Providers(_) => Some("provider"),
+        StatsFilter::ApiKeys(_) => Some("api_key"),
+    }
+}
+
+/// Provider 口径的“请求数”是带上游结论的 Target 尝试数；请求级分类列不按 Provider 记账。
+/// API key 口径沿用该表自己的请求数；上游与请求级分类列不归属于 API key。
+fn filtered_columns(filter: &StatsFilter, request_alias: &str) -> Option<(String, &'static str)> {
+    let (request_expr, upstream_columns) = match filter {
+        StatsFilter::All => return None,
+        StatsFilter::Providers(_) => (
+            "COALESCE(SUM(upstream_request_count), 0)",
+            "COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
+       COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count",
+        ),
+        StatsFilter::ApiKeys(_) => (
+            "COALESCE(SUM(request_count), 0)",
+            "0 AS upstream_request_count,
+       0 AS upstream_error_count",
+        ),
+    };
+    let columns = format!(
+        "{request_expr} AS {request_alias},
+       0 AS terminal_request_count,
+       0 AS failed_request_count,
+       0 AS recovered_request_count,
+       0 AS recovery_known_request_count,
+       {upstream_columns}"
+    );
+    Some((columns, filtered_scope(filter).expect("filtered scope")))
+}
+
+fn filter_identities_json(filter: &StatsFilter) -> anyhow::Result<Option<String>> {
+    match filter {
+        StatsFilter::All => Ok(None),
+        StatsFilter::Providers(ids) | StatsFilter::ApiKeys(ids) => {
+            Ok(Some(serde_json::to_string(ids)?))
+        }
+    }
+}
 
 // 调度只消费最近一小时：用量 SUM 逐维度忽略未知，全未知才为 NULL；
 // 派生 uncached 仅以 input 是否已知为门槛，cache_read 未知时按 0 抵扣，不回写原始 SUM；
@@ -92,8 +146,26 @@ impl UsageStatsStore for SqliteUsageStatsStore {
         }
     }
 
-    async fn stats_overview(&self, window: StatsWindow) -> anyhow::Result<StatsOverview> {
+    async fn stats_overview(
+        &self,
+        window: StatsWindow,
+        filter: StatsFilter,
+    ) -> anyhow::Result<StatsOverview> {
         window.validate()?;
+        filter.validate()?;
+        if let Some((request_columns, scope)) = filtered_columns(&filter, "total_requests") {
+            let identities = filter_identities_json(&filter)?.expect("filtered scope has ids");
+            return Ok(sqlx::query_as::<_, StatsOverview>(sqlx::AssertSqlSafe(format!(
+                "SELECT {request_columns},
+       {STATS_TOKEN_AND_RATE_COLUMNS},
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = '{scope}' AND identity IN (SELECT value FROM json_each(?3)) AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807)"
+            )))
+            .bind(window.start_at)
+            .bind(window.end_at)
+            .bind(identities)
+            .fetch_one(&self.pool)
+            .await?);
+        }
         Ok(sqlx::query_as::<_, StatsOverview>(sqlx::AssertSqlSafe(format!(
             "SELECT COALESCE(SUM(request_count), 0) AS total_requests,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
@@ -102,14 +174,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
        COALESCE(SUM(recovery_known_request_count), 0) AS recovery_known_request_count,
        COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
        COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count,
-       CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
-       CASE WHEN SUM(output_tokens_known) > 0 THEN SUM(output_tokens_sum) END AS total_output_tokens,
-       CASE WHEN SUM(cache_read_tokens_known) > 0 THEN SUM(cache_read_tokens_sum) END AS total_cache_read_tokens,
-       CASE WHEN SUM(cache_write_tokens_known) > 0 THEN SUM(cache_write_tokens_sum) END AS total_cache_write_tokens,
-       CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
-       SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
-       SUM(first_token_ms_sum) * 1.0 / NULLIF(SUM(first_token_ms_count), 0) AS avg_first_token_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps,
+       {STATS_TOKEN_AND_RATE_COLUMNS},
        {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807)")),
         )
         .bind(window.start_at)
@@ -121,9 +186,11 @@ impl UsageStatsStore for SqliteUsageStatsStore {
     async fn stats_series(
         &self,
         window: StatsWindow,
+        filter: StatsFilter,
         bucket_ms: i64,
     ) -> anyhow::Result<Vec<StatsSeries>> {
         window.validate()?;
+        filter.validate()?;
         if bucket_ms < BASE_BUCKET_MS || bucket_ms % BASE_BUCKET_MS != 0 {
             return Err(
                 StatsQueryError("bucket must be a positive multiple of 900 seconds").into(),
@@ -132,9 +199,24 @@ impl UsageStatsStore for SqliteUsageStatsStore {
         let (start, end) = match (window.start_at, window.end_at) {
             (Some(start), Some(end)) => (start, end),
             _ => {
-                let (start, end): (Option<i64>, Option<i64>) = sqlx::query_as(
-                            "SELECT MIN(bucket_start), MAX(bucket_start) FROM stats_usage_buckets WHERE scope = 'global'",
-                        ).fetch_one(&self.pool).await?;
+                let (start, end): (Option<i64>, Option<i64>) = match filtered_scope(&filter) {
+                    None => sqlx::query_as(
+                        "SELECT MIN(bucket_start), MAX(bucket_start) FROM stats_usage_buckets WHERE scope = 'global'",
+                    )
+                    .fetch_one(&self.pool)
+                    .await?,
+                    Some(scope) => {
+                        let identities =
+                            filter_identities_json(&filter)?.expect("filtered scope has ids");
+                        let sql = format!(
+                            "SELECT MIN(bucket_start), MAX(bucket_start) FROM stats_usage_buckets WHERE scope = '{scope}' AND identity IN (SELECT value FROM json_each(?1))"
+                        );
+                        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                            .bind(identities)
+                            .fetch_one(&self.pool)
+                            .await?
+                    }
+                };
                 let (Some(start), Some(end)) = (start, end) else {
                     return Ok(Vec::new());
                 };
@@ -142,30 +224,39 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             }
         };
         let bucket_ms = display_bucket_ms(start, end, bucket_ms);
-        Ok(sqlx::query_as::<_, StatsSeries>(sqlx::AssertSqlSafe(format!(
-            "SELECT (bucket_start - ?4) / ?3 * ?3 + ?4 AS bucket_start, ?3 AS bucket_ms, COALESCE(SUM(request_count), 0) AS request_count,
+        let (sql, identities) = match filtered_columns(&filter, "request_count") {
+            None => (
+                format!(
+                    "SELECT (bucket_start - ?4) / ?3 * ?3 + ?4 AS bucket_start, ?3 AS bucket_ms, COALESCE(SUM(request_count), 0) AS request_count,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
        COALESCE(SUM(failed_request_count), 0) AS failed_request_count,
        COALESCE(SUM(recovered_request_count), 0) AS recovered_request_count,
        COALESCE(SUM(recovery_known_request_count), 0) AS recovery_known_request_count,
        COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
        COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count,
-       CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
-       CASE WHEN SUM(output_tokens_known) > 0 THEN SUM(output_tokens_sum) END AS total_output_tokens,
-       CASE WHEN SUM(cache_read_tokens_known) > 0 THEN SUM(cache_read_tokens_sum) END AS total_cache_read_tokens,
-       CASE WHEN SUM(cache_write_tokens_known) > 0 THEN SUM(cache_write_tokens_sum) END AS total_cache_write_tokens,
-       CASE WHEN SUM(reasoning_tokens_known) > 0 THEN SUM(reasoning_tokens_sum) END AS total_reasoning_tokens,
-       SUM(duration_ms_sum) * 1.0 / NULLIF(SUM(duration_ms_count), 0) AS avg_duration_ms,
-       SUM(first_token_ms_sum) * 1.0 / NULLIF(SUM(first_token_ms_count), 0) AS avg_first_token_ms,
-       CASE WHEN SUM(successful_attempt_count) > 0 AND SUM(successful_output_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_known_count) = SUM(successful_attempt_count) AND SUM(successful_duration_sum) > 0 THEN SUM(successful_output_sum) * 1000.0 / SUM(successful_duration_sum) END AS avg_output_tps,
-       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY (bucket_start - ?4) / ?3 * ?3 + ?4 ORDER BY bucket_start")),
-        )
-        .bind(start)
-        .bind(end)
-        .bind(bucket_ms)
-        .bind(start)
-        .fetch_all(&self.pool)
-        .await?)
+       {STATS_TOKEN_AND_RATE_COLUMNS},
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = 'global' AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY (bucket_start - ?4) / ?3 * ?3 + ?4 ORDER BY bucket_start"
+                ),
+                None,
+            ),
+            Some((request_columns, scope)) => (
+                format!(
+                    "SELECT (bucket_start - ?4) / ?3 * ?3 + ?4 AS bucket_start, ?3 AS bucket_ms, {request_columns},
+       {STATS_TOKEN_AND_RATE_COLUMNS},
+       {MONEY_TOTALS_COLUMNS} FROM stats_usage_buckets WHERE scope = '{scope}' AND identity IN (SELECT value FROM json_each(?5)) AND bucket_start >= COALESCE(?1, -9223372036854775808) AND bucket_start < COALESCE(?2, 9223372036854775807) GROUP BY (bucket_start - ?4) / ?3 * ?3 + ?4 ORDER BY bucket_start"
+                ),
+                Some(filter_identities_json(&filter)?.expect("filtered scope has ids")),
+            ),
+        };
+        let mut query = sqlx::query_as::<_, StatsSeries>(sqlx::AssertSqlSafe(sql))
+            .bind(start)
+            .bind(end)
+            .bind(bucket_ms)
+            .bind(start);
+        if let Some(identities) = identities {
+            query = query.bind(identities);
+        }
+        Ok(query.fetch_all(&self.pool).await?)
     }
 
     async fn stats_by_model(&self, window: StatsWindow) -> anyhow::Result<Vec<ModelStats>> {
@@ -303,6 +394,29 @@ mod tests {
         input_tokens: i64,
         cache_read_tokens: Option<i64>,
     ) -> anyhow::Result<()> {
+        insert_attempt_for_provider(
+            pool,
+            id,
+            turn_id,
+            started_at,
+            "provider",
+            "Provider",
+            input_tokens,
+            cache_read_tokens,
+        )
+        .await
+    }
+
+    async fn insert_attempt_for_provider(
+        pool: &SqlitePool,
+        id: &str,
+        turn_id: &str,
+        started_at: i64,
+        provider_id: &str,
+        provider_name: &str,
+        input_tokens: i64,
+        cache_read_tokens: Option<i64>,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO target_attempt_observations
              (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,input_tokens,output_tokens,cache_read_tokens,reasoning_tokens,usage_recorded,last_event_sequence)
@@ -313,8 +427,8 @@ mod tests {
         .bind(turn_id)
         .bind(turn_id)
         .bind("target")
-        .bind("provider")
-        .bind("Provider")
+        .bind(provider_id)
+        .bind(provider_name)
         .bind("upstream")
         .bind("responses")
         .bind("completed")
@@ -338,6 +452,18 @@ mod tests {
         turn_id: &str,
         started_at: i64,
     ) -> anyhow::Result<()> {
+        insert_failed_attempt_for_provider(pool, id, turn_id, started_at, "provider", "Provider")
+            .await
+    }
+
+    async fn insert_failed_attempt_for_provider(
+        pool: &SqlitePool,
+        id: &str,
+        turn_id: &str,
+        started_at: i64,
+        provider_id: &str,
+        provider_name: &str,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO target_attempt_observations
              (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,last_event_sequence)
@@ -348,8 +474,8 @@ mod tests {
         .bind(turn_id)
         .bind(turn_id)
         .bind("target")
-        .bind("provider")
-        .bind("Provider")
+        .bind(provider_id)
+        .bind(provider_name)
         .bind("upstream")
         .bind("responses")
         .bind("failed")
@@ -568,7 +694,7 @@ mod tests {
         };
         // 已终结请求只含已完成或最终失败、且未在 Target 选择前终止的运行；
         // 取消、断线、进行中与准入前拒绝都不入账。失败的请求是其中失败的部分。
-        let recent_overview = store.stats_overview(window(1)).await?;
+        let recent_overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(recent_overview.terminal_request_count, 4);
         assert_eq!(recent_overview.failed_request_count, 3);
         // 只有 “recovered” 在同一 Model Turn 内先失败、后成功；最终失败不是恢复。
@@ -578,7 +704,9 @@ mod tests {
         assert_eq!(recent_overview.upstream_request_count, 4);
         assert_eq!(recent_overview.upstream_error_count, 2);
         assert_eq!(recent_overview.total_requests, 12);
-        let all_overview = store.stats_overview(StatsWindow::default()).await?;
+        let all_overview = store
+            .stats_overview(StatsWindow::default(), StatsFilter::All)
+            .await?;
         assert_eq!(all_overview.terminal_request_count, 5);
         assert_eq!(all_overview.failed_request_count, 4);
         assert_eq!(all_overview.recovered_request_count, 1);
@@ -586,7 +714,9 @@ mod tests {
         assert_eq!(all_overview.upstream_request_count, 4);
         assert_eq!(all_overview.upstream_error_count, 2);
         assert_eq!(all_overview.total_requests, 13);
-        let series = store.stats_series(window(1), 900_000).await?;
+        let series = store
+            .stats_series(window(1), StatsFilter::All, 900_000)
+            .await?;
         assert_eq!(
             series
                 .iter()
@@ -761,12 +891,14 @@ mod tests {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.terminal_request_count, 3);
         assert_eq!(overview.failed_request_count, 0);
         assert_eq!(overview.recovered_request_count, 1);
         assert_eq!(overview.recovery_known_request_count, 3);
-        let series = store.stats_series(window(1), 900_000).await?;
+        let series = store
+            .stats_series(window(1), StatsFilter::All, 900_000)
+            .await?;
         assert_eq!(
             series
                 .iter()
@@ -802,7 +934,7 @@ mod tests {
         insert_turn(&pool, "late", recent, "model", "key").await?;
         insert_attempt_with_status(&pool, "late-pending", "late", "late", recent, "running")
             .await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.terminal_request_count, 1);
         assert_eq!(overview.recovery_known_request_count, 0);
 
@@ -815,7 +947,7 @@ mod tests {
         .bind(recent + 10)
         .execute(&pool)
         .await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.recovered_request_count, 0);
         assert_eq!(overview.recovery_known_request_count, 1);
         insert_attempt_with_status(&pool, "late-ok", "late", "late", recent + 11, "completed")
@@ -825,7 +957,7 @@ mod tests {
             .bind(recent + 100)
             .execute(&pool)
             .await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.recovered_request_count, 1);
         assert_eq!(overview.recovery_known_request_count, 1);
 
@@ -885,7 +1017,7 @@ mod tests {
             .execute(&pool)
             .await?;
 
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.terminal_request_count, 4);
         assert_eq!(overview.recovered_request_count, 2);
         assert_eq!(overview.recovery_known_request_count, 3);
@@ -900,7 +1032,7 @@ mod tests {
             crate::storage::sql::recovery::refresh_sqlite(&mut tx, interaction).await?;
         }
         tx.commit().await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.recovered_request_count, 2);
         assert_eq!(overview.recovery_known_request_count, 2);
         let mut tx = pool.begin().await?;
@@ -911,7 +1043,7 @@ mod tests {
         .await?;
         crate::storage::sql::recovery::refresh_sqlite(&mut tx, "gap-no-retry").await?;
         tx.commit().await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.recovery_known_request_count, 3);
 
         // 明细清理后已持久化的恢复统计必须保持；按保留期顺序先删尝试、再删运行与交互。
@@ -924,11 +1056,13 @@ mod tests {
         sqlx::query("DELETE FROM interaction_observations WHERE id='gap-retried'")
             .execute(&pool)
             .await?;
-        let overview = store.stats_overview(window(1)).await?;
+        let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.terminal_request_count, 4);
         assert_eq!(overview.recovered_request_count, 2);
         assert_eq!(overview.recovery_known_request_count, 3);
-        let series = store.stats_series(window(1), 900_000).await?;
+        let series = store
+            .stats_series(window(1), StatsFilter::All, 900_000)
+            .await?;
         assert_eq!(
             series
                 .iter()
@@ -997,6 +1131,7 @@ mod tests {
                     start_at: Some(previous),
                     end_at: Some(bucket + BASE_BUCKET_MS),
                 },
+                StatsFilter::All,
                 BASE_BUCKET_MS,
             )
             .await?;
@@ -1409,12 +1544,26 @@ mod tests {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
-        assert_eq!(store.stats_overview(window(3)).await?.avg_output_tps, None);
         assert_eq!(
-            store.stats_overview(window(3)).await?.avg_first_token_ms,
+            store
+                .stats_overview(window(3), StatsFilter::All)
+                .await?
+                .avg_output_tps,
             None
         );
-        assert!(store.stats_series(window(3), 3_600_000).await?.is_empty());
+        assert_eq!(
+            store
+                .stats_overview(window(3), StatsFilter::All)
+                .await?
+                .avg_first_token_ms,
+            None
+        );
+        assert!(
+            store
+                .stats_series(window(3), StatsFilter::All, 3_600_000)
+                .await?
+                .is_empty()
+        );
         let now = chrono::Utc::now().timestamp_millis();
         let recent = now / 3_600_000 * 3_600_000 - 5_400_000;
         let old = now - 4 * 60 * 60 * 1_000;
@@ -1446,7 +1595,7 @@ mod tests {
         sqlx::query("UPDATE target_attempt_observations SET duration_ms=NULL,provider_id='old-provider',provider_name='Old Provider' WHERE id='old-a'")
             .execute(&pool).await?;
 
-        let overview = store.stats_overview(window(3)).await?;
+        let overview = store.stats_overview(window(3), StatsFilter::All).await?;
         assert_eq!(overview.total_input_tokens, Some(7));
         assert_eq!(overview.total_output_tokens, Some(50));
         assert_eq!(overview.total_reasoning_tokens, Some(2));
@@ -1454,13 +1603,17 @@ mod tests {
         assert_eq!(overview.avg_first_token_ms, Some(4900.0));
         assert_eq!(overview.avg_duration_ms, Some(10.0));
         // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
-        let all_time = store.stats_overview(StatsWindow::default()).await?;
+        let all_time = store
+            .stats_overview(StatsWindow::default(), StatsFilter::All)
+            .await?;
         assert_eq!(all_time.total_input_tokens, Some(7));
         assert_eq!(all_time.total_output_tokens, Some(53));
         assert_eq!(all_time.total_cache_write_tokens, None);
         assert_eq!(all_time.avg_output_tps, None);
 
-        let series = store.stats_series(window(3), 3_600_000).await?;
+        let series = store
+            .stats_series(window(3), StatsFilter::All, 3_600_000)
+            .await?;
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].total_input_tokens, Some(7));
         assert_eq!(series[0].total_output_tokens, Some(50));
@@ -1470,11 +1623,15 @@ mod tests {
         assert_eq!(series[0].avg_duration_ms, Some(10.0));
         assert!(series[0].bucket_start >= window(3).start_at.unwrap());
 
-        let quarter = store.stats_series(window(3), 900_000).await?;
+        let quarter = store
+            .stats_series(window(3), StatsFilter::All, 900_000)
+            .await?;
         assert_eq!(quarter.len(), 1);
         assert_eq!(quarter[0].bucket_start % 900_000, 0);
 
-        let day = store.stats_series(window(3), 86_400_000).await?;
+        let day = store
+            .stats_series(window(3), StatsFilter::All, 86_400_000)
+            .await?;
         assert_eq!(day.len(), 1);
         // Display buckets begin at the absolute selected start, independent of browser timezone.
         assert_eq!(day[0].bucket_start, window(3).start_at.unwrap());
@@ -1587,12 +1744,14 @@ mod tests {
                 expected_tps,
                 "{change}"
             );
-            let overview = store.stats_overview(window(3)).await?;
+            let overview = store.stats_overview(window(3), StatsFilter::All).await?;
             assert_eq!(overview.avg_output_tps, expected_tps, "{change}");
             assert_eq!(overview.total_output_tokens, expected_output, "{change}");
             assert_eq!(overview.avg_first_token_ms, expected_first, "{change}");
             assert_eq!(overview.total_input_tokens, expected_input, "{change}");
-            let series = store.stats_series(window(3), 3_600_000).await?;
+            let series = store
+                .stats_series(window(3), StatsFilter::All, 3_600_000)
+                .await?;
             assert_eq!(series.len(), 1);
             assert_eq!(series[0].avg_output_tps, expected_tps, "{change}");
             assert_eq!(series[0].total_output_tokens, expected_output, "{change}");
@@ -1628,11 +1787,17 @@ mod tests {
             .execute(&pool)
             .await?;
             assert_eq!(
-                store.stats_overview(window(3)).await?.total_input_tokens,
+                store
+                    .stats_overview(window(3), StatsFilter::All)
+                    .await?
+                    .total_input_tokens,
                 expected
             );
             assert_eq!(
-                store.stats_series(window(3), 3_600_000).await?[0].total_input_tokens,
+                store
+                    .stats_series(window(3), StatsFilter::All, 3_600_000)
+                    .await?[0]
+                    .total_input_tokens,
                 expected
             );
             assert_eq!(
@@ -1653,10 +1818,15 @@ mod tests {
         sqlx::query("UPDATE target_attempt_observations SET model_turn_id='next',run_id='next',interaction_id='next' WHERE id='recent-b'")
             .execute(&pool).await?;
         assert_eq!(
-            store.stats_overview(window(3)).await?.avg_output_tps,
+            store
+                .stats_overview(window(3), StatsFilter::All)
+                .await?
+                .avg_output_tps,
             Some(5.0)
         );
-        let series = store.stats_series(window(3), 3_600_000).await?;
+        let series = store
+            .stats_series(window(3), StatsFilter::All, 3_600_000)
+            .await?;
         assert_eq!(series.len(), 2);
         assert!(series[0].bucket_start >= window(3).start_at.unwrap());
         assert_eq!(series[1].bucket_start - series[0].bucket_start, 3_600_000);
@@ -1708,18 +1878,24 @@ mod tests {
             .execute(pool)
             .await?;
         assert_eq!(
-            store.stats_overview(selected).await?.avg_duration_ms,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .avg_duration_ms,
             Some(20.0)
         );
         insert_attempt(pool, "revision-attempt", "revision-a", 1_800_000, 12, None).await?;
         assert_eq!(
-            store.stats_overview(selected).await?.total_input_tokens,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .total_input_tokens,
             None
         );
         // NULL -> 已知零以及已知 -> NULL 的覆盖，不把未知当成零。
         sqlx::query("UPDATE target_attempt_observations SET cache_read_tokens=0,output_tokens=0,cache_write_tokens=0,first_token_ms=0 WHERE id='revision-attempt'")
             .execute(pool).await?;
-        let overview = store.stats_overview(selected).await?;
+        let overview = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(overview.total_input_tokens, Some(12));
         assert_eq!(overview.total_output_tokens, Some(0));
         assert_eq!(overview.total_cache_write_tokens, Some(0));
@@ -1730,7 +1906,10 @@ mod tests {
         .execute(pool)
         .await?;
         assert_eq!(
-            store.stats_overview(selected).await?.total_output_tokens,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .total_output_tokens,
             None
         );
         // Provider 标签也是 run source 的间接依赖，不能只检查用量列。
@@ -1744,7 +1923,7 @@ mod tests {
         sqlx::query("UPDATE inference_run_observations SET status='failed',terminal_reason='cancelled' WHERE id='revision-a'")
             .execute(pool).await?;
         // 取消既不是已终结请求也不是失败的请求。
-        let cancelled = store.stats_overview(selected).await?;
+        let cancelled = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(cancelled.terminal_request_count, 0);
         assert_eq!(cancelled.failed_request_count, 0);
         sqlx::query(
@@ -1752,30 +1931,39 @@ mod tests {
         )
         .execute(pool)
         .await?;
-        let failed = store.stats_overview(selected).await?;
+        let failed = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(failed.terminal_request_count, 1);
         assert_eq!(failed.failed_request_count, 1);
         // 拒绝记录属于错误的请求：只进 request_count，不改变四个新计数。
         sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at) VALUES ('revision-rejection',900000,'POST','/v1/responses','responses','authentication','cancelled',400,false,0,9223372036854775807)")
             .execute(pool).await?;
         assert_eq!(
-            store.stats_overview(selected).await?.failed_request_count,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .failed_request_count,
             1
         );
         sqlx::query("UPDATE rejected_request_observations SET code='invalid_api_key',started_at=1800000 WHERE id='revision-rejection'")
             .execute(pool).await?;
         assert_eq!(
-            store.stats_overview(selected).await?.failed_request_count,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .failed_request_count,
             1
         );
         sqlx::query("UPDATE rejected_request_observations SET status_code=499 WHERE id='revision-rejection'")
             .execute(pool).await?;
         assert_eq!(
-            store.stats_overview(selected).await?.failed_request_count,
+            store
+                .stats_overview(selected, StatsFilter::All)
+                .await?
+                .failed_request_count,
             1
         );
         // 无关更新和相关列原值赋值都必须保持公开统计结果不变。
-        let before = serde_json::to_value(store.stats_overview(selected).await?)?;
+        let before = serde_json::to_value(store.stats_overview(selected, StatsFilter::All).await?)?;
         for statement in [
             "UPDATE model_turn_observations SET last_event_sequence=last_event_sequence+1,api_key_id=api_key_id,finished_at=finished_at WHERE id='revision-a'",
             "UPDATE target_attempt_observations SET last_event_sequence=last_event_sequence+1,output_tokens=output_tokens,provider_name=provider_name WHERE id='revision-attempt'",
@@ -1785,7 +1973,7 @@ mod tests {
             sqlx::query(statement).execute(pool).await?;
         }
         assert_eq!(
-            serde_json::to_value(store.stats_overview(selected).await?)?,
+            serde_json::to_value(store.stats_overview(selected, StatsFilter::All).await?)?,
             before
         );
         // attempt 的 Turn 归属决定模型、API Key 及分桶，与自身 started_at 无关。
@@ -1812,7 +2000,10 @@ mod tests {
             .unwrap();
         assert_eq!(previous.total_input_tokens, None);
         assert_eq!(
-            store.stats_series(selected, BASE_BUCKET_MS).await?[0].total_output_tokens,
+            store
+                .stats_series(selected, StatsFilter::All, BASE_BUCKET_MS)
+                .await?[0]
+                .total_output_tokens,
             Some(9)
         );
         Ok(())
@@ -1845,7 +2036,7 @@ mod tests {
             pool: pool.clone(),
             last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
-        let overview = store.stats_overview(selected).await?;
+        let overview = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(overview.total_requests, 2);
         assert_eq!(overview.total_input_tokens, Some(14));
         assert_eq!(overview.total_output_tokens, Some(50));
@@ -1853,7 +2044,9 @@ mod tests {
         assert_eq!(overview.avg_first_token_ms, Some(50.0));
         assert_eq!(overview.avg_duration_ms, Some(10.0));
         assert_eq!(overview.total_cache_write_tokens, None);
-        let series = store.stats_series(selected, BASE_BUCKET_MS).await?;
+        let series = store
+            .stats_series(selected, StatsFilter::All, BASE_BUCKET_MS)
+            .await?;
         assert_eq!(series.len(), 2);
         assert!(series.iter().all(|point| point.bucket_ms > BASE_BUCKET_MS));
         assert_eq!(
@@ -1871,7 +2064,9 @@ mod tests {
         assert!((series[1].avg_output_tps.unwrap() - 10.0 / 3.0).abs() < 1e-12);
         // Quarter-hour start intentionally differs from epoch hour alignment.
         // The 513-quarter range ends with a single-quarter partial hour bucket.
-        let hourly = store.stats_series(selected, 3_600_000).await?;
+        let hourly = store
+            .stats_series(selected, StatsFilter::All, 3_600_000)
+            .await?;
         assert_eq!(hourly.len(), 2);
         assert_eq!(hourly[0].bucket_start, 9_900_000);
         assert_eq!(hourly[1].bucket_start, 470_700_000);
@@ -1896,11 +2091,21 @@ mod tests {
                 .all(|model| model.model == "Same name" && model.deleted)
         );
         assert_ne!(models[0].model_id, models[1].model_id);
-        assert!(store.stats_series(selected, 60_000).await.is_err());
-        assert!(store.stats_series(selected, 1_000_000).await.is_err());
+        assert!(
+            store
+                .stats_series(selected, StatsFilter::All, 60_000)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .stats_series(selected, StatsFilter::All, 1_000_000)
+                .await
+                .is_err()
+        );
         sqlx::query("DELETE FROM interaction_observations WHERE id IN ('durable-first','durable-last','durable-excluded')")
             .execute(pool).await?;
-        let retained = store.stats_overview(selected).await?;
+        let retained = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(retained.total_requests, 2);
         assert_eq!(retained.total_input_tokens, Some(14));
         assert_eq!(retained.total_output_tokens, Some(50));
@@ -1965,6 +2170,265 @@ mod tests {
             .await?;
         crate::migrations::migrate_sqlite(&pool, None).await?;
         verify_fixed_range_survives_detail_cleanup(&pool).await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// 过滤口径读取 Provider / API key 边际桶：Provider 请求数是上游尝试数，
+    /// API key 请求数来自自身桶；请求级分类列在两种过滤下都为零。
+    #[tokio::test]
+    async fn filtered_stats_read_marginal_scopes_and_ignore_unknown_identities()
+    -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let recent = chrono::Utc::now().timestamp_millis() - 10_000;
+        insert_turn(&pool, "a-ok", recent, "model-a", "key-a").await?;
+        insert_turn(&pool, "a-error", recent, "model-a", "key-a").await?;
+        insert_turn(&pool, "b-ok", recent, "model-b", "key-b").await?;
+        insert_attempt_for_provider(
+            &pool,
+            "a-ok-attempt",
+            "a-ok",
+            recent,
+            "provider-a",
+            "provider-a",
+            10,
+            Some(4),
+        )
+        .await?;
+        insert_failed_attempt_for_provider(
+            &pool,
+            "a-error-attempt",
+            "a-error",
+            recent,
+            "provider-a",
+            "provider-a",
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE target_attempt_observations SET error_source='upstream' WHERE id='a-error-attempt'",
+        )
+        .execute(&pool)
+        .await?;
+        insert_attempt_for_provider(
+            &pool,
+            "b-ok-attempt",
+            "b-ok",
+            recent,
+            "provider-b",
+            "provider-b",
+            20,
+            Some(0),
+        )
+        .await?;
+        let store = SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        };
+
+        let provider_a = store
+            .stats_overview(
+                window(1),
+                StatsFilter::Providers(vec!["provider-a".to_owned()]),
+            )
+            .await?;
+        assert_eq!(provider_a.total_requests, 2);
+        assert_eq!(provider_a.upstream_request_count, 2);
+        assert_eq!(provider_a.upstream_error_count, 1);
+        assert_eq!(provider_a.terminal_request_count, 0);
+        assert_eq!(provider_a.failed_request_count, 0);
+        assert_eq!(provider_a.recovered_request_count, 0);
+        assert_eq!(provider_a.recovery_known_request_count, 0);
+        assert_eq!(provider_a.total_input_tokens, Some(6));
+        assert_eq!(provider_a.total_output_tokens, Some(3));
+        assert_eq!(provider_a.avg_duration_ms, Some(10.0));
+        assert_eq!(provider_a.avg_first_token_ms, None);
+        assert_eq!(provider_a.avg_output_tps, Some(300.0));
+
+        let provider_b = store
+            .stats_overview(
+                window(1),
+                StatsFilter::Providers(vec!["provider-b".to_owned()]),
+            )
+            .await?;
+        assert_eq!(provider_b.total_requests, 1);
+        assert_eq!(provider_b.upstream_request_count, 1);
+        assert_eq!(provider_b.upstream_error_count, 0);
+        assert_eq!(provider_b.total_input_tokens, Some(20));
+        assert_eq!(provider_b.total_output_tokens, Some(3));
+
+        let providers = store
+            .stats_overview(
+                window(1),
+                StatsFilter::Providers(vec!["provider-a".to_owned(), "provider-b".to_owned()]),
+            )
+            .await?;
+        assert_eq!(providers.total_requests, 3);
+        assert_eq!(providers.upstream_request_count, 3);
+        assert_eq!(providers.upstream_error_count, 1);
+        assert_eq!(providers.total_input_tokens, Some(26));
+        assert_eq!(providers.total_output_tokens, Some(6));
+
+        let unknown_provider = store
+            .stats_overview(
+                window(1),
+                StatsFilter::Providers(vec!["provider-unknown".to_owned()]),
+            )
+            .await?;
+        assert_eq!(unknown_provider.total_requests, 0);
+        assert_eq!(unknown_provider.upstream_request_count, 0);
+        assert_eq!(unknown_provider.total_input_tokens, None);
+        assert_eq!(unknown_provider.avg_duration_ms, None);
+
+        let api_key_a = store
+            .stats_overview(window(1), StatsFilter::ApiKeys(vec!["key-a".to_owned()]))
+            .await?;
+        assert_eq!(api_key_a.total_requests, 2);
+        assert_eq!(api_key_a.upstream_request_count, 0);
+        assert_eq!(api_key_a.upstream_error_count, 0);
+        assert_eq!(api_key_a.terminal_request_count, 0);
+        assert_eq!(api_key_a.failed_request_count, 0);
+        assert_eq!(api_key_a.recovered_request_count, 0);
+        assert_eq!(api_key_a.recovery_known_request_count, 0);
+        assert_eq!(api_key_a.total_input_tokens, Some(6));
+        assert_eq!(api_key_a.total_output_tokens, Some(3));
+
+        let api_keys = store
+            .stats_overview(
+                window(1),
+                StatsFilter::ApiKeys(vec!["key-a".to_owned(), "key-b".to_owned()]),
+            )
+            .await?;
+        assert_eq!(api_keys.total_requests, 3);
+        assert_eq!(api_keys.total_input_tokens, Some(26));
+        assert_eq!(api_keys.total_output_tokens, Some(6));
+
+        let unknown_key = store
+            .stats_overview(
+                window(1),
+                StatsFilter::ApiKeys(vec!["key-unknown".to_owned()]),
+            )
+            .await?;
+        assert_eq!(unknown_key.total_requests, 0);
+        assert_eq!(unknown_key.total_input_tokens, None);
+
+        let provider_series = store
+            .stats_series(
+                window(1),
+                StatsFilter::Providers(vec!["provider-a".to_owned()]),
+                900_000,
+            )
+            .await?;
+        assert_eq!(
+            provider_series
+                .iter()
+                .map(|bucket| bucket.request_count)
+                .sum::<i64>(),
+            2
+        );
+        assert_eq!(
+            provider_series
+                .iter()
+                .map(|bucket| bucket.upstream_request_count)
+                .sum::<i64>(),
+            2
+        );
+        assert_eq!(
+            provider_series
+                .iter()
+                .map(|bucket| bucket.upstream_error_count)
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(
+            provider_series
+                .iter()
+                .filter_map(|bucket| bucket.total_input_tokens)
+                .sum::<i64>(),
+            6
+        );
+
+        let api_key_series = store
+            .stats_series(
+                window(1),
+                StatsFilter::ApiKeys(vec!["key-a".to_owned()]),
+                900_000,
+            )
+            .await?;
+        assert_eq!(
+            api_key_series
+                .iter()
+                .map(|bucket| bucket.request_count)
+                .sum::<i64>(),
+            2
+        );
+        assert_eq!(
+            api_key_series
+                .iter()
+                .map(|bucket| bucket.upstream_request_count)
+                .sum::<i64>(),
+            0
+        );
+        assert_eq!(
+            api_key_series
+                .iter()
+                .filter_map(|bucket| bucket.total_input_tokens)
+                .sum::<i64>(),
+            6
+        );
+
+        let all_time = store
+            .stats_series(
+                StatsWindow::default(),
+                StatsFilter::Providers(vec!["provider-a".to_owned()]),
+                900_000,
+            )
+            .await?;
+        assert_eq!(
+            all_time
+                .iter()
+                .map(|bucket| bucket.request_count)
+                .sum::<i64>(),
+            2
+        );
+        assert!(
+            store
+                .stats_series(
+                    StatsWindow::default(),
+                    StatsFilter::Providers(vec!["provider-unknown".to_owned()]),
+                    900_000,
+                )
+                .await?
+                .is_empty()
+        );
+
+        assert!(
+            store
+                .stats_overview(window(1), StatsFilter::Providers(Vec::new()))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .stats_overview(
+                    window(1),
+                    StatsFilter::Providers(vec!["provider-a".to_owned(), String::new()]),
+                )
+                .await
+                .is_err()
+        );
+        assert!(StatsFilter::from_query_params(Some("provider-a"), Some("key-a")).is_err());
+        assert!(StatsFilter::from_query_params(Some(""), None).is_err());
+        assert!(StatsFilter::from_query_params(None, Some("key-a,,key-b")).is_err());
+        let too_many = (0..=StatsFilter::MAX_IDS)
+            .map(|index| format!("provider-{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(StatsFilter::from_query_params(Some(&too_many), None).is_err());
+
         pool.close().await;
         Ok(())
     }

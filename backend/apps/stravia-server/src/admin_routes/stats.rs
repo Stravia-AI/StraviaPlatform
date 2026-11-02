@@ -1,10 +1,30 @@
 use super::*;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OverviewParams {
+    start_at: Option<i64>,
+    end_at: Option<i64>,
+    provider_ids: Option<String>,
+    api_key_ids: Option<String>,
+}
+
 pub(super) async fn stats_overview(
     State(gw): State<Gateway>,
-    Query(window): Query<StatsWindow>,
+    Query(params): Query<OverviewParams>,
 ) -> impl IntoResponse {
-    match gw.admin().get_stats_overview(window).await {
+    let window = StatsWindow {
+        start_at: params.start_at,
+        end_at: params.end_at,
+    };
+    let filter = match StatsFilter::from_query_params(
+        params.provider_ids.as_deref(),
+        params.api_key_ids.as_deref(),
+    ) {
+        Ok(filter) => filter,
+        Err(error) => return stats_error(error.into()),
+    };
+    match gw.admin().get_stats_overview(window, filter).await {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => stats_error(e),
     }
@@ -16,6 +36,8 @@ pub(super) struct SeriesParams {
     start_at: Option<i64>,
     end_at: Option<i64>,
     bucket: Option<i64>,
+    provider_ids: Option<String>,
+    api_key_ids: Option<String>,
 }
 
 pub(super) async fn stats_series(
@@ -26,7 +48,18 @@ pub(super) async fn stats_series(
         start_at: params.start_at,
         end_at: params.end_at,
     };
-    match gw.admin().get_stats_series(window, params.bucket).await {
+    let filter = match StatsFilter::from_query_params(
+        params.provider_ids.as_deref(),
+        params.api_key_ids.as_deref(),
+    ) {
+        Ok(filter) => filter,
+        Err(error) => return stats_error(error.into()),
+    };
+    match gw
+        .admin()
+        .get_stats_series(window, filter, params.bucket)
+        .await
+    {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => stats_error(e),
     }

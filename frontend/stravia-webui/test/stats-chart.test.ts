@@ -5,7 +5,9 @@ import {
   buildAvailabilityChart,
   buildAvailabilitySummary,
   buildLatencyChart,
+  hoverWindows,
   planActivityGrid,
+  tokenBreakdown,
 } from '../src/lib/stats-chart'
 
 const HOUR_MS = 3_600_000
@@ -648,5 +650,50 @@ describe('planActivityGrid', () => {
     expect(plan.endMs).toBe(end)
     expect(plan.cellPx).toBeGreaterThan(0)
     expect(plan.startMs).toBeGreaterThan(0)
+  })
+})
+
+describe('tokenBreakdown', () => {
+  test('keeps the fixed category order and omits unreported categories instead of showing 0%', () => {
+    expect(
+      tokenBreakdown({
+        total_input_tokens: 10,
+        total_output_tokens: null,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 4,
+      }),
+    ).toEqual([
+      { key: 'input', value: 10 },
+      { key: 'cache-read', value: 0 },
+      { key: 'cache-write', value: 4 },
+    ])
+  })
+})
+
+describe('hoverWindows', () => {
+  const base = { start_at: Date.UTC(2026, 8, 17, 0), end_at: Date.UTC(2026, 8, 18, 0) }
+
+  test('the period is the hovered bucket and the view is a window of the selected length ending at it', () => {
+    const cell = Date.UTC(2026, 8, 17, 6)
+    expect(hoverWindows(base, cell, HOUR_MS)).toEqual({
+      period: { start_at: cell, end_at: cell + HOUR_MS },
+      view: { start_at: cell + HOUR_MS - DAY_MS, end_at: cell + HOUR_MS },
+    })
+  })
+
+  test('the last coarse bucket is clipped to the selected window end', () => {
+    const cell = base.end_at - HOUR_MS
+    const windows = hoverWindows(base, cell, 6 * HOUR_MS)
+    expect(windows?.period).toEqual({ start_at: cell, end_at: base.end_at })
+    expect(windows?.view).toEqual(base)
+  })
+
+  test('a view that would start at or before the epoch is not offered', () => {
+    const early = { start_at: QUARTER_MS, end_at: QUARTER_MS + DAY_MS }
+    expect(hoverWindows(early, QUARTER_MS, QUARTER_MS)).toBeNull()
+  })
+
+  test('a bucket that starts at or after the window end has no period', () => {
+    expect(hoverWindows(base, base.end_at, HOUR_MS)).toBeNull()
   })
 })

@@ -578,6 +578,80 @@ def test_every_stats_view_rejects_invalid_absolute_window(usage_env):
         assert status == 400, (bucket, body)
 
 
+def test_stats_filters_scope_overview_and_series_to_selected_identities(usage_env):
+    env = usage_env
+    _, proxy_key_a = _create_route(env, "usage-filter-a")
+    _, proxy_key_b = _create_route(env, "usage-filter-b")
+    for scenario, model, proxy_key in (
+        ("a-1", "usage-filter-a", proxy_key_a),
+        ("a-2", "usage-filter-a", proxy_key_a),
+        ("b-1", "usage-filter-b", proxy_key_b),
+    ):
+        status, body = _proxy(env, proxy_key, model, [{"role": "user", "content": scenario}])
+        assert status == 200, body
+    clear(env)
+    status, body = http_request("GET", f"{env['admin']}/api/v1/providers", headers=env["auth"])
+    assert status == 200, body
+    providers = {item["name"]: item["id"] for item in body["data"]}
+    status, body = http_request("GET", f"{env['admin']}/api/v1/api-keys", headers=env["auth"])
+    assert status == 200, body
+    api_keys = {item["name"]: item["id"] for item in body["data"]}
+    provider_a = providers["usage-filter-a-provider"]
+    provider_b = providers["usage-filter-b-provider"]
+    key_a = api_keys["usage-filter-a-key"]
+    key_b = api_keys["usage-filter-b-key"]
+
+    filtered = stats(env, "overview", provider_ids=provider_a)
+    assert filtered["total_requests"] == 2
+    assert filtered["upstream_request_count"] == 2
+    assert filtered["upstream_error_count"] == 0
+    assert filtered["terminal_request_count"] == 0
+    assert filtered["failed_request_count"] == 0
+    assert filtered["recovered_request_count"] == 0
+    assert filtered["recovery_known_request_count"] == 0
+    assert filtered["total_input_tokens"] == 30
+    assert filtered["total_output_tokens"] == 14
+    assert stats(env, "overview", provider_ids=f"{provider_a},{provider_b}")["total_requests"] == 3
+    assert stats(env, "overview", provider_ids=f"{provider_a},{provider_a}")["total_requests"] == 2
+    unknown = stats(env, "overview", provider_ids="provider-does-not-exist")
+    assert unknown["total_requests"] == 0
+    assert unknown["total_input_tokens"] is None
+    assert unknown["upstream_request_count"] == 0
+
+    by_key = stats(env, "overview", api_key_ids=key_a)
+    assert by_key["total_requests"] == 2
+    assert by_key["upstream_request_count"] == 0
+    assert by_key["upstream_error_count"] == 0
+    assert by_key["terminal_request_count"] == 0
+    assert by_key["total_input_tokens"] == 30
+    assert by_key["total_output_tokens"] == 14
+    assert stats(env, "overview", api_key_ids=f"{key_a},{key_b}")["total_requests"] == 3
+    assert stats(env, "overview", api_key_ids="key-does-not-exist")["total_requests"] == 0
+
+    provider_series = stats(env, "series", provider_ids=provider_a)
+    assert sum(bucket["request_count"] for bucket in provider_series) == 2
+    assert sum(bucket["upstream_request_count"] for bucket in provider_series) == 2
+    assert all(bucket["terminal_request_count"] == 0 for bucket in provider_series)
+    key_series = stats(env, "series", api_key_ids=key_a)
+    assert sum(bucket["request_count"] for bucket in key_series) == 2
+    assert all(bucket["upstream_request_count"] == 0 for bucket in key_series)
+    assert stats(env, "series", provider_ids="provider-does-not-exist") == []
+
+    for view in ("overview", "series"):
+        for query in (
+            {"provider_ids": provider_a, "api_key_ids": key_a},
+            {"provider_ids": ""},
+            {"api_key_ids": f"{key_a},,{key_b}"},
+            {"provider_ids": ",".join(f"provider-{index}" for index in range(101))},
+        ):
+            status, body = http_request(
+                "GET", f"{env['admin']}/api/v1/stats/{view}?{urlencode(query)}",
+                headers=env["auth"],
+            )
+            assert status == 400, (view, query, body)
+            assert body["code"] == "invalid_stats_query", body
+
+
 def test_deleted_recreated_and_renamed_resources_keep_distinct_history(usage_env):
     env = usage_env
     model_id, key = _create_route(env, "usage-identity")

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
     ModelStats, OAuthCredential, Provider, ProviderCredentialVersion, ProviderStats, PutRoute,
-    RouteConfig, StatsOverview, StatsSeries, StatsWindow, UpdateApiKey, UpdateProvider,
-    UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings, WebProvider,
+    RouteConfig, StatsFilter, StatsOverview, StatsSeries, StatsWindow, UpdateApiKey,
+    UpdateProvider, UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings, WebProvider,
 };
 use crate::pricing::{Amount, CostBasis, CurrencyKind, CustomCurrency, SubscriptionPeriod};
 use crate::provider_models::{
@@ -739,12 +739,19 @@ pub struct RouteSchedulingUsage {
 #[async_trait]
 pub trait UsageStatsStore: Send + Sync {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage;
-    async fn stats_overview(&self, window: StatsWindow) -> anyhow::Result<StatsOverview>;
+    /// 全局口径读取 `scope='global'`；过滤口径读取所选 `provider` / `api_key`
+    /// 边际桶并限定 `identity`，请求级分类列在过滤口径下恒为零。
+    async fn stats_overview(
+        &self,
+        window: StatsWindow,
+        filter: StatsFilter,
+    ) -> anyhow::Result<StatsOverview>;
     /// Coarsen UTC base buckets over the complete selected interval to at most
     /// 512 presentation buckets, aligned to its start when explicitly selected.
     async fn stats_series(
         &self,
         window: StatsWindow,
+        filter: StatsFilter,
         bucket_ms: i64,
     ) -> anyhow::Result<Vec<StatsSeries>>;
     async fn stats_by_model(&self, window: StatsWindow) -> anyhow::Result<Vec<ModelStats>>;

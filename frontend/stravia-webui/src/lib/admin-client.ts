@@ -1,4 +1,4 @@
-import type { StatsWindow } from '#lib/types/stats.js'
+import type { StatsFilter, StatsWindow } from '#lib/types/stats.js'
 import { apiBase, authenticatedFetch, decodeAdmin, isTauri } from '#lib/auth.js'
 import type { ConnectClientApplyPlan } from '#lib/connect-client-apply.js'
 import type { ConnectClientApplyRequest } from '#lib/connect.js'
@@ -138,8 +138,13 @@ function queryString(query: object): string {
   return params.size > 0 ? `?${params}` : ''
 }
 
-function statsPath(path: string, window?: StatsWindow, bucket?: number): string {
-  return `${path}${queryString({ ...window, bucket })}`
+function statsPath(path: string, window?: StatsWindow, bucket?: number, filter?: StatsFilter): string {
+  // 后端 Query 不接受重复键，id 列表以逗号分隔；id 不含逗号。
+  const ids = {
+    provider_ids: filter && 'provider_ids' in filter ? filter.provider_ids.join(',') : undefined,
+    api_key_ids: filter && 'api_key_ids' in filter ? filter.api_key_ids.join(',') : undefined,
+  }
+  return `${path}${queryString({ ...window, bucket, ...ids })}`
 }
 
 async function request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
@@ -416,9 +421,10 @@ export const admin = {
     },
   },
   stats: {
-    overview: (window?: StatsWindow) => request<StatsOverview>('GET', statsPath('/stats/overview', window)),
-    series: (window?: StatsWindow, bucket?: number) =>
-      request<StatsSeries[]>('GET', statsPath('/stats/series', window, bucket)),
+    overview: (window?: StatsWindow, filter?: StatsFilter) =>
+      request<StatsOverview>('GET', statsPath('/stats/overview', window, undefined, filter)),
+    series: (window?: StatsWindow, bucket?: number, filter?: StatsFilter) =>
+      request<StatsSeries[]>('GET', statsPath('/stats/series', window, bucket, filter)),
     models: (window?: StatsWindow) => request<ModelStats[]>('GET', statsPath('/stats/models', window)),
     providers: (window?: StatsWindow) => request<ProviderStats[]>('GET', statsPath('/stats/providers', window)),
     apiKeys: (window?: StatsWindow) => request<ApiKeyStats[]>('GET', statsPath('/stats/api-keys', window)),

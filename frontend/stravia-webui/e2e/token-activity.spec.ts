@@ -270,10 +270,10 @@ for (const scenario of [
     write: 10,
     total: '130',
     shares: [
-      ['Input Tokens', '15.38%'],
-      ['Output Tokens', '15.38%'],
-      ['Cache read tokens', '61.54%'],
-      ['Cache write tokens', '7.69%'],
+      ['Input', '15.38%'],
+      ['Output', '15.38%'],
+      ['Cache read', '61.54%'],
+      ['Cache write', '7.69%'],
     ],
   },
   {
@@ -284,8 +284,8 @@ for (const scenario of [
     write: 10,
     total: '90',
     shares: [
-      ['Cache read tokens', '88.89%'],
-      ['Cache write tokens', '11.11%'],
+      ['Cache read', '88.89%'],
+      ['Cache write', '11.11%'],
     ],
   },
   {
@@ -296,9 +296,9 @@ for (const scenario of [
     write: 0,
     total: '80',
     shares: [
-      ['Input Tokens', '0%'],
-      ['Cache read tokens', '100%'],
-      ['Cache write tokens', '0%'],
+      ['Input', '0%'],
+      ['Cache read', '100%'],
+      ['Cache write', '0%'],
     ],
   },
 ] as const) {
@@ -459,7 +459,7 @@ test.describe('usage workspace layout', () => {
       ['Token breakdown', 'Token breakdown'],
       ['Models', 'Share of all requests.'],
     ] as const) {
-      const donut = boxes.region(name).locator(`div[aria-label="${label}"]`)
+      const donut = boxes.region(name).locator(`svg[aria-label="${label}"]`)
       const donutBox = (await donut.boundingBox())!
       expect(donutBox.width).toBeGreaterThanOrEqual(10 * rem - 1)
       expect(donutBox.width).toBeLessThanOrEqual(12 * rem + 1)

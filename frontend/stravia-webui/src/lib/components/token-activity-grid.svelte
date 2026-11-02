@@ -8,9 +8,36 @@ interface Props {
   model: ActivityGridModel
   /** 方格边长（px），由容器可用高度决定。 */
   cellPx?: number
+  /** 指针悬停或键盘聚焦的方格起点；离开时为 null。指针优先于焦点。 */
+  onhover?: (start: number | null) => void
 }
 
-let { model, cellPx = 14 }: Props = $props()
+let { model, cellPx = 14, onhover }: Props = $props()
+
+// 悬停与聚焦各记一份，其中一个离开时不应丢掉另一个仍然有效的目标。
+let pointerStart: number | null = null
+let focusStart: number | null = null
+function reportHover(): void {
+  onhover?.(pointerStart ?? focusStart)
+}
+function enterPointer(start: number): void {
+  pointerStart = start
+  reportHover()
+}
+function leavePointer(start: number): void {
+  if (pointerStart !== start) return
+  pointerStart = null
+  reportHover()
+}
+function enterFocus(start: number): void {
+  focusStart = start
+  reportHover()
+}
+function leaveFocus(start: number): void {
+  if (focusStart !== start) return
+  focusStart = null
+  reportHover()
+}
 
 const SIX_HOURS_MS = 21_600_000
 const DAY_MS = 86_400_000
@@ -68,11 +95,15 @@ function cellText(cell: ActivityCell): string {
       <Tooltip.Root>
         <Tooltip.Trigger
           type="button"
-          class="token-activity-cell cursor-default rounded-[3px] p-0 data-[level=0]:bg-secondary data-[level=1]:bg-chart-4 data-[level=2]:bg-chart-3 data-[level=3]:bg-chart-2 data-[level=4]:bg-chart-1"
+          class="token-activity-cell cursor-default rounded-[3px] p-0 transition-colors duration-300 ease-out data-[level=0]:bg-secondary data-[level=1]:bg-chart-4 data-[level=2]:bg-chart-3 data-[level=3]:bg-chart-2 data-[level=4]:bg-chart-1"
           style="grid-column:{cell.col + 1};grid-row:{cell.row + 1}"
           data-level={cell.level}
           data-start={cell.start}
-          aria-label={cellText(cell)} />
+          aria-label={cellText(cell)}
+          onpointerenter={() => enterPointer(cell.start)}
+          onpointerleave={() => leavePointer(cell.start)}
+          onfocus={() => enterFocus(cell.start)}
+          onblur={() => leaveFocus(cell.start)} />
         <!-- 方格只有 ~23px：上方提示会盖住上一行方格，信息提示不参与命中测试才能连续悬停。 -->
         <Tooltip.Content side="top" sideOffset={4} class="pointer-events-none">{cellText(cell)}</Tooltip.Content>
       </Tooltip.Root>

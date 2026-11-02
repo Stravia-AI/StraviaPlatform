@@ -1,6 +1,7 @@
 <script lang="ts">
-import { Axis, Chart, Path, Svg, Tooltip, type ChartState } from 'layerchart'
+import { Axis, Chart, Circle, Path, Svg, Tooltip, type ChartState } from 'layerchart'
 
+import { chartMotion } from '#lib/chart-motion.svelte.js'
 import * as m from '#lib/paraglide/messages.js'
 import { formatNumber, formatTime } from '#lib/format.js'
 import type { LatencyChartPoint } from '#lib/stats-chart.js'
@@ -9,6 +10,9 @@ type LatencyChartContext = ChartState<LatencyChartPoint>
 
 let { data, formatBucket = formatTime }: { data: LatencyChartPoint[]; formatBucket?: (value: Date) => string } =
   $props()
+
+// 窗口、筛选或悬停区间切换时折线与圆点一起缓动；layerchart 只在创建时读取该配置。
+const motion = chartMotion()
 
 let context = $state<LatencyChartContext>()
 let keyboardIndex = $state(0)
@@ -134,30 +138,35 @@ function metricValue(value: number | null, unit: string): string {
           aria-label={m.stats_first_token_latency()}
           fill="none"
           stroke="var(--chart-2)"
-          strokeWidth={2} />
+          strokeWidth={2}
+          {motion} />
         <Path
           pathData={linePath(chart, 'outputTps')}
           aria-label={m.stats_tps()}
           fill="none"
           stroke="var(--chart-1)"
           strokeWidth={2}
-          stroke-dasharray="6 4" />
-        {#each data as point (point.bucket.getTime())}
+          stroke-dasharray="6 4"
+          {motion} />
+        <!-- 圆点按序号对位，才能随折线一起移动；按时间作 key 会在切换区间时整批消失再出现。 -->
+        {#each data as point, index (index)}
           {#if point.firstToken != null}
-            <circle
-              cx={chart.xScale(point.bucket)}
-              cy={chart.yScale(point.firstToken)}
-              r="2"
+            <Circle
+              cx={Number(chart.xScale(point.bucket))}
+              cy={Number(chart.yScale(point.firstToken))}
+              r={2}
               fill="var(--chart-2)"
-              aria-hidden="true" />
+              aria-hidden="true"
+              {motion} />
           {/if}
           {#if point.outputTps != null && chart.y1Scale}
-            <circle
-              cx={chart.xScale(point.bucket)}
+            <Circle
+              cx={Number(chart.xScale(point.bucket))}
               cy={Number(chart.y1Scale(point.outputTps))}
-              r="2"
+              r={2}
               fill="var(--chart-1)"
-              aria-hidden="true" />
+              aria-hidden="true"
+              {motion} />
           {/if}
         {/each}
       </Svg>

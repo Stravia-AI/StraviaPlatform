@@ -9,7 +9,7 @@ use super::{
     types::{ConfirmedUsage, ForestQuery, RunEvent, UsageCoverage},
 };
 use crate::{
-    db::models::StatsWindow,
+    db::models::{StatsFilter, StatsWindow},
     pricing::{Amount, AttemptAmounts, BillingOutcome, CostBasis},
     storage::{Storage, UsageStatsStore, postgres::PostgresStorage, sqlite::SqliteStorage},
 };
@@ -174,12 +174,17 @@ async fn cross_quarter_and_weighted_metrics(
         300,
     )
     .await?;
-    let before = stats.stats_overview(window(START, START + QUARTER)).await?;
+    let before = stats
+        .stats_overview(window(START, START + QUARTER), StatsFilter::All)
+        .await?;
     assert_eq!(before.total_requests, 1);
     assert_eq!(before.total_output_tokens, None);
     assert_eq!(before.avg_duration_ms, None);
     let turns = stats
-        .stats_overview(window(START + QUARTER, START + 3 * QUARTER))
+        .stats_overview(
+            window(START + QUARTER, START + 3 * QUARTER),
+            StatsFilter::All,
+        )
         .await?;
     assert_eq!(turns.total_requests, 2);
     assert_eq!(turns.total_input_tokens, Some(21));
@@ -188,7 +193,7 @@ async fn cross_quarter_and_weighted_metrics(
     assert_eq!(turns.avg_first_token_ms, Some(400.0));
     assert_eq!(turns.avg_output_tps, Some(5.0));
     let all = window(START, START + 4 * QUARTER);
-    let series = stats.stats_series(all, QUARTER).await?;
+    let series = stats.stats_series(all, StatsFilter::All, QUARTER).await?;
     assert_eq!(series.len(), 3);
     assert_eq!(
         series
@@ -213,7 +218,9 @@ async fn cross_quarter_and_weighted_metrics(
     );
     assert_eq!(series[1].avg_output_tps, Some(20.0));
     assert!((series[2].avg_output_tps.unwrap() - 40.0 / 11.0).abs() < 1e-12);
-    let coarse = stats.stats_series(all, 8 * QUARTER).await?;
+    let coarse = stats
+        .stats_series(all, StatsFilter::All, 8 * QUARTER)
+        .await?;
     assert_eq!(coarse.len(), 1);
     assert_eq!(coarse[0].request_count, 3);
     assert_eq!(coarse[0].total_output_tokens, Some(60));
@@ -259,13 +266,25 @@ async fn retention_and_failed_clear(
             .await?,
         0
     );
-    assert_eq!(stats.stats_overview(selected).await?.total_requests, 3);
     assert_eq!(
-        stats.stats_overview(selected).await?.total_output_tokens,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_requests,
+        3
+    );
+    assert_eq!(
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_output_tokens,
         Some(60)
     );
     assert_eq!(
-        stats.stats_overview(selected).await?.avg_output_tps,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .avg_output_tps,
         Some(5.0)
     );
     assert_eq!(stats.stats_by_model(selected).await?[0].request_count, 3);
@@ -286,7 +305,10 @@ async fn retention_and_failed_clear(
     assert!(!batch.has_more);
     observation.update_retention(30).await?;
     assert_eq!(
-        stats.stats_overview(selected).await?.total_output_tokens,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_output_tokens,
         Some(60)
     );
 
@@ -304,7 +326,10 @@ async fn retention_and_failed_clear(
         7
     );
     assert_eq!(
-        stats.stats_overview(selected).await?.total_output_tokens,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_output_tokens,
         Some(67)
     );
     db.remove_fault("stats_usage_buckets").await?;
@@ -324,7 +349,10 @@ async fn retention_and_failed_clear(
         7
     );
     assert_eq!(
-        stats.stats_overview(selected).await?.total_output_tokens,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_output_tokens,
         Some(67)
     );
     db.remove_fault("stats_usage_checkpoints").await?;
@@ -335,12 +363,15 @@ async fn retention_and_failed_clear(
         1
     );
     assert_eq!(
-        stats.stats_overview(selected).await?.total_output_tokens,
+        stats
+            .stats_overview(selected, StatsFilter::All)
+            .await?
+            .total_output_tokens,
         Some(67)
     );
     assert_eq!(
         stats
-            .stats_overview(StatsWindow::default())
+            .stats_overview(StatsWindow::default(), StatsFilter::All)
             .await?
             .total_output_tokens,
         Some(67)
@@ -372,13 +403,17 @@ UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
         db.execute(format!("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at) VALUES ('batch-rejected-{index:04}',{START},'POST','/v1/responses','responses','admission','rejected',400,false,0,1)"))
             .await?;
     }
-    let before = stats.stats_overview(StatsWindow::default()).await?;
+    let before = stats
+        .stats_overview(StatsWindow::default(), StatsFilter::All)
+        .await?;
     let mut removed = Vec::new();
     let mut finished = false;
     for _ in 0..1024 {
         let batch = observation.purge_expired_batch(1).await?;
         removed.extend(batch.removed_interactions);
-        let after = stats.stats_overview(StatsWindow::default()).await?;
+        let after = stats
+            .stats_overview(StatsWindow::default(), StatsFilter::All)
+            .await?;
         assert_eq!(after.total_requests, before.total_requests);
         assert_eq!(after.total_output_tokens, before.total_output_tokens);
         if !batch.has_more {
@@ -436,7 +471,9 @@ INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,e
 INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ('atomic-retention','atomic-retention','owner','fixture',0);"
     ))
     .await?;
-    let before = stats.stats_overview(StatsWindow::default()).await?;
+    let before = stats
+        .stats_overview(StatsWindow::default(), StatsFilter::All)
+        .await?;
     // 父记录删除失败时，前面显式删除的叶子和统计 checkpoint 必须一起回滚。
     db.install_fault("interaction_observations", "DELETE")
         .await?;
@@ -454,7 +491,7 @@ INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_
     }
     assert_eq!(
         stats
-            .stats_overview(StatsWindow::default())
+            .stats_overview(StatsWindow::default(), StatsFilter::All)
             .await?
             .total_output_tokens,
         before.total_output_tokens
@@ -472,7 +509,9 @@ INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_
     ] {
         assert_eq!(db.scalar(sql).await?, 0);
     }
-    let after = stats.stats_overview(StatsWindow::default()).await?;
+    let after = stats
+        .stats_overview(StatsWindow::default(), StatsFilter::All)
+        .await?;
     assert_eq!(after.total_requests, before.total_requests);
     assert_eq!(after.total_output_tokens, before.total_output_tokens);
     Ok(())
@@ -570,7 +609,7 @@ async fn ordered_batch_usage_and_billing(
         .scalar("SELECT COALESCE(CAST(SUM(spent_usd_unconverted_nanos) AS BIGINT),0) FROM api_key_spend WHERE api_key_id='key'")
         .await?;
     let selected = window(BATCH, BATCH + QUARTER);
-    let before = stats.stats_overview(selected).await?;
+    let before = stats.stats_overview(selected, StatsFilter::All).await?;
     assert_eq!(before.total_requests, 0);
     assert_eq!(before.total_input_tokens, None);
     seed_batch_interaction(db, "batch-one").await?;
@@ -703,7 +742,7 @@ async fn ordered_batch_usage_and_billing(
     assert_eq!(revised.payload["usage"]["output_tokens"], 9);
     assert_eq!(revised.payload["usage"]["cache_write_tokens"], 2);
 
-    let after = stats.stats_overview(selected).await?;
+    let after = stats.stats_overview(selected, StatsFilter::All).await?;
     assert_eq!(after.total_requests, 2);
     assert_eq!(after.total_input_tokens, Some(38));
     assert_eq!(after.total_output_tokens, Some(24));
