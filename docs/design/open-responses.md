@@ -273,6 +273,8 @@ OpenAI-compatible Chat 上游报告 `finish_reason="tool_calls"` 却没有任何
 
 公开错误类别只是客户端恢复判断的输入，不承诺一定可安全重放；Stravia 不因此增加重试预算、重放已提交输出或改变工具执行边界。
 
+Anthropic 上游以 `stop_reason="refusal"` 终止（HTTP 200，通常无内容块、输出 token 为 0）是模型的终态拒答，不是成功的空响应，也不是上游错误。解码只取 `stop_details.explanation`（缺失时使用通用英文文案）形成 canonical `Refusal` item / `RefusalDelta` 与 `Done("refusal")`；`stop_details` 的其余字段，尤其是 `fallback_credit_token`，属于账户侧状态，不进入 canonical 模型，也不会出现在任何客户端输出中。各入口按自身惯例呈现：Responses 为 `completed` response 中的 `refusal` content part；Chat 为 `message.refusal` / `delta.refusal` 加 `finish_reason="content_filter"`；Anthropic 为承载说明的文本块加 `stop_reason="refusal"`（无对应内容块类型，`stop_details.category` 不回写）。拒答不触发重试或 failover，节点状态保持 `completed`，成功率统计不变；说明文本作为输出 item 进入观测记录。Gemini 入口尚不呈现拒答。
+
 ### 7.2 WebSocket
 
 WebSocket 复用 `/v1/responses` resource。客户端每轮发送标准 `response.create` event；一条连接内顺序执行多个 response，但同一时刻最多一个 in-flight response。

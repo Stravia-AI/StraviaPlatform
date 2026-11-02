@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- An Anthropic upstream reply that ends with `stop_reason: "refusal"` (for example `reasoning_extraction`, returned as HTTP 200 with no content) used to reach clients as a successful empty response, so agents retried it until their own cap. Responses clients now receive a `refusal` content part on a `completed` response, Chat clients receive `message.refusal` / `delta.refusal` with `finish_reason: "content_filter"`, and Anthropic clients receive the explanation as text with `stop_reason: "refusal"`. A refusal is terminal: it is not retried and does not fail over to another target. The upstream `stop_details.fallback_credit_token` is never forwarded. The Chat ingress now also surfaces refusals that come from Responses upstreams instead of dropping them. Gemini ingress is unchanged.
+
 ## [0.6.1] - 2026-11-02
 
 ### Verification

@@ -199,7 +199,7 @@ impl OpenAIResponseFormatter {
             })
             .collect();
         let finish_reason = if tool_calls.is_empty() {
-            resp.stop_reason.as_deref()
+            resp.stop_reason.as_deref().map(chat_finish_reason)
         } else {
             Some("tool_calls")
         };
@@ -207,6 +207,13 @@ impl OpenAIResponseFormatter {
             "role": "assistant",
             "content": resp.output_text(),
         });
+        let refusal = resp.refusal_text();
+        if !refusal.is_empty() {
+            message
+                .as_object_mut()
+                .expect("message is an object")
+                .insert("refusal".into(), Value::String(refusal));
+        }
         let reasoning = visible_reasoning_text(resp);
         if !reasoning.is_empty() {
             message
@@ -876,14 +883,22 @@ impl OpenAIStreamFormatter {
                     }
                     events.push(SseEvent::new(None, chunk.to_string()));
                 }
-                AiStreamDelta::TextDelta(text)
-                | AiStreamDelta::RefusalDelta(text)
-                | AiStreamDelta::RefusalDeltaWithIndex { text, .. } => {
+                AiStreamDelta::TextDelta(text) => {
                     let chunk = serde_json::json!({
                         "id": self.id,
                         "object": "chat.completion.chunk",
                         "model": self.model,
                         "choices": [{"index": self.native_choice_index, "delta": {"content": text}, "finish_reason": null}]
+                    });
+                    events.push(SseEvent::new(None, chunk.to_string()));
+                }
+                AiStreamDelta::RefusalDelta(text)
+                | AiStreamDelta::RefusalDeltaWithIndex { text, .. } => {
+                    let chunk = serde_json::json!({
+                        "id": self.id,
+                        "object": "chat.completion.chunk",
+                        "model": self.model,
+                        "choices": [{"index": self.native_choice_index, "delta": {"refusal": text}, "finish_reason": null}]
                     });
                     events.push(SseEvent::new(None, chunk.to_string()));
                 }
@@ -928,7 +943,7 @@ impl OpenAIStreamFormatter {
                     let final_reason = if self.saw_tool_call {
                         "tool_calls".to_string()
                     } else {
-                        stop_reason.clone()
+                        chat_finish_reason(stop_reason).to_string()
                     };
                     let chunk = serde_json::json!({
                         "id": self.id,
@@ -956,6 +971,15 @@ impl OpenAIStreamFormatter {
         } else {
             vec![]
         }
+    }
+}
+
+/// Chat Completions has no `refusal` finish reason; `content_filter` is the
+/// closest standard value and is what OpenAI SDKs treat as a policy stop.
+fn chat_finish_reason(reason: &str) -> &str {
+    match reason {
+        "refusal" => "content_filter",
+        other => other,
     }
 }
 

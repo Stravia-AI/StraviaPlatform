@@ -2856,7 +2856,7 @@ fn responses_ingress_keeps_omitted_strict_for_responses_target() {
 }
 
 #[test]
-fn refusal_is_omitted_while_text_survives() {
+fn chat_ingress_keeps_refusal_apart_from_text() {
     let pair = ProtocolTransform::global()
         .bind(
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -2878,7 +2878,7 @@ fn refusal_is_omitted_while_text_survives() {
 
     let encoded = pair.encode_response(&response).unwrap();
     assert_eq!(encoded["choices"][0]["message"]["content"], "visible");
-    assert!(!encoded.to_string().contains("cannot comply"));
+    assert_eq!(encoded["choices"][0]["message"]["refusal"], "cannot comply");
     let (_, mut encoder) = pair.stream().unwrap().into_parts();
     let events = encoder
         .encode_deltas(&[
@@ -2886,11 +2886,252 @@ fn refusal_is_omitted_while_text_survives() {
             AiStreamDelta::RefusalDelta("cannot comply".into()),
         ])
         .unwrap();
-    assert!(events.iter().any(|event| event.data.contains("visible")));
+    let deltas: Vec<Value> = events
+        .iter()
+        .map(|event| {
+            serde_json::from_str::<Value>(&event.data).unwrap()["choices"][0]["delta"].clone()
+        })
+        .collect();
+    assert!(deltas.iter().any(|delta| delta["content"] == "visible"));
     assert!(
-        events
+        deltas
             .iter()
-            .all(|event| !event.data.contains("cannot comply"))
+            .any(|delta| delta["refusal"] == "cannot comply")
+    );
+    assert!(
+        deltas
+            .iter()
+            .all(|delta| delta["content"] != "cannot comply")
+    );
+}
+
+const ANTHROPIC_REFUSAL_EXPLANATION: &str = "This request was blocked by an upstream usage policy.";
+// 凭据哨兵：上游 stop_details 携带的 fallback_credit_token 绝不能出现在任何客户端输出中。
+const ANTHROPIC_REFUSAL_CREDIT_SENTINEL: &str = "credit-token-sentinel-7f3a";
+
+fn anthropic_refusal_details() -> Value {
+    json!({
+        "type": "refusal",
+        "category": "reasoning_extraction",
+        "explanation": ANTHROPIC_REFUSAL_EXPLANATION,
+        "fallback_credit_token": ANTHROPIC_REFUSAL_CREDIT_SENTINEL,
+        "fallback_has_prefill_claim": false,
+    })
+}
+
+/// 上游 Anthropic 拒答：HTTP 200、无内容块、输出 token 为 0。
+fn anthropic_refusal_unary(details: Option<Value>) -> Value {
+    let mut body = json!({
+        "id": "msg_refused",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5-5",
+        "content": [],
+        "stop_reason": "refusal",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 2, "output_tokens": 0},
+    });
+    if let Some(details) = details {
+        body["stop_details"] = details;
+    }
+    body
+}
+
+fn anthropic_refusal_stream(details: Option<Value>) -> String {
+    let mut delta = json!({"stop_reason": "refusal", "stop_sequence": null});
+    if let Some(details) = details {
+        delta["stop_details"] = details;
+    }
+    let start = json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_refused", "type": "message", "role": "assistant",
+            "model": "claude-opus-5-5", "content": [], "stop_reason": null,
+            "usage": {"input_tokens": 2, "output_tokens": 0},
+        },
+    });
+    let message_delta = json!({
+        "type": "message_delta",
+        "delta": delta,
+        "usage": {"input_tokens": 2, "output_tokens": 0},
+    });
+    format!(
+        "event: message_start\ndata: {start}\n\n\
+         event: message_delta\ndata: {message_delta}\n\n\
+         event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+fn refused_unary_through(ingress: super::ProtocolEndpoint, details: Option<Value>) -> Value {
+    let pair = ProtocolTransform::global()
+        .bind(ingress, ANTHROPIC_MESSAGES_2023_06_01)
+        .expect("registered protocol pair");
+    let response = pair
+        .decode_response(anthropic_refusal_unary(details))
+        .expect("refusal is a valid Anthropic response");
+    pair.encode_response(&response)
+        .expect("refusal is representable by the ingress")
+}
+
+fn refused_stream_through(
+    ingress: super::ProtocolEndpoint,
+    details: Option<Value>,
+) -> Vec<(Option<String>, Value)> {
+    let pair = ProtocolTransform::global()
+        .bind(ingress, ANTHROPIC_MESSAGES_2023_06_01)
+        .expect("registered protocol pair");
+    let (mut decoder, mut encoder) = pair.stream().expect("stream-capable pair").into_parts();
+    let mut deltas = decoder
+        .decode_chunk(anthropic_refusal_stream(details).as_bytes())
+        .expect("refusal is a valid Anthropic stream");
+    deltas.extend(decoder.finish().expect("stream finishes"));
+    let mut events = encoder
+        .encode_deltas(&deltas)
+        .expect("refusal is representable by the ingress");
+    events.extend(encoder.finish().expect("encoder finishes"));
+    events
+        .into_iter()
+        .filter(|event| event.data != "[DONE]")
+        .map(|event| {
+            let payload = serde_json::from_str(&event.data).expect("event data is JSON");
+            (event.event, payload)
+        })
+        .collect()
+}
+
+fn assert_no_credit_token(wire: &impl std::fmt::Display) {
+    assert!(
+        !wire.to_string().contains(ANTHROPIC_REFUSAL_CREDIT_SENTINEL),
+        "fallback_credit_token must never reach the client"
+    );
+}
+
+#[test]
+fn anthropic_refusal_reaches_responses_client() {
+    let encoded =
+        refused_unary_through(OPEN_RESPONSES_2026_04_24, Some(anthropic_refusal_details()));
+    assert_eq!(encoded["status"], "completed");
+    let refusal = encoded["output"]
+        .as_array()
+        .and_then(|output| output.iter().find(|item| item["type"] == "message"))
+        .and_then(|message| message["content"].as_array())
+        .and_then(|content| content.iter().find(|part| part["type"] == "refusal"))
+        .expect("a refusal content part, not an empty output");
+    assert_eq!(refusal["refusal"], ANTHROPIC_REFUSAL_EXPLANATION);
+    assert_no_credit_token(&encoded);
+
+    let events =
+        refused_stream_through(OPEN_RESPONSES_2026_04_24, Some(anthropic_refusal_details()));
+    let done = events
+        .iter()
+        .find(|(name, _)| name.as_deref() == Some("response.refusal.done"))
+        .expect("streamed refusal part");
+    assert_eq!(done.1["refusal"], ANTHROPIC_REFUSAL_EXPLANATION);
+    let completed = events
+        .iter()
+        .find(|(name, _)| name.as_deref() == Some("response.completed"))
+        .expect("the refusal is a terminal completed response");
+    assert_eq!(completed.1["response"]["status"], "completed");
+    assert_eq!(
+        completed.1["response"]["output"][0]["content"][0]["refusal"],
+        ANTHROPIC_REFUSAL_EXPLANATION
+    );
+    assert_no_credit_token(&Value::Array(events.into_iter().map(|(_, v)| v).collect()));
+}
+
+#[test]
+fn anthropic_refusal_reaches_chat_client() {
+    let encoded = refused_unary_through(
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        Some(anthropic_refusal_details()),
+    );
+    assert_eq!(encoded["choices"][0]["finish_reason"], "content_filter");
+    assert_eq!(
+        encoded["choices"][0]["message"]["refusal"],
+        ANTHROPIC_REFUSAL_EXPLANATION
+    );
+    assert_no_credit_token(&encoded);
+
+    let events = refused_stream_through(
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        Some(anthropic_refusal_details()),
+    );
+    let choices: Vec<&Value> = events
+        .iter()
+        .map(|(_, chunk)| &chunk["choices"][0])
+        .collect();
+    assert!(
+        choices
+            .iter()
+            .any(|choice| choice["delta"]["refusal"] == ANTHROPIC_REFUSAL_EXPLANATION),
+        "refusal text must be streamed in delta.refusal"
+    );
+    assert!(
+        choices
+            .iter()
+            .all(|choice| choice["delta"].get("content").is_none()),
+        "refusal is not assistant content"
+    );
+    assert_eq!(
+        choices.last().expect("terminal chunk")["finish_reason"],
+        "content_filter"
+    );
+    assert_no_credit_token(&Value::Array(events.into_iter().map(|(_, v)| v).collect()));
+}
+
+#[test]
+fn anthropic_refusal_reaches_anthropic_client() {
+    let encoded = refused_unary_through(
+        ANTHROPIC_MESSAGES_2023_06_01,
+        Some(anthropic_refusal_details()),
+    );
+    assert_eq!(encoded["stop_reason"], "refusal");
+    assert_eq!(
+        encoded["content"],
+        json!([{"type": "text", "text": ANTHROPIC_REFUSAL_EXPLANATION}])
+    );
+    assert_no_credit_token(&encoded);
+
+    let events = refused_stream_through(
+        ANTHROPIC_MESSAGES_2023_06_01,
+        Some(anthropic_refusal_details()),
+    );
+    let text: String = events
+        .iter()
+        .filter(|(name, _)| name.as_deref() == Some("content_block_delta"))
+        .filter_map(|(_, payload)| payload["delta"]["text"].as_str())
+        .collect();
+    assert_eq!(text, ANTHROPIC_REFUSAL_EXPLANATION);
+    let terminal = events
+        .iter()
+        .find(|(name, _)| name.as_deref() == Some("message_delta"))
+        .expect("terminal message_delta");
+    assert_eq!(terminal.1["delta"]["stop_reason"], "refusal");
+    assert_no_credit_token(&Value::Array(events.into_iter().map(|(_, v)| v).collect()));
+}
+
+#[test]
+fn anthropic_refusal_without_details_still_reaches_every_client() {
+    let responses = refused_unary_through(OPEN_RESPONSES_2026_04_24, None);
+    let refusal = responses["output"][0]["content"][0]["refusal"]
+        .as_str()
+        .expect("Responses client gets a refusal part");
+    assert!(!refusal.is_empty());
+
+    let chat = refused_unary_through(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, None);
+    assert_eq!(chat["choices"][0]["finish_reason"], "content_filter");
+    assert!(
+        chat["choices"][0]["message"]["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+    );
+
+    let anthropic = refused_unary_through(ANTHROPIC_MESSAGES_2023_06_01, None);
+    assert_eq!(anthropic["stop_reason"], "refusal");
+    assert!(
+        anthropic["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
     );
 }
 
