@@ -298,17 +298,20 @@ def clear(env):
 SPLIT_COUNTERS = (
     "terminal_request_count", "failed_request_count",
     "upstream_request_count", "upstream_error_count",
+    "recovery_known_request_count", "recovered_request_count",
 )
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 TOOLS = [{"type": "function", "function": {"name": "local_probe", "parameters": {"type": "object"}}}]
 
 
-def assert_split(view, *, terminal, failed, upstream, errors):
+def assert_split(view, *, terminal, failed, upstream, errors, recovered=0):
     assert view["terminal_request_count"] == terminal, view
     assert view["failed_request_count"] == failed, view
     assert view["upstream_request_count"] == upstream, view
     assert view["upstream_error_count"] == errors, view
+    assert view["recovery_known_request_count"] == terminal, view
+    assert view["recovered_request_count"] == recovered, view
     assert "error_count" not in view, view
 
 
@@ -466,7 +469,7 @@ def test_retries_recovery_failure_and_rejection_are_request_facts(usage_env):
     overview = stats(env)
     assert overview["total_requests"] == 3
     # recovered: 1 次上游错误后被重试吸收；failed: 重试预算耗尽后两次上游错误。
-    assert_split(overview, terminal=2, failed=1, upstream=4, errors=3)
+    assert_split(overview, terminal=2, failed=1, upstream=4, errors=3, recovered=1)
     assert overview["total_input_tokens"] == 15
     assert overview["total_output_tokens"] == 7
     provider = stats(env, "providers")[0]
@@ -475,6 +478,22 @@ def test_retries_recovery_failure_and_rejection_are_request_facts(usage_env):
     assert "request_count" not in provider and "error_count" not in provider
     assert stats(env, "models")[0]["request_count"] == 2
     assert stats(env, "api-keys")[0]["request_count"] == 2
+
+
+def test_client_retry_is_a_new_request_not_automatic_recovery(usage_env):
+    env = usage_env
+    model = "usage-client-retry"
+    _route, key = _create_route(env, model, retry_budget=0)
+    messages = [{"role": "user", "content": "recovered"}]
+    status, body = _proxy(env, key, model, messages)
+    assert status >= 500, body
+    status, body = _proxy(env, key, model, messages)
+    assert status == 200, body
+
+    clear(env)
+    overview = stats(env)
+    assert overview["total_requests"] == 2
+    assert_split(overview, terminal=2, failed=1, upstream=2, errors=1)
 
 
 def test_client_disconnect_does_not_invent_failure_or_tokens(usage_env):
@@ -716,7 +735,7 @@ def test_switch_then_success_counts_absorbed_upstream_error(usage_env):
     overview = stats(env)
     assert overview["total_requests"] == 1
     # 第一个 Target 的上游错误被切换吸收：客户端只看到一次成功请求。
-    assert_split(overview, terminal=1, failed=0, upstream=2, errors=1)
+    assert_split(overview, terminal=1, failed=0, upstream=2, errors=1, recovered=1)
     rows = {row["provider_id"]: row for row in stats(env, "providers")}
     assert set(rows) == {first_provider, second_provider}, rows
     assert rows[first_provider]["upstream_request_count"] == 1
@@ -793,7 +812,7 @@ def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env):
     waiting = _wait_for("switch to waiting_client", waiting_stats)
     assert waiting["total_requests"] == 1
     # 第一个 Target 的 503 被切换吸收；第二个 Target 的客户端工具交接仍是成功终态。
-    assert_split(waiting, terminal=1, failed=0, upstream=2, errors=1)
+    assert_split(waiting, terminal=1, failed=0, upstream=2, errors=1, recovered=1)
     rows = {row["provider_id"]: row for row in stats(env, "providers")}
     assert rows[first_provider]["upstream_request_count"] == 1
     assert rows[first_provider]["upstream_error_count"] == 1
@@ -818,7 +837,7 @@ def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env):
     after = _wait_for("superseded switch parent counted once", continued_stats)
     assert after["total_requests"] == 2
     # 续接 Run 再发一次成功上游请求；父 Run 翻为 superseded 不重复计数。
-    assert_split(after, terminal=2, failed=0, upstream=3, errors=1)
+    assert_split(after, terminal=2, failed=0, upstream=3, errors=1, recovered=1)
 
 
 def test_all_targets_failure_counts_each_upstream_error(usage_env):
@@ -933,7 +952,7 @@ def test_local_request_validation_does_not_reduce_availability(usage_env):
     assert_split(overview, terminal=2, failed=1, upstream=2, errors=1)
     series = stats(env, "series")
     assert sum(row["request_count"] for row in series) == 3
-    for field, expected in zip(SPLIT_COUNTERS, (2, 1, 2, 1)):
+    for field, expected in zip(SPLIT_COUNTERS, (2, 1, 2, 1, 2, 0), strict=True):
         assert sum(row[field] for row in series) == expected
 
 
@@ -1173,8 +1192,8 @@ def test_rpm_unsent_request_contributes_no_upstream_attempt(usage_env):
 def test_split_counters_survive_retention_expiry_and_clear(usage_env):
     env = usage_env
     model = "usage-retention-split"
-    _, key = _create_route(env, model, retry_budget=0)
-    status, body = _proxy(env, key, model, [{"role": "user", "content": "known"}])
+    _, key = _create_route(env, model, retry_budget=1)
+    status, body = _proxy(env, key, model, [{"role": "user", "content": "recovered"}])
     assert status == 200, body
     status, body = _proxy(env, key, model, [{"role": "user", "content": "failed"}])
     assert status >= 500, body
@@ -1184,7 +1203,7 @@ def test_split_counters_survive_retention_expiry_and_clear(usage_env):
 
     before = _wait_for("split counters before observation expiry", ready_counters)
     assert before["total_requests"] == 2
-    assert_split(before, terminal=2, failed=1, upstream=2, errors=1)
+    assert_split(before, terminal=2, failed=1, upstream=4, errors=3, recovered=1)
 
     age_observations(env)
     set_retention_days(env, 1)
@@ -1202,8 +1221,8 @@ def test_split_counters_survive_retention_expiry_and_clear(usage_env):
 def test_coarsened_series_sums_split_counters_without_error_count(usage_env):
     env = usage_env
     model = "usage-coarse-split"
-    _, key = _create_route(env, model, retry_budget=0)
-    status, body = _proxy(env, key, model, [{"role": "user", "content": "known"}])
+    _, key = _create_route(env, model, retry_budget=1)
+    status, body = _proxy(env, key, model, [{"role": "user", "content": "recovered"}])
     assert status == 200, body
     status, body = _proxy(env, key, model, [{"role": "user", "content": "failed"}])
     assert status >= 500, body
@@ -1215,7 +1234,7 @@ def test_coarsened_series_sums_split_counters_without_error_count(usage_env):
     series = stats(env, "series", bucket=900, **query)
     assert 1 <= len(series) <= 512
     assert overview["total_requests"] == 2
-    assert_split(overview, terminal=2, failed=1, upstream=2, errors=1)
+    assert_split(overview, terminal=2, failed=1, upstream=4, errors=3, recovered=1)
     assert "error_count" not in overview
     for field in SPLIT_COUNTERS:
         assert sum(row[field] for row in series) == overview[field]
@@ -1223,6 +1242,6 @@ def test_coarsened_series_sums_split_counters_without_error_count(usage_env):
     assert all("error_count" not in row for row in series)
     rows = stats(env, "providers", **query)
     assert len(rows) == 1
-    assert rows[0]["upstream_request_count"] == 2
-    assert rows[0]["upstream_error_count"] == 1
+    assert rows[0]["upstream_request_count"] == 4
+    assert rows[0]["upstream_error_count"] == 3
     assert "request_count" not in rows[0] and "error_count" not in rows[0]

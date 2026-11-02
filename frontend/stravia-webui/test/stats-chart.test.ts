@@ -75,84 +75,134 @@ describe('latency chart', () => {
 describe('availability chart', () => {
   const row = (
     bucket_start: number,
-    terminal_request_count: number,
-    failed_request_count: number,
-    upstream_request_count: number,
-    upstream_error_count: number,
-  ) => ({ bucket_start, terminal_request_count, failed_request_count, upstream_request_count, upstream_error_count })
+    counts: {
+      terminal: number
+      failed: number
+      recovered: number
+      known: number
+      upstream: number
+      upstreamErrors: number
+    },
+  ) => ({
+    bucket_start,
+    terminal_request_count: counts.terminal,
+    failed_request_count: counts.failed,
+    recovered_request_count: counts.recovered,
+    recovery_known_request_count: counts.known,
+    upstream_request_count: counts.upstream,
+    upstream_error_count: counts.upstreamErrors,
+  })
 
-  test('missing buckets stay null so both lines break instead of claiming 100%', () => {
+  test('missing buckets stay null so both lines and the recovery band break', () => {
     const start = Date.UTC(2026, 8, 2, 18, 15)
-    const points = buildAvailabilityChart([row(start, 4, 1, 8, 2), row(start + 8_100_000, 4, 0, 4, 4)], 2_700_000)
+    const points = buildAvailabilityChart(
+      [
+        row(start, { terminal: 4, failed: 1, recovered: 1, known: 4, upstream: 8, upstreamErrors: 2 }),
+        row(start + 8_100_000, { terminal: 4, failed: 0, recovered: 3, known: 4, upstream: 4, upstreamErrors: 4 }),
+      ],
+      2_700_000,
+    )
 
     expect(points).toEqual([
       {
         bucket: new Date(start),
         terminalRequests: 4,
         failedRequests: 1,
+        recoveredRequests: 1,
+        recoveryKnownRequests: 4,
         upstreamRequests: 8,
         upstreamErrors: 2,
-        client: 0.75,
-        upstream: 0.75,
+        final: 0.75,
+        firstPass: 0.5,
+        recoveryGainPoints: 25,
+        upstreamAttemptSuccess: 0.75,
       },
       {
         bucket: new Date(start + 2_700_000),
         terminalRequests: 0,
         failedRequests: 0,
+        recoveredRequests: 0,
+        recoveryKnownRequests: 0,
         upstreamRequests: 0,
         upstreamErrors: 0,
-        client: null,
-        upstream: null,
+        final: null,
+        firstPass: null,
+        recoveryGainPoints: null,
+        upstreamAttemptSuccess: null,
       },
       {
         bucket: new Date(start + 5_400_000),
         terminalRequests: 0,
         failedRequests: 0,
+        recoveredRequests: 0,
+        recoveryKnownRequests: 0,
         upstreamRequests: 0,
         upstreamErrors: 0,
-        client: null,
-        upstream: null,
+        final: null,
+        firstPass: null,
+        recoveryGainPoints: null,
+        upstreamAttemptSuccess: null,
       },
       {
         bucket: new Date(start + 8_100_000),
         terminalRequests: 4,
         failedRequests: 0,
+        recoveredRequests: 3,
+        recoveryKnownRequests: 4,
         upstreamRequests: 4,
         upstreamErrors: 4,
-        client: 1,
-        upstream: 0,
+        final: 1,
+        firstPass: 0.25,
+        recoveryGainPoints: 75,
+        upstreamAttemptSuccess: 0,
       },
     ])
   })
 
-  test('a zero denominator is unknown while a zero numerator is a real 100%', () => {
+  test('a zero denominator is unknown while zero recovery keeps both lines together', () => {
     const start = Date.UTC(2026, 8, 2, 18)
     const points = buildAvailabilityChart(
-      [row(start, 0, 0, 3, 0), row(start + HOUR_MS, 5, 0, 0, 0), row(start + 2 * HOUR_MS, 5, 5, 3, 3)],
+      [
+        row(start, { terminal: 0, failed: 0, recovered: 0, known: 0, upstream: 3, upstreamErrors: 0 }),
+        row(start + HOUR_MS, { terminal: 5, failed: 0, recovered: 0, known: 5, upstream: 0, upstreamErrors: 0 }),
+        row(start + 2 * HOUR_MS, { terminal: 5, failed: 5, recovered: 0, known: 5, upstream: 3, upstreamErrors: 3 }),
+        row(start + 3 * HOUR_MS, { terminal: 4, failed: 1, recovered: 1, known: 3, upstream: 4, upstreamErrors: 0 }),
+      ],
       HOUR_MS,
     )
 
-    expect(points.map((point) => [point.client, point.upstream])).toEqual([
-      [null, 1],
-      [1, null],
-      [0, 0],
+    expect(
+      points.map((point) => [point.final, point.firstPass, point.recoveryGainPoints, point.upstreamAttemptSuccess]),
+    ).toEqual([
+      [null, null, null, 1],
+      [1, 1, 0, null],
+      [0, 0, 0, 0],
+      [0.75, null, null, 1],
     ])
   })
 
   test('the window aggregate divides overview totals instead of averaging buckets', () => {
     const start = Date.UTC(2026, 8, 2, 18)
-    const points = buildAvailabilityChart([row(start, 1, 0, 1, 0), row(start + HOUR_MS, 9, 1, 9, 0)], HOUR_MS)
+    const points = buildAvailabilityChart(
+      [
+        row(start, { terminal: 1, failed: 0, recovered: 0, known: 1, upstream: 1, upstreamErrors: 0 }),
+        row(start + HOUR_MS, { terminal: 9, failed: 1, recovered: 2, known: 9, upstream: 9, upstreamErrors: 0 }),
+      ],
+      HOUR_MS,
+    )
 
-    expect(points.map((point) => point.client)).toEqual([1, 1 - 1 / 9])
-    // 聚合只读概览的整数总量：1 − 1/10，而不是桶均值；请求总数取概览而不是折线求和。
+    expect(points.map((point) => point.final)).toEqual([1, 1 - 1 / 9])
+    // 聚合只读概览的整数总量：最终 9/10、一次通过 7/10；请求总数取概览而不是折线求和。
     expect(
       buildAvailabilitySummary({
         terminal_request_count: 10,
         failed_request_count: 1,
+        recovered_request_count: 2,
+        recovery_known_request_count: 10,
         upstream_request_count: 10,
         upstream_error_count: 0,
       }),
-    ).toEqual({ client: 0.9, upstream: 1 })
+    ).toEqual({ final: 0.9, firstPass: 0.7 })
   })
 
   test('an empty window has no points and neutral overview aggregates', () => {
@@ -161,18 +211,34 @@ describe('availability chart', () => {
       buildAvailabilitySummary({
         terminal_request_count: 0,
         failed_request_count: 0,
+        recovered_request_count: 0,
+        recovery_known_request_count: 0,
         upstream_request_count: 0,
         upstream_error_count: 0,
       }),
-    ).toEqual({ client: null, upstream: null })
+    ).toEqual({ final: null, firstPass: null })
+    // 只有上游尝试、没有已终结请求时，两条请求线仍然未知。
     expect(
       buildAvailabilitySummary({
         terminal_request_count: 0,
         failed_request_count: 0,
+        recovered_request_count: 0,
+        recovery_known_request_count: 0,
         upstream_request_count: 4,
         upstream_error_count: 1,
       }),
-    ).toEqual({ client: null, upstream: 0.75 })
+    ).toEqual({ final: null, firstPass: null })
+    // 恢复判定未覆盖全部已终结请求：最终成功率照常，一次通过率保持未知。
+    expect(
+      buildAvailabilitySummary({
+        terminal_request_count: 10,
+        failed_request_count: 1,
+        recovered_request_count: 2,
+        recovery_known_request_count: 9,
+        upstream_request_count: 10,
+        upstream_error_count: 0,
+      }),
+    ).toEqual({ final: 0.9, firstPass: null })
   })
 })
 

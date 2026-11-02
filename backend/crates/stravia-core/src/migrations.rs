@@ -843,9 +843,9 @@ mod tests {
         interrupted.rollback().await.unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
-        let totals: (i64,i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(error_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
+        let totals: (i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
             .fetch_one(&pool).await.unwrap();
-        assert_eq!(totals, (2, 1, 8, 0, 1, 2));
+        assert_eq!(totals, (2, 8, 0, 1, 2));
         let historical: Vec<(String,String)> = sqlx::query_as("SELECT entity_id,label FROM stats_usage_buckets WHERE scope='model' ORDER BY identity,bucket_start")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(
@@ -860,7 +860,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let after: (i64,i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(error_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
+        let after: (i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(after, totals);
         let checkpoints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_usage_checkpoints")
@@ -909,9 +909,9 @@ mod tests {
         interrupted.rollback().await.unwrap();
         migrate_postgres(&pool, None).await.unwrap();
         migrate_postgres(&pool, None).await.unwrap();
-        let totals: (i64,i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(error_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
+        let totals: (i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
             .fetch_one(&pool).await.unwrap();
-        assert_eq!(totals, (2, 1, 8, 0, 1, 2));
+        assert_eq!(totals, (2, 8, 0, 1, 2));
         let historical: Vec<(String,String)> = sqlx::query_as("SELECT entity_id,label FROM stats_usage_buckets WHERE scope='model' ORDER BY identity,bucket_start")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(
@@ -926,7 +926,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let after: (i64,i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(error_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
+        let after: (i64,i64,i64,i64,i64) = sqlx::query_as("SELECT CAST(SUM(request_count) AS BIGINT),CAST(SUM(input_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_sum) AS BIGINT),CAST(SUM(output_tokens_known) AS BIGINT),CAST(SUM(successful_attempt_count) AS BIGINT) FROM stats_usage_buckets WHERE scope='global'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(after, totals);
         let checkpoints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_usage_checkpoints")

@@ -623,6 +623,8 @@ fn empty_series_bucket(bucket_start: i64, bucket_ms: i64) -> StatsSeries {
         request_count: 0,
         terminal_request_count: 0,
         failed_request_count: 0,
+        recovered_request_count: 0,
+        recovery_known_request_count: 0,
         upstream_request_count: 0,
         upstream_error_count: 0,
         total_input_tokens: None,

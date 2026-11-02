@@ -28,6 +28,8 @@ async function stubStats(page: Page, actualCost?: { amount: string; known_count:
             total_requests: 128,
             terminal_request_count: 128,
             failed_request_count: 2,
+            recovered_request_count: 0,
+            recovery_known_request_count: 128,
             upstream_request_count: 128,
             upstream_error_count: 2,
             total_input_tokens: 600,
@@ -65,6 +67,8 @@ async function stubStats(page: Page, actualCost?: { amount: string; known_count:
           request_count: 1,
           terminal_request_count: 1,
           failed_request_count: 0,
+          recovered_request_count: 0,
+          recovery_known_request_count: 1,
           upstream_request_count: 1,
           upstream_error_count: 0,
           total_input_tokens: known ? tokens : null,
@@ -310,6 +314,8 @@ for (const scenario of [
             total_requests: 1,
             terminal_request_count: 1,
             failed_request_count: 0,
+            recovered_request_count: 0,
+            recovery_known_request_count: 1,
             upstream_request_count: 1,
             upstream_error_count: 0,
             total_input_tokens: scenario.input,
@@ -411,7 +417,7 @@ async function usageBoxes(page: Page) {
     page: (await page.locator('.route-page').boundingBox())!,
     activity: await box('Token activity'),
     latency: await box('Latency and speed'),
-    availability: await box('Availability'),
+    availability: await box('Request success'),
     breakdown: await box('Token breakdown'),
     models: await box('Models'),
     providers: await box('Providers'),
@@ -450,7 +456,7 @@ test.describe('usage workspace layout', () => {
       .evaluate((el) => el.getBoundingClientRect().width)
     expect(cellSize).toBeLessThanOrEqual(16)
 
-    // Breakdown donuts stay 10-12rem; the availability trend takes the width instead.
+    // Breakdown donuts stay 10-12rem; the request success trend takes the width instead.
     for (const [name, label] of [
       ['Token breakdown', 'Token breakdown'],
       ['Models', 'Share of all requests.'],
@@ -461,7 +467,7 @@ test.describe('usage workspace layout', () => {
       expect(donutBox.width).toBeLessThanOrEqual(12 * rem + 1)
       expect(Math.abs(donutBox.width - donutBox.height)).toBeLessThanOrEqual(1)
     }
-    const availabilityChart = page.getByLabel('Availability chart', { exact: true })
+    const availabilityChart = page.getByLabel('Request success chart', { exact: true })
     await expect(availabilityChart).toBeVisible()
     expect(Math.abs((await availabilityChart.boundingBox())!.height - 10 * rem)).toBeLessThanOrEqual(1)
     expect(boxes.availability.width).toBeGreaterThan(boxes.breakdown.width * 2)

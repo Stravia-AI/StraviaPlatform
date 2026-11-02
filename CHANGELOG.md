@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- The existing availability chart now compares request-level final and first-pass success rates on one fixed 0–100% axis. The shaded difference shows automatic recovery contribution; the tooltip includes recovered requests and percentage-point lift. Per-attempt upstream requests, errors and success rate remain in the same chart's tooltip. Cancelled, interrupted, in-progress and rejected requests remain excluded.
+- Stats overview and series add `recovered_request_count` and `recovery_known_request_count`. SQLite/PostgreSQL migration `0036_request_recovery` persists request-level recovery and coverage in the existing durable stats pipeline and backfills only provable retained facts. Missing historical evidence stays unknown rather than implying no retries; observation cleanup does not remove confirmed totals. The same migration drops the unused legacy `error_count` column from the stats tables; it was no longer exposed or read. Stats triggers now refresh only the checkpoint rows a source revision actually changes and carry the difference into the long-term buckets, instead of subtracting, deleting, and re-inserting every row on each revision; the stored totals are unchanged. Back up the database before upgrading.
+
 ## [0.6.0] - 2026-10-30
 
 ### Verification

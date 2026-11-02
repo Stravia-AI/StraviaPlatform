@@ -61,6 +61,8 @@ test.beforeEach(async ({ page }) => {
             total_requests: 50,
             terminal_request_count: 50,
             failed_request_count: 0,
+            recovered_request_count: 0,
+            recovery_known_request_count: 50,
             upstream_request_count: 50,
             upstream_error_count: 0,
             total_input_tokens: 600,

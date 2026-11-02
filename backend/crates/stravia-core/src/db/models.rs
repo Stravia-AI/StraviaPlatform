@@ -991,6 +991,11 @@ pub struct StatsOverview {
     pub terminal_request_count: i64,
     /// 已终结请求中最终失败的数量；取消、断线与进行中不计入。
     pub failed_request_count: i64,
+    /// 已终结请求中因同一 Model Turn 内先失败、后成功而自动恢复的请求数；只计一次。
+    pub recovered_request_count: i64,
+    /// 恢复覆盖已知的已终结请求数：失败请求天然已知未恢复；
+    /// 成功请求只有在尝试明细完整或已有恢复证据时才计入，缺失明细保持未知。
+    pub recovery_known_request_count: i64,
     /// 上游请求：已完成尝试 + 上游错误；本地失败与未知来源不计入。
     pub upstream_request_count: i64,
     /// 上游错误：失败且错误来源为上游的 Target 尝试。
@@ -1020,6 +1025,10 @@ pub struct StatsSeries {
     pub terminal_request_count: i64,
     /// 本桶内已终结请求中最终失败的数量。
     pub failed_request_count: i64,
+    /// 本桶内因同一 Model Turn 内先失败、后成功而自动恢复的请求数。
+    pub recovered_request_count: i64,
+    /// 本桶内恢复覆盖已知的已终结请求数；缺失明细保持未知。
+    pub recovery_known_request_count: i64,
     /// 本桶内上游请求数（已完成尝试 + 上游错误）。
     pub upstream_request_count: i64,
     /// 本桶内失败且来源为上游的 Target 尝试数。

@@ -400,8 +400,8 @@ const hasLatencyMetrics = $derived(latencyChart.some((point) => point.firstToken
 const availabilityChart = $derived(
   buildAvailabilityChart(seriesStats, seriesStats[0]?.bucket_ms ?? seriesBucketSeconds * 1_000),
 )
-const availabilitySummary = $derived(overview ? buildAvailabilitySummary(overview) : { client: null, upstream: null })
-const hasAvailability = $derived(availabilityChart.some((point) => point.client != null || point.upstream != null))
+const availabilitySummary = $derived(overview ? buildAvailabilitySummary(overview) : { final: null, firstPass: null })
+const hasAvailability = $derived(availabilityChart.some((point) => point.final != null))
 interface PieSlice {
   key: string
   label: string
@@ -685,7 +685,7 @@ function retryAll(): void {
         </div>{:else}{@render stateLine(m.cost_series_empty())}{/if}
     </section>
 
-    <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给可用率趋势。 -->
+    <!-- 占比分区：环形图与图例保持 10–12rem 的有界尺寸，宽度交给请求成功率趋势。 -->
     <div
       class="grid gap-8 @min-[36rem]/route-page:grid-cols-2 @min-[80rem]/route-page:grid-cols-[minmax(0,1fr)_minmax(15rem,22rem)_minmax(15rem,22rem)] @min-[80rem]/route-page:gap-x-6">
       <section

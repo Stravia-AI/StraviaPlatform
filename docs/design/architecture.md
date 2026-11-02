@@ -717,7 +717,13 @@ SQLite 与 PostgreSQL 的 Interaction usage 汇总从该 Interaction 的索引 R
 
 长期汇总保存指标的已知计数、有效样本和分子/分母，保留未知、明确零、净输入及成功 attempt Token 口径；跨桶重新计算平均值和加权 TPS，不平均均值。全局与 Provider 保留请求级去重，模型和 API Key 保留 Model Turn 级计数；跨 Provider 分类不必可加为全局请求数。维度以稳定内部身份和非秘密展示快照归属，无配置级联外键；更名不拆分、同名重建不合并，删除后标记 `deleted`，历史 `model_id`/`provider_id` 可空，不保留凭据或失效编辑能力。无法证明旧实体归属时不按名称猜测。
 
-ADR-0083 起统计另存四个可用率计数：全局的已终结请求数与失败的请求数按运行终态计算，排除取消、断线与上游发送前被平台校验拒绝的错误请求，即使已创建 Target 尝试记录也不例外；无可用 Target、额度暂停等服务失败仍计入客户端可用率。全局与供应商的上游请求数与上游错误数按 Target attempt 计算（上游请求 = 已完成尝试 + 来源为上游的失败尝试，上游错误 = 来源为上游的失败尝试）。本地准备失败、未发送、取消与来源未知的尝试既不进上游分子也不进上游分母。供应商统计只暴露上游请求与上游错误，旧 `request_count`/`error_count` 存储列保留但不再对外；粗化展示桶对四个计数求和，比率由前端用总量相除。上游尝试沿用所属 Model Turn 的起点分桶。
+ADR-0083 起统计独立保存请求终态与上游尝试计数：全局的已终结请求数与失败的请求数按运行终态计算，排除取消、断线与上游发送前被平台校验拒绝的错误请求，即使已创建 Target 尝试记录也不例外；无可用 Target、额度暂停等服务失败仍降低最终成功率。全局与供应商的上游请求数与上游错误数按 Target attempt 计算（上游请求 = 已完成尝试 + 来源为上游的失败尝试，上游错误 = 来源为上游的失败尝试）。本地准备失败、未发送、取消与来源未知的尝试既不进上游分子也不进上游分母。供应商统计只暴露上游请求与上游错误；`request_count` 存储列仍是总览、序列、模型与 API Key 请求数的来源，不对供应商暴露；旧口径 `error_count` 存储列已由 `0036_request_recovery` 回收；上游尝试沿用所属 Model Turn 的起点分桶。
+
+迁移 `0036_request_recovery` 沿用同一 source/checkpoint/delta 链路，为全局请求增加 `recovered_request_count` 与 `recovery_known_request_count`；两者和已终结请求数一样，按 Inference Run 开始时间分桶，每个请求最多贡献一次。恢复成功需要同一 Model Turn 内先失败、后成功的自动重试或切换证据，且所属请求最终成功；普通多轮成功、另一次客户端请求和最终失败不算恢复成功。最终失败的请求可确定没有恢复成功；成功请求缺少完整观察事实且没有恢复证据时保持未知。总览与序列返回两个新增计数，粗化时先分别求和。最终成功率为 `(terminal_request_count - failed_request_count) / terminal_request_count`；只有恢复判定覆盖全部已终结请求时，才显示一次通过率与恢复贡献，分别为 `(terminal_request_count - failed_request_count - recovered_request_count) / terminal_request_count` 和 `recovered_request_count / terminal_request_count`。后者以百分点表达，不与按尝试计算的上游调用成功率相减。
+
+同一迁移把 `0018` 起“整行扣除旧 checkpoint、删除、再插入”的刷新改为差量刷新：来源触发器只对该来源仍产出的行执行 `INSERT … ON CONFLICT DO UPDATE … WHERE` 且仅在指标实际变化时写入，不再产出的行单独删除；checkpoint 的 UPDATE/DELETE 触发器把 `NEW − OLD` 或被撤销的 `OLD` 结转进长期桶。来源行已被保留期清理删除时 reclaim 触发器删除 checkpoint 不扣桶，因此历史总量仍保留。长期桶的结果与整行替换一致，但每个来源每次修订只改写变化的行；恢复覆盖由 writer 刷新 checkpoint，桶随触发器结转，不再由应用层同时写两处。
+
+观察缺口的恢复覆盖由 writer 显式刷新，不挂在缺口标记的联动触发器上。正常事件在同一事实事务内更新覆盖；异步写失败的诊断缺口先独立提交，再以独立事务更新长期桶与 checkpoint，避免统计故障抹掉故障本身。覆盖刷新失败时保留已提交的缺口标记并拒绝清理；可重算的覆盖成功刷新后不新增粘性故障状态，也不阻塞正常推理或改变已交付结果。
 
 升级在同一 SQLx 迁移事务安装结构并回填仍存在且可判定的事实，迁移成功后才开放统计源；中断回滚后可重入，不存在异步补账窗口。已删除或从未保存的历史不可恢复，不能补零、解析 Debug 或调用上游重放；清理后不能由汇总追溯已删对话或恢复秒级分布。详细来源/checkpoint 生命周期与统计页操作见 [Interaction Observation 设计](interaction-observation.md#611-独立长期-stats-usage)。
 

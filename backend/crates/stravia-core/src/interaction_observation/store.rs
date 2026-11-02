@@ -706,7 +706,25 @@ impl ObservationStore {
                     .rows_affected()
             }
         };
-        Ok(affected != 0)
+        if affected == 0 {
+            return Ok(false);
+        }
+        // 缺口先提交，避免统计写故障抹掉故障本身；投影失败仍向上传播，清理屏障不能放行。
+        match self {
+            Self::Sqlite(pool, _) => {
+                let mut connection = pool.acquire_write().await?;
+                let mut tx = connection.begin().await?;
+                crate::storage::sql::recovery::refresh_sqlite(&mut tx, interaction_id).await?;
+                tx.commit().await?;
+                connection.finish().await?;
+            }
+            Self::Postgres(pool, _) => {
+                let mut tx = pool.begin().await?;
+                crate::storage::sql::recovery::refresh_postgres(&mut tx, interaction_id).await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(true)
     }
 
     #[tracing::instrument(
@@ -1906,6 +1924,7 @@ impl ObservationStore {
                     .bind(interaction_id)
                     .execute(&mut *tx)
                     .await?;
+                crate::storage::sql::recovery::refresh_sqlite(&mut tx, interaction_id).await?;
                 recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
                 insert_event_sqlite(
                     &mut tx,
@@ -1987,6 +2006,7 @@ impl ObservationStore {
                     .bind(interaction_id)
                     .execute(&mut *tx)
                     .await?;
+                crate::storage::sql::recovery::refresh_postgres(&mut tx, interaction_id).await?;
                 recompute_status_postgres(&mut tx, interaction_id, seq).await?;
                 insert_event_postgres(
                     &mut tx,
@@ -2994,6 +3014,7 @@ async fn apply_sqlite(
                 .bind(iid)
                 .execute(&mut **tx)
                 .await?;
+            crate::storage::sql::recovery::refresh_sqlite(tx, iid).await?;
         }
         _ => {}
     }
@@ -3150,6 +3171,7 @@ async fn apply_postgres(
                 .bind(iid)
                 .execute(&mut **tx)
                 .await?;
+            crate::storage::sql::recovery::refresh_postgres(tx, iid).await?;
         }
         _ => {}
     }

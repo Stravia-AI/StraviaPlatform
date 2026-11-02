@@ -96,6 +96,8 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT (COALESCE(SUM(request_count), 0))::BIGINT AS total_requests,
        (COALESCE(SUM(terminal_request_count), 0))::BIGINT AS terminal_request_count,
        (COALESCE(SUM(failed_request_count), 0))::BIGINT AS failed_request_count,
+       (COALESCE(SUM(recovered_request_count), 0))::BIGINT AS recovered_request_count,
+       (COALESCE(SUM(recovery_known_request_count), 0))::BIGINT AS recovery_known_request_count,
        (COALESCE(SUM(upstream_request_count), 0))::BIGINT AS upstream_request_count,
        (COALESCE(SUM(upstream_error_count), 0))::BIGINT AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN (SUM(input_tokens_sum))::BIGINT END AS total_input_tokens,
@@ -142,6 +144,8 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT (bucket_start - $4) / $3 * $3 + $4 AS bucket_start, $3 AS bucket_ms, (COALESCE(SUM(request_count), 0))::BIGINT AS request_count,
        (COALESCE(SUM(terminal_request_count), 0))::BIGINT AS terminal_request_count,
        (COALESCE(SUM(failed_request_count), 0))::BIGINT AS failed_request_count,
+       (COALESCE(SUM(recovered_request_count), 0))::BIGINT AS recovered_request_count,
+       (COALESCE(SUM(recovery_known_request_count), 0))::BIGINT AS recovery_known_request_count,
        (COALESCE(SUM(upstream_request_count), 0))::BIGINT AS upstream_request_count,
        (COALESCE(SUM(upstream_error_count), 0))::BIGINT AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN (SUM(input_tokens_sum))::BIGINT END AS total_input_tokens,
@@ -356,6 +360,64 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_attempt_with_status(
+        pool: &Pool<Postgres>,
+        id: &str,
+        turn_id: &str,
+        run_id: &str,
+        started_at: i64,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        let finished_at = (status != "running").then_some(started_at + 10);
+        sqlx::query(
+            "INSERT INTO target_attempt_observations
+             (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(run_id)
+        .bind(run_id)
+        .bind("target")
+        .bind("provider")
+        .bind("Provider")
+        .bind("upstream")
+        .bind("responses")
+        .bind(status)
+        .bind(started_at)
+        .bind(finished_at)
+        .bind(finished_at.map(|_| 10_i64))
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_model_turn(
+        pool: &Pool<Postgres>,
+        id: &str,
+        run_id: &str,
+        started_at: i64,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        let finished_at = (status != "running").then_some(started_at + 10);
+        sqlx::query(
+            "INSERT INTO model_turn_observations
+             (id,run_id,interaction_id,route_id,status,started_at,finished_at,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,0)",
+        )
+        .bind(id)
+        .bind(run_id)
+        .bind(run_id)
+        .bind("route")
+        .bind(status)
+        .bind(started_at)
+        .bind(finished_at)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn verify_final_failure_counts(pool: &Pool<Postgres>) -> anyhow::Result<()> {
         let baseline_store = PostgresUsageStatsStore {
             pool: pool.clone(),
@@ -452,7 +514,19 @@ mod tests {
                 .await?;
             insert_failed_attempt(pool, &format!("{id}-failed"), id, recent).await?;
         }
-        insert_attempt(pool, "recovered-success", "recovered", recent, 12, Some(5)).await?;
+        insert_attempt(
+            pool,
+            "recovered-success",
+            "recovered",
+            recent + 20,
+            12,
+            Some(5),
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=$1 WHERE id='recovered'")
+            .bind(recent + 100)
+            .execute(pool)
+            .await?;
         insert_attempt(
             pool,
             "delivery-success",
@@ -511,6 +585,14 @@ mod tests {
             recent_baseline.failed_request_count + 3
         );
         assert_eq!(
+            recent_overview.recovered_request_count,
+            recent_baseline.recovered_request_count + 1
+        );
+        assert_eq!(
+            recent_overview.recovery_known_request_count,
+            recent_baseline.recovery_known_request_count + 4
+        );
+        assert_eq!(
             recent_overview.upstream_request_count,
             recent_baseline.upstream_request_count + 4
         );
@@ -530,6 +612,14 @@ mod tests {
         assert_eq!(
             all_overview.failed_request_count,
             all_baseline.failed_request_count + 4
+        );
+        assert_eq!(
+            all_overview.recovered_request_count,
+            all_baseline.recovered_request_count + 1
+        );
+        assert_eq!(
+            all_overview.recovery_known_request_count,
+            all_baseline.recovery_known_request_count + 5
         );
         assert_eq!(
             all_overview.upstream_request_count,
@@ -557,6 +647,20 @@ mod tests {
                 .map(|bucket| bucket.failed_request_count)
                 .sum::<i64>(),
             recent_baseline.failed_request_count + 3
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovered_request_count)
+                .sum::<i64>(),
+            recent_baseline.recovered_request_count + 1
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovery_known_request_count)
+                .sum::<i64>(),
+            recent_baseline.recovery_known_request_count + 4
         );
         assert_eq!(
             series
@@ -1053,10 +1157,322 @@ mod tests {
         Ok(())
     }
 
+    async fn verify_recovery_counts(pool: &Pool<Postgres>) -> anyhow::Result<()> {
+        let bucket = (10_000_000_000_i64 / BASE_BUCKET_MS) * BASE_BUCKET_MS + BASE_BUCKET_MS;
+        let selected = StatsWindow {
+            start_at: Some(bucket),
+            end_at: Some(bucket + 10 * BASE_BUCKET_MS),
+        };
+        let store = PostgresUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        };
+
+        // 同一 Model Turn 内多次失败后成功：只计一次恢复。
+        insert_turn(pool, "pg-retried", bucket + 1_000, "model", "key").await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-retried-f1",
+            "pg-retried",
+            "pg-retried",
+            bucket + 2_000,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-retried-f2",
+            "pg-retried",
+            "pg-retried",
+            bucket + 2_020,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-retried-ok",
+            "pg-retried",
+            "pg-retried",
+            bucket + 2_040,
+            "completed",
+        )
+        .await?;
+
+        // 正常多轮成功不算恢复。
+        insert_turn(pool, "pg-multi", bucket + 3_000, "model", "key").await?;
+        insert_model_turn(
+            pool,
+            "pg-multi-second",
+            "pg-multi",
+            bucket + 3_100,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-multi-a1",
+            "pg-multi",
+            "pg-multi",
+            bucket + 3_200,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-multi-a2",
+            "pg-multi-second",
+            "pg-multi",
+            bucket + 3_300,
+            "completed",
+        )
+        .await?;
+
+        // 能力降级：失败轮次之后由另一轮回答，不是路由重试。
+        insert_turn(pool, "pg-degraded", bucket + 4_000, "model", "key").await?;
+        insert_model_turn(
+            pool,
+            "pg-degraded-second",
+            "pg-degraded",
+            bucket + 4_100,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-degraded-failed",
+            "pg-degraded",
+            "pg-degraded",
+            bucket + 4_200,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-degraded-ok",
+            "pg-degraded-second",
+            "pg-degraded",
+            bucket + 4_300,
+            "completed",
+        )
+        .await?;
+
+        // 观察缺口撤销普通成功的已知覆盖；已有恢复证据仍然有效。
+        insert_turn(pool, "pg-gap-no-retry", bucket + 5_000, "model", "key").await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-gap-no-retry-ok",
+            "pg-gap-no-retry",
+            "pg-gap-no-retry",
+            bucket + 5_100,
+            "completed",
+        )
+        .await?;
+        insert_turn(pool, "pg-gap-retried", bucket + 6_000, "model", "key").await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-gap-retried-failed",
+            "pg-gap-retried",
+            "pg-gap-retried",
+            bucket + 6_100,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-gap-retried-ok",
+            "pg-gap-retried",
+            "pg-gap-retried",
+            bucket + 6_200,
+            "completed",
+        )
+        .await?;
+        // 请求在尝试完成后才终结；恢复证据必须落在终结边界内。
+        sqlx::query(
+            "UPDATE inference_run_observations SET finished_at=$1
+             WHERE id IN ('pg-retried','pg-multi','pg-degraded','pg-gap-no-retry','pg-gap-retried')",
+        )
+        .bind(bucket + 6_500)
+        .execute(pool)
+        .await?;
+
+        // 迟到的终结事实：运行中尝试使覆盖未知；终结后已知，补记成功后恢复。
+        insert_turn(pool, "pg-late", bucket + 7_000, "model", "key").await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=$1 WHERE id='pg-late'")
+            .bind(bucket + 7_150)
+            .execute(pool)
+            .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-late-pending",
+            "pg-late",
+            "pg-late",
+            bucket + 7_100,
+            "running",
+        )
+        .await?;
+        let overview = store.stats_overview(selected).await?;
+        assert_eq!(overview.terminal_request_count, 6);
+        assert_eq!(overview.recovered_request_count, 2);
+        assert_eq!(overview.recovery_known_request_count, 5);
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET status='failed',finished_at=$1,duration_ms=10
+             WHERE id='pg-late-pending'",
+        )
+        .bind(bucket + 7_110)
+        .execute(pool)
+        .await?;
+        let overview = store.stats_overview(selected).await?;
+        assert_eq!(overview.recovered_request_count, 2);
+        assert_eq!(overview.recovery_known_request_count, 6);
+        insert_attempt_with_status(
+            pool,
+            "pg-late-ok",
+            "pg-late",
+            "pg-late",
+            bucket + 7_120,
+            "completed",
+        )
+        .await?;
+        let overview = store.stats_overview(selected).await?;
+        assert_eq!(overview.terminal_request_count, 6);
+        assert_eq!(overview.failed_request_count, 0);
+        assert_eq!(overview.recovered_request_count, 3);
+        assert_eq!(overview.recovery_known_request_count, 6);
+
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE interaction_observations SET observation_gap=TRUE
+             WHERE id IN ('pg-gap-no-retry','pg-gap-retried')",
+        )
+        .execute(&mut *tx)
+        .await?;
+        for interaction in ["pg-gap-no-retry", "pg-gap-retried"] {
+            crate::storage::sql::recovery::refresh_postgres(&mut tx, interaction).await?;
+        }
+        tx.commit().await?;
+        let overview = store.stats_overview(selected).await?;
+        assert_eq!(overview.recovered_request_count, 3);
+        assert_eq!(overview.recovery_known_request_count, 5);
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE interaction_observations SET observation_gap=FALSE
+             WHERE id='pg-gap-no-retry'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        crate::storage::sql::recovery::refresh_postgres(&mut tx, "pg-gap-no-retry").await?;
+        tx.commit().await?;
+        assert_eq!(
+            store
+                .stats_overview(selected)
+                .await?
+                .recovery_known_request_count,
+            6
+        );
+        let series = store.stats_series(selected, BASE_BUCKET_MS).await?;
+        assert_eq!(
+            series
+                .iter()
+                .map(|point| point.recovered_request_count)
+                .sum::<i64>(),
+            3
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|point| point.recovery_known_request_count)
+                .sum::<i64>(),
+            6
+        );
+
+        // 保留期清理按先尝试、后运行的顺序删除，已持久化统计保持。
+        sqlx::query(
+            "DELETE FROM target_attempt_observations WHERE interaction_id='pg-gap-retried'",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("DELETE FROM inference_run_observations WHERE interaction_id='pg-gap-retried'")
+            .execute(pool)
+            .await?;
+        sqlx::query("DELETE FROM interaction_observations WHERE id='pg-gap-retried'")
+            .execute(pool)
+            .await?;
+        let retained = store.stats_overview(selected).await?;
+        assert_eq!(retained.terminal_request_count, 6);
+        assert_eq!(retained.recovered_request_count, 3);
+        assert_eq!(retained.recovery_known_request_count, 6);
+
+        // 恢复计数按运行开始时间分桶，与尝试自身时间无关。
+        insert_turn(
+            pool,
+            "pg-cross",
+            bucket - BASE_BUCKET_MS + 1_000,
+            "model",
+            "key",
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE model_turn_observations SET started_at=$1,finished_at=$2 WHERE id='pg-cross'",
+        )
+        .bind(bucket + 1_000)
+        .bind(bucket + 3_000)
+        .execute(pool)
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-cross-failed",
+            "pg-cross",
+            "pg-cross",
+            bucket + 1_000,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            pool,
+            "pg-cross-ok",
+            "pg-cross",
+            "pg-cross",
+            bucket + 2_000,
+            "completed",
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=$1 WHERE id='pg-cross'")
+            .bind(bucket + 3_000)
+            .execute(pool)
+            .await?;
+        let cross = store
+            .stats_series(
+                StatsWindow {
+                    start_at: Some(bucket - BASE_BUCKET_MS),
+                    end_at: Some(bucket + BASE_BUCKET_MS),
+                },
+                BASE_BUCKET_MS,
+            )
+            .await?;
+        let run_bucket = cross
+            .iter()
+            .find(|point| point.bucket_start == bucket - BASE_BUCKET_MS)
+            .expect("run start bucket");
+        assert_eq!(run_bucket.terminal_request_count, 1);
+        assert_eq!(run_bucket.recovered_request_count, 1);
+        assert_eq!(run_bucket.recovery_known_request_count, 1);
+        assert_eq!(run_bucket.upstream_request_count, 0);
+        assert_eq!(
+            store
+                .stats_overview(selected)
+                .await?
+                .recovered_request_count,
+            3
+        );
+        Ok(())
+    }
+
     async fn verify_fixed_range_survives_detail_cleanup(
         pool: &Pool<Postgres>,
     ) -> anyhow::Result<()> {
         verify_observation_stat_revisions(pool).await?;
+        verify_recovery_counts(pool).await?;
         let start = 9_900_000;
         let end = start + 513 * BASE_BUCKET_MS;
         let selected = StatsWindow {

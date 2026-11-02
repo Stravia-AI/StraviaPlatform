@@ -42,7 +42,13 @@ export function buildLatencyChart(rows: readonly LatencyStats[], bucketMs: numbe
 
 type AvailabilityStats = Pick<
   StatsSeries,
-  'bucket_start' | 'terminal_request_count' | 'failed_request_count' | 'upstream_request_count' | 'upstream_error_count'
+  | 'bucket_start'
+  | 'terminal_request_count'
+  | 'failed_request_count'
+  | 'recovered_request_count'
+  | 'recovery_known_request_count'
+  | 'upstream_request_count'
+  | 'upstream_error_count'
 >
 
 interface AvailabilityCounts {
@@ -50,58 +56,92 @@ interface AvailabilityCounts {
   terminalRequests: number
   /** 已终结请求中最终失败的请求。 */
   failedRequests: number
+  /** 曾因失败触发自动重试或切换、最终成功的请求。 */
+  recoveredRequests: number
+  /** 自动恢复判定已知的已终结请求数；等于 terminalRequests 时恢复统计完整。 */
+  recoveryKnownRequests: number
   /** 已得到上游判定结果的 Target 尝试。 */
   upstreamRequests: number
   /** 上游来源的终态失败尝试。 */
   upstreamErrors: number
 }
 
-export interface AvailabilityChartPoint extends AvailabilityCounts {
+interface AvailabilityRates {
+  /** 0–1 的最终成功率；分母为零表示未知，保持 null 让折线断开。 */
+  final: number | null
+  /** 0–1 的一次通过率；恢复统计不完整或分母为零时为 null。 */
+  firstPass: number | null
+  /** 最终成功率与一次通过率之差，单位为百分点；未知时为 null。 */
+  recoveryGainPoints: number | null
+}
+
+export interface AvailabilityChartPoint extends AvailabilityCounts, AvailabilityRates {
   /** Bucket 起点的真实时刻；显示文案由轴刻度与 tooltip 按需本地化格式化。 */
   bucket: Date
-  /** 0–1 的客户端可用率；分母为零表示未知，保持 null 让折线断开。 */
-  client: number | null
-  /** 0–1 的上游可用率；分母为零表示未知，保持 null 让折线断开。 */
-  upstream: number | null
+  /** 0–1 的按尝试上游成功率；分母为零表示未知，保持 null。 */
+  upstreamAttemptSuccess: number | null
 }
 
 export interface AvailabilitySummary {
-  /** 0–1 的窗口客户端可用率；分母为零表示未知。 */
-  client: number | null
-  /** 0–1 的窗口上游可用率；分母为零表示未知。 */
-  upstream: number | null
+  /** 0–1 的窗口最终成功率；分母为零表示未知。 */
+  final: number | null
+  /** 0–1 的窗口一次通过率；恢复统计不完整或分母为零时为 null。 */
+  firstPass: number | null
 }
 
 type AvailabilityTotals = Pick<
   StatsOverview,
-  'terminal_request_count' | 'failed_request_count' | 'upstream_request_count' | 'upstream_error_count'
+  | 'terminal_request_count'
+  | 'failed_request_count'
+  | 'recovered_request_count'
+  | 'recovery_known_request_count'
+  | 'upstream_request_count'
+  | 'upstream_error_count'
 >
 
-/** 可用率 = 1 − 错误 ÷ 分母。零分母表示没有可判定的流量，不能补成 100%。 */
-function availabilityRatio(errors: number, total: number): number | null {
-  return total > 0 ? 1 - errors / total : null
+/**
+ * 两条请求口径都由已终结请求集合定义：最终成功率 = (N − F) ÷ N，
+ * 一次通过率 = (N − F − R) ÷ N，差值即 R ÷ N。
+ * 仅当恢复判定覆盖全部已终结请求时才给出恢复相关读数；不 clamp、不推断缺失。
+ */
+function availabilityRates(counts: AvailabilityCounts): AvailabilityRates {
+  const total = counts.terminalRequests
+  const recoveryKnown = total > 0 && counts.recoveryKnownRequests === total
+  return {
+    final: total > 0 ? (total - counts.failedRequests) / total : null,
+    firstPass: recoveryKnown ? (total - counts.failedRequests - counts.recoveredRequests) / total : null,
+    recoveryGainPoints: recoveryKnown ? (counts.recoveredRequests / total) * 100 : null,
+  }
 }
 
 /**
  * 窗口聚合取概览的总量相除；概览与折线同一窗口，但聚合不经过桶边界。
- * 任一总量为 0 时返回 null，由界面显示为中性的“—”。
+ * 没有已终结请求时全部未知；恢复判定不完整时仅保留最终成功率。
  */
 export function buildAvailabilitySummary(totals: AvailabilityTotals): AvailabilitySummary {
-  return {
-    client: availabilityRatio(totals.failed_request_count, totals.terminal_request_count),
-    upstream: availabilityRatio(totals.upstream_error_count, totals.upstream_request_count),
+  const counts: AvailabilityCounts = {
+    terminalRequests: totals.terminal_request_count,
+    failedRequests: totals.failed_request_count,
+    recoveredRequests: totals.recovered_request_count,
+    recoveryKnownRequests: totals.recovery_known_request_count,
+    upstreamRequests: totals.upstream_request_count,
+    upstreamErrors: totals.upstream_error_count,
   }
+  const { final, firstPass } = availabilityRates(counts)
+  return { final, firstPass }
 }
 
-/** 缺桶点：两个分母都为零，两条线都在此断开。 */
+/** 缺桶点：没有已终结请求，两条线都从此断开，也不绘制差值带。 */
 const ZERO_AVAILABILITY: AvailabilityCounts = {
   terminalRequests: 0,
   failedRequests: 0,
+  recoveredRequests: 0,
+  recoveryKnownRequests: 0,
   upstreamRequests: 0,
   upstreamErrors: 0,
 }
 
-/** 从 series 构造客户端与上游两条可用率折线；缺桶补 null（断线），不插值。 */
+/** 从 series 构造最终成功率与一次通过率两条折线；缺桶补 null（断线），不插值。 */
 export function buildAvailabilityChart(rows: readonly AvailabilityStats[], bucketMs: number): AvailabilityChartPoint[] {
   const points: AvailabilityChartPoint[] = []
   let previousStart: number | undefined
@@ -110,20 +150,29 @@ export function buildAvailabilityChart(rows: readonly AvailabilityStats[], bucke
     const start = row.bucket_start
     if (previousStart != null && Number.isFinite(start)) {
       for (let missing = previousStart + bucketMs; missing < start; missing += bucketMs) {
-        points.push({ bucket: new Date(missing), ...ZERO_AVAILABILITY, client: null, upstream: null })
+        points.push({
+          bucket: new Date(missing),
+          ...ZERO_AVAILABILITY,
+          final: null,
+          firstPass: null,
+          recoveryGainPoints: null,
+          upstreamAttemptSuccess: null,
+        })
       }
     }
     const counts: AvailabilityCounts = {
       terminalRequests: row.terminal_request_count,
       failedRequests: row.failed_request_count,
+      recoveredRequests: row.recovered_request_count,
+      recoveryKnownRequests: row.recovery_known_request_count,
       upstreamRequests: row.upstream_request_count,
       upstreamErrors: row.upstream_error_count,
     }
     points.push({
       bucket: new Date(start),
       ...counts,
-      client: availabilityRatio(counts.failedRequests, counts.terminalRequests),
-      upstream: availabilityRatio(counts.upstreamErrors, counts.upstreamRequests),
+      ...availabilityRates(counts),
+      upstreamAttemptSuccess: counts.upstreamRequests > 0 ? 1 - counts.upstreamErrors / counts.upstreamRequests : null,
     })
     previousStart = Number.isFinite(start) ? start : undefined
   }

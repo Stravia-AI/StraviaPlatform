@@ -775,11 +775,21 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                 pending_text.publish_live();
                 next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
             }
-            // 仅重试缺失标记，不重放发现，避免把诊断故障转化为重复计数或执行失败。
+            // 仅重试缺失标记及可重算的覆盖，不重放发现，避免重复计数。
+            let mut gap_projection_failed = false;
             for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
-                if expires(occurred_at, retention_days.load(Ordering::Acquire)) > now()
-                    && !matches!(store.mark_observation_gap(&interaction_id).await, Ok(true))
-                {
+                if expires(occurred_at, retention_days.load(Ordering::Acquire)) <= now() {
+                    continue;
+                }
+                let persisted = match store.mark_observation_gap(&interaction_id).await {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        gap_projection_failed = true;
+                        tracing::debug!(%interaction_id, %error, "failed to refresh observation gap recovery coverage");
+                        false
+                    }
+                };
+                if !persisted {
                     pending_gaps.insert(interaction_id, occurred_at);
                 }
             }
@@ -953,7 +963,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     expired_before,
                     done,
                 }) => {
-                    if let Err(error) = ensure_usage_complete(incomplete_usage) {
+                    if let Err(error) = ensure_usage_complete(incomplete_usage || gap_projection_failed) {
                         let _ = done.send(Err(error));
                         return false;
                     }
@@ -1671,7 +1681,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         None,
                     )
                     .await;
-                    let _ = done.send(ensure_usage_complete(incomplete_usage));
+                    let _ = done.send(ensure_usage_complete(incomplete_usage || gap_projection_failed));
                 }
                 Some(WriterCommand::Shutdown(done)) => {
                     pending_text.publish_live();

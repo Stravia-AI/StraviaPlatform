@@ -10,18 +10,18 @@ let { summary }: { summary: AvailabilitySummaryData } = $props()
 const hintId = $props.id()
 </script>
 
-<div class="flex min-w-0 items-center gap-1">
+<div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
   <dl class="font-technical grid grid-cols-[minmax(0,auto)_auto] gap-x-2 gap-y-1 text-xs tabular-nums">
     <dt class="flex items-center gap-2 text-muted-foreground">
-      <span class="w-4 shrink-0 border-t-2 border-chart-2" aria-hidden="true"></span>
-      {m.stats_client_availability()}
+      <span class="w-4 shrink-0 border-t-2 border-chart-1" aria-hidden="true"></span>
+      {m.stats_final_success_rate()}
     </dt>
-    <dd class="text-right whitespace-nowrap">{summary.client == null ? '—' : formatPercent(summary.client)}</dd>
+    <dd class="text-right whitespace-nowrap">{summary.final == null ? '—' : formatPercent(summary.final)}</dd>
     <dt class="flex items-center gap-2 text-muted-foreground">
-      <span class="w-4 shrink-0 border-t-2 border-dashed border-chart-1" aria-hidden="true"></span>
-      {m.stats_upstream_availability()}
+      <span class="w-4 shrink-0 border-t-2 border-dashed border-chart-2" aria-hidden="true"></span>
+      {m.stats_first_pass_success_rate()}
     </dt>
-    <dd class="text-right whitespace-nowrap">{summary.upstream == null ? '—' : formatPercent(summary.upstream)}</dd>
+    <dd class="text-right whitespace-nowrap">{summary.firstPass == null ? '—' : formatPercent(summary.firstPass)}</dd>
   </dl>
   <Tooltip.Root delayDuration={0} disableCloseOnTriggerClick>
     <Tooltip.Trigger

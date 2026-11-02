@@ -98,6 +98,8 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             "SELECT COALESCE(SUM(request_count), 0) AS total_requests,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
        COALESCE(SUM(failed_request_count), 0) AS failed_request_count,
+       COALESCE(SUM(recovered_request_count), 0) AS recovered_request_count,
+       COALESCE(SUM(recovery_known_request_count), 0) AS recovery_known_request_count,
        COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
        COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
@@ -144,6 +146,8 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             "SELECT (bucket_start - ?4) / ?3 * ?3 + ?4 AS bucket_start, ?3 AS bucket_ms, COALESCE(SUM(request_count), 0) AS request_count,
        COALESCE(SUM(terminal_request_count), 0) AS terminal_request_count,
        COALESCE(SUM(failed_request_count), 0) AS failed_request_count,
+       COALESCE(SUM(recovered_request_count), 0) AS recovered_request_count,
+       COALESCE(SUM(recovery_known_request_count), 0) AS recovery_known_request_count,
        COALESCE(SUM(upstream_request_count), 0) AS upstream_request_count,
        COALESCE(SUM(upstream_error_count), 0) AS upstream_error_count,
        CASE WHEN SUM(input_tokens_known) > 0 THEN SUM(input_tokens_sum) END AS total_input_tokens,
@@ -358,6 +362,64 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_attempt_with_status(
+        pool: &SqlitePool,
+        id: &str,
+        turn_id: &str,
+        run_id: &str,
+        started_at: i64,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        let finished_at = (status != "running").then_some(started_at + 10);
+        sqlx::query(
+            "INSERT INTO target_attempt_observations
+             (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,last_event_sequence)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(run_id)
+        .bind(run_id)
+        .bind("target")
+        .bind("provider")
+        .bind("Provider")
+        .bind("upstream")
+        .bind("responses")
+        .bind(status)
+        .bind(started_at)
+        .bind(finished_at)
+        .bind(finished_at.map(|_| 10_i64))
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_model_turn(
+        pool: &SqlitePool,
+        id: &str,
+        run_id: &str,
+        started_at: i64,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        let finished_at = (status != "running").then_some(started_at + 10);
+        sqlx::query(
+            "INSERT INTO model_turn_observations
+             (id,run_id,interaction_id,route_id,status,started_at,finished_at,last_event_sequence)
+             VALUES (?,?,?,?,?,?,?,0)",
+        )
+        .bind(id)
+        .bind(run_id)
+        .bind(run_id)
+        .bind("route")
+        .bind(status)
+        .bind(started_at)
+        .bind(finished_at)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn management_errors_count_only_final_failed_requests() -> anyhow::Result<()> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -442,7 +504,20 @@ mod tests {
                 .await?;
             insert_failed_attempt(&pool, &format!("{id}-failed"), id, recent).await?;
         }
-        insert_attempt(&pool, "recovered-success", "recovered", recent, 12, Some(5)).await?;
+        insert_attempt(
+            &pool,
+            "recovered-success",
+            "recovered",
+            recent + 20,
+            12,
+            Some(5),
+        )
+        .await?;
+        // 请求终结边界必须晚于恢复证据的完成时间。
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='recovered'")
+            .bind(recent + 100)
+            .execute(&pool)
+            .await?;
         insert_attempt(
             &pool,
             "delivery-success",
@@ -496,6 +571,9 @@ mod tests {
         let recent_overview = store.stats_overview(window(1)).await?;
         assert_eq!(recent_overview.terminal_request_count, 4);
         assert_eq!(recent_overview.failed_request_count, 3);
+        // 只有 “recovered” 在同一 Model Turn 内先失败、后成功；最终失败不是恢复。
+        assert_eq!(recent_overview.recovered_request_count, 1);
+        assert_eq!(recent_overview.recovery_known_request_count, 4);
         // 上游请求 = 已完成尝试 + 上游错误尝试；来源未知的失败尝试不计入任何一方。
         assert_eq!(recent_overview.upstream_request_count, 4);
         assert_eq!(recent_overview.upstream_error_count, 2);
@@ -503,6 +581,8 @@ mod tests {
         let all_overview = store.stats_overview(StatsWindow::default()).await?;
         assert_eq!(all_overview.terminal_request_count, 5);
         assert_eq!(all_overview.failed_request_count, 4);
+        assert_eq!(all_overview.recovered_request_count, 1);
+        assert_eq!(all_overview.recovery_known_request_count, 5);
         assert_eq!(all_overview.upstream_request_count, 4);
         assert_eq!(all_overview.upstream_error_count, 2);
         assert_eq!(all_overview.total_requests, 13);
@@ -520,6 +600,20 @@ mod tests {
                 .map(|bucket| bucket.failed_request_count)
                 .sum::<i64>(),
             3
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovered_request_count)
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovery_known_request_count)
+                .sum::<i64>(),
+            4
         );
         assert_eq!(
             series
@@ -549,6 +643,8 @@ mod tests {
         assert_eq!(rejected_bucket.request_count, 3);
         assert_eq!(rejected_bucket.terminal_request_count, 0);
         assert_eq!(rejected_bucket.failed_request_count, 0);
+        assert_eq!(rejected_bucket.recovered_request_count, 0);
+        assert_eq!(rejected_bucket.recovery_known_request_count, 0);
         assert_eq!(rejected_bucket.upstream_request_count, 0);
         assert_eq!(rejected_bucket.upstream_error_count, 0);
         // 供应商口径只含上游请求与上游错误，不再复用请求/错误计数。
@@ -558,6 +654,367 @@ mod tests {
         let all_providers = store.stats_by_provider(StatsWindow::default()).await?;
         assert_eq!(all_providers[0].upstream_request_count, 4);
         assert_eq!(all_providers[0].upstream_error_count, 2);
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_requires_same_turn_retry_evidence() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let recent = chrono::Utc::now().timestamp_millis() - 10_000;
+
+        // 同一 Model Turn 内多次失败后成功：只计一次恢复。
+        insert_turn(&pool, "retried", recent, "model", "key").await?;
+        insert_attempt_with_status(&pool, "retried-f1", "retried", "retried", recent, "failed")
+            .await?;
+        insert_attempt_with_status(
+            &pool,
+            "retried-f2",
+            "retried",
+            "retried",
+            recent + 20,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "retried-ok",
+            "retried",
+            "retried",
+            recent + 40,
+            "completed",
+        )
+        .await?;
+
+        // 正常多轮成功：不同轮次各自成功，不算失败后的自动恢复。
+        insert_turn(&pool, "multi-round", recent, "model", "key").await?;
+        insert_model_turn(
+            &pool,
+            "multi-round-second",
+            "multi-round",
+            recent + 2,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "multi-round-a1",
+            "multi-round",
+            "multi-round",
+            recent,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "multi-round-a2",
+            "multi-round-second",
+            "multi-round",
+            recent + 3,
+            "completed",
+        )
+        .await?;
+
+        // 能力降级：前一轮失败、随后由另一轮正常回答，不是路由重试。
+        insert_turn(&pool, "degraded", recent, "model", "key").await?;
+        insert_model_turn(
+            &pool,
+            "degraded-second",
+            "degraded",
+            recent + 2,
+            "completed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "degraded-failed",
+            "degraded",
+            "degraded",
+            recent,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "degraded-ok",
+            "degraded-second",
+            "degraded",
+            recent + 3,
+            "completed",
+        )
+        .await?;
+
+        // 请求在尝试完成后才终结；终结边界之外的尝试不得补偿客户端请求。
+        sqlx::query(
+            "UPDATE inference_run_observations SET finished_at=?
+             WHERE id IN ('retried','multi-round','degraded')",
+        )
+        .bind(recent + 100)
+        .execute(&pool)
+        .await?;
+
+        let store = SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        };
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.terminal_request_count, 3);
+        assert_eq!(overview.failed_request_count, 0);
+        assert_eq!(overview.recovered_request_count, 1);
+        assert_eq!(overview.recovery_known_request_count, 3);
+        let series = store.stats_series(window(1), 900_000).await?;
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovered_request_count)
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovery_known_request_count)
+                .sum::<i64>(),
+            3
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_known_tracks_gaps_late_facts_and_retention() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let recent = chrono::Utc::now().timestamp_millis() - 10_000;
+        let store = SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        };
+
+        // 进行中的尝试使“无重试”不可判定。
+        insert_turn(&pool, "late", recent, "model", "key").await?;
+        insert_attempt_with_status(&pool, "late-pending", "late", "late", recent, "running")
+            .await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.terminal_request_count, 1);
+        assert_eq!(overview.recovery_known_request_count, 0);
+
+        // 尝试终结后明细完整：已知未恢复；随后补记同轮成功才恢复。
+        sqlx::query(
+            "UPDATE target_attempt_observations
+             SET status='failed',finished_at=?,duration_ms=10
+             WHERE id='late-pending'",
+        )
+        .bind(recent + 10)
+        .execute(&pool)
+        .await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.recovered_request_count, 0);
+        assert_eq!(overview.recovery_known_request_count, 1);
+        insert_attempt_with_status(&pool, "late-ok", "late", "late", recent + 11, "completed")
+            .await?;
+        // 请求在尝试完成后才终结；恢复证据必须落在终结边界内。
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='late'")
+            .bind(recent + 100)
+            .execute(&pool)
+            .await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.recovered_request_count, 1);
+        assert_eq!(overview.recovery_known_request_count, 1);
+
+        // 观察缺口只撤销“无重试”的已知覆盖，已有恢复证据仍然有效。
+        insert_turn(&pool, "gap-no-retry", recent + 20, "model", "key").await?;
+        insert_attempt_with_status(
+            &pool,
+            "gap-no-retry-ok",
+            "gap-no-retry",
+            "gap-no-retry",
+            recent + 21,
+            "completed",
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='gap-no-retry'")
+            .bind(recent + 100)
+            .execute(&pool)
+            .await?;
+        insert_turn(&pool, "gap-retried", recent + 30, "model", "key").await?;
+        insert_attempt_with_status(
+            &pool,
+            "gap-retried-failed",
+            "gap-retried",
+            "gap-retried",
+            recent + 31,
+            "failed",
+        )
+        .await?;
+        // 重试在同轮失败终结之后发生。
+        insert_attempt_with_status(
+            &pool,
+            "gap-retried-ok",
+            "gap-retried",
+            "gap-retried",
+            recent + 50,
+            "completed",
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='gap-retried'")
+            .bind(recent + 100)
+            .execute(&pool)
+            .await?;
+
+        // 中断的尝试说明明细不完整：不能当作“无重试”的已知覆盖。
+        insert_turn(&pool, "interrupted", recent + 50, "model", "key").await?;
+        insert_attempt_with_status(
+            &pool,
+            "interrupted-attempt",
+            "interrupted",
+            "interrupted",
+            recent + 51,
+            "interrupted",
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='interrupted'")
+            .bind(recent + 100)
+            .execute(&pool)
+            .await?;
+
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.terminal_request_count, 4);
+        assert_eq!(overview.recovered_request_count, 2);
+        assert_eq!(overview.recovery_known_request_count, 3);
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE interaction_observations SET observation_gap=1
+             WHERE id IN ('gap-no-retry','gap-retried')",
+        )
+        .execute(&mut *tx)
+        .await?;
+        for interaction in ["gap-no-retry", "gap-retried"] {
+            crate::storage::sql::recovery::refresh_sqlite(&mut tx, interaction).await?;
+        }
+        tx.commit().await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.recovered_request_count, 2);
+        assert_eq!(overview.recovery_known_request_count, 2);
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE interaction_observations SET observation_gap=0 WHERE id='gap-no-retry'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        crate::storage::sql::recovery::refresh_sqlite(&mut tx, "gap-no-retry").await?;
+        tx.commit().await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.recovery_known_request_count, 3);
+
+        // 明细清理后已持久化的恢复统计必须保持；按保留期顺序先删尝试、再删运行与交互。
+        sqlx::query("DELETE FROM target_attempt_observations WHERE interaction_id='gap-retried'")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DELETE FROM inference_run_observations WHERE interaction_id='gap-retried'")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DELETE FROM interaction_observations WHERE id='gap-retried'")
+            .execute(&pool)
+            .await?;
+        let overview = store.stats_overview(window(1)).await?;
+        assert_eq!(overview.terminal_request_count, 4);
+        assert_eq!(overview.recovered_request_count, 2);
+        assert_eq!(overview.recovery_known_request_count, 3);
+        let series = store.stats_series(window(1), 900_000).await?;
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovered_request_count)
+                .sum::<i64>(),
+            2
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|bucket| bucket.recovery_known_request_count)
+                .sum::<i64>(),
+            3
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_counts_follow_run_start_bucket() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let bucket = now / BASE_BUCKET_MS * BASE_BUCKET_MS;
+        let previous = bucket - BASE_BUCKET_MS;
+        insert_turn(&pool, "cross-bucket", previous + 1_000, "model", "key").await?;
+        sqlx::query(
+            "UPDATE model_turn_observations SET started_at=?,finished_at=? WHERE id='cross-bucket'",
+        )
+        .bind(bucket + 1_000)
+        .bind(bucket + 3_000)
+        .execute(&pool)
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "cross-bucket-failed",
+            "cross-bucket",
+            "cross-bucket",
+            bucket + 1_000,
+            "failed",
+        )
+        .await?;
+        insert_attempt_with_status(
+            &pool,
+            "cross-bucket-ok",
+            "cross-bucket",
+            "cross-bucket",
+            bucket + 2_000,
+            "completed",
+        )
+        .await?;
+        sqlx::query("UPDATE inference_run_observations SET finished_at=? WHERE id='cross-bucket'")
+            .bind(bucket + 3_000)
+            .execute(&pool)
+            .await?;
+        let store = SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        };
+        let series = store
+            .stats_series(
+                StatsWindow {
+                    start_at: Some(previous),
+                    end_at: Some(bucket + BASE_BUCKET_MS),
+                },
+                BASE_BUCKET_MS,
+            )
+            .await?;
+        let run_bucket = series
+            .iter()
+            .find(|bucket| bucket.bucket_start == previous)
+            .expect("run start bucket");
+        assert_eq!(run_bucket.terminal_request_count, 1);
+        assert_eq!(run_bucket.recovered_request_count, 1);
+        assert_eq!(run_bucket.recovery_known_request_count, 1);
+        assert_eq!(run_bucket.upstream_request_count, 0);
+        let attempt_bucket = series
+            .iter()
+            .find(|point| point.bucket_start == bucket)
+            .expect("attempt bucket");
+        assert_eq!(attempt_bucket.terminal_request_count, 0);
+        assert_eq!(attempt_bucket.recovered_request_count, 0);
+        assert_eq!(attempt_bucket.recovery_known_request_count, 0);
         pool.close().await;
         Ok(())
     }

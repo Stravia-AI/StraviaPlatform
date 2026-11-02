@@ -39,11 +39,13 @@ def historical_money(view):
 
 def overview(requests=0, terminal=0, failed=0, upstream=0, upstream_errors=0,
              input_tokens=None, output_tokens=None, cache_read=None,
-             cache_write=None, reasoning=None, duration=None, tps=None):
+             cache_write=None, reasoning=None, duration=None, tps=None,
+             recovery_known=0, recovered=0):
     return {
         **historical_money("overview"),
         "total_requests": requests,
         "terminal_request_count": terminal, "failed_request_count": failed,
+        "recovery_known_request_count": recovery_known, "recovered_request_count": recovered,
         "upstream_request_count": upstream, "upstream_error_count": upstream_errors,
         "total_input_tokens": input_tokens, "total_output_tokens": output_tokens,
         "total_cache_read_tokens": cache_read, "total_cache_write_tokens": cache_write,
@@ -74,9 +76,9 @@ def assert_no_legacy_error_count(actual):
 def assert_retained_contract(env, actual):
     # One completed client request, two model turns, and one admission failure.
     # Known output zero is not erased by the other wholly unknown attempt.
-    assert actual["overview"] == overview(2, 1, 0, 2, 0, 8, 0, 2, duration=200)
+    assert actual["overview"] == overview(2, 1, 0, 2, 0, 8, 0, 2, duration=200, recovery_known=1)
     assert actual["series"] == [
-        series_bucket(900000, requests=2, terminal=1, upstream=0),
+        series_bucket(900000, requests=2, terminal=1, upstream=0, recovery_known=1),
         series_bucket(1800000, upstream=1, input_tokens=8, output_tokens=0, cache_read=2, duration=200, tps=0),
         series_bucket(2700000, upstream=1, duration=200),
     ]
@@ -319,14 +321,14 @@ def assert_classification_contract(env, actual):
     # 等待客户端与接替终态按完成类终结计入，但不计失败；带 Target 尝试的
     # model_not_found 仍是失败请求，只有未尝试的同类错误才算准入前拒绝。
     assert actual["overview"] == overview(
-        7, 5, 2, 2, 1, 8, 4, 2, 1, 0, duration=100, tps=40)
+        7, 5, 2, 2, 1, 8, 4, 2, 1, 0, duration=100, tps=40, recovery_known=3)
     assert actual["series"] == [
         series_bucket(900000, requests=1, terminal=1, upstream=1,
                       input_tokens=8, output_tokens=4, cache_read=2, cache_write=1,
-                      reasoning=0, duration=100, tps=40),
+                      reasoning=0, duration=100, tps=40, recovery_known=1),
         series_bucket(1800000, requests=1),
         series_bucket(2700000, requests=5, terminal=4, failed=2, upstream=1,
-                      upstream_errors=1, duration=100),
+                      upstream_errors=1, duration=100, recovery_known=2),
     ]
     assert actual["models"] == [{
         **historical_money("models"),

@@ -17,6 +17,10 @@ export interface StatsOverview {
   terminal_request_count: number
   /** 已终结请求中最终失败的请求。 */
   failed_request_count: number
+  /** 已终结请求中曾因失败触发自动重试或切换、最终成功的请求。 */
+  recovered_request_count: number
+  /** 自动恢复判定已知的已终结请求数；等于 terminal_request_count 时恢复统计完整。 */
+  recovery_known_request_count: number
   /** 已得到上游判定结果的 Target 尝试。 */
   upstream_request_count: number
   /** 上游来源的终态失败尝试。 */
@@ -44,6 +48,10 @@ export interface StatsSeries {
   request_count: number
   terminal_request_count: number
   failed_request_count: number
+  /** 该桶内曾因失败触发自动重试或切换、最终成功的请求。 */
+  recovered_request_count: number
+  /** 该桶内自动恢复判定已知的已终结请求数。 */
+  recovery_known_request_count: number
   upstream_request_count: number
   upstream_error_count: number
   total_input_tokens: number | null
