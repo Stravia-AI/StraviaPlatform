@@ -124,7 +124,7 @@ def test_reserved_expired_upload_grant_is_preserved_only_in_raw_wire(
 @pytest.mark.admin
 @pytest.mark.parametrize("tool,stream", [(False, False), (False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("enabled", [True, False])
-def test_restored_plaintext_is_preserved_in_diagnostics(
+def test_diagnostics_mask_restored_plaintext_but_raw_wire_preserves_it(
     admin_env: dict[str, Any], tool: bool, stream: bool, enabled: bool,
 ) -> None:
     def reply(content: str) -> str:
@@ -191,9 +191,11 @@ def test_restored_plaintext_is_preserved_in_diagnostics(
 
             detail = _wait_for("plaintext finalized trace", finished)
             assert detail["interaction"]["input_preview"] == reference.group()
-            assert SECRET in json.dumps(detail)
+            masked = "ordinary-before *** ordinary-after"
+            assert SECRET not in json.dumps(detail)
+            assert masked in json.dumps(detail)
             if not tool:
-                assert detail["interaction"]["visible_tail"] == expected
+                assert detail["interaction"]["visible_tail"] == masked
             _, _, archive = download_observation_bundle(env, detail)
             events = observation_bundle_events(archive)
             wire_records = [event for event in events if event.get("layer") == "wire"]

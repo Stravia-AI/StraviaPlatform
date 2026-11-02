@@ -8,6 +8,11 @@
 
 - Manual signed-update smoke checks were not run on Windows x86_64/ARM64 or Linux x86_64/ARM64 because this release environment has no four-platform device matrix. Automated release checks do not replace verification of native installation and relaunch behavior.
 
+### Fixed
+
+- Startup upgrades no longer repeat the completed attempt-error backfill on SQLite or PostgreSQL. Reviewed SQLite migrations that do not require table reconstruction now keep foreign keys enabled throughout, rejecting invalid writes before commit instead of scanning every history and diagnostic table twice. Reconstruction and unclassified migration SQL retain full before/after foreign-key checks; ordinary upgrades no longer audit unrelated pre-existing violations. Migration checksums, transaction durability and stored data formats are unchanged.
+- PostgreSQL request-history reads no longer fail with `503 observation_unavailable` when active credential mappings exist. The indexed existence query now decodes PostgreSQL's integer result correctly; masking and fail-closed behavior are unchanged.
+
 ### Added
 
 - Provider detail pages have a **Cost** tab beside Connection settings, Upstream models and Linked models. It shows the cost basis as a read-only summary edited in a Sheet, usage value for 24 hours, 7 days or 30 days, and the latest five basis changes.

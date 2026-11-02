@@ -281,7 +281,7 @@ impl MappingStore for SqlMappingStore {
             .await
             .map(|row| row.is_some())
             .map_err(|error| self.storage(error)),
-            Self::Postgres(pool) => sqlx::query_scalar::<_, i64>(
+            Self::Postgres(pool) => sqlx::query_scalar::<_, i32>(
                 "SELECT 1 FROM reversible_redaction_mappings WHERE expires_at > $1 LIMIT 1",
             )
             .bind(now)

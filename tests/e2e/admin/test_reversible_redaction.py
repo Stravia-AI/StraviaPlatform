@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -279,6 +280,7 @@ def test_redaction_storage_failures_never_bypass_protection(
         committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_nodes")
         published_before = mapping_sql(env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL")
         set_enabled(env, failure != "read")
+        mapping_unavailable = failure == "read"
         if failure == "read":
             # 关闭检测后，还原所需的真实存储故障也不能被当成未知引用。
             mapping_sql(env, "ALTER TABLE reversible_redaction_mappings RENAME TO redaction_e2e_unavailable")
@@ -321,6 +323,22 @@ def test_redaction_storage_failures_never_bypass_protection(
                 assert "injected" not in json.dumps(body)
                 assert SECRET not in json.dumps(body)
             assert len(received) == (1 if failure.startswith("publish") else 0)
+            if mapping_unavailable:
+                def observation_fails_closed() -> bool:
+                    status, body = http_request(
+                        "GET",
+                        f"{env['admin']}/api/v1/observations/interactions"
+                        f"?anchor_at={int(time.time() * 1000) + 1000}&window_index=0",
+                        headers=env["auth"],
+                    )
+                    if status == 200:
+                        return False
+                    assert status == 503 and body["code"] == "observation_unavailable", body
+                    return True
+
+                _wait_for("observation fails closed while mappings are unavailable", observation_fails_closed)
+                mapping_sql(env, "ALTER TABLE redaction_e2e_unavailable RENAME TO reversible_redaction_mappings")
+                mapping_unavailable = False
             _wait_for(
                 "failed protection interaction",
                 lambda: [row for row in _route_interactions(env, route) if row["status"] == "interrupted"],
@@ -348,9 +366,9 @@ def test_redaction_storage_failures_never_bypass_protection(
             ) == published_before
             assert not any(SECRET in line for line in env["logs"])
         finally:
-            if failure == "read":
+            if mapping_unavailable:
                 mapping_sql(env, "ALTER TABLE redaction_e2e_unavailable RENAME TO reversible_redaction_mappings")
-            else:
+            elif failure != "read":
                 mapping_sql(env, "DROP TRIGGER redaction_e2e_failure")
             set_enabled(env, False)
 

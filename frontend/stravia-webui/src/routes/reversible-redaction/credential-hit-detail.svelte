@@ -73,7 +73,10 @@ function selectMatch(index: number): void {
   // 持续的描边只标出「是哪一块」；再点同一行时它没有变化，用一次短脉冲确认点击生效。
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
     target.animate(
-      [{ outlineOffset: '0px', outlineColor: 'var(--primary)' }, { outlineOffset: '5px', outlineColor: 'transparent' }],
+      [
+        { outlineOffset: '0px', outlineColor: 'var(--primary)' },
+        { outlineOffset: '5px', outlineColor: 'transparent' },
+      ],
       { duration: 480, easing: 'cubic-bezier(0.2, 0, 0, 1)' },
     )
   }
@@ -172,8 +175,7 @@ function selectMatch(index: number): void {
           <span
             class={segment.kind === 'hit' ? 'entry-hit' : 'entry-match'}
             data-match-index={segment.matchIndex}
-            data-active={segment.matchIndex === activeSegment ? 'true' : undefined}
-            >{segment.text}</span>
+            data-active={segment.matchIndex === activeSegment ? 'true' : undefined}>{segment.text}</span>
         {/if}
       {/each}
     </div>

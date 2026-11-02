@@ -105,13 +105,34 @@ async fn ensure_sqlite_foreign_keys(
     Ok(())
 }
 
+fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> bool {
+    // 重建表及其数据转换（2、7、8、12、24、32、33）仍需 FK-off 和完整审计。
+    // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
+    if !matches!(
+        migration.version,
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36
+    ) {
+        return false;
+    }
+    let Ok(index) = SQLITE_MIGRATOR
+        .migrations
+        .binary_search_by_key(&migration.version, |known| known.version)
+    else {
+        return false;
+    };
+    let known = &SQLITE_MIGRATOR.migrations[index];
+    migration.checksum == known.checksum
+        || matches_line_ending_checksum(known.sql.as_str(), migration.checksum.as_ref())
+}
+
 /// 应用受支持的增量迁移并转换历史数据。旧 Debug manifest 非空时必须提供诊断目录。
 pub async fn migrate_sqlite(pool: &SqlitePool, diagnostics: Option<&Path>) -> anyhow::Result<()> {
     run_sqlite_migrator(pool, &SQLITE_MIGRATOR, diagnostics).await
 }
 
 /// Used by the isolated schema exporter with its runtime-resolved migration directory.
-/// 已完整升级时只校验历史并保持外键开启，不执行全库外键扫描或历史转换。
+/// 普通增量迁移保持外键约束；重建或未分类 SQL 保留迁移前后的全库审计。
+/// 已完整升级时只校验历史并保持外键开启，不执行历史转换。
 pub async fn run_sqlite_migrator(
     pool: &SqlitePool,
     migrator: &Migrator,
@@ -139,6 +160,11 @@ pub async fn run_sqlite_migrator(
         None,
     );
     let applied = reject_incompatible_sqlite(&mut pinned.connection, &mut runner).await?;
+    let last_applied = if applied == 0 {
+        0
+    } else {
+        runner.migrations[applied - 1].version
+    };
     // 仅在历史校验成功且已覆盖当前列表时跳过升级工作。
     if applied == runner.iter().count() {
         // 已完整升级：不关闭外键约束、不扫描全部业务表，也不运行没有待处理工作的历史转换。
@@ -153,17 +179,24 @@ pub async fn run_sqlite_migrator(
         );
         return Ok(());
     }
-    let existing_violations: Vec<(String, i64, String, i64)> =
-        sqlx::query_as("PRAGMA foreign_key_check")
-            .fetch_all(&mut *pinned.connection)
+    let requires_rebuild = runner
+        .iter()
+        .skip(applied)
+        .any(|migration| !sqlite_migration_keeps_foreign_keys(migration));
+    ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
+    if requires_rebuild {
+        let existing_violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&mut *pinned.connection)
+                .await?;
+        ensure!(
+            existing_violations.is_empty(),
+            "database already has foreign key violations: {existing_violations:?}"
+        );
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *pinned.connection)
             .await?;
-    ensure!(
-        existing_violations.is_empty(),
-        "database already has foreign key violations: {existing_violations:?}"
-    );
-    sqlx::query("PRAGMA foreign_keys=OFF")
-        .execute(&mut *pinned.connection)
-        .await?;
+    }
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner
@@ -202,7 +235,8 @@ pub async fn run_sqlite_migrator(
         )
         .await?;
     }
-    if runner.version_exists(26) {
+    // 0027 只能在错误详情回填完成后提交；之后的新升级不再扫描历史事件。
+    if runner.version_exists(26) && last_applied < 27 {
         report(
             "usage_backfill",
             "Preparing request classification counters",
@@ -283,13 +317,16 @@ pub async fn run_sqlite_migrator(
         .run_direct(None, &mut *pinned.connection, false)
         .await?;
     report("migration_verify", "Verifying database integrity", 0, None);
-    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
-        .fetch_all(&mut *pinned.connection)
-        .await?;
-    ensure!(
-        violations.is_empty(),
-        "migration created foreign key violations: {violations:?}"
-    );
+    if requires_rebuild {
+        let violations: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(&mut *pinned.connection)
+                .await?;
+        ensure!(
+            violations.is_empty(),
+            "migration created foreign key violations: {violations:?}"
+        );
+    }
     ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
     Migrate::unlock(&mut *pinned.connection).await?;
     pinned.foreign_keys_may_be_off = false;
@@ -334,6 +371,11 @@ pub async fn run_postgres_migrator(
     );
     let mut runner = unlocked_runner(migrator);
     let applied = reject_incompatible_postgres(&mut connection, &mut runner).await?;
+    let last_applied = if applied == 0 {
+        0
+    } else {
+        runner.migrations[applied - 1].version
+    };
     // 在 advisory lock 内判定，避免与其他启动实例交错。
     if applied == runner.iter().count() {
         // 已完整升级：不再执行没有待处理工作的历史转换或重复校验。
@@ -382,7 +424,8 @@ pub async fn run_postgres_migrator(
         crate::interaction_observation::upgrade::convert_event_storage_postgres(&mut connection)
             .await?;
     }
-    if runner.version_exists(26) {
+    // 0027 只能在错误详情回填完成后提交；之后的新升级不再扫描历史事件。
+    if runner.version_exists(26) && last_applied < 27 {
         report(
             "usage_backfill",
             "Preparing request classification counters",
@@ -823,6 +866,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_error_backfill_only_reads_payloads_until_its_completion_boundary() {
+        for version in [26, 27] {
+            let directory = tempfile::tempdir().unwrap();
+            let pool = sqlite_file_pool(directory.path()).await;
+            let prefix = Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= version)
+                    .cloned()
+                    .collect(),
+            );
+            super::run_sqlite_migrator(&pool, &prefix, None)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO interaction_observations \
+                 (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) \
+                 VALUES ('i','owner','i','r','route','failed',1,2,9999999999999);
+                 INSERT INTO inference_run_observations \
+                 (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,expires_at) \
+                 VALUES ('r','i','responses','route','failed',FALSE,1,2,2,9999999999999);
+                 INSERT INTO model_turn_observations \
+                 (id,run_id,interaction_id,route_id,status,started_at,finished_at,last_event_sequence) \
+                 VALUES ('t','r','i','route','failed',1,2,1);
+                 INSERT INTO target_attempt_observations \
+                 (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,last_event_sequence) \
+                 VALUES ('a','t','r','i','target','provider','Provider','upstream','responses','failed',1,2,1);
+                 INSERT INTO observation_events \
+                 (sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) \
+                 VALUES (1,2,'i','r','target_attempt_finished',X'FF',9999999999999);",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let result = migrate_sqlite(&pool, None).await;
+            // 0027 提交前仍欠错误详情回填；之后无关升级不得重新解码历史诊断。
+            let expected_version = if version == 26 {
+                assert!(
+                    result.is_err(),
+                    "unfinished backfill must validate its payload"
+                );
+                26
+            } else {
+                result.expect("completed backfill must not run again on a later upgrade");
+                SQLITE_MIGRATOR.iter().last().unwrap().version
+            };
+            let actual_version: i64 =
+                sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(actual_version, expected_version);
+            let retained: Vec<u8> =
+                sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(retained, [0xff]);
+            let source: Option<String> = sqlx::query_scalar(
+                "SELECT error_source FROM target_attempt_observations WHERE id='a'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(source, None);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
     async fn sqlite_usage_backfill_recovers_interrupted_supported_upgrade() {
         let pool = sqlite_pool().await;
         let prefix = Migrator::with_migrations(
@@ -1066,6 +1180,124 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_incremental_upgrade_preserves_unrelated_orphans_and_enforces_new_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let prefix = |version| {
+            Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= version)
+                    .cloned()
+                    .collect(),
+            )
+        };
+        super::run_sqlite_migrator(&pool, &prefix(21), None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO models(id,model_id) VALUES ('route','model');
+             PRAGMA foreign_keys=OFF;
+             INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+             VALUES ('missing-provider','orphan','manual','present','{}');
+             PRAGMA foreign_keys=ON;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::run_sqlite_migrator(&pool, &prefix(22), None)
+            .await
+            .expect("an unrelated existing orphan is not part of the Route default migration");
+        let output: String =
+            sqlx::query_scalar("SELECT output_modality FROM models WHERE id='route'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(output, "text");
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id='missing-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+        let error = sqlx::query(
+            "INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+             VALUES ('missing-provider','another-orphan','manual','present','{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("incremental migration must leave foreign key enforcement enabled");
+        assert!(
+            error
+                .as_database_error()
+                .unwrap()
+                .is_foreign_key_violation()
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_incremental_upgrade_rolls_back_invalid_foreign_key_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let prefix = |version| {
+            Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= version)
+                    .cloned()
+                    .collect(),
+            )
+        };
+        super::run_sqlite_migrator(&pool, &prefix(21), None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO models(id,model_id) VALUES ('route','model');
+             CREATE TRIGGER invalid_migration_write AFTER UPDATE ON models BEGIN
+                 INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+                 VALUES ('missing-provider','orphan','manual','present','{}');
+             END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            super::run_sqlite_migrator(&pool, &prefix(22), None)
+                .await
+                .is_err()
+        );
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            version, 21,
+            "invalid writes must fail before migration commit"
+        );
+        let output: Option<String> =
+            sqlx::query_scalar("SELECT output_modality FROM models WHERE id='route'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(output, None);
+        let orphans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_models")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(orphans, 0);
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -1542,7 +1774,10 @@ mod tests {
             .await
             .unwrap();
 
-        let error = super::run_sqlite_migrator(&pool, &parent_child_migrator(true), None)
+        // 与已审核增量迁移同号的自定义 SQL 仍须保守审计，不能只按版本号放行。
+        let mut upgrade = parent_child_migrator(true);
+        upgrade.migrations.to_mut()[1].version = 22;
+        let error = super::run_sqlite_migrator(&pool, &upgrade, None)
             .await
             .unwrap_err()
             .to_string();

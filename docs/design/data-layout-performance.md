@@ -4,7 +4,7 @@ status: accepted
 
 # 数据结构与存储性能重构
 
-更新：2026-10-30。当前决策覆盖 Core 历史存储、共享内存表示、Observation 批写、缓存计量与 SQLite checkpoint 窗口。第 6–7 节保留先前隔离探针和库选型证据，不代表正式 HTTP 性能；当前行为以源码、生成 schema 和 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md) 为准。
+更新：2026-11-02。当前决策覆盖 Core 历史存储、共享内存表示、Observation 批写、缓存计量、SQLite checkpoint 窗口与迁移检查范围。第 6–7 节保留先前隔离探针和库选型证据，不代表正式 HTTP 性能；当前行为以源码、生成 schema 和 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md) 为准。
 
 ## 1. 结论与边界
 
@@ -80,7 +80,9 @@ metadata 的扩展对象同样复用 JSON map 的保守条目估重，而不只�
 
 stage 2 先读薄 metadata，使用 encoded 长度与 decoded-size hint 的较大值，加唯一 profile 依赖，选择连续前缀；8 MiB 是逻辑源预算，首个不可拆节点可超预算。hint 不替代 codec/hash 校验。共享 profile 每批只处理一次，局部内容序号不能混成批次偏移；旧 ref-set 必须与 descriptor 完全一致。数据和 cursor 同事务，未选中的尾部留给下一批；最终孤儿/scope 清理由单调游标推进。
 
-升级前停机、排空执行并备份完整数据根和外部数据库，保留迁移并存阶段的额外磁盘空间。恢复可继续已提交阶段；回退必须恢复配套备份，不能让旧二进制读取新 schema。普通已完成库启动不全库扫描 FK 或重跑转换，SQLite FK enforcement 仍开启。两后端参考 schema 必须经 `stravia-tools dump-schema` 从全部迁移生成，不能手编最终 DDL。
+升级前停机、排空执行并备份完整数据根和外部数据库，保留迁移并存阶段的额外磁盘空间。恢复可继续已提交阶段；回退必须恢复配套备份，不能让旧二进制读取新 schema。普通已完成库启动不全库扫描 FK 或重跑转换。经版本与 SQL checksum 核验的普通 SQLite 增量迁移也始终开启 FK enforcement，不为本次不涉及的历史和诊断数据执行前后两次全库审计；重建及未分类迁移仍采用全量检查与固定连接 FK-off 路径。普通升级因此不保证发现无关表中已有的外键违规，具体边界见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。两后端参考 schema 必须经 `stravia-tools dump-schema` 从全部迁移生成，不能手编最终 DDL。
+
+`0026` 后的错误详情回填在 `0027` 提交后不再重复执行，SQLite 与 PostgreSQL 使用相同完成边界；中断于 `0026` 的实例仍必须补齐回填。该优化不修改任何已发布 migration、checksum 或数据格式。迁移不通过扩大 SQLite 页缓存、降低 `synchronous` 或改变 WAL/checkpoint 耐久性来换取速度。
 
 ### 真实 SQLite 一致性副本
 

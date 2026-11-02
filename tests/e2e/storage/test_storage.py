@@ -531,10 +531,10 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert [(hit["rule_id"], hit["source_type"], hit.get("latest_input")) for hit in initial[0]["hits"]] == [("github-pat", "user_message", True)]
             assert initial[0]["linkable"] is True
             preview = _wait_for(
-                "original input preview before restart",
+                "masked input preview before restart",
                 lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
             )
-            assert preview == SECRET
+            assert preview == "***"
             stop_stravia_server(process, logs)
             process = None
 
@@ -553,7 +553,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert restored[0]["hits"] == initial[0]["hits"]
             assert SECRET not in json.dumps(restored)
             assert reference not in json.dumps(restored)
-            assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == SECRET
+            assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == "***"
             status, body = _proxy(env, key, model, [
                 {"role": "user", "content": SECRET},
                 first["choices"][0]["message"],
@@ -578,7 +578,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
                 lambda: _route_interactions(env, route_id),
             )
             assert key_discoveries(env, f"{model}-key") == []
-            assert _detail(env, new_interactions[0]["id"])["interaction"]["input_preview"] == SECRET
+            assert _detail(env, new_interactions[0]["id"])["interaction"]["input_preview"] == "***"
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])
             assert status == 200, body

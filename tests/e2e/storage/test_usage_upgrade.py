@@ -33,7 +33,7 @@ def historical_money(view):
         return {"cost": amount, "billing": amount, "currency": currency}
     if view == "providers":
         # 没有受追踪尝试也没有订阅段：成本不展示。
-        return {"cost": None, "subscription": None, "currency": currency}
+        return {"cost": None, "allocated_cost": None, "subscription": None, "currency": currency}
     return {"actual_cost": amount, "subscription": None, "currency": currency}
 
 
