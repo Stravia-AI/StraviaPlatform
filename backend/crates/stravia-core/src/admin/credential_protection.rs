@@ -1,6 +1,8 @@
+use super::credential_masking::mask_matches;
 use super::{
     AdminService, CredentialDiscoveryError, CredentialDiscoveryField, CredentialDiscoveryHitDetail,
-    CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoveryReuses,
+    CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoveryReuseQuery,
+    CredentialDiscoveryReuses, CredentialVisibility,
 };
 use crate::interaction_observation::CredentialDiscoveryBody;
 use stravia_credential_protection::{
@@ -35,10 +37,12 @@ impl AdminService {
     }
 
     /// 读取命中字段的正文与匹配；正文只存在于响应，不写入日志。
+    /// 默认把匹配区间替换为定长占位符并重算位置，只有 `Revealed` 返回明文与原始偏移。
     pub async fn credential_protection_discovery_hit(
         &self,
         id: &str,
         index: &str,
+        visibility: CredentialVisibility,
     ) -> anyhow::Result<CredentialDiscoveryHitDetail> {
         let (sequence, discovery_index) = parse_discovery_id(id)?;
         let hit_index = parse_hit_index(index)?;
@@ -99,19 +103,29 @@ impl AdminService {
                 found.hit = found.rule_id == hit.rule_id;
             }
         }
+        let (text, matches, masked) = match visibility {
+            CredentialVisibility::Revealed => (text, matches, false),
+            CredentialVisibility::Masked => {
+                let (masked_text, masked_matches) = mask_matches(&text, matches);
+                (masked_text, masked_matches, true)
+            }
+        };
         Ok(CredentialDiscoveryHitDetail::Available {
             field,
             text,
             truncated,
             hit_basis: hit_basis.into(),
+            masked,
             matches,
         })
     }
 
     /// 读取写入时登记的复用位置：只按占位符做索引查找，不同主体的行不返回。
+    /// 没有占位符的映射不可关联复用，仍按同一契约返回空页与零总数。
     pub async fn credential_protection_discovery_reuses(
         &self,
         id: &str,
+        query: CredentialDiscoveryReuseQuery,
     ) -> anyhow::Result<CredentialDiscoveryReuses> {
         let (sequence, discovery_index) = parse_discovery_id(id)?;
         let record = self
@@ -124,20 +138,12 @@ impl AdminService {
             .discovery
             .marker
             .as_deref()
-            .filter(|marker| !marker.is_empty());
-        match marker {
-            Some(marker) => {
-                self.gw
-                    .observation
-                    .credential_discovery_reuses(&record, marker)
-                    .await
-            }
-            None => Ok(CredentialDiscoveryReuses {
-                linkable: false,
-                items: Vec::new(),
-                truncated: false,
-            }),
-        }
+            .filter(|marker| !marker.is_empty())
+            .unwrap_or("");
+        self.gw
+            .observation
+            .credential_discovery_reuses(&record, marker, query)
+            .await
     }
 
     pub async fn credential_custom_rules(&self) -> Result<Vec<CustomRule>, CustomRuleError> {

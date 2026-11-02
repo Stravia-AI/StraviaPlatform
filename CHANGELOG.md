@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking — Credential Protection hit records:** the hit detail (`GET /api/v1/reversible-redaction/discoveries/{id}/hits/{index}`) is now masked by the server by default: each match span is replaced with a fixed-length `••••••`, offsets and line/column refer to the masked text, and the response carries `masked: true`. Plaintext is returned only with `?reveal=true` for sessions allowed to reveal credentials (otherwise `403 credential_reveal_forbidden`). The sheet shows one entry-level Show/Hide plaintext button instead of per-match reveal. `GET .../discoveries/{id}/reuses` is now cursor-paginated (`cursor`, `limit` default 20, max 100) and returns `{ linkable, items, total, next_cursor }`; the 200-item cap and `truncated` are removed, and the sheet's "Later reuse" section is a collapsed, paged dropdown.
+- Request history, request-chain events, error details and the live content stream now mask credentials that Credential Protection has replaced: a request-owner's secret is shown as `***` while that owner still has an active mapping. Instances with no active mapping skip masking entirely (one indexed existence check per read). Stored records are unchanged; once a mapping expires, older records can no longer be masked this way. Debug bundles are unchanged.
+
 ## [0.6.0] - 2026-10-30
 
 ### Verification

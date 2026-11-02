@@ -1,5 +1,9 @@
 use axum::response::Response;
-use stravia_core::admin::{CredentialDiscoveryError, CredentialDiscoveryQuery};
+use stravia_core::admin::identity::AdminSession;
+use stravia_core::admin::{
+    CredentialDiscoveryError, CredentialDiscoveryQuery, CredentialDiscoveryReuseQuery,
+    CredentialVisibility,
+};
 use stravia_credential_protection::{CustomRuleError, CustomRuleInput};
 
 use super::*;
@@ -39,26 +43,56 @@ pub(super) async fn credential_discoveries(
     )
 }
 
+// 不实现 Debug：请求参数不进入诊断。
+#[derive(Deserialize)]
+pub(super) struct CredentialHitQuery {
+    #[serde(default)]
+    reveal: bool,
+}
+
 pub(super) async fn credential_discovery_hit(
     State(gateway): State<Gateway>,
+    Extension(session): Extension<AdminSession>,
     Path((id, index)): Path<(String, String)>,
+    Query(query): Query<CredentialHitQuery>,
 ) -> Response {
+    let Some(visibility) = credential_visibility(query.reveal, &session) else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "credential_reveal_forbidden",
+                "code": "credential_reveal_forbidden",
+            })),
+        )
+            .into_response();
+    };
     discovery_response(
         gateway
             .admin()
-            .credential_protection_discovery_hit(&id, &index)
+            .credential_protection_discovery_hit(&id, &index, visibility)
             .await,
     )
+}
+
+/// 只有显式 `reveal=true` 且会话允许时才返回明文；其余一律遮蔽。
+fn credential_visibility(reveal: bool, session: &AdminSession) -> Option<CredentialVisibility> {
+    match reveal {
+        false => Some(CredentialVisibility::Masked),
+        true => session
+            .may_reveal_credentials()
+            .then_some(CredentialVisibility::Revealed),
+    }
 }
 
 pub(super) async fn credential_discovery_reuses(
     State(gateway): State<Gateway>,
     Path(id): Path<String>,
+    Query(query): Query<CredentialDiscoveryReuseQuery>,
 ) -> Response {
     discovery_response(
         gateway
             .admin()
-            .credential_protection_discovery_reuses(&id)
+            .credential_protection_discovery_reuses(&id, query)
             .await,
     )
 }
@@ -167,4 +201,63 @@ fn unavailable(code: &'static str) -> Response {
         Json(serde_json::json!({ "error": code, "code": code })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use stravia_core::admin::identity::AdminSession;
+    use stravia_core::config::GatewayConfig;
+    use tower::ServiceExt;
+
+    fn session(role: &str) -> AdminSession {
+        AdminSession {
+            session_id: "test-session".into(),
+            username: None,
+            role: role.into(),
+        }
+    }
+
+    #[test]
+    fn only_administrators_may_reveal_while_everyone_can_read_the_masked_view() {
+        assert_eq!(
+            credential_visibility(false, &session("admin")),
+            Some(CredentialVisibility::Masked)
+        );
+        assert_eq!(
+            credential_visibility(true, &session("admin")),
+            Some(CredentialVisibility::Revealed)
+        );
+        assert_eq!(
+            credential_visibility(false, &session("viewer")),
+            Some(CredentialVisibility::Masked)
+        );
+        assert_eq!(credential_visibility(true, &session("viewer")), None);
+    }
+
+    #[tokio::test]
+    async fn reveal_from_a_non_privileged_session_is_forbidden() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let gateway = Gateway::new(GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await?;
+        let app =
+            super::super::create_unprotected_router(gateway).layer(Extension(session("viewer")));
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/reversible-redaction/discoveries/1.0/hits/0?reveal=true")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["error"], "credential_reveal_forbidden");
+        assert_eq!(body["code"], "credential_reveal_forbidden");
+        Ok(())
+    }
 }

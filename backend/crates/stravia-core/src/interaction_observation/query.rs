@@ -487,10 +487,11 @@ impl super::InteractionObservation {
         &self,
         record: &CredentialDiscoveryRecord,
         marker: &str,
+        query: CredentialDiscoveryReuseQuery,
     ) -> anyhow::Result<CredentialDiscoveryReuses> {
         self.inner
             .store
-            .credential_discovery_reuses(record, marker)
+            .credential_discovery_reuses(record, marker, query)
             .await
     }
 }
@@ -511,8 +512,92 @@ struct DiscoveryPayload {
 }
 
 const DISCOVERY_EVENT_BATCH: i64 = 200;
-/// 侧栏最多展示的复用位置；多出一个用于判断是否截断。
-const REUSE_ITEM_LIMIT: usize = 200;
+/// 复用列表的默认与最大分页大小；0 与超限值按命中记录列表同样的方式收敛。
+const REUSE_DEFAULT_LIMIT: u32 = 20;
+const REUSE_MAX_LIMIT: u32 = 100;
+/// 复用游标编码完整排序键；长度有界，异常大输入直接判为无效。
+const REUSE_CURSOR_MAX_BYTES: usize = 4096;
+
+/// 复用分页的排序键：`(last_reused_at, interaction_id, source_type, tool_id, latest_input)`。
+type ReuseCursor = (i64, String, String, String, bool);
+
+fn parse_reuse_cursor(cursor: Option<&str>) -> anyhow::Result<Option<ReuseCursor>> {
+    cursor
+        .map(|cursor| {
+            anyhow::ensure!(
+                cursor.len() <= REUSE_CURSOR_MAX_BYTES,
+                CredentialDiscoveryError::InvalidCursor
+            );
+            let parsed: ReuseCursor = serde_json::from_str(cursor)
+                .map_err(|_| CredentialDiscoveryError::InvalidCursor)?;
+            anyhow::ensure!(parsed.0 >= 0, CredentialDiscoveryError::InvalidCursor);
+            Ok(parsed)
+        })
+        .transpose()
+}
+
+fn encode_reuse_cursor(key: &ReuseCursor) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(key)?)
+}
+
+// 键集谓词只保留严格位于游标之后的行；两端用同一组排序键，方向与 ORDER BY 一致。
+fn push_reuse_cursor_sqlite(
+    builder: &mut QueryBuilder<sqlx::Sqlite>,
+    cursor: Option<&ReuseCursor>,
+) {
+    let Some((last_reused_at, interaction_id, source_type, tool_id, latest_input)) = cursor else {
+        return;
+    };
+    builder
+        .push(" AND (r.last_reused_at<")
+        .push_bind(*last_reused_at)
+        .push(" OR (r.last_reused_at=")
+        .push_bind(*last_reused_at)
+        .push(" AND (r.interaction_id>")
+        .push_bind(interaction_id.as_str())
+        .push(" OR (r.interaction_id=")
+        .push_bind(interaction_id.as_str())
+        .push(" AND (r.source_type>")
+        .push_bind(source_type.as_str())
+        .push(" OR (r.source_type=")
+        .push_bind(source_type.as_str())
+        .push(" AND (r.tool_id>")
+        .push_bind(tool_id.as_str())
+        .push(" OR (r.tool_id=")
+        .push_bind(tool_id.as_str())
+        .push(" AND r.latest_input>")
+        .push_bind(*latest_input)
+        .push("))))))))");
+}
+
+fn push_reuse_cursor_postgres(
+    builder: &mut QueryBuilder<sqlx::Postgres>,
+    cursor: Option<&ReuseCursor>,
+) {
+    let Some((last_reused_at, interaction_id, source_type, tool_id, latest_input)) = cursor else {
+        return;
+    };
+    builder
+        .push(" AND (r.last_reused_at<")
+        .push_bind(*last_reused_at)
+        .push(" OR (r.last_reused_at=")
+        .push_bind(*last_reused_at)
+        .push(" AND (r.interaction_id>")
+        .push_bind(interaction_id.as_str())
+        .push(" OR (r.interaction_id=")
+        .push_bind(interaction_id.as_str())
+        .push(" AND (r.source_type>")
+        .push_bind(source_type.as_str())
+        .push(" OR (r.source_type=")
+        .push_bind(source_type.as_str())
+        .push(" AND (r.tool_id>")
+        .push_bind(tool_id.as_str())
+        .push(" OR (r.tool_id=")
+        .push_bind(tool_id.as_str())
+        .push(" AND r.latest_input>")
+        .push_bind(*latest_input)
+        .push("))))))))");
+}
 
 fn decode_discovery_payload(payload: &[u8]) -> anyhow::Result<DiscoveryPayload> {
     Ok(serde_json::from_slice(&crate::storage_codec::decode(
@@ -1027,21 +1112,46 @@ impl ObservationStore {
     }
 
     /// 按占位符读取写入时登记的复用位置；登记行已按位置去重，只保留最新一次复用。
+    /// 按完整排序键做键集翻页：`last_reused_at` 相同时也不会重复或遗漏。
     pub(super) async fn credential_discovery_reuses(
         &self,
         record: &CredentialDiscoveryRecord,
         marker: &str,
+        query: CredentialDiscoveryReuseQuery,
     ) -> anyhow::Result<CredentialDiscoveryReuses> {
+        let cursor = parse_reuse_cursor(query.cursor.as_deref())?;
+        let limit = query
+            .limit
+            .unwrap_or(REUSE_DEFAULT_LIMIT)
+            .clamp(1, REUSE_MAX_LIMIT) as usize;
         if marker.is_empty() {
             return Ok(CredentialDiscoveryReuses {
                 linkable: false,
                 items: Vec::new(),
-                truncated: false,
+                total: 0,
+                next_cursor: None,
             });
         }
         let now = chrono::Utc::now().timestamp_millis();
-        // 多取一行判断是否截断；上限只约束展示的位置数，与登记量无关。
-        let limit = REUSE_ITEM_LIMIT as i64 + 1;
+        // 总数与游标无关：同一调用者、同一占位符的可见位置数。
+        let total: i64 = match self {
+            Self::Sqlite(pool, _) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>?",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .fetch_one(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3",
+            )
+            .bind(marker)
+            .bind(&record.principal)
+            .bind(now)
+            .fetch_one(pool)
+            .await?,
+        };
         type ReuseStoreRow = (
             String,
             Option<String>,
@@ -1051,30 +1161,58 @@ impl ObservationStore {
             bool,
             i64,
         );
+        // 多取一行判断是否还有下一页。
+        let page_limit = limit as i64 + 1;
         let rows: Vec<ReuseStoreRow> = match self {
-            Self::Sqlite(pool, _) => sqlx::query_as(
-                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>? ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ?",
-            )
-            .bind(marker)
-            .bind(&record.principal)
-            .bind(now)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?,
-            Self::Postgres(pool, _) => sqlx::query_as(
-                "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3 ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT $4",
-            )
-            .bind(marker)
-            .bind(&record.principal)
-            .bind(now)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?,
+            Self::Sqlite(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=",
+                );
+                builder
+                    .push_bind(marker)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now);
+                push_reuse_cursor_sqlite(&mut builder, cursor.as_ref());
+                builder
+                    .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
+                    .push_bind(page_limit);
+                builder.build_query_as().fetch_all(pool).await?
+            }
+            Self::Postgres(pool, _) => {
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=",
+                );
+                builder
+                    .push_bind(marker)
+                    .push(" AND i.principal=")
+                    .push_bind(&record.principal)
+                    .push(" AND i.expires_at>")
+                    .push_bind(now);
+                push_reuse_cursor_postgres(&mut builder, cursor.as_ref());
+                builder
+                    .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
+                    .push_bind(page_limit);
+                builder.build_query_as().fetch_all(pool).await?
+            }
         };
-        let truncated = rows.len() > REUSE_ITEM_LIMIT;
+        let next_cursor = if rows.len() > limit {
+            let (interaction_id, _, _, source_type, tool_id, latest_input, last_reused_at) =
+                &rows[limit - 1];
+            Some(encode_reuse_cursor(&(
+                *last_reused_at,
+                interaction_id.clone(),
+                source_type.clone(),
+                tool_id.clone(),
+                *latest_input,
+            ))?)
+        } else {
+            None
+        };
         let items = rows
             .into_iter()
-            .take(REUSE_ITEM_LIMIT)
+            .take(limit)
             .map(
                 |(
                     interaction_id,
@@ -1103,7 +1241,8 @@ impl ObservationStore {
         Ok(CredentialDiscoveryReuses {
             linkable: true,
             items,
-            truncated,
+            total,
+            next_cursor,
         })
     }
 
@@ -1490,6 +1629,43 @@ impl ObservationStore {
             snapshot_sequence,
             next_cursor,
         }))
+    }
+
+    /// 批量解析交互所属主体，供管理端读取时按主体加载有效映射。
+    /// 调用方只在存在未过期映射时才调用；分块避免超出绑定参数上限。
+    pub async fn interaction_principals(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let mut principals = std::collections::HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(TOKEN_ROOT_CHUNK) {
+            let rows: Vec<(String, String)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT id,principal FROM interaction_observations WHERE id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    query.push(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT id,principal FROM interaction_observations WHERE id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    query.push(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+            };
+            principals.extend(rows);
+        }
+        Ok(principals)
     }
 
     async fn event_page(

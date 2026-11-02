@@ -21,6 +21,19 @@ from tests.e2e.admin.test_reversible_redaction import SECRET, REFERENCE, echo_pr
 
 BASE = "/api/v1/reversible-redaction"
 
+# 服务端遮蔽命中正文的定长占位符：六个 U+2022。
+MASK_TOKEN = "\u2022" * 6
+
+
+def utf16_offsets(text: str, needle: str) -> list[int]:
+    """明文在文本中的每个 UTF-16 code unit 偏移；与服务端的匹配偏移同一口径。"""
+    offsets: list[int] = []
+    start = 0
+    while (found := text.find(needle, start)) >= 0:
+        offsets.append(len(text[:found].encode("utf-16-le")) // 2)
+        start = found + len(needle)
+    return offsets
+
 
 def detect_text(env: dict[str, Any], text: str) -> list[dict[str, Any]]:
     status, body = http_request(
@@ -56,17 +69,25 @@ def pairs(hits: list[dict[str, Any]]) -> set[tuple[str, str, bool | None]]:
     return {(hit["rule_id"], hit["source_type"], hit.get("latest_input")) for hit in hits}
 
 
-def discovery_hit(env: dict[str, Any], discovery_id: str, index: int = 0) -> dict[str, Any]:
+def discovery_hit(
+    env: dict[str, Any], discovery_id: str, index: int = 0, *, reveal: bool = False,
+) -> dict[str, Any]:
+    query = "?reveal=true" if reveal else ""
     status, body = http_request(
-        "GET", f"{env['admin']}{BASE}/discoveries/{discovery_id}/hits/{index}", headers=env["auth"],
+        "GET",
+        f"{env['admin']}{BASE}/discoveries/{discovery_id}/hits/{index}{query}",
+        headers=env["auth"],
     )
     assert status == 200, body
     return body["data"]
 
 
-def discovery_reuses(env: dict[str, Any], discovery_id: str) -> dict[str, Any]:
+def discovery_reuses(env: dict[str, Any], discovery_id: str, **query: object) -> dict[str, Any]:
+    suffix = f"?{urlencode(query)}" if query else ""
     status, body = http_request(
-        "GET", f"{env['admin']}{BASE}/discoveries/{discovery_id}/reuses", headers=env["auth"],
+        "GET",
+        f"{env['admin']}{BASE}/discoveries/{discovery_id}/reuses{suffix}",
+        headers=env["auth"],
     )
     assert status == 200, body
     return body["data"]
@@ -189,9 +210,29 @@ def test_created_mappings_list_hits_detail_and_reuses(admin_env: dict[str, Any])
             detail = discovery_hit(env, first_row["id"])
             assert detail["state"] == "available"
             assert detail["field"] == {"source_type": "user_message"}
-            assert SECRET in detail["text"]
+            assert detail["masked"] is True
+            assert SECRET not in detail["text"]
+            assert detail["text"].count(MASK_TOKEN) >= 2
             assert detail["hit_basis"] == "secret"
             assert any(match["hit"] and match["rule_id"] == "github-pat" for match in detail["matches"])
+            # 匹配位置重算到遮蔽文本：每个匹配都指向定长占位符。
+            assert all(match["end"] - match["start"] == len(MASK_TOKEN) for match in detail["matches"])
+            assert all(
+                detail["text"].encode("utf-16-le")[match["start"] * 2:match["end"] * 2].decode("utf-16-le")
+                == MASK_TOKEN
+                for match in detail["matches"]
+            )
+
+            revealed = discovery_hit(env, first_row["id"], reveal=True)
+            assert revealed["masked"] is False
+            assert revealed["text"].count(SECRET) == 2
+            offsets = utf16_offsets(revealed["text"], SECRET)
+            assert len(offsets) == 2
+            assert sorted(
+                (match["start"], match["end"])
+                for match in revealed["matches"]
+                if match["rule_id"] == "github-pat"
+            ) == [(offset, offset + len(SECRET)) for offset in offsets]
 
             assistant = first["choices"][0]["message"]
             call_id = assistant["tool_calls"][0]["id"]
@@ -210,8 +251,13 @@ def test_created_mappings_list_hits_detail_and_reuses(admin_env: dict[str, Any])
             assert tool_detail["field"]["source_type"] == "tool_result"
             assert tool_detail["field"]["tool_id"] == call_id
             assert tool_detail["field"]["tool_name"] == "configure"
-            assert second in tool_detail["text"]
+            assert tool_detail["masked"] is True
+            assert second not in tool_detail["text"]
+            assert MASK_TOKEN in tool_detail["text"]
             assert tool_detail["hit_basis"] == "secret"
+            revealed = discovery_hit(env, rows[0]["id"], reveal=True)
+            assert revealed["masked"] is False
+            assert second in revealed["text"]
 
             # 模型在工具调用参数里复用了第一个映射：列表仍只有两行，复用只出现在该行的 reuses 里。
             reuses = _wait_for(
@@ -223,6 +269,8 @@ def test_created_mappings_list_hits_detail_and_reuses(admin_env: dict[str, Any])
             assert [(item["source_type"], item.get("tool_id"), item.get("latest_input")) for item in reuses["items"]] == [
                 ("tool_arguments", call_id, None)
             ]
+            assert reuses["total"] == 1
+            assert reuses["next_cursor"] is None
 
             time.sleep(2.01)
             messages += [response["choices"][0]["message"], {"role": "user", "content": third}]
@@ -282,10 +330,23 @@ def test_discovery_detail_reuse_endpoints_and_error_statuses(admin_env: dict[str
             row = _wait_for("created mapping row", lambda: key_discoveries(env, f"{model}-key"))[0]
             detail = discovery_hit(env, row["id"])
             assert detail["state"] == "available"
-            assert SECRET in detail["text"]
+            assert detail["masked"] is True
+            assert SECRET not in detail["text"]
+            assert MASK_TOKEN in detail["text"]
             assert detail["hit_basis"] == "secret"
             assert any(match["hit"] for match in detail["matches"])
-            assert discovery_reuses(env, row["id"]) == {"linkable": True, "items": [], "truncated": False}
+            assert all(match["end"] - match["start"] == len(MASK_TOKEN) for match in detail["matches"])
+            revealed = discovery_hit(env, row["id"], reveal=True)
+            assert revealed["masked"] is False
+            assert f"token {SECRET}" in revealed["text"]
+            (spot,) = utf16_offsets(revealed["text"], SECRET)
+            assert any(
+                match["hit"] and (match["start"], match["end"]) == (spot, spot + len(SECRET))
+                for match in revealed["matches"]
+            )
+            assert discovery_reuses(env, row["id"]) == {
+                "linkable": True, "items": [], "total": 0, "next_cursor": None,
+            }
 
             # 工具续写会归入同一 Interaction；重复提交同一工具结果只保留一个复用位置。
             assistant = body["choices"][0]["message"]
@@ -307,7 +368,17 @@ def test_discovery_detail_reuse_endpoints_and_error_statuses(admin_env: dict[str
             assert [(item["source_type"], item["tool_id"], item.get("latest_input")) for item in reuses["items"]] == [
                 ("tool_result", call_id, None)
             ]
-            assert reuses["truncated"] is False
+            assert reuses["total"] == 1
+            assert reuses["next_cursor"] is None
+
+            # limit 收敛到 1..=100；非法游标按命中记录列表同样映射为 400。
+            assert discovery_reuses(env, row["id"], limit=0)["items"] == reuses["items"]
+            status, invalid = http_request(
+                "GET",
+                f"{env['admin']}{BASE}/discoveries/{row['id']}/reuses?cursor=not-a-cursor",
+                headers=env["auth"],
+            )
+            assert status == 400, invalid
 
             status, invalid = http_request(
                 "GET", f"{env['admin']}{BASE}/discoveries?cursor=bad", headers=env["auth"],

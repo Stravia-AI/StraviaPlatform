@@ -470,6 +470,13 @@ pub struct CredentialDiscoveryField {
     pub tool_name: Option<String>,
 }
 
+/// 命中正文的返回形态：默认遮蔽，只有明确请求且获准时才返回明文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialVisibility {
+    Masked,
+    Revealed,
+}
+
 /// 命中详情；正文含明文，响应类型不得实现 `Debug`。
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -480,6 +487,8 @@ pub enum CredentialDiscoveryHitDetail {
         truncated: bool,
         /// `secret`：按映射明文命中；`rule`：退化为按所选规则命中。
         hit_basis: String,
+        /// `true`：文本与匹配位置已按遮蔽后的文本重算；`false`：明文与原始偏移。
+        masked: bool,
         matches: Vec<stravia_credential_protection::CredentialTextMatch>,
     },
     Unavailable {
@@ -500,11 +509,21 @@ pub struct CredentialDiscoveryReuse {
     pub last_reused_at: i64,
 }
 
+/// 后续复用列表的翻页参数；游标不透明，非法值按 `InvalidCursor` 拒绝。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CredentialDiscoveryReuseQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CredentialDiscoveryReuses {
+    /// 载荷携带非空占位符，才能关联后续复用。
     pub linkable: bool,
     pub items: Vec<CredentialDiscoveryReuse>,
-    pub truncated: bool,
+    /// 当前调用者可见的复用位置总数，与游标和分页大小无关。
+    pub total: i64,
+    pub next_cursor: Option<String>,
 }
 
 /// 命中记录的行引用、游标与索引错误；服务端据此区分 400/404。

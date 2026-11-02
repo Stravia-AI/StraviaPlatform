@@ -280,6 +280,13 @@ impl InteractionObservation {
     ) -> anyhow::Result<Option<InteractionEventsPage>> {
         self.inner.store.get_interaction_events(id, query).await
     }
+    /// 批量解析交互主体；只在管理端确认存在未过期映射后调用。
+    pub(crate) async fn interaction_principals(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        self.inner.store.interaction_principals(ids).await
+    }
     pub(crate) async fn query_rejections(
         &self,
         q: RejectionQuery,
@@ -5686,10 +5693,15 @@ mod snapshot_tests {
 
         let record = store.credential_discovery_record(1, 0).await?.unwrap();
         let reuses = store
-            .credential_discovery_reuses(&record, "m-first")
+            .credential_discovery_reuses(
+                &record,
+                "m-first",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert!(reuses.linkable);
-        assert!(!reuses.truncated);
+        assert_eq!(reuses.total, 4);
+        assert_eq!(reuses.next_cursor, None);
         assert_eq!(
             reuses
                 .items
@@ -5718,18 +5730,27 @@ mod snapshot_tests {
 
         let record = store.credential_discovery_record(1, 1).await?.unwrap();
         let reuses = store
-            .credential_discovery_reuses(&record, "m-first-2")
+            .credential_discovery_reuses(
+                &record,
+                "m-first-2",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert!(reuses.linkable);
         assert!(reuses.items.is_empty());
-        assert!(!reuses.truncated);
+        assert_eq!(reuses.total, 0);
+        assert_eq!(reuses.next_cursor, None);
 
         let record = store.credential_discovery_record(3, 0).await?.unwrap();
-        let reuses = store.credential_discovery_reuses(&record, "").await?;
+        let reuses = store
+            .credential_discovery_reuses(&record, "", CredentialDiscoveryReuseQuery::default())
+            .await?;
         assert!(!reuses.linkable);
         assert!(reuses.items.is_empty());
+        assert_eq!(reuses.total, 0);
+        assert_eq!(reuses.next_cursor, None);
 
-        // 超过 200 项时截断并标记。
+        // 分页取代原来的 200 项上限：默认页只展示 20 项，总数与游标独立。
         let many: Vec<_> = (0..201)
             .map(|index| {
                 json!({
@@ -5792,10 +5813,30 @@ mod snapshot_tests {
         let reused_many: Vec<CredentialDiscovery> =
             serde_json::from_value(json!([many_discovery]))?;
         register_reuses(store, "first", None, now, &reused_many).await?;
-        let reuses = store.credential_discovery_reuses(&record, "m-many").await?;
+        let reuses = store
+            .credential_discovery_reuses(
+                &record,
+                "m-many",
+                CredentialDiscoveryReuseQuery::default(),
+            )
+            .await?;
         assert!(reuses.linkable);
-        assert!(reuses.truncated);
-        assert_eq!(reuses.items.len(), 200);
+        assert_eq!(reuses.total, 201);
+        assert_eq!(reuses.items.len(), 20);
+        assert!(reuses.next_cursor.is_some());
+        let capped = store
+            .credential_discovery_reuses(
+                &record,
+                "m-many",
+                CredentialDiscoveryReuseQuery {
+                    cursor: None,
+                    limit: Some(1_000),
+                },
+            )
+            .await?;
+        assert_eq!(capped.total, 201);
+        assert_eq!(capped.items.len(), 100);
+        assert!(capped.next_cursor.is_some());
 
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
@@ -5962,11 +6003,16 @@ mod snapshot_tests {
             .await?
             .expect("created discovery");
         let reuses = store
-            .credential_discovery_reuses(&record, "m-repeat")
+            .credential_discovery_reuses(
+                &record,
+                "m-repeat",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert!(reuses.linkable);
-        assert!(!reuses.truncated);
         assert_eq!(reuses.items.len(), 1);
+        assert_eq!(reuses.total, 1);
+        assert_eq!(reuses.next_cursor, None);
         let item = &reuses.items[0];
         assert_eq!(item.interaction_id, "reuse-owner");
         assert_eq!(item.run_id.as_deref(), Some("reuse-run-2"));
@@ -6011,7 +6057,11 @@ mod snapshot_tests {
             .await?
             .expect("created discovery");
         let reuses = store
-            .credential_discovery_reuses(&record, "m-order")
+            .credential_discovery_reuses(
+                &record,
+                "m-order",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert_eq!(reuses.items.len(), 1);
         assert_eq!(reuses.items[0].last_reused_at, now - 400);
@@ -6048,7 +6098,11 @@ mod snapshot_tests {
             .await?
             .expect("created discovery");
         let reuses = store
-            .credential_discovery_reuses(&record, "m-distinct")
+            .credential_discovery_reuses(
+                &record,
+                "m-distinct",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert_eq!(
             reuses
@@ -6082,13 +6136,18 @@ mod snapshot_tests {
             .await?
             .expect("created discovery");
         let reuses = store
-            .credential_discovery_reuses(&other, "m-repeat")
+            .credential_discovery_reuses(
+                &other,
+                "m-repeat",
+                CredentialDiscoveryReuseQuery::default(),
+            )
             .await?;
         assert!(reuses.linkable);
         assert!(reuses.items.is_empty());
-        assert!(!reuses.truncated);
+        assert_eq!(reuses.total, 0);
+        assert_eq!(reuses.next_cursor, None);
 
-        // (f) 超过 200 个位置时只返回 200 项并标记截断，登记行本身不丢。
+        // (f) 超过一页的位置按页返回；登记行本身不丢，总数覆盖全部可见位置。
         let sequence = persist_reuse_event(
             store,
             "reuse-owner",
@@ -6117,11 +6176,18 @@ mod snapshot_tests {
             .credential_discovery_record(sequence, 0)
             .await?
             .expect("created discovery");
-        let reuses = store.credential_discovery_reuses(&record, "m-wide").await?;
-        assert!(reuses.truncated);
-        assert_eq!(reuses.items.len(), 200);
+        let reuses = store
+            .credential_discovery_reuses(
+                &record,
+                "m-wide",
+                CredentialDiscoveryReuseQuery::default(),
+            )
+            .await?;
+        assert_eq!(reuses.items.len(), 20);
+        assert_eq!(reuses.total, 201);
+        assert!(reuses.next_cursor.is_some());
         assert_eq!(reuses.items[0].tool_id.as_deref(), Some("wide-000"));
-        assert_eq!(reuses.items[199].tool_id.as_deref(), Some("wide-199"));
+        assert_eq!(reuses.items[19].tool_id.as_deref(), Some("wide-019"));
         assert_eq!(reuse_row_count(store, "m-wide").await?, 201);
 
         // (g) 没有占位符的复用事件不登记，创建行也无法关联复用。
@@ -6148,10 +6214,13 @@ mod snapshot_tests {
             .await?
             .expect("created discovery");
         assert!(record.discovery.marker.is_none());
-        let reuses = store.credential_discovery_reuses(&record, "").await?;
+        let reuses = store
+            .credential_discovery_reuses(&record, "", CredentialDiscoveryReuseQuery::default())
+            .await?;
         assert!(!reuses.linkable);
         assert!(reuses.items.is_empty());
-        assert!(!reuses.truncated);
+        assert_eq!(reuses.total, 0);
+        assert_eq!(reuses.next_cursor, None);
         assert_eq!(reuse_row_count(store, "").await?, 0);
 
         // (h) 同一事件内归一化后同键的位置只登记一行：规则不同但来源、工具调用与
@@ -6207,11 +6276,32 @@ mod snapshot_tests {
             .credential_discovery_record(sequence, 0)
             .await?
             .expect("created discovery");
-        let reuses = store
-            .credential_discovery_reuses(&record, "m-collide")
+        let first_page = store
+            .credential_discovery_reuses(
+                &record,
+                "m-collide",
+                CredentialDiscoveryReuseQuery {
+                    cursor: None,
+                    limit: Some(100),
+                },
+            )
             .await?;
-        assert!(!reuses.truncated);
-        assert_eq!(reuses.items.len(), 154);
+        assert_eq!(first_page.total, 154);
+        assert_eq!(first_page.items.len(), 100);
+        let next_cursor = first_page.next_cursor.expect("second page");
+        let second_page = store
+            .credential_discovery_reuses(
+                &record,
+                "m-collide",
+                CredentialDiscoveryReuseQuery {
+                    cursor: Some(next_cursor),
+                    limit: Some(100),
+                },
+            )
+            .await?;
+        assert_eq!(second_page.total, 154);
+        assert_eq!(second_page.items.len(), 54);
+        assert_eq!(second_page.next_cursor, None);
         assert_eq!(reuse_row_count(store, "m-collide").await?, 154);
 
         // (d) 保留期清理与交互一起删除登记行。
@@ -6298,9 +6388,9 @@ mod snapshot_tests {
             "list query must use the credential hit index: {plan:?}"
         );
 
-        // 复用读取按占位符索引，不扫描登记表。
+        // 复用读取按占位符索引，键集谓词不改变索引查找。
         let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
-            "EXPLAIN QUERY PLAN SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker='m-repeat' AND i.principal='api-key:owner' AND i.expires_at>0 ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT 201",
+            "EXPLAIN QUERY PLAN SELECT r.interaction_id,r.run_id,i.api_key_name,r.source_type,r.tool_id,r.latest_input,r.last_reused_at FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker='m-repeat' AND i.principal='api-key:owner' AND i.expires_at>0 AND (r.last_reused_at<1000 OR (r.last_reused_at=1000 AND (r.interaction_id>'interaction-0' OR (r.interaction_id='interaction-0' AND (r.source_type>'tool_result' OR (r.source_type='tool_result' AND (r.tool_id>'call-0' OR (r.tool_id='call-0' AND r.latest_input>0)))))))) ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT 21",
         )
         .fetch_all(&pool)
         .await?;
@@ -6315,6 +6405,424 @@ mod snapshot_tests {
                 .any(|(_, _, _, detail)| detail.contains("SCAN r")),
             "reuses must not scan registrations: {plan:?}"
         );
+        // 总数与游标无关，只按同一占位符与调用者过滤，同样走索引。
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker='m-repeat' AND i.principal='api-key:owner' AND i.expires_at>0",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert!(
+            plan.iter().any(|(_, _, _, detail)| detail.contains("USING")
+                && detail.contains("credential_mapping_reuses")),
+            "reuse total must be an index lookup: {plan:?}"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    async fn seed_reuse_interaction(
+        store: &store::ObservationStore,
+        id: &str,
+        principal: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> anyhow::Result<()> {
+        match store {
+            store::ObservationStore::Sqlite(pool, _) => {
+                sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                    .bind(id).bind(principal).bind("Page Key").bind(id).bind(id)
+                    .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                    .bind(false).bind(expires_at).execute(pool).await?;
+            }
+            store::ObservationStore::Postgres(pool, _) => {
+                sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                    .bind(id).bind(principal).bind("Page Key").bind(id).bind(id)
+                    .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
+                    .bind(false).bind(expires_at).execute(pool).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reuse_record(principal: &str, marker: &str) -> CredentialDiscoveryRecord {
+        CredentialDiscoveryRecord {
+            sequence: 0,
+            interaction_id: "page-a".into(),
+            run_id: None,
+            principal: principal.into(),
+            discovery: reuse_discovery(
+                Some(marker),
+                vec![locator("tool_result", Some("seed"), None)],
+            ),
+            hits: Vec::new(),
+        }
+    }
+
+    async fn register_reuse_rows(
+        store: &store::ObservationStore,
+        interaction_id: &str,
+        occurred_at: i64,
+        marker: &str,
+        locators: Vec<CredentialLocator>,
+    ) -> anyhow::Result<()> {
+        register_reuses(
+            store,
+            interaction_id,
+            None,
+            occurred_at,
+            &[reuse_discovery(Some(marker), locators)],
+        )
+        .await
+    }
+
+    /// 两个时间组、三个 Interaction，同一时间组内多个位置共享 `last_reused_at`。
+    async fn seed_reuse_page_fixture(
+        store: &store::ObservationStore,
+        now: i64,
+    ) -> anyhow::Result<CredentialDiscoveryRecord> {
+        let live = now + 86_400_000;
+        for id in ["page-a", "page-b", "page-c"] {
+            seed_reuse_interaction(store, id, "api-key:page-owner", now, live).await?;
+        }
+        let groups = [
+            (
+                "page-a",
+                now - 100,
+                vec![
+                    locator("tool_result", Some("a"), None),
+                    locator("tool_result", Some("b"), None),
+                ],
+            ),
+            (
+                "page-b",
+                now - 100,
+                vec![locator("tool_result", Some("a"), None)],
+            ),
+            (
+                "page-c",
+                now - 100,
+                vec![locator("tool_result", Some("c"), None)],
+            ),
+            (
+                "page-a",
+                now - 200,
+                vec![locator("tool_result", Some("m"), None)],
+            ),
+            (
+                "page-b",
+                now - 200,
+                vec![locator("tool_result", Some("n"), None)],
+            ),
+            (
+                "page-c",
+                now - 200,
+                vec![
+                    locator("user_message", None, Some(false)),
+                    locator("user_message", None, Some(true)),
+                ],
+            ),
+        ];
+        for (interaction_id, occurred_at, locators) in groups {
+            register_reuse_rows(store, interaction_id, occurred_at, "m-pages", locators).await?;
+        }
+        Ok(reuse_record("api-key:page-owner", "m-pages"))
+    }
+
+    #[tokio::test]
+    async fn credential_reuse_paging_walks_tied_keys_without_skip_or_duplicate()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
+        );
+        let now = chrono::Utc::now().timestamp_millis();
+        let record = seed_reuse_page_fixture(&store, now).await?;
+
+        let mut cursor = None;
+        let mut collected = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = store
+                .credential_discovery_reuses(
+                    &record,
+                    "m-pages",
+                    CredentialDiscoveryReuseQuery {
+                        cursor: cursor.take(),
+                        limit: Some(2),
+                    },
+                )
+                .await?;
+            assert!(page.linkable);
+            assert_eq!(page.total, 8);
+            collected.extend(page.items.iter().map(|item| {
+                (
+                    item.interaction_id.clone(),
+                    item.source_type.clone(),
+                    item.tool_id.clone(),
+                    item.latest_input,
+                    item.last_reused_at,
+                )
+            }));
+            pages += 1;
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 4, "8 rows with a page size of 2 is four full pages");
+        assert_eq!(
+            collected,
+            [
+                (
+                    "page-a".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("a".to_owned()),
+                    None,
+                    now - 100
+                ),
+                (
+                    "page-a".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("b".to_owned()),
+                    None,
+                    now - 100
+                ),
+                (
+                    "page-b".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("a".to_owned()),
+                    None,
+                    now - 100
+                ),
+                (
+                    "page-c".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("c".to_owned()),
+                    None,
+                    now - 100
+                ),
+                (
+                    "page-a".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("m".to_owned()),
+                    None,
+                    now - 200
+                ),
+                (
+                    "page-b".to_owned(),
+                    "tool_result".to_owned(),
+                    Some("n".to_owned()),
+                    None,
+                    now - 200
+                ),
+                (
+                    "page-c".to_owned(),
+                    "user_message".to_owned(),
+                    None,
+                    Some(false),
+                    now - 200
+                ),
+                (
+                    "page-c".to_owned(),
+                    "user_message".to_owned(),
+                    None,
+                    Some(true),
+                    now - 200
+                ),
+            ]
+        );
+
+        // 0 与超限都按与命中记录列表相同的方式收敛到 1..=100。
+        let single = store
+            .credential_discovery_reuses(
+                &record,
+                "m-pages",
+                CredentialDiscoveryReuseQuery {
+                    cursor: None,
+                    limit: Some(0),
+                },
+            )
+            .await?;
+        assert_eq!(single.items.len(), 1);
+        assert_eq!(single.total, 8);
+        assert!(single.next_cursor.is_some());
+        let oversize = store
+            .credential_discovery_reuses(
+                &record,
+                "m-pages",
+                CredentialDiscoveryReuseQuery {
+                    cursor: None,
+                    limit: Some(1_000),
+                },
+            )
+            .await?;
+        assert_eq!(oversize.items.len(), 8);
+        assert_eq!(oversize.next_cursor, None);
+        let defaulted = store
+            .credential_discovery_reuses(
+                &record,
+                "m-pages",
+                CredentialDiscoveryReuseQuery::default(),
+            )
+            .await?;
+        assert_eq!(defaulted.items.len(), 8);
+        assert_eq!(defaulted.next_cursor, None);
+
+        for cursor in ["not-a-cursor".to_owned(), "x".repeat(8_192)] {
+            let error = store
+                .credential_discovery_reuses(
+                    &record,
+                    "m-pages",
+                    CredentialDiscoveryReuseQuery {
+                        cursor: Some(cursor),
+                        limit: None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CredentialDiscoveryError>().copied(),
+                Some(CredentialDiscoveryError::InvalidCursor)
+            );
+        }
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_reuse_exact_page_boundary_clears_cursor() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
+        );
+        let now = chrono::Utc::now().timestamp_millis();
+        seed_reuse_interaction(
+            &store,
+            "page-boundary",
+            "api-key:page-owner",
+            now,
+            now + 86_400_000,
+        )
+        .await?;
+        let locators = (0..6)
+            .map(|index| {
+                let tool_id = format!("t{index}");
+                locator("tool_result", Some(&tool_id), None)
+            })
+            .collect();
+        register_reuse_rows(&store, "page-boundary", now - 10, "m-boundary", locators).await?;
+        let record = reuse_record("api-key:page-owner", "m-boundary");
+
+        let first = store
+            .credential_discovery_reuses(
+                &record,
+                "m-boundary",
+                CredentialDiscoveryReuseQuery {
+                    cursor: None,
+                    limit: Some(3),
+                },
+            )
+            .await?;
+        assert_eq!(first.total, 6);
+        assert_eq!(first.items.len(), 3);
+        let cursor = first.next_cursor.expect("second page");
+        let second = store
+            .credential_discovery_reuses(
+                &record,
+                "m-boundary",
+                CredentialDiscoveryReuseQuery {
+                    cursor: Some(cursor),
+                    limit: Some(3),
+                },
+            )
+            .await?;
+        assert_eq!(second.total, 6);
+        assert_eq!(second.items.len(), 3);
+        assert_eq!(second.next_cursor, None);
+        let walked: Vec<_> = first
+            .items
+            .iter()
+            .chain(&second.items)
+            .map(|item| item.tool_id.as_deref())
+            .collect();
+        assert_eq!(
+            walked,
+            [
+                Some("t0"),
+                Some("t1"),
+                Some("t2"),
+                Some("t3"),
+                Some("t4"),
+                Some("t5")
+            ]
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn credential_reuse_total_excludes_other_principal_and_expired_rows() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let store = store::ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
+        );
+        let now = chrono::Utc::now().timestamp_millis();
+        let live = now + 86_400_000;
+        seed_reuse_interaction(&store, "visible", "api-key:page-owner", now, live).await?;
+        seed_reuse_interaction(&store, "hidden", "api-key:other", now, live).await?;
+        seed_reuse_interaction(&store, "expired", "api-key:page-owner", now, 0).await?;
+        for interaction_id in ["visible", "hidden", "expired"] {
+            for occurred_at in [now - 50, now - 100] {
+                let tool_id = format!("call-{occurred_at}");
+                register_reuse_rows(
+                    &store,
+                    interaction_id,
+                    occurred_at,
+                    "m-visible",
+                    vec![locator("tool_result", Some(&tool_id), None)],
+                )
+                .await?;
+            }
+        }
+        let record = reuse_record("api-key:page-owner", "m-visible");
+
+        let mut cursor = None;
+        let mut collected = Vec::new();
+        loop {
+            let page = store
+                .credential_discovery_reuses(
+                    &record,
+                    "m-visible",
+                    CredentialDiscoveryReuseQuery {
+                        cursor: cursor.take(),
+                        limit: Some(1),
+                    },
+                )
+                .await?;
+            assert_eq!(page.total, 2);
+            collected.extend(page.items.iter().map(|item| item.interaction_id.clone()));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(collected, ["visible", "visible"]);
+
+        let unlinkable = reuse_record("api-key:page-owner", "");
+        let page = store
+            .credential_discovery_reuses(&unlinkable, "", CredentialDiscoveryReuseQuery::default())
+            .await?;
+        assert!(!page.linkable);
+        assert!(page.items.is_empty());
+        assert_eq!(page.total, 0);
+        assert_eq!(page.next_cursor, None);
         pool.close().await;
         Ok(())
     }

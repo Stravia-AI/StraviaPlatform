@@ -185,7 +185,14 @@ pub(super) async fn interaction_live(
     State(gateway): State<Gateway>,
     Path(id): Path<String>,
 ) -> Response {
-    let stream = gateway.admin().observation_subscribe_live(id).filter_map(|update| async move {
+    let stream = match gateway.admin().observation_subscribe_live(id).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(%error, "live observation subscription failed");
+            return observation_unavailable();
+        }
+    };
+    let stream = stream.filter_map(|update| async move {
         let event = match update {
                 ObservationUpdate::LiveContent(block) => Event::default()
                     .event("live_content")

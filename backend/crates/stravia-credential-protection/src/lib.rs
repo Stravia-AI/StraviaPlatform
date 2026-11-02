@@ -12,7 +12,7 @@ pub use custom::{
 pub use detection::rule_catalog;
 pub use detection::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
-    CredentialTextMatch,
+    CredentialTextMatch, advance_position,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

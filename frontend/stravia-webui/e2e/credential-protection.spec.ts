@@ -65,8 +65,9 @@ interface DiscoveryQuery {
 }
 
 type DiscoveryReply = { items: CredentialDiscoveryRecord[]; next_cursor?: string | null } | { status: number }
-type DetailReply = CredentialHitDetail | { status: number }
-type ReusesReply = CredentialHitReuses | { status: number }
+type FailureReply = { status: number; error?: string; code?: string }
+type DetailReply = CredentialHitDetail | FailureReply
+type ReusesReply = CredentialHitReuses | FailureReply
 
 interface Mock {
   customRules: CustomCredentialRule[]
@@ -75,8 +76,13 @@ interface Mock {
   testText: string[]
   failTest: boolean
   discoveryRequests: DiscoveryQuery[]
-  detailRequests: Array<{ id: string; index: number }>
-  reuseRequests: string[]
+  detailRequests: Array<{ id: string; index: number; reveal: boolean }>
+  reuseRequests: Array<{ id: string; cursor: string | null; limit: number | null }>
+}
+
+interface ReuseQuery {
+  cursor: string | null
+  limit: number | null
 }
 
 interface MockOptions {
@@ -85,8 +91,9 @@ interface MockOptions {
   discoveries?: CredentialDiscoveryRecord[]
   /** 按请求顺序给出每一页；`call` 从 1 开始，便于模拟某一次请求失败。 */
   discoveryPage?: (query: DiscoveryQuery, call: number) => DiscoveryReply
-  detail?: (id: string, index: number) => DetailReply
-  reuses?: (id: string) => ReusesReply
+  /** 返回明文结果；未请求明文时 mock 会按服务端规则遮罩。 */
+  detail?: (id: string, index: number, reveal: boolean) => DetailReply
+  reuses?: (id: string, query: ReuseQuery) => ReusesReply
 }
 
 function discovery(index: number, overrides: Partial<CredentialDiscoveryRecord> = {}): CredentialDiscoveryRecord {
@@ -117,6 +124,7 @@ function availableDetail(
     text: entryText,
     truncated: false,
     hit_basis: 'secret',
+    masked: false,
     matches: [
       {
         rule_id: 'fixture-rule-0',
@@ -153,6 +161,80 @@ function reuse(overrides: Partial<CredentialHitReuse> = {}): CredentialHitReuse 
     latest_input: null,
     last_reused_at: createdAt,
     ...overrides,
+  }
+}
+
+const MASK_TOKEN = '••••••'
+
+/** 按服务端契约模拟遮罩：合并重叠/相邻匹配，替换成固定令牌并重算偏移。 */
+function maskedReply(detail: CredentialHitDetail): CredentialHitDetail {
+  if (detail.state === 'unavailable') return detail
+  const spans = detail.matches
+    .filter((match) => match.end > match.start && match.start >= 0 && match.end <= detail.text.length)
+    .map((match) => ({ start: match.start, end: match.end }))
+    .sort((left, right) => left.start - right.start)
+  const merged: Array<{ start: number; end: number }> = []
+  for (const span of spans) {
+    const last = merged.at(-1)
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end)
+    else merged.push({ ...span })
+  }
+  const tokenStarts: number[] = []
+  let text = ''
+  let cursor = 0
+  for (const span of merged) {
+    text += detail.text.slice(cursor, span.start) + MASK_TOKEN
+    tokenStarts.push(text.length - MASK_TOKEN.length)
+    cursor = span.end
+  }
+  text += detail.text.slice(cursor)
+  const position = (offset: number) => {
+    const lines = text.slice(0, offset).split('\n')
+    return { line: lines.length, column: (lines.at(-1)?.length ?? 0) + 1 }
+  }
+  const matches = detail.matches.flatMap((match) => {
+    if (match.end <= match.start || match.start < 0 || match.end > detail.text.length) return []
+    const mergedIndex = merged.findIndex((span) => span.start <= match.start && match.end <= span.end)
+    if (mergedIndex < 0) return []
+    const start = tokenStarts[mergedIndex]
+    const end = start + MASK_TOKEN.length
+    const startPosition = position(start)
+    const endPosition = position(end)
+    return [
+      {
+        ...match,
+        start,
+        end,
+        start_line: startPosition.line,
+        start_column: startPosition.column,
+        end_line: endPosition.line,
+        end_column: endPosition.column,
+      },
+    ]
+  })
+  return { ...detail, text, masked: true, matches }
+}
+
+/** 按 10 条一页切分 `total` 条复用位置，游标是下一页的起始下标。 */
+function pagedReuses(total: number) {
+  return (_id: string, { cursor, limit }: ReuseQuery): ReusesReply => {
+    const offset = cursor ? Number(cursor) : 0
+    const size = limit ?? 20
+    const count = Math.max(0, Math.min(size, total - offset))
+    return {
+      linkable: true,
+      total,
+      items: Array.from({ length: count }, (_, index) =>
+        reuse({
+          interaction_id: `reuse-${offset + index}`,
+          source_type: index % 2 === 0 ? 'tool_arguments' : 'user_message',
+          tool_id: index % 2 === 0 ? 'tool-9' : null,
+          latest_input: index % 2 === 0 ? null : true,
+          last_reused_at: createdAt - (offset + index) * 1000,
+        }),
+      ),
+      next_cursor: offset + count < total ? String(offset + count) : null,
+    }
   }
 }
 
@@ -212,18 +294,33 @@ async function mockRedaction(page: Page, options: MockOptions = {}) {
     if (hitPath) {
       const id = decodeURIComponent(hitPath[1])
       const index = Number(hitPath[2])
-      state.detailRequests.push({ id, index })
-      const reply = options.detail?.(id, index) ?? availableDetail()
-      if ('status' in reply) return route.fulfill({ status: reply.status, json: { error: 'Fixture hit unavailable' } })
-      return route.fulfill({ json: { data: reply } })
+      const reveal = new URL(request.url()).searchParams.get('reveal') === 'true'
+      state.detailRequests.push({ id, index, reveal })
+      const reply = options.detail?.(id, index, reveal) ?? availableDetail()
+      if ('status' in reply) {
+        return route.fulfill({
+          status: reply.status,
+          json: { error: reply.error ?? 'Fixture hit unavailable', ...(reply.code ? { code: reply.code } : {}) },
+        })
+      }
+      return route.fulfill({ json: { data: reveal ? reply : maskedReply(reply) } })
     }
     const reusePath = pathname.match(/\/reversible-redaction\/discoveries\/([^/]+)\/reuses$/)
     if (reusePath) {
       const id = decodeURIComponent(reusePath[1])
-      state.reuseRequests.push(id)
-      const reply = options.reuses?.(id) ?? { linkable: true, items: [], truncated: false }
-      if ('status' in reply)
-        return route.fulfill({ status: reply.status, json: { error: 'Fixture reuse unavailable' } })
+      const params = new URL(request.url()).searchParams
+      const query: ReuseQuery = {
+        cursor: params.get('cursor'),
+        limit: params.has('limit') ? Number(params.get('limit')) : null,
+      }
+      state.reuseRequests.push({ id, ...query })
+      const reply = options.reuses?.(id, query) ?? { linkable: true, items: [], total: 0, next_cursor: null }
+      if ('status' in reply) {
+        return route.fulfill({
+          status: reply.status,
+          json: { error: reply.error ?? 'Fixture reuse unavailable', ...(reply.code ? { code: reply.code } : {}) },
+        })
+      }
       return route.fulfill({ json: { data: reply } })
     }
     if (pathname.endsWith('/test')) {
@@ -393,16 +490,22 @@ test.describe('hit records', () => {
 
     const entry = dialog.locator('[data-slot="credential-entry"]')
     await expect(entry).toContainText('fourth line')
-    await expect(entry).toContainText('other_secret')
+    await expect(entry).toContainText(MASK_TOKEN)
+    // 命中与其他匹配都由服务端遮罩：明文不进入浏览器。
     await expect(entry).not.toContainText('test_credential')
-    await entry.getByRole('button', { name: 'Show matched text' }).click()
+    await expect(entry).not.toContainText('other_secret')
+    const reveal = dialog.getByRole('button', { name: 'Show plaintext' })
+    await expect(reveal).toHaveAttribute('aria-pressed', 'false')
+    await reveal.click()
     await expect(entry).toContainText('test_credential')
-    await expect(entry.getByRole('button', { name: 'Hide matched text' })).toBeVisible()
+    await expect(entry).toContainText('other_secret')
+    await expect(dialog.getByRole('button', { name: 'Hide plaintext' })).toHaveAttribute('aria-pressed', 'true')
+    await dialog.getByRole('button', { name: 'Hide plaintext' }).click()
+    await expect(entry).not.toContainText('test_credential')
+    await expect(entry).toContainText(MASK_TOKEN)
 
-    const hitMatch = dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })
-    await expect(hitMatch).toHaveAttribute('data-emphasis', 'hit')
-    const otherMatch = dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })
-    await expect(otherMatch).toHaveAttribute('data-emphasis', 'match')
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })).toBeVisible()
 
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
@@ -410,7 +513,7 @@ test.describe('hit records', () => {
 
     const reopened = await openRow(page)
     await expect(reopened.locator('[data-slot="credential-entry"]')).not.toContainText('test_credential')
-    await expect(reopened.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+    await expect(reopened.getByRole('button', { name: 'Show plaintext' })).toBeVisible()
   })
 
   test('opens a long entry centred on the hit and lists matches only when they add something', async ({ page }) => {
@@ -446,7 +549,7 @@ test.describe('hit records', () => {
     await page.goto('/reversible-redaction')
     const dialog = await openRow(page)
     const entry = dialog.locator('[data-slot="credential-entry"]')
-    const mask = entry.getByRole('button', { name: 'Show matched text' })
+    const mask = dialog.getByRole('button', { name: 'Show plaintext' })
     await expect(mask).toBeVisible()
     // 命中位于第 90 行，条目框必须已经滚到它；否则用户得到的是第 1 行起的无关内容。
     await expect
@@ -461,6 +564,149 @@ test.describe('hit records', () => {
     // 唯一的匹配就是命中本身，不再单列一遍。
     await expect(dialog.getByRole('heading', { name: 'Matches' })).toHaveCount(0)
     await expect(dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })).toHaveCount(0)
+  })
+
+  test('highlights the masked token behind the match the user picks and scrolls it into view', async ({ page }) => {
+    const lines = Array.from({ length: 140 }, (_, index) => `filler line ${index + 1}`)
+    lines[9] = 'first: test_credential'
+    lines[119] = 'second: other_secret'
+    const text = lines.join('\n')
+    const hitStart = text.indexOf('test_credential')
+    const otherStart = text.indexOf('other_secret')
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      detail: () =>
+        availableDetail({
+          text,
+          matches: [
+            {
+              rule_id: 'fixture-rule-0',
+              start: hitStart,
+              end: hitStart + 'test_credential'.length,
+              start_line: 10,
+              start_column: 8,
+              end_line: 10,
+              end_column: 23,
+              hit: true,
+            },
+            {
+              rule_id: 'fixture-rule-1',
+              start: otherStart,
+              end: otherStart + 'other_secret'.length,
+              start_line: 120,
+              start_column: 9,
+              end_line: 120,
+              end_column: 21,
+              hit: false,
+            },
+          ],
+        }),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    const tokens = entry.locator('[data-match-index]')
+    await expect(tokens).toHaveCount(2)
+    // 打开时没有点选，任何一块都不高亮；遮罩后两块外观一样，靠点选来区分。
+    await expect(entry.locator('[data-active="true"]')).toHaveCount(0)
+
+    const inFrame = (index: number) =>
+      entry.evaluate((box, matchIndex) => {
+        const frame = box.getBoundingClientRect()
+        const target = box.querySelector(`[data-match-index="${matchIndex}"]`)?.getBoundingClientRect()
+        return target !== undefined && target.top >= frame.top && target.bottom <= frame.bottom
+      }, index)
+
+    const other = dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })
+    await other.click()
+    await expect(other).toHaveAttribute('aria-current', 'true')
+    await expect(entry.locator('[data-match-index="1"]')).toHaveAttribute('data-active', 'true')
+    await expect(entry.locator('[data-active="true"]')).toHaveCount(1)
+    await expect.poll(() => inFrame(1)).toBe(true)
+
+    const hit = dialog.getByRole('button', { name: /\(fixture-rule-0\)/ })
+    await hit.click()
+    await expect(hit).toHaveAttribute('aria-current', 'true')
+    await expect(other).not.toHaveAttribute('aria-current', 'true')
+    await expect(entry.locator('[data-match-index="0"]')).toHaveAttribute('data-active', 'true')
+    await expect(entry.locator('[data-active="true"]')).toHaveCount(1)
+    await expect.poll(() => inFrame(0)).toBe(true)
+
+    // 换成明文是另一份响应：旧的点选不再指向它，不应把高亮带过去。
+    await dialog.getByRole('button', { name: 'Show plaintext' }).click()
+    await expect(entry).toContainText('test_credential')
+    await expect(entry.locator('[data-active="true"]')).toHaveCount(0)
+    await expect(hit).not.toHaveAttribute('aria-current', 'true')
+  })
+
+  test('brings the highlighted token back into view when the entry was scrolled out of the sheet', async ({ page }) => {
+    const lines = Array.from({ length: 140 }, (_, index) => `filler line ${index + 1}`)
+    lines[9] = 'first: test_credential'
+    lines[119] = 'second: other_secret'
+    const text = lines.join('\n')
+    const hitStart = text.indexOf('test_credential')
+    const otherStart = text.indexOf('other_secret')
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0', 'fixture-rule-1'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      detail: () =>
+        availableDetail({
+          text,
+          matches: [
+            {
+              rule_id: 'fixture-rule-0',
+              start: hitStart,
+              end: hitStart + 'test_credential'.length,
+              start_line: 10,
+              start_column: 8,
+              end_line: 10,
+              end_column: 23,
+              hit: true,
+            },
+            {
+              rule_id: 'fixture-rule-1',
+              start: otherStart,
+              end: otherStart + 'other_secret'.length,
+              start_line: 120,
+              start_column: 9,
+              end_line: 120,
+              end_column: 21,
+              hit: false,
+            },
+          ],
+        }),
+    })
+    // 矮视口下条目框比屏幕还高：先把侧栏滚到底，再点列表里远处的匹配，
+    // 高亮的那一块既要在条目框内滚到，也要被带回屏幕内。
+    await page.setViewportSize({ width: 1000, height: 300 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    const other = dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })
+    await entry.evaluate((element) => {
+      for (let node = element.parentElement; node; node = node.parentElement) {
+        if (node.scrollHeight > node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY)) {
+          node.scrollTop = node.scrollHeight
+          return
+        }
+      }
+      throw new Error('The sheet has no scrollable container')
+    })
+    const target = entry.locator('[data-match-index="1"]')
+    await expect(target).not.toBeInViewport()
+    await other.click()
+    await expect(target).toHaveAttribute('data-active', 'true')
+    await expect(target).toBeInViewport()
   })
 
   test('keeps the creating rules when no hit lists them', async ({ page }) => {
@@ -524,19 +770,92 @@ test.describe('hit records', () => {
     const dialog = await openRow(page)
     const entry = dialog.locator('[data-slot="credential-entry"]')
     await expect(entry).toContainText('first entry')
-    await entry.getByRole('button', { name: 'Show matched text' }).click()
+    await expect(entry).not.toContainText('secret_one')
+    await dialog.getByRole('button', { name: 'Show plaintext' }).click()
     await expect(entry).toContainText('secret_one')
 
     await chip(dialog, 'Fixture credential 1', 'Tool result').click()
     await expect(entry).toContainText('second entry')
     await expect(entry).not.toContainText('secret_one')
     await expect(entry).not.toContainText('secret_two')
-    await expect(entry.getByRole('button', { name: 'Show matched text' })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Show plaintext' })).toBeVisible()
     await expect(dialog.getByText('Reader', { exact: true })).toBeVisible()
     expect(state.detailRequests).toEqual([
-      { id: '100.0', index: 0 },
-      { id: '100.0', index: 1 },
+      { id: '100.0', index: 0, reveal: false },
+      { id: '100.0', index: 0, reveal: true },
+      { id: '100.0', index: 1, reveal: false },
     ])
+  })
+
+  test('reveals plaintext on demand, returns to the cached mask on hide and resets when the sheet closes', async ({
+    page,
+  }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    await expect(entry).not.toContainText('test_credential')
+    expect(state.detailRequests).toEqual([{ id: '100.0', index: 0, reveal: false }])
+
+    await dialog.getByRole('button', { name: 'Show plaintext' }).click()
+    await expect(entry).toContainText('test_credential')
+    await expect(dialog.getByRole('button', { name: 'Hide plaintext' })).toHaveAttribute('aria-pressed', 'true')
+    expect(state.detailRequests.filter((request) => request.reveal)).toEqual([{ id: '100.0', index: 0, reveal: true }])
+
+    const requestedBeforeHide = state.detailRequests.length
+    await dialog.getByRole('button', { name: 'Hide plaintext' }).click()
+    await expect(entry).not.toContainText('test_credential')
+    await expect(entry).toContainText(MASK_TOKEN)
+    await expect(dialog.getByRole('button', { name: 'Show plaintext' })).toHaveAttribute('aria-pressed', 'false')
+    expect(state.detailRequests).toHaveLength(requestedBeforeHide)
+
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    const reopened = await openRow(page)
+    await expect(reopened.locator('[data-slot="credential-entry"]')).not.toContainText('test_credential')
+    await expect(reopened.getByRole('button', { name: 'Show plaintext' })).toHaveAttribute('aria-pressed', 'false')
+    expect(state.detailRequests.filter((request) => request.reveal)).toHaveLength(1)
+  })
+
+  test('shows a permission message and keeps the masked entry when plaintext reveal is forbidden', async ({ page }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      detail: (_id, _index, reveal) =>
+        reveal
+          ? { status: 403, error: 'credential_reveal_forbidden', code: 'credential_reveal_forbidden' }
+          : availableDetail(),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    const entry = dialog.locator('[data-slot="credential-entry"]')
+    await expect(entry).toContainText(MASK_TOKEN)
+
+    await dialog.getByRole('button', { name: 'Show plaintext' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('You do not have permission to view plaintext.')
+    await expect(entry).not.toContainText('test_credential')
+    await expect(entry).toContainText(MASK_TOKEN)
+    await expect(dialog.getByRole('button', { name: 'Show plaintext' })).toHaveAttribute('aria-pressed', 'false')
+    expect(state.detailRequests.at(-1)).toEqual({ id: '100.0', index: 0, reveal: true })
+
+    // 再次点击是重试，权限不变时仍保持遮罩。
+    await dialog.getByRole('button', { name: 'Show plaintext' }).click()
+    await expect.poll(() => state.detailRequests.filter((request) => request.reveal).length).toBe(2)
+    await expect(dialog.getByRole('alert')).toContainText('You do not have permission to view plaintext.')
+    await expect(entry).not.toContainText('test_credential')
   })
 
   test('explains when the entry text is unavailable and why', async ({ page }) => {
@@ -589,13 +908,13 @@ test.describe('hit records', () => {
     await expect(
       dialog.getByText('The detected credential is not in the available text.', { exact: false }),
     ).toBeVisible()
-    await expect(dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })).toHaveAttribute('data-emphasis', 'match')
+    await expect(dialog.getByRole('button', { name: /\(fixture-rule-1\)/ })).toBeVisible()
 
     await chip(dialog, 'Fixture credential 1', 'Tool result').click()
     await expect(dialog.getByText('No rule matched this entry.')).toBeVisible()
   })
 
-  test('lists deduplicated later reuse with links to request records', async ({ page }) => {
+  test('keeps later reuse collapsed until expanded and links each location to its request record', async ({ page }) => {
     const state = await mockRedaction(page, {
       discoveries: [
         discovery(0, {
@@ -605,9 +924,9 @@ test.describe('hit records', () => {
       ],
       reuses: () => ({
         linkable: true,
+        total: 3,
+        next_cursor: null,
         items: [
-          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 10 }),
-          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 100 }),
           reuse({
             interaction_id: 'reuse-2',
             source_type: 'user_message',
@@ -615,23 +934,130 @@ test.describe('hit records', () => {
             latest_input: true,
             last_reused_at: createdAt,
           }),
+          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 10 }),
+          reuse({ interaction_id: 'reuse-1', last_reused_at: createdAt - 100 }),
         ],
-        truncated: true,
       }),
     })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     const dialog = await openRow(page)
+    const trigger = dialog.getByRole('button', { name: /Later reuse/ })
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(trigger).toHaveAttribute('aria-controls', /.+/)
+    await expect(dialog.getByRole('link', { name: /Open request record/ })).toHaveCount(0)
+    expect(state.reuseRequests).toEqual([])
+
+    await trigger.click()
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(state.reuseRequests).toEqual([{ id: '100.0', cursor: null, limit: 10 }])
+    await expect(trigger).toContainText('Later reuse')
+    await expect(trigger).toContainText('3')
+    await expect(dialog.getByText('1–3 / 3', { exact: true })).toBeVisible()
+
+    // 同一位置在不同时间被复用时各自是一行；服务端已经排好序，界面不再去重。
     const links = dialog.getByRole('link', { name: /Open request record/ })
-    await expect(links).toHaveCount(2)
+    await expect(links).toHaveCount(3)
     await expect(links.first()).toHaveAttribute('href', '/logs?interaction=reuse-2&highlight=credential-hits')
     await expect(links.first()).toContainText('User message')
     await expect(links.last()).toHaveAttribute('href', '/logs?interaction=reuse-1&highlight=credential-hits')
     await expect(links.last()).toContainText('Tool arguments')
     await expect(links.last()).toContainText('Last reused')
-    await expect(dialog.getByText('Only some reuse locations are shown.')).toBeVisible()
-    // 不显示复用次数，只列出去重后的位置。
-    expect(state.reuseRequests).toEqual(['100.0'])
+    await expect(dialog.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Next' })).toBeDisabled()
+    await expect(dialog.getByText('Only some reuse locations are shown.')).toHaveCount(0)
+  })
+
+  test('pages later reuse with the cursor, walks cached pages and keeps the pager outside the list viewport', async ({
+    page,
+  }) => {
+    const state = await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      reuses: pagedReuses(23),
+    })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await dialog.getByRole('button', { name: /Later reuse/ }).click()
+    await expect(dialog.getByText('1–10 / 23', { exact: true })).toBeVisible()
+    expect(state.reuseRequests).toEqual([{ id: '100.0', cursor: null, limit: 10 }])
+
+    // 触发行的悬停底色向两侧各外扩 0.5rem，文字仍与下方的框左对齐，不偏向一侧。
+    const triggerBox = await dialog.getByRole('button', { name: /Later reuse/ }).boundingBox()
+    const listBox = await dialog.locator('.reuse-box').boundingBox()
+    expect(triggerBox && listBox).toBeTruthy()
+    expect(Math.round(listBox!.x - triggerBox!.x)).toBe(8)
+    expect(Math.round(triggerBox!.x + triggerBox!.width - (listBox!.x + listBox!.width))).toBe(8)
+
+    const previous = dialog.getByRole('button', { name: 'Previous' })
+    const next = dialog.getByRole('button', { name: 'Next' })
+    await expect(previous).toBeDisabled()
+    await expect(next).toBeEnabled()
+
+    await next.click()
+    await expect(dialog.getByText('11–20 / 23', { exact: true })).toBeVisible()
+    expect(state.reuseRequests.at(-1)).toEqual({ id: '100.0', cursor: '10', limit: 10 })
+    await expect(previous).toBeEnabled()
+
+    await next.click()
+    await expect(dialog.getByText('21–23 / 23', { exact: true })).toBeVisible()
+    expect(state.reuseRequests.at(-1)).toEqual({ id: '100.0', cursor: '20', limit: 10 })
+    await expect(next).toBeDisabled()
+
+    // 返回已缓存的页不再请求；页脚留在滚动视口之外，滚到列表底部仍然可见。
+    const requestsAfterLastPage = state.reuseRequests.length
+    await previous.click()
+    await expect(dialog.getByText('11–20 / 23', { exact: true })).toBeVisible()
+    await previous.click()
+    await expect(dialog.getByText('1–10 / 23', { exact: true })).toBeVisible()
+    expect(state.reuseRequests).toHaveLength(requestsAfterLastPage)
+    await expect(previous).toBeDisabled()
+    await expect(dialog.getByRole('link', { name: /Open request record/ })).toHaveCount(10)
+
+    const viewport = dialog.locator('[data-slot="reuse-viewport"]')
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    const pager = dialog.locator('.reuse-pager')
+    await expect(pager).toBeVisible()
+    expect(await pager.evaluate((element) => element.closest('[data-slot="reuse-viewport"]') === null)).toBe(true)
+  })
+
+  test('keeps the reuse pager reachable and the sheet within the viewport at 320px', async ({ page }) => {
+    await mockRedaction(page, {
+      discoveries: [
+        discovery(0, {
+          rule_ids: ['fixture-rule-0'],
+          hits: [{ rule_id: 'fixture-rule-0', source_type: 'tool_result' }],
+        }),
+      ],
+      reuses: pagedReuses(23),
+    })
+    await page.setViewportSize({ width: 320, height: 800 })
+    await page.goto('/reversible-redaction')
+    const dialog = await openRow(page)
+    await dialog.getByRole('button', { name: /Later reuse/ }).click()
+    await expect(dialog.getByText('1–10 / 23', { exact: true })).toBeVisible()
+
+    const next = dialog.getByRole('button', { name: 'Next' })
+    await next.scrollIntoViewIfNeeded()
+    await expect(next).toBeInViewport()
+    await next.click()
+    await expect(dialog.getByText('11–20 / 23', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Previous' })).toBeInViewport()
+    await expect(dialog.getByRole('button', { name: 'Show plaintext' })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+
+    const viewport = dialog.locator('[data-slot="reuse-viewport"]')
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    await expect(dialog.getByText('11–20 / 23', { exact: true })).toBeInViewport()
   })
 
   test('explains an unlinkable mapping and an empty reuse history', async ({ page }) => {
@@ -656,13 +1082,16 @@ test.describe('hit records', () => {
     await expect(
       unlinkable.getByText('This mapping was created before the upgrade, so later reuse cannot be linked.'),
     ).toBeVisible()
+    await expect(unlinkable.getByRole('button', { name: /Later reuse/ })).toHaveCount(0)
     expect(state.reuseRequests).toEqual([])
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
 
     const empty = await openRow(page, 'empty-key')
+    expect(state.reuseRequests).toEqual([])
+    await empty.getByRole('button', { name: /Later reuse/ }).click()
     await expect(empty.getByText('None yet.')).toBeVisible()
-    expect(state.reuseRequests).toEqual(['100.1'])
+    expect(state.reuseRequests).toEqual([{ id: '100.1', cursor: null, limit: 10 }])
   })
 
   test('tells an expired hit from a temporary detail failure and retries the latter', async ({ page }) => {
