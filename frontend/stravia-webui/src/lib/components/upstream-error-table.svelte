@@ -146,6 +146,7 @@ const columns = helper.columns([
       ariaLabel={m.observation_upstream_errors()}
       getRowId={(row: UpstreamErrorSummary) => row.id}
       class="isolate flex-1"
+      workbench
       stickyHeader
       selectionMode="single"
       selectOnRowClick={false}

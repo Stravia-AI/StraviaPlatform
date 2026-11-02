@@ -445,7 +445,10 @@ test('model ID suggestions preserve arbitrary text, composition, and form focus'
   await expect(modelId).toBeFocused()
 })
 
-test('configured Providers table filters and persists column customization', async ({ page }) => {
+test('configured Providers table shows inventory, linked models and cost, and persists column customization', async ({
+  page,
+}) => {
+  const timestamp = '2026-01-01T00:00:00Z'
   const configuredProviders = [
     {
       id: 'zeta-provider',
@@ -457,8 +460,14 @@ test('configured Providers table filters and persists column customization', asy
       channel: 'default',
       configured_credential_fields: ['api_key'],
       is_enabled: true,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
+      model_inventory: {
+        total: 10,
+        available: 7,
+        in_progress: false,
+        last_check: { checked_at: timestamp, outcome: 'success' },
+      },
+      created_at: timestamp,
+      updated_at: timestamp,
     },
     {
       id: 'alpha-provider',
@@ -470,12 +479,76 @@ test('configured Providers table filters and persists column customization', asy
       channel: 'codex',
       configured_credential_fields: [],
       is_enabled: false,
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
+      cost_plan: {
+        id: 'alpha-plan',
+        provider_id: 'alpha-provider',
+        effective_from: 0,
+        basis: 'subscription',
+        period: 'month',
+        price: { amount: '20', currency: 'usd' },
+        created_at: timestamp,
+      },
+      model_inventory: {
+        total: 3,
+        available: 0,
+        in_progress: false,
+        last_check: { checked_at: timestamp, outcome: 'failure' },
+      },
+      created_at: timestamp,
+      updated_at: timestamp,
     },
+  ]
+  const routeTarget = (providerId: string) => ({ id: `target-${providerId}`, provider_id: providerId })
+  const usd = { kind: 'usd', symbol: '$' }
+  const linkedRoutes = [
+    // 同一模型有两个 Target 指向同一供应商，只算一个关联模型。
+    { id: 'route-a', model_id: 'model-a', targets: [routeTarget('zeta-provider'), routeTarget('zeta-provider')] },
+    { id: 'route-b', model_id: 'model-b', targets: [routeTarget('zeta-provider')] },
+    { id: 'route-c', model_id: 'model-c', targets: [routeTarget('other-provider')] },
   ]
   await page.route('**/api/v1/providers', async (route) => {
     await route.fulfill({ json: { data: configuredProviders } })
+  })
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({ json: { data: linkedRoutes } })
+  })
+  await page.route('**/api/v1/stats/providers**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            provider_id: 'zeta-provider',
+            deleted: false,
+            provider: 'Zeta Service',
+            upstream_request_count: 4,
+            upstream_error_count: 0,
+            avg_duration_ms: 100,
+            avg_output_tps: 10,
+            currency: usd,
+            cost: { amount: '12.5', known_count: 4, unknown_count: 0 },
+            subscription: null,
+            allocated_cost: { amount: '12.5', known_count: 4, unknown_count: 0 },
+          },
+          {
+            provider_id: 'alpha-provider',
+            deleted: false,
+            provider: 'Alpha Service',
+            upstream_request_count: 3,
+            upstream_error_count: 0,
+            avg_duration_ms: 100,
+            avg_output_tps: 10,
+            currency: usd,
+            cost: { amount: '50', known_count: 3, unknown_count: 0 },
+            subscription: {
+              cost: { amount: '20', known_count: 0, unknown_count: 0 },
+              usage_equivalent_cost: { amount: '50', known_count: 3, unknown_count: 0 },
+              multiple: '2.5',
+            },
+            allocated_cost: { amount: '20', known_count: 3, unknown_count: 0 },
+          },
+        ],
+      },
+    })
   })
 
   await page.setViewportSize({ width: 1279, height: 800 })
@@ -483,23 +556,49 @@ test('configured Providers table filters and persists column customization', asy
 
   const table = page.getByRole('table', { name: 'Connected AI providers' })
   await expect(table.getByRole('row')).toHaveCount(3)
+  for (const name of ['Provider', 'Protocol', 'Status', 'Upstream models', 'Linked models', 'Cost · 30 days']) {
+    await expect(table.getByRole('columnheader', { name: new RegExp(name) })).toHaveCount(1)
+  }
+  // Base URL 与认证方式不再占列，但 Base URL 仍可搜索，详情页保留完整信息。
+  await expect(table.getByRole('columnheader', { name: /Base URL|Authentication/ })).toHaveCount(0)
+  await expect(table).not.toContainText('https://zeta.example/v1')
+
+  const zeta = table.getByRole('row', { name: /Zeta Service/ })
+  await expect(zeta).toContainText('7 / 10')
+  await expect(zeta.getByRole('link', { name: '2', exact: true })).toHaveAttribute(
+    'href',
+    '/providers/zeta-provider?view=routes',
+  )
+  await expect(zeta).toContainText('$12.50')
+  const alpha = table.getByRole('row', { name: /Alpha Service/ })
+  await expect(alpha).toContainText('0 / 3')
+  await expect(alpha).toContainText('Sync failed')
+  await expect(alpha).toContainText('Not linked')
+  await expect(alpha).toContainText('$20.00 / mo')
+  await expect(alpha).toContainText('2.50× value')
+
   // 窄屏列表有自己的搜索框（桌面宽度下隐藏），按可访问树取可见的那一个。
   const search = page.getByRole('textbox', { name: 'Search providers…' })
   await search.fill('Alpha')
   await expect(table.getByRole('row')).toHaveCount(2)
   await expect(table).toContainText('Alpha Service')
   await expect(table).not.toContainText('Zeta Service')
+  await search.fill('zeta.example')
+  await expect(table.getByRole('row')).toHaveCount(2)
+  await expect(table).toContainText('Zeta Service')
   await search.fill('__missing__')
   await expect(table).toContainText('No providers match your search.')
   await search.fill('')
 
   await page.getByRole('button', { name: 'Columns' }).click()
-  await page.getByRole('menuitemcheckbox', { name: 'Authentication' }).click()
-  await expect(table.getByRole('columnheader', { name: /Authentication/ })).toHaveCount(0)
+  await page.getByRole('menuitemcheckbox', { name: 'Linked models' }).click()
+  await expect(table.getByRole('columnheader', { name: /Linked models/ })).toHaveCount(0)
 
   await page.reload()
-  await expect(table.getByRole('columnheader', { name: /Authentication/ })).toHaveCount(0)
-  await table.getByRole('button', { name: 'Sort Provider ascending' }).click()
+  await expect(table.getByRole('columnheader', { name: /Linked models/ })).toHaveCount(0)
+  await table.getByRole('button', { name: 'Sort Upstream models descending' }).click()
+  await expect(table.getByRole('row').nth(1)).toContainText('Zeta Service')
+  await table.getByRole('button', { name: 'Sort Upstream models ascending' }).click()
   await expect(table.getByRole('row').nth(1)).toContainText('Alpha Service')
 })
 

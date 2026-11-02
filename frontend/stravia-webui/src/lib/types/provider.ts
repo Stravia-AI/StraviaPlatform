@@ -27,8 +27,19 @@ export interface Provider {
   allowance_suspension?: import('./provider-allowance').AllowanceSuspension | null
   /** Current effective cost plan; null means usage-based (default). */
   cost_plan?: ProviderCostPlan | null
+  /** Upstream model inventory summary; only `GET /providers` rows carry it. */
+  model_inventory?: ProviderModelInventory | null
   created_at: string
   updated_at: string
+}
+
+export interface ProviderModelInventory {
+  total: number
+  /** Provider Models that are effectively available, using the same rule as `ProviderModelSummary.available`. */
+  available: number
+  in_progress: boolean
+  /** Latest synchronization attempt; null when the provider has never been checked. */
+  last_check: { checked_at: string; outcome: ModelChangeOutcome } | null
 }
 
 export interface ImageCapabilityDrift {

@@ -11,6 +11,8 @@
 ### Changed
 
 - Usage charts animate data changes (time range, selection, hover) with a 300 ms ease-out transition instead of redrawing; reduced-motion preferences turn it off. Token breakdown legend entries drop the trailing "Token" (for example "Cache write" instead of "Cache write Token").
+- The Providers list no longer has Base URL and Authentication columns; Protocol stays. New columns show the upstream model inventory (available / total, with a warning when the last sync failed or only partly succeeded), the number of linked models, and the cost over the last 30 days (subscription price with its value multiple, usage cost with a `≥` prefix when some attempts have unknown cost, or "Not tracked"). Base URL is still searchable and shown on the Provider detail page. The Linked models count is the number of models with at least one Target on the Provider, and the Provider detail page's Linked models tab uses the same number.
+- `GET /api/v1/providers` rows gain `model_inventory` (`total`, `available`, `in_progress`, `last_check`), computed in one aggregate query over the projected `provider_models` columns on SQLite and PostgreSQL. `available` uses the same rule as `ProviderModelSummary.available`.
 
 ### Fixed
 
@@ -20,6 +22,7 @@
 - Anthropic `redacted_thinking` blocks from an Anthropic upstream are no longer dropped (unary) or passed through as an unclassified event (streaming). They now take part in History Marker projection like signed thinking: the client sees only an opaque marker carrier, and the original `data` is restored in its original position when the conversation is replayed to Anthropic. Previously, replaying a tool-use turn without them could make Anthropic reject the request.
 - When replaying a turn that contains a tool call, the Anthropic encoder keeps `redacted_thinking` blocks ahead of the tool call in their original order relative to `thinking` blocks, instead of moving them behind signed thinking.
 - Responses clients now carry protected reasoning from any non-native upstream (Anthropic signed or redacted thinking, Gemini thought signatures) in the reasoning item's `encrypted_content` as an opaque Stravia pointer instead of in reasoning `content`. Stateless clients such as Codex (`store=false`) and the AI SDK, which drop `content` on replay, can therefore still restore the original protected blocks. Unresolvable pointers are cleared and never forwarded upstream; markers already stored in `content` keep resolving. See ADR-0088.
+- The Upstream Errors tab on the Logs page scrolls again. Its table was not bounded to the workspace height, so rows beyond the first screen were clipped and the mouse wheel did nothing.
 
 ## [0.6.1] - 2026-11-02
 

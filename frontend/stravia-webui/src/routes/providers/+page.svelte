@@ -9,12 +9,22 @@ import PlusIcon from '@lucide/svelte/icons/plus'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { tick } from 'svelte'
 import { toast } from 'svelte-sonner'
-import { admin } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { getModelChanges } from '#lib/model-changes.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { providerOAuthStatusLabel } from '#lib/provider-oauth.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
+import { formatLogTime } from '#lib/format.js'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '#lib/logical-model.js'
+import {
+  countLinkedModels,
+  providerCostSortValue,
+  providerCostState,
+  providerInventorySortValue,
+  providerInventoryState,
+  type ProviderListRow,
+} from '#lib/provider-list.js'
+import { liveStatsWindow } from '#lib/stats-window.js'
 import {
   providerConnectionCheckFailureMessage,
   providerConnectionCheckSuccessMessage,
@@ -35,7 +45,6 @@ import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authoriza
 import ProviderMark from '#lib/components/provider-mark.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import AllowanceSuspension from '#lib/components/allowance-suspension.svelte'
-import TechnicalValue from '#lib/components/technical-value.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
@@ -55,8 +64,16 @@ import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 
 const queryClient = useQueryClient()
+// 成本列固定展示近 30 天；详情页的成本页签提供 24 小时 / 7 天 / 30 天切换。
+const COST_WINDOW_MS = 30 * 86_400_000
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
+const currencyQuery = createQuery(() => currencyQueryOptions())
+const statsQuery = createQuery(() => ({
+  queryKey: ['stats-providers', 'provider-list'],
+  queryFn: () => admin.stats.providers(liveStatsWindow(COST_WINDOW_MS)),
+  refetchInterval: 60_000,
+}))
 
 const profileDescriptorsQuery = createQuery(() => ({
   queryKey: ['provider-descriptors'],
@@ -87,9 +104,17 @@ let reauthorization = $state<{ begin: () => Promise<void>; consume: () => void }
 const providers = $derived(providersQuery.data ?? [])
 const providersEmpty = $derived(!providersQuery.isPending && !providersQuery.isError && providers.length === 0)
 const normalizedQuery = $derived(query.trim().toLocaleLowerCase())
-const visibleProviders = $derived(
-  providers.filter((provider) => providerSearchText(provider).includes(normalizedQuery)),
+const statsByProvider = $derived(
+  new Map((statsQuery.data ?? []).flatMap((row) => (row.provider_id ? [[row.provider_id, row] as const] : []))),
 )
+const rows = $derived<ProviderListRow[]>(
+  providers.map((provider) => ({
+    provider,
+    linkedModelCount: modelsQuery.data ? countLinkedModels(provider.id, modelsQuery.data) : null,
+    stats: statsByProvider.get(provider.id) ?? null,
+  })),
+)
+const visibleRows = $derived(rows.filter((row) => providerSearchText(row.provider).includes(normalizedQuery)))
 const models = $derived(modelsQuery.data ?? [])
 const providerDependenciesUnavailable = $derived(modelsQuery.isPending || modelsQuery.isError)
 
@@ -102,46 +127,49 @@ const driftsByProvider = $derived.by(() => {
   }
   return grouped
 })
-const providerColumnHelper = createDataTableColumnHelper<Provider>()
+const providerColumnHelper = createDataTableColumnHelper<ProviderListRow>()
 const providerColumns = providerColumnHelper.columns([
-  providerColumnHelper.accessor('name', {
+  providerColumnHelper.accessor((row) => row.provider.name, {
+    id: 'name',
     header: () => m.common_model_service(),
     cell: (context) => renderSnippet(providerIdentityCell, context),
     meta: { label: () => m.common_model_service() },
-    size: 280,
+    size: 260,
   }),
-  providerColumnHelper.accessor('protocol', {
+  providerColumnHelper.accessor((row) => row.provider.protocol, {
+    id: 'protocol',
     header: () => m.common_protocol(),
     cell: (context) => renderSnippet(providerProtocolCell, context),
     meta: { label: () => m.common_protocol(), width: 'compact' },
-    size: 160,
+    size: 150,
   }),
-  providerColumnHelper.accessor('base_url', {
-    header: () => m.common_base_url(),
-    cell: (context) => renderSnippet(providerBaseUrlCell, context),
-    meta: { label: () => m.common_base_url(), width: 'fill' },
-    size: 320,
-  }),
-  providerColumnHelper.accessor(
-    (provider) =>
-      providerChannel(provider)?.auth
-        ? 'oauth'
-        : (provider.configured_credential_fields?.length ?? 0) > 0
-          ? 'credentials'
-          : 'none',
-    {
-      id: 'authentication',
-      header: () => m.providers_authentication(),
-      cell: (context) => renderSnippet(providerAuthenticationCell, context),
-      meta: { label: () => m.providers_authentication(), width: 'compact' },
-      size: 140,
-    },
-  ),
-  providerColumnHelper.accessor('is_enabled', {
+  providerColumnHelper.accessor((row) => row.provider.is_enabled, {
+    id: 'is_enabled',
     header: () => m.common_status(),
     cell: (context) => renderSnippet(providerStatusCell, context),
     meta: { label: () => m.common_status(), width: 'fill' },
     size: 200,
+  }),
+  providerColumnHelper.accessor((row) => providerInventorySortValue(row.provider), {
+    id: 'upstream_models',
+    header: () => m.provider_detail_tab_models(),
+    cell: (context) => renderSnippet(providerInventoryCell, context),
+    meta: { label: () => m.provider_detail_tab_models(), width: 'compact' },
+    size: 150,
+  }),
+  providerColumnHelper.accessor((row) => row.linkedModelCount ?? -1, {
+    id: 'linked_models',
+    header: () => m.provider_detail_tab_routes(),
+    cell: (context) => renderSnippet(providerLinkedModelsCell, context),
+    meta: { label: () => m.provider_detail_tab_routes(), width: 'compact' },
+    size: 110,
+  }),
+  providerColumnHelper.accessor(providerCostSortValue, {
+    id: 'cost',
+    header: () => m.providers_cost_column(),
+    cell: (context) => renderSnippet(providerCostCell, context),
+    meta: { label: () => m.providers_cost_column(), width: 'compact' },
+    size: 150,
   }),
   providerColumnHelper.display({
     id: 'actions',
@@ -171,22 +199,25 @@ function providerIcon(provider: Provider): string {
   return profileDescriptor(provider)?.catalog_id ?? provider.preset_key ?? provider.vendor ?? 'custom'
 }
 
-function authenticationLabel(provider: Provider): string {
-  return providerChannel(provider)?.auth
-    ? 'OAuth'
-    : (provider.configured_credential_fields?.length ?? 0) > 0
-      ? m.provider_config_credentials()
-      : m.provider_config_no_credentials()
+function canDiscoverModels(provider: Provider): boolean {
+  return providerChannel(provider)?.capabilities.includes('model_discovery') ?? false
 }
 
-// vendor 技术名不在行内常驻，但仍可搜索。
+function providerViewPath(provider: Provider, view: 'models' | 'routes' | 'cost'): string {
+  return `providers/${encodeURIComponent(provider.id)}?view=${view}`
+}
+
+function providerRowSearchText(row: ProviderListRow): string {
+  return providerSearchText(row.provider)
+}
+
+// vendor 技术名与 Base URL 不在行内常驻，但仍可搜索。
 function providerSearchText(provider: Provider): string {
   return [
     provider.name,
     provider.vendor,
     provider.protocol,
     provider.base_url,
-    authenticationLabel(provider),
     provider.is_enabled ? m.common_enabled_status() : m.common_disabled_status(),
   ]
     .filter(Boolean)
@@ -207,12 +238,12 @@ function openProvider(provider: Provider, event: MouseEvent): void {
   void goto(resolve(`providers/${encodeURIComponent(provider.id)}?view=connection`))
 }
 
-function getProviderRowId(provider: Provider): string {
-  return provider.id
+function getProviderRowId(row: ProviderListRow): string {
+  return row.provider.id
 }
 
-function handleProviderTableRowClick({ event, original }: DataTableRowPointerEvent<Provider>): void {
-  openProvider(original, event)
+function handleProviderTableRowClick({ event, original }: DataTableRowPointerEvent<ProviderListRow>): void {
+  openProvider(original.provider, event)
 }
 
 function providerReferences(provider: Provider): Array<{ route: Route; target: Route['targets'][number] }> {
@@ -222,8 +253,7 @@ function providerReferences(provider: Provider): Array<{ route: Route; target: R
 }
 
 function providerSaved(provider: Provider): void {
-  const canDiscoverModels = providerChannel(provider)?.capabilities.includes('model_discovery') ?? false
-  const view = canDiscoverModels ? 'models&sync=created' : 'connection'
+  const view = canDiscoverModels(provider) ? 'models&sync=created' : 'connection'
   void goto(resolve(`providers/${encodeURIComponent(provider.id)}?view=${view}`))
 }
 
@@ -403,13 +433,13 @@ async function copyProvider(): Promise<void> {
   </DropdownMenu.Root>
 {/snippet}
 
-{#snippet providerIdentityCell(context: DataTableCellContext<Provider>)}
-  {@const provider = context.row.original}
+{#snippet providerIdentityCell(context: DataTableCellContext<ProviderListRow>)}
+  {@const provider = context.row.original.provider}
   {@const drifts = driftsByProvider[provider.id] ?? []}
-  <div class="flex items-center gap-3">
+  <div class="flex max-w-60 items-center gap-3">
     <ProviderMark icon={providerIcon(provider)} name={provider.name} logo={provider.id} />
     <div class="min-w-0">
-      <p class="truncate font-medium">{provider.name}</p>
+      <p class="truncate font-medium" title={provider.name}>{provider.name}</p>
       {#if drifts.length > 0}
         <Badge
           class="mt-1"
@@ -422,20 +452,92 @@ async function copyProvider(): Promise<void> {
   </div>
 {/snippet}
 
-{#snippet providerProtocolCell(context: DataTableCellContext<Provider>)}
-  <Badge variant="outline">{context.row.original.protocol || m.provider_config_custom_protocol()}</Badge>
+{#snippet providerProtocolCell(context: DataTableCellContext<ProviderListRow>)}
+  <Badge variant="outline">{context.row.original.provider.protocol || m.provider_config_custom_protocol()}</Badge>
 {/snippet}
 
-{#snippet providerBaseUrlCell(context: DataTableCellContext<Provider>)}
-  <TechnicalValue value={context.row.original.base_url} copyable />
+{#snippet inventoryValue(provider: Provider)}
+  {@const inventory = providerInventoryState(provider, canDiscoverModels(provider))}
+  {#if inventory.kind === 'unknown' || inventory.kind === 'none'}
+    <span class="text-muted-foreground">—</span>
+  {:else if inventory.kind === 'unsynced'}
+    <span class="text-muted-foreground">{m.providers_inventory_unsynced()}</span>
+  {:else}
+    <a
+      class="flex flex-wrap items-center gap-x-2 gap-y-0.5 hover:underline"
+      href={resolve(providerViewPath(provider, 'models'))}
+      title={inventory.checkedAt
+        ? m.providers_inventory_last_checked({ time: formatLogTime(inventory.checkedAt) })
+        : undefined}>
+      {#if inventory.total > 0 || inventory.status === 'ok'}
+        <span
+          class="font-technical tabular-nums"
+          aria-label={m.providers_inventory_counts_aria({ available: inventory.available, total: inventory.total })}
+          >{inventory.available} / {inventory.total}</span>
+      {/if}
+      {#if inventory.status === 'syncing'}
+        <StatusIndicator compact label={m.providers_inventory_syncing()} />
+      {:else if inventory.status === 'failure'}
+        <StatusIndicator compact tone="warning" label={m.providers_inventory_failed()} />
+      {:else if inventory.status === 'partial_success'}
+        <StatusIndicator compact tone="warning" label={m.providers_inventory_partial()} />
+      {/if}
+    </a>
+  {/if}
 {/snippet}
 
-{#snippet providerAuthenticationCell(context: DataTableCellContext<Provider>)}
-  {authenticationLabel(context.row.original)}
+{#snippet linkedModelsValue(row: ProviderListRow)}
+  {#if row.linkedModelCount === null}
+    <span class="text-muted-foreground">—</span>
+  {:else if row.linkedModelCount === 0}
+    <span class="text-muted-foreground">{m.providers_linked_models_none()}</span>
+  {:else}
+    <a class="font-technical tabular-nums hover:underline" href={resolve(providerViewPath(row.provider, 'routes'))}
+      >{row.linkedModelCount}</a>
+  {/if}
 {/snippet}
 
-{#snippet providerStatusCell(context: DataTableCellContext<Provider>)}
-  {@const provider = context.row.original}
+{#snippet costValue(row: ProviderListRow)}
+  {@const cost = providerCostState(row, {
+    statsStatus: statsQuery.status,
+    currencyStatus: currencyQuery.status,
+    customCurrency: currencyQuery.data ?? null,
+  })}
+  {#if cost.kind === 'loading'}
+    <Skeleton class="h-4 w-16" />
+  {:else if cost.kind === 'unavailable'}
+    <span class="text-muted-foreground">{m.providers_cost_not_loaded()}</span>
+  {:else if cost.kind === 'untracked'}
+    <span class="text-muted-foreground">{m.cost_basis_none()}</span>
+  {:else}
+    <a class="flex flex-col hover:underline" href={resolve(providerViewPath(row.provider, 'cost'))}>
+      {#if cost.kind === 'usage'}
+        <span class="font-technical tabular-nums">{cost.amount ?? '—'}</span>
+      {:else}
+        <span class="font-technical tabular-nums">{cost.price}</span>
+        <span class="text-xs text-muted-foreground"
+          >{cost.multiple
+            ? m.providers_cost_value_multiple({ multiple: cost.multiple })
+            : m.cost_basis_subscription()}</span>
+      {/if}
+    </a>
+  {/if}
+{/snippet}
+
+{#snippet providerInventoryCell(context: DataTableCellContext<ProviderListRow>)}
+  {@render inventoryValue(context.row.original.provider)}
+{/snippet}
+
+{#snippet providerLinkedModelsCell(context: DataTableCellContext<ProviderListRow>)}
+  {@render linkedModelsValue(context.row.original)}
+{/snippet}
+
+{#snippet providerCostCell(context: DataTableCellContext<ProviderListRow>)}
+  {@render costValue(context.row.original)}
+{/snippet}
+
+{#snippet providerStatusCell(context: DataTableCellContext<ProviderListRow>)}
+  {@const provider = context.row.original.provider}
   {@const credentialInvalid = provider.credential_status === 'invalid'}
   <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
     {#if credentialInvalid || !provider.is_enabled || !provider.allowance_suspension}
@@ -480,9 +582,9 @@ async function copyProvider(): Promise<void> {
   {/if}
 {/snippet}
 
-{#snippet providerActionsCell(context: DataTableCellContext<Provider>)}
+{#snippet providerActionsCell(context: DataTableCellContext<ProviderListRow>)}
   <div class="flex justify-end gap-1">
-    {@render providerActions(context.row.original)}
+    {@render providerActions(context.row.original.provider)}
   </div>
 {/snippet}
 
@@ -519,14 +621,14 @@ async function copyProvider(): Promise<void> {
       <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
           workbench
-          data={providers}
+          data={rows}
           columns={providerColumns}
           labels={providerTableLabels}
           getRowId={getProviderRowId}
           ariaLabel={m.providers_table_aria_label()}
           globalFilterEnabled
           bind:globalFilter={query}
-          globalFilterText={providerSearchText}
+          globalFilterText={providerRowSearchText}
           globalFilterPlaceholder={m.providers_table_search()}
           columnToggle
           toolbarLast={modelChangesAction}
@@ -535,7 +637,7 @@ async function copyProvider(): Promise<void> {
           sortMode="multiple"
           resizableColumns
           reorderableColumns
-          stateKey="providers-data-table"
+          stateKey="providers-data-table-v2"
           onRowClick={handleProviderTableRowClick} />
       </div>
 
@@ -550,10 +652,11 @@ async function copyProvider(): Promise<void> {
           </InputGroup.Root>
           <div class="flex justify-end">{@render modelChangesAction()}</div>
         </div>
-        {#if visibleProviders.length === 0}
+        {#if visibleRows.length === 0}
           <p class="py-6 text-center text-sm text-muted-foreground" role="status">{m.providers_table_no_results()}</p>
         {/if}
-        {#each visibleProviders as provider (provider.id)}
+        {#each visibleRows as row (row.provider.id)}
+          {@const provider = row.provider}
           {@const drifts = driftsByProvider[provider.id] ?? []}
           {@const credentialInvalid = provider.credential_status === 'invalid'}
           <div class="route-mobile-row">
@@ -563,11 +666,10 @@ async function copyProvider(): Promise<void> {
                 <div class="min-w-0">
                   <p class="truncate font-medium">{provider.name}</p>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    {provider.protocol || m.provider_config_custom_protocol()} · {authenticationLabel(provider)}
+                    {provider.protocol || m.provider_config_custom_protocol()}
                   </p>
                 </div>
               </div>
-              <TechnicalValue class="mt-2 max-w-full text-muted-foreground" value={provider.base_url} />
               <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                 {#if credentialInvalid || !provider.is_enabled || !provider.allowance_suspension}
                   <StatusIndicator
@@ -590,6 +692,20 @@ async function copyProvider(): Promise<void> {
                 <p class="mt-1 text-xs text-destructive">{m.providers_credential_invalid()}</p>
               {/if}
               {@render oauthRecovery(provider)}
+              <dl class="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+                <div class="flex items-center gap-1.5">
+                  <dt class="text-muted-foreground">{m.provider_detail_tab_models()}</dt>
+                  <dd>{@render inventoryValue(provider)}</dd>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <dt class="text-muted-foreground">{m.provider_detail_tab_routes()}</dt>
+                  <dd>{@render linkedModelsValue(row)}</dd>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <dt class="text-muted-foreground">{m.providers_cost_column()}</dt>
+                  <dd>{@render costValue(row)}</dd>
+                </div>
+              </dl>
               {#if drifts.length > 0}
                 <Badge
                   class="mt-2"

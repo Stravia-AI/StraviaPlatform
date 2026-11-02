@@ -697,6 +697,14 @@ mod tests {
             ProviderModelStore::get(&self.delegate, provider_id, model_id).await
         }
 
+        async fn count_by_provider(
+            &self,
+        ) -> anyhow::Result<
+            std::collections::HashMap<String, crate::provider_models::ProviderModelCounts>,
+        > {
+            ProviderModelStore::count_by_provider(&self.delegate).await
+        }
+
         async fn find(
             &self,
             provider_id: &str,

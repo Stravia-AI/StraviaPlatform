@@ -14,9 +14,10 @@ use crate::db::models::{
 use crate::pricing::{Amount, CostBasis, CurrencyKind, CustomCurrency, SubscriptionPeriod};
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord,
-    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
-    ProviderModelSelectionPolicy, ProviderModelSyncState, ProviderModelSyncSummary,
-    ProviderModelThinkingMapValidator, RestoreProviderModel, model_id_match_key,
+    ProviderModelCounts, ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord,
+    ProviderModelRestore, ProviderModelSelectionPolicy, ProviderModelSyncState,
+    ProviderModelSyncSummary, ProviderModelThinkingMapValidator, RestoreProviderModel,
+    model_id_match_key,
 };
 use rust_decimal::Decimal;
 
@@ -492,6 +493,9 @@ pub trait ProviderModelStore: Send + Sync {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Vec<ProviderModelRecord>>;
+    /// 每个 Provider 的 Provider Model 总数与可用数；没有清单的 Provider 不在结果中。
+    /// 可用性规则与 [`ProviderModelRecord::effective_available`] 同源，且不读取 `metadata_json`。
+    async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>>;
     async fn get(
         &self,
         provider_id: &str,

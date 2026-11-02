@@ -6,12 +6,12 @@ use crate::provider_models::{
     CreateManualProviderModel, ModelChangeItem, ModelChangeOutcome, ModelChangePage,
     ModelChangeQuery, ModelChangeRecord, ModelChangeSource, ModelChangeType, ModelModalities,
     ModelSpecificationDiff, NewProviderModelRecord, ProviderModelDetail, ProviderModelField,
-    ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
-    ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelRestore,
-    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelSummary,
-    ProviderModelSyncFailure, ProviderModelSyncState, ProviderModelSyncSummary,
-    RestoreProviderModel, RestoreProviderModelSync, SnapshotState, SourceStamp,
-    UpdateProviderModel, UpdateProviderModelSelection, UpdateProviderModelSyncState,
+    ProviderModelInventory, ProviderModelLastCheck, ProviderModelMetadata, ProviderModelMutation,
+    ProviderModelPresence, ProviderModelPresenceUpdate, ProviderModelReconciliation,
+    ProviderModelRestore, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    ProviderModelSummary, ProviderModelSyncFailure, ProviderModelSyncState,
+    ProviderModelSyncSummary, RestoreProviderModel, RestoreProviderModelSync, SnapshotState,
+    SourceStamp, UpdateProviderModel, UpdateProviderModelSelection, UpdateProviderModelSyncState,
     apply_provider_model_changes, change_fields, merge_source_specification, normalize_model_id,
     restore_source_fields, same_discovery_provider,
 };
@@ -139,6 +139,33 @@ impl AdminService {
             .gw
             .provider_model_pause_reason(&provider, state.automatic_sync);
         Ok(state)
+    }
+
+    /// 供应商列表行内的清单概况：计数一次聚合查询，同步状态按主键逐个读取（与列表其余按行读取一致）。
+    pub async fn provider_model_inventories(
+        &self,
+        provider_ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, ProviderModelInventory>> {
+        let models = self.gw.storage.provider_models();
+        let mut counts = models.count_by_provider().await?;
+        let mut inventories = std::collections::HashMap::with_capacity(provider_ids.len());
+        for provider_id in provider_ids {
+            let state = models.sync_state(provider_id).await?;
+            let counts = counts.remove(provider_id).unwrap_or_default();
+            inventories.insert(
+                provider_id.clone(),
+                ProviderModelInventory {
+                    total: counts.total,
+                    available: counts.available,
+                    in_progress: self.gw.provider_model_sync.in_progress(provider_id),
+                    last_check: state.last_check.map(|check| ProviderModelLastCheck {
+                        checked_at: check.checked_at,
+                        outcome: check.outcome,
+                    }),
+                },
+            );
+        }
+        Ok(inventories)
     }
 
     pub async fn update_provider_model_sync_state(
