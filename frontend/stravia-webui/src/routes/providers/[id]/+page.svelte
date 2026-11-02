@@ -13,6 +13,7 @@ import { getModelChanges, syncToast, syncErrorToast, modelChangeReason } from '#
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '#lib/logical-model.js'
+import { countLinkedModels } from '#lib/provider-list.js'
 import type { Provider, ProviderModelSyncSummary } from '#lib/types.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
@@ -70,7 +71,11 @@ const routeReferences = $derived(
 const detailTabs: Array<{ id: ProviderDetailView; label: () => string; count?: number }> = $derived([
   { id: 'connection', label: m.provider_detail_tab_connection },
   ...(usesProviderModels ? [{ id: 'models' as const, label: m.provider_detail_tab_models }] : []),
-  { id: 'routes', label: m.provider_detail_tab_routes, count: routeReferences.length || undefined },
+  {
+    id: 'routes',
+    label: m.provider_detail_tab_routes,
+    count: countLinkedModels(providerId, routesQuery.data ?? []) || undefined,
+  },
   { id: 'cost', label: m.provider_detail_tab_cost },
 ])
 

@@ -14,7 +14,7 @@ import { Button } from '#lib/components/ui/button/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
 import { formatLogTime } from '#lib/format.js'
-import { formatCostPlanPrice, formatMoney, formatValueMultiple, isMoneyUnknown } from '#lib/money.js'
+import { formatCostPlanPrice, formatLowerBoundMoney, formatMoney, formatValueMultiple } from '#lib/money.js'
 import {
   costDraftFromSuggestion,
   costSuggestionFromAllowance,
@@ -22,14 +22,7 @@ import {
   type ProviderCostDraftFields,
 } from '#lib/provider-cost-draft.js'
 import { liveStatsWindow } from '#lib/stats-window.js'
-import type {
-  DisplayCurrency,
-  MoneyAmount,
-  NewProviderCostPlan,
-  Provider,
-  ProviderCostPlan,
-  ProviderStats,
-} from '#lib/types.js'
+import type { NewProviderCostPlan, Provider, ProviderCostPlan, ProviderStats } from '#lib/types.js'
 
 interface Props {
   provider: Provider
@@ -131,24 +124,21 @@ function historyLabel(item: ProviderCostPlan): string {
     : basisLabel(item)
 }
 
-/** 存在成本未知的尝试时金额只是下限，用「≥」标出；整体未知时沿用「未知」。 */
-function lowerBoundMoney(money: MoneyAmount, currency: DisplayCurrency): string {
-  const text = formatMoney(money, currency)
-  return money.unknown_count > 0 && !isMoneyUnknown(money) ? `≥${text}` : text
-}
-
 function valueMetrics(row: ProviderStats): MetricItem[] | null {
   if (basis === 'usage') {
     if (!row.cost) return null
     return [
-      { label: m.cost_usage_cost(), value: lowerBoundMoney(row.cost, row.currency) },
+      { label: m.cost_usage_cost(), value: formatLowerBoundMoney(row.cost, row.currency) },
       { label: m.cost_value_priced_calls(), value: String(row.cost.known_count) },
     ]
   }
   const subscription = row.subscription
   if (!subscription) return null
   return [
-    { label: m.cost_usage_equivalent(), value: lowerBoundMoney(subscription.usage_equivalent_cost, row.currency) },
+    {
+      label: m.cost_usage_equivalent(),
+      value: formatLowerBoundMoney(subscription.usage_equivalent_cost, row.currency),
+    },
     { label: m.cost_subscription_cost(), value: formatMoney(subscription.cost, row.currency) },
     { label: m.cost_value_multiple(), value: formatValueMultiple(subscription) },
   ]

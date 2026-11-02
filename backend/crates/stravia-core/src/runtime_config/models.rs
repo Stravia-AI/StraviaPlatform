@@ -81,6 +81,11 @@ impl ProviderModelStore for RuntimeConfig {
         Ok(self.model_index(provider_id).await?.records.clone())
     }
 
+    /// 管理列表用的一次性聚合，直接读存储，不预热或占用逐 Provider 的运行时索引缓存。
+    async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
+        self.source.provider_models().count_by_provider().await
+    }
+
     async fn get(
         &self,
         provider_id: &str,

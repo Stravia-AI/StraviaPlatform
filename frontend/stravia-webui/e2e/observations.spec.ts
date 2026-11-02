@@ -4951,4 +4951,55 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByRole('button', { name: 'Open interaction', exact: true })).toHaveCount(0)
     await expect(inspector.getByRole('button', { name: 'Debug bundle', exact: true })).toBeVisible()
   })
+
+  test('a long upstream error list scrolls inside its own table viewport', async ({ page }) => {
+    await installObservationFixture(page)
+    const items = Array.from({ length: 60 }, (_, index) => ({
+      id: `attempt-${index}`,
+      run_id: `run-${index}`,
+      interaction_id: null,
+      root_id: null,
+      request_id: `req-${index}`,
+      started_at: startedAt + index * 1_000,
+      duration_ms: 500 + index,
+      provider_id: null,
+      provider_name: 'Ember Provider',
+      upstream_model: 'ember-upstream-v1',
+      model: 'ember-route',
+      model_display_name: 'Ember Pro',
+      api_key_id: null,
+      api_key_name: 'Ops key',
+      client: null,
+      error: {
+        source: 'upstream',
+        code: 'upstream_unavailable',
+        message: `Upstream overloaded ${index}`,
+        status_code: 529,
+        upstream_code: 'overloaded_error',
+      },
+      outcome: 'caused_failure',
+      debug_status: 'none',
+      observation_gap: false,
+    }))
+    await page.route('**/api/v1/observations/upstream-errors**', async (route) => {
+      await route.fulfill({ json: { data: { items, total: items.length, next_cursor: null, snapshot_sequence: 10 } } })
+    })
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Upstream Errors', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Upstream Errors', exact: true })
+    await expect(table.getByRole('row')).toHaveCount(items.length + 1)
+
+    // 表格自带的滚动容器必须被限制在工作区高度内；否则内容被外层 overflow:hidden 截断，滚轮无效。
+    const scroller = await table.evaluateHandle((element) => {
+      for (let node = element.parentElement; node; node = node.parentElement) {
+        const { overflowY } = getComputedStyle(node)
+        if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) return node
+      }
+      return null
+    })
+    expect(await scroller.evaluate((node) => node !== null)).toBe(true)
+    await table.getByRole('row').nth(1).hover()
+    await page.mouse.wheel(0, 600)
+    await expect.poll(() => scroller.evaluate((node) => (node as HTMLElement).scrollTop)).toBeGreaterThan(0)
+  })
 })

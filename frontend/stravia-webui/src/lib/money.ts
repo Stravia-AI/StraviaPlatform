@@ -102,6 +102,12 @@ export function formatMoney(money: MoneyAmount | null | undefined, currency: Dis
   return formatCostAmount(money.amount, currency?.symbol ?? '$')
 }
 
+/** 存在成本未知的尝试时金额只是下限，用「≥」标出；整体未知时沿用「未知」。 */
+export function formatLowerBoundMoney(money: MoneyAmount, currency: DisplayCurrency | undefined): string {
+  const text = formatMoney(money, currency)
+  return money.unknown_count > 0 && !isMoneyUnknown(money) ? `≥${text}` : text
+}
+
 /**
  * 订阅价值倍数（订阅 Provider 的等价按量成本 ÷ 订阅费用）。Core 精确计算；这里只取整展示。
  * 存在成本未知的尝试时等价按量成本只是下限，倍数同样只是下限，用「≥」标出。

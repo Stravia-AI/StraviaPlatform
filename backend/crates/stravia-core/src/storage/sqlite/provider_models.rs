@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use anyhow::Context;
@@ -10,11 +10,12 @@ use super::SqliteStorage;
 use super::routes::SqliteRouteStore;
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord, PriceComponents,
-    ProviderModelCostRule, ProviderModelCostRuleKind, ProviderModelMetadata, ProviderModelMutation,
-    ProviderModelPresence, ProviderModelPresenceUpdate, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelRestore, ProviderModelSelectionPolicy,
-    ProviderModelSourceKind, ProviderModelSyncState, ProviderModelSyncSummary,
-    RestoreProviderModel, SnapshotState,
+    ProviderModelCostRule, ProviderModelCostRuleKind, ProviderModelCounts, ProviderModelMetadata,
+    ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
+    ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelStateGroup,
+    ProviderModelSyncState, ProviderModelSyncSummary, RestoreProviderModel, SnapshotState,
+    count_provider_models,
 };
 use crate::storage::CONFIG_EPOCH_KEY;
 use crate::storage::traits::ProviderModelStore;
@@ -73,6 +74,29 @@ impl ProviderModelStore for SqliteStorage {
                 decode_record(row, cost_rules)
             })
             .collect()
+    }
+
+    async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
+        let mut connection = self.pool.acquire().await?;
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64)>(
+            r#"SELECT provider_id, source_kind, presence, lifecycle_status, selection_policy, COUNT(*)
+               FROM provider_models
+               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy"#,
+        )
+        .fetch_all(&mut *connection)
+        .await?;
+        count_provider_models(rows.into_iter().map(
+            |(provider_id, source_kind, presence, lifecycle_status, selection_policy, count)| {
+                ProviderModelStateGroup {
+                    provider_id,
+                    source_kind,
+                    presence,
+                    lifecycle_status,
+                    selection_policy,
+                    count,
+                }
+            },
+        ))
     }
 
     async fn get(
@@ -1136,6 +1160,100 @@ mod tests {
     use super::*;
     use crate::provider_models::{ModelCost, SourceStamp};
     use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
+
+    #[tokio::test]
+    async fn count_by_provider_matches_the_record_availability_rule_for_every_state() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
+        for provider_id in ["matrix", "single", "empty"] {
+            sqlx::query(
+                "INSERT INTO providers (id, name, protocol, base_url, api_key)
+                 VALUES (?, ?, 'openai', 'https://example.com', 'key')",
+            )
+            .bind(provider_id)
+            .bind(provider_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let storage = SqliteStorage::from_pool(pool);
+
+        let mut next = 0;
+        let mut insert =
+            |provider_id: &str, source_kind, presence, selection_policy, status: Option<&str>| {
+                next += 1;
+                NewProviderModelRecord {
+                    provider_id: provider_id.into(),
+                    model_id: format!("model-{next}"),
+                    source_kind,
+                    snapshot_state: SnapshotState::Unregistered,
+                    source_metadata: None,
+                    metadata_source_provider_id: None,
+                    presence,
+                    selection_policy,
+                    metadata: ProviderModelMetadata {
+                        status: status.map(str::to_owned),
+                        ..ProviderModelMetadata::bare(&format!("model-{next}"))
+                    },
+                }
+            };
+        let mut records = Vec::new();
+        for source_kind in [
+            ProviderModelSourceKind::Discovered,
+            ProviderModelSourceKind::Manual,
+        ] {
+            for presence in [
+                ProviderModelPresence::Present,
+                ProviderModelPresence::Missing,
+            ] {
+                for policy in [
+                    ProviderModelSelectionPolicy::Auto,
+                    ProviderModelSelectionPolicy::ForceEnabled,
+                    ProviderModelSelectionPolicy::ForceDisabled,
+                ] {
+                    for status in [None, Some("beta"), Some("deprecated")] {
+                        records.push(insert("matrix", source_kind, presence, policy, status));
+                    }
+                }
+            }
+        }
+        records.push(insert(
+            "single",
+            ProviderModelSourceKind::Discovered,
+            ProviderModelPresence::Present,
+            ProviderModelSelectionPolicy::Auto,
+            None,
+        ));
+        for record in records {
+            let mutation = storage.create(record, None).await.unwrap();
+            assert!(matches!(mutation, ProviderModelMutation::Applied(_)));
+        }
+
+        let counts = storage.count_by_provider().await.unwrap();
+        for provider_id in ["matrix", "single"] {
+            let models = storage.list_for_provider(provider_id).await.unwrap();
+            assert_eq!(
+                counts.get(provider_id).copied(),
+                Some(ProviderModelCounts {
+                    total: models.len(),
+                    available: models
+                        .iter()
+                        .filter(|model| model.effective_available())
+                        .count(),
+                }),
+                "{provider_id}"
+            );
+        }
+        assert_eq!(counts["matrix"].total, 36);
+        assert!(
+            counts["matrix"].available > 0 && counts["matrix"].available < 36,
+            "the matrix must exercise both available and unavailable models"
+        );
+        assert!(!counts.contains_key("empty"));
+    }
 
     #[tokio::test]
     async fn stale_reconciliation_rolls_back_all_sqlite_updates() {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- The Providers list no longer has Base URL and Authentication columns; Protocol stays. New columns show the upstream model inventory (available / total, with a warning when the last sync failed or only partly succeeded), the number of linked models, and the cost over the last 30 days (subscription price with its value multiple, usage cost with a `≥` prefix when some attempts have unknown cost, or "Not tracked"). Base URL is still searchable and shown on the Provider detail page. The Linked models count is the number of models with at least one Target on the Provider, and the Provider detail page's Linked models tab uses the same number.
+- `GET /api/v1/providers` rows gain `model_inventory` (`total`, `available`, `in_progress`, `last_check`), computed in one aggregate query over the projected `provider_models` columns on SQLite and PostgreSQL. `available` uses the same rule as `ProviderModelSummary.available`.
+
+### Fixed
+
+- The Upstream Errors tab on the Logs page scrolls again. Its table was not bounded to the workspace height, so rows beyond the first screen were clipped and the mouse wheel did nothing.
+
 ## [0.6.1] - 2026-11-02
 
 ### Verification

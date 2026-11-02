@@ -54,8 +54,17 @@ pub(super) async fn list_providers(State(gw): State<Gateway>) -> impl IntoRespon
                 Ok(plans) => plans,
                 Err(error) => return err(error),
             };
+            let provider_ids: Vec<String> = providers
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect();
+            let mut inventories = match gw.admin().provider_model_inventories(&provider_ids).await {
+                Ok(inventories) => inventories,
+                Err(error) => return err(error),
+            };
             let mut data = Vec::with_capacity(providers.len());
             for provider in providers {
+                let provider_id = provider.id.clone();
                 let cost_plan = match current_plans.remove(&provider.id) {
                     Some(plan) => match stravia_core::admin::provider_cost_plan_value(&plan) {
                         Ok(value) => Some(value),
@@ -63,10 +72,22 @@ pub(super) async fn list_providers(State(gw): State<Gateway>) -> impl IntoRespon
                     },
                     None => None,
                 };
-                match provider_value_with_plan(&gw, provider, cost_plan).await {
-                    Ok(provider) => data.push(provider),
+                let mut provider = match provider_value_with_plan(&gw, provider, cost_plan).await {
+                    Ok(provider) => provider,
                     Err(error) => return err(error),
-                }
+                };
+                let inventory = match inventories.remove(&provider_id) {
+                    Some(inventory) => match serde_json::to_value(inventory) {
+                        Ok(value) => value,
+                        Err(error) => return err(error.into()),
+                    },
+                    None => serde_json::Value::Null,
+                };
+                provider
+                    .as_object_mut()
+                    .expect("Provider serialization must produce an object")
+                    .insert("model_inventory".into(), inventory);
+                data.push(provider);
             }
             Json(serde_json::json!({ "data": data })).into_response()
         }

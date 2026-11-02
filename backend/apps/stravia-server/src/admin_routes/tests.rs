@@ -511,6 +511,109 @@ async fn provider_endpoints_keep_unavailable_profiles_visible_without_echoing_se
 }
 
 #[tokio::test]
+async fn provider_list_reports_model_inventory_with_the_effective_availability_rule()
+-> anyhow::Result<()> {
+    use stravia_core::provider_models::{
+        NewProviderModelRecord, ProviderModelMetadata, ProviderModelPresence,
+        ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
+    };
+
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    let create_provider = |name: &str| CreateProviderRecord {
+        name: name.into(),
+        vendor: Some("openai".into()),
+        protocol: "openai-compatible".into(),
+        base_url: "https://api.openai.com/v1".into(),
+        preset_key: Some("openai".into()),
+        channel: Some("default".into()),
+        models_source: Some("catalog".into()),
+        static_models: None,
+        api_key: String::new(),
+        adapter_credentials: "{}".into(),
+        vendor_options: "{}".into(),
+        auth_mode: "apikey".into(),
+        use_proxy: false,
+    };
+    let stocked = gateway
+        .storage
+        .providers()
+        .create(create_provider("stocked"))
+        .await?;
+    let empty = gateway
+        .storage
+        .providers()
+        .create(create_provider("empty"))
+        .await?;
+    let model = |model_id: &str,
+                 source_kind: ProviderModelSourceKind,
+                 presence: ProviderModelPresence,
+                 selection_policy: ProviderModelSelectionPolicy,
+                 status: Option<&str>| NewProviderModelRecord {
+        provider_id: stocked.id.clone(),
+        model_id: model_id.into(),
+        source_kind,
+        snapshot_state: SnapshotState::Unregistered,
+        source_metadata: None,
+        metadata_source_provider_id: None,
+        presence,
+        selection_policy,
+        metadata: ProviderModelMetadata {
+            status: status.map(str::to_owned),
+            ..ProviderModelMetadata::bare(model_id)
+        },
+    };
+    use ProviderModelPresence::{Missing, Present};
+    use ProviderModelSelectionPolicy::{Auto, ForceDisabled, ForceEnabled};
+    use ProviderModelSourceKind::{Discovered, Manual};
+    for record in [
+        // 可用：上游在列且未弃用。
+        model("present", Discovered, Present, Auto, None),
+        // 不可用：上游已不再列出。
+        model("missing", Discovered, Missing, Auto, None),
+        // 不可用：上游标记为弃用。
+        model("deprecated", Discovered, Present, Auto, Some("deprecated")),
+        // 可用：人工强制启用覆盖「上游已不再列出」。
+        model("forced-on", Discovered, Missing, ForceEnabled, None),
+        // 不可用：人工强制停用覆盖「上游在列」。
+        model("forced-off", Discovered, Present, ForceDisabled, None),
+        // 可用：手动模型没有上游清单可对照。
+        model("manual", Manual, Missing, Auto, None),
+    ] {
+        gateway
+            .storage
+            .provider_models()
+            .create(record, None)
+            .await?;
+    }
+    let app = create_unprotected_router(gateway);
+
+    let response = app
+        .oneshot(Request::get("/api/v1/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let providers = json["data"].as_array().expect("provider list");
+    let inventory = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .expect("provider listed")["model_inventory"]
+            .clone()
+    };
+    assert_eq!(
+        inventory(&stocked.id),
+        serde_json::json!({ "total": 6, "available": 3, "in_progress": false, "last_check": null })
+    );
+    assert_eq!(
+        inventory(&empty.id),
+        serde_json::json!({ "total": 0, "available": 0, "in_progress": false, "last_check": null })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use anyhow::Context;
@@ -9,11 +9,12 @@ use sqlx::{PgConnection, Postgres, Transaction};
 use super::PostgresStorage;
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord, PriceComponents,
-    ProviderModelCostRule, ProviderModelCostRuleKind, ProviderModelMetadata, ProviderModelMutation,
-    ProviderModelPresence, ProviderModelPresenceUpdate, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelRestore, ProviderModelSelectionPolicy,
-    ProviderModelSourceKind, ProviderModelSyncState, ProviderModelSyncSummary,
-    RestoreProviderModel, SnapshotState,
+    ProviderModelCostRule, ProviderModelCostRuleKind, ProviderModelCounts, ProviderModelMetadata,
+    ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
+    ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelStateGroup,
+    ProviderModelSyncState, ProviderModelSyncSummary, RestoreProviderModel, SnapshotState,
+    count_provider_models,
 };
 use crate::storage::traits::ProviderModelStore;
 
@@ -71,6 +72,29 @@ impl ProviderModelStore for PostgresStorage {
                 decode_record(row, cost_rules)
             })
             .collect()
+    }
+
+    async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
+        let mut conn = self.pool.acquire().await?;
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64)>(
+            r#"SELECT provider_id, source_kind, presence, lifecycle_status, selection_policy, COUNT(*)
+               FROM provider_models
+               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy"#,
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        count_provider_models(rows.into_iter().map(
+            |(provider_id, source_kind, presence, lifecycle_status, selection_policy, count)| {
+                ProviderModelStateGroup {
+                    provider_id,
+                    source_kind,
+                    presence,
+                    lifecycle_status,
+                    selection_policy,
+                    count,
+                }
+            },
+        ))
     }
 
     async fn get(

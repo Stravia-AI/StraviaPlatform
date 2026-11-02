@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -14,9 +15,9 @@ use crate::plugin::PluginStore;
 use crate::pricing::{CostBasis, CustomCurrency};
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord,
-    ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord, ProviderModelRestore,
-    ProviderModelSelectionPolicy, ProviderModelSourceKind, ProviderModelSyncState,
-    ProviderModelSyncSummary, RestoreProviderModel, SnapshotState,
+    ProviderModelCounts, ProviderModelMutation, ProviderModelReconciliation, ProviderModelRecord,
+    ProviderModelRestore, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    ProviderModelSyncState, ProviderModelSyncSummary, RestoreProviderModel, SnapshotState,
 };
 
 use super::traits::{
@@ -794,6 +795,18 @@ impl ProviderModelStore for MemoryStorage {
             .filter(|item| item.provider_id == provider_id)
             .cloned()
             .collect())
+    }
+
+    async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
+        let mut counts = HashMap::<String, ProviderModelCounts>::new();
+        for item in self.provider_models.read().await.iter() {
+            let entry = counts.entry(item.provider_id.clone()).or_default();
+            entry.total += 1;
+            if item.effective_available() {
+                entry.available += 1;
+            }
+        }
+        Ok(counts)
     }
 
     async fn get(

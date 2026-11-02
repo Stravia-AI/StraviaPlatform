@@ -765,16 +765,73 @@ impl ProviderModelRecord {
     }
 
     pub fn effective_available(&self) -> bool {
-        match self.selection_policy {
-            ProviderModelSelectionPolicy::ForceEnabled => true,
-            ProviderModelSelectionPolicy::ForceDisabled => false,
-            ProviderModelSelectionPolicy::Auto => {
-                (self.source_kind == ProviderModelSourceKind::Manual
-                    || self.presence == ProviderModelPresence::Present)
-                    && self.metadata.lifecycle_status() != Some("deprecated")
-            }
+        effective_availability(
+            self.selection_policy,
+            self.source_kind,
+            self.presence,
+            self.metadata.lifecycle_status(),
+        )
+    }
+}
+
+/// Provider Model 可用性规则的唯一实现。记录读取与按投影列聚合共用它，避免两处判定漂移。
+pub fn effective_availability(
+    selection_policy: ProviderModelSelectionPolicy,
+    source_kind: ProviderModelSourceKind,
+    presence: ProviderModelPresence,
+    lifecycle_status: Option<&str>,
+) -> bool {
+    match selection_policy {
+        ProviderModelSelectionPolicy::ForceEnabled => true,
+        ProviderModelSelectionPolicy::ForceDisabled => false,
+        ProviderModelSelectionPolicy::Auto => {
+            (source_kind == ProviderModelSourceKind::Manual
+                || presence == ProviderModelPresence::Present)
+                && lifecycle_status != Some("deprecated")
         }
     }
+}
+
+/// 一个 Provider 的 Provider Model 总数与可用数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderModelCounts {
+    pub total: usize,
+    pub available: usize,
+}
+
+/// 存储层按 `(provider, 来源, presence, 生命周期, 选择策略)` 分组后的行数。
+/// 这些列都是 `provider_models` 的投影列，聚合不需要读取 `metadata_json`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModelStateGroup {
+    pub provider_id: String,
+    pub source_kind: String,
+    pub presence: String,
+    pub lifecycle_status: Option<String>,
+    pub selection_policy: String,
+    pub count: i64,
+}
+
+/// 把分组行折叠成每个 Provider 的计数；列值非法或计数为负时报错，不跳过。
+pub fn count_provider_models(
+    groups: impl IntoIterator<Item = ProviderModelStateGroup>,
+) -> anyhow::Result<std::collections::HashMap<String, ProviderModelCounts>> {
+    let mut counts = std::collections::HashMap::<String, ProviderModelCounts>::new();
+    for group in groups {
+        let count = usize::try_from(group.count)
+            .with_context(|| format!("invalid Provider Model count {}", group.count))?;
+        let available = effective_availability(
+            ProviderModelSelectionPolicy::from_str(&group.selection_policy)?,
+            ProviderModelSourceKind::from_str(&group.source_kind)?,
+            ProviderModelPresence::from_str(&group.presence)?,
+            group.lifecycle_status.as_deref(),
+        );
+        let entry = counts.entry(group.provider_id).or_default();
+        entry.total += count;
+        if available {
+            entry.available += count;
+        }
+    }
+    Ok(counts)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1531,6 +1588,21 @@ pub struct ProviderModelSyncState {
     pub pause_reason: Option<String>,
     pub last_check: Option<ProviderModelSyncSummary>,
     pub has_successful_sync: bool,
+}
+
+/// 供应商列表行内的上游模型清单概况；`last_check` 为 `None` 表示从未检查过。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModelInventory {
+    pub total: usize,
+    pub available: usize,
+    pub in_progress: bool,
+    pub last_check: Option<ProviderModelLastCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderModelLastCheck {
+    pub checked_at: String,
+    pub outcome: ModelChangeOutcome,
 }
 
 impl Default for ProviderModelSyncState {
