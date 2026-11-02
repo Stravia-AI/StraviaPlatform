@@ -313,3 +313,94 @@ async fn official_prices_match_names_and_versions_but_preserve_variants_and_chan
     gateway.shutdown().await;
     Ok(())
 }
+
+/// 官方目录里 `deepseek-flash`、`deepseek-v4-flash` 等别名同时声明一个 Canonical 型号时，
+/// 取与型号 ID 最接近的条目的价格；距离并列仍视为歧义，保持未知。
+#[tokio::test]
+async fn aliases_of_one_official_model_use_the_closest_id_and_ties_stay_unpriced()
+-> anyhow::Result<()> {
+    let catalog = pricing_catalog().await?;
+    catalog
+        .set_index(
+            "pricing-aliases",
+            json!({
+                "deepseek": catalog_entry(
+                    "deepseek", "DeepSeek", "@ai-sdk/openai-compatible", None
+                )
+            }),
+        )
+        .await;
+    {
+        let mut state = catalog.state.write().await;
+        state.canonical.as_object_mut().unwrap().extend(
+            json!({
+                "deepseek/deepseek-v4.1-flash-1017": {
+                    "id": "deepseek/deepseek-v4.1-flash-1017",
+                    "name": "DeepSeek V4.1 Flash 1017"
+                },
+                "deepseek/tie-model": {"id": "deepseek/tie-model", "name": "Tie Model"}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        state.inventory = json!({"data": [
+            {"id": "deepseek-v4-1-flash-1017", "display_name": "DeepSeek V4.1 Flash"},
+            {"id": "tie-model"}
+        ]});
+    }
+    let entry = |id: &str, canonical: &str, input: &str| {
+        json!({
+            "id": id, "name": id, "canonical_id": canonical,
+            "cost": {"input": input, "output": "0.6"}
+        })
+    };
+    catalog
+        .set_scope(
+            "deepseek",
+            200,
+            json!({
+                "deepseek-flash": entry("deepseek-flash", "deepseek/deepseek-v4.1-flash-1017", "9"),
+                "deepseek-v4-flash": entry(
+                    "deepseek-v4-flash", "deepseek/deepseek-v4.1-flash-1017", "0.15"
+                ),
+                "deepseek-v4-flash-vision-exp": entry(
+                    "deepseek-v4-flash-vision-exp", "deepseek/deepseek-v4.1-flash-1017", "9"
+                ),
+                "tie-a": entry("tie-a", "deepseek/tie-model", "9"),
+                "tie-b": entry("tie-b", "deepseek/tie-model", "9")
+            }),
+        )
+        .await;
+    let directory = tempfile::tempdir()?;
+    let gateway = fixture_gateway(catalog.base_url(), directory.path()).await?;
+    gateway.catalog_sync.refresh().await?;
+    let provider = gateway
+        .admin()
+        .create_provider(discovered_provider(&catalog))
+        .await?;
+    gateway.admin().sync_provider_models(&provider.id).await?;
+
+    let closest = gateway
+        .admin()
+        .get_provider_model(&provider.id, "deepseek-v4-1-flash-1017")
+        .await?;
+    let cost = closest
+        .metadata
+        .cost
+        .expect("closest alias supplies the price");
+    assert_eq!(cost.prices.input, Some(Decimal::new(15, 2)));
+    assert_eq!(cost.prices.output, Some(Decimal::new(6, 1)));
+    assert!(
+        gateway
+            .admin()
+            .get_provider_model(&provider.id, "tie-model")
+            .await?
+            .metadata
+            .cost
+            .is_none(),
+        "equally close aliases must stay unpriced"
+    );
+    gateway.shutdown().await;
+    Ok(())
+}

@@ -17,6 +17,8 @@ pub use connect::wrap_request;
 pub use request::ASSIGN_MODEL_PATH;
 pub use request::DevinClientPlatform;
 pub use request::DevinModelConfig;
+#[cfg(test)]
+pub use request::DevinModelCost;
 pub use request::GET_CHAT_MESSAGE_PATH;
 pub use request::ModelAssignment;
 pub use request::decode_assign_model_response;
