@@ -163,6 +163,24 @@ impl AiResponse {
         self.output_texts().collect()
     }
 
+    /// Assistant refusal text, kept apart from [`Self::output_text`] because
+    /// protocols such as Chat Completions carry it in a dedicated field.
+    pub fn refusal_text(&self) -> String {
+        self.items
+            .iter()
+            .filter(|item| item.role == crate::protocol::ir::Role::Assistant)
+            .filter_map(|item| match &item.content {
+                crate::protocol::ir::MessageContent::Blocks(blocks) => Some(blocks),
+                crate::protocol::ir::MessageContent::Text(_) => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                crate::protocol::ir::ContentBlock::Refusal { refusal } => Some(refusal.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn reasoning_items(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
         self.items.iter().filter_map(AiItem::thinking_ref)
     }

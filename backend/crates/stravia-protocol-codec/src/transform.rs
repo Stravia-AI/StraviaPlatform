@@ -1028,7 +1028,12 @@ fn item_block_representable(
         _ => {
             request_block_representable(target, block)
                 || output
-                    && target == Protocol::OpenResponses
+                    && matches!(
+                        target,
+                        Protocol::OpenResponses
+                            | Protocol::OpenAICompatible
+                            | Protocol::AnthropicMessages
+                    )
                     && matches!(block, ContentBlock::Refusal { .. })
         }
     };
@@ -1398,7 +1403,10 @@ fn prune_delta(
             None
         }
         AiStreamDelta::RefusalDelta(_) | AiStreamDelta::RefusalDeltaWithIndex { .. }
-            if target != Protocol::OpenResponses =>
+            if !matches!(
+                target,
+                Protocol::OpenResponses | Protocol::OpenAICompatible | Protocol::AnthropicMessages
+            ) =>
         {
             None
         }

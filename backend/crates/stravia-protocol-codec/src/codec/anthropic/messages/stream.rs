@@ -13,6 +13,23 @@ use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 // ── Non-streaming response parser ──
 
+/// Shown when an upstream refusal carries no usable explanation.
+const DEFAULT_REFUSAL_MESSAGE: &str = "The model refused to respond to this request.";
+
+/// Client-visible text for a `stop_reason = "refusal"` terminal.
+///
+/// Only `explanation` is read: the rest of `stop_details` (notably
+/// `fallback_credit_token`) is account-side state and must not reach clients.
+fn refusal_explanation(stop_details: Option<&Value>) -> String {
+    stop_details
+        .and_then(|details| details.get("explanation"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|explanation| !explanation.is_empty())
+        .unwrap_or(DEFAULT_REFUSAL_MESSAGE)
+        .to_owned()
+}
+
 pub struct AnthropicResponseParser;
 
 impl AnthropicResponseParser {
@@ -132,6 +149,11 @@ impl AnthropicResponseParser {
                 "tool_use" => "tool_calls".to_string(),
                 other => other.to_string(),
             });
+        if stop_reason.as_deref() == Some("refusal") {
+            items.push(AiItem::refusal(refusal_explanation(
+                resp.get("stop_details"),
+            )));
+        }
 
         let usage = extract_anthropic_usage(&resp);
 
@@ -247,6 +269,11 @@ impl AnthropicResponseFormatter {
             } else if let Some(text) = item.output_text_ref() {
                 if !text.is_empty() {
                     content.push(serde_json::json!({"type": "text", "text": text}));
+                }
+            } else if let Some(refusal) = item.refusal_ref() {
+                // 拒答没有对应的内容块类型；以文本呈现，终止原因由 stop_reason 承载。
+                if !refusal.is_empty() {
+                    content.push(serde_json::json!({"type": "text", "text": refusal}));
                 }
             } else if let Some(call) = item.function_call_ref() {
                 let Ok(input) = serde_json::from_str::<Value>(&call.arguments) else {
@@ -535,6 +562,11 @@ fn parse_anthropic_event(
                     "tool_use" => "tool_calls",
                     other => other,
                 };
+                if normalized == "refusal" {
+                    deltas.push(AiStreamDelta::RefusalDelta(refusal_explanation(
+                        delta.get("stop_details"),
+                    )));
+                }
                 deltas.push(AiStreamDelta::Done {
                     stop_reason: normalized.to_string(),
                 });
