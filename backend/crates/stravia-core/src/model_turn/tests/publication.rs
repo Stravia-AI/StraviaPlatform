@@ -239,7 +239,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     let marker = record.discovery.marker.clone().expect("recorded marker");
     let reuses = gateway
         .observation
-        .credential_discovery_reuses(&record, &marker)
+        .credential_discovery_reuses(&record, &marker, Default::default())
         .await
         .unwrap();
     assert_eq!(reuses.items.len(), 1);
@@ -320,7 +320,7 @@ async fn reuse_is_recorded_where_the_request_submits_a_credential_not_in_replaye
         let marker = record.discovery.marker.clone().expect("recorded marker");
         gateway
             .observation
-            .credential_discovery_reuses(&record, &marker)
+            .credential_discovery_reuses(&record, &marker, Default::default())
             .await
             .unwrap()
     };
@@ -903,6 +903,7 @@ async fn observation_writer_failure_does_not_change_canonical_publication_succes
 
 #[tokio::test]
 async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() {
+    use crate::admin::CredentialVisibility;
     use crate::interaction_observation::CredentialDiscoveryHitDetail;
 
     let secret = "ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH";
@@ -982,7 +983,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
 
     let detail = gateway
         .admin()
-        .credential_protection_discovery_hit("2.0", "0")
+        .credential_protection_discovery_hit("2.0", "0", CredentialVisibility::Revealed)
         .await
         .unwrap();
     match detail {
@@ -991,16 +992,49 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
             text,
             truncated,
             hit_basis,
+            masked,
             matches,
         } => {
             assert_eq!(field.source_type, "user_message");
             assert_eq!(field.tool_id, None);
             assert_eq!(field.tool_name, None);
             assert!(!truncated);
+            assert!(!masked);
             assert!(text.contains(secret));
             assert_eq!(hit_basis, "secret");
             let hit = matches.iter().find(|item| item.hit).expect("secret match");
             assert_eq!(hit.rule_id, "github-pat");
+        }
+        CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
+    }
+
+    let detail = gateway
+        .admin()
+        .credential_protection_discovery_hit("2.0", "0", CredentialVisibility::Masked)
+        .await
+        .unwrap();
+    match detail {
+        CredentialDiscoveryHitDetail::Available {
+            text,
+            masked,
+            hit_basis,
+            matches,
+            ..
+        } => {
+            assert!(masked);
+            assert!(!text.contains(secret));
+            assert!(text.contains('\u{2022}'));
+            assert_eq!(hit_basis, "secret");
+            assert!(
+                matches
+                    .iter()
+                    .all(|item| item.end - item.start == 6 && !item.rule_id.is_empty())
+            );
+            assert!(
+                matches
+                    .iter()
+                    .any(|item| item.hit && item.rule_id == "github-pat")
+            );
         }
         CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
     }
@@ -1011,7 +1045,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .unwrap();
     let detail = gateway
         .admin()
-        .credential_protection_discovery_hit("2.0", "0")
+        .credential_protection_discovery_hit("2.0", "0", CredentialVisibility::Revealed)
         .await
         .unwrap();
     match detail {

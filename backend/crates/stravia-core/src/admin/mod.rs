@@ -16,6 +16,7 @@ use crate::db::models::*;
 mod api_keys;
 mod auth_data;
 pub(crate) mod browser;
+mod credential_masking;
 mod credential_protection;
 mod extensions;
 pub mod identity;
@@ -26,6 +27,7 @@ mod money;
 mod oauth;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
+mod observation_masking;
 pub mod provider_allowance;
 mod provider_connection;
 pub(crate) mod routes;
@@ -34,19 +36,20 @@ pub mod updates;
 mod web_access;
 mod web_search;
 
+pub use crate::interaction_observation::CredentialVisibility;
 pub use crate::interaction_observation::{
     BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ClientErrorDetail,
     ClientErrorPage, ClientErrorQuery, ClientErrorSummary, ConfirmedUsage,
     CredentialDiscoveryError, CredentialDiscoveryField, CredentialDiscoveryHit,
     CredentialDiscoveryHitDetail, CredentialDiscoveryItem, CredentialDiscoveryPage,
-    CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuses, DebugState,
-    DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage,
-    InteractionEventsQuery, InteractionSnapshot, InteractionSummary, KnownInteraction,
-    ObservationChange, ObservationEvent, ObservationQueryError, ObservationStream,
-    ObservationUpdate, RejectionDetail, RejectionPage, RejectionQuery, RejectionSummary,
-    RootChange, RootChangesBaseline, RootChangesPage, RootChangesQuery, RunDetail, TraceManifest,
-    UpstreamAttemptTiming, UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorQuery,
-    UpstreamErrorSummary, UsageCoverage,
+    CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuseQuery,
+    CredentialDiscoveryReuses, DebugState, DownloadTicket, ForestPage, ForestQuery, ForestRoot,
+    InteractionDetail, InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot,
+    InteractionSummary, KnownInteraction, ObservationChange, ObservationEvent,
+    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
+    RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage,
+    RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming, UpstreamErrorDetail,
+    UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use money::{ProviderCostPlanInput, provider_cost_plan_value};

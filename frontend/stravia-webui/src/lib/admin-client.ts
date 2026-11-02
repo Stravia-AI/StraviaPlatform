@@ -17,6 +17,7 @@ import type {
   CredentialDiscoveryQuery,
   CredentialDiscoveryPage,
   CredentialHitDetail,
+  CredentialHitReuseQuery,
   CredentialHitReuses,
   ProviderModelDetail,
   PreparedProviderModel,
@@ -182,13 +183,18 @@ export const admin = {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
       request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
-    hit: (id: string, index: number) =>
+    hit: (id: string, index: number, options: { reveal?: boolean } = {}) =>
       request<CredentialHitDetail>(
         'GET',
-        `/reversible-redaction/discoveries/${encodeURIComponent(id)}/hits/${encodeURIComponent(String(index))}`,
+        `/reversible-redaction/discoveries/${encodeURIComponent(id)}/hits/${encodeURIComponent(String(index))}${queryString(
+          { reveal: options.reveal ? 'true' : undefined },
+        )}`,
       ),
-    reuses: (id: string) =>
-      request<CredentialHitReuses>('GET', `/reversible-redaction/discoveries/${encodeURIComponent(id)}/reuses`),
+    reuses: (id: string, query: CredentialHitReuseQuery = {}) =>
+      request<CredentialHitReuses>(
+        'GET',
+        `/reversible-redaction/discoveries/${encodeURIComponent(id)}/reuses${queryString(query)}`,
+      ),
     test: (text: string) => request<{ matches: CredentialMatch[] }>('POST', '/reversible-redaction/test', { text }),
     customRules: {
       list: () => request<CustomCredentialRule[]>('GET', '/reversible-redaction/custom-rules'),

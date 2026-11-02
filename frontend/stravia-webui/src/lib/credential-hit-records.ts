@@ -1,11 +1,5 @@
 import * as m from '#lib/paraglide/messages.js'
-import type {
-  CredentialDiscoveryRecord,
-  CredentialHit,
-  CredentialHitMatch,
-  CredentialHitReuse,
-  CredentialRuleSet,
-} from '#lib/types.js'
+import type { CredentialDiscoveryRecord, CredentialHit, CredentialHitMatch, CredentialRuleSet } from '#lib/types.js'
 
 /** 从命中记录进入请求记录时携带的 URL 参数；只有这个入口会触发命中高亮。 */
 export const HIT_HIGHLIGHT_QUERY = 'highlight'
@@ -15,6 +9,9 @@ export const HIT_HIGHLIGHT_VALUE = 'credential-hits'
 export const HIT_RECORDS_REFRESH_MS = 30_000
 
 export const HIT_RECORDS_PAGE_SIZE = 30
+
+/** 后续复用列表每页行数；服务端上限 100，默认 20。 */
+export const HIT_REUSE_PAGE_SIZE = 10
 
 /** 行内只并列展示前几个命中，其余收敛成计数。 */
 export const HIT_PREVIEW_LIMIT = 3
@@ -138,20 +135,19 @@ export interface CredentialEntrySegment {
   text: string
   /** `hit` 是映射对应的命中，`match` 是同一检测器找到的其他匹配。 */
   kind: 'plain' | 'hit' | 'match'
-  /** 指向 detail.matches 的下标，遮罩与定位都靠它。 */
+  /**
+   * 指向 detail.matches 的下标；重叠的后续匹配共用前面的片段。
+   * 服务端合并相邻遮罩后，多条匹配会落在同一个令牌上，定位时按区间回退到该片段。
+   */
   matchIndex: number | null
-  revealed: boolean
 }
 
 /**
  * 按 UTF-16 偏移把条目正文切成可渲染的片段，偏移与「密钥匹配测试」一致（区间右端不含）。
  * 越界与零长度匹配会被丢弃；相互重叠时保留前面的匹配，后面的按剩余区间截短。
+ * 遮罩模式下服务端已把每个匹配换成固定令牌，同一令牌上的多条匹配只渲染一次。
  */
-export function entrySegments(
-  text: string,
-  matches: readonly CredentialHitMatch[],
-  revealed: ReadonlySet<number> = new Set(),
-): CredentialEntrySegment[] {
+export function entrySegments(text: string, matches: readonly CredentialHitMatch[]): CredentialEntrySegment[] {
   const ordered = matches
     .map((match, index) => ({ match, index }))
     .filter(({ match }) => match.end > match.start && match.start < text.length && match.end > 0)
@@ -163,35 +159,52 @@ export function entrySegments(
     const start = Math.max(cursor, match.start)
     const end = Math.min(text.length, match.end)
     if (end <= cursor) continue
-    if (start > cursor)
-      segments.push({ text: text.slice(cursor, start), kind: 'plain', matchIndex: null, revealed: false })
-    segments.push({
-      text: text.slice(start, end),
-      kind: match.hit ? 'hit' : 'match',
-      matchIndex: index,
-      revealed: revealed.has(index),
-    })
+    if (start > cursor) segments.push({ text: text.slice(cursor, start), kind: 'plain', matchIndex: null })
+    segments.push({ text: text.slice(start, end), kind: match.hit ? 'hit' : 'match', matchIndex: index })
     cursor = end
   }
-  if (cursor < text.length)
-    segments.push({ text: text.slice(cursor), kind: 'plain', matchIndex: null, revealed: false })
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), kind: 'plain', matchIndex: null })
   return segments
 }
 
-export const HIT_MASK = '••••••'
-
 /**
- * 复用位置的展示去重：同一位置在多次扫描中可能重复出现，只保留最近一次；
- * 按最近复用倒序，便于把最近发生的位置放在前面。
+ * 某条匹配实际落在哪个已渲染的片段上，返回该片段的 `matchIndex`；找不到返回 null。
+ * 自己有片段时就是自己；被合并进同一令牌或与前一条重叠而没有片段的匹配，
+ * 归属第一个与它区间相交的片段，这样点列表里的任意一行都能高亮到正文里可见的那一块。
  */
-export function uniqueReuses(items: readonly CredentialHitReuse[]): CredentialHitReuse[] {
-  const latest = new Map<string, CredentialHitReuse>()
-  for (const item of items) {
-    const key = JSON.stringify([item.interaction_id, item.source_type, item.tool_id ?? item.latest_input ?? null])
-    const previous = latest.get(key)
-    if (!previous || item.last_reused_at > previous.last_reused_at) latest.set(key, item)
+export function segmentOwner(
+  segments: readonly CredentialEntrySegment[],
+  matches: readonly CredentialHitMatch[],
+  index: number,
+): number | null {
+  if (segments.some((segment) => segment.matchIndex === index)) return index
+  const target = matches[index]
+  if (!target) return null
+  for (const segment of segments) {
+    if (segment.matchIndex === null) continue
+    const owner = matches[segment.matchIndex]
+    if (owner.start < target.end && target.start < owner.end) return segment.matchIndex
   }
-  return [...latest.values()].sort((left, right) => right.last_reused_at - left.last_reused_at)
+  return null
+}
+
+export interface ReusePageBounds {
+  /** 1 起算的闭区间，用于范围文案。 */
+  start: number
+  end: number
+}
+
+/** 复用列表当前页的 1 起算闭区间；没有行时返回 null。 */
+export function reusePageBounds(
+  pageIndex: number,
+  pageSize: number,
+  itemCount: number,
+  total: number,
+): ReusePageBounds | null {
+  if (itemCount <= 0 || total <= 0) return null
+  const start = pageIndex * pageSize + 1
+  if (start > total) return null
+  return { start, end: Math.min(start + itemCount - 1, total) }
 }
 
 /** 命中记录进入请求记录的路径；组件再交给 SvelteKit 的 `resolve` 处理部署前缀。 */
@@ -199,8 +212,11 @@ export function requestLogPath(interactionId: string): string {
   return `/logs?interaction=${encodeURIComponent(interactionId)}&${HIT_HIGHLIGHT_QUERY}=${HIT_HIGHLIGHT_VALUE}`
 }
 
-/** 侧栏请求失败时区分「记录已不存在」与「暂时取不到」，两者给出不同的恢复动作。 */
-export function hitQueryFailure(error: unknown): 'gone' | 'failed' {
-  if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) return 'gone'
+/** 侧栏请求失败时区分「记录已不存在」「没有查看明文的权限」与「暂时取不到」，分别给出恢复动作。 */
+export function hitQueryFailure(error: unknown): 'gone' | 'forbidden' | 'failed' {
+  if (typeof error !== 'object' || error === null) return 'failed'
+  if ('status' in error && error.status === 404) return 'gone'
+  if ('status' in error && error.status === 403 && 'code' in error && error.code === 'credential_reveal_forbidden')
+    return 'forbidden'
   return 'failed'
 }

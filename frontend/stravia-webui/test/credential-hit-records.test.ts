@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   HIT_RECORDS_REFRESH_MS,
+  HIT_REUSE_PAGE_SIZE,
   appendHitRecords,
   displayRuleSets,
   entrySegments,
@@ -11,10 +12,11 @@ import {
   previewHits,
   refreshHitRecords,
   requestLogPath,
+  reusePageBounds,
+  segmentOwner,
   uniqueHits,
-  uniqueReuses,
 } from '../src/lib/credential-hit-records'
-import type { CredentialHitMatch, CredentialHitReuse, CredentialDiscoveryRecord } from '../src/lib/types'
+import type { CredentialHitMatch, CredentialDiscoveryRecord } from '../src/lib/types'
 
 function record(id: string, createdAt: number): CredentialDiscoveryRecord {
   return {
@@ -194,15 +196,10 @@ describe('entrySegments', () => {
     const matches = [match({ start: 2, end: 8, hit: true }), match({ start: 0, end: 2, hit: false, rule_id: 'other' })]
     const segments = entrySegments(text, matches)
     expect(segments).toEqual([
-      { text: 'ab', kind: 'match', matchIndex: 1, revealed: false },
-      { text: 'SECRET', kind: 'hit', matchIndex: 0, revealed: false },
-      { text: 'cd', kind: 'plain', matchIndex: null, revealed: false },
+      { text: 'ab', kind: 'match', matchIndex: 1 },
+      { text: 'SECRET', kind: 'hit', matchIndex: 0 },
+      { text: 'cd', kind: 'plain', matchIndex: null },
     ])
-  })
-
-  test('marks a hit as revealed only when its index is in the revealed set', () => {
-    const segments = entrySegments('SECRET', [match({ end: 6, hit: true })], new Set([0]))
-    expect(segments).toEqual([{ text: 'SECRET', kind: 'hit', matchIndex: 0, revealed: true }])
   })
 
   test('clamps overlapping matches to the remaining range', () => {
@@ -211,14 +208,26 @@ describe('entrySegments', () => {
       match({ start: 4, end: 10, rule_id: 'second' }),
     ])
     expect(segments).toEqual([
-      { text: 'abcdef', kind: 'match', matchIndex: 0, revealed: false },
-      { text: 'ghij', kind: 'match', matchIndex: 1, revealed: false },
+      { text: 'abcdef', kind: 'match', matchIndex: 0 },
+      { text: 'ghij', kind: 'match', matchIndex: 1 },
+    ])
+  })
+
+  test('renders a merged mask token once when several matches share its span', () => {
+    const segments = entrySegments('before••••••after', [
+      match({ start: 6, end: 12, hit: true }),
+      match({ start: 6, end: 12, hit: false, rule_id: 'second' }),
+    ])
+    expect(segments).toEqual([
+      { text: 'before', kind: 'plain', matchIndex: null },
+      { text: '••••••', kind: 'hit', matchIndex: 0 },
+      { text: 'after', kind: 'plain', matchIndex: null },
     ])
   })
 
   test('ignores empty, negative and out-of-range matches', () => {
     const text = 'abc'
-    expect(entrySegments(text, [])).toEqual([{ text: 'abc', kind: 'plain', matchIndex: null, revealed: false }])
+    expect(entrySegments(text, [])).toEqual([{ text: 'abc', kind: 'plain', matchIndex: null }])
     expect(
       entrySegments(text, [
         match({ start: 1, end: 1 }),
@@ -227,8 +236,8 @@ describe('entrySegments', () => {
         match({ start: 0, end: 2 }),
       ]),
     ).toEqual([
-      { text: 'ab', kind: 'match', matchIndex: 3, revealed: false },
-      { text: 'c', kind: 'plain', matchIndex: null, revealed: false },
+      { text: 'ab', kind: 'match', matchIndex: 3 },
+      { text: 'c', kind: 'plain', matchIndex: null },
     ])
   })
 
@@ -237,35 +246,47 @@ describe('entrySegments', () => {
   })
 })
 
-describe('uniqueReuses', () => {
-  const reuse = (overrides: Partial<CredentialHitReuse> = {}): CredentialHitReuse => ({
-    interaction_id: 'interaction-1',
-    run_id: 'run-1',
-    api_key_name: 'key',
-    source_type: 'tool_arguments',
-    tool_id: 'tool-1',
-    latest_input: null,
-    last_reused_at: 100,
-    ...overrides,
+describe('segmentOwner', () => {
+  test('a match with its own segment owns itself', () => {
+    const matches = [match({ start: 2, end: 8 }), match({ start: 0, end: 2, rule_id: 'other' })]
+    const segments = entrySegments('abSECRETcd', matches)
+    expect(segmentOwner(segments, matches, 0)).toBe(0)
+    expect(segmentOwner(segments, matches, 1)).toBe(1)
   })
 
-  test('keeps the latest occurrence of each location and sorts newest first', () => {
-    const items = [
-      reuse({ last_reused_at: 100 }),
-      reuse({ last_reused_at: 300 }),
-      reuse({ interaction_id: 'interaction-2', last_reused_at: 200 }),
-      reuse({ source_type: 'user_message', tool_id: null, latest_input: true, last_reused_at: 250 }),
-    ]
-    expect(uniqueReuses(items).map((item) => [item.interaction_id, item.last_reused_at])).toEqual([
-      ['interaction-1', 300],
-      ['interaction-1', 250],
-      ['interaction-2', 200],
-    ])
+  test('matches merged into one mask token resolve to the segment that renders it', () => {
+    const matches = [match({ start: 6, end: 12, hit: true }), match({ start: 6, end: 12, rule_id: 'second' })]
+    const segments = entrySegments('before••••••after', matches)
+    expect(segmentOwner(segments, matches, 1)).toBe(0)
   })
 
-  test('treats different tools at one interaction as different locations', () => {
-    const items = [reuse({ tool_id: 'tool-1' }), reuse({ tool_id: 'tool-2', last_reused_at: 200 })]
-    expect(uniqueReuses(items)).toHaveLength(2)
+  test('a partially overlapping match resolves to the segment it overlaps', () => {
+    const matches = [match({ start: 0, end: 6 }), match({ start: 4, end: 10, rule_id: 'second' })]
+    const segments = entrySegments('abcdefghij', matches)
+    expect(segmentOwner(segments, matches, 1)).toBe(1)
+    const swallowed = [match({ start: 0, end: 10 }), match({ start: 3, end: 5, rule_id: 'inner' })]
+    expect(segmentOwner(entrySegments('abcdefghij', swallowed), swallowed, 1)).toBe(0)
+  })
+
+  test('returns null for a match outside the text or an unknown index', () => {
+    const matches = [match({ start: 1, end: 3 }), match({ start: 8, end: 9, rule_id: 'beyond' })]
+    const segments = entrySegments('abcd', matches)
+    expect(segmentOwner(segments, matches, 1)).toBeNull()
+    expect(segmentOwner(segments, matches, 5)).toBeNull()
+  })
+})
+
+describe('reusePageBounds', () => {
+  test('uses a one-based closed range for full and partial pages', () => {
+    expect(reusePageBounds(0, HIT_REUSE_PAGE_SIZE, 10, 23)).toEqual({ start: 1, end: 10 })
+    expect(reusePageBounds(1, HIT_REUSE_PAGE_SIZE, 10, 23)).toEqual({ start: 11, end: 20 })
+    expect(reusePageBounds(2, HIT_REUSE_PAGE_SIZE, 3, 23)).toEqual({ start: 21, end: 23 })
+  })
+
+  test('has no range for an empty list or a page past the total', () => {
+    expect(reusePageBounds(0, HIT_REUSE_PAGE_SIZE, 0, 0)).toBeNull()
+    expect(reusePageBounds(3, HIT_REUSE_PAGE_SIZE, 0, 23)).toBeNull()
+    expect(reusePageBounds(0, HIT_REUSE_PAGE_SIZE, 10, 0)).toBeNull()
   })
 })
 
@@ -282,5 +303,17 @@ describe('hitQueryFailure', () => {
     expect(hitQueryFailure({ status: 503 })).toBe('failed')
     expect(hitQueryFailure(new Error('network'))).toBe('failed')
     expect(hitQueryFailure(null)).toBe('failed')
+  })
+
+  test('recognises the reveal-forbidden response and keeps other 403s generic', () => {
+    expect(hitQueryFailure({ status: 403, code: 'credential_reveal_forbidden' })).toBe('forbidden')
+    expect(
+      hitQueryFailure(
+        Object.assign(new Error('credential_reveal_forbidden'), { status: 403, code: 'credential_reveal_forbidden' }),
+      ),
+    ).toBe('forbidden')
+    expect(hitQueryFailure({ status: 403, code: 'other_forbidden' })).toBe('failed')
+    expect(hitQueryFailure({ status: 403 })).toBe('failed')
+    expect(hitQueryFailure({ status: 500, code: 'credential_reveal_forbidden' })).toBe('failed')
   })
 })

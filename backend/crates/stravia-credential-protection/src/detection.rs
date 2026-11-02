@@ -218,7 +218,10 @@ fn positioned(
     Ok(matches)
 }
 
-fn advance_position(
+/// 从给定位置按 UTF-16 code unit 前进；只有 `\n` 换行，其余字符（含 `\r`）各占一列。
+///
+/// 偏移与行列的约定由检测器定义；管理与观测读取同一段文本时复用同一实现。
+pub fn advance_position(
     text: &str,
     (mut offset, mut line, mut column): (usize, usize, usize),
 ) -> (usize, usize, usize) {

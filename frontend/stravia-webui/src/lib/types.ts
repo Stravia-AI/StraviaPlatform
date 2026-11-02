@@ -119,6 +119,8 @@ export type CredentialHitDetail =
       text: string
       truncated: boolean
       hit_basis: 'secret' | 'rule'
+      /** 文本与匹配偏移已由服务端遮罩；只有明确请求且获准时为 false。 */
+      masked: boolean
       matches: CredentialHitMatch[]
     }
   | { state: 'unavailable'; field: CredentialHitField; reason: 'not_retained' | 'missing' }
@@ -133,8 +135,15 @@ export interface CredentialHitReuse {
   last_reused_at: number
 }
 
+export interface CredentialHitReuseQuery {
+  cursor?: string
+  limit?: number
+}
+
 export interface CredentialHitReuses {
   linkable: boolean
   items: CredentialHitReuse[]
-  truncated: boolean
+  /** 当前调用方可见的复用行总数，与分页参数无关。 */
+  total: number
+  next_cursor: string | null
 }

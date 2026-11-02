@@ -116,10 +116,15 @@ impl ProtectedSecrets {
 
     fn text_inner(&self, text: &mut String, depth: usize) {
         if depth < 16 && text.contains('\\') {
-            if let Ok(mut value) = serde_json::from_str::<Value>(text) {
+            // Only objects, arrays and strings can contain a backslash in valid JSON;
+            // skip parsing large escaped payloads that cannot be JSON.
+            let trimmed = text.trim_start();
+            let json_shaped =
+                trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('"');
+            if json_shaped && let Ok(mut value) = serde_json::from_str::<Value>(text) {
                 self.value_inner(&mut value, depth + 1);
                 *text = serde_json::to_string(&value).expect("diagnostic JSON serialization");
-            } else if text.starts_with("data:") {
+            } else if !json_shaped && text.starts_with("data:") {
                 *text = text
                     .split_inclusive('\n')
                     .map(|line| {

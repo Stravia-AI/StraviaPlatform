@@ -1,4 +1,7 @@
+import { infiniteQueryOptions } from '@tanstack/svelte-query'
+
 import { admin } from '#lib/admin-client.js'
+import { HIT_REUSE_PAGE_SIZE } from '#lib/credential-hit-records.js'
 
 export const CUSTOM_CREDENTIAL_RULES_KEY = ['credential-protection-custom-rules']
 
@@ -16,26 +19,30 @@ export const customCredentialRulesQuery = (enabled = true) => ({
 })
 
 /**
- * 命中详情只在侧栏打开且选中了某条命中时请求；键里带记录 ID 与命中下标，切换时不会沿用上一条的数据。
+ * 命中详情只在侧栏打开且选中了某条命中时请求；键里带记录 ID、命中下标与明文变体，切换时不会沿用上一条的数据。
+ * 遮罩与明文分开缓存：隐藏明文后立刻回到已缓存的遮罩结果，不重新请求。
  * 404 表示该条目已过期或下标不存在，重试没有意义，交由界面直接说明。
  */
-export const credentialHitDetailQuery = (recordId: string | null, index: number, enabled: boolean) => ({
-  queryKey: ['credential-protection-hit-detail', recordId, index],
+export const credentialHitDetailQuery = (recordId: string | null, index: number, enabled: boolean, reveal = false) => ({
+  queryKey: ['credential-protection-hit-detail', recordId, index, reveal ? 'revealed' : 'masked'],
   queryFn: () => {
     if (recordId === null) throw new Error('Hit detail requested without a record')
-    return admin.credentialProtection.hit(recordId, index)
+    return admin.credentialProtection.hit(recordId, index, { reveal })
   },
   enabled: enabled && recordId !== null,
   retry: false,
 })
 
-/** 后续复用与当前选中的命中下标无关，整行侧栏打开时取一次即可。 */
-export const credentialHitReusesQuery = (recordId: string | null, enabled: boolean) => ({
-  queryKey: ['credential-protection-hit-reuses', recordId],
-  queryFn: () => {
-    if (recordId === null) throw new Error('Reuse history requested without a record')
-    return admin.credentialProtection.reuses(recordId)
-  },
-  enabled: enabled && recordId !== null,
-  retry: false,
-})
+/** 后续复用与当前选中的命中下标无关；首次展开时才取第一页，之后按游标追加并保留已加载页。 */
+export const credentialHitReusesQuery = (recordId: string | null, enabled: boolean) =>
+  infiniteQueryOptions({
+    queryKey: ['credential-protection-hit-reuses', recordId],
+    queryFn: ({ pageParam }) => {
+      if (recordId === null) throw new Error('Reuse history requested without a record')
+      return admin.credentialProtection.reuses(recordId, { cursor: pageParam, limit: HIT_REUSE_PAGE_SIZE })
+    },
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    enabled: enabled && recordId !== null,
+    retry: false,
+  })

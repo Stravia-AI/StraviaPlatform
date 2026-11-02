@@ -15,7 +15,15 @@ impl AdminService {
     // ── Interaction Observation ──
 
     pub async fn client_errors(&self, query: ClientErrorQuery) -> anyhow::Result<ClientErrorPage> {
-        self.gw.observation.client_errors(query).await
+        let mut page = self.gw.observation.client_errors(query).await?;
+        let ids = page
+            .items
+            .iter()
+            .filter_map(|item| item.interaction_id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        masker.mask_client_error_page(&mut page);
+        Ok(page)
     }
 
     pub async fn client_error_detail(
@@ -28,6 +36,14 @@ impl AdminService {
             let currency = self.gw.custom_currency_snapshot();
             project_attempt_amounts(&mut detail.events, currency.as_deref());
         }
+        let ids = detail
+            .iter()
+            .filter_map(|detail| detail.request.interaction_id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        if let Some(detail) = &mut detail {
+            masker.mask_client_error_detail(detail);
+        }
         Ok(detail)
     }
 
@@ -35,7 +51,15 @@ impl AdminService {
         &self,
         query: UpstreamErrorQuery,
     ) -> anyhow::Result<UpstreamErrorPage> {
-        self.gw.observation.upstream_errors(query).await
+        let mut page = self.gw.observation.upstream_errors(query).await?;
+        let ids = page
+            .items
+            .iter()
+            .filter_map(|item| item.interaction_id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        masker.mask_upstream_error_page(&mut page);
+        Ok(page)
     }
 
     pub async fn upstream_error_detail(
@@ -47,18 +71,44 @@ impl AdminService {
             let currency = self.gw.custom_currency_snapshot();
             project_attempt_amounts(&mut detail.events, currency.as_deref());
         }
+        let ids = detail
+            .iter()
+            .filter_map(|detail| detail.error.interaction_id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        if let Some(detail) = &mut detail {
+            masker.mask_upstream_error_detail(detail);
+        }
         Ok(detail)
     }
 
     pub async fn observation_forest(&self, query: ForestQuery) -> anyhow::Result<ForestPage> {
-        self.gw.observation.query_forest(query).await
+        let mut page = self.gw.observation.query_forest(query).await?;
+        let ids = page
+            .roots
+            .iter()
+            .flat_map(|root| root.interactions.iter())
+            .map(|summary| summary.id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        masker.mask_forest(&mut page);
+        Ok(page)
     }
 
     pub async fn observation_root_changes(
         &self,
         query: RootChangesQuery,
     ) -> anyhow::Result<RootChangesPage> {
-        self.gw.observation.query_root_changes(query).await
+        let mut page = self.gw.observation.query_root_changes(query).await?;
+        let ids = page
+            .changes
+            .iter()
+            .flat_map(|change| change.interactions.iter())
+            .map(|summary| summary.id.clone())
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        masker.mask_root_changes(&mut page);
+        Ok(page)
     }
 
     pub async fn observation_interaction(
@@ -72,6 +122,22 @@ impl AdminService {
             for run in &mut detail.runs {
                 project_attempt_amounts(&mut run.events, currency.as_deref());
             }
+        }
+        let ids = detail
+            .iter()
+            .flat_map(|detail| {
+                std::iter::once(detail.interaction.id.clone()).chain(
+                    detail
+                        .root
+                        .interactions
+                        .iter()
+                        .map(|summary| summary.id.clone()),
+                )
+            })
+            .collect();
+        let masker = self.observation_masker(ids).await?;
+        if let Some(detail) = &mut detail {
+            masker.mask_interaction_detail(detail);
         }
         Ok(detail)
     }
@@ -97,6 +163,14 @@ impl AdminService {
                 project_attempt_amounts(&mut run.events, currency.as_deref());
             }
         }
+        let ids = page
+            .as_ref()
+            .map(|_| vec![id.to_owned()])
+            .unwrap_or_default();
+        let masker = self.observation_masker(ids).await?;
+        if let Some(page) = &mut page {
+            masker.mask_interaction_events_page(page, id);
+        }
         Ok(page)
     }
 
@@ -115,8 +189,12 @@ impl AdminService {
         self.gw.observation.subscribe(after)
     }
 
-    pub fn observation_subscribe_live(&self, interaction_id: String) -> ObservationStream {
-        self.gw.observation.subscribe_live(interaction_id)
+    /// 建立实时订阅；存在有效映射时按主体脱敏，映射刷新失败会以 `live_gap` 结束订阅。
+    pub async fn observation_subscribe_live(
+        &self,
+        interaction_id: String,
+    ) -> anyhow::Result<ObservationStream> {
+        self.masked_live_observation(interaction_id).await
     }
 
     pub fn observation_debug(&self) -> DebugState {

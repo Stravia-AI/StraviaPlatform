@@ -68,6 +68,11 @@ pub struct InternedMappings {
 #[async_trait]
 pub trait MappingStore: Send + Sync {
     async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError>;
+    /// 实例内是否存在未过期映射。没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
+    /// 默认返回 `true`，让未知实现保持保守行为。
+    async fn any_active(&self) -> Result<bool, RedactionError> {
+        Ok(true)
+    }
     async fn intern(
         &self,
         principal: &Principal,
@@ -261,6 +266,28 @@ impl MappingStore for SqlMappingStore {
             .bind(now())
             .fetch_all(pool)
             .await
+            .map_err(|error| self.storage(error)),
+        }
+    }
+
+    async fn any_active(&self) -> Result<bool, RedactionError> {
+        let now = now();
+        match self {
+            Self::Sqlite(pool) => sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM reversible_redaction_mappings WHERE expires_at > ? LIMIT 1",
+            )
+            .bind(now)
+            .fetch_optional(pool)
+            .await
+            .map(|row| row.is_some())
+            .map_err(|error| self.storage(error)),
+            Self::Postgres(pool) => sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM reversible_redaction_mappings WHERE expires_at > $1 LIMIT 1",
+            )
+            .bind(now)
+            .fetch_optional(pool)
+            .await
+            .map(|row| row.is_some())
             .map_err(|error| self.storage(error)),
         }
     }

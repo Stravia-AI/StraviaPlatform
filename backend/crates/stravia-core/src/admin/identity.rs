@@ -40,6 +40,13 @@ pub struct AdminSession {
     pub role: String,
 }
 
+impl AdminSession {
+    /// 是否允许在命中详情中查看明文。当前唯一的角色是管理员；后续 RBAC 只改这里。
+    pub fn may_reveal_credentials(&self) -> bool {
+        self.role == ROLE_ADMIN
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid administrator credentials")]
