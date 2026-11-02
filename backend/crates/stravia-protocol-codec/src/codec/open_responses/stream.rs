@@ -69,6 +69,8 @@ pub struct ResponsesStreamFormatter {
     next_message_content_index: usize,
     accumulated_reasoning: String,
     accumulated_reasoning_content: String,
+    /// Ciphertext delivered by the typed Reasoning that completes the open unindexed item.
+    reasoning_encrypted_content: Option<String>,
     reasoning_summary_started: bool,
     usage: Usage,
     started: bool,
@@ -114,6 +116,7 @@ impl ResponsesStreamFormatter {
             next_message_content_index: 0,
             accumulated_reasoning: String::new(),
             accumulated_reasoning_content: String::new(),
+            reasoning_encrypted_content: None,
             reasoning_summary_started: false,
             usage: Usage::default(),
             started: false,
@@ -561,6 +564,9 @@ impl ResponsesStreamFormatter {
                 "text": self.accumulated_reasoning_content
             }]);
         }
+        if let Some(encrypted_content) = &self.reasoning_encrypted_content {
+            item["encrypted_content"] = serde_json::Value::String(encrypted_content.clone());
+        }
         item
     }
 
@@ -630,6 +636,7 @@ impl ResponsesStreamFormatter {
         self.reasoning_output_index = None;
         self.accumulated_reasoning.clear();
         self.accumulated_reasoning_content.clear();
+        self.reasoning_encrypted_content = None;
         self.reasoning_summary_started = false;
     }
 
@@ -2011,6 +2018,14 @@ impl ResponsesStreamFormatter {
                                 sealed["encrypted_content"] =
                                     serde_json::Value::String(ciphertext.to_owned());
                             }
+                        } else if self.reasoning_item_id.is_some()
+                            && !self.indexed_reasoning.contains_key(index)
+                        {
+                            // Providers without output indices (Anthropic, Gemini) stream Thinking
+                            // through the unindexed item; its typed completion finishes that item
+                            // instead of opening a second one at the same position.
+                            self.reasoning_encrypted_content = encrypted_content.map(str::to_owned);
+                            self.seal_reasoning_item(&mut events);
                         } else {
                             self.ensure_indexed_reasoning(&mut events, *index, None);
                             let mut reasoning = self

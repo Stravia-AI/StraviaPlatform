@@ -15,7 +15,8 @@ use std::time::Duration;
 use crate::history_marker::{
     HISTORY_MARKER_PREFIX, HistoryMarker, HistoryMarkerError, HistoryMarkerStore,
     PROJECTION_DELIMITER_PREFIX, ThinkingMarkerInput, render_history_marker,
-    render_preview_projection_end, render_preview_projection_span, render_preview_projection_start,
+    render_history_marker_token, render_preview_projection_end, render_preview_projection_span,
+    render_preview_projection_start,
 };
 use stravia_protocol_codec::transform::ThinkingCarrierFacts;
 use stravia_runtime_contract::Principal;
@@ -807,56 +808,20 @@ impl ClientProjectionSession {
         }
         .iter()
         .filter(|block| is_thinking(block));
-        for marker in &markers {
+        let preview_streamed = preview_started || !preview_deltas.is_empty();
+        for (position, marker) in markers.iter().enumerate() {
             if self.state.ingress
                 == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
             {
-                let block = marker_blocks
+                marker_blocks
                     .next()
                     .ok_or(HistoryMarkerError::InvalidPayload)?;
-                let content_index = match block {
-                    ContentBlock::Reasoning { content, .. } => content.len().saturating_sub(1),
-                    _ => 0,
-                };
-                // Facts describe what a Model Leg can carry, not the identity
-                // of the item it actually streamed. Keep the marker on the
-                // preview's last carrier, including its content part.
-                let carrier = finish_deltas.last().or_else(|| preview_deltas.last());
-                let indexed_part = match carrier {
-                    Some(AiStreamDelta::ThinkingDeltaWithMetadata {
-                        output_index: Some(index),
-                        content_index: Some(part),
-                        ..
-                    }) => Some((*index, *part)),
-                    Some(AiStreamDelta::ReasoningSummaryDelta {
-                        output_index: Some(index),
-                        content_index: Some(_),
-                        ..
-                    }) => Some((*index, 0)),
-                    Some(_) => None,
-                    None if matches!(block, ContentBlock::Reasoning { .. }) => {
-                        Some((output_index, content_index))
-                    }
-                    None => None,
-                };
-                if let Some((index, part)) = indexed_part {
-                    marker_deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
-                        text: render_history_marker(marker),
-                        obfuscation: None,
-                        output_index: Some(index),
-                        content_index: Some(part),
-                    });
-                } else {
-                    marker_deltas.push(AiStreamDelta::ThinkingDelta(render_history_marker(marker)));
+                // A block without a streamed preview (redacted data) still owns a reasoning item;
+                // the empty delta opens it so the token never depends on index agreement.
+                if position > 0 || !preview_streamed {
+                    marker_deltas.push(AiStreamDelta::ThinkingDelta(String::new()));
                 }
-                marker_deltas.push(AiStreamDelta::ItemDone {
-                    index: output_index,
-                    item: if indexed_part.is_some() {
-                        AiItem::reasoning(Vec::new(), Vec::new(), None)
-                    } else {
-                        AiItem::thinking("", None)
-                    },
-                });
+                marker_deltas.push(responses_marker_done(output_index, marker));
             } else {
                 marker_deltas.push(marker_delta_for(
                     self.state.openai_compatible,
@@ -1842,11 +1807,18 @@ impl ClientProjectionSession {
                             projected.push(marker_item);
                         }
                         if newly_persisted {
-                            staged_deltas.push(marker_delta_for(
-                                self.state.openai_compatible,
-                                block_post_text,
-                                render_history_marker(&marker),
-                            ));
+                            if self.state.ingress
+                                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+                            {
+                                staged_deltas.push(AiStreamDelta::ThinkingDelta(String::new()));
+                                staged_deltas.push(responses_marker_done(output_index, &marker));
+                            } else {
+                                staged_deltas.push(marker_delta_for(
+                                    self.state.openai_compatible,
+                                    block_post_text,
+                                    render_history_marker(&marker),
+                                ));
+                            }
                             staged_references.push(ProjectedMarkerReference {
                                 reference: marker.reference,
                                 platform: false,
@@ -1936,6 +1908,20 @@ impl ClientProjectionSession {
                 .create_thinking(&self.principal, input)
                 .await
         }
+    }
+}
+
+/// Responses clients return `encrypted_content` verbatim but drop or rewrite readable reasoning
+/// `content`, so a projected Thinking Marker is delivered as the typed completion of its reasoning
+/// item, whichever upstream produced the protected block.
+fn responses_marker_done(output_index: usize, marker: &HistoryMarker) -> AiStreamDelta {
+    AiStreamDelta::ItemDone {
+        index: output_index,
+        item: AiItem::reasoning(
+            Vec::new(),
+            Vec::new(),
+            Some(render_history_marker_token(&marker.reference)),
+        ),
     }
 }
 
@@ -2399,19 +2385,17 @@ impl ProjectionState {
             None => (Vec::new(), Vec::new()),
             _ => unreachable!("Thinking projection uses a native reasoning carrier"),
         };
-        // The marker belongs to this synthetic block, not a second independent item.
-        // It follows the last content part, matching the streamed carrier.
-        let rendered = render_history_marker(marker);
-        if let Some(last) = content.last_mut() {
-            last.push_str(&rendered);
-        } else {
-            content.push(rendered);
-        }
         // Empty preview parts emit no live bytes. Their authoritative boundaries
         // remain in the marker payload rather than creating unary-only carriers.
         summary.retain(|part| !part.is_empty());
         content.retain(|part| !part.is_empty());
-        AiItem::reasoning(summary, content, None)
+        // The Marker belongs to this synthetic block and rides in the opaque slot that
+        // stateless clients return verbatim; the readable preview stays display-only.
+        AiItem::reasoning(
+            summary,
+            content,
+            Some(render_history_marker_token(&marker.reference)),
+        )
     }
 
     pub(super) fn post_text_preview(
@@ -2794,7 +2778,13 @@ mod tests {
             assert_eq!(done["output_index"], index);
             assert_eq!(added["item"]["id"], done["item"]["id"]);
             assert_eq!(&done["item"], output);
-            assert!(output.get("encrypted_content").is_none());
+            assert!(
+                output["encrypted_content"]
+                    .as_str()
+                    .is_some_and(crate::history_marker::is_history_marker_token),
+                "{output}"
+            );
+            assert!(!output.to_string().contains("cipher"), "{output}");
         }
         let mut canonical = AiResponse::new("independent", "model");
         canonical.items = originals.clone();
@@ -3335,6 +3325,7 @@ mod tests {
                         .unwrap();
                 }
             }
+            let tokens = reasoning_tokens_of(&live);
             let rendered = text_of(
                 &live
                     .into_iter()
@@ -3348,7 +3339,16 @@ mod tests {
                     })
                     .collect::<Vec<_>>(),
             );
-            assert_eq!(rendered.matches(HISTORY_MARKER_PREFIX).count(), 1);
+            assert_eq!(
+                rendered.matches(HISTORY_MARKER_PREFIX).count() + tokens.len(),
+                1,
+                "{ingress}: {rendered}"
+            );
+            assert_eq!(
+                tokens.len(),
+                usize::from(ingress == OPEN_RESPONSES_2026_04_24),
+                "only Responses delivers the Marker as a reasoning token"
+            );
             let mut response = AiResponse::new("response-bound", "logical-model");
             response.items = vec![
                 original.clone(),
@@ -3363,9 +3363,15 @@ mod tests {
                 .report_delivery(staged, ProjectionDelivery::Sent)
                 .await
                 .expect("deliver settled thinking");
+            let replay_item = match tokens.first() {
+                Some(token) => {
+                    AiItem::reasoning(Vec::new(), vec![rendered.clone()], Some(token.clone()))
+                }
+                None => AiItem::thinking(rendered, None),
+            };
             let mut replay = stravia_runtime_contract::protocol::ir::AiRequest::new(
                 "deepseek-model",
-                vec![AiItem::thinking(rendered, None)],
+                vec![replay_item],
             );
             crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut replay)
                 .await
@@ -3579,7 +3585,12 @@ mod tests {
             "ordinary Text must retain first position"
         );
         assert!(rendered.contains("later thought"));
-        assert_eq!(rendered.matches(HISTORY_MARKER_PREFIX).count(), 1);
+        let tokens = reasoning_tokens_of(&live);
+        assert_eq!(tokens.len(), 1, "{live:?}");
+        assert!(
+            !rendered.contains(HISTORY_MARKER_PREFIX),
+            "the Marker rides in encrypted_content, not readable text: {rendered}"
+        );
         let mut response = AiResponse::new("response", "claude");
         response.items = vec![AiItem::output_text("answer"), original.clone()];
         let batch = session
@@ -3587,7 +3598,11 @@ mod tests {
             .await
             .expect("settle same leg");
         let live_references =
-            crate::history_marker::history_marker_references(&[AiItem::output_text(rendered)]);
+            crate::history_marker::history_marker_references(&[AiItem::reasoning(
+                Vec::new(),
+                Vec::new(),
+                Some(tokens[0].clone()),
+            )]);
         assert_eq!(
             crate::history_marker::history_marker_references(&response.items),
             live_references
@@ -4087,6 +4102,21 @@ mod tests {
                 | AiStreamDelta::TextDeltaWithMetadata { text, .. }
                 | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
                 | AiStreamDelta::ReasoningSummaryDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Marker tokens Responses clients receive in `encrypted_content`, in delivery order.
+    fn reasoning_tokens_of(deltas: &[AiStreamDelta]) -> Vec<String> {
+        deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::ItemDone { item, .. } => item
+                    .reasoning_ref()
+                    .and_then(|(_, _, token)| token)
+                    .filter(|token| crate::history_marker::is_history_marker_token(token))
+                    .map(str::to_owned),
                 _ => None,
             })
             .collect()

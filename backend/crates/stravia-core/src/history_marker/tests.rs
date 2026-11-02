@@ -1728,6 +1728,170 @@ async fn resolver_treats_content_preview_as_display_only_while_marker_remains() 
     assert_eq!(request.items[2].output_text_ref(), Some("C2"));
 }
 
+/// Responses clients round-trip `encrypted_content` but not Stravia's private `content` text
+/// (Codex drops reasoning `content`; AI SDK only replays `summary` and `encrypted_content`).
+/// The projected Thinking Marker therefore rides in the opaque slot, whatever the upstream was.
+async fn published_signed_thinking(
+    store: &dyn HistoryMarkerStore,
+    owner: &Principal,
+    block: ContentBlock,
+) -> HistoryMarker {
+    let marker = store
+        .create_thinking(
+            owner,
+            ThinkingMarkerInput {
+                source: None,
+                block,
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    marker
+}
+
+#[tokio::test]
+async fn resolver_restores_protected_thinking_from_reasoning_marker_token() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    for (authoritative, preview) in [
+        (
+            ContentBlock::Thinking {
+                thinking: "authoritative".into(),
+                signature: Some("opaque-signature".into()),
+            },
+            true,
+        ),
+        (
+            ContentBlock::RedactedThinking {
+                data: "opaque-redacted".into(),
+            },
+            false,
+        ),
+    ] {
+        let marker = published_signed_thinking(store.as_ref(), &owner, authoritative.clone()).await;
+        // Stateless clients return the token alone; raw-echo clients also return the preview.
+        for returned_preview in [false, preview] {
+            let content = if returned_preview {
+                vec![render_preview_projection_span(
+                    &marker.reference,
+                    0,
+                    "visible preview",
+                )]
+            } else {
+                Vec::new()
+            };
+            let mut request = AiRequest::new(
+                "model",
+                vec![AiItem::reasoning(
+                    Vec::new(),
+                    content,
+                    Some(render_history_marker_token(&marker.reference)),
+                )],
+            );
+            assert!(request_needs_marker_resolution(&request));
+            assert_eq!(
+                history_marker_references(&request.items),
+                vec![marker.reference.clone()]
+            );
+
+            let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+                .await
+                .unwrap();
+
+            assert_eq!(summary.restored_thinking_segments, 1);
+            assert_eq!(request.items.len(), 1, "{authoritative:?}");
+            let MessageContent::Blocks(blocks) = &request.items[0].content else {
+                panic!("restored Thinking is a block item");
+            };
+            assert_eq!(
+                serde_json::to_value(blocks).unwrap(),
+                serde_json::to_value([authoritative.clone()]).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolver_never_forwards_an_unresolvable_reasoning_marker_token() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let stranger = principal("stranger");
+    let marker = published_signed_thinking(
+        store.as_ref(),
+        &stranger,
+        ContentBlock::Thinking {
+            thinking: "foreign".into(),
+            signature: Some("foreign-signature".into()),
+        },
+    )
+    .await;
+    for reference in [marker.reference.as_str(), "abcdefghijklmnopqrstuvwxyzab"] {
+        let mut request = AiRequest::new(
+            "model",
+            vec![AiItem::reasoning(
+                Vec::new(),
+                vec!["client note".into()],
+                Some(render_history_marker_token(reference)),
+            )],
+        );
+
+        let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+            .await
+            .unwrap();
+
+        assert_eq!(summary, MarkerResolution::default());
+        let wire = serde_json::to_string(&request.items).unwrap();
+        assert!(!wire.contains(HISTORY_MARKER_PREFIX), "{wire}");
+        assert!(!wire.contains("foreign"), "{wire}");
+        assert!(
+            request.items.iter().all(|item| item
+                .reasoning_ref()
+                .is_none_or(|(_, _, cipher)| cipher.is_none())),
+            "{wire}"
+        );
+    }
+}
+
+#[test]
+fn provider_ciphertext_is_never_mistaken_for_a_marker_token() {
+    let native = AiItem::reasoning(
+        vec!["summary".into()],
+        Vec::new(),
+        Some("gAAAAABprovider-ciphertext".into()),
+    );
+    let request = AiRequest::new("model", vec![native.clone()]);
+
+    assert!(!request_needs_marker_resolution(&request));
+    assert!(history_marker_references(&request.items).is_empty());
+    assert!(
+        protected_payload_digest(&ContentBlock::Reasoning {
+            summary: Vec::new(),
+            content: Vec::new(),
+            encrypted_content: Some("gAAAAABprovider-ciphertext".into()),
+        })
+        .is_some()
+    );
+    // A Stravia token is a pointer into private history, not a provider-issued payload.
+    assert!(
+        protected_payload_digest(&ContentBlock::Reasoning {
+            summary: Vec::new(),
+            content: Vec::new(),
+            encrypted_content: Some(render_history_marker_token("abcdefghijklmnopqrstuvwxyzab")),
+        })
+        .is_none()
+    );
+}
+
 #[tokio::test]
 async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
     let store = sqlite_store().await;

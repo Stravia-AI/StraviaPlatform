@@ -183,7 +183,7 @@ Wire-only state留在目标 stream session：`output_index`、`content_index`、
 
 Reasoning content 保持 dated reasoning item 结构，但 wire delta/done 使用 rolling `response.reasoning_text.delta` 与 `response.reasoning_text.done` 名称，以兼容当前 OpenAI Responses 客户端。Decoder 同时接受 dated `response.reasoning.delta` / `response.reasoning.done` 与 rolling 名称；reasoning summary lifecycle 不变。
 
-通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。`Thinking.signature` 不是 Responses 的 `encrypted_content`，不得在输出、流事件或历史投影中互换。Generation Chain 的 ingress 历史投影保留实际 OUTPUT 的公开文本与 item 身份；原生 `Reasoning.summary`、`Reasoning.content` 与真实密文保持原样，不套用上游 REQUEST 的字段约束。已知跨协议交付的原始思考块及可信来源由既有一对一 History Marker 保存，回放时恢复；Effective Model Request 与权威输出仍保留原始块，不回写既有历史节点或观察父边。
+通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。`Thinking.signature` 不是 Responses 的 `encrypted_content`，不得在输出、流事件或历史投影中互换。Generation Chain 的 ingress 历史投影保留实际 OUTPUT 的公开文本与 item 身份；原生 `Reasoning.summary`、`Reasoning.content` 与真实密文保持原样，不套用上游 REQUEST 的字段约束。已知跨协议交付的原始思考块及可信来源由既有一对一 History Marker 保存，回放时恢复；Responses 出口的 Marker 以 Stravia 令牌放在 reasoning `encrypted_content`（见 [ADR-0088](../adr/0088-carry-responses-thinking-markers-in-encrypted-content.md)），预览仍在 `content`，没有预览的块（如 `redacted_thinking`）产生只有令牌的 reasoning item。令牌不是上游密文：无法解析或不属于当前 Principal 时清除，不会转发给上游。Effective Model Request 与权威输出仍保留原始块，不回写既有历史节点或观察父边。
 
 OpenAI-compatible 响应中的推理字段缺失、显式空字符串、`null` 与真实文本是不同状态。真实文本仍进入 canonical `Thinking`；显式空值由内部 response metadata 保留，经同步响应、流式聚合、隐藏轮次和 Generation Chain 的 effective history 回放，在发送 Chat 请求时恢复为原值。字段缺失保持缺失，不为所有 assistant 补空推理，也不按 Provider、模型或 URL 特判。实际推理文本优先于空值；后到的空流事件不能覆盖已交付的文本。
 

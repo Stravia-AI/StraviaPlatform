@@ -6,6 +6,7 @@
 
 - Anthropic `redacted_thinking` blocks from an Anthropic upstream are no longer dropped (unary) or passed through as an unclassified event (streaming). They now take part in History Marker projection like signed thinking: the client sees only an opaque marker carrier, and the original `data` is restored in its original position when the conversation is replayed to Anthropic. Previously, replaying a tool-use turn without them could make Anthropic reject the request.
 - When replaying a turn that contains a tool call, the Anthropic encoder keeps `redacted_thinking` blocks ahead of the tool call in their original order relative to `thinking` blocks, instead of moving them behind signed thinking.
+- Responses clients now carry protected reasoning from any non-native upstream (Anthropic signed or redacted thinking, Gemini thought signatures) in the reasoning item's `encrypted_content` as an opaque Stravia pointer instead of in reasoning `content`. Stateless clients such as Codex (`store=false`) and the AI SDK, which drop `content` on replay, can therefore still restore the original protected blocks. Unresolvable pointers are cleared and never forwarded upstream; markers already stored in `content` keep resolving. See ADR-0088.
 
 ## [0.6.0] - 2026-10-30
 

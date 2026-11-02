@@ -336,24 +336,35 @@ async fn responses_delivered_protected_thinking_replay_preserves_parent() {
     use axum::response::IntoResponse;
     use serde_json::{Value, json};
 
-    for readable in [false, true] {
+    for (readable, replay) in [
+        (false, "echo"),
+        (true, "echo"),
+        (false, "stateless"),
+        (true, "stateless"),
+    ] {
         let parts = if readable {
             json!([{"text": "public summary", "thought": true, "thoughtSignature": "protected-signature"}, {"text": "answer"}])
         } else {
             json!([{"text": "", "thought": true, "thoughtSignature": "protected-signature"}, {"text": "answer"}])
         };
         let upstream = json!({"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}]});
-        let app = Router::new().fallback(move |uri: axum::http::Uri| {
-            let upstream = upstream.clone();
-            async move {
-                if uri.path().contains("streamGenerateContent") {
-                    (
-                        [(header::CONTENT_TYPE, "text/event-stream")],
-                        format!("data: {upstream}\n\n"),
-                    )
-                        .into_response()
-                } else {
-                    Json(upstream).into_response()
+        let upstream_requests = Arc::new(parking_lot::Mutex::new(Vec::<Value>::new()));
+        let app = Router::new().fallback({
+            let upstream_requests = Arc::clone(&upstream_requests);
+            move |uri: axum::http::Uri, Json(body): Json<Value>| {
+                let upstream = upstream.clone();
+                let upstream_requests = Arc::clone(&upstream_requests);
+                async move {
+                    upstream_requests.lock().push(body);
+                    if uri.path().contains("streamGenerateContent") {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            format!("data: {upstream}\n\n"),
+                        )
+                            .into_response()
+                    } else {
+                        Json(upstream).into_response()
+                    }
                 }
             }
         });
@@ -412,6 +423,23 @@ async fn responses_delivered_protected_thinking_replay_preserves_parent() {
                 serde_json::from_slice(&body).unwrap()
             };
             assert!(!delivered.to_string().contains("protected-signature"));
+            let delivered_output = delivered["output"].as_array().unwrap().clone();
+            let reasoning = delivered_output
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .collect::<Vec<_>>();
+            assert_eq!(reasoning.len(), 1, "{delivered}");
+            assert!(
+                reasoning[0]["encrypted_content"]
+                    .as_str()
+                    .is_some_and(|token| token.starts_with("<!--sh:")),
+                "readable={readable}, stream={stream}: {delivered}"
+            );
+            assert!(
+                !reasoning[0]["content"].to_string().contains("<!--sh:")
+                    && !reasoning[0]["summary"].to_string().contains("<!--sh:"),
+                "readable={readable}, stream={stream}: {delivered}"
+            );
             wait_for_observed_run_finish(&mut events).await;
             let forest = gateway
                 .observation
@@ -441,18 +469,41 @@ async fn responses_delivered_protected_thinking_replay_preserves_parent() {
                     found = Some(run.generation_parent_id.clone());
                 }
             }
-            assert_eq!(
-                found.unwrap(),
-                parent,
-                "readable={readable}, stream={stream}"
-            );
-            assert_eq!(
-                user_inputs, 1,
-                "full replay does not resubmit the original user delta"
-            );
+            // Strict parent discovery compares the whole reasoning item, so a client that drops
+            // the readable preview (`stateless`) starts a new root; the protected block is still
+            // restored from the token, which the upstream request check below proves.
+            if replay == "echo" || !readable {
+                assert_eq!(
+                    found.unwrap(),
+                    parent,
+                    "readable={readable}, replay={replay}, stream={stream}"
+                );
+                assert_eq!(
+                    user_inputs, 1,
+                    "full replay does not resubmit the original user delta"
+                );
+            }
             parent = delivered["id"].as_str().map(str::to_owned);
-            input.extend(delivered["output"].as_array().unwrap().iter().cloned());
+            for mut item in delivered_output {
+                if replay == "stateless" && item["type"] == "reasoning" {
+                    // Codex and the AI SDK (`store=false`) drop readable reasoning `content`.
+                    item.as_object_mut().unwrap().remove("content");
+                }
+                input.push(item);
+            }
             input.push(json!({"role": "assistant", "content": "continue"}));
+        }
+        let upstream_requests = upstream_requests.lock().clone();
+        assert_eq!(
+            upstream_requests.len(),
+            4,
+            "readable={readable}, replay={replay}"
+        );
+        for (turn, request) in upstream_requests.iter().enumerate().skip(1) {
+            assert!(
+                request.to_string().contains("protected-signature"),
+                "readable={readable}, replay={replay}, turn={turn}: signature must be restored from the Marker token: {request}"
+            );
         }
         server.abort();
     }
@@ -1697,7 +1748,13 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
     ];
 
     for (name, content, stop_reason) in scenarios {
-        for stream in [true, false] {
+        for (stream, replay) in [
+            (true, "echo"),
+            (false, "echo"),
+            (true, "stateless"),
+            (false, "stateless"),
+        ] {
+            let name = format!("{name}/{replay}");
             let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
             let app = Router::new()
                 .fallback(axum::routing::post(handle))
@@ -1774,6 +1831,25 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                 } else {
                     serde_json::from_slice(&body).unwrap()
                 };
+                if stream {
+                    let mut added = std::str::from_utf8(&body)
+                        .unwrap()
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                        .filter(|event| event["type"] == "response.output_item.added")
+                        .map(|event| event["output_index"].as_u64().unwrap())
+                        .collect::<Vec<_>>();
+                    let emitted = added.len();
+                    added.sort_unstable();
+                    added.dedup();
+                    assert_eq!(
+                        added.len(),
+                        emitted,
+                        "{name} stream={stream}: duplicate output_index in {}",
+                        String::from_utf8_lossy(&body)
+                    );
+                }
                 let wire = delivered.to_string();
                 assert!(
                     !wire.contains("OPAQUE-REDACTED"),
@@ -1784,6 +1860,23 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                     "{name} stream={stream}: {wire}"
                 );
                 let delivered_output = delivered["output"].as_array().unwrap().clone();
+                let reasoning_count = delivered_output
+                    .iter()
+                    .filter(|item| item["type"] == "reasoning")
+                    .count();
+                let protected_count = content
+                    .iter()
+                    .filter(|block| {
+                        matches!(
+                            block["type"].as_str(),
+                            Some("thinking" | "redacted_thinking")
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    reasoning_count, protected_count,
+                    "{name} stream={stream}: one reasoning item per protected block: {wire}"
+                );
                 for item in delivered_output
                     .iter()
                     .filter(|item| item["type"] == "reasoning")
@@ -1793,8 +1886,26 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                         "{name} stream={stream}: reasoning carrier id {}",
                         item["id"]
                     );
+                    // Stateless clients echo only `encrypted_content`; the Marker must ride there.
+                    assert!(
+                        item["encrypted_content"]
+                            .as_str()
+                            .is_some_and(|token| token.starts_with("<!--sh:")),
+                        "{name} stream={stream}: marker token missing from {item}"
+                    );
+                    assert!(
+                        !item["content"].to_string().contains("<!--sh:")
+                            && !item["summary"].to_string().contains("<!--sh:"),
+                        "{name} stream={stream}: marker text leaked into readable reasoning {item}"
+                    );
                 }
-                input.extend(delivered_output.iter().cloned());
+                for mut item in delivered_output {
+                    if replay == "stateless" && item["type"] == "reasoning" {
+                        // Codex and the AI SDK (`store=false`) drop readable reasoning `content`.
+                        item.as_object_mut().unwrap().remove("content");
+                    }
+                    input.push(item);
+                }
                 if stop_reason == "tool_use" {
                     input.push(json!({"type": "function_call_output", "call_id": "toolu_read", "output": "ok"}));
                 } else {

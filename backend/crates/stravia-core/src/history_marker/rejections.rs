@@ -85,6 +85,7 @@ impl ReasoningRejections {
 }
 
 /// 与来源清单复用同一摘要算法；空字符串没有可回放的受保护载荷。
+/// Stravia 签发的 marker 令牌只是指向私有历史的指针，不是上游签发的载荷。
 pub(crate) fn protected_payload_digest(block: &ContentBlock) -> Option<[u8; 32]> {
     let payload = match block {
         ContentBlock::Thinking {
@@ -98,7 +99,8 @@ pub(crate) fn protected_payload_digest(block: &ContentBlock) -> Option<[u8; 32]>
         | ContentBlock::RedactedThinking { data: payload } => payload,
         _ => return None,
     };
-    (!payload.is_empty()).then(|| hash_bytes(payload.as_bytes()))
+    (!payload.is_empty() && !super::is_history_marker_token(payload))
+        .then(|| hash_bytes(payload.as_bytes()))
 }
 
 /// 域分隔区分来源键与载荷键；authority 使用长度前缀防止字符串拼接歧义。

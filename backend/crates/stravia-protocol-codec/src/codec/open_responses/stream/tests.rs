@@ -1798,6 +1798,112 @@ fn completed_item_forwards_encrypted_only_reasoning() {
         "opaque"
     );
 }
+
+#[test]
+fn typed_reasoning_completion_seals_the_open_unindexed_reasoning_item() {
+    // Anthropic and Gemini stream Thinking without output indices. When the engine finishes
+    // such a block with a typed Reasoning that carries `encrypted_content`, the ciphertext must land
+    // on the reasoning item already streaming, not open a second item at the same output index.
+    use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-unindexed".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDelta("preview".into()),
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("token".into())),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 1,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 1,
+            tool_call: ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        },
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let bodies = event_bodies(&events);
+
+    let added = bodies
+        .iter()
+        .filter(|body| body["type"] == "response.output_item.added")
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(added, [Some(0), Some(1)], "{bodies:?}");
+    let reasoning_done = completed_history(&events)
+        .into_iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning_done.len(), 1, "{bodies:?}");
+    assert_eq!(reasoning_done[0]["content"][0]["text"], "preview");
+    assert_eq!(reasoning_done[0]["encrypted_content"], "token");
+    let terminal = bodies
+        .iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    assert_eq!(terminal["response"]["output"][0], reasoning_done[0]);
+}
+
+#[test]
+fn marker_only_reasoning_opens_its_own_item_for_the_typed_completion() {
+    // Redacted thinking has no readable preview: the empty delta opens the item that the
+    // typed completion then seals with the token, followed by an unrelated tool call.
+    use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-marker-only".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDelta(String::new()),
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("token".into())),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 1,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 1,
+            tool_call: ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        },
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let bodies = event_bodies(&events);
+
+    let added = bodies
+        .iter()
+        .filter(|body| body["type"] == "response.output_item.added")
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(added, [Some(0), Some(1)], "{bodies:?}");
+    let history = completed_history(&events);
+    assert_eq!(history[0]["type"], "reasoning");
+    assert_eq!(history[0]["encrypted_content"], "token");
+    assert!(history[0].get("content").is_none(), "{history:?}");
+    assert_eq!(history[1]["type"], "function_call");
+}
 #[test]
 fn preserves_multiple_message_output_indices() {
     let mut formatter = ResponsesStreamFormatter::new();
