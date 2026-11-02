@@ -24,7 +24,7 @@ use stravia_vendor_sdk::{
     read_http_body,
 };
 
-use super::parsers;
+use super::{billing, parsers};
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const USAGE_LIMITS_PATH: &str = "/users/me/plan/usage-limits";
@@ -62,6 +62,7 @@ pub(super) fn execute(
     // 额度接口只返回窗口占用，不含订阅等级；Cline 官方 SDK 另用同一主机上的
     // GET /users/me/plan 读取当前套餐。该请求失败时保持 None，不影响额度快照。
     parsed.plan_label = current_plan_label(host, base, credential);
+    parsed.billing = billing::cline(parsed.plan_label.as_deref());
     Ok(parsed)
 }
 
@@ -155,7 +156,7 @@ fn parse_limits(value: &Value) -> Result<AllowanceResponse, PluginError> {
         item.condition = parsers::condition(&item);
         allowances.push(item);
     }
-    Ok(parsers::response(allowances))
+    Ok(parsers::response(allowances, None))
 }
 
 /// Nominal window length in seconds for the documented types; unknown types

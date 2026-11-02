@@ -53,6 +53,11 @@ pub struct ProviderAllowanceSnapshot {
     /// (email, username or nickname); absent when the vendor has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
+    /// Billing mode and plan price the vendor plugin established for this
+    /// account. A suggestion for the Provider cost plan, never applied
+    /// automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<ProviderAllowanceBilling>,
     pub status: ProviderAllowanceStatus,
     pub allowances: Vec<Allowance>,
     pub models: Vec<ModelAllowance>,
@@ -71,6 +76,38 @@ pub enum ProviderAllowanceStatus {
     Fresh,
     Stale,
     Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceBilling {
+    pub kind: ProviderAllowanceBillingKind,
+    /// Billing cycle of a subscription, when known. A price implies a period.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<ProviderAllowanceBillingPeriod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<ProviderAllowanceBillingPrice>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAllowanceBillingKind {
+    Usage,
+    Subscription,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAllowanceBillingPeriod {
+    Month,
+    Year,
+}
+
+/// Plan fee for one period. `amount` is a positive decimal string and
+/// `currency` an upper-case ISO 4217 code; neither is converted by Core.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceBillingPrice {
+    pub amount: String,
+    pub currency: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

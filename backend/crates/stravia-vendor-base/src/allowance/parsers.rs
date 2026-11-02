@@ -1,7 +1,9 @@
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::plan::display_name;
-use stravia_vendor_sdk::{AllowanceAmount, AllowanceItem, AllowanceResponse};
+use stravia_vendor_sdk::{AllowanceAmount, AllowanceBilling, AllowanceItem, AllowanceResponse};
+
+use super::billing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Monitor {
@@ -27,7 +29,9 @@ pub(super) fn parse(monitor: Monitor, body: &[u8]) -> Result<AllowanceResponse, 
         Monitor::NanoGpt => parse_nano_gpt(&payload),
         Monitor::ZaiCodingPlan => parse_zai(&payload),
         Monitor::ZhipuAiCodingPlan => parse_zhipu(&payload),
-        Monitor::MiniMaxCodingPlan | Monitor::MiniMaxCnCodingPlan => parse_minimax(&payload, true),
+        Monitor::MiniMaxCodingPlan | Monitor::MiniMaxCnCodingPlan => {
+            parse_minimax(&payload, true, monitor)
+        }
         Monitor::Wafer => parse_wafer(&payload),
         Monitor::OpenCodeGo => parse_opencode_go(&payload),
         Monitor::Crof => parse_crof(&payload),
@@ -37,9 +41,12 @@ pub(super) fn parse(monitor: Monitor, body: &[u8]) -> Result<AllowanceResponse, 
     require(parsed)
 }
 
-pub(super) fn parse_minimax_fallback(body: &[u8]) -> Result<AllowanceResponse, ()> {
+pub(super) fn parse_minimax_fallback(
+    monitor: Monitor,
+    body: &[u8],
+) -> Result<AllowanceResponse, ()> {
     let payload: Value = serde_json::from_slice(body).map_err(|_| ())?;
-    require(parse_minimax(&payload, false)?)
+    require(parse_minimax(&payload, false, monitor)?)
 }
 
 fn require(mut response: AllowanceResponse) -> Result<AllowanceResponse, ()> {
@@ -57,12 +64,16 @@ fn require(mut response: AllowanceResponse) -> Result<AllowanceResponse, ()> {
     Ok(response)
 }
 
-pub(super) fn response(allowances: Vec<AllowanceItem>) -> AllowanceResponse {
+pub(super) fn response(
+    allowances: Vec<AllowanceItem>,
+    billing: Option<AllowanceBilling>,
+) -> AllowanceResponse {
     AllowanceResponse {
         allowances,
         models: Vec::new(),
         plan_label: None,
         account_label: None,
+        billing,
     }
 }
 
@@ -236,7 +247,14 @@ fn parse_github_copilot(payload: &Value) -> Result<AllowanceResponse, ()> {
         );
     }
     allowance.resets_at_unix_ms = payload.get("quota_reset_date").and_then(timestamp_millis);
-    let mut parsed = response(vec![allowance]);
+    let mut parsed = response(
+        vec![allowance],
+        // 计费档位优先看 `access_type_sku`：`copilot_plan: individual` 同时覆盖 Pro 与 Pro+。
+        billing::copilot(
+            payload.get("access_type_sku").and_then(non_empty),
+            payload.get("copilot_plan").and_then(non_empty),
+        ),
+    );
     // GitHub 在该响应里只给用户名 `login`，没有邮箱。
     parsed.account_label = first_account_label([payload.get("login").and_then(Value::as_str)]);
     // `copilot_plan`（free/individual/business/enterprise/pro）是响应里唯一的订阅等级；
@@ -297,14 +315,15 @@ fn parse_kimi(payload: &Value) -> Result<AllowanceResponse, ()> {
             }
         }
     }
-    let mut parsed = response(allowances);
-    // 上游只在 `user.membership.level` 给 LEVEL_* 枚举；公开客户端对营销套餐名的映射
+    // 上游只在 `user/membership/level` 给 LEVEL_* 枚举；公开客户端对营销套餐名的映射
     // 互相冲突，因此这里只去掉枚举前缀整理成可读等级，不杜撰套餐名。
-    parsed.plan_label = payload
+    let plan = payload
         .pointer("/user/membership/level")
         .and_then(non_empty)
         .filter(|level| !level.eq_ignore_ascii_case("LEVEL_UNSPECIFIED"))
         .and_then(kimi_level_name);
+    let mut parsed = response(allowances, billing::kimi(plan.as_deref()));
+    parsed.plan_label = plan;
     Ok(parsed)
 }
 
@@ -373,7 +392,8 @@ fn parse_nano_gpt(payload: &Value) -> Result<AllowanceResponse, ()> {
             allowances.push(allowance);
         }
     }
-    Ok(response(allowances))
+    let billing = billing::nano_gpt(!allowances.is_empty());
+    Ok(response(allowances, billing))
 }
 
 fn parse_zai(payload: &Value) -> Result<AllowanceResponse, ()> {
@@ -419,11 +439,14 @@ fn parse_zai(payload: &Value) -> Result<AllowanceResponse, ()> {
             _ => {}
         }
     }
+    let plan = data.get("level").and_then(non_empty).and_then(display_name);
+    let billing = billing::zai(plan.as_deref());
     Ok(AllowanceResponse {
         allowances,
         models: Vec::new(),
-        plan_label: data.get("level").and_then(non_empty).and_then(display_name),
+        plan_label: plan,
         account_label: None,
+        billing,
     })
 }
 
@@ -469,16 +492,21 @@ fn parse_zhipu(payload: &Value) -> Result<AllowanceResponse, ()> {
             _ => {}
         }
     }
-    let mut parsed = response(allowances);
     // 实测 open.bigmodel.cn 的 quota/limit 响应带 `data.level`（如 pro），与 Z.ai 同源。
-    parsed.plan_label = payload
+    let plan = payload
         .pointer("/data/level")
         .and_then(non_empty)
         .and_then(display_name);
+    let mut parsed = response(allowances, billing::zhipu(plan.as_deref()));
+    parsed.plan_label = plan;
     Ok(parsed)
 }
 
-fn parse_minimax(payload: &Value, token_plan: bool) -> Result<AllowanceResponse, ()> {
+fn parse_minimax(
+    payload: &Value,
+    token_plan: bool,
+    monitor: Monitor,
+) -> Result<AllowanceResponse, ()> {
     let object = payload.as_object().ok_or(())?;
     if let Some(base) = object.get("base_resp").and_then(Value::as_object)
         && field_number(base, "status_code") != Some(0.0)
@@ -546,8 +574,14 @@ fn parse_minimax(payload: &Value, token_plan: bool) -> Result<AllowanceResponse,
             allowances.push(weekly);
         }
     }
-    let mut parsed = response(allowances);
-    parsed.plan_label = minimax_plan(object);
+    let plan = minimax_plan(object);
+    // 国际站（minimax.io）用美元标价，国内站（minimaxi.com）只有人民币价。
+    let billing = billing::minimax(
+        plan.as_deref(),
+        matches!(monitor, Monitor::MiniMaxCodingPlan),
+    );
+    let mut parsed = response(allowances, billing);
+    parsed.plan_label = plan;
     Ok(parsed)
 }
 
@@ -648,14 +682,17 @@ fn parse_wafer(payload: &Value) -> Result<AllowanceResponse, ()> {
     );
     allowance.window_seconds = seconds;
     allowance.resets_at_unix_ms = reset;
+    let plan = object
+        .get("plan_tier")
+        .and_then(non_empty)
+        .map(str::to_owned);
+    let billing = billing::wafer(plan.as_deref());
     Ok(AllowanceResponse {
         allowances: vec![allowance],
         models: Vec::new(),
-        plan_label: object
-            .get("plan_tier")
-            .and_then(non_empty)
-            .map(str::to_owned),
+        plan_label: plan,
         account_label: None,
+        billing,
     })
 }
 
@@ -681,14 +718,17 @@ fn parse_opencode_go(payload: &Value) -> Result<AllowanceResponse, ()> {
         allowance.resets_at_unix_ms = Some(reset);
         allowances.push(allowance);
     }
-    Ok(response(allowances))
+    let billing = billing::opencode_go(!allowances.is_empty());
+    Ok(response(allowances, billing))
 }
 
 fn parse_crof(payload: &Value) -> Result<AllowanceResponse, ()> {
     let credits = payload.get("credits").and_then(number).ok_or(())?;
     let mut allowance = item("credits", "Credits", "balance");
     allowance.remaining = Some(amount(credits, "currency", Some("USD")));
-    Ok(response(vec![allowance]))
+    // Crof 只按 token 扣余额，没有订阅：官方定价页 https://crof.ai/pricing
+    // （2026-11-02 直连不可达，按 2026-09-14 官方页面归档内容核对）。
+    Ok(response(vec![allowance], Some(billing::usage())))
 }
 
 fn parse_deepseek(payload: &Value) -> Result<AllowanceResponse, ()> {
@@ -721,7 +761,9 @@ fn parse_deepseek(payload: &Value) -> Result<AllowanceResponse, ()> {
             .unwrap_or(&entries[0]);
         allowances.push(deepseek_balance_item(*balance, *currency));
     }
-    Ok(response(allowances))
+    // DeepSeek 只按 token 从充值余额扣费，没有订阅
+    // （https://api-docs.deepseek.com/quick_start/pricing ，2026-11-02 核对）。
+    Ok(response(allowances, Some(billing::usage())))
 }
 
 fn deepseek_balance_item(balance: f64, currency: Option<&str>) -> AllowanceItem {
@@ -823,12 +865,25 @@ fn parse_neuralwatt(payload: &Value) -> Result<AllowanceResponse, ()> {
         allowance.remaining = Some(amount(balance, "currency", Some("USD")));
         allowances.push(allowance);
     }
-    let mut parsed = response(allowances);
     // quota 响应里的 `subscription.plan` 就是订阅计划名；余额型账户没有 subscription。
-    parsed.plan_label = payload
+    let plan = payload
         .pointer("/subscription/plan")
         .and_then(non_empty)
         .and_then(display_name);
+    let billing = if object
+        .get("subscription")
+        .and_then(Value::as_object)
+        .is_some()
+    {
+        billing::neuralwatt(plan.as_deref())
+    } else if credits.is_some() {
+        // 没有订阅、只有余额：按量计费。
+        Some(billing::usage())
+    } else {
+        None
+    };
+    let mut parsed = response(allowances, billing);
+    parsed.plan_label = plan;
     Ok(parsed)
 }
 
@@ -865,7 +920,9 @@ fn period_window_seconds(period: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Monitor, parse};
+    use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod};
+
+    use super::{Monitor, parse, parse_minimax_fallback};
 
     #[test]
     fn copilot_reports_the_github_login_as_the_account() {
@@ -983,5 +1040,126 @@ mod tests {
         }"#;
         let response = parse(Monitor::NeuralWatt, body).unwrap();
         assert_eq!(response.plan_label.as_deref(), Some("Pro"));
+    }
+
+    #[test]
+    fn priced_plans_attach_the_published_monthly_price() {
+        let copilot = br#"{
+            "login": "octocat",
+            "copilot_plan": "individual",
+            "access_type_sku": "monthly_subscriber_quota",
+            "quota_snapshots": {"premium_interactions": {"entitlement": 300, "remaining": 120}}
+        }"#;
+        let billing = parse(Monitor::GitHubCopilot, copilot)
+            .unwrap()
+            .billing
+            .expect("Pro is a priced plan");
+        assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+        let price = billing.price.expect("Pro price");
+        assert_eq!(price.amount, "10");
+        assert_eq!(price.currency, "USD");
+
+        let zai = br#"{
+            "data": {
+                "level": "pro",
+                "limits": [{
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 42,
+                    "nextResetTime": 1760000000000
+                }]
+            }
+        }"#;
+        let billing = parse(Monitor::ZaiCodingPlan, zai)
+            .unwrap()
+            .billing
+            .expect("GLM Coding Plan Pro is a priced plan");
+        assert_eq!(billing.price.expect("Pro price").amount, "80");
+    }
+
+    #[test]
+    fn identified_subscriptions_without_a_usd_price_keep_kind_and_period() {
+        // 智谱（BigModel）只有人民币价格。
+        let zhipu = br#"{
+            "data": {
+                "level": "pro",
+                "limits": [{"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 42}]
+            }
+        }"#;
+        let billing = parse(Monitor::ZhipuAiCodingPlan, zhipu)
+            .unwrap()
+            .billing
+            .expect("paid subscription");
+        assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+        assert_eq!(billing.price, None);
+    }
+
+    #[test]
+    fn balance_only_accounts_are_usage_based() {
+        for (monitor, body) in [
+            (Monitor::Crof, br#"{"credits": 12.5}"#.as_slice()),
+            (
+                Monitor::DeepSeek,
+                br#"{"balance_infos": [{"currency": "USD", "total_balance": "10.00"}]}"#.as_slice(),
+            ),
+        ] {
+            let billing = parse(monitor, body)
+                .unwrap()
+                .billing
+                .expect("credit-only account");
+            assert_eq!(billing.kind, AllowanceBillingKind::Usage);
+            assert_eq!(billing.period, None);
+            assert_eq!(billing.price, None);
+        }
+    }
+
+    #[test]
+    fn unknown_plans_leave_billing_unknown() {
+        let zai = br#"{
+            "data": {
+                "level": "team",
+                "limits": [{"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 42}]
+            }
+        }"#;
+        assert_eq!(parse(Monitor::ZaiCodingPlan, zai).unwrap().billing, None);
+
+        let copilot = br#"{
+            "copilot_plan": "free",
+            "access_type_sku": "free_limited_copilot",
+            "quota_snapshots": {"premium_interactions": {"entitlement": 50, "remaining": 20}}
+        }"#;
+        assert_eq!(
+            parse(Monitor::GitHubCopilot, copilot).unwrap().billing,
+            None
+        );
+    }
+
+    #[test]
+    fn minimax_only_prices_the_usd_region() {
+        let body = br#"{
+            "base_resp": {"status_code": 0},
+            "current_subscribe_title": "Go",
+            "model_remains": [{
+                "model_name": "general",
+                "current_interval_total_count": 100,
+                "current_interval_usage_count": 96,
+                "current_interval_remaining_percent": 96,
+                "start_time": 1780279200000,
+                "end_time": 1780297200000,
+                "current_weekly_remaining_percent": 99
+            }]
+        }"#;
+        let global = parse(Monitor::MiniMaxCodingPlan, body).unwrap().billing;
+        assert_eq!(global.expect("M Plan Go price").price.unwrap().amount, "22");
+        // 国内站只有人民币价，同一份响应不写美元价格。
+        let cn = parse_minimax_fallback(Monitor::MiniMaxCnCodingPlan, body)
+            .unwrap()
+            .billing
+            .expect("paid subscription");
+        assert_eq!(cn.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(cn.price, None);
     }
 }

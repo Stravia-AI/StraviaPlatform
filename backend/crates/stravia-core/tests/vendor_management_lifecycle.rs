@@ -2368,6 +2368,18 @@ async fn compatible_update_keeps_old_management_work_and_routes_new_work_to_v2()
     assert_eq!(allowance.plan_label.as_deref(), Some("fixture-2.0.0"));
     // 插件回传的账号标识带首尾空白，核心层须裁剪后再暴露。
     assert_eq!(allowance.account_label.as_deref(), Some("account-2.0.0"));
+    // 插件回传的价格带空白与小写币种；核心层规范化后暴露为可采用的订阅建议。
+    use stravia_core::admin::provider_allowance::{
+        ProviderAllowanceBillingKind, ProviderAllowanceBillingPeriod,
+    };
+    let billing = allowance.billing.expect("plugin billing");
+    assert_eq!(billing.kind, ProviderAllowanceBillingKind::Subscription);
+    assert_eq!(billing.period, Some(ProviderAllowanceBillingPeriod::Month));
+    let price = billing.price.expect("plugin price");
+    assert_eq!(
+        (price.amount.as_str(), price.currency.as_str()),
+        ("20", "USD")
+    );
 
     old_request.reply(UpstreamReply::models());
     let summary = old_discovery.await??;

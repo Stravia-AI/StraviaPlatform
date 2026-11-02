@@ -18,13 +18,21 @@ const providerBase = {
 }
 
 const providers = [
-  { ...providerBase, provider_id: 'p-none', provider: 'Untracked service', cost: null, subscription: null },
+  {
+    ...providerBase,
+    provider_id: 'p-none',
+    provider: 'Untracked service',
+    cost: null,
+    subscription: null,
+    allocated_cost: null,
+  },
   {
     ...providerBase,
     provider_id: 'p-usage',
     provider: 'Metered service',
     cost: money('12.345', 4),
     subscription: null,
+    allocated_cost: money('12.345', 4),
   },
   {
     ...providerBase,
@@ -32,6 +40,7 @@ const providers = [
     provider: 'Worth it plan',
     cost: null,
     subscription: { cost: money('10'), usage_equivalent_cost: money('25.004', 3), multiple: '2.5004' },
+    allocated_cost: money('10'),
   },
   {
     ...providerBase,
@@ -39,6 +48,7 @@ const providers = [
     provider: 'Partly priced plan',
     cost: null,
     subscription: { cost: money('10'), usage_equivalent_cost: money('5', 1, 2), multiple: '0.5' },
+    allocated_cost: money('10'),
   },
   {
     ...providerBase,
@@ -46,6 +56,15 @@ const providers = [
     provider: 'Idle plan',
     cost: null,
     subscription: { cost: money('0'), usage_equivalent_cost: money('0'), multiple: null },
+    allocated_cost: money('0'),
+  },
+  {
+    ...providerBase,
+    provider_id: 'p-unknown',
+    provider: 'Unpriced service',
+    cost: money('0', 0, 3),
+    subscription: null,
+    allocated_cost: money('0', 0, 3),
   },
 ]
 
@@ -85,43 +104,53 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
-test('provider table rounds costs to cents and highlights the subscription value multiple', async ({ page }) => {
+test('provider table carries one cost column and no other provider cost columns', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/stats')
   const table = page.getByRole('table', { name: 'Providers' })
-  const row = (name: string) => table.getByRole('row').filter({ hasText: name })
-
-  // Not tracked: the row exists but carries no cost of any kind.
-  await expect(row('Untracked service')).toBeVisible()
-  await expect(row('Untracked service').getByRole('cell').filter({ hasText: /[$×]/ })).toHaveCount(0)
-
-  // Metered: cost only, rounded half away from zero.
-  await expect(row('Metered service')).toContainText('$12.35')
-  await expect(row('Metered service').getByRole('cell').filter({ hasText: '×' })).toHaveCount(0)
-
-  // Subscription: equivalent usage, subscription cost and multiple; ≥1× is emphasised.
-  const worth = row('Worth it plan')
-  await expect(worth).toContainText('$25.00')
-  await expect(worth).toContainText('$10.00')
-  const multiple = worth.getByRole('cell', { name: '2.50×', exact: true })
-  await expect(multiple).toBeVisible()
-  await expect(multiple).toHaveClass(/text-success/)
-
-  // Unpriced usage makes the multiple a lower bound, and below 1× is not emphasised.
-  const partial = row('Partly priced plan').getByRole('cell', { name: '≥0.50×', exact: true })
-  await expect(partial).toBeVisible()
-  await expect(partial).not.toHaveClass(/text-success/)
-
-  // Zero subscription cost in the window cannot form a ratio.
-  await expect(row('Idle plan').getByRole('cell').last()).toHaveText('—')
+  const expected = [
+    ['Untracked service', '—'],
+    ['Metered service', '$12.35'],
+    ['Worth it plan', '$10.00'],
+    ['Partly priced plan', '$10.00'],
+    ['Idle plan', '$0.00'],
+    ['Unpriced service', 'Unknown'],
+  ]
+  await expect(table.getByRole('row').filter({ hasText: 'Metered service' })).toBeVisible()
+  const column = (await table.getByRole('columnheader').allInnerTexts()).findIndex((text) => text.trim() === 'Cost')
+  expect(column).toBeGreaterThan(-1)
+  for (const [name, shown] of expected) {
+    const row = table.getByRole('row').filter({ hasText: name })
+    await expect(row.getByRole('cell').nth(column)).toHaveText(shown)
+  }
+  for (const header of ['Estimated cost', 'Subscription cost', 'Value multiple']) {
+    await expect(table.getByRole('columnheader', { name: header })).toHaveCount(0)
+  }
 })
 
-test('overview cost card rounds to cents and reports the subscription value', async ({ page }) => {
+test('providers can be sorted by cost', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/stats')
+  const table = page.getByRole('table', { name: 'Providers' })
+  const header = table.getByRole('columnheader').filter({ hasText: /^\s*Cost\s*$/ })
+  await header.getByRole('button').click()
+  if ((await header.getAttribute('aria-sort')) !== 'descending') await header.getByRole('button').click()
+  await expect(header).toHaveAttribute('aria-sort', 'descending')
+  const names = await table
+    .getByRole('row')
+    .evaluateAll((rows) => rows.slice(1).map((row) => row.querySelector('td')?.textContent?.trim()))
+  expect(names.indexOf('Metered service')).toBeLessThan(names.indexOf('Worth it plan'))
+  expect(names.indexOf('Worth it plan')).toBeLessThan(names.indexOf('Idle plan'))
+})
+
+test('overview shows only the total cost', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/stats')
   const metric = page
     .locator('.route-metric-strip__item')
-    .filter({ has: page.getByText('Actual cost', { exact: true }) })
+    .filter({ has: page.getByText('Total cost', { exact: true }) })
   await expect(metric.locator('p').nth(1)).toHaveText('$22.35')
-  await expect(metric).toContainText('Subscription value 1.50×')
+  await expect(metric).not.toContainText('Subscription value')
+  await expect(page.getByRole('heading', { name: 'Cost trend' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Model cost and billing' })).toHaveCount(0)
 })

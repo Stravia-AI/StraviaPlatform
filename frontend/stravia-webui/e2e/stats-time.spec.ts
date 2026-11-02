@@ -715,10 +715,11 @@ test.describe('statistics resource breakdowns', () => {
     await page.goto('/stats')
     const providers = page.getByRole('region', { name: 'Providers', exact: true })
     const colorOf = (locator: Locator) => locator.evaluate((el) => getComputedStyle(el).color)
-    for (const header of ['Upstream Requests', 'Upstream Errors', 'Upstream Error Rate']) {
-      // 列头必须字面写出“上游”，排序按钮的可访问名称以它开头。
+    for (const header of ['Requests', 'Errors', 'Error rate']) {
+      // 列头直接写指标名，不带“上游”前缀；排序按钮的可访问名称以它开头。
       await expect(providers.getByRole('columnheader', { name: new RegExp(`^Sort ${header} `) })).toBeVisible()
     }
+    await expect(providers.getByRole('columnheader', { name: /Upstream/ })).toHaveCount(0)
     const failing = providers.getByRole('row').filter({ hasText: 'Service 01' })
     const healthy = providers.getByRole('row').filter({ hasText: 'Service 02' })
     const idle = providers.getByRole('row').filter({ hasText: 'Service 03' })
@@ -740,8 +741,8 @@ test.describe('statistics resource breakdowns', () => {
     const failingList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 01' })
     const healthyList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 02' })
     const idleList = providers.locator('.route-mobile-row').filter({ hasText: 'Service 03' })
-    const failingError = failingList.getByText('3 upstream errors', { exact: true })
-    const healthyError = healthyList.getByText('0 upstream errors', { exact: true })
+    const failingError = failingList.getByText('3 errors', { exact: true })
+    const healthyError = healthyList.getByText('0 errors', { exact: true })
     expect(await colorOf(failingError)).toBe(failingColor)
     expect(await colorOf(healthyError)).not.toBe(failingColor)
     await expect(failingList).toContainText('3%')

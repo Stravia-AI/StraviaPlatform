@@ -198,6 +198,7 @@ fn balance_is_a_usd_remaining_amount_without_an_invented_limit() {
     assert_eq!(remaining.currency.as_deref(), Some("USD"));
     assert!(item.used.is_none() && item.limit.is_none());
     assert!(response.models.is_empty());
+    assert!(response.billing.is_none());
     assert!(allowance::parse(json!({})).is_err());
     assert!(allowance::parse(json!({"balance":"12"})).is_err());
     assert!(allowance::parse(json!({"usage":[]})).is_err());

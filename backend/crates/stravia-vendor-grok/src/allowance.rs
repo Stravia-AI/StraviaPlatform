@@ -5,9 +5,9 @@ use stravia_vendor_common::common;
 use stravia_vendor_common::connection_check::invalid_response;
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceItem, AllowanceRequest, AllowanceResponse, ConnectionCheckResponse,
-    ConnectionCheckVerification, ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot,
-    read_http_body,
+    AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceItem,
+    AllowanceRequest, AllowanceResponse, ConnectionCheckResponse, ConnectionCheckVerification,
+    ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot, read_http_body,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -35,7 +35,9 @@ pub(crate) fn execute(
     // 另外请求 cli-chat-proxy 的 `/user?include=subscription` 读取
     // `subscriptionTier`（如 SuperGrokPro、X Premium），这里沿用同一来源。
     // 附加请求失败（例如凭据是 API key）只影响等级展示，不拖垮额度刷新。
-    parsed.plan_label = fetch_plan_label(host, credential);
+    let plan = fetch_plan_label(host, credential);
+    parsed.billing = billing_for_plan(plan.as_deref());
+    parsed.plan_label = plan;
     // 额度接口不返回身份；`email` 在登录或刷新令牌时从 id_token 保存，旧凭据下次刷新后才有。
     parsed.account_label = stravia_vendor_common::account::first_account_label([provider
         .credentials
@@ -143,6 +145,25 @@ fn plan_label(user: &Value) -> Option<String> {
     display_name(user.get("subscriptionTier").and_then(Value::as_str)?)
 }
 
+/// 订阅价格表。`/user` 返回的是旧 SuperGrok/X Premium 等级
+/// （官方客户端列出的 `SuperGrokPro`、`SuperGrokPlus`、`GrokPro`、
+/// `SuperGrokLite`、`XPremiumPlus`、`XPremium`、`XBasic`），这些套餐仍然有效，
+/// 但 x.ai 现行定价页只公布新的 X Subscription（Plus/Premium/Super/Ultra）：
+/// https://x.ai/pricing 与 https://docs.x.ai/x-subscription/pricing（2026-11-02 核对）。
+/// 旧套餐的美元标价不再公布，无法把等级名一一对应到新套餐，因此只标记订阅、
+/// 不填金额；免费档没有 `subscriptionTier`，不会进入这里。
+fn billing_for_plan(plan: Option<&str>) -> Option<AllowanceBilling> {
+    match plan? {
+        "SuperGrokPro" | "SuperGrokPlus" | "GrokPro" | "SuperGrokLite" | "XPremiumPlus"
+        | "XPremium" | "XBasic" => Some(AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: None,
+        }),
+        _ => None,
+    }
+}
+
 fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
     ["access_token", "api_key", "apiKey", "token"]
         .into_iter()
@@ -220,6 +241,7 @@ fn parse_xai(body: &[u8], now: i64) -> Result<AllowanceResponse, ()> {
         models: Vec::new(),
         plan_label: None,
         account_label: None,
+        billing: None,
     })
 }
 
@@ -477,9 +499,12 @@ fn error(kind: ErrorKind, message: &str, upstream_status: Option<u16>) -> Plugin
 
 #[cfg(test)]
 mod tests {
-    use super::{ProtobufScan, grpc_status_error, parse_grpc_web, plan_label, scan_protobuf};
+    use super::{
+        ProtobufScan, billing_for_plan, grpc_status_error, parse_grpc_web, plan_label,
+        scan_protobuf,
+    };
     use serde_json::json;
-    use stravia_vendor_sdk::ErrorKind;
+    use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod, ErrorKind};
 
     /// 形状取自官方 grok-build 的 `UserInfo`：`/v1/user?include=subscription`
     /// 在有有效订阅时返回 `subscriptionTier`，无订阅时整个字段缺省。
@@ -510,6 +535,27 @@ mod tests {
         assert_eq!(plan_label(&json!({"userId": "u-3"})), None);
         assert_eq!(plan_label(&json!({"subscriptionTier": null})), None);
         assert_eq!(plan_label(&json!({"subscriptionTier": "  "})), None);
+    }
+
+    #[test]
+    fn paid_subscription_tiers_are_subscriptions_without_a_published_price() {
+        for tier in [
+            "SuperGrokPro",
+            "SuperGrokPlus",
+            "GrokPro",
+            "SuperGrokLite",
+            "XPremiumPlus",
+            "XPremium",
+            "XBasic",
+        ] {
+            let billing = billing_for_plan(Some(tier)).unwrap();
+            assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+            assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+            assert_eq!(billing.price, None);
+        }
+        assert_eq!(billing_for_plan(Some("Free")), None);
+        assert_eq!(billing_for_plan(Some("Unknown")), None);
+        assert_eq!(billing_for_plan(None), None);
     }
 
     #[test]

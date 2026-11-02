@@ -640,6 +640,49 @@ pub struct AllowanceResponse {
     /// Absent when the upstream cannot report one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
+    /// How this account is billed, only when the plugin can establish it from
+    /// the upstream response or from the vendor's published plan prices.
+    /// Absent means unknown, never "pay as you go".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<AllowanceBilling>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceBillingKind {
+    /// Charged per use against a balance or credit; no recurring plan fee.
+    Usage,
+    /// A recurring plan fee, with or without a known price.
+    Subscription,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceBillingPeriod {
+    Month,
+    Year,
+}
+
+/// A recurring plan fee as the vendor publishes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowanceBillingPrice {
+    /// Positive decimal string for one billing period.
+    pub amount: String,
+    /// ISO 4217 code. The host never converts between currencies.
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowanceBilling {
+    pub kind: AllowanceBillingKind,
+    /// Billing cycle of `price`; only meaningful for a subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<AllowanceBillingPeriod>,
+    /// Plan fee for one `period`. A plugin fills it only when the plan is
+    /// identified and the vendor publishes one fixed price for it; otherwise
+    /// it stays absent and the user enters the amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<AllowanceBillingPrice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

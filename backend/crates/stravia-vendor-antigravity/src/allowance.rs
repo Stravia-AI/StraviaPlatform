@@ -5,7 +5,8 @@ use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common::plugin_error;
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot,
 };
 
@@ -30,15 +31,15 @@ pub(crate) fn execute(
     let stored = |key: &str| provider.credentials.get(key).and_then(Value::as_str);
     response.account_label = first_account_label([stored("email"), stored("name")]);
     // 等级只是附加展示信息，与 Command Code 的订阅查询一致：该请求失败时不让额度读取失败。
-    response.plan_label = crate::client::post_json(
+    let discovery = crate::client::post_json(
         host,
         provider,
         "loadCodeAssist",
         &json!({"metadata":{"ideType":"ANTIGRAVITY"}}),
     )
-    .ok()
-    .as_ref()
-    .and_then(plan_label);
+    .ok();
+    response.plan_label = discovery.as_ref().and_then(plan_label);
+    response.billing = billing_for_plan(response.plan_label.as_deref());
     Ok(response)
 }
 
@@ -47,6 +48,30 @@ pub(crate) fn execute(
 /// 每次读取额度时重新发现；没有 `paidTier` 说明没有订阅，不展示等级。
 fn plan_label(discovery: &Value) -> Option<String> {
     display_name(discovery.get("paidTier")?.get("name")?.as_str()?)
+}
+
+/// 订阅价格表。Google AI Pro 的月付标价来自 Google One：
+/// https://one.google.com/about/plans?hl=en_US（2026-11-02 核对，$19.99/月）。
+/// Google AI Ultra 目前有 $100 与 $200 两档，`paidTier.name` 都只写
+/// `Google AI Ultra`，无法从等级名唯一确定价格，因此只标记订阅、不填金额：
+/// https://antigravity.google/blog/changes-to-antigravity-plans/（2026-11-02 核对）。
+/// 免费档没有 `paidTier`，不会进入这里。
+fn billing_for_plan(plan: Option<&str>) -> Option<AllowanceBilling> {
+    fn subscription(price: Option<(&str, &str)>) -> AllowanceBilling {
+        AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: price.map(|(amount, currency)| AllowanceBillingPrice {
+                amount: amount.into(),
+                currency: currency.into(),
+            }),
+        }
+    }
+    match plan? {
+        "Google AI Pro" => Some(subscription(Some(("19.99", "USD")))),
+        "Google AI Ultra" => Some(subscription(None)),
+        _ => None,
+    }
 }
 
 fn text<'a>(object: &'a Map<String, Value>, key: &str) -> Option<Option<&'a str>> {
@@ -87,6 +112,7 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
         models: Vec::new(),
         plan_label: None,
         account_label: None,
+        billing: None,
     })
 }
 
@@ -282,6 +308,30 @@ mod tests {
         let free = json!({"currentTier": {"id": "free-tier", "name": "Antigravity"}});
         assert_eq!(plan_label(&free), None);
         assert_eq!(plan_label(&json!({"paidTier": {"name": " "}})), None);
+    }
+
+    #[test]
+    fn billing_prices_only_the_unambiguous_google_ai_plan() {
+        let pro = billing_for_plan(Some("Google AI Pro")).unwrap();
+        assert_eq!(pro.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(pro.period, Some(AllowanceBillingPeriod::Month));
+        assert_eq!(
+            pro.price,
+            Some(AllowanceBillingPrice {
+                amount: "19.99".into(),
+                currency: "USD".into(),
+            })
+        );
+
+        // 两档 Ultra 同名，等级名无法区分 $100 与 $200。
+        let ultra = billing_for_plan(Some("Google AI Ultra")).unwrap();
+        assert_eq!(ultra.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(ultra.period, Some(AllowanceBillingPeriod::Month));
+        assert_eq!(ultra.price, None);
+
+        assert_eq!(billing_for_plan(None), None);
+        assert_eq!(billing_for_plan(Some("Antigravity")), None);
+        assert_eq!(billing_for_plan(Some("Google AI Pro (student)")), None);
     }
 
     #[test]

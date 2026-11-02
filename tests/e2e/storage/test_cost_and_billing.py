@@ -149,6 +149,8 @@ def test_frozen_money_survives_rate_changes_reset_and_detail_deletion(usage_env)
         money(row["cost"], "0.00045", 2)
         money(row["billing"], "0.3", 2)
     money(stats(env, "providers")[0]["cost"], "0.00045", 2)
+    # 按量 Provider 的分摊成本即窗口内的实际按量成本。
+    money(stats(env, "providers")[0]["allocated_cost"], "0.00045", 2)
     money(stats(env, "series")[0]["actual_cost"], "0.00045", 2)
 
     reset = admin(env, "POST", f"api-keys/{key['id']}/spend/reset")
@@ -166,6 +168,7 @@ def test_frozen_money_survives_rate_changes_reset_and_detail_deletion(usage_env)
         money(row["cost"], "0.00045", 2)
         money(row["billing"], "0.3", 2)
     assert stats(env, "providers")[0]["deleted"] is True
+    money(stats(env, "providers")[0]["allocated_cost"], "0.00045", 2)
     money(stats(env)["actual_cost"], "0.00045", 2)
 
 
@@ -318,6 +321,9 @@ def test_subscription_history_stops_at_delete_and_copy_is_usage(usage_env):
     money(row["cost"], "0.00003", 1)
     money(row["subscription"]["usage_equivalent_cost"], "0.00003", 1)
     assert_subscription_multiple(row["subscription"])
+    # 订阅 Provider 的分摊成本只含摊销，等价按量成本不再重复计入。
+    assert row["allocated_cost"]["known_count"] == 0, row
+    assert Decimal(row["allocated_cost"]["amount"]) == Decimal(row["subscription"]["cost"]["amount"]), row
     overview = stats(env)
     money(overview["subscription"]["usage_equivalent_cost"], "0.00003", 1)
     assert_subscription_multiple(overview["subscription"])
@@ -337,6 +343,7 @@ def test_subscription_history_stops_at_delete_and_copy_is_usage(usage_env):
     # 永久统计桶保留订阅尝试的等价按量成本；仅有摊销的 Provider 才显示 0。
     money(deleted["cost"], "0.00003", 1)
     assert Decimal(deleted["subscription"]["cost"]["amount"]) == actual
+    assert Decimal(deleted["allocated_cost"]["amount"]) == actual
     assert_subscription_multiple(deleted["subscription"])
 
 
@@ -371,6 +378,7 @@ def test_none_cost_basis_records_no_cost_until_basis_returns(usage_env):
     row = next(row for row in stats(env, "providers") if row["provider_id"] == provider["id"])
     assert row["cost"] is None, row
     assert row["subscription"] is None, row
+    assert row["allocated_cost"] is None, row
     money(stats(env, "models")[0]["cost"], "0", 0)
 
     def finished_attempt():
@@ -409,6 +417,7 @@ def test_none_cost_basis_records_no_cost_until_basis_returns(usage_env):
 
     row = _wait_for("usage cost after basis switch", usage_row)
     money(row["cost"], "0.00003", 1)
+    money(row["allocated_cost"], "0.00003", 1)
     assert row["subscription"] is None, row
 
     admin(env, "POST", f"providers/{provider['id']}/cost-plans", {

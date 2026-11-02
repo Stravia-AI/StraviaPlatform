@@ -17,6 +17,7 @@ import type { Provider, ProviderModelSyncSummary } from '#lib/types.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import ProviderConnectionView from '#lib/components/provider-connection-view.svelte'
+import ProviderCostView from '#lib/components/provider-cost-view.svelte'
 import ProviderMark from '#lib/components/provider-mark.svelte'
 import ProviderModelCatalog from '#lib/components/provider-model-catalog.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
@@ -29,7 +30,7 @@ import { tabsListVariants, tabsTriggerVariants } from '#lib/components/ui/tabs/i
 
 const providerId = $derived(page.params.id ?? '')
 
-type ProviderDetailView = 'connection' | 'models' | 'routes'
+type ProviderDetailView = 'connection' | 'models' | 'routes' | 'cost'
 
 const view = $derived(parseProviderDetailView(page.url.searchParams.get('view')))
 const queryClient = useQueryClient()
@@ -50,6 +51,7 @@ let savedProvider = $state<Provider>()
 const provider = $derived(savedProvider ?? providersQuery.data?.find((item) => item.id === providerId))
 const descriptor = $derived(providerDescriptorsQuery.data?.find((item) => item.provider_id === provider?.vendor))
 const channel = $derived(descriptor?.channels.find((item) => item.id === provider?.channel))
+const supportsAllowance = $derived(channel?.capabilities.includes('allowance') ?? false)
 const canDiscoverModels = $derived(channel?.capabilities.includes('model_discovery') ?? false)
 const usesProviderModels = $derived(
   Boolean(
@@ -69,6 +71,7 @@ const detailTabs: Array<{ id: ProviderDetailView; label: () => string; count?: n
   { id: 'connection', label: m.provider_detail_tab_connection },
   ...(usesProviderModels ? [{ id: 'models' as const, label: m.provider_detail_tab_models }] : []),
   { id: 'routes', label: m.provider_detail_tab_routes, count: routeReferences.length || undefined },
+  { id: 'cost', label: m.provider_detail_tab_cost },
 ])
 
 $effect(() => {
@@ -79,7 +82,7 @@ $effect(() => {
 })
 
 function parseProviderDetailView(value: string | null): ProviderDetailView {
-  return value === 'models' || value === 'routes' ? value : 'connection'
+  return value === 'models' || value === 'routes' || value === 'cost' ? value : 'connection'
 }
 
 async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | undefined> {
@@ -184,6 +187,8 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
 
     {#if view === 'connection' || (view === 'models' && !usesProviderModels)}
       <ProviderConnectionView {provider} onSaved={(saved: Provider) => (savedProvider = saved)} />
+    {:else if view === 'cost'}
+      <ProviderCostView {provider} {supportsAllowance} />
     {:else if view === 'models'}
       {#if syncProviderId === providerId && (syncStatus === 'syncing' || syncStatus === 'error')}
         <section class="rounded-xl border p-4" aria-live="polite">

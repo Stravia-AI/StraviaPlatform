@@ -89,6 +89,8 @@ export interface ProviderStats {
   cost: MoneyAmount | null
   /** 窗口内与订阅生效段重叠时的订阅对比；否则为 null。 */
   subscription: SubscriptionValue | null
+  /** 窗口内分摊到该供应商的成本：按量尝试的实际成本加订阅在窗口内的摊销；不计算成本且没有订阅时为 null。 */
+  allocated_cost: MoneyAmount | null
 }
 
 /** 订阅供应商在同一窗口内的成本对比，金额与倍数均由 Core 计算。 */

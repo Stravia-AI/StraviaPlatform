@@ -104,17 +104,15 @@ for (const scenario of [
   },
   { name: 'entirely unknown usage', cost: { amount: '0', known_count: 0, unknown_count: 1 }, shown: 'Unknown' },
 ]) {
-  test(`cost summary and timeline preserve ${scenario.name}`, async ({ page }) => {
+  test(`total cost preserves ${scenario.name}`, async ({ page }) => {
     await prepareApp(page)
     await stubStats(page, scenario.cost)
     await page.goto('/stats')
     const metric = page
       .locator('.route-metric-strip__item')
-      .filter({ has: page.getByText('Actual cost', { exact: true }) })
+      .filter({ has: page.getByText('Total cost', { exact: true }) })
     await expect(metric.locator('p').nth(1)).toHaveText(scenario.shown)
-    const chart = page.getByRole('slider', { name: 'Cost trend chart' })
-    await expect(chart).toBeVisible()
-    await expect(chart).toHaveAttribute('aria-valuetext', new RegExp(scenario.shown.replace('$', '\\$')))
+    await expect(page.getByRole('slider', { name: 'Cost trend chart' })).toHaveCount(0)
   })
 }
 
@@ -489,6 +487,37 @@ test.describe('usage workspace layout', () => {
     const requestColumn = (await keyTable.getByRole('columnheader').nth(1).boundingBox())!
     expect(nameColumn.width).toBeGreaterThan(requestColumn.width * 1.5)
   })
+
+  for (const [locale, providerRegion, keyRegion] of [
+    ['en-US', 'Providers', 'API Key usage'],
+    ['zh-CN', '供应商', 'API 密钥使用'],
+  ] as const) {
+    test(`${locale} puts the provider and API key tables on one row at 2560 without scrolling`, async ({ page }) => {
+      await prepareApp(page)
+      await stubStats(page)
+      await populateResources(page)
+      await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+      await page.setViewportSize({ width: 2560, height: 1440 })
+      await page.goto('/stats')
+      const providers = page.getByRole('region', { name: providerRegion, exact: true })
+      const keys = page.getByRole('region', { name: keyRegion, exact: true })
+      await expect(providers.getByRole('table')).toBeVisible()
+      await expect(keys.getByRole('table')).toBeVisible()
+      const [providerBox, keyBox] = [(await providers.boundingBox())!, (await keys.boundingBox())!]
+      expect(Math.abs(providerBox.y - keyBox.y)).toBeLessThanOrEqual(1)
+      expect(keyBox.x).toBeGreaterThanOrEqual(providerBox.x + providerBox.width)
+      for (const section of [providers, keys]) {
+        const scrolls = await section.getByRole('table').evaluate((table) => {
+          for (let el = table.parentElement; el; el = el.parentElement) {
+            if (el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== 'visible') return true
+            if (el.matches('section')) break
+          }
+          return false
+        })
+        expect(scrolls).toBe(false)
+      }
+    })
+  }
 
   test('1440 keeps resource tables and analyses readable in one column', async ({ page }) => {
     await prepareApp(page)

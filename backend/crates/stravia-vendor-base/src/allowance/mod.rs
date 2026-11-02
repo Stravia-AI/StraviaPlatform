@@ -1,3 +1,4 @@
+mod billing;
 mod clinepass;
 mod parsers;
 
@@ -46,7 +47,7 @@ pub(crate) fn execute(
         }
         let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
         let parsed = if count > 1 && index > 0 {
-            parsers::parse_minimax_fallback(&body)
+            parsers::parse_minimax_fallback(monitor, &body)
         } else {
             parsers::parse(monitor, &body)
         };
