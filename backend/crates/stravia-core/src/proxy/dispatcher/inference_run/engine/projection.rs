@@ -1336,6 +1336,12 @@ impl ClientProjectionSession {
         {
             self.current_unindexed_item_kind = None;
         }
+        // 已完成条目（如 Anthropic 一次性给出的 redacted_thinking）占用了该输出位置；
+        // 之后的无索引条目若复用同一位置，会与它的 Marker 载体冲突。
+        if index >= self.next_unindexed_output_index {
+            self.next_unindexed_output_index = index.saturating_add(1);
+            self.current_unindexed_item_kind = None;
+        }
         let closed = self.close_thinking(index, item).await?;
         if closed.had_live_projection || !closed.markers.is_empty() {
             self.projected_thinking_items.insert(index);

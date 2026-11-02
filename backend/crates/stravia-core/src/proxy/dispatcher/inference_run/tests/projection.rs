@@ -1565,3 +1565,257 @@ async fn exposed_platform_tools_preserve_visible_text_and_thinking_order() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
     assert!(tool_calls.lock().is_empty());
 }
+
+#[tokio::test]
+async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
+    use axum::Json;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use serde_json::{Value, json};
+
+    #[derive(Clone)]
+    struct Upstream {
+        requests: Arc<parking_lot::Mutex<Vec<Value>>>,
+        content: Vec<Value>,
+        stop_reason: &'static str,
+    }
+
+    fn message(id: &str, content: &[Value], stop_reason: &str) -> Value {
+        json!({
+            "id": id, "type": "message", "role": "assistant", "model": "provider-model",
+            "content": content, "stop_reason": stop_reason, "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })
+    }
+
+    fn sse(id: &str, content: &[Value], stop_reason: &str) -> String {
+        let mut events = vec![json!({
+            "type": "message_start",
+            "message": {
+                "id": id, "type": "message", "role": "assistant", "model": "provider-model",
+                "content": [], "stop_reason": null, "stop_sequence": null,
+                "usage": {"input_tokens": 1, "output_tokens": 0}
+            }
+        })];
+        for (index, block) in content.iter().enumerate() {
+            match block["type"].as_str().unwrap() {
+                "thinking" => {
+                    events.push(json!({"type": "content_block_start", "index": index,
+                        "content_block": {"type": "thinking", "thinking": "", "signature": ""}}));
+                    events.push(json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "thinking_delta", "thinking": block["thinking"]}}));
+                    events.push(json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "signature_delta", "signature": block["signature"]}}));
+                }
+                "redacted_thinking" => events.push(json!({
+                    "type": "content_block_start", "index": index, "content_block": block
+                })),
+                "text" => {
+                    events.push(json!({"type": "content_block_start", "index": index,
+                        "content_block": {"type": "text", "text": ""}}));
+                    events.push(json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "text_delta", "text": block["text"]}}));
+                }
+                "tool_use" => {
+                    events.push(json!({"type": "content_block_start", "index": index,
+                        "content_block": {"type": "tool_use", "id": block["id"],
+                            "name": block["name"], "input": {}}}));
+                    events.push(json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "input_json_delta",
+                            "partial_json": block["input"].to_string()}}));
+                }
+                other => panic!("unsupported fixture block {other}"),
+            }
+            events.push(json!({"type": "content_block_stop", "index": index}));
+        }
+        events.push(json!({"type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+            "usage": {"output_tokens": 2}}));
+        events.push(json!({"type": "message_stop"}));
+        events
+            .into_iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    async fn handle(
+        State(upstream): State<Upstream>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        let first = {
+            let mut requests = upstream.requests.lock();
+            requests.push(body.clone());
+            requests.len() == 1
+        };
+        let (id, content, stop_reason) = if first {
+            ("msg_first", upstream.content.clone(), upstream.stop_reason)
+        } else {
+            (
+                "msg_second",
+                vec![json!({"type": "text", "text": "done"})],
+                "end_turn",
+            )
+        };
+        if body["stream"] == true {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                sse(id, &content, stop_reason),
+            )
+                .into_response()
+        } else {
+            Json(message(id, &content, stop_reason)).into_response()
+        }
+    }
+
+    let thinking =
+        json!({"type": "thinking", "thinking": "visible reasoning", "signature": "SIG-VISIBLE"});
+    let redacted = json!({"type": "redacted_thinking", "data": "OPAQUE-REDACTED"});
+    let tool_use =
+        json!({"type": "tool_use", "id": "toolu_read", "name": "read", "input": {"path": "a"}});
+    let text = json!({"type": "text", "text": "answer"});
+    let scenarios = [
+        (
+            "thinking+redacted+tool",
+            vec![thinking.clone(), redacted.clone(), tool_use.clone()],
+            "tool_use",
+        ),
+        (
+            "redacted+thinking+tool",
+            vec![redacted.clone(), thinking.clone(), tool_use.clone()],
+            "tool_use",
+        ),
+        (
+            "redacted+text",
+            vec![redacted.clone(), text.clone()],
+            "end_turn",
+        ),
+    ];
+
+    for (name, content, stop_reason) in scenarios {
+        for stream in [true, false] {
+            let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let app = Router::new()
+                .fallback(axum::routing::post(handle))
+                .with_state(Upstream {
+                    requests: Arc::clone(&requests),
+                    content: content.clone(),
+                    stop_reason,
+                });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let data_dir = tempfile::tempdir().unwrap();
+            let gateway = Gateway::new(crate::config::GatewayConfig {
+                data_dir: data_dir.path().to_path_buf(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let model = "anthropic-redacted-replay";
+            configure_route_with_protocol(
+                &gateway,
+                model,
+                &[format!("http://{address}")],
+                "custom",
+                "anthropic-messages",
+            )
+            .await;
+            let headers = authorized_headers(&gateway).await;
+            let authorization = headers.get(header::AUTHORIZATION).unwrap();
+            let router = crate::proxy::server::create_router(gateway.clone());
+            let tools = json!([{"type": "function", "name": "read",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]);
+            let mut input = vec![json!({"role": "user", "content": "question"})];
+            for turn in 0..2 {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::post("/v1/responses")
+                            .header("content-type", "application/json")
+                            .header(header::AUTHORIZATION, authorization.clone())
+                            .body(Body::from(
+                                json!({"model": model, "input": input, "stream": stream, "tools": tools})
+                                    .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{name} stream={stream}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+                if turn == 1 {
+                    break;
+                }
+                let delivered: Value = if stream {
+                    std::str::from_utf8(&body)
+                        .unwrap()
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                        .find(|event| event["type"] == "response.completed")
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{name}: no response.completed in {}",
+                                String::from_utf8_lossy(&body)
+                            )
+                        })["response"]
+                        .clone()
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                let wire = delivered.to_string();
+                assert!(
+                    !wire.contains("OPAQUE-REDACTED"),
+                    "{name} stream={stream}: {wire}"
+                );
+                assert!(
+                    !wire.contains("SIG-VISIBLE"),
+                    "{name} stream={stream}: {wire}"
+                );
+                let delivered_output = delivered["output"].as_array().unwrap().clone();
+                for item in delivered_output
+                    .iter()
+                    .filter(|item| item["type"] == "reasoning")
+                {
+                    assert!(
+                        item["id"].as_str().is_some_and(|id| id.starts_with("rs_")),
+                        "{name} stream={stream}: reasoning carrier id {}",
+                        item["id"]
+                    );
+                }
+                input.extend(delivered_output.iter().cloned());
+                if stop_reason == "tool_use" {
+                    input.push(json!({"type": "function_call_output", "call_id": "toolu_read", "output": "ok"}));
+                } else {
+                    input.push(json!({"role": "user", "content": "continue"}));
+                }
+            }
+            let requests = requests.lock().clone();
+            assert_eq!(requests.len(), 2, "{name} stream={stream}");
+            let assistant = requests[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["role"] == "assistant");
+            let replayed = assistant.map(|message| message["content"].clone());
+            assert_eq!(
+                replayed,
+                Some(json!(content)),
+                "{name} stream={stream}: upstream must receive the original protected blocks in order"
+            );
+            server.abort();
+            close_test_gateway(gateway, data_dir).await;
+        }
+    }
+}

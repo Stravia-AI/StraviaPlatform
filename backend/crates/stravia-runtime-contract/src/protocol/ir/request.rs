@@ -855,6 +855,18 @@ impl AiItem {
         }
     }
 
+    pub fn redacted_thinking(data: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                data: data.into(),
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }
+    }
+
     pub fn reasoning(
         summary: Vec<String>,
         content: Vec<String>,
@@ -1021,6 +1033,16 @@ impl AiItem {
                 content.as_slice(),
                 encrypted_content.as_deref(),
             )),
+            _ => None,
+        }
+    }
+
+    pub fn redacted_thinking_ref(&self) -> Option<&str> {
+        let MessageContent::Blocks(blocks) = &self.content else {
+            return None;
+        };
+        match blocks.as_slice() {
+            [ContentBlock::RedactedThinking { data }] => Some(data),
             _ => None,
         }
     }

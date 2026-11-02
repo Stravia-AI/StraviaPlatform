@@ -1175,6 +1175,37 @@ fn redacted_thinking_keeps_native_redacted_block() {
 }
 
 #[test]
+fn redacted_thinking_keeps_its_position_among_thinking_blocks_before_tool_use() {
+    let request = assistant_blocks_request(vec![
+        ContentBlock::RedactedThinking {
+            data: "redacted-data".into(),
+        },
+        ContentBlock::Thinking {
+            thinking: "visible".into(),
+            signature: Some("signed".into()),
+        },
+        ContentBlock::ToolUse {
+            id: "toolu_read".into(),
+            name: "read".into(),
+            input: serde_json::json!({"path": "a"}),
+            cache_control: None,
+        },
+    ]);
+
+    let (body, _) = AnthropicEncoder.encode_request(request).expect("encode");
+
+    // Anthropic 要求回传的 thinking / redacted_thinking 保持原始相对顺序。
+    assert_eq!(
+        body["messages"][1]["content"],
+        serde_json::json!([
+            {"type": "redacted_thinking", "data": "redacted-data"},
+            {"type": "thinking", "thinking": "visible", "signature": "signed"},
+            {"type": "tool_use", "id": "toolu_read", "name": "read", "input": {"path": "a"}}
+        ])
+    );
+}
+
+#[test]
 fn meta_reasoning_without_signature_degrades_to_text() {
     let request = AiRequest::new(
         "model",

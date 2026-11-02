@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Anthropic `redacted_thinking` blocks from an Anthropic upstream are no longer dropped (unary) or passed through as an unclassified event (streaming). They now take part in History Marker projection like signed thinking: the client sees only an opaque marker carrier, and the original `data` is restored in its original position when the conversation is replayed to Anthropic. Previously, replaying a tool-use turn without them could make Anthropic reject the request.
+- When replaying a turn that contains a tool call, the Anthropic encoder keeps `redacted_thinking` blocks ahead of the tool call in their original order relative to `thinking` blocks, instead of moving them behind signed thinking.
+
 ## [0.6.0] - 2026-10-30
 
 ### Verification

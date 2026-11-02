@@ -1395,7 +1395,8 @@ fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
         let mut tool_uses: Vec<Value> = Vec::new();
         for b in arr.drain(..) {
             match b.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-                "thinking" => thinking.push(b),
+                // redacted_thinking 与 thinking 同属必须按原序回传的思考块。
+                "thinking" | "redacted_thinking" => thinking.push(b),
                 "tool_use" => tool_uses.push(b),
                 _ => others.push(b),
             }
