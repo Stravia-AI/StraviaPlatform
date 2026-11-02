@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.1] - 2026-11-02
+
+### Verification
+
+- Manual signed-update smoke checks were not run on Windows x86_64/ARM64 or Linux x86_64/ARM64 because this release environment has no four-platform device matrix. Automated release checks do not replace verification of native installation and relaunch behavior.
+
 ### Added
 
 - Provider detail pages have a **Cost** tab beside Connection settings, Upstream models and Linked models. It shows the cost basis as a read-only summary edited in a Sheet, usage value for 24 hours, 7 days or 30 days, and the latest five basis changes.
