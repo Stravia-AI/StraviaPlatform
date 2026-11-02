@@ -360,6 +360,7 @@ async fn signed_in_catalog_and_organization_balance() {
     };
     assert_eq!(out.allowances[0].kind, "balance");
     assert_eq!(out.allowances[0].remaining.as_ref().unwrap().value, "7.5");
+    assert!(out.billing.is_none());
     let request = s.requests.lock()[1].clone();
     assert!(request.url.ends_with("/api/profile/balance"));
     assert!(

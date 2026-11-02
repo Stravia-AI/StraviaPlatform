@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Provider detail pages have a **Cost** tab beside Connection settings, Upstream models and Linked models. It shows the cost basis as a read-only summary edited in a Sheet, usage value for 24 hours, 7 days or 30 days, and the latest five basis changes.
+- Vendor plugins can report a billing suggestion with the allowance snapshot (`billing`: `usage` or `subscription`, period and the official list price). The Cost tab offers it as a suggestion to adopt or dismiss; it is never written automatically. Plugin prices are USD; with a custom currency the suggested price is converted at the current rate and adopted in that currency, and a plan whose price is unknown or not in USD leaves the amount for you to enter. Plugins include a price only when the vendor publishes one fixed USD list price for that exact plan (for example Claude Code Pro and Max, Codex Plus, Copilot Pro); per-seat, enterprise, CNY-only and unidentifiable plans report the subscription without a price, and DeepSeek and Crof report pay-as-you-go.
+
 ### Changed
 
+- Provider cost basis moved out of the connection form. The Usage page now shows a single cost: the **Total cost** at the top (all subscription amortization plus pay-as-you-go cost) and one **Cost** column in the Provider table, both for the selected time range. The Provider table's request and error columns are now labelled Requests, Errors and Error rate, without the "Upstream" prefix. The cost trend, subscription value, model cost and API Key cost sections and columns are gone; Provider usage cost, subscription cost and value multiple live on the Provider's Cost tab.
+- `GET /api/v1/stats/providers` rows gain `allocated_cost` (pay-as-you-go cost plus subscription amortization in the window).
 - The existing availability chart now compares request-level final and first-pass success rates on one fixed 0–100% axis. The shaded difference shows automatic recovery contribution; the tooltip includes recovered requests and percentage-point lift. Per-attempt upstream requests, errors and success rate remain in the same chart's tooltip. Cancelled, interrupted, in-progress and rejected requests remain excluded.
 - Stats overview and series add `recovered_request_count` and `recovery_known_request_count`. SQLite/PostgreSQL migration `0036_request_recovery` persists request-level recovery and coverage in the existing durable stats pipeline and backfills only provable retained facts. Missing historical evidence stays unknown rather than implying no retries; observation cleanup does not remove confirmed totals. The same migration drops the unused legacy `error_count` column from the stats tables; it was no longer exposed or read. Stats triggers now refresh only the checkpoint rows a source revision actually changes and carry the difference into the long-term buckets, instead of subtracting, deleting, and re-inserting every row on each revision; the stored totals are unchanged. Back up the database before upgrading.
 

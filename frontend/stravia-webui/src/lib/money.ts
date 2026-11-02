@@ -10,7 +10,11 @@ import type {
   SubscriptionValue,
 } from '#lib/types.js'
 
-/** USD is always the fallback; the UI never converts, it only chooses the symbol to label API amounts. */
+/**
+ * USD is always the fallback. Core converts every recorded amount, so the UI only chooses the symbol to label API
+ * amounts; the one exception is {@link convertUsdToCustom}, which expresses a plugin's USD list price in the display
+ * currency before the user adopts it.
+ */
 export function currencyForKind(kind: CurrencyKind, custom: CustomCurrency | null | undefined): DisplayCurrency {
   return kind === 'custom' ? { kind, symbol: custom?.symbol?.trim() || '$' } : { kind: 'usd', symbol: '$' }
 }
@@ -48,6 +52,25 @@ export function roundToCents(amount: string): bigint | null {
   let cents = BigInt(whole + digits.slice(0, 2))
   if (digits.charCodeAt(2) >= 0x35) cents += 1n
   return sign ? -cents : cents
+}
+
+/**
+ * 把美元金额按 `1 USD = usdRate 自定义币种` 换算，并按「中点远离零」取整到两位小数，返回普通十进制字符串。
+ * 任一输入不是普通十进制，或汇率不为正时返回 null，由调用方保持美元写法而不是猜一个数。
+ */
+export function convertUsdToCustom(usdAmount: string, usdRate: string): string | null {
+  const decimal = /^(\d+)(?:\.(\d+))?$/
+  const amountMatch = decimal.exec(String(usdAmount).trim())
+  const rateMatch = decimal.exec(String(usdRate).trim())
+  if (!amountMatch || !rateMatch) return null
+  const [, amountWhole, amountFraction = ''] = amountMatch
+  const [, rateWhole, rateFraction = ''] = rateMatch
+  const rate = BigInt(rateWhole + rateFraction)
+  if (rate === 0n) return null
+  const divisor = 10n ** BigInt(amountFraction.length + rateFraction.length)
+  // 先乘 100 得到分，再加半个除数实现四舍五入；两个操作数都非负，整数除法即向下取整。
+  const cents = (BigInt(amountWhole + amountFraction) * rate * 100n * 2n + divisor) / (divisor * 2n)
+  return `${cents / 100n}.${String(cents % 100n).padStart(2, '0')}`
 }
 
 /** 成本读数：统一四舍五入到两位小数。无法解析时原样返回，不伪造数值。 */

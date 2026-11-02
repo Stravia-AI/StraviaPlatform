@@ -1099,6 +1099,10 @@ pub struct ProviderStats {
     /// 该 Provider 的订阅价值对比；窗口内没有订阅段重叠时为 null。
     #[sqlx(skip)]
     pub subscription: Option<SubscriptionValue>,
+    /// 窗口内分摊到该 Provider 的成本：按量尝试的实际成本加订阅在窗口内的摊销，
+    /// 与全局实际成本同一口径。不计算成本且窗口内没有订阅段重叠时为 null。
+    #[sqlx(skip)]
+    pub allocated_cost: Option<DisplayMoney>,
     #[sqlx(skip)]
     pub currency: DisplayCurrency,
 }

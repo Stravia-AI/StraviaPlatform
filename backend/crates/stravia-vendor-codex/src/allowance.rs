@@ -6,7 +6,8 @@ use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
     ConnectionCheckVerification, ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot,
 };
 
@@ -227,16 +228,67 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
     for allowance in &mut allowances {
         allowance.condition = condition(allowance);
     }
+    let plan = plan_type(object);
     Some(AllowanceResponse {
         allowances,
         models: Vec::new(),
         // live wham/usage 响应顶层带 `plan_type`（如 `pro`）；`plus`、`team` 等同为机器小写值。
-        plan_label: object
-            .get("plan_type")
-            .and_then(Value::as_str)
-            .and_then(display_name),
+        plan_label: plan.as_deref().and_then(display_name),
         account_label: None,
+        billing: plan.as_deref().and_then(billing_for_plan),
     })
+}
+
+/// `plan_type` 是机器标识（官方 Codex 客户端也先转小写再匹配）；展示名与计费表
+/// 都从这一个规范化标识派生。
+fn plan_type(object: &Map<String, Value>) -> Option<String> {
+    object
+        .get("plan_type")
+        .and_then(Value::as_str)
+        .map(|plan| plan.trim().to_ascii_lowercase())
+        .filter(|plan| !plan.is_empty())
+}
+
+/// 按规范化 `plan_type` 给出计费建议。
+///
+/// OpenAI 官方 ChatGPT 价格（美元、按月）：Plus $20/月；Go 公布的美元价为 $8/月
+/// （部分市场按地区定价，这里一律按美元标价给出）；Pro 分三档用量等级（$100 起），
+/// `plan_type` 不区分档位；Business 按席位（Standard $25/席/月、Premium $125/席/月），
+/// Enterprise 定制，Edu 按机构计价。
+/// 来源：https://chatgpt.com/pricing/ 与 https://openai.com/index/introducing-chatgpt-go/，
+/// 2026-11-02 核对。
+fn billing_for_plan(plan: &str) -> Option<AllowanceBilling> {
+    match plan {
+        "plus" => Some(subscription(Some("20.00"))),
+        "go" => Some(subscription(Some("8.00"))),
+        // `plan_type` 不区分 Pro 的三档用量等级，价格无法唯一确定。
+        "pro" | "prolite" | "promax" => Some(subscription(None)),
+        // 工作区与教育方案按席位或定制计价，没有单一账号价格。
+        "team"
+        | "self_serve_business_prolite"
+        | "self_serve_business_usage_based"
+        | "business"
+        | "ent26"
+        | "enterprise_cbp_automation"
+        | "enterprise_cbp_usage_based"
+        | "enterprise"
+        | "edu"
+        | "edu_plus"
+        | "edu_pro" => Some(subscription(None)),
+        // Free、学术研究者方案（sci/sci_plus，未公布价格）与未知标识都不下结论。
+        _ => None,
+    }
+}
+
+fn subscription(amount: Option<&str>) -> AllowanceBilling {
+    AllowanceBilling {
+        kind: AllowanceBillingKind::Subscription,
+        period: Some(AllowanceBillingPeriod::Month),
+        price: amount.map(|amount| AllowanceBillingPrice {
+            amount: amount.into(),
+            currency: "USD".into(),
+        }),
+    }
 }
 
 fn item(key: impl Into<String>, label: impl Into<String>, kind: &str) -> AllowanceItem {
@@ -376,9 +428,9 @@ mod tests {
 
     use base64::Engine;
     use serde_json::{Value, json};
-    use stravia_vendor_sdk::AllowanceAmount;
+    use stravia_vendor_sdk::{AllowanceAmount, AllowanceBillingKind, AllowanceBillingPeriod};
 
-    use super::{account_label, parse, validate_usage};
+    use super::{account_label, billing_for_plan, parse, validate_usage};
 
     fn credentials_with_id_token(claims: Value) -> BTreeMap<String, Value> {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
@@ -418,6 +470,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(without_plan.plan_label, None);
+    }
+
+    #[test]
+    fn plus_billing_carries_the_published_monthly_usd_price() {
+        let billing = billing_for_plan("plus").unwrap();
+        assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+        assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+        let price = billing.price.unwrap();
+        assert_eq!(
+            (price.amount.as_str(), price.currency.as_str()),
+            ("20.00", "USD")
+        );
+    }
+
+    #[test]
+    fn go_billing_carries_the_published_usd_price() {
+        let price = billing_for_plan("go").unwrap().price.unwrap();
+        assert_eq!(
+            (price.amount.as_str(), price.currency.as_str()),
+            ("8.00", "USD")
+        );
+    }
+
+    #[test]
+    fn tiered_and_seat_priced_plans_are_subscriptions_without_a_price() {
+        // Pro 有三档用量等级且 `plan_type` 不区分；工作区与教育方案按席位或定制计价。
+        for plan in [
+            "pro",
+            "prolite",
+            "promax",
+            "team",
+            "business",
+            "self_serve_business_prolite",
+            "self_serve_business_usage_based",
+            "ent26",
+            "enterprise_cbp_automation",
+            "enterprise_cbp_usage_based",
+            "enterprise",
+            "edu",
+            "edu_plus",
+            "edu_pro",
+        ] {
+            let billing = billing_for_plan(plan).unwrap();
+            assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+            assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+            assert!(billing.price.is_none(), "{plan}");
+        }
+    }
+
+    #[test]
+    fn free_scientific_and_unknown_plans_have_no_billing() {
+        for plan in ["free", "sci", "sci_plus", "", "teams", "Plus"] {
+            assert!(billing_for_plan(plan).is_none(), "{plan}");
+        }
+    }
+
+    #[test]
+    fn parse_derives_billing_from_the_same_plan_type_as_the_label() {
+        let parse_plan = |body: &str| {
+            let response = parse(body.as_bytes()).unwrap();
+            (response.plan_label, response.billing)
+        };
+        let (label, billing) = parse_plan(
+            r#"{"plan_type":"plus","rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":3}}}"#,
+        );
+        assert_eq!(label.as_deref(), Some("Plus"));
+        assert_eq!(billing.unwrap().price.unwrap().amount, "20.00");
+        let (label, billing) = parse_plan(
+            r#"{"plan_type":"PRO","rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":3}}}"#,
+        );
+        assert_eq!(label.as_deref(), Some("Pro"));
+        assert!(billing.unwrap().price.is_none());
+        let (label, billing) = parse_plan(
+            r#"{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"used_percent":3}}}"#,
+        );
+        assert_eq!(label, None);
+        assert!(billing.is_none());
     }
 
     fn assert_credits(amount: &AllowanceAmount, value: &str) {

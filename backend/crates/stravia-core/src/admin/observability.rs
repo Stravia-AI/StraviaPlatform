@@ -337,6 +337,9 @@ impl AdminService {
             });
             row.subscription = has_subscription
                 .then(|| subscription_value(money, subscription_cost, currency.as_deref()));
+            let payg_tracked = money.payg_cost_known_count > 0 || money.payg_cost_unknown_count > 0;
+            row.allocated_cost = (payg_tracked || has_subscription)
+                .then(|| actual_money(money, subscription_cost, currency.as_deref()));
             row.currency = DisplayCurrency::from_snapshot(currency.as_deref());
         }
         let plan_only: std::collections::BTreeSet<String> = amortized
@@ -384,6 +387,11 @@ impl AdminService {
                 // 仅有摊销记录的 Provider 没有尝试成本，展示 0 而不是隐藏。
                 cost: Some(display_money(Some(0), Some(0), 0, 0, currency.as_deref())),
                 subscription: Some(subscription_value(
+                    UsageMoneyTotals::default(),
+                    subscription_cost,
+                    currency.as_deref(),
+                )),
+                allocated_cost: Some(actual_money(
                     UsageMoneyTotals::default(),
                     subscription_cost,
                     currency.as_deref(),

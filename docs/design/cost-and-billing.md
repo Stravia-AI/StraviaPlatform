@@ -184,6 +184,7 @@ Core 新增纯函数模块（建议 `backend/crates/stravia-core/src/pricing.rs`
 - 修改成本方式或订阅价都追加一条记录，生效时间为写入时刻，不支持回溯生效或编辑旧记录。任何一条新记录都结束前一段订阅的摊销；切到 `none` 同样会停止摊销。
 - 删除 Provider 时，若当前为订阅，在同一事务内追加一条 `usage` 记录作为订阅终点，历史摊销保持不变。
 - 复制 Provider（`/api/v1/providers/{id}/copy`）不复制成本方式，新 Provider 从按量开始，避免同一订阅被计两次。
+- 具备额度读取能力的 Provider，其额度快照可带插件识别出的 `billing`（[ADR-0088](../adr/0088-let-allowance-plugins-suggest-provider-billing.md)）。它只是对管理员的建议，从不自动写入成本方式；采用建议与手动设置走同一个追加接口。
 
 ### 5.2 Provider Model 价格与逐字段固定
 
@@ -362,7 +363,7 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 
 - `overview`：`actual_cost`（不变）；窗口与订阅段重叠时另有 `subscription: SubscriptionValue`。
 - `series`：`actual_cost`（不变）。
-- `providers`：`cost`（该 Provider 全部受追踪尝试的按量估价：按量尝试取实际成本，订阅尝试取等价按量成本；既无受追踪尝试也无订阅段重叠时为 `null`）与 `subscription`（`SubscriptionValue`，无订阅段重叠时为 `null`）。删除原 `actual_cost` 与 `usage_equivalent_cost`。
+- `providers`：`cost`（该 Provider 全部受追踪尝试的按量估价：按量尝试取实际成本，订阅尝试取等价按量成本；既无受追踪尝试也无订阅段重叠时为 `null`）与 `subscription`（`SubscriptionValue`，无订阅段重叠时为 `null`）。删除原 `actual_cost` 与 `usage_equivalent_cost`。另有 `allocated_cost`：窗口内分摊到该 Provider 的成本，与全局 `actual_cost` 使用同一计算（`actual_money`）——按量尝试的实际成本加订阅在窗口内的摊销，订阅摊销溢出时按 §5.4 记为未知；既无按量受追踪尝试也无订阅段重叠时为 `null`。订阅 Provider 的等价按量成本不计入。
 - `models`（Route）与 `api-keys`：`cost`（所有尝试的按量估价，包括订阅 Provider 的等价按量成本）与 `billing`；不把 Provider 订阅摊销分配到 Route 或 API Key。
 
 `SubscriptionValue = {cost: 金额, usage_equivalent_cost: 金额, multiple: "1.2345" | null}`：`cost` 是窗口内摊销订阅费用（两个计数恒为 0，摊销溢出时为 `unknown_count: 1`），`usage_equivalent_cost` 是同窗口内订阅基准尝试的等价按量成本，`multiple` 是两者之比的 4 位小数（见 §5.4）。
@@ -376,15 +377,15 @@ PostgreSQL 以对应的 trigger function 实现同一语义。只有 DDL，不�
 |设置|`frontend/stravia-webui/src/routes/settings/+page.svelte`|「自定义币种」：符号与「1 USD = X」；首次保存前确认，说明设定后不能删除、现有消费上限会按此汇率换算|
 |共享价格编辑器|`price-editor.svelte`、`price-form.ts`|四项价格、上下文分档、每项的币种切换（仅在设有自定义币种时出现）、「添加峰谷定价」；供 Provider Model 与 Route 共用|
 |Provider Model 编辑|`provider-model-editor.svelte`、`provider-model-form.ts`、`provider-model-editing.ts`|字段标签旁显示已固定状态与「恢复同步」；只提交改动字段；删除重新导入菜单与相关文案|
-|Provider|`provider-connection-view.svelte`、`routes/providers/[id]/+page.svelte`|成本方式是连接表单内联的 `FormSection`，与「连接」「网络」同级并位于最后，随「保存连接」一起提交；三种方式：不计算／按量／订阅（月付或年付、价格、币种）；显示当前生效记录与变更历史|
+|Provider|`provider-cost-view.svelte`、`provider-cost-plan-editor.svelte`、`routes/providers/[id]/+page.svelte`|Provider 详情页与「连接设置」「上游模型」「关联模型」同级的「成本」页签，不进入添加 Provider 流程，也不属于连接表单。成本方式以只读摘要加「编辑」呈现，经侧边 Sheet 显式保存（不计算／按量／订阅：月付或年付、价格、币种），保存追加一条生效记录；失败时 Sheet 与输入保留。页内依次为成本方式、用量价值（24 小时／7 天／30 天窗口，按量显示预估成本与已计价调用，订阅显示等价按量成本、订阅费用与价值倍数，有未计价调用时标「≥」）和最近 5 条变更历史（多于 5 条时说明已截断）。额度插件识别出计费方式时在成本方式下提示“检测到订阅”，管理员可采用（进入编辑 Sheet）或忽略；插件标价一律是美元，配置了自定义币种时按当前汇率换算并取整到 2 位小数后以自定义币种带入，汇率不可用时保持美元，没有美元标价时只带入周期；明确选择「不计算」后不再提示|
 |Route|`model-editor.svelte`|计费：不计费／按次（金额与币种）／按 Token（共享价格编辑器）；当前只在 API Key 页面与模型设置页展示，不进入用量统计的 Route 行|
 |API Key|`api-key-editor.svelte`、`routes/api-keys/[id]/+page.svelte`|消费上限输入；列表以「可用余额」列替代「模型访问」，详情显示已消费、可用余额、上次清零时间与「清零」按钮（需确认）|
-|用量统计|`routes/stats/+page.svelte`|全局：实际成本与订阅价值（订阅费用、等价按量成本、价值倍数）；Provider 行：按量成本、订阅费用、价值倍数（`none` 不显示成本）；Route 与 API Key：按量成本与计费金额。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
+|用量统计|`routes/stats/+page.svelte`|只显示一个成本：顶部「总成本」（`overview.actual_cost`，全部订阅摊销加按量成本）与 Provider 表的「成本」列（`providers[].allocated_cost`，按所选时间窗口分摊，可排序，缺失显示「—」）。不显示成本趋势、订阅价值、Route 成本与计费、API Key 成本与计费；Provider 的预估成本、订阅费用与价值倍数见其详情页的「成本」页签。所有金额在 UI 四舍五入到 2 位小数，Core 保留纳精度|
 |请求详情|`observation-inspector-content.svelte`|每个尝试显示成本（订阅 Provider 标注为等价按量）与计费；未知显示「未知」|
 
 价格编辑器负责必填项与数字、时间的输入语法；时区、星期、时段顺序与重叠、倍率有效性由 Core 统一校验。保存失败时显示 Core 错误并保留草稿，取消编辑或切换模型后清除对应错误。
 
-订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。金额卡片与成本趋势使用同一规则，未知尝试不能被画成已知零成本。
+订阅摊销增加已知金额，但不增加已知尝试数。即使 `known_count = 0` 且存在未知按量尝试，非零摊销金额仍须正常显示；只有金额为零、没有已知尝试且存在未知尝试时显示「未知」。总成本卡片与 Provider 表的成本列使用同一规则，未知尝试不能被画成已知零成本。
 
 订阅价值倍数直接展示 Core 返回的 4 位小数；`usage_equivalent_cost.unknown_count > 0` 时显示为下界（「≥」）。`multiple` 为 `null`（订阅费用为零或任一侧不可表示）时不显示倍数。金额统一由 WebUI 格式化器四舍五入到 2 位小数，Core 返回的纳精度值不截断。
 

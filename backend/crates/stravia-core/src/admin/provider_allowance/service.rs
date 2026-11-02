@@ -17,9 +17,10 @@ use crate::runtime_cache::RuntimeCache;
 use super::samples::{AllowanceSample, AllowanceSampleStore, SAMPLE_RETENTION_MILLIS};
 use super::{
     Allowance, AllowanceAmount, AllowanceCondition, AllowanceKind, ExhaustionForecast,
-    ExhaustionForecastStatus, ModelAllowance, ProviderAllowanceError,
-    ProviderAllowanceErrorCategory, ProviderAllowanceSnapshot, ProviderAllowanceStatus,
-    ProviderAllowanceTarget,
+    ExhaustionForecastStatus, ModelAllowance, ProviderAllowanceBilling,
+    ProviderAllowanceBillingKind, ProviderAllowanceBillingPeriod, ProviderAllowanceBillingPrice,
+    ProviderAllowanceError, ProviderAllowanceErrorCategory, ProviderAllowanceSnapshot,
+    ProviderAllowanceStatus, ProviderAllowanceTarget,
 };
 
 const SUCCESS_TTL: Duration = Duration::from_secs(180);
@@ -107,6 +108,7 @@ impl ProviderAllowanceState {
                 snapshot.status = ProviderAllowanceStatus::Error;
                 snapshot.plan_label = None;
                 snapshot.account_label = None;
+                snapshot.billing = None;
                 snapshot.fetched_at = None;
                 snapshot.allowances.clear();
                 snapshot.models.clear();
@@ -186,6 +188,12 @@ impl CacheEntry {
             + snapshot.channel.len()
             + snapshot.plan_label.as_ref().map_or(0, String::len)
             + snapshot.account_label.as_ref().map_or(0, String::len)
+            + snapshot.billing.as_ref().map_or(0, |billing| {
+                billing
+                    .price
+                    .as_ref()
+                    .map_or(0, |price| price.amount.len() + price.currency.len())
+            })
             + snapshot.fetched_at.as_ref().map_or(0, String::len)
             + snapshot
                 .error
@@ -1040,6 +1048,7 @@ fn map_allowance_response(
         !allowances.is_empty() || models.iter().any(|model| !model.allowances.is_empty()),
         "allowance result is empty"
     );
+    let billing = response.billing.map(map_billing).transpose()?;
     Ok(ProviderAllowanceSnapshot {
         guard_supported: true,
         missing_guarded_keys: Vec::new(),
@@ -1050,11 +1059,67 @@ fn map_allowance_response(
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: trimmed_label(response.plan_label),
         account_label: trimmed_label(response.account_label),
+        billing,
         status: ProviderAllowanceStatus::Fresh,
         allowances,
         models,
         fetched_at: Some(chrono::Utc::now().to_rfc3339()),
         error: None,
+    })
+}
+
+/// 计费建议与 Provider 成本方式同规则：按量不带周期与价格，价格必须带周期，
+/// 金额为正的十进制数，币种为 ISO 4217 字母代码。插件违约时整条额度结果无效，
+/// 不静默丢弃，避免把错误价格当作“未知”。
+fn map_billing(
+    billing: stravia_vendor_sdk::AllowanceBilling,
+) -> anyhow::Result<ProviderAllowanceBilling> {
+    use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod};
+    let kind = match billing.kind {
+        AllowanceBillingKind::Usage => {
+            anyhow::ensure!(
+                billing.period.is_none() && billing.price.is_none(),
+                "usage billing cannot carry a period or price"
+            );
+            ProviderAllowanceBillingKind::Usage
+        }
+        AllowanceBillingKind::Subscription => ProviderAllowanceBillingKind::Subscription,
+    };
+    anyhow::ensure!(
+        billing.price.is_none() || billing.period.is_some(),
+        "billing price requires a period"
+    );
+    let period = billing.period.map(|period| match period {
+        AllowanceBillingPeriod::Month => ProviderAllowanceBillingPeriod::Month,
+        AllowanceBillingPeriod::Year => ProviderAllowanceBillingPeriod::Year,
+    });
+    let price = billing
+        .price
+        .map(|price| {
+            let amount = price
+                .amount
+                .trim()
+                .parse::<rust_decimal::Decimal>()
+                .map_err(|_| anyhow::anyhow!("billing price is not a decimal"))?;
+            anyhow::ensure!(
+                amount > rust_decimal::Decimal::ZERO,
+                "billing price must be positive"
+            );
+            let currency = price.currency.trim().to_ascii_uppercase();
+            anyhow::ensure!(
+                currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_uppercase()),
+                "billing currency must be an ISO 4217 code"
+            );
+            Ok(ProviderAllowanceBillingPrice {
+                amount: amount.normalize().to_string(),
+                currency,
+            })
+        })
+        .transpose()?;
+    Ok(ProviderAllowanceBilling {
+        kind,
+        period,
+        price,
     })
 }
 
@@ -1438,6 +1503,7 @@ fn error_snapshot(provider: &Provider, error: ProviderAllowanceError) -> Provide
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: None,
         account_label: None,
+        billing: None,
         status: ProviderAllowanceStatus::Error,
         fetched_at: None,
         allowances: Vec::new(),
@@ -1464,6 +1530,7 @@ fn stale_or_error_snapshot(
         channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
         plan_label: previous.plan_label.clone(),
         account_label: previous.account_label.clone(),
+        billing: previous.billing.clone(),
         status: ProviderAllowanceStatus::Stale,
         fetched_at: previous.fetched_at.clone(),
         allowances: previous.allowances.clone(),
@@ -1521,6 +1588,7 @@ mod tests {
             channel: "default".into(),
             plan_label: None,
             account_label: None,
+            billing: None,
             status,
             allowances: vec![map_allowance(sdk_item("USD")).expect("allowance")],
             models: Vec::new(),
@@ -1730,6 +1798,7 @@ mod tests {
             channel: "default".into(),
             plan_label: None,
             account_label: None,
+            billing: None,
             status: ProviderAllowanceStatus::Fresh,
             allowances: vec![map_allowance(item).expect("allowance")],
             models: Vec::new(),
@@ -1775,5 +1844,107 @@ mod tests {
         let mut item = sdk_item("USD");
         item.used = Some(sdk_amount("1", Some("CNY")));
         assert!(map_allowance(item).is_err());
+    }
+
+    fn sdk_billing(
+        kind: stravia_vendor_sdk::AllowanceBillingKind,
+        period: Option<stravia_vendor_sdk::AllowanceBillingPeriod>,
+        price: Option<(&str, &str)>,
+    ) -> stravia_vendor_sdk::AllowanceBilling {
+        stravia_vendor_sdk::AllowanceBilling {
+            kind,
+            period,
+            price: price.map(
+                |(amount, currency)| stravia_vendor_sdk::AllowanceBillingPrice {
+                    amount: amount.into(),
+                    currency: currency.into(),
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn subscription_billing_normalizes_amount_and_currency() {
+        use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod};
+        let billing = map_billing(sdk_billing(
+            AllowanceBillingKind::Subscription,
+            Some(AllowanceBillingPeriod::Month),
+            Some((" 100.00 ", "usd")),
+        ))
+        .expect("billing");
+        assert_eq!(billing.kind, ProviderAllowanceBillingKind::Subscription);
+        assert_eq!(billing.period, Some(ProviderAllowanceBillingPeriod::Month));
+        assert_eq!(
+            billing.price,
+            Some(ProviderAllowanceBillingPrice {
+                amount: "100".into(),
+                currency: "USD".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn subscription_billing_may_omit_the_price() {
+        use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod};
+        for period in [None, Some(AllowanceBillingPeriod::Year)] {
+            let billing = map_billing(sdk_billing(
+                AllowanceBillingKind::Subscription,
+                period,
+                None,
+            ))
+            .expect("billing");
+            assert!(billing.price.is_none());
+        }
+    }
+
+    #[test]
+    fn billing_violating_cost_plan_rules_is_rejected() {
+        use stravia_vendor_sdk::{AllowanceBillingKind, AllowanceBillingPeriod};
+        let month = Some(AllowanceBillingPeriod::Month);
+        for billing in [
+            // 按量不带周期或价格
+            sdk_billing(AllowanceBillingKind::Usage, month, None),
+            sdk_billing(AllowanceBillingKind::Usage, None, Some(("1", "USD"))),
+            // 价格必须带周期
+            sdk_billing(
+                AllowanceBillingKind::Subscription,
+                None,
+                Some(("20", "USD")),
+            ),
+            // 金额必须是正的十进制数
+            sdk_billing(
+                AllowanceBillingKind::Subscription,
+                month,
+                Some(("0", "USD")),
+            ),
+            sdk_billing(
+                AllowanceBillingKind::Subscription,
+                month,
+                Some(("-5", "USD")),
+            ),
+            sdk_billing(
+                AllowanceBillingKind::Subscription,
+                month,
+                Some(("free", "USD")),
+            ),
+            // 币种必须是三位字母代码
+            sdk_billing(AllowanceBillingKind::Subscription, month, Some(("20", "$"))),
+            sdk_billing(
+                AllowanceBillingKind::Subscription,
+                month,
+                Some(("20", "US1")),
+            ),
+        ] {
+            assert!(map_billing(billing.clone()).is_err(), "{billing:?}");
+        }
+    }
+
+    #[test]
+    fn usage_billing_maps_without_price() {
+        use stravia_vendor_sdk::AllowanceBillingKind;
+        let billing =
+            map_billing(sdk_billing(AllowanceBillingKind::Usage, None, None)).expect("billing");
+        assert_eq!(billing.kind, ProviderAllowanceBillingKind::Usage);
+        assert!(billing.period.is_none() && billing.price.is_none());
     }
 }

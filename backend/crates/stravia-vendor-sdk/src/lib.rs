@@ -52,8 +52,9 @@ pub use envelope::{
     encode_request_payload,
 };
 pub use guest::{
-    AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, AuthRequest, AuthResponse,
-    AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResponse, AuthRequest,
+    AuthResponse, AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
     ConfigValidationResponse, ConnectionCheckRequest, ConnectionCheckResponse,
     ConnectionCheckVerification, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
     MediaArtifact, MediaImageAspectRatio, MediaImageRequest, MediaImageResolution,

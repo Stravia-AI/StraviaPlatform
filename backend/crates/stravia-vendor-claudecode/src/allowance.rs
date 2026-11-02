@@ -11,7 +11,8 @@ use stravia_vendor_common::common;
 use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
     ConnectionCheckVerification, GuestHost, HttpRequest, ModelAllowance, PluginError,
     ProviderSnapshot, read_http_body,
 };
@@ -46,7 +47,10 @@ pub(crate) fn execute(
     // 订阅等级不在 usage 响应里；Claude Code 自己登录/刷新时也向
     // `/api/oauth/profile` 取 `organization_type` 与 `rate_limit_tier`。
     // 该接口失败不影响额度展示，因此失败时保持 None。
-    response.plan_label = fetch_plan_label(host, access_token);
+    let plan = fetch_profile_plan(host, access_token);
+    response.plan_label = plan.as_deref().and_then(display_name);
+    // 等级能确定时才给出计费建议；价格为 Anthropic 官方页面公布的美元月费。
+    response.billing = plan.as_deref().and_then(billing_for_plan);
     // 只取登录时保存的邮箱；`organization_name` 是组织名，不是账号标识。
     response.account_label =
         first_account_label([provider.credentials.get("email").and_then(Value::as_str)]);
@@ -117,9 +121,9 @@ fn validate_usage(value: &Value) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// 取订阅等级。profile 接口只用于展示，失败或无 `user:profile` 权限时降级为
-/// `None`，不让一次附加请求拖垮额度刷新。
-fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
+/// 取规范化订阅标识（见 `profile_plan`）。profile 接口只用于展示与计费建议，
+/// 失败或无 `user:profile` 权限时降级为 `None`，不让一次附加请求拖垮额度刷新。
+fn fetch_profile_plan(host: &GuestHost, access_token: &str) -> Option<String> {
     let response = host
         .http_start(HttpRequest {
             method: "GET".into(),
@@ -138,10 +142,11 @@ fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
         return None;
     }
     let body = read_http_body(&response, MAX_PROFILE_BODY).ok()?;
-    profile_plan_label(&serde_json::from_slice(&body).ok()?)
+    profile_plan(&serde_json::from_slice(&body).ok()?)
 }
 
-/// 依据 `/api/oauth/profile` 判定订阅等级。
+/// 依据 `/api/oauth/profile` 得到规范化订阅标识：`free` / `pro` / `max` /
+/// `max_<倍率>` / `team` / `enterprise`。展示名和计费表都从这里派生。
 ///
 /// Claude Code 客户端 `fetchProfileInfo` 把 `organization.organization_type` 映射为
 /// `claude_max` → max、`claude_pro` → pro、`claude_team` → team、
@@ -149,7 +154,7 @@ fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
 /// `organization.rate_limit_tier`（`default_claude_max_5x` / `_20x`）。
 /// 组织字段缺失时按 `rate_limit_tier`、再按账号的 `has_claude_max` /
 /// `has_claude_pro` 兜底；两个布尔值都明确为 false 时才是 Free。
-fn profile_plan_label(profile: &Value) -> Option<String> {
+fn profile_plan(profile: &Value) -> Option<String> {
     let organization = profile.get("organization");
     let organization_type = organization
         .and_then(|value| value.get("organization_type"))
@@ -158,12 +163,12 @@ fn profile_plan_label(profile: &Value) -> Option<String> {
         .and_then(|value| value.get("rate_limit_tier"))
         .and_then(non_empty);
     if let Some(plan) = organization_type.and_then(plan_from_organization) {
-        return max_plan_label(plan, rate_limit_tier);
+        return max_plan(plan, rate_limit_tier);
     }
     if let Some(tier) = rate_limit_tier
-        && let Some(label) = plan_from_rate_limit_tier(tier)
+        && let Some(plan) = plan_from_rate_limit_tier(tier)
     {
-        return Some(label);
+        return Some(plan);
     }
     let account = profile.get("account");
     let flag = |field: &str| {
@@ -172,9 +177,9 @@ fn profile_plan_label(profile: &Value) -> Option<String> {
             .and_then(Value::as_bool)
     };
     match (flag("has_claude_max"), flag("has_claude_pro")) {
-        (Some(true), _) => max_plan_label("max", rate_limit_tier),
-        (_, Some(true)) => display_name("pro"),
-        (Some(false), Some(false)) => display_name("free"),
+        (Some(true), _) => max_plan("max", rate_limit_tier),
+        (_, Some(true)) => Some("pro".into()),
+        (Some(false), Some(false)) => Some("free".into()),
         _ => None,
     }
 }
@@ -194,29 +199,61 @@ fn plan_from_organization(organization_type: &str) -> Option<&'static str> {
 fn plan_from_rate_limit_tier(rate_limit_tier: &str) -> Option<String> {
     let tier = rate_limit_tier.trim().to_ascii_lowercase();
     if tier.contains("max") {
-        return max_plan_label("max", Some(rate_limit_tier));
+        return max_plan("max", Some(rate_limit_tier));
     }
     if tier.contains("pro") {
-        return display_name("pro");
+        return Some("pro".into());
     }
     if tier.contains("team") {
-        return display_name("team");
+        return Some("team".into());
     }
     if tier.contains("enterprise") {
-        return display_name("enterprise");
+        return Some("enterprise".into());
     }
     None
 }
 
-fn max_plan_label(plan: &str, rate_limit_tier: Option<&str>) -> Option<String> {
+/// Max 保留倍率（`max_5x` / `max_20x`）：不同倍率价格不同，不能合并成一个等级。
+fn max_plan(plan: &str, rate_limit_tier: Option<&str>) -> Option<String> {
     if plan != "max" {
-        return display_name(plan);
+        return Some(plan.into());
     }
-    let machine = match rate_limit_tier.and_then(max_multiplier) {
+    Some(match rate_limit_tier.and_then(max_multiplier) {
         Some(multiplier) => format!("max_{multiplier}"),
         None => "max".into(),
-    };
-    display_name(&machine)
+    })
+}
+
+/// 按规范化订阅标识给出计费建议。
+///
+/// Anthropic 官方 claude.ai 个人方案价格（美元、按月）：Pro $20/月；
+/// Max 5x（`default_claude_max_5x`）$100/月；Max 20x（页面现展示为 Ultra，
+/// 升级链接带 `plan=max_20x`）$200/月；Team 按席位（Standard $25/席/月、
+/// Premium $125/席/月），Enterprise 为席位费加 API 用量，都没有单一账号价格。
+/// 来源：https://claude.com/pricing（www.anthropic.com/pricing 跳转），2026-11-02 核对。
+fn billing_for_plan(plan: &str) -> Option<AllowanceBilling> {
+    match plan {
+        "pro" => Some(subscription(Some("20.00"))),
+        "max_5x" => Some(subscription(Some("100.00"))),
+        "max_20x" => Some(subscription(Some("200.00"))),
+        // 只知道是 Max、不知道 5x/20x 时两条价格都可能，留给用户选择。
+        "max" => Some(subscription(None)),
+        // Team / Enterprise 按席位或用量计价，价格随组织规模变化。
+        "team" | "enterprise" => Some(subscription(None)),
+        // Free 与未知等级都不能断言是付费订阅。
+        _ => None,
+    }
+}
+
+fn subscription(amount: Option<&str>) -> AllowanceBilling {
+    AllowanceBilling {
+        kind: AllowanceBillingKind::Subscription,
+        period: Some(AllowanceBillingPeriod::Month),
+        price: amount.map(|amount| AllowanceBillingPrice {
+            amount: amount.into(),
+            currency: "USD".into(),
+        }),
+    }
 }
 
 /// `default_claude_max_5x` / `default_claude_max_20x` 中 `max` 后面的倍率。
@@ -294,6 +331,8 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
             .collect(),
         plan_label: None,
         account_label: None,
+        // 计费建议要等 profile 判定订阅等级后才能填；usage 响应本身不含计费信息。
+        billing: None,
     })
 }
 
@@ -421,6 +460,11 @@ fn timestamp_millis(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 展示名和计费建议都由同一个规范化等级派生，旧用例通过这里继续校验展示名。
+    fn profile_plan_label(profile: &Value) -> Option<String> {
+        profile_plan(profile).as_deref().and_then(display_name)
+    }
 
     #[test]
     fn limits_payload_maps_shared_windows_scoped_models_and_extra_usage() {
@@ -558,6 +602,76 @@ mod tests {
             None
         );
         assert_eq!(profile_plan_label(&json!({})), None);
+    }
+
+    #[test]
+    fn billing_for_plan_uses_published_claude_ai_prices() {
+        for (plan, amount) in [
+            ("pro", "20.00"),
+            ("max_5x", "100.00"),
+            ("max_20x", "200.00"),
+        ] {
+            let billing = billing_for_plan(plan).unwrap();
+            assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+            assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+            let price = billing.price.unwrap();
+            assert_eq!(
+                (price.amount.as_str(), price.currency.as_str()),
+                (amount, "USD")
+            );
+        }
+    }
+
+    #[test]
+    fn seat_priced_and_unknown_multiplier_plans_are_subscriptions_without_a_price() {
+        // Team/Enterprise 按席位或用量计价；`max` 未给出倍率时 5x 与 20x 两种价格都可能。
+        for plan in ["team", "enterprise", "max"] {
+            let billing = billing_for_plan(plan).unwrap();
+            assert_eq!(billing.kind, AllowanceBillingKind::Subscription);
+            assert_eq!(billing.period, Some(AllowanceBillingPeriod::Month));
+            assert!(billing.price.is_none(), "{plan}");
+        }
+    }
+
+    #[test]
+    fn free_and_unknown_plans_have_no_billing() {
+        for plan in ["free", "max_100x", "", "claude_max", "Pro"] {
+            assert!(billing_for_plan(plan).is_none(), "{plan}");
+        }
+    }
+
+    #[test]
+    fn profile_billing_uses_the_same_normalized_plan_as_the_label() {
+        let billing = |organization_type: &str, rate_limit_tier: &str| {
+            let profile = json!({
+                "account": {"has_claude_max": false, "has_claude_pro": false},
+                "organization": {
+                    "organization_type": organization_type,
+                    "rate_limit_tier": rate_limit_tier
+                }
+            });
+            profile_plan(&profile)
+                .as_deref()
+                .and_then(billing_for_plan)
+                .and_then(|billing| billing.price)
+                .map(|price| price.amount)
+        };
+        assert_eq!(
+            billing("claude_pro", "default_claude_pro").as_deref(),
+            Some("20.00")
+        );
+        assert_eq!(
+            billing("claude_max", "default_claude_max_5x").as_deref(),
+            Some("100.00")
+        );
+        assert_eq!(
+            billing("claude_max", "default_claude_max_20x").as_deref(),
+            Some("200.00")
+        );
+        // Team Premium 也带 max_5x tier，但组织类型是 Team，不能套用 Max 的价格。
+        assert_eq!(billing("claude_team", "default_claude_max_5x"), None);
+        // 没有倍率的 Max 只知道是订阅，不知道是 5x 还是 20x。
+        assert_eq!(billing("claude_max", ""), None);
     }
 
     #[test]

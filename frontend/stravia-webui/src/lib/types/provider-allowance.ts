@@ -5,6 +5,15 @@ export type ExhaustionForecastStatus = 'no_risk' | 'will_exhaust' | 'unknown'
 export type ProviderAllowanceErrorCategory =
   'authentication' | 'rate_limited' | 'timeout' | 'upstream_unavailable' | 'invalid_response'
 
+export type ProviderAllowanceBillingKind = 'usage' | 'subscription'
+
+/** 供应商插件识别出的计费方式，只是成本方式的建议；价格是一个周期的官方标价，币种为 ISO 4217 代码。 */
+export interface ProviderAllowanceBilling {
+  kind: ProviderAllowanceBillingKind
+  period?: 'month' | 'year'
+  price?: { amount: string; currency: string }
+}
+
 export interface AllowanceAmount {
   value: number
   unit: string
@@ -62,6 +71,7 @@ export interface ProviderAllowanceSnapshot {
   channel: string
   plan_label?: string
   account_label?: string
+  billing?: ProviderAllowanceBilling
   status: ProviderAllowanceStatus
   allowances: Allowance[]
   models: ModelAllowance[]

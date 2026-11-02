@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::Value;
 use stravia_vendor_sdk::{
-    AiResponse, AiStreamDelta, AllowanceAmount, AllowanceItem, AllowanceResponse, AuthCallback,
+    AiResponse, AiStreamDelta, AllowanceAmount, AllowanceBilling, AllowanceBillingKind,
+    AllowanceBillingPeriod, AllowanceBillingPrice, AllowanceItem, AllowanceResponse, AuthCallback,
     AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse,
     AuthStep, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
     ConfigFieldKind, ConfigGroup, ConnectionCheckResponse, ConnectionCheckVerification,
@@ -476,6 +477,15 @@ fn allowance(
         models,
         plan_label: Some(format!("fixture-{}", Profile::current().version())),
         account_label: Some(format!("  account-{}  ", Profile::current().version())),
+        // 带空白与小写币种，核心层须规范化后再暴露。
+        billing: Some(AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: Some(AllowanceBillingPrice {
+                amount: " 20.00 ".into(),
+                currency: "usd".into(),
+            }),
+        }),
     })
 }
 

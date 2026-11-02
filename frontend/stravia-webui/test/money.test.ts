@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  convertUsdToCustom,
   formatCostAmount,
   formatCostNumber,
   formatMoney,
@@ -87,5 +88,30 @@ describe('subscription value multiple', () => {
   test('shows a dash when the subscription cost for the window is zero', () => {
     expect(formatValueMultiple(subscription(null))).toBe('—')
     expect(formatValueMultiple(null)).toBe('—')
+  })
+})
+
+describe('USD to custom currency conversion', () => {
+  test('multiplies by the rate and rounds half away from zero to two decimals', () => {
+    expect(convertUsdToCustom('20', '7.25')).toBe('145.00')
+    expect(convertUsdToCustom('19.99', '7.25')).toBe('144.93')
+    expect(convertUsdToCustom('0.01', '0.5')).toBe('0.01')
+    expect(convertUsdToCustom('0.01', '0.49')).toBe('0.00')
+    expect(convertUsdToCustom('1', '1.005')).toBe('1.01')
+    expect(convertUsdToCustom('0', '7.25')).toBe('0.00')
+  })
+
+  test('is exact for amounts beyond double precision', () => {
+    expect(convertUsdToCustom('9007199254740993', '1')).toBe('9007199254740993.00')
+    expect(convertUsdToCustom('1234567890123.45', '0.000001')).toBe('1234567.89')
+  })
+
+  test('refuses input it cannot convert exactly', () => {
+    for (const rate of ['0', '0.0', '', '-1', 'abc', '1e3', '1,5']) {
+      expect(convertUsdToCustom('20', rate), rate).toBeNull()
+    }
+    for (const amount of ['', '-5', '1e3', 'abc']) {
+      expect(convertUsdToCustom(amount, '7.25'), amount).toBeNull()
+    }
   })
 })

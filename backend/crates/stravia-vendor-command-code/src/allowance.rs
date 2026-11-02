@@ -2,7 +2,8 @@ use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot, read_http_body,
 };
 
@@ -44,6 +45,10 @@ pub(crate) fn execute(
         .and_then(commandcode_subscription);
     if let Some(subscription) = &subscription {
         parsed.plan_label = subscription.plan_label.clone();
+        parsed.billing = commandcode_billing(
+            subscription.plan_id.as_deref(),
+            subscription.status.as_deref(),
+        );
     }
 
     if let Some(subscription) = &subscription
@@ -194,6 +199,7 @@ fn parse_credits(body: &[u8]) -> Option<AllowanceResponse> {
         models: Vec::new(),
         plan_label: None,
         account_label: None,
+        billing: None,
     })
 }
 
@@ -217,6 +223,8 @@ fn commandcode_account_label(body: &[u8]) -> Option<String> {
 
 struct CommandCodeSubscription {
     plan_label: Option<String>,
+    plan_id: Option<String>,
+    status: Option<String>,
     period_start_raw: Option<String>,
     period_start: Option<i64>,
     period_end: Option<i64>,
@@ -240,12 +248,53 @@ fn commandcode_subscription(body: &[u8]) -> Option<CommandCodeSubscription> {
     });
     let result = CommandCodeSubscription {
         plan_label,
+        plan_id: plan.map(str::to_owned),
+        status: status.map(str::to_owned),
         period_start_raw,
         period_start: field_timestamp(data, "currentPeriodStart"),
         period_end: field_timestamp(data, "currentPeriodEnd"),
     };
     (result.plan_label.is_some() || result.period_start.is_some() || result.period_end.is_some())
         .then_some(result)
+}
+
+fn commandcode_billing(plan: Option<&str>, status: Option<&str>) -> Option<AllowanceBilling> {
+    // CLI 与 discovery 的 subscription_plan 使用同一组当前订阅状态
+    // （active/trialing/past_due）；只有这三种状态才声明订阅计费，
+    // canceled/expired/unpaid/paused/incomplete 等状态 billing 保持未知。
+    if !matches!(status, Some("active" | "trialing" | "past_due")) {
+        return None;
+    }
+    billing_for_plan(plan)
+}
+
+fn billing_for_plan(plan: Option<&str>) -> Option<AllowanceBilling> {
+    let subscription = |amount: Option<&str>| {
+        Some(AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: amount.map(|amount| AllowanceBillingPrice {
+                amount: amount.into(),
+                currency: "USD".into(),
+            }),
+        })
+    };
+    // 价格来源：https://commandcode.ai/pricing（2026-11-02 核对，页面标注为每月美元价）；
+    // /alpha/billing/subscriptions 只返回 planId、status、currentPeriodStart、currentPeriodEnd，
+    // 没有金额、币种或计费周期字段，因此只能按 planId 映射官方公布的固定月费。
+    match plan? {
+        "individual-go" => subscription(Some("1")),
+        "individual-goat" => subscription(Some("10")),
+        "individual-pro" => subscription(Some("20")),
+        "individual-max" => subscription(Some("100")),
+        "individual-ultra" => subscription(Some("200")),
+        "individual-provider" => subscription(Some("15")),
+        // Teams 是团队套餐，官方页的 $40/月 不是单账号固定价，按规则不写价格。
+        "teams-pro" => subscription(None),
+        // v1 是旧版 Go/Pro 的 planId，官方定价页不再单列其价格，因此只声明订阅周期。
+        "individual-go-v1" | "individual-pro-v1" => subscription(None),
+        _ => None,
+    }
 }
 
 fn commandcode_summary_cost(body: &[u8]) -> Option<f64> {
@@ -436,7 +485,93 @@ fn invalid_response() -> PluginError {
 
 #[cfg(test)]
 mod tests {
-    use super::commandcode_account_label;
+    use super::{
+        AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceBillingPrice,
+        billing_for_plan, commandcode_account_label, commandcode_billing, commandcode_subscription,
+    };
+
+    fn price(amount: &str) -> Option<AllowanceBillingPrice> {
+        Some(AllowanceBillingPrice {
+            amount: amount.into(),
+            currency: "USD".into(),
+        })
+    }
+
+    fn subscription(price: Option<AllowanceBillingPrice>) -> Option<AllowanceBilling> {
+        Some(AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price,
+        })
+    }
+
+    #[test]
+    fn known_plans_use_the_published_monthly_usd_price() {
+        for (plan, amount) in [
+            ("individual-go", "1"),
+            ("individual-goat", "10"),
+            ("individual-pro", "20"),
+            ("individual-max", "100"),
+            ("individual-ultra", "200"),
+            ("individual-provider", "15"),
+        ] {
+            assert_eq!(
+                billing_for_plan(Some(plan)),
+                subscription(price(amount)),
+                "{plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn plans_without_a_published_price_stay_subscriptions_without_a_price() {
+        for plan in ["individual-go-v1", "individual-pro-v1", "teams-pro"] {
+            assert_eq!(billing_for_plan(Some(plan)), subscription(None), "{plan}");
+        }
+    }
+
+    #[test]
+    fn unknown_or_inactive_plans_do_not_claim_a_live_subscription() {
+        assert_eq!(billing_for_plan(Some("future-plan")), None);
+        assert_eq!(billing_for_plan(None), None);
+        for status in ["active", "trialing", "past_due"] {
+            assert!(
+                commandcode_billing(Some("individual-go"), Some(status)).is_some(),
+                "{status}"
+            );
+        }
+        for status in [
+            "canceled",
+            "cancelled",
+            "expired",
+            "incomplete",
+            "unpaid",
+            "paused",
+            "unknown",
+        ] {
+            assert_eq!(
+                commandcode_billing(Some("individual-go"), Some(status)),
+                None,
+                "{status}"
+            );
+        }
+        assert_eq!(commandcode_billing(Some("individual-go"), None), None);
+        assert_eq!(commandcode_billing(None, Some("active")), None);
+    }
+
+    #[test]
+    fn subscription_parser_keeps_plan_and_status_for_billing() {
+        let parsed = commandcode_subscription(
+            br#"{"success":true,"data":{"planId":"individual-goat","status":"active","currentPeriodStart":"2026-11-01T00:00:00Z","currentPeriodEnd":"2026-12-01T00:00:00Z"}}"#,
+        )
+        .expect("subscription");
+        assert_eq!(parsed.plan_id.as_deref(), Some("individual-goat"));
+        assert_eq!(parsed.status.as_deref(), Some("active"));
+        assert_eq!(
+            commandcode_billing(parsed.plan_id.as_deref(), parsed.status.as_deref()),
+            subscription(price("10"))
+        );
+    }
 
     #[test]
     fn account_label_prefers_email_then_user_name_then_name() {

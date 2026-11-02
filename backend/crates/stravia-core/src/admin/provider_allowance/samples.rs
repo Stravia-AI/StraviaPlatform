@@ -268,6 +268,7 @@ mod tests {
             channel: "default".into(),
             plan_label: None,
             account_label: None,
+            billing: None,
             status,
             allowances: vec![allowance("account")],
             models: vec![ModelAllowance {

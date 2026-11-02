@@ -2,9 +2,10 @@ use serde_json::Value;
 use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::connection_check;
 use stravia_vendor_sdk::{
-    AllowanceAmount, AllowanceItem, AllowanceRequest, AllowanceResponse, ConnectionCheckResponse,
-    ConnectionCheckVerification, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
-    read_http_body,
+    AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
+    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResponse,
+    ConnectionCheckResponse, ConnectionCheckVerification, ErrorKind, GuestHost, PluginError,
+    ProviderSnapshot, read_http_body,
 };
 
 use crate::codec::devin_connect::proto::{ProtoField, parse_fields};
@@ -194,11 +195,13 @@ fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {
     for allowance in &mut allowances {
         allowance.condition = condition(allowance);
     }
+    let billing = billing_for_plan(plan_label.as_deref());
     Ok(AllowanceResponse {
         allowances,
         models: Vec::new(),
         plan_label,
         account_label,
+        billing,
     })
 }
 
@@ -291,6 +294,42 @@ fn window_label(key: &str) -> &'static str {
     }
 }
 
+/// Devin/Windsurf 订阅价格表。官方定价页 https://devin.ai/pricing
+/// （windsurf.com/pricing 现跳转到这里，2026-11-02 核对）列出 Pro $20/月、
+/// Max $200/月；Teams 是 $80/月团队费加 $40/月每个完整开发者席位，Enterprise
+/// 需联系销售，都没有单一账号价格。`Pro Ultimate`/`Teams Ultimate` 已不在
+/// 当前定价页，也不填金额。
+fn billing_for_plan(plan: Option<&str>) -> Option<AllowanceBilling> {
+    fn subscription(price: Option<&str>) -> AllowanceBilling {
+        AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: price.map(|amount| AllowanceBillingPrice {
+                amount: amount.into(),
+                currency: "USD".into(),
+            }),
+        }
+    }
+    match plan? {
+        "Pro" | "Devin Pro" => Some(subscription(Some("20"))),
+        "Max" | "Devin Max" => Some(subscription(Some("200"))),
+        // 按席位/团队的方案、已下架的旧等级与定制企业方案没有单一账号价格。
+        "Pro Ultimate"
+        | "Teams"
+        | "Teams Ultimate"
+        | "Devin Teams"
+        | "Devin Teams V2"
+        | "Enterprise (SaaS)"
+        | "Enterprise (Self-Serve)"
+        | "Enterprise (SaaS Pooled)"
+        | "Devin Enterprise"
+        | "Hybrid"
+        | "Enterprise (Self-Hosted)" => Some(subscription(None)),
+        // 免费、试用与未知等级不下结论。
+        _ => None,
+    }
+}
+
 fn tier_label(tier: u64) -> &'static str {
     match tier {
         1 => "Teams",
@@ -374,10 +413,99 @@ fn error(kind: ErrorKind, message: impl Into<String>) -> PluginError {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{billing_for_plan, parse_response};
     use crate::codec::devin_connect::proto::{
         write_message_field, write_string_field, write_varint_field,
     };
+    use stravia_vendor_sdk::{
+        AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceBillingPrice,
+        AllowanceResponse,
+    };
+
+    fn response_with_plan(plan: Option<&str>, tier: Option<u64>) -> AllowanceResponse {
+        let mut plan_info = Vec::new();
+        if let Some(plan) = plan {
+            write_string_field(&mut plan_info, 2, plan);
+        }
+        if let Some(tier) = tier {
+            write_varint_field(&mut plan_info, 1, tier);
+        }
+        let mut plan_status = Vec::new();
+        write_message_field(&mut plan_status, 1, &plan_info);
+        let mut user_status = Vec::new();
+        write_message_field(&mut user_status, 13, &plan_status);
+        let mut body = Vec::new();
+        write_message_field(&mut body, 1, &user_status);
+        parse_response(&body).expect("plan label should be enough to parse")
+    }
+
+    #[test]
+    fn billing_prices_only_the_plans_with_one_published_usd_price() {
+        for (plan, amount) in [
+            ("Pro", "20"),
+            ("Devin Pro", "20"),
+            ("Max", "200"),
+            ("Devin Max", "200"),
+        ] {
+            let parsed = response_with_plan(Some(plan), None);
+            assert_eq!(parsed.plan_label.as_deref(), Some(plan));
+            assert_eq!(
+                parsed.billing,
+                Some(AllowanceBilling {
+                    kind: AllowanceBillingKind::Subscription,
+                    period: Some(AllowanceBillingPeriod::Month),
+                    price: Some(AllowanceBillingPrice {
+                        amount: amount.into(),
+                        currency: "USD".into(),
+                    }),
+                })
+            );
+        }
+        // 只有等级枚举、没有 plan_name 时，tier_label 产出的标识同样命中价格表。
+        let parsed = response_with_plan(None, Some(16));
+        assert_eq!(parsed.plan_label.as_deref(), Some("Devin Pro"));
+        assert_eq!(
+            parsed
+                .billing
+                .and_then(|billing| billing.price)
+                .map(|price| price.amount),
+            Some("20".into())
+        );
+    }
+
+    #[test]
+    fn team_and_legacy_plans_are_subscriptions_without_a_price() {
+        for plan in [
+            "Pro Ultimate",
+            "Teams",
+            "Teams Ultimate",
+            "Devin Teams",
+            "Devin Teams V2",
+            "Devin Enterprise",
+            "Enterprise (SaaS)",
+            "Enterprise (Self-Serve)",
+            "Enterprise (SaaS Pooled)",
+            "Hybrid",
+            "Enterprise (Self-Hosted)",
+        ] {
+            let billing = response_with_plan(Some(plan), None).billing.unwrap();
+            assert_eq!(billing.kind, AllowanceBillingKind::Subscription, "{plan}");
+            assert_eq!(
+                billing.period,
+                Some(AllowanceBillingPeriod::Month),
+                "{plan}"
+            );
+            assert_eq!(billing.price, None, "{plan}");
+        }
+    }
+
+    #[test]
+    fn free_trial_and_unknown_plans_have_no_billing() {
+        for plan in ["Devin Free", "Devin Trial", "Trial", "Unknown"] {
+            assert_eq!(response_with_plan(Some(plan), None).billing, None, "{plan}");
+        }
+        assert_eq!(billing_for_plan(None), None);
+    }
 
     #[test]
     fn reports_exhausted_windows_when_zero_remaining_percent_is_omitted() {

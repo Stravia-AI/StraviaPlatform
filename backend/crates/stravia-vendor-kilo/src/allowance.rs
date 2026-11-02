@@ -34,6 +34,9 @@ pub(super) fn parse(value: Value) -> Result<AllowanceResponse, PluginError> {
         // 属于不透明 ID，按规则不写入 plan_label。
         plan_label: None,
         account_label: None,
+        // Kilo Pass 订阅也把额度打进同一余额，现有响应无法区分纯按量付费与订阅账号，
+        // 因此 billing 保持未知（None），不猜测 Usage。
+        billing: None,
     })
 }
 pub(super) fn execute(

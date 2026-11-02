@@ -28,6 +28,7 @@ use stravia_vendor_runtime::{
     LogLevel, OperationScope, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
+    AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceBillingPrice,
     AllowanceRequest, AuthRequest, AuthResponse, AuthStep, DiscoverRequest, ErrorKind,
     MediaImageAspectRatio, MediaImageRequest, MediaImageResolution, MediaReference, OperationInput,
     OperationOutput, ProviderSnapshot,
@@ -894,6 +895,17 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     assert_eq!(quota.allowances.len(), 1);
     assert_eq!(quota.allowances[0].used_percent.as_deref(), Some("30"));
     assert_eq!(quota.plan_label.as_deref(), Some("Google AI Pro"));
+    assert_eq!(
+        quota.billing,
+        Some(AllowanceBilling {
+            kind: AllowanceBillingKind::Subscription,
+            period: Some(AllowanceBillingPeriod::Month),
+            price: Some(AllowanceBillingPrice {
+                amount: "19.99".into(),
+                currency: "USD".into(),
+            }),
+        })
+    );
     let AuthResponse::Credentials { values, .. } =
         auth(&runtime, &plugin, &services, &provider, AuthStep::Refresh).await
     else {
