@@ -3,6 +3,9 @@ use std::collections::HashSet;
 
 const REJECTION_BATCH_SIZE: i64 = 100;
 
+/// 清空历史时将被删除的交互（非 running / waiting_client）引用的全部正文。
+const CLEARED_CONTENT_IDS: &str = "SELECT content_id FROM observation_event_contents WHERE sequence IN (SELECT e.sequence FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE i.status NOT IN ('running','waiting_client')) UNION SELECT content_id FROM observation_tool_results WHERE sequence IN (SELECT e.sequence FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE i.status NOT IN ('running','waiting_client'))";
+
 pub(super) struct RetentionBatch {
     pub(super) removed_interactions: Vec<String>,
     pub(super) removed_rejections: u64,
@@ -200,11 +203,17 @@ impl ObservationStore {
                     sqlx::query("DELETE FROM rejected_request_observations")
                         .execute(&mut *tx)
                         .await?;
+                    // 引用行随交互级联删除；先记下将失去引用的正文，删除后在同一事务入 GC 队列。
+                    let content_ids: Vec<i64> = sqlx::query_scalar(CLEARED_CONTENT_IDS)
+                        .fetch_all(&mut *tx)
+                        .await?;
                     // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
                     sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
                         .execute(&mut *tx)
                         .await?;
                     let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
+                    crate::content_store::sqlite::enqueue_unreferenced(&mut tx, &content_ids)
+                        .await?;
                     tx.commit().await?;
                     connection.finish().await?;
                     deleted
@@ -218,11 +227,17 @@ impl ObservationStore {
                 sqlx::query("DELETE FROM rejected_request_observations")
                     .execute(&mut *tx)
                     .await?;
+                // 引用行随交互级联删除；先记下将失去引用的正文，删除后在同一事务入 GC 队列。
+                let content_ids: Vec<i64> = sqlx::query_scalar(CLEARED_CONTENT_IDS)
+                    .fetch_all(&mut *tx)
+                    .await?;
                 // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
                 sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
                     .execute(&mut *tx)
                     .await?;
                 let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
+                crate::content_store::postgres::enqueue_unreferenced(&mut tx, &content_ids)
+                    .await?;
                 tx.commit().await?;
 
                 self.remove_orphan_manifests().await?;

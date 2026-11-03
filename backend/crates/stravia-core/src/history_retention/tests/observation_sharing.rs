@@ -82,3 +82,48 @@ both_backends!(
     1,
     three_parties_share_one_body
 );
+
+/// 清空 Observation 历史后，只被 Observation 引用的正文由下一轮扫描回收；
+/// 仍被 Turn Chain 引用的正文继续可读。
+async fn clearing_history_releases_observation_only_bodies(fx: Fixture) {
+    let shared = "clear shared body ".repeat(37);
+    let visible = "clear visible body ".repeat(35);
+    let tool_output = "clear tool output ".repeat(33);
+
+    let node = fx.commit(None, &Refs::answer(&shared)).await;
+    fx.observe(&shared, &visible, &tool_output).await;
+    assert!(fx.observed_interactions().await > 0, "interaction is readable");
+    assert_eq!(fx.text_rows_in_any_scope(shared.len()).await, 1);
+    assert_eq!(fx.text_rows_in_any_scope(visible.len()).await, 1);
+    assert_eq!(fx.text_rows_in_any_scope(tool_output.len()).await, 1);
+
+    fx.maintenance
+        .observation
+        .clear_history()
+        .await
+        .expect("clear observation history");
+    assert_eq!(fx.observed_interactions().await, 0);
+
+    fx.sweep_to_completion(super::now_ms()).await;
+    assert_eq!(
+        fx.text_rows_in_any_scope(visible.len()).await,
+        0,
+        "Observation-only visible output is collected after clear"
+    );
+    assert_eq!(
+        fx.text_rows_in_any_scope(tool_output.len()).await,
+        0,
+        "Observation-only tool output is collected after clear"
+    );
+    assert!(
+        fx.turn_mentions(&node, &shared).await,
+        "the Turn Chain still reads its body"
+    );
+    assert_eq!(fx.text_rows_in_any_scope(shared.len()).await, 1);
+}
+both_backends!(
+    sqlite_clearing_history_releases_observation_only_bodies,
+    postgres_clearing_history_releases_observation_only_bodies,
+    1,
+    clearing_history_releases_observation_only_bodies
+);
