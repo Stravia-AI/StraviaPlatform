@@ -59,7 +59,21 @@ pub(super) struct TurnStart<'a> {
     pub input: Option<&'a [String]>,
     pub input_at: i64,
     pub tool_results: &'a [(RunEvent, i64)],
+    /// 客户端工具结果先于用户输入到达：事件序号按生产方到达顺序分配。
+    pub tools_first: bool,
     pub leading: &'a [(RunEvent, i64)],
+}
+
+/// 首轮写入里输入事件与工具结果事件在“额外事件”中的位置（0 或 1）。
+/// 序号按生产方到达顺序分配，而不是按存储实现的写入顺序。
+fn extra_slots(start: &TurnStart<'_>) -> (usize, usize) {
+    let has_input = start.input.is_some();
+    let has_tools = !start.tool_results.is_empty();
+    if start.tools_first {
+        (usize::from(has_tools), 0)
+    } else {
+        (0, usize::from(has_input))
+    }
 }
 
 impl ObservationStore {
@@ -793,8 +807,11 @@ impl ObservationStore {
                         payload,
                     ));
                 }
+                let (input_slot, tool_slot) = extra_slots(&start);
+                let first_extra = sequence + 1;
+                let last_sequence = turn_sequence + i64::try_from(durable_count)? - 1;
                 if let Some(input) = start.input {
-                    sequence += 1;
+                    let sequence = first_extra + i64::try_from(input_slot)?;
                     let mut units = split_user_input(input);
                     let content_ids =
                         super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
@@ -833,8 +850,7 @@ impl ObservationStore {
                     ));
                 }
                 if !start.tool_results.is_empty() {
-                    sequence += 1;
-                    let tool_sequence = sequence;
+                    let tool_sequence = first_extra + i64::try_from(tool_slot)?;
                     let mut latest_tool_at = start.at;
                     insert_event_sqlite(
                         &mut tx,
@@ -884,12 +900,13 @@ impl ObservationStore {
                     ));
                 }
                 if status_event(start.turn) || !start.tool_results.is_empty() {
-                    recompute_status_sqlite(&mut tx, interaction_id, sequence).await?;
+                    recompute_status_sqlite(&mut tx, interaction_id, last_sequence).await?;
                 }
-                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(sequence).bind(interaction_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last_sequence).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last_sequence).bind(interaction_id).execute(&mut *tx).await?;
                 tx.commit().await?;
                 connection.finish().await?;
+                result.sort_by_key(|event| event.sequence);
                 Ok(result)
             }
             Self::Postgres(pool, _) => {
@@ -1012,8 +1029,10 @@ impl ObservationStore {
                         payload,
                     ));
                 }
+                let (input_slot, tool_slot) = extra_slots(&start);
+                let extras: Vec<i64> = sequences.collect();
                 if let Some(text) = start.input {
-                    let input_sequence = sequences.next().expect("allocated input sequence");
+                    let input_sequence = extras[input_slot];
                     let mut units = split_user_input(text);
                     let content_ids =
                         super::content_refs::intern_postgres(&mut tx, &principal, &mut units).await?;
@@ -1053,7 +1072,7 @@ impl ObservationStore {
                     ));
                 }
                 if !start.tool_results.is_empty() {
-                    let tool_sequence = sequences.next().expect("allocated tool sequence");
+                    let tool_sequence = extras[tool_slot];
                     let mut latest_tool_at = start.at;
                     insert_event_postgres(
                         &mut tx,
@@ -1103,6 +1122,7 @@ impl ObservationStore {
                         Value::Null,
                     ));
                 }
+                result.sort_by_key(|event| event.sequence);
                 let last_sequence = result.last().map_or(turn_sequence, |event| event.sequence);
                 if status_event(start.turn) || !start.tool_results.is_empty() {
                     recompute_status_postgres(&mut tx, interaction_id, last_sequence).await?;
@@ -5067,6 +5087,74 @@ mod tests {
             Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
         );
         pending_tools_replacement_scenario(&store).await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// 首轮写入的事件序号按生产方到达顺序分配：工具结果先到则先于用户输入事件，
+    /// 反之亦然；与存储实现里先写哪一块无关。
+    #[tokio::test]
+    async fn turn_start_sequences_follow_producer_order() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool.clone(),
+            Arc::new(DebugTraceIndex::empty(std::path::Path::new("."))),
+        );
+        let tool = [(
+            RunEvent::ClientToolResult {
+                tool_id: "call".into(),
+                content: serde_json::json!("result"),
+                is_error: false,
+            },
+            3,
+        )];
+        let input = vec!["question".to_owned()];
+        for (run, tools_first) in [("tools-first", true), ("input-first", false)] {
+            admit_tool_run(&store, run, None, "owner").await?;
+            let turn = RunEvent::ModelTurnStarted {
+                retention_detached: false,
+                model_turn_id: format!("turn-{run}"),
+                route_id: "route".into(),
+                model_display_name: None,
+                estimated_input_tokens: None,
+            };
+            let events = store
+                .persist_turn_start(
+                    run,
+                    run,
+                    TurnStart {
+                        turn: &turn,
+                        at: 2,
+                        attempt: None,
+                        attempt_at: 2,
+                        input: Some(&input),
+                        input_at: 4,
+                        tool_results: &tool,
+                        tools_first,
+                        leading: &[],
+                    },
+                )
+                .await?;
+            let kinds: Vec<_> = events.iter().map(|event| event.kind.as_str()).collect();
+            let expected = if tools_first {
+                ["model_turn_started", "client_tool_result", "user_input_recorded"]
+            } else {
+                ["model_turn_started", "user_input_recorded", "client_tool_result"]
+            };
+            assert_eq!(kinds, expected, "{run}: published in sequence order");
+            assert!(events.windows(2).all(|pair| pair[0].sequence < pair[1].sequence));
+            let stored: Vec<String> = store
+                .replay(0)
+                .await?
+                .into_iter()
+                .filter(|event| event.run_id.as_deref() == Some(run))
+                .map(|event| event.kind)
+                .filter(|kind| expected.contains(&kind.as_str()))
+                .collect();
+            assert_eq!(stored, expected, "{run}: replay follows the same order");
+        }
         pool.close().await;
         Ok(())
     }

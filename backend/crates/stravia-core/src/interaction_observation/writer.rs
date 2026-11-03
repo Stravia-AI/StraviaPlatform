@@ -727,6 +727,8 @@ struct PendingTurn {
     attempt: Option<(RunEvent, i64)>,
     input: Option<(Vec<String>, i64)>,
     tool_results: Vec<(RunEvent, i64)>,
+    /// 工具结果先于输入到达（生产方顺序）；落盘时事件序号据此排列。
+    tools_first: bool,
     leading: Vec<(RunEvent, i64)>,
 }
 
@@ -757,6 +759,7 @@ async fn persist_turn_start_phase(
                 input: pending.input.as_ref().map(|(units, _)| units.as_slice()),
                 input_at: pending.input.as_ref().map_or(pending.at, |(_, at)| *at),
                 tool_results: &pending.tool_results,
+                tools_first: pending.tools_first,
                 leading: &pending.leading,
             },
         )
@@ -836,8 +839,10 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         // A discarded stats-bearing transaction cannot be declared summarized by a later barrier.
         // Keep cleanup blocked for this runtime; ordinary diagnostic gaps do not set this state.
         let mut incomplete_usage = false;
-        let mut pending_turn: Option<PendingTurn> = None;
-        let mut buffered_finish: Option<PendingTurnFinish> = None;
+        let mut phases = PhaseBuffers {
+            turns: HashMap::new(),
+            finishes: HashMap::new(),
+        };
         let context = WriterContext {
             store: &store,
             debug_trace_index: &debug_trace_index,
@@ -934,8 +939,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     run_id,
                     event,
                     occurred_at,
-                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id) => {
-                    let mut turn = pending_turn.take().expect("pending turn");
+                }) if phases.turns.contains_key(&run_id) => {
+                    let mut turn = phases.turns.remove(&run_id).expect("pending turn");
                     match event {
                         RunEvent::TargetAttemptStarted { .. } => {
                             turn.attempt = Some((event, occurred_at));
@@ -958,22 +963,21 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         }
                         event if is_turn_leading(&event) => {
                             turn.leading.push((event, occurred_at));
-                            pending_turn = Some(turn);
+                            phases.turns.insert(run_id.clone(), turn);
                             return false;
                         }
                         // 其余事件（正文块、工具结果、Turn 结束等）需要各自的块/引用写入路径，
                         // 不能当作开始事务里的普通前置行：先把没有 attempt 的 Turn 开始落盘，
                         // 再让该事件走常规路径。
                         event => {
-                            pending_turn = Some(turn);
+                            phases.turns.insert(run_id.clone(), turn);
                             commit_buffered_phases(
                                 &context,
                                 &attribution,
                                 &mut pending_gaps,
                                 &mut incomplete_usage,
-                                &mut pending_turn,
-                                &mut buffered_finish,
-                                |id| id == run_id,
+                                &mut phases,
+                                        |id| id == run_id,
                                 occurred_at,
                             )
                             .await;
@@ -990,15 +994,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     event,
                     occurred_at,
                 }) if matches!(event, RunEvent::ModelTurnStarted { .. })
-                    && pending_turn.is_none() =>
+                    && !phases.turns.contains_key(&run_id) =>
                 {
-                    pending_turn = Some(PendingTurn {
+                    let key = run_id.clone();
+                    phases.turns.insert(key, PendingTurn {
                         run_id,
                         turn: event,
                         at: occurred_at,
                         attempt: None,
                         input: None,
                         tool_results: Vec::new(),
+                        tools_first: false,
                         leading: Vec::new(),
                     });
                     return false;
@@ -1007,19 +1013,19 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     run_id,
                     units,
                     occurred_at,
-                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
+                }) if phases.turns.contains_key(&run_id)
                     && attribution.has_new_user(&run_id) =>
                 {
-                    let mut turn = pending_turn.take().expect("pending turn");
+                    let mut turn = phases.turns.remove(&run_id).expect("pending turn");
                     turn.input = Some((units, occurred_at));
-                    pending_turn = Some(turn);
+                    phases.turns.insert(run_id.clone(), turn);
                     return false;
                 }
                 Some(WriterCommand::ClientToolResults {
                     run_id,
                     events,
                     occurred_at,
-                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id) => {
+                }) if phases.turns.contains_key(&run_id) => {
                     if replayed_tool_results.remove(&run_id) {
                         return false;
                     }
@@ -1031,10 +1037,13 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         .await
                     {
                         Ok(events) => {
-                            let mut turn = pending_turn.take().expect("pending turn");
+                            let mut turn = phases.turns.remove(&run_id).expect("pending turn");
+                            if turn.tool_results.is_empty() && turn.input.is_none() {
+                                turn.tools_first = true;
+                            }
                             turn.tool_results
                                 .extend(events.into_iter().map(|event| (event, occurred_at)));
-                            pending_turn = Some(turn);
+                            phases.turns.insert(run_id.clone(), turn);
                         }
                         Err(error) => {
                             pending_gaps.insert(interaction.to_owned(), occurred_at);
@@ -1047,14 +1056,14 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     run_id,
                     event,
                     occurred_at,
-                }) if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id) => {
-                    let mut finish = buffered_finish.take().expect("pending finish");
+                }) if phases.finishes.contains_key(&run_id) => {
+                    let mut finish = phases.finishes.remove(&run_id).expect("pending finish");
                     match event {
                         RunEvent::UsageConfirmed {
                             attempt_id, usage, ..
                         } if finish.attempt_id.as_deref() == Some(attempt_id.as_str()) => {
                             super::store::coalesce_usage(&mut finish.usage, &usage);
-                            buffered_finish = Some(finish);
+                            phases.finishes.insert(run_id.clone(), finish);
                             return false;
                         }
                         RunEvent::ModelTurnFinished {
@@ -1110,13 +1119,13 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                 }
                             }
-                            buffered_finish = Some(finish);
+                            phases.finishes.insert(run_id.clone(), finish);
                             return false;
                         }
                         // 与 Turn/attempt 生命周期无关的客户端交付与诊断事件：先于合并后的
                         // Turn 结束行落盘，缓冲的 attempt 结束继续等待 Turn 结束。
                         event if is_turn_independent(&event) => {
-                            buffered_finish = Some(finish);
+                            phases.finishes.insert(run_id.clone(), finish);
                             Some(WriterCommand::Event {
                                 run_id,
                                 event,
@@ -1159,7 +1168,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     event,
                     occurred_at,
                 }) if matches!(event, RunEvent::TargetAttemptFinished { .. })
-                    && buffered_finish.is_none() =>
+                    && !phases.finishes.contains_key(&run_id) =>
                 {
                     let (model_turn_id, attempt_id, usage) = match &event {
                         RunEvent::TargetAttemptFinished {
@@ -1170,7 +1179,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         } => (model_turn_id.clone(), Some(attempt_id.clone()), usage.clone()),
                         _ => unreachable!("guarded target attempt finish"),
                     };
-                    buffered_finish = Some(PendingTurnFinish {
+                    phases.finishes.insert(run_id.clone(), PendingTurnFinish {
                         run_id,
                         model_turn_id,
                         attempt_id,
@@ -1753,8 +1762,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &attribution,
                         &mut pending_gaps,
                         &mut incomplete_usage,
-                        &mut pending_turn,
-                        &mut buffered_finish,
+                        &mut phases,
                         |buffered| buffered == run_id,
                         finished_at,
                     )
@@ -1848,9 +1856,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             &attribution,
                             &mut pending_gaps,
                             &mut incomplete_usage,
-                            &mut pending_turn,
-                            &mut buffered_finish,
-                            |buffered| buffered == run_id,
+                            &mut phases,
+                                |buffered| buffered == run_id,
                             occurred_at,
                         )
                         .await;
@@ -2015,8 +2022,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &attribution,
                         &mut pending_gaps,
                         &mut incomplete_usage,
-                        &mut pending_turn,
-                        &mut buffered_finish,
+                        &mut phases,
                         |buffered| attribution.interaction_for_run(buffered) == Some(interaction_id.as_str()),
                         now(),
                     )
@@ -2037,8 +2043,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &attribution,
                         &mut pending_gaps,
                         &mut incomplete_usage,
-                        &mut pending_turn,
-                        &mut buffered_finish,
+                        &mut phases,
                         |_| true,
                         now(),
                     )
@@ -2060,8 +2065,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &attribution,
                         &mut pending_gaps,
                         &mut incomplete_usage,
-                        &mut pending_turn,
-                        &mut buffered_finish,
+                        &mut phases,
                         |_| true,
                         now(),
                     )
@@ -2170,25 +2174,33 @@ pub(super) fn redacted_persist_cause(error: &anyhow::Error) -> String {
     "persistence".to_owned()
 }
 
+/// 每个 Run 各自缓冲的阶段：轮次开始与 attempt 结束。并发 Run 的阶段事件在队列里交错到达，
+/// 缓冲按 Run 分开，互不占用也互不打断。
+struct PhaseBuffers {
+    turns: HashMap<String, PendingTurn>,
+    finishes: HashMap<String, PendingTurnFinish>,
+}
+
 /// 把尚缓冲的轮次开始与 attempt 结束阶段落盘；屏障、关停与 Run 收尾都经这里提交。
 /// 阶段事务失败整体记为一个观察缺口，且因这些阶段承载 Turn/用量事实而阻止清理。
-#[allow(clippy::too_many_arguments)]
 async fn commit_buffered_phases(
     context: &WriterContext<'_>,
     attribution: &RunAttribution<ObservationEvidence>,
     pending_gaps: &mut HashMap<String, i64>,
     incomplete_usage: &mut bool,
-    pending_turn: &mut Option<PendingTurn>,
-    buffered_finish: &mut Option<PendingTurnFinish>,
+    buffers: &mut PhaseBuffers,
     selects: impl Fn(&str) -> bool,
     at: i64,
 ) {
-    if pending_turn.as_ref().is_some_and(|turn| selects(&turn.run_id))
-        && let Some(turn) = pending_turn.take()
-        && let Some(interaction) = attribution.interaction_for_run(&turn.run_id)
-    {
+    let turn_runs: Vec<String> = buffers.turns.keys().filter(|run| selects(run)).cloned().collect();
+    for run_id in turn_runs {
+        let Some(turn) = buffers.turns.remove(&run_id) else {
+            continue;
+        };
+        let Some(interaction) = attribution.interaction_for_run(&run_id) else {
+            continue;
+        };
         let interaction = interaction.to_owned();
-        let run_id = turn.run_id.clone();
         match persist_turn_start_phase(context.store, &interaction, turn).await {
             Ok(events) => {
                 for event in events {
@@ -2202,12 +2214,15 @@ async fn commit_buffered_phases(
             }
         }
     }
-    if buffered_finish.as_ref().is_some_and(|finish| selects(&finish.run_id))
-        && let Some(finish) = buffered_finish.take()
-        && let Some(interaction) = attribution.interaction_for_run(&finish.run_id)
-    {
+    let finish_runs: Vec<String> = buffers.finishes.keys().filter(|run| selects(run)).cloned().collect();
+    for run_id in finish_runs {
+        let Some(finish) = buffers.finishes.remove(&run_id) else {
+            continue;
+        };
+        let Some(interaction) = attribution.interaction_for_run(&run_id) else {
+            continue;
+        };
         let interaction = interaction.to_owned();
-        let run_id = finish.run_id.clone();
         match context
             .store
             .persist_run_events(&interaction, &run_id, &[(finish.attempt, None, finish.at)])

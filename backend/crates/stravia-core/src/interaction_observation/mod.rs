@@ -3545,6 +3545,62 @@ mod snapshot_tests {
         Ok(())
     }
 
+    /// 两个 Run 的阶段事件在写入队列里交错到达：每个 Run 各自缓冲自己的开始与结算阶段，
+    /// 互不占用对方的缓冲，两者都得到合并后的 Turn 开始行与 Turn 结束行。
+    #[tokio::test]
+    async fn interleaved_runs_each_merge_turn_start_and_finish() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let first = test_run(&observation, "interleave-1", facts(Vec::new()));
+        let second = test_run(&observation, "interleave-2", facts(Vec::new()));
+        first.record(flow_turn_started("t1"));
+        second.record(flow_turn_started("t2"));
+        first.record(flow_attempt_started("t1", "a1"));
+        second.record(flow_attempt_started("t2", "a2"));
+        first.record(flow_attempt_finished("t1", "a1", "completed"));
+        second.record(flow_attempt_finished("t2", "a2", "completed"));
+        first.record(flow_turn_finished("t1", "completed"));
+        second.record(flow_turn_finished("t2", "completed"));
+        for run in [&first, &second] {
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: None,
+                status: "completed".into(),
+                terminal_reason: None,
+                generation_node_id: None,
+                generation_root_id: None,
+            });
+        }
+        observation.flush().await?;
+        let events = replayed(&observation).await?;
+        for (run_id, turn, attempt) in [("interleave-1", "t1", "a1"), ("interleave-2", "t2", "a2")] {
+            let started = events_of(&events, Some(run_id), "model_turn_started");
+            assert_eq!(started.len(), 1, "{run_id}: one turn start row");
+            assert_eq!(
+                started[0].payload["attempt"]["attempt_id"], attempt,
+                "{run_id}: the first attempt start rides on the turn start row"
+            );
+            assert!(
+                events_of(&events, Some(run_id), "target_attempt_started").is_empty(),
+                "{run_id}: no standalone attempt start row"
+            );
+            let finished = events_of(&events, Some(run_id), "model_turn_finished");
+            assert_eq!(finished.len(), 1, "{run_id}: one turn finish row");
+            assert_eq!(finished[0].payload["model_turn_id"], turn);
+            assert_eq!(finished[0].payload["attempt"]["attempt_id"], attempt);
+            assert!(
+                events_of(&events, Some(run_id), "target_attempt_finished").is_empty(),
+                "{run_id}: no standalone attempt finish row"
+            );
+        }
+        drop((first, second));
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
     /// Turn 开始与 attempt 开始之间到达的正文块仍走块与内容引用路径：
     /// 不能作为开始事务里的普通前置行把全文写进 attrs。
     #[tokio::test]
