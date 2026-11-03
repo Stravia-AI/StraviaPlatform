@@ -3086,7 +3086,7 @@ mod snapshot_tests {
             assert_eq!(result.payload["results"][0]["content"], expected);
         }
         let results: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM observation_events WHERE kind='client_tool_result' AND tool_id='history-call'",
+            "SELECT COUNT(*) FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.kind='client_tool_result' AND tr.tool_id='history-call'",
         )
         .fetch_one(&pool)
         .await?;

@@ -942,6 +942,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         }
                                     }
                                     Err(error) => {
+                                        incomplete_usage = true;
                                         pending_gaps.insert(interaction, occurred_at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
                                     }
@@ -1048,6 +1049,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
+                                        incomplete_usage = true;
                                         pending_gaps.insert(interaction, occurred_at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn finish persistence failed");
                                     }
@@ -1072,6 +1074,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         }
                                     }
                                     Err(error) => {
+                                        incomplete_usage = true;
                                         pending_gaps.insert(interaction, finish.at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
                                     }
@@ -1670,48 +1673,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                 }) => {
                     replayed_tool_results.remove(&run_id);
                     // 收尾前先落盘尚未完成的轮次阶段，避免末轮输入或 attempt 事实丢失。
-                    if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
-                        && let Some(turn) = pending_turn.take()
-                        && let Some(interaction) = attribution.interaction_for_run(&run_id)
-                    {
-                        let interaction = interaction.to_owned();
-                        match persist_turn_start_phase(&store, &interaction, turn).await {
-                            Ok(events) => {
-                                for event in events {
-                                    publish(&updates, &trace_sequence, event);
-                                }
-                            }
-                            Err(error) => {
-                                pending_gaps.insert(interaction, finished_at);
-                                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
-                            }
-                        }
-                    }
-                    if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id)
-                        && let Some(finish) = buffered_finish.take()
-                    {
-                        if let Some(interaction) = attribution.interaction_for_run(&run_id) {
-                            let interaction = interaction.to_owned();
-                            match store
-                                .persist_run_events(
-                                    &interaction,
-                                    &run_id,
-                                    &[(finish.attempt, None, finish.at)],
-                                )
-                                .await
-                            {
-                                Ok(events) => {
-                                    for event in events {
-                                        publish(&updates, &trace_sequence, event);
-                                    }
-                                }
-                                Err(error) => {
-                                    pending_gaps.insert(interaction, finish.at);
-                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
-                                }
-                            }
-                        }
-                    }
+                    commit_buffered_phases(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut pending_turn,
+                        &mut buffered_finish,
+                        |buffered| buffered == run_id,
+                        finished_at,
+                    )
+                    .await;
                     if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
                         outcome.client_output_committed |= committed;
                         if outcome.delivery.is_none() {
@@ -1797,47 +1769,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     occurred_at,
                 }) => {
                     if let Some(run_id) = run_id.as_deref() {
-                        if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
-                            && let Some(turn) = pending_turn.take()
-                            && let Some(interaction) = attribution.interaction_for_run(run_id)
-                        {
-                            let interaction = interaction.to_owned();
-                            match persist_turn_start_phase(&store, &interaction, turn).await {
-                                Ok(events) => {
-                                    for event in events {
-                                        publish(&updates, &trace_sequence, event);
-                                    }
-                                }
-                                Err(error) => {
-                                    pending_gaps.insert(interaction, occurred_at);
-                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
-                                }
-                            }
-                        }
-                        if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id)
-                            && let Some(finish) = buffered_finish.take()
-                            && let Some(interaction) = attribution.interaction_for_run(run_id)
-                        {
-                            let interaction = interaction.to_owned();
-                            match store
-                                .persist_run_events(
-                                    &interaction,
-                                    run_id,
-                                    &[(finish.attempt, None, finish.at)],
-                                )
-                                .await
-                            {
-                                Ok(events) => {
-                                    for event in events {
-                                        publish(&updates, &trace_sequence, event);
-                                    }
-                                }
-                                Err(error) => {
-                                    pending_gaps.insert(interaction, finish.at);
-                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
-                                }
-                            }
-                        }
+                        commit_buffered_phases(
+                            &context,
+                            &attribution,
+                            &mut pending_gaps,
+                            &mut incomplete_usage,
+                            &mut pending_turn,
+                            &mut buffered_finish,
+                            |buffered| buffered == run_id,
+                            occurred_at,
+                        )
+                        .await;
                         replayed_tool_results.remove(run_id);
                         if gap {
                             if let Some(trace) = &trace {
@@ -1994,6 +1936,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     for run in runs {
                         flush_one(&mut pending_text, &run);
                     }
+                    commit_buffered_phases(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut pending_turn,
+                        &mut buffered_finish,
+                        |buffered| attribution.interaction_for_run(buffered) == Some(interaction_id.as_str()),
+                        now(),
+                    )
+                    .await;
                     flush_active_manifests(
                         &context,
                         &attribution,
@@ -2005,6 +1958,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Barrier(done)) => {
+                    commit_buffered_phases(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut pending_turn,
+                        &mut buffered_finish,
+                        |_| true,
+                        now(),
+                    )
+                    .await;
                     // 读己之写屏障不绕过正文限频；新订阅从当前镜像读取。
                     flush_active_manifests(
                         &context,
@@ -2017,6 +1981,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let _ = done.send(ensure_usage_complete(incomplete_usage || gap_projection_failed));
                 }
                 Some(WriterCommand::Shutdown(done)) => {
+                    commit_buffered_phases(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut pending_turn,
+                        &mut buffered_finish,
+                        |_| true,
+                        now(),
+                    )
+                    .await;
                     pending_text.publish_live();
                     let _ = done.send(());
                     return true;
@@ -2119,6 +2094,63 @@ pub(super) fn redacted_persist_cause(error: &anyhow::Error) -> String {
         }
     }
     "persistence".to_owned()
+}
+
+/// 把尚缓冲的轮次开始与 attempt 结束阶段落盘；屏障、关停与 Run 收尾都经这里提交。
+/// 阶段事务失败整体记为一个观察缺口，且因这些阶段承载 Turn/用量事实而阻止清理。
+#[allow(clippy::too_many_arguments)]
+async fn commit_buffered_phases(
+    context: &WriterContext<'_>,
+    attribution: &RunAttribution<ObservationEvidence>,
+    pending_gaps: &mut HashMap<String, i64>,
+    incomplete_usage: &mut bool,
+    pending_turn: &mut Option<PendingTurn>,
+    buffered_finish: &mut Option<PendingTurnFinish>,
+    selects: impl Fn(&str) -> bool,
+    at: i64,
+) {
+    if pending_turn.as_ref().is_some_and(|turn| selects(&turn.run_id))
+        && let Some(turn) = pending_turn.take()
+        && let Some(interaction) = attribution.interaction_for_run(&turn.run_id)
+    {
+        let interaction = interaction.to_owned();
+        let run_id = turn.run_id.clone();
+        match persist_turn_start_phase(context.store, &interaction, turn).await {
+            Ok(events) => {
+                for event in events {
+                    publish(context.updates, context.trace_sequence, event);
+                }
+            }
+            Err(error) => {
+                *incomplete_usage = true;
+                pending_gaps.insert(interaction, at);
+                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
+            }
+        }
+    }
+    if buffered_finish.as_ref().is_some_and(|finish| selects(&finish.run_id))
+        && let Some(finish) = buffered_finish.take()
+        && let Some(interaction) = attribution.interaction_for_run(&finish.run_id)
+    {
+        let interaction = interaction.to_owned();
+        let run_id = finish.run_id.clone();
+        match context
+            .store
+            .persist_run_events(&interaction, &run_id, &[(finish.attempt, None, finish.at)])
+            .await
+        {
+            Ok(events) => {
+                for event in events {
+                    publish(context.updates, context.trace_sequence, event);
+                }
+            }
+            Err(error) => {
+                *incomplete_usage = true;
+                pending_gaps.insert(interaction, finish.at);
+                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
+            }
+        }
+    }
 }
 
 fn publish(

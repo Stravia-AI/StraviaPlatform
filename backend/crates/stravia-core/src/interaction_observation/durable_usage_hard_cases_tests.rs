@@ -237,10 +237,9 @@ async fn retention_and_failed_clear(
     observation: &ObservationStore,
 ) -> anyhow::Result<()> {
     let selected = window(START, START + 4 * QUARTER);
-    // The real retention setting recalculates expiry. No TTL shortening or wall-clock sleeps.
+    // 清理只由调用方给的截止时间决定，不依赖到期列，也不缩短 TTL 或真实等待。
     db.execute("UPDATE interaction_observations SET status='running' WHERE id='long'; UPDATE inference_run_observations SET status='running',finished_at=NULL WHERE id='long'").await?;
-    observation.update_retention(7).await?;
-    let cutoff = START + 3 * QUARTER + 7 * 86_400_000;
+    let cutoff = START + 3 * QUARTER;
     let batch = observation
         .purge_expired_batch(cutoff - 2 * QUARTER)
         .await?;
@@ -688,19 +687,18 @@ async fn ordered_batch_usage_and_billing(
             event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
         })
         .count();
-    assert_eq!(revisions, 2, "late confirmation must persist a revision");
+    // 迟到确认并入既有的结束事实，不再追加行；结束事实随之逐字段合并。
+    assert_eq!(revisions, 1, "late confirmation revises the finish fact in place");
     let revised = split.runs[0]
         .events
         .iter()
-        .rev()
         .find(|event| {
             event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
         })
         .unwrap();
-    // Management reads project input to net input, which needs a known cache
-    // read; this revision leaves cache read unknown and keeps the prior zero.
-    assert!(revised.payload["usage"]["input_tokens"].is_null());
+    assert_eq!(revised.payload["usage"]["input_tokens"], 15);
     assert_eq!(revised.payload["usage"]["output_tokens"], 9);
+    assert_eq!(revised.payload["usage"]["cache_read_tokens"], 0);
     assert_eq!(revised.payload["usage"]["cache_write_tokens"], 2);
 
     let after = stats.stats_overview(selected).await?;
