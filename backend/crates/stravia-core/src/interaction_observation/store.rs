@@ -1776,29 +1776,6 @@ impl ObservationStore {
                     absorbs_batch_usage = finish_usage.is_some();
                 }
             }
-            if let RunEvent::UsageConfirmed {
-                attempt_id, usage, ..
-            } = run_event
-            {
-                let candidates: Vec<Vec<u8>> = match self {
-                    Self::Sqlite(pool, _) => sqlx::query_scalar("SELECT attrs FROM observation_events WHERE run_id=? AND kind='target_attempt_finished' ORDER BY sequence DESC").bind(run_id).fetch_all(pool).await?,
-                    Self::Postgres(pool, _) => sqlx::query_scalar("SELECT attrs FROM observation_events WHERE run_id=$1 AND kind='target_attempt_finished' ORDER BY sequence DESC").bind(run_id).fetch_all(pool).await?,
-                };
-                let mut terminal = None;
-                for bytes in candidates {
-                    let value: Value =
-                        serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?;
-                    if value["attempt_id"].as_str() == Some(attempt_id) {
-                        terminal = Some(value);
-                        break;
-                    }
-                }
-                if let Some(terminal) = terminal {
-                    payload = terminal;
-                    payload["usage"] = serde_json::to_value(usage)?;
-                    payload["kind"] = Value::String("target_attempt_finished".into());
-                }
-            }
             if let RunEvent::NativeCompactionAssociated {
                 source_generation_id,
                 source_operation_id,

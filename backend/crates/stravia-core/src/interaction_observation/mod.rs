@@ -1813,6 +1813,41 @@ mod snapshot_tests {
         )?)?)
     }
 
+    /// 公共重放视图：事件正文已按内容引用还原，测试只经此观察持久结果。
+    async fn replayed(observation: &InteractionObservation) -> anyhow::Result<Vec<types::ObservationEvent>> {
+        observation.flush().await?;
+        observation.inner.store.replay(0).await
+    }
+
+    fn events_of<'a>(
+        events: &'a [types::ObservationEvent],
+        run_id: Option<&str>,
+        kind: &str,
+    ) -> Vec<&'a types::ObservationEvent> {
+        events
+            .iter()
+            .filter(|event| event.kind == kind && run_id.is_none_or(|id| event.run_id.as_deref() == Some(id)))
+            .collect()
+    }
+
+    fn only_event<'a>(
+        events: &'a [types::ObservationEvent],
+        run_id: Option<&str>,
+        kind: &str,
+    ) -> &'a types::ObservationEvent {
+        let found = events_of(events, run_id, kind);
+        assert_eq!(found.len(), 1, "{kind} of {run_id:?}");
+        found[0]
+    }
+
+    /// 持久了对应 kind 的 Run，按事件顺序。
+    fn runs_with(events: &[types::ObservationEvent], kind: &str) -> Vec<String> {
+        events_of(events, None, kind)
+            .into_iter()
+            .filter_map(|event| event.run_id.clone())
+            .collect()
+    }
+
     async fn load_trace_values(snapshot: trace::TraceSnapshot) -> anyhow::Result<Vec<Value>> {
         tokio::task::spawn_blocking(move || {
             let mut values = Vec::new();
@@ -2677,10 +2712,8 @@ mod snapshot_tests {
         ).fetch_one(&pool).await?;
         assert_eq!(started, (turn_at, attempt_at));
 
-        let finish_payload: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE run_id='backlog-lifecycle' AND kind='run_finished'",
-        ).fetch_one(&pool).await?;
-        let finish_payload = stored_payload(&finish_payload)?;
+        let events = replayed(&observation).await?;
+        let finish_payload = &only_event(&events, Some("backlog-lifecycle"), "run_finished").payload;
         assert_eq!(
             finish_payload["delivery"]["status"].as_str(),
             Some("delivered")
@@ -2742,13 +2775,12 @@ mod snapshot_tests {
         drop(lock);
         observation.flush().await?;
 
-        let text_payload: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE run_id='backlog-text' AND kind='client_visible_content' ORDER BY sequence DESC LIMIT 1",
-        ).fetch_one(&pool).await?;
-        let text_payload = stored_payload(&text_payload)?;
-        let first_received_at = text_payload["first_received_at"]
-            .as_i64()
-            .expect("first received time");
+        let events = replayed(&observation).await?;
+        // 合并后的文本块事件的发生时间就是首次接收时间。
+        let first_received_at = events_of(&events, Some("backlog-text"), "client_visible_content")
+            .last()
+            .expect("visible text event")
+            .occurred_at;
         assert!(
             first_received_at <= delivered_at,
             "first text receive was sampled at writer dequeue: {first_received_at} > {delivered_at}"
@@ -2905,13 +2937,11 @@ mod snapshot_tests {
         assert_eq!(child_run.parent_run_id.as_deref(), Some(source.run_id()));
         assert_eq!(source_run.status, "superseded");
         assert_eq!(detail.interaction.status, "completed");
-        let finished: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_finished'",
-        )
-        .bind(source.run_id())
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(stored_payload(&finished)?["status"], "superseded");
+        let events = replayed(&observation).await?;
+        assert_eq!(
+            only_event(&events, Some(source.run_id()), "run_finished").payload["status"],
+            "superseded"
+        );
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -3027,13 +3057,11 @@ mod snapshot_tests {
         finish(&replay_run, "completed");
         observation.flush().await?;
 
-        let admitted: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_admitted'",
-        )
-        .bind(replay_run.run_id())
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(stored_payload(&admitted)?["grouping_reason"], "new_user");
+        let events = replayed(&observation).await?;
+        assert_eq!(
+            only_event(&events, Some(replay_run.run_id()), "run_admitted").payload["grouping_reason"],
+            "new_user"
+        );
         let replay_results: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM observation_events WHERE run_id=? AND kind='client_tool_result'",
         )
@@ -3057,13 +3085,9 @@ mod snapshot_tests {
             branch.publish_input_preview();
             finish(&branch, "completed");
             observation.flush().await?;
-            let result: Vec<u8> = sqlx::query_scalar(
-                "SELECT payload FROM observation_events WHERE run_id=? AND kind='client_tool_result'",
-            )
-            .bind(branch.run_id())
-            .fetch_one(&pool)
-            .await?;
-            assert_eq!(stored_payload(&result)?["content"], expected);
+            let events = replayed(&observation).await?;
+            let result = only_event(&events, Some(branch.run_id()), "client_tool_result");
+            assert_eq!(result.payload["results"][0]["content"], expected);
         }
         let results: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM observation_events WHERE kind='client_tool_result' AND tool_id='history-call'",
@@ -3259,12 +3283,14 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(standalone_usage, 0);
-        let terminal_attempt: Vec<u8> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE kind='target_attempt_finished' AND run_id='missing-finish' ORDER BY sequence DESC LIMIT 1")
-            .fetch_one(&pool).await?;
-        assert_eq!(
-            stored_payload(&terminal_attempt)?["usage"]["input_tokens"],
-            7
-        );
+        let events = replayed(&observation).await?;
+        let finished = events_of(&events, Some("missing-finish"), "model_turn_finished")
+            .into_iter()
+            .chain(events_of(&events, Some("missing-finish"), "target_attempt_finished"))
+            .next()
+            .expect("attempt finish fact");
+        let usage = finished.payload.get("attempt").map_or(&finished.payload, |attempt| attempt);
+        assert_eq!(usage["usage"]["input_tokens"], 7);
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -3527,19 +3553,14 @@ mod snapshot_tests {
         assert_eq!(rows[0].2.as_deref(), Some("burst-parent"));
         assert_eq!(rows[1].3, "completed");
         assert_eq!(rows[1].4.as_deref(), Some("burst-generation"));
-        let payload: Vec<u8> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='client_visible_content'")
-            .fetch_one(&pool).await?;
-        let payload = stored_payload(&payload)?;
-        assert_eq!(payload["text"], "文".repeat(16384));
-        assert_eq!(payload["block_id"], block_id);
-        assert_eq!(payload["complete"], true);
-        assert!(payload["first_received_at"].is_i64());
-        assert!(payload["receive_order"].is_u64());
-        let tool_payload: Vec<u8> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE run_id='burst-parent' AND kind='platform_tool_started'")
-            .fetch_one(&pool).await?;
-        let tool_payload = stored_payload(&tool_payload)?;
+        let events = replayed(&observation).await?;
+        let text = only_event(&events, Some("burst-parent"), "client_visible_content");
+        assert_eq!(text.payload["text"], "文".repeat(16384));
+        assert_eq!(text.payload["block_id"], block_id);
+        assert_eq!(text.payload["complete"], true);
+        let tool = only_event(&events, Some("burst-parent"), "platform_tool_started");
         assert!(
-            payload["receive_order"].as_u64() < tool_payload["receive_order"].as_u64(),
+            text.sequence < tool.sequence,
             "late canonical close must retain the text block's first reception order"
         );
         let volatile_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE run_id='burst-parent' AND kind IN ('client_visible_content_delta','client_output_committed')")
@@ -4086,16 +4107,9 @@ mod snapshot_tests {
         unknown.protect_secrets(["preview-secret"]);
         unknown.publish_input_preview();
         observation.flush().await?;
-        let previews: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT run_id,payload FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
-        )
-        .fetch_all(&pool)
-        .await?;
+        let events = replayed(&observation).await?;
         assert_eq!(
-            previews
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
+            runs_with(&events, "user_input_recorded"),
             [
                 "preview-initial",
                 "preview-fork",
@@ -4103,9 +4117,9 @@ mod snapshot_tests {
                 "preview-unavailable"
             ]
         );
-        for (_, payload) in previews {
+        for event in events_of(&events, None, "user_input_recorded") {
             assert!(
-                stored_payload(&payload)?["text"]
+                event.payload["text"]
                     .as_str()
                     .unwrap()
                     .contains("preview-secret")
@@ -4126,7 +4140,7 @@ mod snapshot_tests {
             );
             for run in &detail.runs {
                 for event in &run.events {
-                    if event.kind == "input_preview_recorded" {
+                    if event.kind == "user_input_recorded" {
                         queried_previews.push(run.id.clone());
                         assert!(event.payload.to_string().contains("preview-secret"));
                     }
@@ -4258,20 +4272,15 @@ mod snapshot_tests {
         });
         observation.flush().await?;
 
+        let events = replayed(&observation).await?;
         let payload = |kind: &str| {
-            let pool = pool.clone();
-            let kind = kind.to_owned();
-            async move {
-                let bytes: Vec<u8> = sqlx::query_scalar(
-                    "SELECT payload FROM observation_events WHERE run_id='credential-hit-bounds' AND kind=?",
-                )
-                .bind(kind)
-                .fetch_one(&pool)
-                .await?;
-                stored_payload(&bytes)
-            }
+            Ok::<_, anyhow::Error>(
+                only_event(&events, Some("credential-hit-bounds"), kind)
+                    .payload
+                    .clone(),
+            )
         };
-        let reused = payload("credential_mappings_reused").await?;
+        let reused = payload("credential_mappings_reused")?;
         let discovery = &reused["discoveries"][0];
         let locators = discovery["locators"].as_array().unwrap();
         assert_eq!(locators.len(), MAX_DISCOVERY_LOCATORS);
@@ -4291,7 +4300,7 @@ mod snapshot_tests {
             "占位符对所有 Run 记录"
         );
 
-        let created = payload("credential_mappings_created").await?;
+        let created = payload("credential_mappings_created")?;
         let locators = created["discoveries"][0]["locators"].as_array().unwrap();
         assert_eq!(locators.len(), 1);
         assert_eq!(locators[0]["latest_input"], false);
@@ -4354,21 +4363,15 @@ mod snapshot_tests {
             child.publish_input_preview();
         }
         observation.flush().await?;
-        let previews: Vec<String> = sqlx::query_scalar(
-            "SELECT run_id FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
-        )
-        .fetch_all(&pool)
-        .await?;
+        let events = replayed(&observation).await?;
         assert_eq!(
-            previews,
+            runs_with(&events, "user_input_recorded"),
             ["preview-verified-parent", "preview-verified-new-user"]
         );
-        let payload: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE kind='run_admitted' AND run_id='preview-verified-history'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(stored_payload(&payload)?["has_new_user"], false);
+        assert_eq!(
+            only_event(&events, Some("preview-verified-history"), "run_admitted").payload["has_new_user"],
+            false
+        );
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -4467,18 +4470,15 @@ mod snapshot_tests {
         });
         observation.flush().await?;
 
-        let previews: Vec<String> = sqlx::query_scalar(
-            "SELECT run_id FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
-        )
-        .fetch_all(&pool)
-        .await?;
-        assert_eq!(previews, ["image-root", "image-reminded"]);
-        let admitted: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE kind='run_admitted' AND run_id='image-rewritten'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(stored_payload(&admitted)?["has_new_user"], false);
+        let events = replayed(&observation).await?;
+        assert_eq!(
+            runs_with(&events, "user_input_recorded"),
+            ["image-root", "image-reminded"]
+        );
+        assert_eq!(
+            only_event(&events, Some("image-rewritten"), "run_admitted").payload["has_new_user"],
+            false
+        );
         observation.shutdown().await;
         pool.close().await;
         Ok(())
@@ -7087,14 +7087,9 @@ mod snapshot_tests {
                         .fetch_one(&pool)
                         .await?;
                 assert_eq!(status, "running");
-                let admitted_payload: Vec<u8> = sqlx::query_scalar(
-                    "SELECT payload FROM observation_events WHERE run_id=? AND kind='run_admitted'",
-                )
-                .bind(&id)
-                .fetch_one(&pool)
-                .await?;
+                let events = replayed(&observation).await?;
                 assert_eq!(
-                    stored_payload(&admitted_payload)?["grouping_reason"],
+                    only_event(&events, Some(&id), "run_admitted").payload["grouping_reason"],
                     reason,
                     "{id}"
                 );
@@ -7429,18 +7424,15 @@ mod snapshot_tests {
         observer.record(visible_item("public-answer", "public answer"));
         drop(observer);
         observation.flush().await?;
-        let rows: Vec<(String, Vec<u8>)> =
-            sqlx::query_as("SELECT kind, payload FROM observation_events ORDER BY sequence")
-                .fetch_all(&pool)
-                .await?;
-        let events: Vec<(String, Value)> = rows
+        let events: Vec<(String, Value)> = replayed(&observation)
+            .await?
             .into_iter()
-            .map(|(kind, payload)| (kind, stored_payload(&payload).expect("event payload")))
+            .map(|event| (event.kind, event.payload))
             .collect();
         let results: Vec<_> = events
             .iter()
             .filter(|event| event.0 == "client_tool_result")
-            .map(|event| &event.1)
+            .flat_map(|event| event.1["results"].as_array().into_iter().flatten())
             .collect();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0]["content"], "restored-tool-secret");
@@ -7483,10 +7475,11 @@ mod snapshot_tests {
             event.0.as_str(),
             "model_thinking_delta" | "model_thinking_finished" | "client_visible_content_delta"
         )));
-        let visible: String =
-            sqlx::query_scalar("SELECT visible_tail FROM interaction_observations")
-                .fetch_one(&pool)
-                .await?;
+        let visible: String = events
+            .iter()
+            .filter(|event| event.0 == "client_visible_content")
+            .filter_map(|event| event.1["text"].as_str())
+            .collect();
         assert_eq!(visible, "public answer");
         let stored = serde_json::to_string(&events)?;
         for retained in [
