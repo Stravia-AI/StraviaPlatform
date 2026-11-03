@@ -306,6 +306,23 @@ test('hovering a legend item enlarges its slice, dims the others and shows its v
     return box.width * box.height
   }
 
+  // 环形图挂载或数据切换时会用 300ms 补间展开；等扇区路径连续数帧不再变化后，再取静止面积作基线。
+  await expect(slice('cache-read')).toBeVisible()
+  await slice('cache-read').evaluate((path) => {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    let last = path.getAttribute('d')
+    let steadyFrames = 0
+    const sample = () => {
+      const current = path.getAttribute('d')
+      steadyFrames = current === last ? steadyFrames + 1 : 0
+      last = current
+      if (steadyFrames >= 3) resolve()
+      else requestAnimationFrame(sample)
+    }
+    requestAnimationFrame(sample)
+    return promise
+  })
+
   const before = await area('cache-read')
   await breakdown.getByRole('listitem').filter({ hasText: 'Cache read' }).hover()
   await expect(slice('cache-read')).toBeVisible()
@@ -313,7 +330,7 @@ test('hovering a legend item enlarges its slice, dims the others and shows its v
   await expect.poll(() => area('cache-read')).toBeGreaterThan(before)
   await expect(slice('input')).toHaveCSS('opacity', /^0\.[3-6]/)
   await expect(breakdown.getByText('320', { exact: true })).toBeVisible()
-  expect(await slice('cache-read').getAttribute('opacity')).toBe('1')
+  await expect(slice('cache-read')).toHaveCSS('opacity', '1')
 
   await page.mouse.move(5, 5)
   await expect.poll(() => area('cache-read')).toBeLessThanOrEqual(before + 0.5)

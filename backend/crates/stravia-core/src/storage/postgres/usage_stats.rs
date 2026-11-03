@@ -394,8 +394,7 @@ mod tests {
             id,
             turn_id,
             started_at,
-            "provider",
-            "Provider",
+            ("provider", "Provider"),
             input_tokens,
             cache_read_tokens,
         )
@@ -407,8 +406,7 @@ mod tests {
         id: &str,
         turn_id: &str,
         started_at: i64,
-        provider_id: &str,
-        provider_name: &str,
+        (provider_id, provider_name): (&str, &str),
         input_tokens: i64,
         cache_read_tokens: Option<i64>,
     ) -> anyhow::Result<()> {
@@ -1817,8 +1815,7 @@ mod tests {
                     "a-ok-attempt",
                     "a-ok",
                     recent,
-                    "provider-a",
-                    "provider-a",
+                    ("provider-a", "provider-a"),
                     10,
                     Some(4),
                 )
@@ -1840,8 +1837,7 @@ mod tests {
                     "b-ok-attempt",
                     "b-ok",
                     recent,
-                    "provider-b",
-                    "provider-b",
+                    ("provider-b", "provider-b"),
                     20,
                     Some(0),
                 )

@@ -994,8 +994,7 @@ mod tests {
 
     async fn insert_bucket(
         pool: &sqlx::SqlitePool,
-        scope: &str,
-        identity: &str,
+        (scope, identity): (&str, &str),
         bucket_start: i64,
         request_count: i64,
         upstream_request_count: i64,
@@ -1037,8 +1036,7 @@ mod tests {
         let start = end - 3_600_000;
         insert_bucket(
             &pool,
-            "provider",
-            "provider-a",
+            ("provider", "provider-a"),
             start,
             0,
             1,
@@ -1046,8 +1044,8 @@ mod tests {
             1,
         )
         .await?;
-        insert_bucket(&pool, "provider", "provider-b", start, 0, 1, 0, 0).await?;
-        insert_bucket(&pool, "api_key", "key-a", start, 1, 0, 500_000_000, 1).await?;
+        insert_bucket(&pool, ("provider", "provider-b"), start, 0, 1, 0, 0).await?;
+        insert_bucket(&pool, ("api_key", "key-a"), start, 1, 0, 500_000_000, 1).await?;
         // 365/12 天月价 2,628,000 USD 即每秒 1 USD；一小时窗口摊销 3,600 USD。
         for (id, provider_id) in [("plan-a", "provider-a"), ("plan-b", "provider-b")] {
             sqlx::query(
