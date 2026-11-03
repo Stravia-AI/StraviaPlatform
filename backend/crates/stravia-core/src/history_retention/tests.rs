@@ -565,6 +565,164 @@ impl Fixture {
             })
     }
 
+    // --- Observation 写入 ---
+
+    /// 经 Observation 领域入口写一段交互：来源 Run 的用户输入与可见输出块，
+    /// 续接 Run 的客户端工具结果（均引用正文）。返回续接 Run 的 id。
+    async fn observe(&self, input: &str, visible: &str, tool_output: &str) -> String {
+        use crate::interaction_observation::{
+            AdmissionFacts, IngressStart, RunEvent, RunOutcome, RunStart,
+        };
+
+        let observation = &self.maintenance.observation;
+        let user = |text: &str| AiItem {
+            role: Role::User,
+            content: MessageContent::Text(Arc::new(text.to_owned())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let admit = |id: &str, items: Vec<AiItem>, parent: Option<&str>, new_user: bool| {
+            observation
+                .observe_ingress(IngressStart {
+                    id: id.into(),
+                    method: "POST".into(),
+                    path: "/v1/responses".into(),
+                    protocol: "responses".into(),
+                })
+                .admit(
+                    RunStart {
+                        id: id.into(),
+                        principal: self.owner.continuation_key(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    },
+                    AdmissionFacts {
+                        client_request: Arc::new(AiRequest::new("model", items)),
+                        has_new_user: new_user,
+                        has_matching_pending_tool_result: parent.is_some(),
+                        generation_root_id: parent.map(str::to_owned),
+                        generation_parent_id: parent.map(str::to_owned),
+                    },
+                )
+        };
+        let finish = |run: &crate::interaction_observation::RunObserver,
+                      node: &str,
+                      status: &str| {
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: Some(now_ms()),
+                status: status.into(),
+                terminal_reason: None,
+                generation_node_id: Some(node.to_owned()),
+                generation_root_id: Some(node.to_owned()),
+            });
+        };
+
+        let tool_id = self.unique("observed-call");
+        let source_node = self.commit(None, &Refs::default()).await;
+        let question = user(input);
+        let call = AiItem::function_call(ToolCall {
+            id: tool_id.clone().into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        });
+        let source = admit(
+            &self.unique("observed-source"),
+            vec![question.clone()],
+            None,
+            true,
+        );
+        // 用户输入随 Turn 开始阶段一起落盘，所以来源 Run 要有完整的 Turn 与 attempt。
+        source.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: "observed-turn".into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        source.capture_input_preview(std::slice::from_ref(&question));
+        source.publish_input_preview();
+        source.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: "observed-turn".into(),
+            attempt_id: "observed-attempt".into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://127.0.0.1".into(),
+            cost_basis: None,
+        });
+        let block_id = self.unique("observed-block");
+        source.record(RunEvent::ClientVisibleContent {
+            text: visible.to_owned(),
+            parts: vec![serde_json::json!({"type": "text", "text": visible})],
+            block_id: block_id.clone(),
+            item: serde_json::json!({"id": block_id, "role": "assistant", "content": visible}),
+            complete: true,
+        });
+        source.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: "observed-turn".into(),
+            attempt_id: "observed-attempt".into(),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 10,
+            first_token_ms: None,
+            usage: None,
+            amounts: None,
+        });
+        source.record(RunEvent::ModelTurnFinished {
+            retention_detached: false,
+            model_turn_id: "observed-turn".into(),
+            status: "completed".into(),
+        });
+        source.record(RunEvent::ClientToolHandoff {
+            tool_id: tool_id.clone(),
+            name: "probe".into(),
+            input: None,
+        });
+        source.observe_client_completion(
+            std::slice::from_ref(&question),
+            std::slice::from_ref(&call),
+            now_ms(),
+            true,
+        );
+        finish(&source, &source_node, "waiting_client");
+
+        let items = vec![
+            question,
+            call,
+            AiItem::function_call_output(tool_id.as_str(), serde_json::json!(tool_output)),
+        ];
+        let followup_id = self.unique("observed-followup");
+        let followup = admit(&followup_id, items.clone(), Some(&source_node), false);
+        followup.capture_client_tool_results(&items);
+        followup.publish_input_preview();
+        finish(&followup, &source_node, "completed");
+        observation.flush().await.expect("observation flush");
+        followup_id
+    }
+
+    /// 经公共查询读取：森林里是否还有交互。
+    async fn observed_interactions(&self) -> usize {
+        self.maintenance
+            .observation
+            .query_forest(crate::interaction_observation::ForestQuery::default())
+            .await
+            .expect("observation forest")
+            .roots
+            .iter()
+            .map(|root| root.interactions.len())
+            .sum()
+    }
+
     // --- 不变量用的行数 ---
 
     async fn count(&self, table: &str) -> i64 {
@@ -1263,6 +1421,47 @@ both_backends!(
     shared_content_lives_until_its_last_referrer_is_gone
 );
 
+/// Observation 引用的正文与 Turn 共享：Turn 先过期时正文留给仍在期内的交互，
+/// 交互也被清理后正文随之回收；可见输出与工具结果正文随交互一并回收。
+async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
+    let n = fx.window();
+    let shared = "observation shared body ".repeat(30);
+    let visible = "observation visible body ".repeat(31);
+    let tool_output = "observation tool output ".repeat(27);
+    let node = fx.commit(None, &Refs::answer(&shared)).await;
+    let t_node = fx.tick().await;
+    fx.observe(&shared, &visible, &tool_output).await;
+    let t_observed = fx.tick().await;
+    assert!(fx.observed_interactions().await > 0, "interaction is readable");
+    assert_eq!(fx.text_body_rows(shared.len()).await, 1, "one shared body row");
+    assert_eq!(fx.text_body_rows(visible.len()).await, 1);
+    assert_eq!(fx.text_body_rows(tool_output.len()).await, 1);
+
+    fx.sweep_to_completion(t_node + n).await;
+    assert!(!fx.turn_readable(&node).await);
+    assert!(
+        fx.observed_interactions().await > 0,
+        "the interaction was active after the node was written"
+    );
+    assert_eq!(
+        fx.text_body_rows(shared.len()).await,
+        1,
+        "the observed input still references the shared body"
+    );
+
+    fx.sweep_to_completion(t_observed + n).await;
+    assert_eq!(fx.observed_interactions().await, 0);
+    for body in [&shared, &visible, &tool_output] {
+        assert_eq!(fx.text_body_rows(body.len()).await, 0, "last referrer removed");
+    }
+}
+both_backends!(
+    sqlite_observation_content_lives_until_its_interaction_is_swept,
+    postgres_observation_content_lives_until_its_interaction_is_swept,
+    1,
+    observation_content_lives_until_its_interaction_is_swept
+);
+
 /// 不变量：`now` 越过所有下限并扫完后，节点、Marker、映射、压缩登记、正文、正文范围
 /// 与所有回收队列都为空。任何一种引用关系缺少释放触发器，都会在这里留下残余。
 async fn nothing_is_left_behind_once_every_floor_has_passed(fx: Fixture) {
@@ -1336,6 +1535,15 @@ async fn nothing_is_left_behind_once_every_floor_has_passed(fx: Fixture) {
     // 之后它们只能靠引用释放触发器重新入队，缺任何一条都会在最后留下残余。
     fx.sweep(t_deps + fx.window()).await;
 
+    // Observation 的交互与正文：用户输入与 Turn/Marker 共用一份正文，另有可见输出与工具结果。
+    // 在提前扫描之后才写入，保证它们在最终扫描前一直在期内。
+    fx.observe(
+        &shared,
+        "invariant observed visible body",
+        "invariant observed tool output",
+    )
+    .await;
+
     let t_end = fx.tick().await;
 
     for table in [
@@ -1344,6 +1552,12 @@ async fn nothing_is_left_behind_once_every_floor_has_passed(fx: Fixture) {
         "reversible_redaction_mappings",
         "native_compactions",
         "contents",
+        "interaction_observations",
+        "inference_run_observations",
+        "observation_events",
+        "observation_blocks",
+        "observation_event_contents",
+        "observation_tool_results",
     ] {
         assert!(
             fx.count(table).await > 0,
@@ -1367,6 +1581,13 @@ async fn nothing_is_left_behind_once_every_floor_has_passed(fx: Fixture) {
         "native_compaction_sources",
         "native_compaction_states",
         "public_tool_executions",
+        "interaction_observations",
+        "inference_run_observations",
+        "rejected_request_observations",
+        "observation_events",
+        "observation_blocks",
+        "observation_event_contents",
+        "observation_tool_results",
         "contents",
         "content_scopes",
     ]
