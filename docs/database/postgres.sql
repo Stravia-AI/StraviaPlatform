@@ -58,6 +58,65 @@ END $$;
 
 
 --
+-- Name: native_compaction_sources_release(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.native_compaction_sources_release() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.source_id <> OLD.record_id THEN
+        PERFORM 1 FROM native_compactions WHERE id = OLD.source_id FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (SELECT 1 FROM native_compaction_sources WHERE source_id = OLD.source_id) THEN
+            INSERT INTO native_compaction_gc(record_id) VALUES (OLD.source_id)
+            ON CONFLICT (record_id) DO NOTHING;
+        END IF;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
+-- Name: native_compactions_release_source_node(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.native_compactions_release_source_node() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.source_generation_id IS NOT NULL THEN
+        PERFORM 1 FROM turn_nodes WHERE id = OLD.source_generation_id FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (
+            SELECT 1 FROM native_compactions c
+            WHERE c.source_generation_id = OLD.source_generation_id
+        ) THEN
+            INSERT INTO turn_node_gc(node_pk)
+            SELECT n.node_pk FROM turn_nodes n WHERE n.id = OLD.source_generation_id
+            ON CONFLICT (node_pk) DO NOTHING;
+        END IF;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
+-- Name: public_tool_executions_release_marker(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.public_tool_executions_release_marker() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM 1 FROM history_markers WHERE reference = OLD.marker_reference FOR NO KEY UPDATE;
+    IF FOUND THEN
+        INSERT INTO history_marker_gc(reference) VALUES (OLD.marker_reference)
+        ON CONFLICT (reference) DO NOTHING;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
 -- Name: retain_terminal_tool_execution(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1091,6 +1150,76 @@ WHERE (
 END $$;
 
 
+--
+-- Name: turn_node_compactions_release(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.turn_node_compactions_release() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM 1 FROM native_compactions WHERE id = OLD.record_id FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_compactions WHERE record_id = OLD.record_id) THEN
+        INSERT INTO native_compaction_gc(record_id) VALUES (OLD.record_id)
+        ON CONFLICT (record_id) DO NOTHING;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
+-- Name: turn_node_markers_release(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.turn_node_markers_release() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM 1 FROM history_markers WHERE reference = OLD.reference FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_markers WHERE reference = OLD.reference) THEN
+        INSERT INTO history_marker_gc(reference) VALUES (OLD.reference)
+        ON CONFLICT (reference) DO NOTHING;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
+-- Name: turn_node_redaction_mappings_release(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.turn_node_redaction_mappings_release() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM 1 FROM reversible_redaction_mappings WHERE reference = OLD.reference FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_redaction_mappings WHERE reference = OLD.reference) THEN
+        INSERT INTO redaction_mapping_gc(reference) VALUES (OLD.reference)
+        ON CONFLICT (reference) DO NOTHING;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
+--
+-- Name: turn_nodes_release_parent(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.turn_nodes_release_parent() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.parent_pk IS NOT NULL THEN
+        PERFORM 1 FROM turn_nodes WHERE node_pk = OLD.parent_pk FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_nodes WHERE parent_pk = OLD.parent_pk) THEN
+            INSERT INTO turn_node_gc(node_pk) VALUES (OLD.parent_pk)
+            ON CONFLICT (node_pk) DO NOTHING;
+        END IF;
+    END IF;
+    RETURN OLD;
+END $$;
+
+
 SET default_table_access_method = heap;
 
 --
@@ -1265,6 +1394,57 @@ CREATE TABLE public.artifacts (
 
 
 --
+-- Name: content_gc; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.content_gc (
+    content_id bigint NOT NULL
+);
+
+
+--
+-- Name: content_scopes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.content_scopes (
+    id bigint NOT NULL,
+    principal text NOT NULL
+);
+
+
+--
+-- Name: contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.contents (
+    id bigint NOT NULL,
+    scope_id bigint NOT NULL,
+    digest bytea NOT NULL,
+    format smallint NOT NULL,
+    raw_len bigint NOT NULL,
+    body bytea NOT NULL,
+    CONSTRAINT contents_digest_check CHECK ((octet_length(digest) = 32)),
+    CONSTRAINT contents_format_check CHECK ((format = ANY (ARRAY[0, 1]))),
+    CONSTRAINT contents_raw_len_check CHECK ((raw_len >= 0))
+);
+ALTER TABLE ONLY public.contents ALTER COLUMN body SET STORAGE EXTERNAL;
+
+
+--
+-- Name: contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.contents ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME public.contents_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: credential_custom_rules; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1295,6 +1475,27 @@ CREATE TABLE public.credential_mapping_reuses (
 
 
 --
+-- Name: history_marker_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.history_marker_contents (
+    reference text NOT NULL,
+    ordinal bigint NOT NULL,
+    content_id bigint NOT NULL,
+    CONSTRAINT history_marker_contents_ordinal_check CHECK ((ordinal >= 0))
+);
+
+
+--
+-- Name: history_marker_gc; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.history_marker_gc (
+    reference text NOT NULL
+);
+
+
+--
 -- Name: history_markers; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1305,7 +1506,6 @@ CREATE TABLE public.history_markers (
     activity text NOT NULL,
     tool_id text,
     call_payload text,
-    segment_payload text,
     execution_state text,
     execution_owner text,
     lease_expires_at bigint,
@@ -1313,10 +1513,23 @@ CREATE TABLE public.history_markers (
     published_at bigint,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
-    expires_at bigint NOT NULL,
+    segment_payload bytea,
+    pending_until bigint,
     CONSTRAINT history_markers_check CHECK ((((kind = 'thinking'::text) AND (tool_id IS NULL) AND (call_payload IS NULL) AND (execution_state IS NULL) AND (segment_payload IS NOT NULL)) OR ((kind = 'platform'::text) AND (tool_id IS NOT NULL) AND (call_payload IS NOT NULL) AND (execution_state IS NOT NULL) AND (execution_deadline IS NOT NULL)))),
     CONSTRAINT history_markers_execution_state_check CHECK (((execution_state IS NULL) OR (execution_state = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text, 'interrupted'::text])))),
-    CONSTRAINT history_markers_kind_check CHECK ((kind = ANY (ARRAY['platform'::text, 'thinking'::text])))
+    CONSTRAINT history_markers_kind_check CHECK ((kind = ANY (ARRAY['platform'::text, 'thinking'::text]))),
+    CONSTRAINT history_markers_pending_until_check CHECK (((published_at IS NULL) OR (pending_until IS NULL)))
+);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN segment_payload SET STORAGE EXTERNAL;
+
+
+--
+-- Name: history_retention_watermarks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.history_retention_watermarks (
+    name text NOT NULL,
+    "position" bigint NOT NULL
 );
 
 
@@ -1343,11 +1556,15 @@ CREATE TABLE public.inference_run_observations (
     last_active_at bigint NOT NULL,
     finished_at bigint,
     last_event_sequence bigint DEFAULT 0 NOT NULL,
-    expires_at bigint NOT NULL,
     failure_json text,
     request_model text,
     delivery_completed_at bigint,
     rejected_before_target boolean DEFAULT false NOT NULL,
+    inferred_retry boolean DEFAULT false NOT NULL,
+    grouping_reason text,
+    diagnostic_source_run_id text,
+    has_new_user boolean DEFAULT false NOT NULL,
+    superseded_by text,
     CONSTRAINT inference_run_background_active_contract CHECK ((background_active >= 0))
 );
 
@@ -1370,11 +1587,9 @@ CREATE TABLE public.interaction_observations (
     status text NOT NULL,
     started_at bigint NOT NULL,
     last_active_at bigint NOT NULL,
-    visible_tail text DEFAULT ''::text NOT NULL,
     observation_gap boolean DEFAULT false NOT NULL,
     last_event_sequence bigint DEFAULT 0 NOT NULL,
-    expires_at bigint NOT NULL,
-    input_preview text
+    input_sequence bigint
 );
 
 
@@ -1484,6 +1699,15 @@ CREATE TABLE public.models (
 
 
 --
+-- Name: native_compaction_gc; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.native_compaction_gc (
+    record_id text NOT NULL
+);
+
+
+--
 -- Name: native_compaction_sources; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1518,9 +1742,40 @@ CREATE TABLE public.native_compactions (
     operation_id text NOT NULL,
     payload text NOT NULL,
     created_at bigint NOT NULL,
-    delivered_at bigint,
-    referenced_at bigint,
-    expires_at bigint NOT NULL
+    pending_until bigint,
+    confirmed_at bigint,
+    CONSTRAINT native_compactions_confirmation_check CHECK (((confirmed_at IS NULL) OR (pending_until IS NULL)))
+);
+
+
+--
+-- Name: observation_blocks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.observation_blocks (
+    sequence bigint NOT NULL,
+    interaction_id text NOT NULL,
+    run_id text NOT NULL,
+    model_turn_id text,
+    attempt_id text,
+    item_ordinal bigint NOT NULL,
+    channel text NOT NULL,
+    complete boolean NOT NULL,
+    envelope bytea,
+    CONSTRAINT observation_blocks_channel_check CHECK ((channel = ANY (ARRAY['thinking'::text, 'visible'::text]))),
+    CONSTRAINT observation_blocks_item_ordinal_check CHECK ((item_ordinal >= 0))
+);
+
+
+--
+-- Name: observation_event_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.observation_event_contents (
+    sequence bigint NOT NULL,
+    ordinal bigint NOT NULL,
+    content_id bigint NOT NULL,
+    CONSTRAINT observation_event_contents_ordinal_check CHECK ((ordinal >= 0))
 );
 
 
@@ -1547,12 +1802,10 @@ CREATE TABLE public.observation_events (
     run_id text,
     rejection_id text,
     kind text NOT NULL,
-    payload bytea NOT NULL,
-    expires_at bigint NOT NULL,
     tool_id text,
-    operation_id text
+    operation_id text,
+    attrs bytea
 );
-ALTER TABLE ONLY public.observation_events ALTER COLUMN payload SET STORAGE EXTERNAL;
 
 
 --
@@ -1579,6 +1832,20 @@ CREATE TABLE public.observation_tail_sources (
     last_unit_hash text NOT NULL,
     generation_node_id text,
     expires_at bigint NOT NULL
+);
+
+
+--
+-- Name: observation_tool_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.observation_tool_results (
+    sequence bigint NOT NULL,
+    ordinal bigint NOT NULL,
+    tool_id text NOT NULL,
+    is_error boolean NOT NULL,
+    content_id bigint NOT NULL,
+    CONSTRAINT observation_tool_results_ordinal_check CHECK ((ordinal >= 0))
 );
 
 
@@ -1816,6 +2083,15 @@ CREATE TABLE public.public_tool_executions (
 
 
 --
+-- Name: redaction_mapping_gc; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.redaction_mapping_gc (
+    reference text NOT NULL
+);
+
+
+--
 -- Name: rejected_request_observations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1830,7 +2106,6 @@ CREATE TABLE public.rejected_request_observations (
     status_code bigint NOT NULL,
     debug_enabled boolean NOT NULL,
     last_event_sequence bigint NOT NULL,
-    expires_at bigint NOT NULL,
     failure_json text,
     request_model text,
     api_key_id text,
@@ -1851,8 +2126,9 @@ CREATE TABLE public.reversible_redaction_mappings (
     published_at bigint,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
-    expires_at bigint NOT NULL,
-    rule_ids text DEFAULT '[]'::text NOT NULL
+    rule_ids text DEFAULT '[]'::text NOT NULL,
+    pending_until bigint,
+    CONSTRAINT reversible_redaction_mappings_pending_until_check CHECK (((published_at IS NULL) OR (pending_until IS NULL)))
 );
 
 
@@ -2952,39 +3228,12 @@ UNION ALL
 
 
 --
--- Name: turn_content_gc; Type: TABLE; Schema: public; Owner: -
+-- Name: turn_node_compactions; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.turn_content_gc (
-    content_id bigint NOT NULL
-);
-
-
---
--- Name: turn_contents; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.turn_contents (
-    id bigint NOT NULL,
-    scope_id bigint NOT NULL,
-    digest bytea NOT NULL,
-    content bytea NOT NULL,
-    CONSTRAINT turn_contents_digest_check CHECK ((octet_length(digest) = 32))
-);
-ALTER TABLE ONLY public.turn_contents ALTER COLUMN content SET STORAGE EXTERNAL;
-
-
---
--- Name: turn_contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-ALTER TABLE public.turn_contents ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
-    SEQUENCE NAME public.turn_contents_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
+CREATE TABLE public.turn_node_compactions (
+    node_pk bigint NOT NULL,
+    record_id text NOT NULL
 );
 
 
@@ -2997,7 +3246,7 @@ CREATE TABLE public.turn_node_contents (
     scope_id bigint NOT NULL,
     ordinal bigint NOT NULL,
     content_id bigint NOT NULL,
-    CONSTRAINT turn_node_contents_ordinal_check CHECK ((ordinal >= 0))
+    CONSTRAINT turn_node_contents_v4_ordinal_check CHECK ((ordinal >= 0))
 );
 
 
@@ -3007,6 +3256,16 @@ CREATE TABLE public.turn_node_contents (
 
 CREATE TABLE public.turn_node_gc (
     node_pk bigint NOT NULL
+);
+
+
+--
+-- Name: turn_node_markers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_markers (
+    node_pk bigint NOT NULL,
+    reference text NOT NULL
 );
 
 
@@ -3022,12 +3281,21 @@ ALTER TABLE ONLY public.turn_node_payloads ALTER COLUMN payload SET STORAGE EXTE
 
 
 --
+-- Name: turn_node_redaction_mappings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.turn_node_redaction_mappings (
+    node_pk bigint NOT NULL,
+    reference text NOT NULL
+);
+
+
+--
 -- Name: turn_node_retention; Type: TABLE; Schema: public; Owner: -
 --
 
 CREATE TABLE public.turn_node_retention (
     node_pk bigint NOT NULL,
-    expires_at bigint NOT NULL,
     deleting boolean DEFAULT false NOT NULL
 );
 
@@ -3071,20 +3339,10 @@ ALTER TABLE public.turn_nodes ALTER COLUMN node_pk ADD GENERATED BY DEFAULT AS I
 
 
 --
--- Name: turn_scopes; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.turn_scopes (
-    id bigint NOT NULL,
-    principal text NOT NULL
-);
-
-
---
 -- Name: turn_scopes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
-ALTER TABLE public.turn_scopes ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+ALTER TABLE public.content_scopes ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
     SEQUENCE NAME public.turn_scopes_id_seq
     START WITH 1
     INCREMENT BY 1
@@ -3280,6 +3538,38 @@ ALTER TABLE ONLY public.artifacts
 
 
 --
+-- Name: content_gc content_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_gc
+    ADD CONSTRAINT content_gc_pkey PRIMARY KEY (content_id);
+
+
+--
+-- Name: contents contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contents
+    ADD CONSTRAINT contents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: contents contents_scope_id_digest_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contents
+    ADD CONSTRAINT contents_scope_id_digest_key UNIQUE (scope_id, digest);
+
+
+--
+-- Name: contents contents_scope_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contents
+    ADD CONSTRAINT contents_scope_id_id_key UNIQUE (scope_id, id);
+
+
+--
 -- Name: credential_custom_rules credential_custom_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3296,11 +3586,43 @@ ALTER TABLE ONLY public.credential_mapping_reuses
 
 
 --
+-- Name: history_marker_contents history_marker_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_contents
+    ADD CONSTRAINT history_marker_contents_pkey PRIMARY KEY (reference, ordinal);
+
+
+--
+-- Name: history_marker_contents history_marker_contents_reference_content_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_contents
+    ADD CONSTRAINT history_marker_contents_reference_content_id_key UNIQUE (reference, content_id);
+
+
+--
+-- Name: history_marker_gc history_marker_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_gc
+    ADD CONSTRAINT history_marker_gc_pkey PRIMARY KEY (reference);
+
+
+--
 -- Name: history_markers history_markers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.history_markers
     ADD CONSTRAINT history_markers_pkey PRIMARY KEY (reference);
+
+
+--
+-- Name: history_retention_watermarks history_retention_watermarks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_retention_watermarks
+    ADD CONSTRAINT history_retention_watermarks_pkey PRIMARY KEY (name);
 
 
 --
@@ -3360,6 +3682,14 @@ ALTER TABLE ONLY public.models
 
 
 --
+-- Name: native_compaction_gc native_compaction_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.native_compaction_gc
+    ADD CONSTRAINT native_compaction_gc_pkey PRIMARY KEY (record_id);
+
+
+--
 -- Name: native_compaction_sources native_compaction_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3384,6 +3714,22 @@ ALTER TABLE ONLY public.native_compactions
 
 
 --
+-- Name: observation_blocks observation_blocks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_blocks
+    ADD CONSTRAINT observation_blocks_pkey PRIMARY KEY (sequence);
+
+
+--
+-- Name: observation_event_contents observation_event_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_event_contents
+    ADD CONSTRAINT observation_event_contents_pkey PRIMARY KEY (sequence, ordinal);
+
+
+--
 -- Name: observation_events observation_events_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3405,6 +3751,14 @@ ALTER TABLE ONLY public.observation_pending_tools
 
 ALTER TABLE ONLY public.observation_tail_sources
     ADD CONSTRAINT observation_tail_sources_pkey PRIMARY KEY (run_id);
+
+
+--
+-- Name: observation_tool_results observation_tool_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tool_results
+    ADD CONSTRAINT observation_tool_results_pkey PRIMARY KEY (sequence, ordinal);
 
 
 --
@@ -3496,6 +3850,14 @@ ALTER TABLE ONLY public.public_tool_executions
 
 
 --
+-- Name: redaction_mapping_gc redaction_mapping_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.redaction_mapping_gc
+    ADD CONSTRAINT redaction_mapping_gc_pkey PRIMARY KEY (reference);
+
+
+--
 -- Name: rejected_request_observations rejected_request_observations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3544,35 +3906,11 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_content_gc turn_content_gc_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_node_compactions turn_node_compactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_content_gc
-    ADD CONSTRAINT turn_content_gc_pkey PRIMARY KEY (content_id);
-
-
---
--- Name: turn_contents turn_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_contents
-    ADD CONSTRAINT turn_contents_pkey PRIMARY KEY (id);
-
-
---
--- Name: turn_contents turn_contents_scope_id_digest_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_contents
-    ADD CONSTRAINT turn_contents_scope_id_digest_key UNIQUE (scope_id, digest);
-
-
---
--- Name: turn_contents turn_contents_scope_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.turn_contents
-    ADD CONSTRAINT turn_contents_scope_id_id_key UNIQUE (scope_id, id);
+ALTER TABLE ONLY public.turn_node_compactions
+    ADD CONSTRAINT turn_node_compactions_pkey PRIMARY KEY (node_pk, record_id);
 
 
 --
@@ -3600,11 +3938,27 @@ ALTER TABLE ONLY public.turn_node_gc
 
 
 --
+-- Name: turn_node_markers turn_node_markers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_markers
+    ADD CONSTRAINT turn_node_markers_pkey PRIMARY KEY (node_pk, reference);
+
+
+--
 -- Name: turn_node_payloads turn_node_payloads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.turn_node_payloads
     ADD CONSTRAINT turn_node_payloads_pkey PRIMARY KEY (node_pk);
+
+
+--
+-- Name: turn_node_redaction_mappings turn_node_redaction_mappings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_redaction_mappings
+    ADD CONSTRAINT turn_node_redaction_mappings_pkey PRIMARY KEY (node_pk, reference);
 
 
 --
@@ -3648,18 +4002,18 @@ ALTER TABLE ONLY public.turn_nodes
 
 
 --
--- Name: turn_scopes turn_scopes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: content_scopes turn_scopes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_scopes
+ALTER TABLE ONLY public.content_scopes
     ADD CONSTRAINT turn_scopes_pkey PRIMARY KEY (id);
 
 
 --
--- Name: turn_scopes turn_scopes_principal_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: content_scopes turn_scopes_principal_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_scopes
+ALTER TABLE ONLY public.content_scopes
     ADD CONSTRAINT turn_scopes_principal_key UNIQUE (principal);
 
 
@@ -3708,6 +4062,27 @@ ALTER TABLE ONLY public.web_providers
 --
 
 CREATE INDEX credential_mapping_reuses_interaction_idx ON public.credential_mapping_reuses USING btree (interaction_id);
+
+
+--
+-- Name: history_marker_contents_content_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX history_marker_contents_content_idx ON public.history_marker_contents USING btree (content_id);
+
+
+--
+-- Name: history_markers_pending_until_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX history_markers_pending_until_idx ON public.history_markers USING btree (pending_until);
+
+
+--
+-- Name: history_markers_published_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX history_markers_published_at_idx ON public.history_markers USING btree (published_at);
 
 
 --
@@ -3767,13 +4142,6 @@ CREATE INDEX idx_history_markers_execution ON public.history_markers USING btree
 
 
 --
--- Name: idx_history_markers_expiry; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_history_markers_expiry ON public.history_markers USING btree (expires_at);
-
-
---
 -- Name: idx_history_markers_principal_reference; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3820,13 +4188,6 @@ CREATE INDEX idx_native_compaction_state_fingerprint ON public.native_compaction
 --
 
 CREATE INDEX idx_native_compaction_state_identity ON public.native_compaction_states USING btree (principal, native_identity);
-
-
---
--- Name: idx_native_compactions_expiry; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_native_compactions_expiry ON public.native_compactions USING btree (expires_at);
 
 
 --
@@ -3886,17 +4247,10 @@ CREATE INDEX idx_provider_models_provider_state ON public.provider_models USING 
 
 
 --
--- Name: idx_reversible_redaction_mappings_expiry; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_reversible_redaction_mappings_principal_pending; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_reversible_redaction_mappings_expiry ON public.reversible_redaction_mappings USING btree (expires_at);
-
-
---
--- Name: idx_reversible_redaction_mappings_principal_expiry; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_reversible_redaction_mappings_principal_expiry ON public.reversible_redaction_mappings USING btree (principal, expires_at);
+CREATE INDEX idx_reversible_redaction_mappings_principal_pending ON public.reversible_redaction_mappings USING btree (principal, pending_until);
 
 
 --
@@ -3949,10 +4303,10 @@ CREATE INDEX inference_runs_status_idx ON public.inference_run_observations USIN
 
 
 --
--- Name: interaction_observations_expiry_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: interaction_observations_activity_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX interaction_observations_expiry_idx ON public.interaction_observations USING btree (expires_at, id);
+CREATE INDEX interaction_observations_activity_idx ON public.interaction_observations USING btree (last_active_at, id);
 
 
 --
@@ -4012,10 +4366,38 @@ CREATE INDEX model_turns_run_status_idx ON public.model_turn_observations USING 
 
 
 --
+-- Name: native_compactions_confirmed_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX native_compactions_confirmed_at_idx ON public.native_compactions USING btree (confirmed_at);
+
+
+--
 -- Name: native_compactions_generation_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX native_compactions_generation_idx ON public.native_compactions USING btree (source_generation_id) WHERE (source_generation_id IS NOT NULL);
+
+
+--
+-- Name: native_compactions_pending_until_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX native_compactions_pending_until_idx ON public.native_compactions USING btree (pending_until);
+
+
+--
+-- Name: observation_blocks_channel_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_blocks_channel_idx ON public.observation_blocks USING btree (interaction_id, channel, sequence DESC);
+
+
+--
+-- Name: observation_event_contents_content_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_event_contents_content_idx ON public.observation_event_contents USING btree (content_id);
 
 
 --
@@ -4117,6 +4499,20 @@ CREATE INDEX observation_tail_sources_interaction_idx ON public.observation_tail
 
 
 --
+-- Name: observation_tool_results_content_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_tool_results_content_idx ON public.observation_tool_results USING btree (content_id);
+
+
+--
+-- Name: observation_tool_results_tool_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_tool_results_tool_idx ON public.observation_tool_results USING btree (tool_id, sequence);
+
+
+--
 -- Name: provider_cost_plans_effective; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4145,17 +4541,24 @@ CREATE INDEX rejected_requests_client_error_window_idx ON public.rejected_reques
 
 
 --
--- Name: rejected_requests_expiry_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX rejected_requests_expiry_idx ON public.rejected_request_observations USING btree (expires_at, id);
-
-
---
 -- Name: rejected_requests_window_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX rejected_requests_window_idx ON public.rejected_request_observations USING btree (occurred_at DESC, id);
+
+
+--
+-- Name: reversible_redaction_mappings_pending_until_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reversible_redaction_mappings_pending_until_idx ON public.reversible_redaction_mappings USING btree (pending_until);
+
+
+--
+-- Name: reversible_redaction_mappings_published_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reversible_redaction_mappings_published_at_idx ON public.reversible_redaction_mappings USING btree (published_at);
 
 
 --
@@ -4201,6 +4604,13 @@ CREATE INDEX target_attempts_upstream_error_window_idx ON public.target_attempt_
 
 
 --
+-- Name: turn_node_compactions_record_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_node_compactions_record_idx ON public.turn_node_compactions USING btree (record_id);
+
+
+--
 -- Name: turn_node_contents_content_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4208,10 +4618,24 @@ CREATE INDEX turn_node_contents_content_idx ON public.turn_node_contents USING b
 
 
 --
--- Name: turn_node_retention_expiry_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: turn_node_markers_reference_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX turn_node_retention_expiry_idx ON public.turn_node_retention USING btree (expires_at, node_pk);
+CREATE INDEX turn_node_markers_reference_idx ON public.turn_node_markers USING btree (reference);
+
+
+--
+-- Name: turn_node_redaction_mappings_reference_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_node_redaction_mappings_reference_idx ON public.turn_node_redaction_mappings USING btree (reference);
+
+
+--
+-- Name: turn_nodes_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX turn_nodes_created_at_idx ON public.turn_nodes USING btree (created_at, node_pk);
 
 
 --
@@ -4240,6 +4664,27 @@ CREATE INDEX turn_nodes_scope_idx ON public.turn_nodes USING btree (scope_id);
 --
 
 CREATE TRIGGER api_key_spend_credit AFTER INSERT OR UPDATE OF billing_state ON public.target_attempt_observations FOR EACH ROW EXECUTE FUNCTION public.api_key_spend_credit();
+
+
+--
+-- Name: native_compaction_sources native_compaction_sources_release; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER native_compaction_sources_release AFTER DELETE ON public.native_compaction_sources FOR EACH ROW EXECUTE FUNCTION public.native_compaction_sources_release();
+
+
+--
+-- Name: native_compactions native_compactions_release_source_node; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER native_compactions_release_source_node AFTER DELETE ON public.native_compactions FOR EACH ROW EXECUTE FUNCTION public.native_compactions_release_source_node();
+
+
+--
+-- Name: public_tool_executions public_tool_executions_release_marker; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER public_tool_executions_release_marker AFTER DELETE ON public.public_tool_executions FOR EACH ROW EXECUTE FUNCTION public.public_tool_executions_release_marker();
 
 
 --
@@ -4327,6 +4772,34 @@ CREATE TRIGGER stats_usage_turn_update AFTER UPDATE OF id, route_id, model_displ
 
 
 --
+-- Name: turn_node_compactions turn_node_compactions_release; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER turn_node_compactions_release AFTER DELETE ON public.turn_node_compactions FOR EACH ROW EXECUTE FUNCTION public.turn_node_compactions_release();
+
+
+--
+-- Name: turn_node_markers turn_node_markers_release; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER turn_node_markers_release AFTER DELETE ON public.turn_node_markers FOR EACH ROW EXECUTE FUNCTION public.turn_node_markers_release();
+
+
+--
+-- Name: turn_node_redaction_mappings turn_node_redaction_mappings_release; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER turn_node_redaction_mappings_release AFTER DELETE ON public.turn_node_redaction_mappings FOR EACH ROW EXECUTE FUNCTION public.turn_node_redaction_mappings_release();
+
+
+--
+-- Name: turn_nodes turn_nodes_release_parent; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER turn_nodes_release_parent AFTER DELETE ON public.turn_nodes FOR EACH ROW EXECUTE FUNCTION public.turn_nodes_release_parent();
+
+
+--
 -- Name: admin_sessions admin_sessions_identity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4391,11 +4864,51 @@ ALTER TABLE ONLY public.artifact_uploads
 
 
 --
+-- Name: content_gc content_gc_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.content_gc
+    ADD CONSTRAINT content_gc_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.contents(id) ON DELETE CASCADE;
+
+
+--
+-- Name: contents contents_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.contents
+    ADD CONSTRAINT contents_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.content_scopes(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: credential_mapping_reuses credential_mapping_reuses_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.credential_mapping_reuses
     ADD CONSTRAINT credential_mapping_reuses_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: history_marker_contents history_marker_contents_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_contents
+    ADD CONSTRAINT history_marker_contents_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.contents(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: history_marker_contents history_marker_contents_reference_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_contents
+    ADD CONSTRAINT history_marker_contents_reference_fkey FOREIGN KEY (reference) REFERENCES public.history_markers(reference) ON DELETE CASCADE;
+
+
+--
+-- Name: history_marker_gc history_marker_gc_reference_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.history_marker_gc
+    ADD CONSTRAINT history_marker_gc_reference_fkey FOREIGN KEY (reference) REFERENCES public.history_markers(reference) ON DELETE CASCADE;
 
 
 --
@@ -4479,6 +4992,14 @@ ALTER TABLE ONLY public.model_turn_observations
 
 
 --
+-- Name: native_compaction_gc native_compaction_gc_record_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.native_compaction_gc
+    ADD CONSTRAINT native_compaction_gc_record_id_fkey FOREIGN KEY (record_id) REFERENCES public.native_compactions(id) ON DELETE CASCADE;
+
+
+--
 -- Name: native_compaction_sources native_compaction_sources_record_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4508,6 +5029,46 @@ ALTER TABLE ONLY public.native_compaction_states
 
 ALTER TABLE ONLY public.native_compactions
     ADD CONSTRAINT native_compactions_source_generation_id_fkey FOREIGN KEY (source_generation_id) REFERENCES public.turn_nodes(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: observation_blocks observation_blocks_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_blocks
+    ADD CONSTRAINT observation_blocks_interaction_id_fkey FOREIGN KEY (interaction_id) REFERENCES public.interaction_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_blocks observation_blocks_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_blocks
+    ADD CONSTRAINT observation_blocks_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.inference_run_observations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_blocks observation_blocks_sequence_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_blocks
+    ADD CONSTRAINT observation_blocks_sequence_fkey FOREIGN KEY (sequence) REFERENCES public.observation_events(sequence) ON DELETE CASCADE;
+
+
+--
+-- Name: observation_event_contents observation_event_contents_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_event_contents
+    ADD CONSTRAINT observation_event_contents_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.contents(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: observation_event_contents observation_event_contents_sequence_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_event_contents
+    ADD CONSTRAINT observation_event_contents_sequence_fkey FOREIGN KEY (sequence) REFERENCES public.observation_events(sequence) ON DELETE CASCADE;
 
 
 --
@@ -4567,6 +5128,22 @@ ALTER TABLE ONLY public.observation_tail_sources
 
 
 --
+-- Name: observation_tool_results observation_tool_results_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tool_results
+    ADD CONSTRAINT observation_tool_results_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.contents(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: observation_tool_results observation_tool_results_sequence_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.observation_tool_results
+    ADD CONSTRAINT observation_tool_results_sequence_fkey FOREIGN KEY (sequence) REFERENCES public.observation_events(sequence) ON DELETE CASCADE;
+
+
+--
 -- Name: provider_allowance_guards provider_allowance_guards_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4623,6 +5200,14 @@ ALTER TABLE ONLY public.provider_oauth_credentials
 
 
 --
+-- Name: redaction_mapping_gc redaction_mapping_gc_reference_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.redaction_mapping_gc
+    ADD CONSTRAINT redaction_mapping_gc_reference_fkey FOREIGN KEY (reference) REFERENCES public.reversible_redaction_mappings(reference) ON DELETE CASCADE;
+
+
+--
 -- Name: target_attempt_observations target_attempt_observations_interaction_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4647,19 +5232,19 @@ ALTER TABLE ONLY public.target_attempt_observations
 
 
 --
--- Name: turn_content_gc turn_content_gc_content_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_node_compactions turn_node_compactions_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_content_gc
-    ADD CONSTRAINT turn_content_gc_content_id_fkey FOREIGN KEY (content_id) REFERENCES public.turn_contents(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.turn_node_compactions
+    ADD CONSTRAINT turn_node_compactions_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
 
 
 --
--- Name: turn_contents turn_contents_scope_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: turn_node_compactions turn_node_compactions_record_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.turn_contents
-    ADD CONSTRAINT turn_contents_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.turn_scopes(id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.turn_node_compactions
+    ADD CONSTRAINT turn_node_compactions_record_id_fkey FOREIGN KEY (record_id) REFERENCES public.native_compactions(id) ON DELETE RESTRICT;
 
 
 --
@@ -4675,7 +5260,7 @@ ALTER TABLE ONLY public.turn_node_contents
 --
 
 ALTER TABLE ONLY public.turn_node_contents
-    ADD CONSTRAINT turn_node_contents_scope_id_content_id_fkey FOREIGN KEY (scope_id, content_id) REFERENCES public.turn_contents(scope_id, id) ON DELETE RESTRICT;
+    ADD CONSTRAINT turn_node_contents_scope_id_content_id_fkey FOREIGN KEY (scope_id, content_id) REFERENCES public.contents(scope_id, id) ON DELETE RESTRICT;
 
 
 --
@@ -4687,11 +5272,43 @@ ALTER TABLE ONLY public.turn_node_gc
 
 
 --
+-- Name: turn_node_markers turn_node_markers_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_markers
+    ADD CONSTRAINT turn_node_markers_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_markers turn_node_markers_reference_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_markers
+    ADD CONSTRAINT turn_node_markers_reference_fkey FOREIGN KEY (reference) REFERENCES public.history_markers(reference) ON DELETE RESTRICT;
+
+
+--
 -- Name: turn_node_payloads turn_node_payloads_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.turn_node_payloads
     ADD CONSTRAINT turn_node_payloads_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_redaction_mappings turn_node_redaction_mappings_node_pk_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_redaction_mappings
+    ADD CONSTRAINT turn_node_redaction_mappings_node_pk_fkey FOREIGN KEY (node_pk) REFERENCES public.turn_nodes(node_pk) ON DELETE CASCADE;
+
+
+--
+-- Name: turn_node_redaction_mappings turn_node_redaction_mappings_reference_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.turn_node_redaction_mappings
+    ADD CONSTRAINT turn_node_redaction_mappings_reference_fkey FOREIGN KEY (reference) REFERENCES public.reversible_redaction_mappings(reference) ON DELETE RESTRICT;
 
 
 --
@@ -4715,7 +5332,7 @@ ALTER TABLE ONLY public.turn_nodes
 --
 
 ALTER TABLE ONLY public.turn_nodes
-    ADD CONSTRAINT turn_nodes_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.turn_scopes(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT turn_nodes_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.content_scopes(id) ON DELETE RESTRICT;
 
 
 --

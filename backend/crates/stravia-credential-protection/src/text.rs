@@ -1349,40 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn expired_outbound_snapshot_fails_closed_but_restore_stays_literal() {
-        // A loaded mapping can expire after detection/intern and before replacement.
-        // Pin that boundary instead of racing a wall-clock sleep.
-        let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
-            secret: "synthetic snapshot secret".into(),
-            rule_ids: Default::default(),
-        };
-        let mut request = AiRequest::new("model", Vec::new());
-        request.instructions = Some(mapping.secret.clone());
-        assert!(matches!(
-            redact_request(&mut request, std::slice::from_ref(&mapping)),
-            Err(RedactionError::InvalidText)
-        ));
-        let mut used = BTreeSet::new();
-        assert_eq!(
-            replace(
-                &mapping.reference,
-                std::slice::from_ref(&mapping),
-                true,
-                &mut used
-            ),
-            mapping.reference
-        );
-        assert!(used.is_empty());
-        request.instructions = Some("ordinary text".into());
-        assert_eq!(
-            redact_request(&mut request, &[mapping]).unwrap().references,
-            Vec::<String>::new()
-        );
-        assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
-    }
-
-    #[test]
     fn malformed_tool_arguments_still_sweep_credentials_and_pass_through() {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
