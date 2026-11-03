@@ -277,6 +277,7 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(credential_discovery_reuses),
         )
         .route("/observations/interactions", get(interaction_forest))
+        .route("/observations/contents", get(observation_contents))
         .route("/observations/interactions/{id}", get(interaction_detail))
         .route(
             "/observations/interactions/{id}/events",

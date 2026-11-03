@@ -9,9 +9,6 @@ use stravia_credential_protection::{
     CredentialMatch, CredentialRuleCatalog, CustomRule, CustomRuleError, CustomRuleInput,
 };
 
-/// 命中正文的字节上限；超出时按字符边界截断并标记 `truncated`。
-const MAX_DISCOVERY_TEXT_BYTES: usize = 1024 * 1024;
-
 impl AdminService {
     /// 返回当前实例内置的本地规则及其有效条件，不执行检测或联网验证。
     pub async fn credential_protection_rules(&self) -> anyhow::Result<CredentialRuleCatalog> {
@@ -82,7 +79,7 @@ impl AdminService {
             }
             CredentialDiscoveryBody::Retained(value) => value,
         };
-        let (text, truncated) = discovery_text(&value);
+        let text = discovery_text(&value);
         let secret = match record
             .discovery
             .marker
@@ -113,7 +110,6 @@ impl AdminService {
         Ok(CredentialDiscoveryHitDetail::Available {
             field,
             text,
-            truncated,
             hit_basis: hit_basis.into(),
             masked,
             matches,
@@ -203,8 +199,8 @@ fn parse_hit_index(index: &str) -> Result<usize, CredentialDiscoveryError> {
         .map_err(|_| CredentialDiscoveryError::InvalidReference)
 }
 
-fn discovery_text(value: &serde_json::Value) -> (String, bool) {
-    let text = match value {
+fn discovery_text(value: &serde_json::Value) -> String {
+    match value {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Array(items) if items.iter().all(text_block) => items
             .iter()
@@ -212,17 +208,7 @@ fn discovery_text(value: &serde_json::Value) -> (String, bool) {
             .collect::<Vec<_>>()
             .join("\n"),
         other => serde_json::to_string_pretty(other).expect("JSON values always serialize"),
-    };
-    if text.len() <= MAX_DISCOVERY_TEXT_BYTES {
-        return (text, false);
     }
-    let mut end = MAX_DISCOVERY_TEXT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut text = text;
-    text.truncate(end);
-    (text, true)
 }
 
 fn text_block(value: &serde_json::Value) -> bool {

@@ -2281,3 +2281,46 @@ async fn catalog_parity_drives_dynamic_profiles_through_management_http() -> any
 
     Ok(())
 }
+
+#[tokio::test]
+async fn observation_contents_rejects_invalid_ids_with_stable_code() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway,
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+    let tokens = auth.login_native().await?;
+    let too_many = (1..=257)
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for query in ["", "?ids=", "?ids=1,,2", "?ids=0", "?ids=-3", "?ids=abc"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(std::iter::once(format!("?ids={too_many}")))
+    {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/observations/contents{query}"))
+                    .header("authorization", format!("Bearer {}", tokens.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["code"], "invalid_observation_ids", "{query}");
+    }
+    Ok(())
+}

@@ -3663,7 +3663,7 @@ mod snapshot_tests {
             .get_interaction(&id, ForestQuery::default())
             .await?
             .expect("committed interaction");
-        assert_eq!(detail.interaction.visible_tail, "saved answer");
+        assert_eq!(detail.output_text, "saved answer");
         let page = observation
             .get_interaction_events(
                 &id,
@@ -7313,7 +7313,7 @@ mod snapshot_tests {
             .get_interaction(&id, ForestQuery::default())
             .await?
             .expect("persisted interaction");
-        assert_eq!(detail.interaction.visible_tail, text);
+        assert_eq!(detail.output_text, text);
         let page = observation
             .get_interaction_events(
                 &id,

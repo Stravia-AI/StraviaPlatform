@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stravia_credential_protection::marker;
+use sha2::{Digest, Sha256};
 
 pub(crate) const REDACTED: &str = "***";
 
@@ -53,6 +54,23 @@ impl ProtectedSecrets {
             }
         }
         values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+    }
+
+    /// 已注册明文的稳定指纹；用于内容端点 ETag，映射新增或消失都会改变结果。
+    pub(crate) fn version(&self) -> [u8; 32] {
+        let mut raws: Vec<String> = self
+            .0
+            .read()
+            .iter()
+            .map(|secret| secret.raw.clone())
+            .collect();
+        raws.sort_unstable();
+        let mut hasher = Sha256::new();
+        for raw in raws {
+            hasher.update(raw.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.finalize().into()
     }
 
     pub(crate) fn text(&self, text: &mut String) {

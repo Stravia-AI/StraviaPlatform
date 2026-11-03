@@ -483,8 +483,8 @@ pub enum CredentialVisibility {
 pub enum CredentialDiscoveryHitDetail {
     Available {
         field: CredentialDiscoveryField,
+        /// 全文，不截断。
         text: String,
-        truncated: bool,
         /// `secret`：按映射明文命中；`rule`：退化为按所选规则命中。
         hit_basis: String,
         /// `true`：文本与匹配位置已按遮蔽后的文本重算；`false`：明文与原始偏移。
@@ -799,8 +799,8 @@ pub struct ObservationChange {
     pub rejection_id: Option<String>,
     pub kind: String,
     pub boundary: bool,
-    /// 仅 `target_attempt_finished` 且尝试带错误时取事件载荷中的 `error.source`；
-    /// 上游错误列表据此判断是否需要静默刷新，读取载荷不额外查询存储。
+    /// 失败尝试取 `error.source`：独立失败行在 `error`，合并的 Turn 结束行在
+    /// `attempt.error`。上游错误列表据此判断是否需要静默刷新。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_source: Option<String>,
 }
@@ -812,20 +812,23 @@ impl ObservationChange {
             "run_admitted"
                 | "run_finished"
                 | "run_state_changed"
-                | "client_visible_content"
-                | "model_thinking"
                 | "request_rejected"
+                | "model_thinking"
+                | "client_visible_content"
+                | "user_input_recorded"
+                | "client_tool_result"
         );
-        let error_source = (event.kind == "target_attempt_finished")
-            .then(|| {
-                event
-                    .payload
-                    .get("error")
-                    .and_then(|error| error.get("source"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .flatten();
+        let error_source = match event.kind.as_str() {
+            "target_attempt_finished" => event.payload.get("error"),
+            "model_turn_finished" => event
+                .payload
+                .get("attempt")
+                .and_then(|attempt| attempt.get("error")),
+            _ => None,
+        }
+        .and_then(|error| error.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
         Self {
             sequence: event.sequence,
             occurred_at: event.occurred_at,
@@ -866,6 +869,8 @@ pub enum ObservationQueryError {
     InvalidEventPage,
     #[error("invalid observation filter")]
     InvalidFilter,
+    #[error("invalid observation content ids")]
+    InvalidContentIds,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -887,6 +892,45 @@ pub struct ForestQuery {
     pub min_tokens: Option<i64>,
 }
 
+/// 一个有序正文引用：内容 id 与原始字节数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentRef {
+    pub content_id: i64,
+    pub raw_len: i64,
+}
+
+/// 列表与变更接口的输入/输出摘要：只有有序引用与字节数，不含正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentSummary {
+    pub refs: Vec<ContentRef>,
+    /// 各引用原始字节数之和；不含拼接分隔符。
+    pub raw_len: i64,
+}
+
+impl ContentSummary {
+    pub(crate) fn new(refs: Vec<ContentRef>) -> Self {
+        let raw_len = refs.iter().map(|reference| reference.raw_len).sum();
+        Self { refs, raw_len }
+    }
+}
+
+/// 内容端点的内部结果：正文 + 供 ETag 的映射版本。
+pub struct ObservationContents {
+    pub contents: Vec<ObservationContent>,
+    pub version: String,
+}
+
+/// 内容端点返回的一项正文；`digest` 只用于 ETag，不进入响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationContent {
+    pub content_id: i64,
+    pub format: String,
+    pub raw_len: i64,
+    pub body: Value,
+    #[serde(skip)]
+    pub digest: [u8; 32],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionSummary {
     /// Durable diagnostic/native metadata, never an execution parent override.
@@ -901,9 +945,10 @@ pub struct InteractionSummary {
     pub status: String,
     pub started_at: i64,
     pub last_active_at: i64,
-    /// Opening text of the normalized initiating user message; absent for uncaptured input.
-    pub input_preview: Option<String>,
-    pub visible_tail: String,
+    /// 根 Run 最新用户输入的引用；正文经内容端点读取。
+    pub input: ContentSummary,
+    /// 最新可见块的引用；正文经内容端点读取。
+    pub output: ContentSummary,
     /// The interaction contains at least one terminal-error run that the client-errors view
     /// lists as a run record (failed request, or request rejected before Target selection).
     pub failed_request: bool,
@@ -1019,6 +1064,10 @@ pub struct InteractionDetail {
     pub interaction: InteractionSummary,
     pub root: ForestRoot,
     pub runs: Vec<RunDetail>,
+    /// 完整用户输入；有序文本单元以 `\n` 连接，不截断。
+    pub input_text: String,
+    /// 完整可见输出；块内单元以 `\n\n` 连接，模型轮次之间以 `\n\n` 分隔。
+    pub output_text: String,
     pub snapshot_sequence: i64,
     pub older_events_cursor: Option<i64>,
 }
