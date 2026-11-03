@@ -393,6 +393,62 @@ fn strip_markers(text: &str) -> (String, Vec<String>) {
     (cleaned.trim_matches('\n').to_owned(), references)
 }
 
+fn private_references(text: &str, include_projections: bool) -> Vec<String> {
+    let mut references = Vec::new();
+    for token in tokenize_private_syntax(text) {
+        match token {
+            PrivateToken::Marker(reference) => references.push(reference),
+            PrivateToken::Delimiter(delimiter) if include_projections => {
+                references.push(delimiter.reference);
+            }
+            PrivateToken::Visible(_) | PrivateToken::Delimiter(_) => {}
+        }
+    }
+    references
+}
+
+/// 收集文本中的 Marker reference，并包含跨协议投影定界符携带的 reference。
+/// 用于提交时登记依赖；读取侧的 [`history_marker_references`] 只返回可还原的 Marker。
+pub(crate) fn history_marker_references_in_text(text: &str) -> Vec<String> {
+    private_references(text, true)
+}
+
+/// 请求增量与响应 item 中需要随节点登记的 Marker reference（含投影语法）。
+pub(crate) fn history_marker_commit_references(items: &[AiItem]) -> Vec<String> {
+    let mut references = Vec::new();
+    for item in items {
+        if item.role != Role::Assistant {
+            continue;
+        }
+        let mut collect = |text: &str| references.extend(private_references(text, true));
+        match &item.content {
+            MessageContent::Text(text) => collect(text),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text, .. } => collect(text),
+                        ContentBlock::Thinking {
+                            thinking: text,
+                            signature: None,
+                        } => collect(text),
+                        ContentBlock::Reasoning {
+                            summary,
+                            content,
+                            encrypted_content: None,
+                        } => {
+                            for text in summary.iter().chain(content) {
+                                collect(text);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    references
+}
+
 pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
     history_marker_references_iter(items.iter())
 }

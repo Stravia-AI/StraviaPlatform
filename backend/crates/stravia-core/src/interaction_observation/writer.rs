@@ -1057,6 +1057,34 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             }
                             return false;
                         }
+                        // 请求失败只回填 Run 的失败列，不携带 attrs；先于 Turn 结束行落盘，
+                        // 缓冲的 attempt 结束仍并入随后的 Turn 结束行，不被它打断。
+                        event @ RunEvent::RequestFailed { .. } => {
+                            if let Some(interaction) = attribution.interaction_for_run(&run_id) {
+                                let interaction = interaction.to_owned();
+                                match store
+                                    .persist_run_events(
+                                        &interaction,
+                                        &run_id,
+                                        &[(event, None, occurred_at)],
+                                    )
+                                    .await
+                                {
+                                    Ok(events) => {
+                                        for event in events {
+                                            publish(&updates, &trace_sequence, event);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        incomplete_usage = true;
+                                        pending_gaps.insert(interaction, occurred_at);
+                                        tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "request failure persistence failed");
+                                    }
+                                }
+                            }
+                            buffered_finish = Some(finish);
+                            return false;
+                        }
                         event => {
                             if let Some(interaction) = attribution.interaction_for_run(&run_id) {
                                 let interaction = interaction.to_owned();

@@ -146,64 +146,6 @@ macro_rules! backend {
                 }
                 Ok(output)
             }
-
-            /// 删除过期 Marker：先取回它们的正文 ID，再删除 Marker（引用随外键
-            /// 级联），最后把失去引用的正文入队。每批 256 条，循环到清空。
-            pub(crate) async fn cleanup_markers(pool: &$pool, now: i64) -> anyhow::Result<u64> {
-                let mut connection = pool.acquire_write().await?;
-                let mut transaction = connection.begin_with($begin).await?;
-                let mut removed = 0u64;
-                loop {
-                    let mut select = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT reference FROM history_markers WHERE expires_at <= ",
-                    );
-                    select.push_bind(now);
-                    select.push(
-                        " AND NOT EXISTS (SELECT 1 FROM public_tool_executions p \
-                         WHERE p.marker_reference = history_markers.reference) \
-                         ORDER BY reference LIMIT 256",
-                    );
-                    let references: Vec<String> = select
-                        .build_query_scalar()
-                        .fetch_all(&mut *transaction)
-                        .await?;
-                    if references.is_empty() {
-                        break;
-                    }
-                    let mut ids = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT content_id FROM history_marker_contents WHERE reference IN (",
-                    );
-                    let mut list = ids.separated(",");
-                    for reference in &references {
-                        list.push_bind(reference);
-                    }
-                    list.push_unseparated(")");
-                    let released: Vec<i64> = ids
-                        .build_query_scalar()
-                        .fetch_all(&mut *transaction)
-                        .await?;
-                    let mut delete =
-                        sqlx::QueryBuilder::<$db>::new("DELETE FROM history_markers WHERE reference IN (");
-                    let mut list = delete.separated(",");
-                    for reference in &references {
-                        list.push_bind(reference);
-                    }
-                    list.push_unseparated(")");
-                    removed += delete
-                        .build()
-                        .execute(&mut *transaction)
-                        .await?
-                        .rows_affected();
-                    crate::content_store::$module::enqueue_unreferenced(
-                        &mut *transaction,
-                        &released,
-                    )
-                    .await?;
-                }
-                transaction.commit().await?;
-                connection.finish().await?;
-                Ok(removed)
-            }
         }
     };
 }

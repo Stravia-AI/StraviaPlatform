@@ -12,11 +12,7 @@ use stravia_runtime_contract::protocol::ir::canonical;
 
 mod sql;
 
-#[cfg(test)]
-mod retention_tests;
-
 const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
-const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_RESOLUTION_RECORDS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +92,7 @@ impl Compaction {
         }
     }
 
-    /// 原子登记完整状态后即可解析；交付确认只延长保留期，不开启解析资格。
+    /// 原子登记完整状态后即可解析；确认只记录首次交付时刻，不延长任何保留期。
     pub(crate) async fn register(
         &self,
         principal: &Principal,
@@ -136,17 +132,7 @@ impl Compaction {
             target: input.target,
             window: input.window,
         };
-        self.store
-            .extend(
-                principal,
-                &record.source_record_ids,
-                PENDING_RETENTION,
-                false,
-            )
-            .await?;
-        self.store
-            .insert(principal, &record, &states, PENDING_RETENTION)
-            .await?;
+        self.store.insert(principal, &record, &states).await?;
         Ok(record)
     }
 
@@ -240,9 +226,6 @@ impl Compaction {
             return Err(CompactionError::Conflict);
         }
         let record_ids = ids.into_iter().collect::<Vec<_>>();
-        self.store
-            .extend(principal, &record_ids, RETENTION, false)
-            .await?;
         Ok(Some(ResolvedCompaction {
             record_ids,
             source_generation_id: tip.source_generation_id.clone(),
@@ -257,19 +240,16 @@ impl Compaction {
         principal: &Principal,
         ids: &[String],
     ) -> Result<(), CompactionError> {
-        self.store.extend(principal, ids, RETENTION, true).await
+        self.store.confirm(principal, ids).await
     }
 
-    pub(crate) async fn extend_retention(
+    /// 期限扫描入队后由回收步骤删除；返回本轮删除的登记行数。
+    pub(crate) async fn sweep(
         &self,
-        principal: &Principal,
-        ids: &[String],
-    ) -> Result<(), CompactionError> {
-        self.store.extend(principal, ids, RETENTION, false).await
-    }
-
-    pub(crate) async fn cleanup_expired(&self) -> Result<(), CompactionError> {
-        self.store.cleanup().await
+        now: i64,
+        retention: Duration,
+    ) -> Result<u64, CompactionError> {
+        self.store.sweep(now, retention).await
     }
 }
 

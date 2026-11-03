@@ -15,13 +15,11 @@ use std::fmt::Write as _;
 
 use anyhow::{Context, ensure};
 use serde_json::Value;
+use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::content::{
     ContentFormat, ContentUnitBody, item_content_units,
 };
-use stravia_runtime_contract::protocol::ir::AiItem;
-use stravia_runtime_contract::turn_chain::{
-    TurnNode, TurnNodeId, TurnNodeKind, TurnReadContext,
-};
+use stravia_runtime_contract::turn_chain::{TurnNode, TurnNodeId, TurnNodeKind, TurnReadContext};
 
 use crate::content_store::{self, Content, ContentDigest, Descriptor, Slot};
 
@@ -109,7 +107,8 @@ impl Extraction {
         }
         let ordinal = self.contents.len();
         self.index.insert(digest, ordinal);
-        self.contents.push(Content::with_digest(digest, format, raw));
+        self.contents
+            .push(Content::with_digest(digest, format, raw));
         ordinal
     }
 
@@ -153,11 +152,7 @@ enum Pending {
 
 /// 一个历史条目：正文位置置空后的条目信封是一个 JSON 单元，正文单元按 IR 正文
 /// 规则逐个外置。类型化解析失败时整条保持不透明 JSON 单元，原字节原样保留。
-fn externalize_item(
-    target: &mut Value,
-    path: &str,
-    state: &mut Extraction,
-) -> anyhow::Result<()> {
+fn externalize_item(target: &mut Value, path: &str, state: &mut Extraction) -> anyhow::Result<()> {
     let mut pending = Vec::new();
     state.scratch.clear();
     serde_json::to_writer(&mut state.scratch, &*target)?;
@@ -336,16 +331,13 @@ macro_rules! link_backend {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "INSERT INTO turn_node_contents (node_pk, scope_id, ordinal, content_id) ",
                 );
-                query.push_values(
-                    chunk.iter().enumerate(),
-                    |mut row, (offset, id)| {
-                        let ordinal = base * 200 + offset;
-                        row.push_bind(node_pk)
-                            .push_bind(scope_id)
-                            .push_bind(ordinal as i64)
-                            .push_bind(*id);
-                    },
-                );
+                query.push_values(chunk.iter().enumerate(), |mut row, (offset, id)| {
+                    let ordinal = base * 200 + offset;
+                    row.push_bind(node_pk)
+                        .push_bind(scope_id)
+                        .push_bind(ordinal as i64)
+                        .push_bind(*id);
+                });
                 query.build().execute(&mut *connection).await?;
             }
             Ok(())

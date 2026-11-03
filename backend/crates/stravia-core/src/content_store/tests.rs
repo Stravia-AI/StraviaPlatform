@@ -1,5 +1,5 @@
-use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 use serde_json::json;
+use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 
 use super::descriptor::{Descriptor, Slot, SlotKind};
 use super::*;
@@ -16,7 +16,10 @@ fn digest_depends_on_format_and_bytes() {
         content_digest(ContentFormat::Text, b"hello"),
         content_digest(ContentFormat::Json, b"hello")
     );
-    assert_eq!(hex(&content_digest(ContentFormat::Json, b"\"hello\"")).len(), 64);
+    assert_eq!(
+        hex(&content_digest(ContentFormat::Json, b"\"hello\"")).len(),
+        64
+    );
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -40,7 +43,12 @@ fn descriptor_roundtrip_preserves_slots() {
     let slots = vec![
         Slot::text("/content/0".to_owned(), 0),
         Slot::json("/content/1".to_owned(), 1),
-        Slot::concat("/content/2".to_owned(), 2, "pre".to_owned(), "post".to_owned()),
+        Slot::concat(
+            "/content/2".to_owned(),
+            2,
+            "pre".to_owned(),
+            "post".to_owned(),
+        ),
     ];
     let data = json!({"content": [null, null, null]});
     let encoded = encode_descriptor(&data, &slots).unwrap();
@@ -74,15 +82,25 @@ fn restore_applies_parent_before_nested_slot() {
         })
     })
     .unwrap();
-    assert_eq!(restored, json!({"message": {"content": ["body"], "role": "user"}}));
+    assert_eq!(
+        restored,
+        json!({"message": {"content": ["body"], "role": "user"}})
+    );
 }
 
 #[test]
 fn concat_slot_rejoins_literals() {
     let mut data = json!(null);
-    restore_slots(&mut data, &[Slot::concat(String::new(), 0, "pre ".into(), " post".into())], |_| {
-        Ok(json!("body"))
-    })
+    restore_slots(
+        &mut data,
+        &[Slot::concat(
+            String::new(),
+            0,
+            "pre ".into(),
+            " post".into(),
+        )],
+        |_| Ok(json!("body")),
+    )
     .unwrap();
     assert_eq!(data, json!("pre body post"));
 }

@@ -146,7 +146,6 @@ pub(super) async fn configure_gateway_extensions(
             web_search::host::SearchHost(gateway.clone()),
         ))),
         report_validator,
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(GatewayWebSearchAuthorizer {
             gateway: gateway.clone(),
         }),

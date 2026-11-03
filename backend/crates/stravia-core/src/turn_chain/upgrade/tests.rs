@@ -1061,9 +1061,9 @@ async fn prunes_scopes_created_only_for_orphan_contents() -> anyhow::Result<()> 
 /// 内容与升级前的物化结果逐字节相同。
 #[tokio::test]
 async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::Result<()> {
-    use sqlx::sqlite::SqlitePoolOptions;
     use crate::history_marker::{HiddenHistorySegment, HistoryMarkerStore, SqlHistoryMarkerStore};
     use crate::turn_chain::SqlTurnChainStore;
+    use sqlx::sqlite::SqlitePoolOptions;
     use stravia_runtime_contract::Principal;
     use stravia_runtime_contract::protocol::ir::AiItem;
     use stravia_runtime_contract::turn_chain::TurnChainStore;
@@ -1200,7 +1200,10 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
             .bind(expires_at)
             .execute(&mut *connection)
             .await?;
-        expected.push(("marker", serde_json::to_vec(&serde_json::from_value::<HiddenHistorySegment>(segment)?)?));
+        expected.push((
+            "marker",
+            serde_json::to_vec(&serde_json::from_value::<HiddenHistorySegment>(segment)?)?,
+        ));
     }
 
     crate::migrations::migrate_sqlite(&pool, None).await?;
@@ -1217,13 +1220,21 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
     let owner = Principal::new("alice");
     let turns = SqlTurnChainStore::sqlite(pool.clone());
     let chain = turns
-        .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new("upgrade-child"))
+        .materialize(
+            &owner,
+            TurnNodeKind::Response,
+            &TurnNodeId::new("upgrade-child"),
+        )
         .await
         .expect("child chain after upgrade");
     assert_eq!(chain.len(), 2);
     for (node, (id, bytes)) in chain.iter().zip(&expected) {
         assert_eq!(node.id.as_str(), *id);
-        assert_eq!(&serde_json::to_vec(&node.payload)?, bytes, "payload of {id}");
+        assert_eq!(
+            &serde_json::to_vec(&node.payload)?,
+            bytes,
+            "payload of {id}"
+        );
     }
     let marker = SqlHistoryMarkerStore::sqlite(pool.clone())
         .resolve(&owner, &reference)

@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::history_marker::{
     HISTORY_MARKER_PREFIX, HistoryMarker, HistoryMarkerError, HistoryMarkerStore,
@@ -311,9 +310,6 @@ impl UploadProjection {
         self.drain_ready(principal)
     }
 }
-
-const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
-const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PreviewCarrier {
@@ -933,9 +929,7 @@ impl ClientProjectionSession {
     }
 
     async fn publish(&self, references: &[String]) -> Result<(), HistoryMarkerError> {
-        self.marker_store
-            .publish(&self.principal, references, PUBLISHED_MARKER_RETENTION)
-            .await
+        self.marker_store.publish(&self.principal, references).await
     }
 
     /// Whether the current Model Leg's client output has been committed.
@@ -1919,7 +1913,6 @@ impl ClientProjectionSession {
             block,
             source,
             activity: "Preserving protected reasoning".into(),
-            pending_retention: THINKING_MARKER_PENDING_RETENTION,
         };
         if let Some(reserved) = reserved {
             self.marker_store
@@ -4507,8 +4500,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                     activity: "Searching".into(),
-                    execution_limit: Duration::from_secs(30),
-                    pending_retention: Duration::from_secs(60),
+                    execution_limit: std::time::Duration::from_secs(30),
                 },
             )
             .await
@@ -4553,8 +4545,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                     activity: "Searching".into(),
-                    execution_limit: Duration::from_secs(30),
-                    pending_retention: Duration::from_secs(60),
+                    execution_limit: std::time::Duration::from_secs(30),
                 },
             )
             .await

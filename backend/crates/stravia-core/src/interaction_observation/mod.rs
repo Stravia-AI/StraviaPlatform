@@ -351,7 +351,6 @@ impl InteractionObservation {
         if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
             tracing::debug!(%error, "observation writer unavailable during retention update");
         }
-        self.sweep(chrono::Utc::now().timestamp_millis()).await?;
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
@@ -381,16 +380,19 @@ impl InteractionObservation {
             .store(partial, Ordering::Release);
         Ok(result)
     }
-    /// 以调用方给定的当前时间执行一轮保留期清理；时间只经此参数进入，测试因此不必改写时间戳。
-    pub(crate) async fn sweep_retention(&self, now: i64) -> anyhow::Result<()> {
-        self.sweep(now).await
-    }
+    /// 统一历史扫描入口：`now` 与 `retention` 都由调用方给定，与其他域同一轮扫描。
+    /// 超过保留期且已结束的交互整体清理，过期调试 trace、空闲等待的客户端叶也在这里收口。
+    /// 返回被清理的调试 trace 数。
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.maintenance.sweep",
         skip_all
     )]
-    async fn sweep(&self, now: i64) -> anyhow::Result<()> {
+    pub(crate) async fn sweep_history(
+        &self,
+        now: i64,
+        retention: std::time::Duration,
+    ) -> anyhow::Result<u64> {
         self.flush().await?;
         let ids = self.inner.store.mark_expired_tombstones(now).await?;
         let mut deleted = Vec::new();
@@ -400,9 +402,7 @@ impl InteractionObservation {
             }
         }
         self.inner.store.delete_manifests(&deleted).await?;
-        let cutoff = now.saturating_sub(
-            i64::from(self.inner.retention_days.load(Ordering::Acquire)).saturating_mul(86_400_000),
-        );
+        let cutoff = now.saturating_sub(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
         self.purge_history(Some(cutoff)).await?;
         for event in self
             .inner
@@ -424,7 +424,7 @@ impl InteractionObservation {
         self.inner
             .partial_trace_count
             .store(partial, Ordering::Release);
-        Ok(())
+        Ok(u64::try_from(deleted.len()).unwrap_or(u64::MAX))
     }
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
@@ -1990,7 +1990,10 @@ mod snapshot_tests {
         .execute(&pool)
         .await?;
 
-        let error = observation.sweep_retention(sweep_at).await.unwrap_err();
+        let error = observation
+            .sweep_history(sweep_at, retention_window(&observation))
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("retention fixture delete fault"));
         // 后续批次失败不能回滚已提交的清理，也不能删除未完成的当前批次。
         let retained: Vec<String> = sqlx::query_scalar(
@@ -2008,7 +2011,9 @@ mod snapshot_tests {
         sqlx::query("DROP TRIGGER retention_delete_fault")
             .execute(&pool)
             .await?;
-        observation.sweep_retention(sweep_at).await?;
+        observation
+            .sweep_history(sweep_at, retention_window(&observation))
+            .await?;
         let retained: Vec<String> =
             sqlx::query_scalar("SELECT id FROM interaction_observations ORDER BY id")
                 .fetch_all(&pool)
@@ -2092,7 +2097,15 @@ mod snapshot_tests {
                     .await?;
                 // Removing the storage fault cannot reconstruct the discarded confirmed revision.
                 assert!(observation.clear_history().await.is_err());
-                assert!(observation.sweep(chrono::Utc::now().timestamp_millis()).await.is_err());
+                assert!(
+                    observation
+                        .sweep_history(
+                            chrono::Utc::now().timestamp_millis(),
+                            retention_window(&observation)
+                        )
+                        .await
+                        .is_err()
+                );
             } else {
                 sqlx::raw_sql("CREATE TRIGGER async_diagnostic_fault BEFORE INSERT ON observation_events BEGIN SELECT RAISE(ABORT,'diagnostic unavailable'); END;")
                     .execute(&pool).await?;
@@ -2211,6 +2224,13 @@ mod snapshot_tests {
     }
 
     type RunRow = (String, String, Option<String>, String, Option<String>);
+
+    /// 当前配置的保留窗口；扫描入口的保留期由调用方给定。
+    fn retention_window(observation: &InteractionObservation) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            u64::from(observation.inner.retention_days.load(Ordering::Acquire)) * 86_400,
+        )
+    }
 
     async fn test_observation(
         pool: &sqlx::SqlitePool,
@@ -3725,7 +3745,9 @@ mod snapshot_tests {
         assert!(old_directory.join("manifest.json").is_file());
         observation.clear_debug().await?;
         observation.flush().await?;
-        observation.sweep_retention(chrono::Utc::now().timestamp_millis()).await?;
+        observation
+            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .await?;
         assert!(!old_directory.exists());
         assert!(
             observation
@@ -3737,7 +3759,9 @@ mod snapshot_tests {
         );
         drop(active);
         observation.flush().await?;
-        observation.sweep_retention(chrono::Utc::now().timestamp_millis()).await?;
+        observation
+            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .await?;
         assert!(!old_directory.exists());
         assert!(
             observation
@@ -3799,7 +3823,9 @@ mod snapshot_tests {
         observation.clear_debug().await?;
         drop(ingress);
         observation.flush().await?;
-        observation.sweep_retention(chrono::Utc::now().timestamp_millis()).await?;
+        observation
+            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .await?;
         assert!(
             trace
                 .manifest()
@@ -3919,7 +3945,9 @@ mod snapshot_tests {
         );
         let (_, partial) = observation.inner.store.debug_manifest_counts().await?;
         assert!(partial >= 1);
-        observation.sweep_retention(chrono::Utc::now().timestamp_millis()).await?;
+        observation
+            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .await?;
         assert!(observation.debug_state().partial_trace_count >= 1);
         // Clear and retention erase the retained state without durable files.
         observation.clear_debug().await?;

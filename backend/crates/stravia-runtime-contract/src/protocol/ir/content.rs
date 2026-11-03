@@ -119,7 +119,9 @@ pub fn block_content_units<'a>(
         ContentBlock::Thinking { thinking, .. } => {
             text_unit(units, format!("{pointer}/thinking"), thinking);
         }
-        ContentBlock::Reasoning { summary, content, .. } => {
+        ContentBlock::Reasoning {
+            summary, content, ..
+        } => {
             for (index, text) in summary.iter().enumerate() {
                 text_unit(units, format!("{pointer}/summary/{index}"), text);
             }
@@ -129,12 +131,11 @@ pub fn block_content_units<'a>(
         }
         // ToolResult / ServerToolResult 的 content：字符串是文本单元，
         // 其他 JSON（包括 `null` 与块数组）整段是 JSON 单元。
-        ContentBlock::ToolResult { content, .. } | ContentBlock::ServerToolResult { content, .. } => {
-            match content {
-                Value::String(text) => text_unit(units, format!("{pointer}/content"), text),
-                other => json_unit(units, format!("{pointer}/content"), other),
-            }
-        }
+        ContentBlock::ToolResult { content, .. }
+        | ContentBlock::ServerToolResult { content, .. } => match content {
+            Value::String(text) => text_unit(units, format!("{pointer}/content"), text),
+            other => json_unit(units, format!("{pointer}/content"), other),
+        },
         _ => {}
     }
 }
@@ -161,10 +162,7 @@ mod tests {
         let item = item(json!({"role": "user", "content": "hello"}));
         let units = item_content_units(&item);
         assert_eq!(pointers(&units), vec![("/content", ContentFormat::Text)]);
-        assert!(matches!(
-            units[0].body,
-            ContentUnitBody::Text("hello")
-        ));
+        assert!(matches!(units[0].body, ContentUnitBody::Text("hello")));
     }
 
     #[test]
@@ -237,10 +235,7 @@ mod tests {
             units[1].body,
             ContentUnitBody::Json(Value::Object(_))
         ));
-        assert!(matches!(
-            units[3].body,
-            ContentUnitBody::Json(Value::Null)
-        ));
+        assert!(matches!(units[3].body, ContentUnitBody::Json(Value::Null)));
     }
 
     #[test]
@@ -291,8 +286,14 @@ mod tests {
         assert_eq!(ContentFormat::Json.as_byte(), 1);
         assert_eq!(ContentFormat::Text.as_database_value(), 0);
         assert_eq!(ContentFormat::Json.as_database_value(), 1);
-        assert_eq!(ContentFormat::from_database_value(0), Some(ContentFormat::Text));
-        assert_eq!(ContentFormat::from_database_value(1), Some(ContentFormat::Json));
+        assert_eq!(
+            ContentFormat::from_database_value(0),
+            Some(ContentFormat::Text)
+        );
+        assert_eq!(
+            ContentFormat::from_database_value(1),
+            Some(ContentFormat::Json)
+        );
         assert_eq!(ContentFormat::from_database_value(2), None);
     }
 

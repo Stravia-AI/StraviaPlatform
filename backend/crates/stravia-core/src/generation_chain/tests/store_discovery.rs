@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
 #[test]
@@ -254,8 +255,8 @@ impl TurnChainStore for ControlledDiscoveryTurnChainStore {
             .find_reusable_prefixes(principal, kind, query)
             .await
     }
-    async fn sweep_expired(&self) -> Result<u64, TurnUnavailable> {
-        self.inner.sweep_expired().await
+    async fn sweep_history(&self, now: i64) -> Result<u64, TurnUnavailable> {
+        self.inner.sweep_history(now).await
     }
 }
 
@@ -267,7 +268,6 @@ async fn native_preparation_reuses_owned_workspace_for_diagnostic_source() {
     ));
     let chain = GenerationChain::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
@@ -322,7 +322,6 @@ async fn discovery_workspace_recovers_transient_errors_and_does_not_adopt_a_part
     ));
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     commit_observation_node(
@@ -331,7 +330,6 @@ async fn discovery_workspace_recovers_transient_errors_and_does_not_adopt_a_part
         "recoverable-root",
         None,
         observation_payload(vec![user_message("root")], None, None, "answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -340,7 +338,6 @@ async fn discovery_workspace_recovers_transient_errors_and_does_not_adopt_a_part
         "partial-root",
         None,
         observation_payload(vec![user_message("partial")], None, None, "answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -349,7 +346,6 @@ async fn discovery_workspace_recovers_transient_errors_and_does_not_adopt_a_part
         "invalid-tail",
         Some("partial-root"),
         serde_json::json!({"invalid":true}),
-        Duration::from_secs(60),
     )
     .await;
     let mut workspace = DiscoveryWorkspace::new(&owner, true);
@@ -408,7 +404,6 @@ async fn discovery_workspace_budget_overflow_keeps_prior_evidence_without_partia
     ));
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     commit_observation_node(
@@ -417,7 +412,6 @@ async fn discovery_workspace_budget_overflow_keeps_prior_evidence_without_partia
         "small-root",
         None,
         observation_payload(vec![user_message("root")], None, None, "answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -431,7 +425,6 @@ async fn discovery_workspace_budget_overflow_keeps_prior_evidence_without_partia
             None,
             "large answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     let mut workspace = DiscoveryWorkspace::with_budget(&owner, 64 * 1024);
@@ -471,7 +464,6 @@ async fn discovery_workspace_rejects_structurally_large_response_metadata() {
     ));
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     let mut payload = observation_payload(vec![user_message("root")], None, None, "answer");
@@ -483,7 +475,6 @@ async fn discovery_workspace_rejects_structurally_large_response_metadata() {
         "structured-metadata-root",
         None,
         payload,
-        Duration::from_secs(60),
     )
     .await;
     let mut workspace = DiscoveryWorkspace::with_budget(&owner, 64 * 1024);
@@ -514,7 +505,6 @@ async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
     ));
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     commit_observation_node(
@@ -523,7 +513,6 @@ async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
         "long-lived-root",
         None,
         observation_payload(vec![user_message("root")], None, None, "answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -532,7 +521,6 @@ async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
         "short-lived-child",
         Some("long-lived-root"),
         observation_payload(vec![user_message("child")], None, None, "child answer"),
-        Duration::from_secs(60),
     )
     .await;
     let parent_expiry = std::time::Instant::now() + Duration::from_secs(40);
@@ -585,7 +573,7 @@ async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
             after_child_expiry,
         )
         .expect("the longer root certificate still permits cached ancestry replay");
-    let cached_parent = materialize_discovery_nodes(&nodes, expires_at).unwrap();
+    let cached_parent = materialize_discovery_nodes(&nodes, expires_at, 7).unwrap();
     assert_eq!(cached_parent.expires_at, parent_expiry);
     assert_eq!(
         serde_json::to_value(&cached_parent).unwrap(),
@@ -599,7 +587,6 @@ async fn discovery_workspace_preserves_candidate_order_and_distinct_complete_win
         let owner = principal("workspace-owner");
         let store = GenerationChainStore::from_turn_chain(
             Arc::new(crate::turn_chain::test_store().await),
-            Duration::from_secs(60),
             crate::runtime_cache::RuntimeCache::tinyufo(1),
         );
         let mut root = responses_request(vec![user_message("exact question")]);
@@ -626,6 +613,9 @@ async fn discovery_workspace_preserves_candidate_order_and_distinct_complete_win
                         "target",
                         OPEN_RESPONSES_2026_04_24,
                     ),
+
+                    marker_references: Vec::new(),
+                    redaction_references: Vec::new(),
                 })
                 .await
                 .unwrap();
@@ -696,7 +686,6 @@ async fn discovery_workspace_replays_shared_ancestry_across_multiple_candidates(
     let owner = principal("workspace-shared-owner");
     let store = GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     let mut root_request = responses_request(vec![user_message("root question")]);
@@ -717,6 +706,9 @@ async fn discovery_workspace_replays_shared_ancestry_across_multiple_candidates(
                 "target",
                 OPEN_RESPONSES_2026_04_24,
             ),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .unwrap();
@@ -745,6 +737,9 @@ async fn discovery_workspace_replays_shared_ancestry_across_multiple_candidates(
                 "target",
                 OPEN_RESPONSES_2026_04_24,
             ),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .unwrap();
@@ -775,7 +770,6 @@ async fn discovery_workspace_rechecks_candidate_priority_after_a_previous_match(
     let durable = Arc::new(crate::turn_chain::test_store().await);
     let store = GenerationChainStore::from_turn_chain(
         durable.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     let mut root = responses_request(vec![user_message("question")]);
@@ -796,6 +790,9 @@ async fn discovery_workspace_rechecks_candidate_priority_after_a_previous_match(
                 "target",
                 OPEN_RESPONSES_2026_04_24,
             ),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .unwrap();
@@ -823,7 +820,9 @@ async fn discovery_workspace_rechecks_candidate_priority_after_a_previous_match(
             principal: owner.clone(),
             payload_version: RESPONSE_PAYLOAD_VERSION,
             payload: serde_json::json!({"invalid":true}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: Some(ReusablePrefixMetadata {
                 namespace: format!("{GENERATION_PREFIX_NAMESPACE}session"),
                 fingerprint: generation_session_fingerprint(&root).unwrap(),
@@ -860,7 +859,6 @@ async fn discovery_projection_skips_only_proven_incompatible_corrupt_candidates(
         let durable = Arc::new(crate::turn_chain::test_store().await);
         let store = GenerationChainStore::from_turn_chain(
             durable.clone(),
-            Duration::from_secs(60),
             crate::runtime_cache::RuntimeCache::tinyufo(1),
         );
         let mut root = responses_request(vec![user_message("question")]);
@@ -881,6 +879,9 @@ async fn discovery_projection_skips_only_proven_incompatible_corrupt_candidates(
                     "target",
                     OPEN_RESPONSES_2026_04_24,
                 ),
+
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
             })
             .await
             .unwrap();
@@ -932,7 +933,9 @@ async fn discovery_projection_skips_only_proven_incompatible_corrupt_candidates(
                 principal: owner.clone(),
                 payload_version: RESPONSE_PAYLOAD_VERSION,
                 payload: serde_json::json!({"invalid": true}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: Some(ReusablePrefixMetadata {
                     namespace: history.reusable_namespace(),
                     fingerprint: history.session_fingerprint.clone().unwrap(),
@@ -970,7 +973,6 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
     let durable = Arc::new(crate::turn_chain::test_store().await);
     let store = GenerationChainStore::from_turn_chain(
         durable.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     commit_observation_node(
@@ -984,7 +986,6 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
             Some(vec![AiItem::output_text("old answer")]),
             "old answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     let mut workspace = DiscoveryWorkspace::new(&owner, true);
@@ -1019,9 +1020,12 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
         "expired-durable-root",
         None,
         observation_payload(vec![user_message("expired")], None, None, "expired answer"),
-        Duration::ZERO,
     )
     .await;
+    durable
+        .sweep_history(past_retention_window())
+        .await
+        .expect("reclaim history past the retention window");
     assert_eq!(
         store
             .materialize_discovery_generation(
@@ -1040,7 +1044,6 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
         "valid-workspace-root",
         None,
         observation_payload(vec![user_message("kept")], None, None, "root answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -1049,7 +1052,6 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
         "invalid-workspace-tail",
         Some("valid-workspace-root"),
         serde_json::json!({"invalid":true}),
-        Duration::from_secs(60),
     )
     .await;
     for _ in 0..2 {
@@ -1152,10 +1154,10 @@ async fn shared_discovery_replay_preserves_mutations_reasoning_and_media_boundar
             },
         ];
         let expires_at = std::time::Instant::now() + Duration::from_secs(60);
-        let owned = materialize_generation_nodes(nodes.clone(), expires_at).unwrap();
+        let owned = materialize_generation_nodes(nodes.clone(), expires_at, 7).unwrap();
         let mut workspace = DiscoveryWorkspace::new(&owner, true);
         let decoded = workspace.decode_chain(&owner, nodes).unwrap();
-        let borrowed = materialize_discovery_nodes(&decoded, expires_at).unwrap();
+        let borrowed = materialize_discovery_nodes(&decoded, expires_at, 7).unwrap();
         assert_eq!(
             serde_json::to_value(&owned).unwrap(),
             serde_json::to_value(&borrowed).unwrap()
@@ -1207,6 +1209,7 @@ fn historical_v6_request_controls_are_imported_before_continuation_inheritance()
             payload,
         }],
         std::time::Instant::now() + Duration::from_secs(60),
+        7,
     )
     .unwrap();
     let mut continuation = responses_request(vec![user_message("continue")]);
@@ -1288,10 +1291,11 @@ impl TurnChainStore for CountingParentTurnChainStore {
         self.inner.commit(commit).await
     }
 
-    async fn sweep_expired(
+    async fn sweep_history(
         &self,
+        now: i64,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
-        self.inner.sweep_expired().await
+        self.inner.sweep_history(now).await
     }
 }
 
@@ -1331,7 +1335,6 @@ async fn optimization_plain_parent_reads_chain_once_cold_and_not_at_all_warm() {
         "resp_optimization_root",
         None,
         root,
-        Duration::from_secs(60),
     )
     .await;
     let mut child = observation_payload(
@@ -1347,12 +1350,10 @@ async fn optimization_plain_parent_reads_chain_once_cold_and_not_at_all_warm() {
         "resp_optimization_child",
         Some("resp_optimization_root"),
         child,
-        Duration::from_secs(60),
     )
     .await;
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     for (iteration, expected_reads) in [(0, 1), (1, 1)] {
@@ -1422,7 +1423,6 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
             Some(vec![old_output]),
             "private old answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -1438,12 +1438,10 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
             Some(vec![AiItem::output_text("new answer")]),
             "private new answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     // 首次冷读后 materialized 与引用目录同键缓存，后续命中不再触发存储读。
@@ -1497,7 +1495,6 @@ async fn optimization_reference_conflicts_across_ancestors_remain_ambiguous() {
             Some(vec![item("first answer")]),
             "private first answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -1511,12 +1508,10 @@ async fn optimization_reference_conflicts_across_ancestors_remain_ambiguous() {
             Some(vec![item("conflicting answer")]),
             "private conflicting answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let mut request = continuation_to(
@@ -1549,7 +1544,6 @@ async fn blocked_generation_commit(
     ));
     let chain = GenerationChain::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -1773,7 +1767,6 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
     let seed_backend = Arc::new(crate::turn_chain::test_store().await);
     let seed = GenerationChainStore::from_turn_chain(
         seed_backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
     let root_input = responses_request(vec![user_message("root question")]);
@@ -1788,6 +1781,9 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
         response: root_output,
         upstream_response_id: None,
         effective_state: GenerationChainState::default(),
+
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
     })
     .await
     .unwrap();
@@ -1821,6 +1817,9 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
             response: output,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .unwrap();
@@ -1859,7 +1858,9 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
                 parent_id: node.parent_id,
                 payload_version: node.payload_version,
                 payload: node.payload,
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: prefix,
             })
             .await
@@ -1876,7 +1877,6 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
     }
     let chain = GenerationChain::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
     );
@@ -1933,7 +1933,6 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -1977,9 +1976,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
 
     // Simulate durable indexes written by the previous projection, without
     // changing immutable payloads or parent edges.
-    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool) = backend.as_ref() else {
-        unreachable!()
-    };
+    let pool = backend.sqlite_pool_for_test().expect("sqlite backend");
     {
         let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query("UPDATE turn_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99, prefix_projection_version = 999, prefix_controls_fingerprint = 'stale-controls', prefix_context_fingerprint = 'stale-context' WHERE id = ?")
@@ -1995,7 +1992,6 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .unwrap();
     let restarted = GenerationChain::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -2093,7 +2089,8 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         })
         .await
         .unwrap();
-    sqlx::query("UPDATE turn_node_retention SET expires_at = 0 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
+    // 祖先处于回收中（deleting）时不可用，前缀重建不能依赖它。
+    sqlx::query("UPDATE turn_node_retention SET deleting = 1 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(a.id())
         .execute(pool)
         .await
@@ -2133,7 +2130,6 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
 async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -2186,7 +2182,6 @@ async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
 async fn edited_tool_history_does_not_merge_a_later_user_into_tool_continuation() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -2256,7 +2251,6 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
     });
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let owner = principal("owner");
@@ -2270,6 +2264,9 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -2301,11 +2298,7 @@ async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_m
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024);
-    let store = GenerationChainStore::from_turn_chain(
-        backend.clone(),
-        Duration::from_secs(60),
-        cache.clone(),
-    );
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
     let owner = principal("shared-cache-owner");
     let id = TurnNodeId::new("resp_shared_cache");
     let mut response = AiResponse::new("upstream", "model");
@@ -2320,6 +2313,9 @@ async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_m
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -2372,6 +2368,9 @@ async fn save_generation_with_effective_request(
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save generation with effective request controls");
@@ -2384,11 +2383,7 @@ async fn materialization_cache_admits_small_effective_request_controls() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(
-        backend.clone(),
-        Duration::from_secs(60),
-        cache.clone(),
-    );
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
     let owner = principal("effective-weight-small");
     let id = TurnNodeId::new("resp_effective_weight_small");
     let mut effective = responses_request(Vec::new());
@@ -2447,11 +2442,7 @@ async fn materialization_cache_rejects_oversized_effective_request_controls() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(
-        backend.clone(),
-        Duration::from_secs(60),
-        cache.clone(),
-    );
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
     let owner = principal("effective-weight-oversized");
 
     // 32 KiB of serialized JSON, but 16K retained empty schema objects.
@@ -2539,11 +2530,7 @@ async fn materialization_cache_rejects_structurally_large_item_metadata() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(
-        backend.clone(),
-        Duration::from_secs(60),
-        cache.clone(),
-    );
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
     let owner = principal("item-metadata-weight");
     let id = TurnNodeId::new("resp_item_metadata_weight");
     let metadata = serde_json::Value::Object(
@@ -2580,23 +2567,19 @@ async fn materialization_cache_rejects_structurally_large_item_metadata() {
 }
 
 #[tokio::test]
-async fn materialization_cache_does_not_outlive_the_generation_ttl() {
+async fn materialization_cache_does_not_outlive_the_retention_window() {
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024);
     let backend = Arc::new(ControlledDiscoveryTurnChainStore::new(
-        crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone()),
+        crate::turn_chain::SqlTurnChainStore::sqlite(pool),
     ));
-    let store = GenerationChainStore::from_turn_chain(
-        backend.clone(),
-        Duration::from_secs(1),
-        cache.clone(),
-    );
+    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
     let owner = principal("owner");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    let before_save = chrono::Utc::now().timestamp_millis();
+    let before_save = std::time::Instant::now();
     store
         .save(GenerationChainCommit {
             principal: owner.clone(),
@@ -2607,30 +2590,15 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
 
-    let after_save = chrono::Utc::now().timestamp_millis();
+    let after_save = std::time::Instant::now();
     let id = TurnNodeId::new("resp_expiring");
-    let committed_expiry: i64 =
-        sqlx::query_scalar("SELECT r.expires_at FROM turn_node_retention r JOIN turn_nodes n ON n.node_pk = r.node_pk WHERE n.id = ?")
-            .bind(id.as_str())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!((before_save + 1000..=after_save + 1000).contains(&committed_expiry));
-
-    // Control the durable fixture deadline before filling the cache; initial
-    // materialization must not race the configured one-second retention window.
-    let durable_expiry = chrono::Utc::now().timestamp_millis() + 60_000;
-    let live_rows = sqlx::query("UPDATE turn_node_retention SET expires_at = ? WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
-        .bind(durable_expiry)
-        .bind(id.as_str())
-        .execute(&pool)
-        .await
-        .expect("set controlled durable deadline");
-    assert_eq!(live_rows.rows_affected(), 1);
     let mut cached = responses_request(vec![user_message("follow up")]);
     crate::router::stamp_previous_response_id(&mut cached, "resp_expiring");
     store
@@ -2652,15 +2620,22 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
             .expect("SQL must supply the initial materialization certificate"),
         "the cache must inherit the durable generation deadline exactly"
     );
+    // 缓存期限来自头节点 `created_at + N`，不会超出保留窗口。
+    let window = crate::history_retention::HistoryRetention::new(
+        crate::history_retention::DEFAULT_RETENTION_DAYS,
+    )
+    .window();
     assert!(materialized.expires_at > std::time::Instant::now());
+    assert!(materialized.expires_at <= after_save + window);
+    assert!(materialized.expires_at + Duration::from_secs(60) >= before_save + window);
     assert!(items_equal(
         &materialized.client_items,
         &[user_message("question"), AiItem::output_text("answer")]
     ));
 
-    // Advance both expiry certificates explicitly rather than racing a one-second
-    // TTL against scheduler delays. Keep the stale entry resident so this exercises
-    // the consumer's expiry check, not merely the cache backend's eviction.
+    // 真实时钟无法拨快：把驻留条目的期限置为已过，再用晚于窗口的 `now` 回收历史，
+    // 以验证消费方在期限已过时不会继续从缓存提供已回收的 Generation。
+
     let expired_materialization = MaterializedGeneration {
         root_id: materialized.root_id.clone(),
         compaction_record_ids: materialized.compaction_record_ids.clone(),
@@ -2675,14 +2650,13 @@ async fn materialization_cache_does_not_outlive_the_generation_ttl() {
         client_item_units: materialized.client_item_units,
         payload_version: materialized.payload_version,
         expires_at: std::time::Instant::now(),
+        retention_days: materialized.retention_days,
     };
     let bytes = stravia_runtime_contract::json::serialized_len(&expired_materialization).unwrap();
-    let expired_rows = sqlx::query("UPDATE turn_node_retention SET expires_at = 0 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
-        .bind(id.as_str())
-        .execute(&pool)
+    backend
+        .sweep_history(past_retention_window())
         .await
-        .expect("expire durable generation");
-    assert_eq!(expired_rows.rows_affected(), 1);
+        .expect("reclaim expired generation");
     cache
         .put(
             "generation.materialized",
@@ -2764,7 +2738,6 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
     let artifact_store: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> = artifacts;
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         Some(artifact_store),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -2856,7 +2829,6 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         artifacts.clone();
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         Some(artifact_store),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -2983,6 +2955,9 @@ async fn previous_response_materializes_history_and_supports_branching() {
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3025,6 +3000,9 @@ async fn replacement_mutation_replays_the_effective_history_without_a_hook() {
             response,
             upstream_response_id: Some("upstream".into()),
             effective_state: state,
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save rewritten response");
@@ -3086,6 +3064,9 @@ async fn previous_response_materializes_the_ordered_item_graph_without_collapsin
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3115,7 +3096,6 @@ async fn previous_response_materializes_the_ordered_item_graph_without_collapsin
 async fn automatic_parent_matches_a_combined_assistant_turn() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -3184,7 +3164,6 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
 async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_allows_it() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -3286,7 +3265,6 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
 async fn stable_session_does_not_link_semantically_changed_history() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -3346,7 +3324,6 @@ async fn stable_session_does_not_link_semantically_changed_history() {
 async fn controls_prefix_wins_when_same_session_candidate_does_not_match() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -3432,6 +3409,9 @@ async fn previous_response_resolves_principal_scoped_item_references() {
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3559,6 +3539,9 @@ async fn previous_response_resolves_references_to_persisted_input_items() {
             response: AiResponse::new("answer", "model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3602,6 +3585,9 @@ async fn previous_response_inherits_instructions_unless_replaced() {
             response: AiResponse::new("answer", "model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3663,6 +3649,9 @@ async fn previous_response_inherits_request_configuration_and_keeps_overrides() 
             response: AiResponse::new("answer", "root-model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3730,6 +3719,9 @@ async fn response_ids_are_isolated_by_principal() {
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -3751,7 +3743,6 @@ async fn response_history_survives_adapter_reconstruction() {
     let owner = principal("owner");
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&turn_chain),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let mut response = AiResponse::new("upstream", "model");
@@ -3766,13 +3757,15 @@ async fn response_history_survives_adapter_reconstruction() {
             response,
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
 
     let reconstructed = GenerationChainStore::from_turn_chain(
         turn_chain,
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let mut continuation = responses_request(vec![user_message("follow-up")]);
@@ -3817,7 +3810,6 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     );
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     store
@@ -3830,13 +3822,15 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
             response: AiResponse::new("upstream", "model"),
             upstream_response_id: None,
             effective_state: GenerationChainState::default(),
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .unwrap();
     drop(store);
     let reconstructed = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
-        Duration::from_secs(60),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
     let mut request = responses_request(Vec::new());
@@ -3945,6 +3939,9 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
             response,
             upstream_response_id: Some("upstream-1".into()),
             effective_state: state,
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -4020,6 +4017,9 @@ async fn automatic_prefix_selects_exact_completed_context_and_leaves_new_items()
             response,
             upstream_response_id: Some("upstream-1".into()),
             effective_state: state,
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save reusable response");
@@ -4107,6 +4107,9 @@ async fn automatic_prefix_preserves_parallel_tool_result_ids_after_duplicate_eff
             response,
             upstream_response_id: Some("upstream".into()),
             effective_state: state,
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save response");
@@ -4246,6 +4249,9 @@ async fn automatic_prefix_never_turns_an_identical_full_request_into_an_empty_de
             response,
             upstream_response_id: Some("upstream-1".into()),
             effective_state: state,
+
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
         })
         .await
         .expect("save reusable response");
@@ -4518,13 +4524,20 @@ fn observation_payload(
     .expect("observation payload")
 }
 
+/// 比默认保留窗口晚一天的 `now`：真实时钟无法拨快，回收只能经由 `sweep_history` 的
+/// `now` 参数推进到窗口之外。
+fn past_retention_window() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+        + (i64::from(crate::history_retention::DEFAULT_RETENTION_DAYS) + 1)
+            * crate::history_retention::DAY_MILLIS
+}
+
 async fn commit_observation_node(
     store: &dyn TurnChainStore,
     owner: &Principal,
     id: &str,
     parent: Option<&str>,
     payload: serde_json::Value,
-    idle_ttl: Duration,
 ) {
     store
         .commit(TurnCommit {
@@ -4534,7 +4547,9 @@ async fn commit_observation_node(
             principal: owner.clone(),
             payload_version: RESPONSE_PAYLOAD_VERSION,
             payload,
-            idle_ttl,
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -4546,7 +4561,6 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
         Arc::clone(&backend),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -4563,7 +4577,6 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
             Some(vec![AiItem::output_text("public root")]),
             "private root",
         ),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -4579,7 +4592,6 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
             None,
             "fallback answer",
         ),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -4595,7 +4607,6 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
             Some(vec![AiItem::output_text("public replacement")]),
             "private replacement",
         ),
-        Duration::from_secs(60),
     )
     .await;
 
@@ -4655,7 +4666,6 @@ async fn ancestor_client_item_workspace_keeps_branches_and_principals_isolated()
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
         Arc::clone(&backend),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -4676,7 +4686,6 @@ async fn ancestor_client_item_workspace_keeps_branches_and_principals_isolated()
             id,
             parent,
             observation_payload(vec![user_message(question)], None, None, answer),
-            Duration::from_secs(60),
         )
         .await;
     }
@@ -4727,9 +4736,12 @@ async fn ancestor_client_item_workspace_keeps_branches_and_principals_isolated()
         "expired-child",
         Some("shared-root"),
         observation_payload(vec![user_message("expired")], None, None, "expired"),
-        Duration::ZERO,
     )
     .await;
+    backend
+        .sweep_history(past_retention_window())
+        .await
+        .expect("reclaim history past the retention window");
     assert!(
         !chain
             .visit_ancestor_client_items(&owner, "expired-child", &mut workspace, |_, _, _| {
@@ -4745,7 +4757,6 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
         Arc::clone(&backend),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -4768,9 +4779,12 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
         "expired-observation",
         None,
         observation_payload(vec![user_message("expired")], None, None, "expired answer"),
-        Duration::ZERO,
     )
     .await;
+    backend
+        .sweep_history(past_retention_window())
+        .await
+        .expect("reclaim history past the retention window");
 
     assert!(
         !chain
@@ -4788,7 +4802,6 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
     let backend: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(
         Arc::clone(&backend),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
     );
@@ -4800,7 +4813,6 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
         "valid-observation-root",
         None,
         observation_payload(vec![user_message("valid")], None, None, "answer"),
-        Duration::from_secs(60),
     )
     .await;
     commit_observation_node(
@@ -4809,7 +4821,6 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
         "invalid-observation-tail",
         Some("valid-observation-root"),
         serde_json::json!({"invalid": true}),
-        Duration::from_secs(60),
     )
     .await;
 

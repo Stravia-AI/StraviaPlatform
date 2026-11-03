@@ -804,4 +804,3 @@ backend!(
     sqlx::PgConnection<'_>,
     " FOR KEY SHARE"
 );
-

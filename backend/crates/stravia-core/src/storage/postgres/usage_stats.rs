@@ -238,8 +238,8 @@ mod tests {
     ) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO interaction_observations
-             (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+             (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(id)
         .bind("owner")
@@ -251,13 +251,12 @@ mod tests {
         .bind("completed")
         .bind(started_at)
         .bind(started_at)
-        .bind(i64::MAX)
         .execute(pool)
         .await?;
         sqlx::query(
             "INSERT INTO inference_run_observations
-             (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence,expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+             (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(id)
         .bind(id)
@@ -269,7 +268,6 @@ mod tests {
         .bind(started_at)
         .bind(started_at + 10)
         .bind(0_i64)
-        .bind(i64::MAX)
         .execute(pool)
         .await?;
         sqlx::query(
@@ -439,16 +437,15 @@ mod tests {
             .find(|provider| provider.provider_id.as_deref() == Some("provider"));
         let now = chrono::Utc::now().timestamp_millis();
         let recent = now - 1_000;
-        for (id, run_status, turn_status, reason, finished, expires_at) in [
-            ("recovered", "completed", "completed", None, true, i64::MAX),
-            ("running", "running", "running", None, false, i64::MAX),
+        for (id, run_status, turn_status, reason, finished) in [
+            ("recovered", "completed", "completed", None, true),
+            ("running", "running", "running", None, false),
             (
                 "cancelled",
                 "cancelled",
                 "cancelled",
                 Some("cancelled"),
                 true,
-                i64::MAX,
             ),
             (
                 "interrupted",
@@ -456,7 +453,6 @@ mod tests {
                 "interrupted",
                 Some("process_restarted"),
                 true,
-                i64::MAX,
             ),
             (
                 "disconnected",
@@ -464,7 +460,6 @@ mod tests {
                 "failed",
                 Some("client_disconnected"),
                 true,
-                i64::MAX,
             ),
             (
                 "unfinished",
@@ -472,7 +467,6 @@ mod tests {
                 "failed",
                 Some("upstream_error"),
                 false,
-                i64::MAX,
             ),
             (
                 "expired",
@@ -480,7 +474,6 @@ mod tests {
                 "failed",
                 Some("upstream_error"),
                 true,
-                now - 1,
             ),
             (
                 "upstream-error",
@@ -488,7 +481,6 @@ mod tests {
                 "failed",
                 Some("upstream_error"),
                 true,
-                i64::MAX,
             ),
             (
                 "delivery-error",
@@ -496,15 +488,13 @@ mod tests {
                 "completed",
                 Some("delivery_error"),
                 true,
-                i64::MAX,
             ),
         ] {
             insert_turn(pool, id, recent, "model", "key").await?;
-            sqlx::query("UPDATE inference_run_observations SET status=$1,terminal_reason=$2,finished_at=$3,expires_at=$4 WHERE id=$5")
+            sqlx::query("UPDATE inference_run_observations SET status=$1,terminal_reason=$2,finished_at=$3 WHERE id=$4")
                 .bind(run_status)
                 .bind(reason)
                 .bind(finished.then_some(recent + 10))
-                .bind(expires_at)
                 .bind(id)
                 .execute(pool).await?;
             sqlx::query("UPDATE model_turn_observations SET status=$1 WHERE id=$2")
@@ -566,9 +556,9 @@ mod tests {
             ("rejected-disconnected", "client_disconnected", 499),
         ] {
             sqlx::query("INSERT INTO rejected_request_observations
-                (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at)
-                VALUES ($1,$2,'POST','/v1/responses','responses','authentication',$3,$4,FALSE,0,$5)")
-                .bind(id).bind(now - 1_800_000).bind(code).bind(status_code).bind(i64::MAX)
+                (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence)
+                VALUES ($1,$2,'POST','/v1/responses','responses','authentication',$3,$4,FALSE,0)")
+                .bind(id).bind(now - 1_800_000).bind(code).bind(status_code)
                 .execute(pool).await?;
         }
         let store = PostgresUsageStatsStore {
@@ -1095,7 +1085,7 @@ mod tests {
         assert_eq!(failed.terminal_request_count, 1);
         assert_eq!(failed.failed_request_count, 1);
         // 拒绝记录属于错误的请求：只进 request_count，不改变四个新计数。
-        sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at) VALUES ('revision-rejection',900000,'POST','/v1/responses','responses','authentication','cancelled',400,false,0,9223372036854775807)")
+        sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence) VALUES ('revision-rejection',900000,'POST','/v1/responses','responses','authentication','cancelled',400,false,0)")
             .execute(pool).await?;
         assert_eq!(
             store.stats_overview(selected).await?.failed_request_count,

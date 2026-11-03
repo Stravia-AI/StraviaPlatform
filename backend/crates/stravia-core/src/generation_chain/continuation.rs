@@ -277,7 +277,10 @@ mod tests {
     async fn trusted_parent_prepares_delta_and_preserves_complete_fallback() {
         let lookup = test_chain().await.continuation_lookup();
         let owner = Principal::new("owner");
-        let proof = evidence(&owner, std::time::Instant::now() + Duration::from_secs(60));
+        let proof = evidence(
+            &owner,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
         let mut request = request("parent");
         let original_items = request.items.clone();
         let mut fallback = None;
@@ -305,7 +308,10 @@ mod tests {
     async fn trusted_proof_does_not_bypass_history_controls_or_protocol_gates() {
         let lookup = test_chain().await.continuation_lookup();
         let owner = Principal::new("owner");
-        let proof = evidence(&owner, std::time::Instant::now() + Duration::from_secs(60));
+        let proof = evidence(
+            &owner,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
         for mode in ["history", "controls", "protocol"] {
             let mut request = request("parent");
             let mut target = target("provider:model");
@@ -337,8 +343,14 @@ mod tests {
     async fn invalid_or_source_only_proofs_preserve_complete_history() {
         let lookup = test_chain().await.continuation_lookup();
         let owner = Principal::new("owner");
-        let valid = evidence(&owner, std::time::Instant::now() + Duration::from_secs(60));
-        let expired = evidence(&owner, std::time::Instant::now() - Duration::from_secs(1));
+        let valid = evidence(
+            &owner,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let expired = evidence(
+            &owner,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
         let mut source_only = valid.clone();
         if let GenerationParentTarget::Resolved(proof) = &mut source_only {
             Arc::make_mut(proof).state = None;

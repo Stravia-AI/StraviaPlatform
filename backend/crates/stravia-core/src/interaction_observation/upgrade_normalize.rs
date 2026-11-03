@@ -128,6 +128,20 @@ struct SplitRow {
     payload: Value,
 }
 
+/// 解码旧载荷。已损坏的历史诊断不得阻断整库升级：事件行保留，载荷按空对象迁移。
+fn legacy_payload(sequence: i64, bytes: &[u8]) -> Value {
+    match crate::storage_codec::decode(bytes)
+        .map_err(anyhow::Error::from)
+        .and_then(|raw| serde_json::from_slice(&raw).map_err(anyhow::Error::from))
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(sequence, %error, "observation payload unreadable during normalization; migrated as empty");
+            Value::Object(serde_json::Map::new())
+        }
+    }
+}
+
 /// 第一段：事件载荷拆分为 attrs / 块 / 内容引用，Run 列就地回填。
 async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> anyhow::Result<()> {
     let mut last: i64 = sqlx::query_scalar(
@@ -157,8 +171,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    payload: serde_json::from_slice(&crate::storage_codec::decode(&payload)?)
-                        .context("observation payload is not JSON")?,
+                    payload: legacy_payload(row.try_get("sequence")?, &payload),
                 },
             ));
         }
@@ -351,8 +364,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    payload: serde_json::from_slice(&crate::storage_codec::decode(&payload)?)
-                        .context("observation payload is not JSON")?,
+                    payload: legacy_payload(row.try_get("sequence")?, &payload),
                 },
             ));
         }

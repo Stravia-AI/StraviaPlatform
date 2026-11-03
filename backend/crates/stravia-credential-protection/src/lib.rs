@@ -17,7 +17,6 @@ pub use detection::{
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 
@@ -28,7 +27,6 @@ use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::redaction::{RedactionError, RedactionTrace};
 
 pub const SETTING_KEY: &str = "reversible_redaction_enabled";
-const PUBLISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MARKER_INSTRUCTION: &str =
     "Preserve Stravia redaction markers verbatim when used; Stravia restores their values.";
 
@@ -337,9 +335,7 @@ impl ReversibleRedaction {
     ) -> Result<(), RedactionError> {
         let references = trace.references()?;
         if !references.is_empty() {
-            self.mappings
-                .publish(principal, &references, PUBLISHED_RETENTION)
-                .await?;
+            self.mappings.publish(principal, &references).await?;
         }
         Ok(())
     }
@@ -469,7 +465,6 @@ mod tests {
                 marker::SUFFIX
             ),
             secret: "sk-known-9f2c41".into(),
-            expires_at: i64::MAX,
             rule_ids: RuleIds::from(
                 rule_ids
                     .iter()

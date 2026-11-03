@@ -110,7 +110,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 41..=42
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=42
     ) {
         return false;
     }
@@ -324,6 +324,21 @@ pub async fn run_sqlite_migrator(
                 None,
             );
             crate::content_store::upgrade::run_sqlite(&mut pinned.connection).await?;
+        }
+    }
+    if runner.version_exists(39) {
+        // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
+        runner
+            .run_direct(Some(39), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=40 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report("retention_data", "Converting dependency retention", 0, None);
+            crate::turn_chain::upgrade::retention_sqlite(&mut pinned.connection).await?;
         }
     }
     if runner.version_exists(41) {
@@ -552,6 +567,19 @@ pub async fn run_postgres_migrator(
             crate::content_store::upgrade::run_postgres(&mut connection).await?;
         }
     }
+    if runner.version_exists(39) {
+        // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
+        runner.run_direct(Some(39), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=40 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report("retention_data", "Converting dependency retention", 0, None);
+            crate::turn_chain::upgrade::retention_postgres(&mut connection).await?;
+        }
+    }
     if runner.version_exists(41) {
         report(
             "observation_schema",
@@ -572,8 +600,7 @@ pub async fn run_postgres_migrator(
                 0,
                 None,
             );
-            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection)
-                .await?;
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection).await?;
         }
     }
     report(
@@ -1007,12 +1034,23 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(actual_version, expected_version);
-            let retained: Vec<u8> =
-                sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(retained, [0xff]);
+            if version == 26 {
+                let retained: Vec<u8> =
+                    sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(retained, [0xff]);
+            } else {
+                // 无法解码的历史诊断不阻断升级：事件行保留，载荷按空对象迁移。
+                let kept: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM observation_events WHERE sequence=1",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(kept, 1);
+            }
             let source: Option<String> = sqlx::query_scalar(
                 "SELECT error_source FROM target_attempt_observations WHERE id='a'",
             )
@@ -1204,13 +1242,14 @@ mod tests {
             ("credential hit records".into(), true)
         );
         let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+            sqlx::query_scalar("SELECT attrs FROM observation_events WHERE sequence=1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         let actual: serde_json::Value =
             serde_json::from_slice(&crate::storage_codec::decode(&stored).unwrap()).unwrap();
         let mut expected = payload;
+        expected.as_object_mut().unwrap().remove("kind");
         expected["discoveries"][0]["rule_ids"] = serde_json::json!(["custom.kept"]);
         assert_eq!(actual, expected);
     }

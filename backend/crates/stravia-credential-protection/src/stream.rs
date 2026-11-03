@@ -585,7 +585,6 @@ mod tests {
         let mappings = [Mapping {
             reference: reference.into(),
             secret: secret.into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         }];
         let input = format!(
@@ -622,7 +621,6 @@ mod tests {
         let mappings = [Mapping {
             reference: reference.into(),
             secret: "restored-credential".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         }];
         for split in 1..reference.len() {
@@ -686,7 +684,6 @@ mod tests {
         let mappings = [Mapping {
             reference: reference.into(),
             secret: "stravia".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         }];
         let input = format!("前缀<<backend/crates/{reference}-core/src {unknown} {legacy} <!--sr:");

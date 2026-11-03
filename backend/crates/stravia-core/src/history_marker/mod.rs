@@ -9,6 +9,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
+
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::ToolCall;
@@ -20,9 +22,10 @@ pub use syntax::{
     history_marker_references, render_history_marker, resolve_request_markers,
 };
 pub(crate) use syntax::{
-    client_shaped_request, history_marker_references_iter, mark_current_run_projected,
-    new_reference, render_preview_projection_end, render_preview_projection_span,
-    render_preview_projection_start, request_needs_marker_resolution, valid_reference,
+    client_shaped_request, history_marker_commit_references, history_marker_references_in_text,
+    mark_current_run_projected, new_reference, render_preview_projection_end,
+    render_preview_projection_span, render_preview_projection_start,
+    request_needs_marker_resolution, valid_reference,
 };
 #[cfg(test)]
 pub(crate) use syntax::{render_history_marker_reference, render_text_projection_span};
@@ -182,7 +185,6 @@ pub struct PlatformMarkerInput {
     pub call: ToolCall,
     pub activity: String,
     pub execution_limit: Duration,
-    pub pending_retention: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +209,6 @@ pub struct ThinkingMarkerInput {
     pub block: ContentBlock,
     pub source: Option<ThinkingSource>,
     pub activity: String,
-    pub pending_retention: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,21 +338,15 @@ pub trait HistoryMarkerStore: Send + Sync {
         reference: &str,
     ) -> Result<Option<ResolvedHistoryMarker>, HistoryMarkerError>;
 
+    /// 发布只记录首次发布时刻并清空未发布下限，不延长任何保留期。
     async fn publish(
         &self,
         principal: &Principal,
         references: &[String],
-        retention: Duration,
     ) -> Result<(), HistoryMarkerError>;
 
-    async fn extend_retention(
-        &self,
-        principal: &Principal,
-        references: &[String],
-        retention: Duration,
-    ) -> Result<(), HistoryMarkerError>;
-
-    async fn cleanup_expired(&self) -> Result<u64, HistoryMarkerError>;
+    /// 期限扫描入队后由回收步骤删除；`retention` 是当前统一天数。
+    async fn sweep(&self, now: i64, retention: Duration) -> Result<u64, HistoryMarkerError>;
 }
 
 #[cfg(test)]

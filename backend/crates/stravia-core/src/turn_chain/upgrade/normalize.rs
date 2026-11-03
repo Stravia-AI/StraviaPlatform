@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, bail, ensure};
 use serde_json::{Map, Value};
 
-use crate::turn_chain::upgrade::v3_content as content;
 use crate::turn_chain::upgrade::format2;
+use crate::turn_chain::upgrade::v3_content as content;
 
 const STAGE_DONE: i64 = 4;
 const DEFAULT_NODE_BATCH: usize = 64;

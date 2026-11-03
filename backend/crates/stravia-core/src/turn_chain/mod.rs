@@ -14,7 +14,7 @@ struct StoredAncestorRow {
     parent_id: Option<String>,
     payload_version: i64,
     payload: Option<Vec<u8>>,
-    expires_at: Option<i64>,
+    created_at: i64,
 }
 
 pub(crate) mod content;
@@ -32,5 +32,7 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
     SqlTurnChainStore::sqlite(pool)
 }
 
+#[cfg(test)]
+mod retention_tests;
 #[cfg(test)]
 mod tests;
