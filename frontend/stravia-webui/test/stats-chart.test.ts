@@ -281,10 +281,10 @@ describe('activity grid', () => {
       { startMs: start, endMs: start + 2_700_000, bucketMs: 900_000 },
     )
 
-    expect(grid.cells.map(({ start: time, tokens, level }) => [time, tokens, level])).toEqual([
-      [start, 12, 4],
-      [start + 900_000, null, 0],
-      [start + 1_800_000, 0, 0],
+    expect(grid.cells.map(({ start: time, tokens, intensity }) => [time, tokens, intensity])).toEqual([
+      [start, 12, 1],
+      [start + 900_000, null, null],
+      [start + 1_800_000, 0, null],
     ])
     expect(grid.colStarts).toEqual([start])
     expect(grid.colCount).toBe(1)
@@ -429,13 +429,52 @@ describe('activity grid', () => {
     expect(byStart.get(end - 3 * DAY_MS)?.tokens).toBe(0)
     expect(byStart.get(end - 2 * DAY_MS)?.tokens).toBeNull()
     expect(byStart.get(end - DAY_MS)?.tokens).toBe(10)
-    expect(byStart.get(end - DAY_MS)?.level).toBe(4)
+    expect(byStart.get(end - DAY_MS)?.intensity).toBe(1)
     expect(byStart.has(end)).toBe(false)
 
     const positions = new Set(grid.cells.map((cell) => `${cell.col}:${cell.row}`))
     expect(positions.size).toBe(grid.cells.length)
     expect(grid.rowCount).toBeLessThanOrEqual(7)
     expect(grid.colCount).toBe(grid.colStarts.length)
+  })
+
+  describe('intensity', () => {
+    const start = Date.UTC(2026, 8, 17)
+    const intensities = (usage: (number | null)[]) =>
+      buildActivityGrid(
+        usage.map((tokens, index) => ({
+          bucket_start: start + index * HOUR_MS,
+          total_input_tokens: tokens,
+          total_output_tokens: tokens == null ? null : 0,
+          total_cache_read_tokens: null,
+          total_cache_write_tokens: null,
+        })),
+        { startMs: start, endMs: start + usage.length * HOUR_MS, bucketMs: HOUR_MS },
+      ).cells.map((cell) => cell.intensity)
+
+    test('is rank-based so one outlier peak cannot flatten the rest of the grid', () => {
+      // 按峰值线性缩放时前七格都会挤在接近 0 的位置；按名次它们均匀铺满 0–1。
+      expect(intensities([1, 2, 3, 4, 5, 6, 7, 1_000_000])).toEqual([0, 1 / 7, 2 / 7, 3 / 7, 4 / 7, 5 / 7, 6 / 7, 1])
+    })
+
+    test('depends only on usage order, not on how far apart the values are', () => {
+      expect(intensities([10, 20, 30])).toEqual(intensities([10, 11, 1_000_000]))
+    })
+
+    test('equal usage shares one intensity and the peak is always 1', () => {
+      // 并列取较低名次，峰值固定为 1。
+      expect(intensities([100, 100, 100, 100, 100, 100, 100, 100, 1_000_000])).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 1])
+      // 单个活跃格、全部相同、并列峰值都是 1。
+      expect(intensities([0, 7, null, 0])).toEqual([null, 1, null, null])
+      expect(intensities([5, 5, 5])).toEqual([1, 1, 1])
+      expect(intensities([10, 30, 30])).toEqual([0, 1, 1])
+      // 两个活跃格也要拉开。
+      expect(intensities([10, 20])).toEqual([0, 1])
+    })
+
+    test('zero and unknown usage have no intensity and do not take a rank', () => {
+      expect(intensities([0, 0, null, 10, 20, 30, 40])).toEqual([null, null, null, 0, 1 / 3, 2 / 3, 1])
+    })
   })
 
   test('sub-day buckets group into parent-period columns', () => {

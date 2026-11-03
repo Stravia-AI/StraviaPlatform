@@ -85,7 +85,7 @@ function cellText(cell: ActivityCell): string {
 }
 </script>
 
-<div class="flex min-w-0 flex-col items-start">
+<div class="token-activity flex min-w-0 flex-col items-start">
   <div
     class="grid w-fit gap-1"
     style="grid-template-columns:repeat({model.colCount},{cellPx}px);grid-auto-rows:{cellPx}px"
@@ -95,9 +95,9 @@ function cellText(cell: ActivityCell): string {
       <Tooltip.Root>
         <Tooltip.Trigger
           type="button"
-          class="token-activity-cell cursor-default rounded-[3px] p-0 transition-colors duration-300 ease-out data-[level=0]:bg-secondary data-[level=1]:bg-chart-4 data-[level=2]:bg-chart-3 data-[level=3]:bg-chart-2 data-[level=4]:bg-chart-1"
-          style="grid-column:{cell.col + 1};grid-row:{cell.row + 1}"
-          data-level={cell.level}
+          class="token-activity-cell cursor-default rounded-[3px] bg-secondary p-0 transition-colors duration-300 ease-out"
+          style="grid-column:{cell.col + 1};grid-row:{cell.row + 1};--t:{cell.intensity ?? 0}"
+          data-intensity={cell.intensity ?? undefined}
           data-start={cell.start}
           aria-label={cellText(cell)}
           onpointerenter={() => enterPointer(cell.start)}
@@ -122,17 +122,30 @@ function cellText(cell: ActivityCell): string {
   {/if}
   <div class="mt-2 flex w-fit self-end items-center gap-1 text-[0.625rem] leading-3 text-muted-foreground">
     <span class="mr-1">{m.stats_activity_less()}</span>
-    {#each [0, 1, 2, 3, 4] as level (level)}
-      <span
-        class="size-3 rounded-[3px] data-[level=0]:bg-secondary data-[level=1]:bg-chart-4 data-[level=2]:bg-chart-3 data-[level=3]:bg-chart-2 data-[level=4]:bg-chart-1"
-        data-level={level}></span>
-    {/each}
+    <span class="size-3 rounded-[3px] bg-secondary"></span>
+    <span class="token-activity-ramp h-3 w-16 rounded-[3px]"></span>
     <span class="ml-1">{m.stats_activity_more()}</span>
   </div>
 </div>
 
 <style>
-/* Trigger 的实际 DOM 由 Bits UI 组件渲染，scoped 选择器够不到，必须用 :global。 */
+/*
+ * 连续色阶：低端取折线色阶的最浅色 chart-4，高端取最深色 chart-1 再向前景色偏移，两端之间在 oklch 中线性插值，
+ * 强度 --t（0–1）即插值比例。折线色阶本身接近等差，所以不必经过 chart-3 / chart-2；向前景偏移是为了加大明度跨度。
+ * foreground 在浅色主题偏深、深色主题偏亮，「越多越显眼」的方向无需按主题分写，也不新增全局色值。
+ * 低端保持 chart-4 原色，保证最弱的活跃格与空格（secondary）仍有足够差距。
+ */
+.token-activity {
+  --activity-low: var(--chart-4);
+  --activity-high: color-mix(in oklch, var(--chart-1), var(--foreground) 36%);
+}
+.token-activity-ramp {
+  background-image: linear-gradient(in oklch to right, var(--activity-low), var(--activity-high));
+}
+/* 格子的 DOM 由 Bits UI 组件渲染，scoped 选择器够不到，必须用 :global；没有 data-intensity 的格子保持空格底色。 */
+:global(.token-activity-cell[data-intensity]) {
+  background-color: color-mix(in oklch, var(--activity-high) calc(var(--t) * 100%), var(--activity-low));
+}
 :global(.token-activity-cell:hover),
 :global(.token-activity-cell:focus-visible) {
   outline: 1px solid var(--foreground);
