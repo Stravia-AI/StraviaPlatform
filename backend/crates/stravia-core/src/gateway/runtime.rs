@@ -801,7 +801,7 @@ impl Gateway {
 
                     let observation_result = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = observation.sweep_retention() => result,
+                        result = observation.sweep_retention(chrono::Utc::now().timestamp_millis()) => result,
                     };
                     if observation_result.is_err() {
                         tracing::warn!("observation retention cleanup incomplete");
