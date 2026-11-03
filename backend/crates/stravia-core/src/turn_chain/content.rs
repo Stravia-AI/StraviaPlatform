@@ -1,36 +1,34 @@
-//! Per-node semantic content externalization, principal-scoped content rows.
+//! 节点载荷的正文外置。一条 stored node payload 是一个 descriptor：
+//! `{"data": <正文位置为 null 的载荷>, "slots": [...]}`；`turn_node_contents`
+//! 持有权威的 `ordinal -> content_id` 映射，descriptor 不携带内容 ID。
 //!
-//! A stored node payload is one descriptor:
-//! `{"data": <payload with externalized slots null>, "slots":
-//! [[json_pointer, ordinal], ...]}`. `turn_node_contents` holds the
-//! authoritative `ordinal -> content_id` mapping; the descriptor carries no
-//! content keys or ids. Every non-null semantic unit is externalized regardless
-//! of size: empty, short and huge values share one rule and one deduplication
-//! path. Raw compact serde JSON is the content identity; SHA-256 over the
-//! fixed `stravia.turn-content.v1\0` prefix and those bytes produces a 32-byte
-//! digest, and every digest row is owned by exactly one principal scope.
+//! 正文单元由 IR 的 [`item_content_units`] 唯一确定：历史条目先整体作为 JSON
+//! 信封单元，再把它内部的文本/JSON 正文取成嵌套槽。数组元素按原字节保存，
+//! 类型化解析只用于确定位置；解析失败时整条保持不透明 JSON 单元，绝不重排或
+//! 改写原字节。文本单元保存原始 UTF-8，跨协议投影文本因此可以逐字节往返。
 //!
-//! Unit boundaries are unchanged: array elements under history-item keys are
-//! opaque leaves, shared system/instruction/tool values are units, and vendor
-//! profile containers are walked first and then externalized whole so their
-//! parent slot restores before its nested slots.
+//! 槽位顺序保证父容器先于嵌套槽恢复：信封槽先于自己的子槽；vendor profile
+//! 容器先于其内部槽。共享单元的恢复只在最后一次使用处移动值，其余位置克隆。
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Context, ensure};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use stravia_runtime_contract::turn_chain::{TurnNode, TurnNodeId, TurnNodeKind, TurnReadContext};
+use stravia_runtime_contract::protocol::ir::content::{
+    ContentFormat, ContentUnitBody, item_content_units,
+};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::turn_chain::{
+    TurnNode, TurnNodeId, TurnNodeKind, TurnReadContext,
+};
 
-pub(super) type ContentDigest = [u8; 32];
+use crate::content_store::{self, Content, ContentDigest, Descriptor, Slot};
 
-/// Legacy domain-free hashes are not normalized content identities.
-const CONTENT_DIGEST_DOMAIN: &[u8] = b"stravia.turn-content.v1\0";
+pub(super) use crate::content_store::LookupScope;
+pub(super) use crate::content_store::prepare_missing;
 
-/// Keys whose array elements are raw history items. Elements are opaque
-/// leaves: they are externalized verbatim and their inner fields are never
-/// interpreted.
+/// 数组元素是原始历史条目。元素整体是信封单元，内部正文由 IR 定义。
 const ITEM_ARRAY_KEYS: &[&str] = &[
     "items",
     "input",
@@ -39,62 +37,23 @@ const ITEM_ARRAY_KEYS: &[&str] = &[
     "transcript",
     "client_output",
 ];
-/// Keys whose whole value is a shared configuration string or object.
+/// 整段是共享配置 JSON 单元。
 const SCALAR_KEYS: &[&str] = &["system", "effective_system", "instructions", "tools"];
-/// Vendor containers that are walked for inner slots first, then externalized
-/// whole so their smaller keys deduplicate independently.
+/// vendor 容器先遍历内部槽，再整体外置；父槽排在内部槽之前。
 const PROFILE_KEYS: &[&str] = &[
     "__open_responses_response_profile",
     "__open_responses_effective_request",
 ];
 
-/// One distinct content body. `bytes` starts as raw compact JSON and becomes
-/// storage-codec bytes after `prepare_missing`; `encoded` records which form is
-/// present so a stale existence hint can rebuild the body without a second
-/// serialization.
-pub(super) struct Content {
-    digest: ContentDigest,
-    bytes: Vec<u8>,
-    encoded: bool,
-}
-
-impl Content {
-    fn new(digest: ContentDigest, bytes: Vec<u8>) -> Self {
-        Self {
-            digest,
-            bytes,
-            encoded: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn digest(&self) -> ContentDigest {
-        self.digest
-    }
-
-    /// Releases the body once the row is known to exist inside the caller's
-    /// locked transaction; recovery before that point still needs it.
-    fn release(&mut self) {
-        self.bytes = Vec::new();
-        self.encoded = true;
-    }
-}
-
 pub(super) struct Extracted {
     pub data: Value,
-    pub slots: Vec<(String, usize)>,
+    pub slots: Vec<Slot>,
     pub contents: Vec<Content>,
 }
 
-pub(super) struct Encoded {
-    pub payload: Vec<u8>,
-    pub contents: Vec<Content>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum LookupScope<'a> {
-    Id(i64),
-    Principal(&'a str),
+pub(crate) struct Encoded {
+    pub(crate) payload: Vec<u8>,
+    pub(crate) contents: Vec<Content>,
 }
 
 pub(super) struct StoredNode {
@@ -123,25 +82,6 @@ macro_rules! reference_projection {
 }
 pub(super) use reference_projection;
 
-/// Full 32-byte SHA-256 content identity with a fixed domain prefix.
-pub(super) fn content_key(bytes: &[u8]) -> ContentDigest {
-    Sha256::new()
-        .chain_update(CONTENT_DIGEST_DOMAIN)
-        .chain_update(bytes)
-        .finalize()
-        .into()
-}
-
-#[derive(Default)]
-struct Extraction {
-    slots: Vec<(String, usize)>,
-    contents: Vec<Content>,
-    index: HashMap<ContentDigest, usize>,
-    /// Serialization buffer reused across occurrences; a duplicate value never
-    /// keeps a second copy of its body.
-    scratch: Vec<u8>,
-}
-
 fn push_pointer_token(path: &mut String, token: &str) {
     path.push('/');
     for character in token.chars() {
@@ -153,67 +93,179 @@ fn push_pointer_token(path: &mut String, token: &str) {
     }
 }
 
-/// Externalizes one semantic unit. Null is presence, not content, and stays
-/// inline. The slot path is moved into the slot list exactly once.
-fn externalize(value: &mut Value, path: &str, state: &mut Extraction) -> anyhow::Result<bool> {
-    if value.is_null() {
-        return Ok(false);
-    }
-    state.scratch.clear();
-    serde_json::to_writer(&mut state.scratch, &*value)?;
-    let digest = content_key(&state.scratch);
-    let ordinal = if let Some(ordinal) = state.index.get(&digest).copied() {
-        ordinal
-    } else {
-        let ordinal = state.contents.len();
-        state.index.insert(digest, ordinal);
-        state
-            .contents
-            .push(Content::new(digest, std::mem::take(&mut state.scratch)));
-        ordinal
-    };
-    state.slots.push((path.to_owned(), ordinal));
-    *value = Value::Null;
-    Ok(true)
+#[derive(Default)]
+struct Extraction {
+    slots: Vec<Slot>,
+    contents: Vec<Content>,
+    index: HashMap<ContentDigest, usize>,
+    /// 被移动进 `contents` 后重新分配；重复正文不会保留第二份。
+    scratch: Vec<u8>,
 }
 
-fn externalize_items(
-    array: &mut [Value],
-    path: &mut String,
+impl Extraction {
+    fn intern(&mut self, digest: ContentDigest, format: ContentFormat, raw: Vec<u8>) -> usize {
+        if let Some(ordinal) = self.index.get(&digest) {
+            return *ordinal;
+        }
+        let ordinal = self.contents.len();
+        self.index.insert(digest, ordinal);
+        self.contents.push(Content::with_digest(digest, format, raw));
+        ordinal
+    }
+
+    fn intern_text(&mut self, text: &str) -> usize {
+        let digest = content_store::content_digest(ContentFormat::Text, text.as_bytes());
+        if let Some(ordinal) = self.index.get(&digest) {
+            return *ordinal;
+        }
+        self.intern(digest, ContentFormat::Text, text.as_bytes().to_vec())
+    }
+
+    /// 把 `target` 序列化为紧凑 JSON 单元并置空；null 是「无内容」，保持内联。
+    fn externalize_json(&mut self, target: &mut Value, path: &str) -> anyhow::Result<bool> {
+        if target.is_null() {
+            return Ok(false);
+        }
+        self.scratch.clear();
+        serde_json::to_writer(&mut self.scratch, &*target)?;
+        let raw = std::mem::take(&mut self.scratch);
+        let digest = content_store::content_digest(ContentFormat::Json, &raw);
+        let ordinal = self.intern(digest, ContentFormat::Json, raw);
+        self.slots.push(Slot::json(path.to_owned(), ordinal));
+        *target = Value::Null;
+        Ok(true)
+    }
+}
+
+/// 待外置的正文单元；信封序列化后再按顺序入槽。
+enum Pending {
+    Text {
+        pointer: String,
+        prefix: Option<String>,
+        text: String,
+        suffix: String,
+    },
+    Json {
+        pointer: String,
+        raw: Vec<u8>,
+    },
+}
+
+/// 一个历史条目：正文位置置空后的条目信封是一个 JSON 单元，正文单元按 IR 正文
+/// 规则逐个外置。类型化解析失败时整条保持不透明 JSON 单元，原字节原样保留。
+fn externalize_item(
+    target: &mut Value,
+    path: &str,
     state: &mut Extraction,
 ) -> anyhow::Result<()> {
-    for (index, item) in array.iter_mut().enumerate() {
-        let base = path.len();
-        let _ = write!(path, "/{index}");
-        externalize(item, path.as_str(), state)?;
-        path.truncate(base);
+    let mut pending = Vec::new();
+    state.scratch.clear();
+    serde_json::to_writer(&mut state.scratch, &*target)?;
+    if let Ok(item) = serde_json::from_slice::<AiItem>(&state.scratch) {
+        for unit in item_content_units(&item) {
+            let Some(body) = target.pointer_mut(&unit.pointer) else {
+                continue;
+            };
+            if body.is_null() {
+                continue;
+            }
+            let pointer = format!("{path}{}", unit.pointer);
+            match unit.body {
+                ContentUnitBody::Text(text) => {
+                    // 跨协议投影文本拆成字面量加共享正文；拼接校验失败则整串存储。
+                    pending.push(
+                        match crate::history_marker::syntax::split_projected_text(text) {
+                            Some((prefix, text, suffix)) => Pending::Text {
+                                pointer,
+                                prefix: Some(prefix),
+                                text,
+                                suffix,
+                            },
+                            None => Pending::Text {
+                                pointer,
+                                prefix: None,
+                                text: text.to_owned(),
+                                suffix: String::new(),
+                            },
+                        },
+                    );
+                }
+                ContentUnitBody::Json(_) => {
+                    pending.push(Pending::Json {
+                        pointer,
+                        raw: serde_json::to_vec(&*body)?,
+                    });
+                }
+            }
+            *body = Value::Null;
+        }
     }
+    state.scratch.clear();
+    serde_json::to_writer(&mut state.scratch, &*target)?;
+    let raw = std::mem::take(&mut state.scratch);
+    let envelope = state.intern(
+        content_store::content_digest(ContentFormat::Json, &raw),
+        ContentFormat::Json,
+        raw,
+    );
+    state.slots.push(Slot::json(path.to_owned(), envelope));
+    for unit in pending {
+        match unit {
+            Pending::Text {
+                pointer,
+                prefix: Some(prefix),
+                text,
+                suffix,
+            } => {
+                let ordinal = state.intern_text(&text);
+                state
+                    .slots
+                    .push(Slot::concat(pointer, ordinal, prefix, suffix));
+            }
+            Pending::Text {
+                pointer,
+                prefix: None,
+                text,
+                ..
+            } => {
+                let ordinal = state.intern_text(&text);
+                state.slots.push(Slot::text(pointer, ordinal));
+            }
+            Pending::Json { pointer, raw } => {
+                let digest = content_store::content_digest(ContentFormat::Json, &raw);
+                let ordinal = state.intern(digest, ContentFormat::Json, raw);
+                state.slots.push(Slot::json(pointer, ordinal));
+            }
+        }
+    }
+    *target = Value::Null;
     Ok(())
 }
 
-fn walk(value: &mut Value, path: &mut String, state: &mut Extraction) -> anyhow::Result<()> {
-    match value {
+fn walk(target: &mut Value, path: &mut String, state: &mut Extraction) -> anyhow::Result<()> {
+    match target {
         Value::Object(object) => {
             for (name, child) in object.iter_mut() {
                 let base = path.len();
                 push_pointer_token(path, name);
-                let name = name.as_str();
-                if ITEM_ARRAY_KEYS.contains(&name) && child.is_array() {
-                    externalize_items(
-                        child.as_array_mut().context("history item array")?,
-                        path,
-                        state,
-                    )?;
-                } else if SCALAR_KEYS.contains(&name) {
-                    externalize(child, path.as_str(), state)?;
-                } else if PROFILE_KEYS.contains(&name) {
-                    // Inner slots are discovered first but the container must
-                    // restore before them: keep its entry ahead of its own
-                    // subtree so pointer resolution always descends through a
-                    // materialized parent.
+                let key = name.as_str();
+                if ITEM_ARRAY_KEYS.contains(&key) && child.is_array() {
+                    let array = child.as_array_mut().context("history item array")?;
+                    for (index, item) in array.iter_mut().enumerate() {
+                        let item_base = path.len();
+                        let _ = write!(path, "/{index}");
+                        externalize_item(item, path.as_str(), state)?;
+                        path.truncate(item_base);
+                    }
+                } else if SCALAR_KEYS.contains(&key) {
+                    state.externalize_json(child, path.as_str())?;
+                } else if PROFILE_KEYS.contains(&key) {
+                    // 内部槽先被发现，但父容器必须先恢复：把容器槽移到子树之前。
                     let first = state.slots.len();
                     walk(child, path, state)?;
-                    if externalize(child, path.as_str(), state)? && state.slots.len() > first + 1 {
+                    if state.externalize_json(child, path.as_str())?
+                        && state.slots.len() > first + 1
+                    {
                         state.slots[first..].rotate_right(1);
                     }
                 } else {
@@ -235,12 +287,12 @@ fn walk(value: &mut Value, path: &mut String, state: &mut Extraction) -> anyhow:
     Ok(())
 }
 
-/// Extracts every non-null semantic unit. Repeated raw bytes share one
-/// `Content`; every occurrence keeps its own slot so order, repeats, escapes
-/// and nulls survive restore.
-pub(super) fn extract(mut payload: Value) -> anyhow::Result<Extracted> {
+/// 外置全部正文单元；重复正文共享一个 `Content`，每次出现保留独立槽位，
+/// 因此顺序、重复、转义与 null 都能还原。
+pub(super) fn extract(payload: Value) -> anyhow::Result<Extracted> {
     let mut state = Extraction::default();
     let mut path = String::new();
+    let mut payload = payload;
     walk(&mut payload, &mut path, &mut state)?;
     Ok(Extracted {
         data: payload,
@@ -249,154 +301,21 @@ pub(super) fn extract(mut payload: Value) -> anyhow::Result<Extracted> {
     })
 }
 
-#[derive(serde::Serialize)]
-struct DescriptorRef<'a> {
-    data: &'a Value,
-    slots: &'a [(String, usize)],
-}
-
-/// Encodes the v3 descriptor. The ordinal array is the only place paths and
-/// ordinal numbers live; content ids stay in the relation table.
-pub(super) fn encode_descriptor(
-    data: &Value,
-    slots: &[(String, usize)],
-) -> anyhow::Result<Vec<u8>> {
-    let descriptor = serde_json::to_vec(&DescriptorRef { data, slots })?;
-    crate::storage_codec::encode(std::borrow::Cow::Owned(descriptor))
-}
-
-pub(super) fn encode(payload: Value) -> anyhow::Result<Encoded> {
+pub(crate) fn encode(payload: Value) -> anyhow::Result<Encoded> {
     let Extracted {
         data,
         slots,
         contents,
     } = extract(payload)?;
-    let payload = encode_descriptor(&data, &slots)?;
+    let payload = content_store::encode_descriptor(&data, &slots)?;
     Ok(Encoded { payload, contents })
 }
 
-/// Compresses bodies for content ids that were missing at the last existence
-/// probe. Probes before the write transaction are hints only, so existing ids
-/// keep their body for recovery until the authoritative locked lookup.
-pub(super) async fn prepare_missing(
-    contents: &mut [Content],
-    ids: &[Option<i64>],
-) -> anyhow::Result<()> {
-    ensure!(
-        contents.len() == ids.len(),
-        "history content id count mismatch"
-    );
-    for (content, id) in contents.iter().zip(ids) {
-        if id.is_none() {
-            ensure!(!content.bytes.is_empty(), "missing history content body");
-        }
-    }
-    let pending: Vec<_> = contents
-        .iter_mut()
-        .zip(ids)
-        .enumerate()
-        .filter(|(_, (content, id))| id.is_none() && !content.encoded)
-        .map(|(index, (content, _))| (index, std::mem::take(&mut content.bytes)))
-        .collect();
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let prepared = tokio::task::spawn_blocking(move || {
-        pending
-            .into_iter()
-            .map(|(index, raw)| Ok((index, crate::storage_codec::encode(raw.into())?)))
-            .collect::<anyhow::Result<Vec<_>>>()
-    })
-    .await
-    .context("history content preparation worker failed")??;
-    for (index, bytes) in prepared {
-        contents[index].bytes = bytes;
-        contents[index].encoded = true;
-    }
-    Ok(())
-}
-
-/// Content positions grouped by digest without allocating per digest: the
-/// first occurrence covers the common unique case and only genuine repeats get
-/// a small overflow vector. Duplicate digests are legal for lookup/intern and
-/// all positions resolve to the same row; the link relation itself requires
-/// distinct ordinals.
-struct DigestPositions {
-    first: HashMap<ContentDigest, usize>,
-    duplicates: HashMap<ContentDigest, Vec<usize>>,
-}
-
-impl DigestPositions {
-    fn new(contents: &[Content]) -> Self {
-        let mut first = HashMap::with_capacity(contents.len());
-        let mut duplicates: HashMap<ContentDigest, Vec<usize>> = HashMap::new();
-        for (index, content) in contents.iter().enumerate() {
-            match first.entry(content.digest) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(index);
-                }
-                std::collections::hash_map::Entry::Occupied(entry) => {
-                    duplicates.entry(*entry.key()).or_default().push(index);
-                }
-            }
-        }
-        Self { first, duplicates }
-    }
-
-    fn digests(&self) -> impl Iterator<Item = ContentDigest> + '_ {
-        self.first.keys().copied()
-    }
-
-    fn observe(&self, ids: &mut [Option<i64>], digest: &[u8], id: i64) -> anyhow::Result<()> {
-        let digest: ContentDigest = digest
-            .try_into()
-            .context("invalid stored history content digest")?;
-        if let Some(index) = self.first.get(&digest) {
-            ids[*index] = Some(id);
-            if let Some(indices) = self.duplicates.get(&digest) {
-                for index in indices {
-                    ids[*index] = Some(id);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Descriptor {
-    data: Value,
-    slots: Vec<(String, usize)>,
-}
-
-enum RestoredContent {
-    Owned(Value),
-    Shared(std::sync::Arc<Value>),
-}
-
-impl RestoredContent {
-    fn value(&self) -> &Value {
-        match self {
-            Self::Owned(value) => value,
-            Self::Shared(value) => value,
-        }
-    }
-
-    fn into_value(self) -> Value {
-        match self {
-            Self::Owned(value) => value,
-            Self::Shared(value) => std::sync::Arc::unwrap_or_clone(value),
-        }
-    }
-}
-
-macro_rules! backend {
-    ($put:ident, $lookup:ident, $intern:ident, $link:ident, $restore:ident, $restore_context:ident, $db:ty, $conn:ty, $lock:literal) => {
-        /// Links an already-interned node to distinct content ids. The ids
-        /// array order is the descriptor ordinal. Callers hold the write
-        /// transaction; PostgreSQL callers hold the contents table lock.
-        pub(super) async fn $link(
+macro_rules! link_backend {
+    ($name:ident, $db:ty, $conn:ty) => {
+        /// 已 intern 的节点与去重后的正文 ID 建引用。ID 顺序就是 descriptor
+        /// 的 ordinal；调用方持有写事务。
+        pub(super) async fn $name(
             connection: &mut $conn,
             node_pk: i64,
             scope_id: i64,
@@ -417,182 +336,278 @@ macro_rules! backend {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "INSERT INTO turn_node_contents (node_pk, scope_id, ordinal, content_id) ",
                 );
-                query.push_values(chunk.iter().enumerate(), |mut row, (offset, id)| {
-                    let ordinal = base * 200 + offset;
-                    row.push_bind(node_pk)
-                        .push_bind(scope_id)
-                        .push_bind(ordinal as i64)
-                        .push_bind(*id);
-                });
+                query.push_values(
+                    chunk.iter().enumerate(),
+                    |mut row, (offset, id)| {
+                        let ordinal = base * 200 + offset;
+                        row.push_bind(node_pk)
+                            .push_bind(scope_id)
+                            .push_bind(ordinal as i64)
+                            .push_bind(*id);
+                    },
+                );
                 query.build().execute(&mut *connection).await?;
             }
             Ok(())
         }
+    };
+}
+link_backend!(link_sqlite, sqlx::Sqlite, sqlx::SqliteConnection<'_>);
+link_backend!(link_postgres, sqlx::Postgres, sqlx::PgConnection<'_>);
 
-        /// Existence probe. Without the caller's transaction locks the result
-        /// is only a hint; `lock` adds a row lock on PostgreSQL.
-        pub(super) async fn $lookup(
-            connection: &mut $conn,
-            scope: LookupScope<'_>,
-            contents: &[Content],
-            lock: bool,
-        ) -> anyhow::Result<Vec<Option<i64>>> {
-            let mut ids = vec![None; contents.len()];
-            if contents.is_empty() {
-                return Ok(ids);
-            }
-            let positions = DigestPositions::new(contents);
-            let mut digests: Vec<ContentDigest> = positions.digests().collect();
-            digests.sort_unstable();
-            for chunk in digests.chunks(400) {
-                let mut query = sqlx::QueryBuilder::<$db>::new(
-                    "SELECT id, digest FROM turn_contents WHERE scope_id = ",
-                );
-                match scope {
-                    LookupScope::Id(id) => { query.push_bind(id); }
-                    LookupScope::Principal(principal) => {
-                        query.push("(SELECT id FROM turn_scopes WHERE principal = ")
-                            .push_bind(principal).push(")");
-                    }
-                }
-                query.push(" AND digest IN (");
-                let mut list = query.separated(",");
-                for digest in chunk {
-                    list.push_bind(digest.as_slice());
-                }
-                list.push_unseparated(")");
-                // Deterministic row-lock order for concurrent commits.
-                query.push(" ORDER BY digest");
-                if lock {
-                    query.push($lock);
-                }
-                let rows: Vec<(i64, Vec<u8>)> =
-                    query.build_query_as().fetch_all(&mut *connection).await?;
-                for (id, digest) in rows {
-                    positions.observe(&mut ids, &digest, id)?;
-                }
-            }
-            Ok(ids)
+pub(super) async fn read_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+    scope_id: i64,
+    ids: &[i64],
+) -> anyhow::Result<Vec<content_store::Body>> {
+    content_store::sqlite::read(connection, scope_id, ids).await
+}
+
+pub(super) async fn read_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+    scope_id: i64,
+    ids: &[i64],
+) -> anyhow::Result<Vec<content_store::Body>> {
+    content_store::postgres::read(connection, scope_id, ids).await
+}
+
+pub(super) async fn lookup_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+    scope: LookupScope<'_>,
+    contents: &[Content],
+    lock: bool,
+) -> anyhow::Result<Vec<Option<i64>>> {
+    content_store::sqlite::lookup(connection, scope, contents, lock).await
+}
+
+pub(super) async fn lookup_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+    scope: LookupScope<'_>,
+    contents: &[Content],
+    lock: bool,
+) -> anyhow::Result<Vec<Option<i64>>> {
+    content_store::postgres::lookup(connection, scope, contents, lock).await
+}
+
+pub(super) async fn intern_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+    scope_id: i64,
+    contents: &mut [Content],
+) -> anyhow::Result<Vec<i64>> {
+    content_store::sqlite::intern(connection, scope_id, contents).await
+}
+
+pub(super) async fn intern_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+    scope_id: i64,
+    contents: &mut [Content],
+) -> anyhow::Result<Vec<i64>> {
+    content_store::postgres::intern(connection, scope_id, contents).await
+}
+
+pub(super) async fn put_sqlite(
+    connection: &mut sqlx::SqliteConnection<'_>,
+    node_pk: i64,
+    scope_id: i64,
+    contents: &mut [Content],
+) -> anyhow::Result<()> {
+    let ids = intern_sqlite(connection, scope_id, contents).await?;
+    link_sqlite(connection, node_pk, scope_id, &ids).await
+}
+
+pub(super) async fn put_postgres(
+    connection: &mut sqlx::PgConnection<'_>,
+    node_pk: i64,
+    scope_id: i64,
+    contents: &mut [Content],
+) -> anyhow::Result<()> {
+    let ids = intern_postgres(connection, scope_id, contents).await?;
+    link_postgres(connection, node_pk, scope_id, &ids).await
+}
+
+/// 恢复前的结构校验：归属、ordinal 连续、descriptor 槽位可解析。
+struct RestorePlan {
+    scope_id: i64,
+    plans: Vec<(Value, Vec<Slot>)>,
+    mappings: Vec<Vec<i64>>,
+    /// 每份正文的使用次数；最后一次使用直接移动值。
+    uses: HashMap<i64, usize>,
+    needed: Vec<i64>,
+}
+
+fn plan_restore(nodes: &mut [StoredNode]) -> anyhow::Result<RestorePlan> {
+    let scope_id = nodes[0].scope_id;
+    let mut identities = HashSet::with_capacity(nodes.len());
+    let mut mappings = Vec::with_capacity(nodes.len());
+    for node in nodes.iter_mut() {
+        ensure!(
+            identities.insert(node.node_pk),
+            "duplicate history node identity"
+        );
+        ensure!(node.scope_id == scope_id, "history node scope mismatch");
+        let mut references = std::mem::take(&mut node.references);
+        references.sort_unstable_by_key(|reference| reference[1]);
+        let mut mapping = Vec::with_capacity(references.len());
+        for [row_scope, ordinal, content_id] in references {
+            ensure!(scope_id == row_scope, "history content scope mismatch");
+            let ordinal = usize::try_from(ordinal).context("invalid history content ordinal")?;
+            ensure!(
+                ordinal == mapping.len(),
+                "non-contiguous history content ordinal"
+            );
+            mapping.push(content_id);
         }
+        mappings.push(mapping);
+    }
 
-        /// Authoritative locked lookup plus missing-row insertion. Returns one
-        /// id per input digest position in input order. Existing bodies are
-        /// released only after the locked SELECT protects their rows; stale
-        /// hint-missing bodies are compressed before ordered inserts.
-        pub(super) async fn $intern(
-            connection: &mut $conn,
-            scope_id: i64,
-            contents: &mut [Content],
-        ) -> anyhow::Result<Vec<i64>> {
-            let mut ids = $lookup(connection, LookupScope::Id(scope_id), contents, true).await?;
-            for (content, id) in contents.iter_mut().zip(&ids) {
-                if id.is_some() {
-                    content.release();
-                }
-            }
-            prepare_missing(contents, &ids).await?;
-
-            let positions = DigestPositions::new(contents);
-            let mut missing: Vec<usize> = ids
-                .iter()
-                .enumerate()
-                .filter_map(|(index, id)| id.is_none().then_some(index))
-                .collect();
-            // Deterministic insert order: concurrent writers take speculative
-            // insertion locks in the same digest order.
-            missing.sort_unstable_by(|left, right| {
-                contents[*left].digest.cmp(&contents[*right].digest)
-            });
-            let mut unique: Vec<usize> = Vec::with_capacity(missing.len());
-            for index in missing {
-                if unique
-                    .last()
-                    .is_none_or(|previous| contents[*previous].digest != contents[index].digest)
-                {
-                    unique.push(index);
-                }
-            }
-            for chunk in unique.chunks(200) {
-                for index in chunk {
-                    ensure!(
-                        contents[*index].encoded && !contents[*index].bytes.is_empty(),
-                        "missing prepared history content"
-                    );
-                }
-                let mut query = sqlx::QueryBuilder::<$db>::new(
-                    "INSERT INTO turn_contents (scope_id, digest, content) ",
-                );
-                query.push_values(chunk.iter(), |mut row, index| {
-                    row.push_bind(scope_id)
-                        .push_bind(contents[*index].digest.as_slice())
-                        .push_bind(contents[*index].bytes.as_slice());
-                });
-                query.push(
-                    " ON CONFLICT (scope_id, digest) DO NOTHING RETURNING id, digest",
-                );
-                let inserted: Vec<(i64, Vec<u8>)> =
-                    query.build_query_as().fetch_all(&mut *connection).await?;
-                for (id, digest) in inserted {
-                    positions.observe(&mut ids, &digest, id)?;
-                }
-            }
-
-            // A row that won the conflict but was not returned is resolved by
-            // one targeted locked lookup; no retry loop and no meaningless
-            // UPDATE.
-            let unresolved: Vec<usize> = ids
-                .iter()
-                .enumerate()
-                .filter_map(|(index, id)| id.is_none().then_some(index))
-                .collect();
-            if !unresolved.is_empty() {
-                let mut keys: Vec<ContentDigest> = unresolved
-                    .iter()
-                    .map(|index| contents[*index].digest)
-                    .collect();
-                keys.sort_unstable();
-                keys.dedup();
-                for chunk in keys.chunks(400) {
-                    let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT id, digest FROM turn_contents WHERE scope_id = ",
-                    );
-                    query.push_bind(scope_id).push(" AND digest IN (");
-                    let mut list = query.separated(",");
-                    for digest in chunk {
-                        list.push_bind(digest.as_slice());
-                    }
-                    list.push_unseparated(")");
-                    query.push(" ORDER BY digest");
-                    query.push($lock);
-                    let rows: Vec<(i64, Vec<u8>)> =
-                        query.build_query_as().fetch_all(&mut *connection).await?;
-                    for (id, digest) in rows {
-                        positions.observe(&mut ids, &digest, id)?;
-                    }
-                }
-            }
-            let ids = ids
-                .into_iter()
-                .map(|id| id.context("missing history content"))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            for content in contents.iter_mut() {
-                content.release();
-            }
-            Ok(ids)
+    let mut plans = Vec::with_capacity(nodes.len());
+    let mut uses: HashMap<i64, usize> = HashMap::new();
+    for (index, node) in nodes.iter_mut().enumerate() {
+        let encoded = std::mem::take(&mut node.payload);
+        let descriptor: Descriptor = content_store::decode_descriptor(&encoded)?;
+        let mapping = &mappings[index];
+        let mut seen = vec![false; mapping.len()];
+        for slot in &descriptor.slots {
+            ensure!(
+                slot.ordinal < mapping.len(),
+                "history slot ordinal out of range"
+            );
+            seen[slot.ordinal] = true;
+            *uses.entry(mapping[slot.ordinal]).or_default() += 1;
         }
+        ensure!(
+            seen.iter().all(|referenced| *referenced),
+            "unreferenced history content ordinal"
+        );
+        plans.push((descriptor.data, descriptor.slots));
+    }
+    let mut needed: Vec<i64> = uses.keys().copied().collect();
+    needed.sort_unstable();
+    Ok(RestorePlan {
+        scope_id,
+        plans,
+        mappings,
+        uses,
+        needed,
+    })
+}
 
-        /// Intern then link convenience for a node that already has its
-        /// `turn_nodes` row.
-        pub(super) async fn $put(
-            connection: &mut $conn,
-            node_pk: i64,
-            scope_id: i64,
-            contents: &mut [Content],
-        ) -> anyhow::Result<()> {
-            let ids = $intern(connection, scope_id, contents).await?;
-            $link(connection, node_pk, scope_id, &ids).await
+enum RestoredContent {
+    Owned(Value),
+    Shared(std::sync::Arc<Value>),
+}
+
+impl RestoredContent {
+    fn as_value(&self) -> &Value {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => value,
         }
+    }
 
+    fn into_value(self) -> Value {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => std::sync::Arc::unwrap_or_clone(value),
+        }
+    }
+}
+
+/// 把读取到的正文并入缓存。文本正文在缓存中表示为 `Value::String`，
+/// 值本身仍是原始 UTF-8，不做 JSON 转义。
+fn load_bodies(
+    loaded: &mut HashMap<i64, RestoredContent>,
+    bodies: Vec<content_store::Body>,
+    context: &mut Option<&mut TurnReadContext>,
+) -> anyhow::Result<()> {
+    for body in bodies {
+        let value = match body.format {
+            ContentFormat::Text => Value::String(body.text()?.to_owned()),
+            ContentFormat::Json => body.json()?,
+        };
+        let admit = context
+            .as_deref()
+            .is_some_and(|context| context.admission_open());
+        let restored = if admit {
+            let value = std::sync::Arc::new(value);
+            let bytes = crate::memory::json_retained_bytes(&value)
+                .saturating_add(std::mem::size_of::<(i64, (std::sync::Arc<Value>, usize))>())
+                .saturating_add(2 * std::mem::size_of::<usize>());
+            context
+                .as_deref_mut()
+                .expect("open content admission")
+                .stage_content(body.id, value.clone(), bytes);
+            RestoredContent::Shared(value)
+        } else {
+            RestoredContent::Owned(value)
+        };
+        loaded.insert(body.id, restored);
+    }
+    Ok(())
+}
+
+fn restore_payload(
+    data: &mut Value,
+    slots: &[Slot],
+    mapping: &[i64],
+    uses: &mut HashMap<i64, usize>,
+    loaded: &mut HashMap<i64, RestoredContent>,
+) -> anyhow::Result<()> {
+    content_store::restore_slots(data, slots, |ordinal| {
+        let content_id = *mapping
+            .get(ordinal)
+            .context("history slot ordinal out of range")?;
+        let remaining = uses
+            .get_mut(&content_id)
+            .context("missing history content")?;
+        ensure!(*remaining > 0, "history content use underflow");
+        *remaining -= 1;
+        if *remaining == 0 {
+            Ok(loaded
+                .remove(&content_id)
+                .context("missing history content")?
+                .into_value())
+        } else {
+            Ok(loaded
+                .get(&content_id)
+                .context("missing history content")?
+                .as_value()
+                .clone())
+        }
+    })
+}
+
+fn apply_plan(
+    nodes: Vec<StoredNode>,
+    plan: RestorePlan,
+    loaded: &mut HashMap<i64, RestoredContent>,
+) -> anyhow::Result<Vec<TurnNode>> {
+    let RestorePlan {
+        plans,
+        mappings,
+        mut uses,
+        needed,
+        ..
+    } = plan;
+    for id in &needed {
+        ensure!(loaded.contains_key(id), "missing history content");
+    }
+    let mut restored = Vec::with_capacity(nodes.len());
+    for ((stored, (mut data, slots)), mapping) in nodes.into_iter().zip(plans).zip(mappings) {
+        restore_payload(&mut data, &slots, &mapping, &mut uses, loaded)?;
+        restored.push(TurnNode {
+            id: stored.id,
+            kind: stored.kind,
+            parent_id: stored.parent_id,
+            payload_version: stored.payload_version,
+            payload: data,
+        });
+    }
+    Ok(restored)
+}
+
+macro_rules! restore_backend {
+    ($read:ident, $restore:ident, $restore_context:ident, $conn:ty) => {
         pub(super) async fn $restore(
             connection: &mut $conn,
             nodes: Vec<StoredNode>,
@@ -611,190 +626,47 @@ macro_rules! backend {
             if nodes.is_empty() {
                 return Ok(Vec::new());
             }
-            let scope_id = nodes[0].scope_id;
-            let mut identities = HashSet::with_capacity(nodes.len());
-            let mut mappings = Vec::with_capacity(nodes.len());
-            for node in &mut nodes {
-                ensure!(
-                    identities.insert(node.node_pk),
-                    "duplicate history node identity"
-                );
-                ensure!(node.scope_id == scope_id, "history node scope mismatch");
-                let mut references = std::mem::take(&mut node.references);
-                references.sort_unstable_by_key(|reference| reference[1]);
-                let mut mapping = Vec::with_capacity(references.len());
-                for [row_scope, ordinal, content_id] in references {
-                    ensure!(scope_id == row_scope, "history content scope mismatch");
-                    let ordinal = usize::try_from(ordinal)
-                        .context("invalid history content ordinal")?;
-                    ensure!(
-                        ordinal == mapping.len(),
-                        "non-contiguous history content ordinal"
-                    );
-                    mapping.push(content_id);
-                }
-                mappings.push(mapping);
-            }
-
-            let mut plans = Vec::with_capacity(nodes.len());
-            let mut uses: HashMap<i64, usize> = HashMap::new();
-            for (index, node) in nodes.iter_mut().enumerate() {
-                let encoded = std::mem::take(&mut node.payload);
-                let raw = crate::storage_codec::decode(&encoded)?;
-                let descriptor: Descriptor = serde_json::from_slice(&raw)?;
-                drop(raw);
-                drop(encoded);
-                let mapping = &mappings[index];
-                let mut seen = vec![false; mapping.len()];
-                for (_, ordinal) in &descriptor.slots {
-                    ensure!(
-                        *ordinal < mapping.len(),
-                        "history slot ordinal out of range"
-                    );
-                    seen[*ordinal] = true;
-                    *uses.entry(mapping[*ordinal]).or_default() += 1;
-                }
-                ensure!(
-                    seen.iter().all(|referenced| *referenced),
-                    "unreferenced history content ordinal"
-                );
-                plans.push((descriptor.data, descriptor.slots));
-            }
-
-            let mut needed: Vec<i64> = uses.keys().copied().collect();
-            needed.sort_unstable();
-            let mut values: HashMap<i64, RestoredContent> =
-                HashMap::with_capacity(needed.len());
+            let plan = plan_restore(&mut nodes)?;
+            let mut loaded: HashMap<i64, RestoredContent> = HashMap::with_capacity(plan.needed.len());
             if let Some(context) = context.as_deref() {
-                for id in &needed {
+                for id in &plan.needed {
                     if let Some(value) = context.cached_content(*id) {
-                        values.insert(*id, RestoredContent::Shared(value));
+                        loaded.insert(
+                            *id,
+                            RestoredContent::Shared(value),
+                        );
                     }
                 }
             }
-            let missing: Vec<i64> = needed
+            let missing: Vec<i64> = plan
+                .needed
                 .iter()
                 .copied()
-                .filter(|id| !values.contains_key(id))
+                .filter(|id| !loaded.contains_key(id))
                 .collect();
-            let mut content_reads = 0u64;
-            if !missing.is_empty() {
-                for chunk in missing.chunks(256) {
-                    let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT id, digest, content FROM turn_contents WHERE scope_id = ",
-                    );
-                    query.push_bind(scope_id).push(" AND id IN (");
-                    let mut list = query.separated(",");
-                    for id in chunk {
-                        list.push_bind(*id);
-                    }
-                    list.push_unseparated(") ORDER BY id");
-                    let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = query
-                        .build_query_as()
-                        .fetch_all(&mut *connection)
-                        .await?;
-                    for (id, digest, encoded) in rows {
-                        let digest: ContentDigest = digest
-                            .as_slice()
-                            .try_into()
-                            .context("invalid stored history content digest")?;
-                        let raw = crate::storage_codec::decode(&encoded)?;
-                        ensure!(content_key(&raw) == digest, "damaged history content");
-                        let value = serde_json::from_slice::<Value>(&raw)?;
-                        let admit = context
-                            .as_deref()
-                            .is_some_and(|context| context.admission_open());
-                        let value = if admit {
-                            let value = std::sync::Arc::new(value);
-                            let bytes = crate::memory::json_retained_bytes(&value)
-                                .saturating_add(std::mem::size_of::<(i64, (std::sync::Arc<Value>, usize))>())
-                                .saturating_add(2 * std::mem::size_of::<usize>());
-                            context
-                                .as_deref_mut()
-                                .expect("open content admission")
-                                .stage_content(id, value.clone(), bytes);
-                            RestoredContent::Shared(value)
-                        } else {
-                            RestoredContent::Owned(value)
-                        };
-                        values.insert(id, value);
-                        content_reads += 1;
-                    }
-                }
+            let read_count = missing.len();
+            let bodies = $read(connection, plan.scope_id, &missing).await?;
+            load_bodies(&mut loaded, bodies, &mut context)?;
+            let nodes = apply_plan(nodes, plan, &mut loaded)?;
+            let mut output = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                output.push(finish(node, context.as_deref())?);
             }
-            for id in &needed {
-                ensure!(
-                    values.contains_key(id),
-                    "missing history content"
-                );
-            }
-            drop(needed);
-
-            let mut restored = Vec::with_capacity(nodes.len());
-            for ((stored, (mut data, plan)), mapping) in
-                nodes.into_iter().zip(plans).zip(mappings)
-            {
-                for (pointer, ordinal) in plan {
-                    let content_id = mapping[ordinal];
-                    let slot = data
-                        .pointer_mut(&pointer)
-                        .context("invalid history slot")?;
-                    ensure!(slot.is_null(), "history slot overwrites data");
-                    let remaining = uses
-                        .get_mut(&content_id)
-                        .context("missing history content")?;
-                    ensure!(*remaining > 0, "history content use underflow");
-                    *remaining -= 1;
-                    // Each JSON slot needs an independent Value, but the final
-                    // occurrence consumes the uncached decoded tree instead of
-                    // cloning it and immediately dropping the original.
-                    *slot = if *remaining == 0 {
-                        values
-                            .remove(&content_id)
-                            .context("missing history content")?
-                            .into_value()
-                    } else {
-                        values
-                            .get(&content_id)
-                            .context("missing history content")?
-                            .value()
-                            .clone()
-                    };
-                }
-                let node = TurnNode {
-                    id: stored.id,
-                    kind: stored.kind,
-                    parent_id: stored.parent_id,
-                    payload_version: stored.payload_version,
-                    payload: data,
-                };
-                restored.push(finish(node, context.as_deref())?);
-            }
-            tracing::info!(target: "stravia::perf", content_read_count = content_reads,
-                reference_count = content_reads, "turn_chain.content.restore");
-            Ok(restored)
+            tracing::info!(target: "stravia::perf", content_read_count = read_count,
+                reference_count = read_count, "turn_chain.content.restore");
+            Ok(output)
         }
     };
 }
-backend!(
-    put_sqlite,
-    lookup_sqlite,
-    intern_sqlite,
-    link_sqlite,
+restore_backend!(
+    read_sqlite,
     restore_sqlite,
     restore_sqlite_context,
-    sqlx::Sqlite,
-    sqlx::SqliteConnection<'_>,
-    ""
+    sqlx::SqliteConnection<'_>
 );
-backend!(
-    put_postgres,
-    lookup_postgres,
-    intern_postgres,
-    link_postgres,
+restore_backend!(
+    read_postgres,
     restore_postgres,
     restore_postgres_context,
-    sqlx::Postgres,
-    sqlx::PgConnection<'_>,
-    " FOR KEY SHARE"
+    sqlx::PgConnection<'_>
 );

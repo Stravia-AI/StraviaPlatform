@@ -6,8 +6,6 @@ use std::collections::{HashMap, VecDeque};
 const SEED_BATCH: usize = 512;
 const NODE_BATCH: usize = 128;
 const REFERENCE_BATCH: usize = 2048;
-const CONTENT_BATCH: usize = 512;
-const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
 
 #[derive(sqlx::FromRow)]
 struct Candidate {
@@ -46,19 +44,10 @@ fn close_deletable(nodes: &[Candidate], allowed: &mut [bool]) {
 }
 
 macro_rules! backend {
-    ($seed:ident, $collect:ident, $prune:ident, $pool:ty, $conn:ty, $db:ty, $begin:literal, $lock:literal) => {
+    ($seed:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $begin:literal, $lock:literal) => {
         async fn $prune(connection: &mut $conn, scopes: &mut Vec<i64>) -> anyhow::Result<()> {
-            scopes.sort_unstable();
-            scopes.dedup();
-            if scopes.is_empty() { return Ok(()); }
-            let mut query = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_scopes WHERE id IN (");
-            let mut list = query.separated(",");
-            for scope in scopes.iter() { list.push_bind(*scope); }
-            list.push_unseparated(")");
-            query.push(" AND NOT EXISTS(SELECT 1 FROM turn_nodes n WHERE n.scope_id=turn_scopes.id) \
-                        AND NOT EXISTS(SELECT 1 FROM turn_contents c WHERE c.scope_id=turn_scopes.id)");
-            query.build().execute(&mut *connection).await?;
-            Ok(())
+            let scopes = std::mem::take(scopes);
+            $prune_scopes(connection, &scopes).await
         }
 
         async fn $seed(pool: &$pool, now: i64, after: Option<(i64,i64)>) -> anyhow::Result<Option<(i64,i64)>> {
@@ -123,23 +112,8 @@ macro_rules! backend {
                 for node_pk in &targets { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
                 mark.build().execute(&mut *transaction).await?;
-                // 写锁保证两条语句使用相同的引用窗口；只为窗口外已无引用的内容入队，
-                // 避免逐行跨 driver 回传 content_id，再在 Rust 去重并送回数据库。
-                // SQLite 的复合 NOT IN 未命中仍会扫描窗口检查 NULL；等值反连接允许使用窗口索引。
-                let mut queue = sqlx::QueryBuilder::<$db>::new(
-                    "WITH doomed AS MATERIALIZED (SELECT node_pk,ordinal,content_id FROM turn_node_contents WHERE node_pk IN (",
-                );
-                let mut list = queue.separated(",");
-                for node_pk in &targets { list.push_bind(*node_pk); }
-                list.push_unseparated(")");
-                queue.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push("), \
-                    candidates AS MATERIALIZED (SELECT DISTINCT content_id FROM doomed) \
-                    INSERT INTO turn_content_gc(content_id) SELECT candidate.content_id FROM candidates candidate \
-                    WHERE NOT EXISTS(SELECT 1 FROM turn_node_contents live WHERE live.content_id=candidate.content_id \
-                        AND NOT EXISTS(SELECT 1 FROM doomed victim WHERE victim.node_pk=live.node_pk AND victim.ordinal=live.ordinal)) \
-                    ON CONFLICT(content_id) DO NOTHING");
-                queue.build().execute(&mut *transaction).await?;
-                // 引用行本身也有上限，不能让一个巨大节点的 ON DELETE CASCADE 霸占写锁。
+                // 删除引用并取回失去引用的正文 ID，再在同一事务内按四类反向引用
+                // 重检后入队；跨 driver 回传一次 ID 列表，避免逐行查询。
                 let mut remove = sqlx::QueryBuilder::<$db>::new(
                     "DELETE FROM turn_node_contents WHERE (node_pk,ordinal) IN \
                      (SELECT node_pk,ordinal FROM turn_node_contents WHERE node_pk IN (",
@@ -147,8 +121,10 @@ macro_rules! backend {
                 let mut list = remove.separated(",");
                 for node_pk in &targets { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
-                remove.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push(")");
-                removed_refs = remove.build().execute(&mut *transaction).await?.rows_affected();
+                remove.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push(") RETURNING content_id");
+                let released: Vec<i64> = remove.build_query_scalar().fetch_all(&mut *transaction).await?;
+                removed_refs = released.len();
+                $enqueue(&mut *transaction, &released).await?;
             }
             let mut deletable = eligible.clone();
             if !targets.is_empty() {
@@ -191,43 +167,21 @@ macro_rules! backend {
                 list.push_unseparated(")");
                 remove.build().execute(&mut *transaction).await?;
             }
-            let mut scopes: Vec<i64> = nodes.iter().zip(&deletable).filter_map(|(node,allowed)| allowed.then_some(node.scope_id)).collect();
-            ensure!(visited == 0 || removed > 0 || removed_refs > 0 || !blocked.is_empty(), "history collection made no progress");
-            // 节点、引用和内容各自的上限不变，在同一小事务内完成，避免重复提交和取写租约。
-            // 先固定小批队列，再按主键读正文；否则 SQLite 可为满足排序反向扫描全部内容。
-            let mut query = sqlx::QueryBuilder::<$db>::new(
-                "WITH candidates AS MATERIALIZED (SELECT content_id FROM turn_content_gc ORDER BY content_id LIMIT ",
+            let mut scopes: Vec<i64> = nodes
+                .iter()
+                .zip(&deletable)
+                .filter_map(|(node, allowed)| allowed.then_some(node.scope_id))
+                .collect();
+            ensure!(
+                visited == 0 || removed > 0 || removed_refs > 0 || !blocked.is_empty(),
+                "history collection made no progress"
             );
-            query.push(CONTENT_BATCH).push(") \
-                 SELECT c.id,c.scope_id,CASE WHEN EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.content_id=c.id) \
-                 THEN CAST(0 AS BIGINT) ELSE CAST(length(c.content) AS BIGINT) END \
-                 FROM candidates g JOIN turn_contents c ON c.id=g.content_id ORDER BY c.id");
-            let rows: Vec<(i64,i64,i64)> = query.build_query_as().fetch_all(&mut *transaction).await?;
-            let mut selected = Vec::with_capacity(rows.len());
-            let mut bytes = 0i64;
-            for row in rows {
-                if !selected.is_empty() && bytes.saturating_add(row.2) > CONTENT_BYTES { break; }
-                bytes = bytes.saturating_add(row.2);
-                selected.push(row);
-            }
-            if !selected.is_empty() {
-                let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_contents WHERE id IN (");
-                let mut list = remove.separated(",");
-                for row in &selected { list.push_bind(row.0); }
-                list.push_unseparated(")");
-                remove.push(" AND NOT EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.content_id=turn_contents.id)");
-                remove.build().execute(&mut *transaction).await?;
-                let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_content_gc WHERE content_id IN (");
-                let mut list = remove.separated(",");
-                for row in &selected { list.push_bind(row.0); }
-                list.push_unseparated(")");
-                remove.build().execute(&mut *transaction).await?;
-                scopes.extend(selected.iter().map(|row| row.1));
-            }
+            // 节点与引用各自的上限不变，在同一小事务内完成；内容回收在节点收集
+            // 结束后单独进行，两个入口共享同一套内容存储锁协议。
             $prune(&mut transaction, &mut scopes).await?;
             transaction.commit().await?;
             connection.finish().await?;
-            Ok((visited + selected.len(),removed))
+            Ok((visited, removed))
         }
     };
 }
@@ -236,6 +190,8 @@ backend!(
     seed_sqlite,
     collect_sqlite,
     prune_sqlite,
+    crate::content_store::sqlite::prune_scopes,
+    crate::content_store::sqlite::enqueue_unreferenced,
     sqlx::SqlitePool,
     sqlx::SqliteConnection<'_>,
     sqlx::Sqlite,
@@ -246,11 +202,13 @@ backend!(
     seed_postgres,
     collect_postgres,
     prune_postgres,
+    crate::content_store::postgres::prune_scopes,
+    crate::content_store::postgres::enqueue_unreferenced,
     sqlx::PgPool,
     sqlx::PgConnection<'_>,
     sqlx::Postgres,
     "BEGIN",
-    "LOCK TABLE turn_nodes,turn_contents IN SHARE ROW EXCLUSIVE MODE"
+    "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE"
 );
 
 pub(super) async fn sweep(store: &SqlTurnChainStore) -> anyhow::Result<u64> {
@@ -275,5 +233,10 @@ pub(super) async fn sweep(store: &SqlTurnChainStore) -> anyhow::Result<u64> {
             break;
         }
     }
+    // 节点收集只负责登记；内容摘要在本批节点的全部引用操作之内重检后删除。
+    match store {
+        SqlTurnChainStore::Sqlite(pool) => crate::content_store::sweep_sqlite(pool).await?,
+        SqlTurnChainStore::Postgres(pool) => crate::content_store::sweep_postgres(pool).await?,
+    };
     Ok(removed)
 }

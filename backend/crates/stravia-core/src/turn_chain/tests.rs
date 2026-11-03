@@ -1,4 +1,5 @@
 use super::*;
+use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 use std::sync::Arc;
 
 fn principal(id: &str) -> Principal {
@@ -7,7 +8,7 @@ fn principal(id: &str) -> Principal {
 
 async fn content_counts(pool: &sqlx::SqlitePool, principal: &str) -> (i64, i64) {
     let contents: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+        "SELECT COUNT(*) FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = ?",
     )
     .bind(principal)
@@ -15,7 +16,7 @@ async fn content_counts(pool: &sqlx::SqlitePool, principal: &str) -> (i64, i64) 
     .await
     .expect("content count");
     let references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM turn_node_contents r JOIN turn_scopes s ON s.id = r.scope_id \
+        "SELECT COUNT(*) FROM turn_node_contents r JOIN content_scopes s ON s.id = r.scope_id \
          WHERE s.principal = ?",
     )
     .bind(principal)
@@ -30,9 +31,9 @@ async fn scoped_content_id(
     principal: &str,
     raw: &serde_json::Value,
 ) -> i64 {
-    let digest = content::content_key(&serde_json::to_vec(raw).expect("serialize content"));
+    let digest = crate::content_store::content_digest(ContentFormat::Json, &serde_json::to_vec(raw).expect("serialize content"));
     sqlx::query_scalar(
-        "SELECT c.id FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+        "SELECT c.id FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = ? AND c.digest = ?",
     )
     .bind(principal)
@@ -115,36 +116,27 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
 }
 
 async fn begin_collecting_first_reference(store: &SqlTurnChainStore, id: &TurnNodeId) {
-    let queue = "INSERT INTO turn_content_gc(content_id) \
-         SELECT content_id FROM turn_node_contents \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0 \
-         ON CONFLICT(content_id) DO NOTHING";
-    let delete = "DELETE FROM turn_node_contents \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0";
+    macro_rules! begin {
+        ($pool:expr, $enqueue:path) => {{
+            let mut connection = $pool.acquire().await.unwrap();
+            let removed: Vec<i64> = sqlx::query_scalar(
+                "DELETE FROM turn_node_contents \
+                 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0 \
+                 RETURNING content_id",
+            )
+            .bind(id.as_str())
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+            $enqueue(&mut connection, &removed).await.unwrap();
+        }};
+    }
     match store {
         SqlTurnChainStore::Sqlite(pool) => {
-            sqlx::query(queue)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-            sqlx::query(delete)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
+            begin!(pool, crate::content_store::sqlite::enqueue_unreferenced)
         }
         SqlTurnChainStore::Postgres(pool) => {
-            sqlx::query(queue)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-            sqlx::query(delete)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
+            begin!(pool, crate::content_store::postgres::enqueue_unreferenced)
         }
     }
 }
@@ -172,7 +164,7 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
         .await
         .expect("live history");
     // 复制真实 descriptor、保留期和引用，构造同一 Principal 下大量独立的到期节点。
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -329,7 +321,7 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
         content_counts(&pool, &owner.continuation_key()).await,
         (1, 1)
     );
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -341,25 +333,22 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
     )
     .await;
 
-    // 模拟中断或重建后仍在表里的持久候选：600 个孤儿内容以及一个仍被节点引用的内容。
-    sqlx::query(
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<600) \
-         INSERT INTO turn_contents(scope_id, digest, content) \
-         SELECT ?, CAST(printf('%032d', i) AS BLOB), zeroblob(64) FROM n",
-    )
-    .bind(scope)
-    .execute(&pool)
-    .await
-    .expect("orphan contents");
-    sqlx::query(
-        "INSERT INTO turn_content_gc(content_id) \
-         SELECT id FROM turn_contents WHERE scope_id = ? AND id >= ?",
-    )
-    .bind(scope)
-    .bind(shared_id)
-    .execute(&pool)
-    .await
-    .expect("persisted content candidates");
+    // 模拟中断或重建后仍在表里的持久候选：600 个孤儿内容以及一个仍被节点引用的内容，
+    // 全部经由共享正文存储的公开入口写入与登记；仍被引用的内容不会进入队列。
+    {
+        let mut connection = pool.acquire().await.expect("connection");
+        let mut orphans: Vec<crate::content_store::Content> = (0..600)
+            .map(|index| crate::content_store::Content::text(format!("orphan content {index}")))
+            .collect();
+        let mut ids = crate::content_store::sqlite::intern(&mut connection, scope, &mut orphans)
+            .await
+            .expect("orphan contents");
+        ids.push(shared_id);
+        let enqueued = crate::content_store::sqlite::enqueue_unreferenced(&mut connection, &ids)
+            .await
+            .expect("persisted content candidates");
+        assert_eq!(enqueued, 600, "referenced content must not be queued");
+    }
 
     assert_eq!(store.sweep_expired().await.expect("sweep"), 0);
     assert_eq!(
@@ -368,7 +357,7 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
         "queued orphans are collected while live references protect their content"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_content_gc")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM content_gc")
             .fetch_one(&pool)
             .await
             .expect("remaining content candidates"),
@@ -758,7 +747,7 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
         serde_json::json!({"items": [shared.clone()]})
     );
     assert!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_contents WHERE id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contents WHERE id = ?")
             .bind(scoped_content_id(&pool, &owner.continuation_key(), &shared).await)
             .fetch_one(&pool)
             .await
@@ -882,7 +871,7 @@ async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM turn_nodes n JOIN turn_scopes s ON s.id = n.scope_id \
+            "SELECT COUNT(*) FROM turn_nodes n JOIN content_scopes s ON s.id = n.scope_id \
              WHERE s.principal = ?",
         )
         .bind(owner.continuation_key())
@@ -937,7 +926,7 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
         &serde_json::json!("authoritative content"),
     )
     .await;
-    let content: Vec<u8> = sqlx::query_scalar("SELECT content FROM turn_contents WHERE id = ?")
+    let content: Vec<u8> = sqlx::query_scalar("SELECT body FROM contents WHERE id = ?")
         .bind(content_id)
         .fetch_one(&pool)
         .await
@@ -1592,7 +1581,7 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     }
     let head = head.expect("chain head");
     let now = chrono::Utc::now().timestamp_millis();
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -1697,7 +1686,7 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
     let owner = principal("owner");
     let now = chrono::Utc::now().timestamp_millis();
     let scope: i64 =
-        sqlx::query_scalar("INSERT INTO turn_scopes(principal) VALUES(?) RETURNING id")
+        sqlx::query_scalar("INSERT INTO content_scopes(principal) VALUES(?) RETURNING id")
             .bind(owner.continuation_key())
             .fetch_one(&pool)
             .await
@@ -1968,7 +1957,7 @@ async fn ancestor_suffix_rows(
          n.payload_version, p.payload, r.expires_at,",
                 super::content::reference_projection!($backend),
                 " FROM turn_nodes n \
-         JOIN turn_scopes s ON s.id = n.scope_id \
+         JOIN content_scopes s ON s.id = n.scope_id \
          LEFT JOIN turn_nodes parent ON parent.node_pk = n.parent_pk \
          LEFT JOIN turn_node_payloads p ON p.node_pk = n.node_pk \
          LEFT JOIN turn_node_retention r ON r.node_pk = n.node_pk \
@@ -2289,7 +2278,7 @@ async fn assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_
         );
     }
     let partial = "UPDATE turn_nodes SET prefix_context_fingerprint = NULL WHERE id = 'known' \
-         AND scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
+         AND scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
     match store {
         SqlTurnChainStore::Sqlite(pool) => {
             sqlx::query(partial)
@@ -2470,8 +2459,8 @@ async fn store_content_id(
     principal: &Principal,
     raw: &serde_json::Value,
 ) -> i64 {
-    let digest = content::content_key(&serde_json::to_vec(raw).unwrap());
-    let query = "SELECT c.id FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+    let digest = crate::content_store::content_digest(ContentFormat::Json, &serde_json::to_vec(raw).unwrap());
+    let query = "SELECT c.id FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = $1 AND c.digest = $2";
     match store {
         SqlTurnChainStore::Sqlite(pool) => sqlx::query_scalar(query)
@@ -2495,8 +2484,8 @@ async fn overwrite_context_content(
     content_id: i64,
     bytes: Vec<u8>,
 ) {
-    let query = "UPDATE turn_contents SET content = $1 WHERE id = $2 \
-         AND scope_id = (SELECT id FROM turn_scopes WHERE principal = $3)";
+    let query = "UPDATE contents SET body = $1 WHERE id = $2 \
+         AND scope_id = (SELECT id FROM content_scopes WHERE principal = $3)";
     match store {
         SqlTurnChainStore::Sqlite(pool) => {
             sqlx::query(query)
@@ -2767,9 +2756,9 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
     );
     // A missing owner-scoped row must not be replaced by a foreign row.
     let delete_references = "DELETE FROM turn_node_contents \
-         WHERE scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
-    let delete_contents = "DELETE FROM turn_contents \
-         WHERE scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
+         WHERE scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
+    let delete_contents = "DELETE FROM contents \
+         WHERE scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
     match store {
         SqlTurnChainStore::Sqlite(pool) => {
             sqlx::query(delete_references)

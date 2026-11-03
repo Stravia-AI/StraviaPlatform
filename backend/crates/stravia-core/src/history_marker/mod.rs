@@ -1,6 +1,8 @@
+pub(crate) mod content;
+pub(crate) mod payload;
 mod rejections;
 mod sql;
-mod syntax;
+pub(crate) mod syntax;
 
 use std::time::Duration;
 

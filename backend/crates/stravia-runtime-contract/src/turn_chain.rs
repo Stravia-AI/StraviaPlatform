@@ -150,7 +150,7 @@ pub struct TurnReadContext {
     budget: usize,
     admission_open: bool,
     validated_until: HashMap<TurnNodeId, Instant>,
-    /// Internal `turn_contents.id` values; each id is owned by exactly one
+    /// Internal `contents.id` values; each id is owned by exactly one
     /// principal scope, so a numeric key never crosses principals.
     contents: HashMap<i64, (Arc<Value>, usize)>,
     pending_contents: HashMap<i64, (Arc<Value>, usize)>,

@@ -2,7 +2,7 @@ use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 use stravia_runtime_contract::turn_chain::{TurnNodeId, TurnNodeKind};
 
-use crate::turn_chain::content;
+use crate::turn_chain::upgrade::v3_content as content;
 
 use super::format2;
 use super::normalize::{Limits, run_sqlite};
@@ -1054,5 +1054,184 @@ async fn prunes_scopes_created_only_for_orphan_contents() -> anyhow::Result<()> 
     .await?;
     assert_eq!(node_scope, 1, "scope owning a node must survive");
     assert_eq!(restore_one(&mut connection, "n", "a").await?, payload);
+    Ok(())
+}
+
+/// 0036 形态的 Turn 节点与 Marker 经 0037 → Rust 转换 → 0038 后，通过公开读取入口得到的
+/// 内容与升级前的物化结果逐字节相同。
+#[tokio::test]
+async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::Result<()> {
+    use sqlx::sqlite::SqlitePoolOptions;
+    use crate::history_marker::{HiddenHistorySegment, HistoryMarkerStore, SqlHistoryMarkerStore};
+    use crate::turn_chain::SqlTurnChainStore;
+    use stravia_runtime_contract::Principal;
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    use stravia_runtime_contract::turn_chain::TurnChainStore;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    let all = sqlx::migrate!("./migrations/sqlite");
+    let migrator = sqlx::migrate::Migrator::with_migrations(
+        all.iter()
+            .filter(|migration| migration.version <= 36)
+            .cloned()
+            .collect(),
+    );
+    let item = |item: AiItem| serde_json::to_value(item).expect("item json");
+    let reference = crate::history_marker::syntax::new_reference();
+    let body = "shared projected body ".repeat(19);
+    let projected = format!(
+        "lead\n{}\ntail",
+        crate::history_marker::render_text_projection_span(
+            &crate::history_marker::syntax::new_reference(),
+            0,
+            &body,
+        )
+    );
+    let nodes = [
+        (
+            "upgrade-root",
+            None,
+            json!({
+                "effective_system": "system text ".repeat(24),
+                "items": [item(AiItem::output_text("question")), item(AiItem::output_text(&projected))],
+            }),
+        ),
+        (
+            "upgrade-child",
+            Some("upgrade-root"),
+            json!({
+                "items": [
+                    item(AiItem::output_text(&body)),
+                    item(AiItem::thinking("deep thoughts", Some("signature".into()))),
+                ],
+                "__open_responses_response_profile": {
+                    "id": "profile",
+                    "output": [item(AiItem::output_text(&body))],
+                },
+            }),
+        ),
+    ];
+
+    let mut expected = Vec::new();
+    {
+        let mut connection = pool.acquire().await?;
+        migrator.run_direct(None, &mut *connection, false).await?;
+        let scope: i64 = sqlx::query_scalar(
+            "INSERT INTO turn_scopes(principal) VALUES('api-key:alice') RETURNING id",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        let expires_at = chrono::Utc::now().timestamp_millis() + 86_400_000;
+        let mut pks = std::collections::HashMap::new();
+        for (id, parent, payload) in &nodes {
+            let mut encoded = content::encode(payload.clone())?;
+            let parent_pk = parent.map(|parent| pks[parent]);
+            let node_pk: i64 = sqlx::query_scalar(
+                "INSERT INTO turn_nodes(id,scope_id,kind,parent_pk,payload_version,created_at) \
+                 VALUES($1,$2,'response',$3,6,1) RETURNING node_pk",
+            )
+            .bind(*id)
+            .bind(scope)
+            .bind(parent_pk)
+            .fetch_one(&mut *connection)
+            .await?;
+            pks.insert(*id, node_pk);
+            sqlx::query("INSERT INTO turn_node_payloads(node_pk,payload) VALUES($1,$2)")
+                .bind(node_pk)
+                .bind(&encoded.payload)
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("INSERT INTO turn_node_retention(node_pk,expires_at) VALUES($1,$2)")
+                .bind(node_pk)
+                .bind(expires_at)
+                .execute(&mut *connection)
+                .await?;
+            content::put_sqlite(&mut connection, node_pk, scope, &mut encoded.contents).await?;
+        }
+        // 升级前的物化结果：用保留的 v3 恢复器读回。
+        for (id, parent, _) in &nodes {
+            let node_pk = pks[id];
+            let (payload, version): (Vec<u8>, i64) = sqlx::query_as(
+                "SELECT p.payload, n.payload_version FROM turn_node_payloads p \
+                 JOIN turn_nodes n ON n.node_pk = p.node_pk WHERE p.node_pk = $1",
+            )
+            .bind(node_pk)
+            .fetch_one(&mut *connection)
+            .await?;
+            let references: sqlx::types::Json<Vec<[i64; 3]>> = sqlx::query_scalar(
+                "SELECT json_group_array(json_array(c.scope_id,c.ordinal,c.content_id)) \
+                 FROM turn_node_contents c WHERE c.node_pk = $1",
+            )
+            .bind(node_pk)
+            .fetch_one(&mut *connection)
+            .await?;
+            let restored = content::restore_sqlite(
+                &mut connection,
+                vec![content::StoredNode {
+                    node_pk,
+                    scope_id: scope,
+                    references: references.0,
+                    id: TurnNodeId::new(*id),
+                    kind: TurnNodeKind::Response,
+                    parent_id: parent.map(TurnNodeId::new),
+                    payload_version: u32::try_from(version)?,
+                    payload,
+                }],
+            )
+            .await?;
+            expected.push((*id, serde_json::to_vec(&restored[0].payload)?));
+        }
+
+        let tool_text = "marker tool result ".repeat(21);
+        let call = json!({"id": "call-fixture", "name": "fixture-tool", "arguments": "{}"});
+        let segment = json!({
+            "kind": "platform",
+            "call": call,
+            "result": {"type": "tool_result", "tool_use_id": "call-fixture", "content": tool_text, "is_error": false},
+        });
+        sqlx::query("INSERT INTO history_markers (reference, principal, kind, activity, tool_id, call_payload, segment_payload, execution_state, execution_deadline, published_at, created_at, updated_at, expires_at) VALUES (?, 'api-key:alice', 'platform', 'Fixture platform call', 'call-fixture', ?, ?, 'completed', ?, 1, 1, 1, ?)")
+            .bind(&reference)
+            .bind(serde_json::to_string(&call)?)
+            .bind(serde_json::to_string(&segment)?)
+            .bind(expires_at)
+            .bind(expires_at)
+            .execute(&mut *connection)
+            .await?;
+        expected.push(("marker", serde_json::to_vec(&serde_json::from_value::<HiddenHistorySegment>(segment)?)?));
+    }
+
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+    // 已完成的升级再次运行必须是空操作。
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+
+    let retired: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('turn_contents','turn_content_gc','turn_scopes','content_upgrade')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retired, 0);
+
+    let owner = Principal::new("alice");
+    let turns = SqlTurnChainStore::sqlite(pool.clone());
+    let chain = turns
+        .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new("upgrade-child"))
+        .await
+        .expect("child chain after upgrade");
+    assert_eq!(chain.len(), 2);
+    for (node, (id, bytes)) in chain.iter().zip(&expected) {
+        assert_eq!(node.id.as_str(), *id);
+        assert_eq!(&serde_json::to_vec(&node.payload)?, bytes, "payload of {id}");
+    }
+    let marker = SqlHistoryMarkerStore::sqlite(pool.clone())
+        .resolve(&owner, &reference)
+        .await?
+        .expect("marker after upgrade");
+    assert_eq!(
+        serde_json::to_vec(&marker.segment.expect("segment"))?,
+        expected.last().expect("marker expectation").1
+    );
     Ok(())
 }

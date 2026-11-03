@@ -161,6 +161,56 @@ pub(crate) fn render_preview_projection_end(reference: &str, ordinal: usize) -> 
     )
 }
 
+/// 把恰好一个跨协议投影 span 拆成 `(prefix, body, suffix)`；正文与两段字面量拼回
+/// 后必须逐字节等于原文。文本形态不符合（多个 span、非法定界符、无法配对）时返回
+/// `None`，调用方整串存为一个文本单元。
+pub(crate) fn split_projected_text(text: &str) -> Option<(String, String, String)> {
+    let start = text.find(PROJECTION_DELIMITER_PREFIX)?;
+    let payload = &text[start + PROJECTION_DELIMITER_PREFIX.len()..];
+    let comment_end = payload.find(PROJECTION_DELIMITER_SUFFIX)?;
+    let delimiter = parse_projection_delimiter(&payload[..comment_end])?;
+    // 只有正文投影（`t`）拆正文；预览定界符保持整串。
+    if delimiter.mode != ProjectionMode::Text || delimiter.boundary != ProjectionBoundary::Start {
+        return None;
+    }
+    let start_literal_end = start
+        .checked_add(PROJECTION_DELIMITER_PREFIX.len())?
+        .checked_add(comment_end)?
+        .checked_add(PROJECTION_DELIMITER_SUFFIX.len())?;
+    let start_literal = &text[start..start_literal_end];
+    if start_literal
+        != render_projection_delimiter(
+            &delimiter.reference,
+            delimiter.ordinal,
+            delimiter.mode,
+            ProjectionBoundary::Start,
+        )
+    {
+        return None;
+    }
+    let end_literal = render_projection_delimiter(
+        &delimiter.reference,
+        delimiter.ordinal,
+        delimiter.mode,
+        ProjectionBoundary::End,
+    );
+    let body_start = start_literal_end;
+    let end = body_start + text[body_start..].find(&end_literal)?;
+    let body = &text[body_start..end];
+    let suffix = &text[end..];
+    if body.contains(PROJECTION_DELIMITER_PREFIX)
+        || text[end + end_literal.len()..].contains(PROJECTION_DELIMITER_PREFIX)
+    {
+        return None;
+    }
+    let prefix = &text[..body_start];
+    let reconstructed = format!("{prefix}{body}{suffix}");
+    if reconstructed != text {
+        return None;
+    }
+    Some((prefix.to_owned(), body.to_owned(), suffix.to_owned()))
+}
+
 pub(crate) fn new_reference() -> String {
     stravia_runtime_contract::identifier::new_id()
 }
