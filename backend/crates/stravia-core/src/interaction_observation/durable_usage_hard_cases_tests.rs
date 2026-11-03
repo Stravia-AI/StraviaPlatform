@@ -839,7 +839,7 @@ async fn admission_follow_ups_commit_with_the_admission(
     }
     assert_eq!(
         db.scalar(
-            "SELECT CAST(observation_gap AS BIGINT) FROM interaction_observations WHERE id='follow-ok'"
+            "SELECT CAST(CASE WHEN observation_gap THEN 1 ELSE 0 END AS BIGINT) FROM interaction_observations WHERE id='follow-ok'"
         )
         .await?,
         1

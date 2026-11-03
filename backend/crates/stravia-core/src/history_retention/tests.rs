@@ -655,7 +655,10 @@ impl Fixture {
             upstream_url: "http://127.0.0.1".into(),
             cost_basis: None,
         });
-        let block_id = self.unique("observed-block");
+        let block_id = crate::interaction_observation::canonical_item_block_id(
+            &self.unique("observed-block"),
+            0,
+        );
         source.record(RunEvent::ClientVisibleContent {
             text: visible.to_owned(),
             parts: vec![serde_json::json!({"type": "text", "text": visible})],
