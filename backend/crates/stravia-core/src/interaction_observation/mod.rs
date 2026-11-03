@@ -19,6 +19,7 @@ mod trace;
 mod trace_storage;
 mod types;
 pub(crate) mod upgrade;
+pub(crate) mod upgrade_normalize;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
@@ -399,7 +400,11 @@ impl InteractionObservation {
             }
         }
         self.inner.store.delete_manifests(&deleted).await?;
-        self.purge_history(Some(now)).await?;
+        let cutoff = now.saturating_sub(
+            i64::from(self.inner.retention_days.load(Ordering::Acquire))
+                .saturating_mul(86_400_000),
+        );
+        self.purge_history(Some(cutoff)).await?;
         for event in self
             .inner
             .store

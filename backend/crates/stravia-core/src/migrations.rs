@@ -110,7 +110,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 41..=42
     ) {
         return false;
     }
@@ -326,6 +326,34 @@ pub async fn run_sqlite_migrator(
             crate::content_store::upgrade::run_sqlite(&mut pinned.connection).await?;
         }
     }
+    if runner.version_exists(41) {
+        report(
+            "observation_schema",
+            "Preparing normalized observation schema",
+            0,
+            None,
+        );
+        runner
+            .run_direct(Some(41), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=42 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "observation_data",
+                "Normalizing observation history",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade_normalize::normalize_sqlite(
+                &mut *pinned.connection,
+            )
+            .await?;
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -522,6 +550,29 @@ pub async fn run_postgres_migrator(
                 None,
             );
             crate::content_store::upgrade::run_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(41) {
+        report(
+            "observation_schema",
+            "Preparing normalized observation schema",
+            0,
+            None,
+        );
+        runner.run_direct(Some(41), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=42 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "observation_data",
+                "Normalizing observation history",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection).await?;
         }
     }
     report(
