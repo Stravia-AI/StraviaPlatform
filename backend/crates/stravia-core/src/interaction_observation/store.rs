@@ -3,7 +3,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Row, SqlitePool};
 use std::{borrow::Cow, sync::Arc};
 
-use super::content_refs::StoreUnit;
+use super::content_refs::{text_content, value_content};
+use crate::content_store::Content;
 use super::types::{
     ConfirmedUsage, CredentialDiscovery, IngressStart, ObservationEvent, RejectedOutcome, RunEvent,
     RunOutcome, RunStart,
@@ -727,9 +728,9 @@ impl ObservationStore {
                 }
                 if let Some(input) = start.input {
                     sequence += 1;
-                    let units = split_user_input(input);
+                    let mut units = split_user_input(input);
                     let content_ids =
-                        super::content_refs::intern_sqlite(&mut tx, &principal, &units).await?;
+                        super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
                     insert_event_sqlite(
                         &mut tx,
                         EventInsert {
@@ -790,9 +791,9 @@ impl ObservationStore {
                         else {
                             continue;
                         };
-                        let units = vec![StoreUnit::from_value(content)];
+                        let mut units = vec![value_content(content)];
                         let content_ids =
-                            super::content_refs::intern_sqlite(&mut tx, &principal, &units).await?;
+                            super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
                         insert_tool_result_sqlite(
                             &mut tx,
                             tool_sequence,
@@ -946,9 +947,9 @@ impl ObservationStore {
                 }
                 if let Some(text) = start.input {
                     let input_sequence = sequences.next().expect("allocated input sequence");
-                    let units = split_user_input(text);
+                    let mut units = split_user_input(text);
                     let content_ids =
-                        super::content_refs::intern_postgres(&mut tx, &principal, &units).await?;
+                        super::content_refs::intern_postgres(&mut tx, &principal, &mut units).await?;
                     insert_event_postgres(
                         &mut tx,
                         EventInsert {
@@ -1009,9 +1010,9 @@ impl ObservationStore {
                         else {
                             continue;
                         };
-                        let units = vec![StoreUnit::from_value(content)];
+                        let mut units = vec![value_content(content)];
                         let content_ids =
-                            super::content_refs::intern_postgres(&mut tx, &principal, &units)
+                            super::content_refs::intern_postgres(&mut tx, &principal, &mut units)
                                 .await?;
                         insert_tool_result_postgres(
                             &mut tx,
@@ -1132,16 +1133,29 @@ impl ObservationStore {
                 stored.push((tool_id, is_error, content_id));
             }
         }
-        let bodies = super::content_refs::read_contents(
-            self,
-            &stored.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
-        )
-        .await?;
+        // 祖先链只含同 Principal 的 Run，正文都在该 Principal 的 scope 内。
+        let principals = self
+            .interaction_principals(&[interaction_id.to_owned()])
+            .await?;
+        let bodies = match principals.get(interaction_id) {
+            Some(principal) => {
+                super::content_refs::read_scoped(
+                    self,
+                    principal,
+                    &stored.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
+                )
+                .await?
+            }
+            None => crate::content_store::Bodies::from_rows(Vec::new()),
+        };
         for (tool_id, is_error, content_id) in stored {
-            let Some(body) = bodies.get(&content_id) else {
+            let Some(body) = bodies.get(content_id) else {
                 continue;
             };
-            latest.insert(tool_id, PreviousResult::Stored(body.as_value()?, is_error));
+            latest.insert(
+                tool_id,
+                PreviousResult::Stored(super::content_refs::body_value(body)?, is_error),
+            );
         }
         let mut persisted: Vec<RunEvent> = Vec::new();
         // 批内只保留已接收事件的位置，避免历史工具正文在逐项去重时再次复制。
@@ -1244,11 +1258,11 @@ impl ObservationStore {
                     else {
                         anyhow::bail!("client tool result batch contains another event kind");
                     };
-                    let unit = StoreUnit::from_value(content);
+                    let mut unit = value_content(content);
                     let content_ids = super::content_refs::intern_sqlite(
                         &mut tx,
                         &principal,
-                        std::slice::from_ref(&unit),
+                        std::slice::from_mut(&mut unit),
                     )
                     .await?;
                     insert_tool_result_sqlite(
@@ -1312,11 +1326,11 @@ impl ObservationStore {
                     else {
                         anyhow::bail!("client tool result batch contains another event kind");
                     };
-                    let unit = StoreUnit::from_value(content);
+                    let mut unit = value_content(content);
                     let content_ids = super::content_refs::intern_postgres(
                         &mut tx,
                         &principal,
-                        std::slice::from_ref(&unit),
+                        std::slice::from_mut(&mut unit),
                     )
                     .await?;
                     insert_tool_result_postgres(
@@ -1468,7 +1482,7 @@ impl ObservationStore {
         units: &[String],
         at: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
-        let units = split_user_input(units);
+        let mut units = split_user_input(units);
         match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
@@ -1480,7 +1494,7 @@ impl ObservationStore {
                         .await?;
                 let seq = next_sqlite(&mut tx).await?;
                 let content_ids =
-                    super::content_refs::intern_sqlite(&mut tx, &principal, &units).await?;
+                    super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
                 insert_event_sqlite(
                     &mut tx,
                     EventInsert {
@@ -1523,7 +1537,7 @@ impl ObservationStore {
                     .fetch_one(&mut *tx)
                     .await?;
                 let content_ids =
-                    super::content_refs::intern_postgres(&mut tx, &principal, &units).await?;
+                    super::content_refs::intern_postgres(&mut tx, &principal, &mut units).await?;
                 insert_event_postgres(
                     &mut tx,
                     EventInsert {
@@ -1578,12 +1592,12 @@ impl ObservationStore {
             item_ordinal: i64,
             complete: bool,
             envelope: Option<Value>,
-            units: Vec<StoreUnit>,
+            units: Vec<Content>,
         }
         struct PreparedToolResult {
             tool_id: String,
             is_error: bool,
-            unit: StoreUnit,
+            unit: Content,
         }
         struct PreparedEvent<'a> {
             source_index: usize,
@@ -1673,7 +1687,7 @@ impl ObservationStore {
                     tool_results = Some(vec![PreparedToolResult {
                         tool_id: tool_id.clone(),
                         is_error: *is_error,
-                        unit: StoreUnit::from_value(content),
+                        unit: value_content(content),
                     }]);
                     payload = Value::Null;
                 }
@@ -1921,9 +1935,9 @@ impl ObservationStore {
                     let sequence = next_sequence;
                     next_sequence += 1;
                     current_sequence = sequence;
-                    if let Some(block) = block {
+                    if let Some(mut block) = block {
                         let content_ids =
-                            super::content_refs::intern_sqlite(&mut tx, &principal, &block.units)
+                            super::content_refs::intern_sqlite(&mut tx, &principal, &mut block.units)
                                 .await?;
                         let envelope = block
                             .envelope
@@ -1970,7 +1984,7 @@ impl ObservationStore {
                         ));
                         continue;
                     }
-                    if let Some(tool_results) = tool_results {
+                    if let Some(mut tool_results) = tool_results {
                         insert_event_sqlite(
                             &mut tx,
                             EventInsert {
@@ -1984,11 +1998,11 @@ impl ObservationStore {
                             },
                         )
                         .await?;
-                        for (index, tool) in tool_results.iter().enumerate() {
+                        for (index, tool) in tool_results.iter_mut().enumerate() {
                             let content_ids = super::content_refs::intern_sqlite(
                                 &mut tx,
                                 &principal,
-                                std::slice::from_ref(&tool.unit),
+                                std::slice::from_mut(&mut tool.unit),
                             )
                             .await?;
                             insert_tool_result_sqlite(
@@ -2162,9 +2176,9 @@ impl ObservationStore {
                     }
                     let sequence = sequences.next().expect("allocated durable event sequence");
                     current_sequence = sequence;
-                    if let Some(block) = block {
+                    if let Some(mut block) = block {
                         let content_ids =
-                            super::content_refs::intern_postgres(&mut tx, &principal, &block.units)
+                            super::content_refs::intern_postgres(&mut tx, &principal, &mut block.units)
                                 .await?;
                         let envelope = block
                             .envelope
@@ -2211,7 +2225,7 @@ impl ObservationStore {
                         ));
                         continue;
                     }
-                    if let Some(tool_results) = tool_results {
+                    if let Some(mut tool_results) = tool_results {
                         insert_event_postgres(
                             &mut tx,
                             EventInsert {
@@ -2225,11 +2239,11 @@ impl ObservationStore {
                             },
                         )
                         .await?;
-                        for (index, tool) in tool_results.iter().enumerate() {
+                        for (index, tool) in tool_results.iter_mut().enumerate() {
                             let content_ids = super::content_refs::intern_postgres(
                                 &mut tx,
                                 &principal,
-                                std::slice::from_ref(&tool.unit),
+                                std::slice::from_mut(&mut tool.unit),
                             )
                             .await?;
                             insert_tool_result_postgres(
@@ -3424,8 +3438,8 @@ fn attrs_without_kind(event: &RunEvent) -> anyhow::Result<serde_json::Map<String
 }
 
 /// 用户 item 的文本正文；空字符串同样寻址。
-fn split_user_input(units: &[String]) -> Vec<StoreUnit> {
-    units.iter().map(StoreUnit::text).collect()
+fn split_user_input(units: &[String]) -> Vec<Content> {
+    units.iter().map(text_content).collect()
 }
 
 async fn insert_event_content_refs_sqlite(
