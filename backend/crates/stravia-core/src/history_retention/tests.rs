@@ -593,7 +593,7 @@ impl Fixture {
                 .admit(
                     RunStart {
                         id: id.into(),
-                        principal: self.owner.continuation_key(),
+                        principal: self.owner.api_key_id().into(),
                         api_key_id: None,
                         api_key_name: None,
                         route_id: "route".into(),
@@ -1672,3 +1672,5 @@ both_backends!(
     1,
     commit_rejects_a_dependency_that_was_already_reclaimed
 );
+
+mod observation_sharing;

@@ -607,7 +607,7 @@ async fn held_publication_turn(
         .admit(
             crate::interaction_observation::RunStart {
                 id: run_id,
-                principal: principal.continuation_key(),
+                principal: principal.api_key_id().into(),
                 api_key_id: None,
                 api_key_name: None,
                 route_id: "publication-model".into(),
@@ -905,7 +905,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
     };
     let mut connection = pool.acquire().await.unwrap();
-    let scope = crate::content_store::sqlite::resolve_scope(&mut connection, "hit")
+    let scope = crate::content_store::sqlite::resolve_scope(&mut connection, "api-key:hit")
         .await
         .unwrap();
     let mut contents = [crate::content_store::Content::text(format!(

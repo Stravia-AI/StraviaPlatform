@@ -39,7 +39,7 @@ fn credential_observer(
         .admit(
             crate::interaction_observation::RunStart {
                 id,
-                principal: principal.continuation_key(),
+                principal: principal.api_key_id().into(),
                 api_key_id: None,
                 api_key_name: Some("Discovery test".into()),
                 route_id: "discovery-model".into(),
