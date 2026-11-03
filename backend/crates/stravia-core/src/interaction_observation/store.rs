@@ -152,47 +152,24 @@ impl ObservationStore {
         waiting_client: bool,
         tail: Option<TailSource<'_>>,
     ) -> anyhow::Result<Option<ObservationEvent>> {
-        type CompletionRow = (String, Option<String>, bool, i64, Option<i64>);
-        let requested = if waiting_client {
-            "waiting_client"
-        } else {
-            "completed"
+        let completion = ClientCompletionWrite {
+            delivered_at,
+            waiting_client,
+            tail,
         };
         match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                let row: Option<CompletionRow> = sqlx::query_as(
-                    "UPDATE inference_run_observations SET
-                        status=CASE
-                            WHEN status='failed' THEN status
-                            WHEN user_interrupted=1 THEN 'user_interrupted'
-                            WHEN status NOT IN ('running','waiting_client') THEN status
-                            WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
-                            ELSE ?1 END,
-                        delivery_completed_at=?2,finished_at=COALESCE(finished_at,MAX(started_at,?2)),
-                        last_active_at=MAX(last_active_at,?2),last_event_sequence=?3
-                    WHERE id=?4 AND delivery_completed_at IS NULL
-                    RETURNING status,terminal_reason,user_interrupted,last_active_at,finished_at",
-                ).bind(requested).bind(delivered_at).bind(seq).bind(run_id).fetch_optional(&mut *tx).await?;
-                if let Some(tail) = &tail {
-                    write_tail_source_sqlite(&mut tx, run_id, interaction_id, tail).await?;
-                }
-                let Some((status, _reason, _interrupted, recorded_at, _finished_at)) = row else {
+                let Some((status, recorded_at)) =
+                    apply_client_completion_sqlite(&mut tx, run_id, interaction_id, &completion, seq)
+                        .await?
+                else {
                     tx.commit().await?;
                     connection.finish().await?;
                     return Ok(None);
                 };
-                if matches!(status.as_str(), "user_interrupted" | "superseded") {
-                    sqlx::query(
-                        "UPDATE inference_run_observations SET terminal_reason=? WHERE id=?",
-                    )
-                    .bind(&status)
-                    .bind(run_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
                 recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
                 insert_event_sqlite(
                     &mut tx,
@@ -224,35 +201,13 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                let row: Option<CompletionRow> = sqlx::query_as(
-                    "UPDATE inference_run_observations SET
-                        status=CASE
-                            WHEN status='failed' THEN status
-                            WHEN user_interrupted THEN 'user_interrupted'
-                            WHEN status NOT IN ('running','waiting_client') THEN status
-                            WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
-                            ELSE $1 END,
-                        delivery_completed_at=$2,finished_at=COALESCE(finished_at,GREATEST(started_at,$2)),
-                        last_active_at=GREATEST(last_active_at,$2),last_event_sequence=$3
-                    WHERE id=$4 AND delivery_completed_at IS NULL
-                    RETURNING status,terminal_reason,user_interrupted,last_active_at,finished_at",
-                ).bind(requested).bind(delivered_at).bind(seq).bind(run_id).fetch_optional(&mut *tx).await?;
-                if let Some(tail) = &tail {
-                    write_tail_source_postgres(&mut tx, run_id, interaction_id, tail).await?;
-                }
-                let Some((status, _reason, _interrupted, recorded_at, _finished_at)) = row else {
+                let Some((status, recorded_at)) =
+                    apply_client_completion_postgres(&mut tx, run_id, interaction_id, &completion, seq)
+                        .await?
+                else {
                     tx.commit().await?;
                     return Ok(None);
                 };
-                if matches!(status.as_str(), "user_interrupted" | "superseded") {
-                    sqlx::query(
-                        "UPDATE inference_run_observations SET terminal_reason=$1 WHERE id=$2",
-                    )
-                    .bind(&status)
-                    .bind(run_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
                 recompute_status_postgres(&mut tx, interaction_id, seq).await?;
                 insert_event_postgres(
                     &mut tx,
@@ -279,41 +234,6 @@ impl ObservationStore {
                 )))
             }
         }
-    }
-
-    #[tracing::instrument(
-        target = "stravia::perf",
-        name = "observation.writer.set_tail_generation_node",
-        skip_all
-    )]
-    pub(super) async fn set_tail_generation_node(
-        &self,
-        run_id: &str,
-        generation_node_id: &str,
-    ) -> anyhow::Result<()> {
-        match self {
-            Self::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
-                sqlx::query(
-                    "UPDATE observation_tail_sources SET generation_node_id=? WHERE run_id=?",
-                )
-                .bind(generation_node_id)
-                .bind(run_id)
-                .execute(&mut *connection)
-                .await?;
-                connection.finish().await?;
-            }
-            Self::Postgres(pool, _) => {
-                sqlx::query(
-                    "UPDATE observation_tail_sources SET generation_node_id=$1 WHERE run_id=$2",
-                )
-                .bind(generation_node_id)
-                .bind(run_id)
-                .execute(pool)
-                .await?;
-            }
-        }
-        Ok(())
     }
 
     pub(super) async fn tail_sources_by_hashes(
@@ -810,6 +730,7 @@ impl ObservationStore {
                 let (input_slot, tool_slot) = extra_slots(&start);
                 let first_extra = sequence + 1;
                 let last_sequence = turn_sequence + i64::try_from(durable_count)? - 1;
+                let mut root_input_sequence = None;
                 if let Some(input) = start.input {
                     let sequence = first_extra + i64::try_from(input_slot)?;
                     let mut units = split_user_input(input);
@@ -830,13 +751,7 @@ impl ObservationStore {
                     .await?;
                     insert_event_content_refs_sqlite(&mut tx, sequence, &content_ids).await?;
                     if root_run_id == run_id {
-                        sqlx::query(
-                            "UPDATE interaction_observations SET input_sequence=? WHERE id=?",
-                        )
-                        .bind(sequence)
-                        .bind(interaction_id)
-                        .execute(&mut *tx)
-                        .await?;
+                        root_input_sequence = Some(sequence);
                     }
                     latest_at = latest_at.max(start.input_at);
                     result.push(event(
@@ -899,11 +814,14 @@ impl ObservationStore {
                         Value::Null,
                     ));
                 }
-                if status_event(start.turn) || !start.tool_results.is_empty() {
-                    recompute_status_sqlite(&mut tx, interaction_id, last_sequence).await?;
-                }
+                // Run 与 Interaction 的活动字段各只写一次：先写 Run，Interaction 的状态重算
+                // 读取到的就是已推进的 Run 活动时间。
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last_sequence).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last_sequence).bind(interaction_id).execute(&mut *tx).await?;
+                if status_event(start.turn) || !start.tool_results.is_empty() {
+                    refresh_interaction_sqlite(&mut tx, interaction_id, last_sequence, root_input_sequence).await?;
+                } else {
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,input_sequence=COALESCE(?,input_sequence) WHERE id=?").bind(latest_at).bind(last_sequence).bind(root_input_sequence).bind(interaction_id).execute(&mut *tx).await?;
+                }
                 tx.commit().await?;
                 connection.finish().await?;
                 result.sort_by_key(|event| event.sequence);
@@ -1031,6 +949,7 @@ impl ObservationStore {
                 }
                 let (input_slot, tool_slot) = extra_slots(&start);
                 let extras: Vec<i64> = sequences.collect();
+                let mut root_input_sequence = None;
                 if let Some(text) = start.input {
                     let input_sequence = extras[input_slot];
                     let mut units = split_user_input(text);
@@ -1052,13 +971,7 @@ impl ObservationStore {
                     insert_event_content_refs_postgres(&mut tx, input_sequence, &content_ids)
                         .await?;
                     if root_run_id == run_id {
-                        sqlx::query(
-                            "UPDATE interaction_observations SET input_sequence=$1 WHERE id=$2",
-                        )
-                        .bind(input_sequence)
-                        .bind(interaction_id)
-                        .execute(&mut *tx)
-                        .await?;
+                        root_input_sequence = Some(input_sequence);
                     }
                     latest_at = latest_at.max(start.input_at);
                     result.push(event(
@@ -1124,11 +1037,12 @@ impl ObservationStore {
                 }
                 result.sort_by_key(|event| event.sequence);
                 let last_sequence = result.last().map_or(turn_sequence, |event| event.sequence);
-                if status_event(start.turn) || !start.tool_results.is_empty() {
-                    recompute_status_postgres(&mut tx, interaction_id, last_sequence).await?;
-                }
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last_sequence).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last_sequence).bind(interaction_id).execute(&mut *tx).await?;
+                if status_event(start.turn) || !start.tool_results.is_empty() {
+                    refresh_interaction_postgres(&mut tx, interaction_id, last_sequence, root_input_sequence).await?;
+                } else {
+                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,input_sequence=COALESCE($3,input_sequence) WHERE id=$4").bind(latest_at).bind(last_sequence).bind(root_input_sequence).bind(interaction_id).execute(&mut *tx).await?;
+                }
                 tx.commit().await?;
                 Ok(result)
             }
@@ -1374,9 +1288,8 @@ impl ObservationStore {
                     .await?;
                     latest_at = latest_at.max(*at);
                 }
-                recompute_status_sqlite(&mut tx, interaction_id, sequence).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(sequence).bind(interaction_id).execute(&mut *tx).await?;
+                recompute_status_sqlite(&mut tx, interaction_id, sequence).await?;
                 tx.commit().await?;
                 connection.finish().await?;
                 Ok(Some(event(
@@ -1442,9 +1355,8 @@ impl ObservationStore {
                     .await?;
                     latest_at = latest_at.max(*at);
                 }
-                recompute_status_postgres(&mut tx, interaction_id, sequence).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(sequence).bind(interaction_id).execute(&mut *tx).await?;
+                recompute_status_postgres(&mut tx, interaction_id, sequence).await?;
                 tx.commit().await?;
                 Ok(Some(event(
                     sequence,
@@ -1534,9 +1446,8 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
                 tx.commit().await?;
                 connection.finish().await?;
                 seq
@@ -1572,9 +1483,8 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                recompute_status_postgres(&mut tx, interaction_id, seq).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                recompute_status_postgres(&mut tx, interaction_id, seq).await?;
                 tx.commit().await?;
                 seq
             }
@@ -1603,11 +1513,11 @@ impl ObservationStore {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-                let principal: String =
-                    sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=?")
-                        .bind(interaction_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                let (principal, is_root): (String, bool) = sqlx::query_as("SELECT i.principal,EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=? AND r.interaction_id=i.id AND r.parent_run_id IS NULL) FROM interaction_observations i WHERE i.id=?")
+                    .bind(run_id)
+                    .bind(interaction_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
                 let seq = next_sqlite(&mut tx).await?;
                 let content_ids =
                     super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
@@ -1625,10 +1535,9 @@ impl ObservationStore {
                 )
                 .await?;
                 insert_event_content_refs_sqlite(&mut tx, seq, &content_ids).await?;
-                sqlx::query("UPDATE interaction_observations SET input_sequence=? WHERE id=? AND EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=? AND r.interaction_id=? AND r.parent_run_id IS NULL)").bind(seq).bind(interaction_id).bind(run_id).bind(interaction_id).execute(&mut *tx).await?;
-                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
+                // Run 先推进活动时间，Interaction 的状态重算随后一次写入状态、活动、序号与输入序号。
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                refresh_interaction_sqlite(&mut tx, interaction_id, seq, is_root.then_some(seq)).await?;
                 tx.commit().await?;
                 connection.finish().await?;
                 Ok(Some(event(
@@ -1643,9 +1552,10 @@ impl ObservationStore {
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
-                let principal: String = sqlx::query_scalar(
-                    "SELECT principal FROM interaction_observations WHERE id=$1",
+                let (principal, is_root): (String, bool) = sqlx::query_as(
+                    "SELECT i.principal,EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=$1 AND r.interaction_id=i.id AND r.parent_run_id IS NULL) FROM interaction_observations i WHERE i.id=$2",
                 )
+                .bind(run_id)
                 .bind(interaction_id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -1668,10 +1578,8 @@ impl ObservationStore {
                 )
                 .await?;
                 insert_event_content_refs_postgres(&mut tx, seq, &content_ids).await?;
-                sqlx::query("UPDATE interaction_observations SET input_sequence=$1 WHERE id=$2 AND EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=$3 AND r.interaction_id=$2 AND r.parent_run_id IS NULL)").bind(seq).bind(interaction_id).bind(run_id).execute(&mut *tx).await?;
-                recompute_status_postgres(&mut tx, interaction_id, seq).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                refresh_interaction_postgres(&mut tx, interaction_id, seq, is_root.then_some(seq)).await?;
                 tx.commit().await?;
                 Ok(Some(event(
                     seq,
@@ -2184,11 +2092,12 @@ impl ObservationStore {
                     ));
                 }
                 if let Some(last) = result.last() {
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
                     if status_changed {
                         recompute_status_sqlite(&mut tx, interaction_id, last.sequence).await?;
+                    } else {
+                        sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;
@@ -2429,11 +2338,12 @@ impl ObservationStore {
                     ));
                 }
                 if let Some(last) = result.last() {
+                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
                     if status_changed {
                         recompute_status_postgres(&mut tx, interaction_id, last.sequence).await?;
+                    } else {
+                        sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
                     }
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
             }
@@ -2898,11 +2808,37 @@ impl ObservationStore {
         now: i64,
         rejected_before_target: bool,
     ) -> anyhow::Result<ObservationEvent> {
+        self.finish_run_with_completion(
+            interaction_id,
+            run_id,
+            outcome,
+            now,
+            rejected_before_target,
+            None,
+        )
+        .await
+    }
+
+    /// 收尾事务：客户端交付结算与尾源、尾源的 Generation 节点、`run_finished` 同事务提交。
+    /// 交付结算在同一事务内不再单独写 `run_state_changed` 行，状态随 `run_finished` 发布。
+    pub(super) async fn finish_run_with_completion(
+        &self,
+        interaction_id: &str,
+        run_id: &str,
+        outcome: &RunOutcome,
+        now: i64,
+        rejected_before_target: bool,
+        completion: Option<ClientCompletionWrite<'_>>,
+    ) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
+                if let Some(completion) = &completion {
+                    apply_client_completion_sqlite(&mut tx, run_id, interaction_id, completion, seq)
+                        .await?;
+                }
                 // 耗时采用实际结束时刻；终态事件不能排到延迟记录的前序事件之前。
                 let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6,rejected_before_target=MAX(rejected_before_target,?8) WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,?),client_output_committed=MAX(client_output_committed,?),terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=? RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at")
@@ -2918,6 +2854,15 @@ impl ObservationStore {
                 payload["client_output_committed"] = Value::Bool(committed);
                 payload["generation_parent_id"] = serde_json::to_value(parent)?;
                 recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
+                if let Some(node) = outcome.generation_node_id.as_deref() {
+                    sqlx::query(
+                        "UPDATE observation_tail_sources SET generation_node_id=? WHERE run_id=?",
+                    )
+                    .bind(node)
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 insert_event_sqlite(
                     &mut tx,
                     EventInsert {
@@ -2948,6 +2893,10 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
+                if let Some(completion) = &completion {
+                    apply_client_completion_postgres(&mut tx, run_id, interaction_id, completion, seq)
+                        .await?;
+                }
                 let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6,rejected_before_target=rejected_before_target OR $8 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).bind(rejected_before_target).fetch_one(&mut *tx).await?;
                 let (committed, parent, status, reason, delivered_at): (bool, Option<String>, String, Option<String>, Option<i64>) = sqlx::query_as("UPDATE inference_run_observations SET delivery_completed_at=COALESCE(delivery_completed_at,$1),client_output_committed=client_output_committed OR $2,terminal_reason=CASE WHEN status='superseded' THEN 'superseded' ELSE terminal_reason END WHERE id=$3 RETURNING client_output_committed,generation_parent_id,status,terminal_reason,delivery_completed_at").bind(outcome.delivery_completed_at).bind(outcome.client_output_committed).bind(run_id).fetch_one(&mut *tx).await?;
                 let mut payload = finish_payload(outcome, interrupted)?;
@@ -2958,6 +2907,15 @@ impl ObservationStore {
                 payload["client_output_committed"] = Value::Bool(committed);
                 payload["generation_parent_id"] = serde_json::to_value(parent)?;
                 recompute_status_postgres(&mut tx, interaction_id, seq).await?;
+                if let Some(node) = outcome.generation_node_id.as_deref() {
+                    sqlx::query(
+                        "UPDATE observation_tail_sources SET generation_node_id=$1 WHERE run_id=$2",
+                    )
+                    .bind(node)
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 insert_event_postgres(
                     &mut tx,
                     EventInsert {
@@ -4286,6 +4244,17 @@ async fn recompute_status_sqlite(
     iid: &str,
     seq: i64,
 ) -> anyhow::Result<()> {
+    refresh_interaction_sqlite(tx, iid, seq, None).await
+}
+
+/// 重算 Interaction 状态、活动时间与末事件序号，并可在同一条 UPDATE 里登记输入事件序号，
+/// 使一个事务对 Interaction 行只写一次。
+async fn refresh_interaction_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    iid: &str,
+    seq: i64,
+    input_sequence: Option<i64>,
+) -> anyhow::Result<()> {
     let runs: Vec<(String, String, bool, bool, i64)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id),r.last_active_at FROM inference_run_observations r WHERE r.interaction_id=?")
         .bind(iid).fetch_all(&mut **tx).await?;
     let evidence = if runs
@@ -4309,8 +4278,8 @@ async fn recompute_status_sqlite(
             )
         }));
     let activity: Option<i64> = runs.iter().map(|run| run.4).max();
-    sqlx::query("UPDATE interaction_observations SET status=?,last_active_at=MAX(last_active_at,COALESCE(?,last_active_at)),last_event_sequence=? WHERE id=?")
-        .bind(status).bind(activity).bind(seq).bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET status=?,last_active_at=MAX(last_active_at,COALESCE(?,last_active_at)),last_event_sequence=?,input_sequence=COALESCE(?,input_sequence) WHERE id=?")
+        .bind(status).bind(activity).bind(seq).bind(input_sequence).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -4326,6 +4295,15 @@ async fn recompute_status_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     iid: &str,
     seq: i64,
+) -> anyhow::Result<()> {
+    refresh_interaction_postgres(tx, iid, seq, None).await
+}
+
+async fn refresh_interaction_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    iid: &str,
+    seq: i64,
+    input_sequence: Option<i64>,
 ) -> anyhow::Result<()> {
     let runs: Vec<(String, String, bool, bool, i64)> = sqlx::query_as("SELECT r.id,r.status,r.background_active>0,NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id AND c.interaction_id=r.interaction_id),r.last_active_at FROM inference_run_observations r WHERE r.interaction_id=$1")
         .bind(iid).fetch_all(&mut **tx).await?;
@@ -4350,9 +4328,113 @@ async fn recompute_status_postgres(
             )
         }));
     let activity: Option<i64> = runs.iter().map(|run| run.4).max();
-    sqlx::query("UPDATE interaction_observations SET status=$1,last_active_at=GREATEST(last_active_at,COALESCE($2,last_active_at)),last_event_sequence=$3 WHERE id=$4")
-        .bind(status).bind(activity).bind(seq).bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET status=$1,last_active_at=GREATEST(last_active_at,COALESCE($2,last_active_at)),last_event_sequence=$3,input_sequence=COALESCE($4,input_sequence) WHERE id=$5")
+        .bind(status).bind(activity).bind(seq).bind(input_sequence).bind(iid).execute(&mut **tx).await?;
     Ok(())
+}
+
+/// 客户端交付结算：Run 交付时刻与终态候选、可选的尾源。可单独提交，
+/// 也可并入 `finish_run_with_completion` 的收尾事务。
+pub(super) struct ClientCompletionWrite<'a> {
+    pub delivered_at: i64,
+    pub waiting_client: bool,
+    pub tail: Option<TailSource<'a>>,
+}
+
+/// 交付结算的事务内语句（不含 Interaction 状态重算与事件行）。
+/// 返回 `(状态, 记录时刻)`；Run 已结算过交付时返回 `None`，尾源仍照常写入。
+async fn apply_client_completion_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &str,
+    interaction_id: &str,
+    completion: &ClientCompletionWrite<'_>,
+    seq: i64,
+) -> anyhow::Result<Option<(String, i64)>> {
+    let requested = if completion.waiting_client {
+        "waiting_client"
+    } else {
+        "completed"
+    };
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "UPDATE inference_run_observations SET
+            status=CASE
+                WHEN status='failed' THEN status
+                WHEN user_interrupted=1 THEN 'user_interrupted'
+                WHEN status NOT IN ('running','waiting_client') THEN status
+                WHEN ?1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
+                ELSE ?1 END,
+            delivery_completed_at=?2,finished_at=COALESCE(finished_at,MAX(started_at,?2)),
+            last_active_at=MAX(last_active_at,?2),last_event_sequence=?3
+        WHERE id=?4 AND delivery_completed_at IS NULL
+        RETURNING status,last_active_at",
+    )
+    .bind(requested)
+    .bind(completion.delivered_at)
+    .bind(seq)
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(tail) = &completion.tail {
+        write_tail_source_sqlite(tx, run_id, interaction_id, tail).await?;
+    }
+    let Some((status, recorded_at)) = row else {
+        return Ok(None);
+    };
+    if matches!(status.as_str(), "user_interrupted" | "superseded") {
+        sqlx::query("UPDATE inference_run_observations SET terminal_reason=? WHERE id=?")
+            .bind(&status)
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(Some((status, recorded_at)))
+}
+
+async fn apply_client_completion_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    interaction_id: &str,
+    completion: &ClientCompletionWrite<'_>,
+    seq: i64,
+) -> anyhow::Result<Option<(String, i64)>> {
+    let requested = if completion.waiting_client {
+        "waiting_client"
+    } else {
+        "completed"
+    };
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "UPDATE inference_run_observations SET
+            status=CASE
+                WHEN status='failed' THEN status
+                WHEN user_interrupted THEN 'user_interrupted'
+                WHEN status NOT IN ('running','waiting_client') THEN status
+                WHEN $1='waiting_client' AND EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) THEN 'superseded'
+                ELSE $1 END,
+            delivery_completed_at=$2,finished_at=COALESCE(finished_at,GREATEST(started_at,$2)),
+            last_active_at=GREATEST(last_active_at,$2),last_event_sequence=$3
+        WHERE id=$4 AND delivery_completed_at IS NULL
+        RETURNING status,last_active_at",
+    )
+    .bind(requested)
+    .bind(completion.delivered_at)
+    .bind(seq)
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(tail) = &completion.tail {
+        write_tail_source_postgres(tx, run_id, interaction_id, tail).await?;
+    }
+    let Some((status, recorded_at)) = row else {
+        return Ok(None);
+    };
+    if matches!(status.as_str(), "user_interrupted" | "superseded") {
+        sqlx::query("UPDATE inference_run_observations SET terminal_reason=$1 WHERE id=$2")
+            .bind(&status)
+            .bind(run_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(Some((status, recorded_at)))
 }
 
 /// 尾源与其待回传工具 ID；随客户端交付事务一起落盘。

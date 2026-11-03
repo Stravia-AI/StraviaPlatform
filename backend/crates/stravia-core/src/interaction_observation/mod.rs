@@ -2416,6 +2416,68 @@ mod snapshot_tests {
         Ok(())
     }
 
+    /// 客户端交付结算、尾源与 Generation 节点随 `run_finished` 同一收尾事务落盘：
+    /// 不再为交付结算单独写 `run_state_changed` 行；在收尾前被屏障强制落盘时仍照常出现。
+    #[tokio::test]
+    async fn client_completion_rides_on_the_run_closeout() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let call = |id: &str| {
+            AiItem::function_call(ToolCall {
+                id: id.into(),
+                name: "probe".into(),
+                arguments: "{}".into(),
+            })
+        };
+        let outcome = |node: Option<&str>, delivered_at: i64| RunOutcome {
+            client_output_committed: true,
+            delivery: None,
+            delivery_completed_at: Some(delivered_at),
+            status: "waiting_client".into(),
+            terminal_reason: None,
+            generation_node_id: node.map(str::to_owned),
+            generation_root_id: None,
+        };
+
+        let merged = test_run(&observation, "closeout-merged", facts(Vec::new()));
+        let delivered_at = writer::now();
+        merged.observe_client_completion(&[], &[call("merged-call")], delivered_at, true);
+        merged.finish(outcome(Some("node-merged"), delivered_at));
+        observation.flush().await?;
+
+        let barrier = test_run(&observation, "closeout-barrier", facts(Vec::new()));
+        barrier.observe_client_completion(&[], &[call("barrier-call")], delivered_at, true);
+        observation.flush().await?;
+        barrier.finish(outcome(Some("node-barrier"), delivered_at));
+        observation.flush().await?;
+
+        let events = replayed(&observation).await?;
+        assert!(
+            events_of(&events, Some("closeout-merged"), "run_state_changed").is_empty(),
+            "delivery settlement shares the closeout transaction"
+        );
+        assert_eq!(events_of(&events, Some("closeout-merged"), "run_finished").len(), 1);
+        assert_eq!(
+            events_of(&events, Some("closeout-barrier"), "run_state_changed").len(),
+            1,
+            "a barrier before closeout commits the settlement on its own"
+        );
+        for (run, node) in [("closeout-merged", "node-merged"), ("closeout-barrier", "node-barrier")] {
+            let stored: (Option<i64>, Option<String>) = sqlx::query_as(
+                "SELECT r.delivery_completed_at,t.generation_node_id FROM inference_run_observations r JOIN observation_tail_sources t ON t.run_id=r.id WHERE r.id=?",
+            )
+            .bind(run)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(stored, (Some(delivered_at), Some(node.to_owned())), "{run}");
+        }
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn retention_yields_to_admission_before_finishing_the_expired_window()
     -> anyhow::Result<()> {
@@ -2700,7 +2762,7 @@ mod snapshot_tests {
         observation.flush().await?;
 
         let events: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT kind,occurred_at FROM observation_events WHERE run_id='backlog-lifecycle' AND kind IN ('model_turn_started','client_tool_result','target_attempt_started','target_attempt_finished') ORDER BY sequence",
+            "SELECT kind,occurred_at FROM observation_events WHERE run_id='backlog-lifecycle' AND kind IN ('model_turn_started','client_tool_result','target_attempt_finished') ORDER BY sequence",
         ).fetch_all(&pool).await?;
         for (kind, occurred_at) in &events {
             assert!(
@@ -2717,7 +2779,13 @@ mod snapshot_tests {
         };
         let turn_at = at("model_turn_started");
         let tool_at = at("client_tool_result");
-        let attempt_at = at("target_attempt_started");
+        // 首个 attempt 的开始并入 Turn 开始行，它自己的来源时刻随行携带。
+        let replayed_events = replayed(&observation).await?;
+        let attempt_at = only_event(&replayed_events, Some("backlog-lifecycle"), "model_turn_started")
+            .payload["attempt_at"]
+            .as_i64()
+            .expect("merged attempt start time");
+        assert!(attempt_at <= delivered_at);
         assert!(
             tool_at - turn_at >= 5,
             "batched and deferred commands must keep their own source times: turn={turn_at} tool={tool_at}"

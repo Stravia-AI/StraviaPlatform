@@ -842,6 +842,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         let mut phases = PhaseBuffers {
             turns: HashMap::new(),
             finishes: HashMap::new(),
+            completions: HashMap::new(),
         };
         let context = WriterContext {
             store: &store,
@@ -1222,6 +1223,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let _ = response.send(result);
                 }
                 Some(WriterCommand::ClientDisconnected { runs, occurred_at }) => {
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |_| true,
+                    )
+                    .await;
                     for run_id in runs {
                         match store.disconnect_waiting_client(&run_id, occurred_at).await {
                             Ok(Some(event)) => publish(&updates, &trace_sequence, event),
@@ -1301,6 +1311,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     expired_before,
                     done,
                 }) => {
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |_| true,
+                    )
+                    .await;
                     if let Err(error) = ensure_usage_complete(incomplete_usage || gap_projection_failed) {
                         let _ = done.send(Err(error));
                         return false;
@@ -1347,42 +1366,34 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     delivered_at,
                     waiting_client,
                 }) => {
-                    let at = delivered_at;
-                    let expiry = retention.deadline(at);
+                    let expiry = retention.deadline(delivered_at);
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
                     };
-                    // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获；
-                    // 交付结算与尾源在同一事务里提交，失败时只记一个观察缺口。
-                    let pending = window
+                    // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获。交付结算与尾源
+                    // 先缓冲，随 Run 收尾事务一并提交；其间任何会读取持久尾源的命令
+                    // （准入、屏障等）都会先把它单独落盘。
+                    let pending_tool_ids = window
                         .as_ref()
                         .and_then(super::tail::Window::pending_tool_ids)
                         .unwrap_or_default();
-                    let hash = window.as_ref().and_then(super::tail::Window::last_hash_hex);
-                    let tail_source = hash.as_deref().map(|hash| TailSource {
-                        principal: &principal,
-                        last_unit_hash: hash,
-                        pending_tool_ids: &pending,
-                        expires_at: expiry,
-                    });
-                    match store
-                        .persist_client_completion(
-                            &run_id,
-                            interaction,
+                    let tail = window
+                        .as_ref()
+                        .and_then(super::tail::Window::last_hash_hex)
+                        .map(|last_unit_hash| PendingTail {
+                            last_unit_hash,
+                            pending_tool_ids,
+                            expires_at: expiry,
+                        });
+                    phases.completions.insert(
+                        run_id.clone(),
+                        PendingCompletion {
+                            principal: principal.clone(),
                             delivered_at,
                             waiting_client,
-                            tail_source,
-                        )
-                        .await
-                    {
-                        Ok(Some(event)) => publish(&updates, &trace_sequence, event),
-                        Ok(None) => {}
-                        Err(error) => {
-                            incomplete_usage = true;
-                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
-                            pending_gaps.insert(interaction.to_owned(), at);
-                        }
-                    }
+                            tail,
+                        },
+                    );
                     if let Some(window) = window {
                         attribution.insert_tail_source(
                             run_id,
@@ -1405,6 +1416,16 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         discarded_trace,
                     } = *payload;
                     let now = occurred_at;
+                    // 新请求可能续接上一个 Run 的尾源与待回传工具：先让缓冲的交付结算落盘。
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |_| true,
+                    )
+                    .await;
                     // Run Attribution owns the placement decision end to end; the
                     // writer only persists the outcome and publishes it.
                     let mut decision = attribution
@@ -1807,6 +1828,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         FinishFacts {
                             at: finished_at,
                             rejected_before_target,
+                            completion: phases.completions.remove(&run_id),
                         },
                     )
                     .await;
@@ -1861,6 +1883,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             occurred_at,
                         )
                         .await;
+                        if pending_finish.is_none() {
+                            commit_buffered_completions(
+                                &context,
+                                &attribution,
+                                &mut pending_gaps,
+                                &mut incomplete_usage,
+                                &mut phases,
+                                |buffered| buffered == run_id,
+                            )
+                            .await;
+                        }
                         replayed_tool_results.remove(run_id);
                         if gap {
                             if let Some(trace) = &trace {
@@ -1933,6 +1966,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 FinishFacts {
                                     at: finished_at,
                                     rejected_before_target,
+                                    completion: phases.completions.remove(run_id),
                                 },
                             )
                             .await;
@@ -2027,6 +2061,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         now(),
                     )
                     .await;
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |buffered| attribution.interaction_for_run(buffered) == Some(interaction_id.as_str()),
+                    )
+                    .await;
                     flush_active_manifests(
                         &context,
                         &attribution,
@@ -2046,6 +2089,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &mut phases,
                         |_| true,
                         now(),
+                    )
+                    .await;
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |_| true,
                     )
                     .await;
                     // 读己之写屏障不绕过正文限频；新订阅从当前镜像读取。
@@ -2068,6 +2120,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         &mut phases,
                         |_| true,
                         now(),
+                    )
+                    .await;
+                    commit_buffered_completions(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |_| true,
                     )
                     .await;
                     pending_text.publish_live();
@@ -2179,6 +2240,83 @@ pub(super) fn redacted_persist_cause(error: &anyhow::Error) -> String {
 struct PhaseBuffers {
     turns: HashMap<String, PendingTurn>,
     finishes: HashMap<String, PendingTurnFinish>,
+    /// 客户端交付结算：等 Run 收尾时并入收尾事务；其他会读取持久状态的命令前先落盘。
+    completions: HashMap<String, PendingCompletion>,
+}
+
+/// 已到达但尚未落盘的客户端交付结算与尾源。
+struct PendingCompletion {
+    principal: String,
+    delivered_at: i64,
+    waiting_client: bool,
+    tail: Option<PendingTail>,
+}
+
+struct PendingTail {
+    last_unit_hash: String,
+    pending_tool_ids: Vec<String>,
+    expires_at: i64,
+}
+
+impl PendingCompletion {
+    fn write(&self) -> super::store::ClientCompletionWrite<'_> {
+        super::store::ClientCompletionWrite {
+            delivered_at: self.delivered_at,
+            waiting_client: self.waiting_client,
+            tail: self.tail.as_ref().map(|tail| TailSource {
+                principal: &self.principal,
+                last_unit_hash: &tail.last_unit_hash,
+                pending_tool_ids: &tail.pending_tool_ids,
+                expires_at: tail.expires_at,
+            }),
+        }
+    }
+}
+
+/// 把选中 Run 的缓冲交付结算单独落盘；Run 收尾时它们改由收尾事务一并提交。
+async fn commit_buffered_completions(
+    context: &WriterContext<'_>,
+    attribution: &RunAttribution<ObservationEvidence>,
+    pending_gaps: &mut HashMap<String, i64>,
+    incomplete_usage: &mut bool,
+    buffers: &mut PhaseBuffers,
+    selects: impl Fn(&str) -> bool,
+) {
+    let runs: Vec<String> = buffers
+        .completions
+        .keys()
+        .filter(|run| selects(run))
+        .cloned()
+        .collect();
+    for run_id in runs {
+        let Some(completion) = buffers.completions.remove(&run_id) else {
+            continue;
+        };
+        let Some(interaction) = attribution.interaction_for_run(&run_id) else {
+            continue;
+        };
+        let interaction = interaction.to_owned();
+        let write = completion.write();
+        match context
+            .store
+            .persist_client_completion(
+                &run_id,
+                &interaction,
+                write.delivered_at,
+                write.waiting_client,
+                write.tail,
+            )
+            .await
+        {
+            Ok(Some(event)) => publish(context.updates, context.trace_sequence, event),
+            Ok(None) => {}
+            Err(error) => {
+                *incomplete_usage = true;
+                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
+                pending_gaps.insert(interaction, completion.delivered_at);
+            }
+        }
+    }
 }
 
 /// 把尚缓冲的轮次开始与 attempt 结束阶段落盘；屏障、关停与 Run 收尾都经这里提交。
@@ -2283,6 +2421,8 @@ fn ensure_usage_complete(incomplete_usage: bool) -> anyhow::Result<()> {
 struct FinishFacts {
     at: i64,
     rejected_before_target: bool,
+    /// 尚未落盘的客户端交付结算，并入收尾事务。
+    completion: Option<PendingCompletion>,
 }
 
 async fn persist_finish(
@@ -2297,6 +2437,7 @@ async fn persist_finish(
     let FinishFacts {
         at,
         rejected_before_target,
+        completion,
     } = finish;
     flush_one(pending_text, run_id);
     pending_text.retain(|run| run != run_id);
@@ -2305,18 +2446,20 @@ async fn persist_finish(
         let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
         let result = context
             .store
-            .finish_run(interaction, run_id, outcome, at, rejected_before_target)
+            .finish_run_with_completion(
+                interaction,
+                run_id,
+                outcome,
+                at,
+                rejected_before_target,
+                completion.as_ref().map(PendingCompletion::write),
+            )
             .instrument(span.clone())
             .await;
         span.record("status", if result.is_ok() { "completed" } else { "error" });
         drop(span);
         match result {
             Ok(value) => {
-                if let Some(node) = outcome.generation_node_id.as_deref()
-                    && let Err(error) = context.store.set_tail_generation_node(run_id, node).await
-                {
-                    tracing::debug!(%run_id, %error, "failed to persist tail Generation node");
-                }
                 publish(context.updates, context.trace_sequence, value);
             }
             Err(error) => {
