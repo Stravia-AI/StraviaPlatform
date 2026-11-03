@@ -704,6 +704,17 @@ impl ObservationStore {
                     )
                     .await?;
                     writes.push_event(sequence, *at, &kind, &payload)?;
+                    // 复用与事件同一事务登记（与 persist_ordered_run_events 一致）：侧栏只读登记表。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = leading {
+                        upsert_credential_mapping_reuses_sqlite(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            *at,
+                            discoveries,
+                        )
+                        .await?;
+                    }
                     latest_at = latest_at.max(*at);
                     result.push(event(
                         sequence,
@@ -899,6 +910,17 @@ impl ObservationStore {
                     )
                     .await?;
                     writes.push_event(leading_sequence, *at, &kind, &payload)?;
+                    // 复用与事件同一事务登记（与 persist_ordered_run_events 一致）：侧栏只读登记表。
+                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = leading {
+                        upsert_credential_mapping_reuses_postgres(
+                            &mut tx,
+                            interaction_id,
+                            Some(run_id),
+                            *at,
+                            discoveries,
+                        )
+                        .await?;
+                    }
                     latest_at = latest_at.max(*at);
                     result.push(event(
                         leading_sequence,
