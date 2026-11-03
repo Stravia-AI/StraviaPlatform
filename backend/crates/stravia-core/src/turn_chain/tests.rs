@@ -1416,6 +1416,7 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
     assert_prefix_rebuild_decodes_shared_ancestors_once(&store).await;
     assert_reusable_prefix_store_contract(Arc::new(store.clone())).await;
     assert_request_context_contract(&store).await;
+    assert_cached_prefix_keeps_the_head_expiry(&store).await;
     assert_expired_query_cutoff_proof_falls_back_to_current_facts(&store).await;
     assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_indexes(&store).await;
     assert_postgres_concurrent_commits_and_gc(&store).await;
@@ -1977,6 +1978,45 @@ async fn ancestor_suffix_rows(
     }
 }
 
+/// 整条链共用头节点（最新节点）的计时：命中缓存的祖先前缀不能把链的有效期拉回祖先自己的期限。
+async fn assert_cached_prefix_keeps_the_head_expiry(store: &SqlTurnChainStore) {
+    let owner = principal("head-expiry");
+    let root = TurnNodeId::response();
+    let child = TurnNodeId::response();
+    let commit = |id: &TurnNodeId, parent: Option<&TurnNodeId>| TurnCommit {
+        id: id.clone(),
+        parent_id: parent.cloned(),
+        principal: owner.clone(),
+        kind: TurnNodeKind::Response,
+        payload_version: 1,
+        payload: serde_json::json!({"node": id.as_str()}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: None,
+    };
+    store.commit(commit(&root, None)).await.unwrap();
+    let mut context = TurnReadContext::new(&owner, TurnNodeKind::Response);
+    let root_chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &root, &mut context)
+        .await
+        .unwrap();
+    let decoded: Arc<dyn std::any::Any + Send + Sync> = Arc::new("validated root");
+    context.admit(&root_chain, vec![(decoded, 128)]);
+    // 子节点创建得更晚，因此头节点的期限晚于祖先的期限。
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    store.commit(commit(&child, Some(&root))).await.unwrap();
+    let chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &child, &mut context)
+        .await
+        .unwrap();
+    assert_eq!(chain.nodes.len(), 2);
+    assert!(
+        chain.expires_at > root_chain.expires_at,
+        "the chain expires with its head, not with the cached ancestor"
+    );
+}
+
 async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &SqlTurnChainStore) {
     let owner = principal("query-cutoff-expiry");
     let root = TurnNodeId::response();
@@ -2072,6 +2112,11 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
         ),
         "a truly expired durable ancestor cannot be revived by the old proof"
     );
+}
+
+#[tokio::test]
+async fn cached_prefix_keeps_the_head_expiry() {
+    assert_cached_prefix_keeps_the_head_expiry(&test_store().await).await;
 }
 
 #[tokio::test]

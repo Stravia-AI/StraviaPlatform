@@ -57,7 +57,7 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $begin:literal, $lock:literal, $for_key_share:literal) => {{
+            ($pool:expr, $begin:literal, $lock:expr, $for_key_share:literal) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
@@ -169,6 +169,40 @@ impl Store {
             .transpose()
     }
 
+    /// 客户端回传解析：只确认仍未确认的登记（已确认的不写库）。
+    pub(super) async fn confirm_pending(
+        &self,
+        principal: &Principal,
+        ids: &[String],
+    ) -> Result<(), CompactionError> {
+        let key = principal.continuation_key();
+        const SQL: &str =
+            "SELECT confirmed_at IS NULL FROM native_compactions WHERE id = $1 AND principal = $2";
+        macro_rules! fetch {
+            ($pool:expr, $id:expr) => {
+                sqlx::query_scalar::<_, bool>(SQL)
+                    .bind($id)
+                    .bind(&key)
+                    .fetch_optional($pool)
+                    .await
+                    .map_err(storage)?
+            };
+        }
+        let mut pending = Vec::new();
+        for id in ids {
+            let is_pending = match self {
+                Self::Sqlite(pool) => fetch!(pool, id),
+                Self::Postgres(pool) => fetch!(pool, id),
+            };
+            match is_pending {
+                Some(true) => pending.push(id.clone()),
+                Some(false) => {}
+                None => return Err(CompactionError::Unavailable),
+            }
+        }
+        self.confirm(principal, &pending).await
+    }
+
     /// 首次交付确认或被客户端回传解析：置 `confirmed_at` 并清空未确认下限。
     pub(super) async fn confirm(
         &self,
@@ -219,7 +253,7 @@ impl Store {
     ) -> Result<u64, CompactionError> {
         let threshold = now.saturating_sub(retention_ms(retention));
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:literal, $skip_locked:literal) => {{
+            ($pool:expr, $begin:literal, $lock:expr, $skip_locked:literal) => {{
                 let mut recovered = 0u64;
                 {
                     let mut connection = $pool.acquire_write().await.map_err(storage)?;
@@ -259,8 +293,9 @@ impl Store {
                     let mut tx = connection.begin_with($begin).await.map_err(storage)?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                     let claim = format!(
-                        "SELECT record_id FROM native_compaction_gc \
-                         ORDER BY record_id LIMIT {SWEEP_BATCH}{}",
+                        "SELECT g.record_id FROM native_compaction_gc g \
+                         JOIN native_compactions c ON c.id = g.record_id \
+                         ORDER BY g.record_id LIMIT {SWEEP_BATCH}{}",
                         $skip_locked,
                     );
                     let claimed: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(claim))
@@ -284,24 +319,24 @@ impl Store {
                             sqlx::query("DELETE FROM native_compaction_gc WHERE record_id = $1")
                                 .bind(id).execute(&mut *tx).await.map_err(storage)?;
                         } else {
-                            // 删除自己的来源边；来源记录由触发器重新入队。
-                            sqlx::query("DELETE FROM native_compaction_sources WHERE record_id = $1")
-                                .bind(id).execute(&mut *tx).await.map_err(storage)?;
+                            // 来源边随记录级联删除，来源记录由释放触发器重新入队。
                             recovered = recovered.saturating_add(deleted);
                         }
                     }
                     tx.commit().await.map_err(storage)?;
                     connection.finish().await.map_err(storage)?;
-                    if i64::try_from(claimed.len()).unwrap_or(i64::MAX) < SWEEP_BATCH {
-                        break;
-                    }
                 }
                 Ok(recovered)
             }};
         }
         match self {
             Self::Sqlite(pool) => sweep!(pool, "BEGIN IMMEDIATE", "", ""),
-            Self::Postgres(pool) => sweep!(pool, "BEGIN", "", " FOR UPDATE SKIP LOCKED"),
+            Self::Postgres(pool) => sweep!(
+                pool,
+                "BEGIN",
+                crate::history_retention::PG_GC_LOCK,
+                " FOR UPDATE OF g, c SKIP LOCKED"
+            ),
         }
     }
 }

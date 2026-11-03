@@ -7,22 +7,41 @@ use super::*;
 const CONTENT_BATCH: usize = 512;
 const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
 
-/// 四类反向引用都必须重检；新增引用类型时同步修改这里与 [`enqueue_unreferenced`]。
-macro_rules! unreferenced {
+/// 四类反向引用的唯一清单；新增引用类型时只改这里与 [`enqueue_unreferenced`] 的调用方。
+macro_rules! referenced {
     ($c:literal) => {
         concat!(
-            "NOT EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=",
+            "EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=",
             $c,
             ")",
-            " AND NOT EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=",
+            " OR EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=",
             $c,
             ")",
-            " AND NOT EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=",
+            " OR EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=",
             $c,
             ")",
-            " AND NOT EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=",
+            " OR EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=",
             $c,
             ")"
+        )
+    };
+}
+
+macro_rules! unreferenced {
+    ($c:literal) => {
+        concat!("NOT (", referenced!($c), ")")
+    };
+}
+
+/// 领取候选的列：被引用的候选字节数记 0，不占批次的字节预算。
+macro_rules! claim_columns {
+    ($size:literal) => {
+        concat!(
+            "SELECT c.id, c.scope_id, CASE WHEN ",
+            referenced!("c.id"),
+            " THEN 0 ELSE ",
+            $size,
+            " END"
         )
     };
 }
@@ -35,50 +54,48 @@ macro_rules! backend {
         $conn:ty,
         $begin:literal,
         $key_share:literal,
-        $claim_before:literal,
-        $claim_after:literal
+        $no_key_update:literal,
+        $skip_locked:literal,
+        $claim_before:expr,
+        $claim_after:expr
     ) => {
         pub(crate) mod $module {
             use super::*;
 
             /// 取得 Principal 的 scope；不存在时插入。调用方持有写事务。
+            ///
+            /// 已有 scope 一律带 `FOR KEY SHARE`（行锁后端），清理方的 `FOR UPDATE` 领取
+            /// 因此不会与写入方交错。插入冲突说明别的事务刚创建了它：回到加锁查询重读，
+            /// 而不是裸读；该 scope 若恰好被清理删除，则下一轮重新插入。
             pub(crate) async fn resolve_scope(
                 connection: &mut $conn,
                 principal: &str,
             ) -> anyhow::Result<i64> {
-                let scope: Option<i64> = {
-                    let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT id FROM content_scopes WHERE principal = ",
-                    );
-                    query.push_bind(principal);
-                    query.push($key_share);
-                    query.build_query_scalar().fetch_optional(&mut *connection).await?
-                };
-                if let Some(scope) = scope {
-                    return Ok(scope);
-                }
-                let inserted: Option<i64> = {
-                    let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "INSERT INTO content_scopes(principal) VALUES(",
-                    );
-                    query.push_bind(principal);
-                    query.push(") ON CONFLICT(principal) DO NOTHING RETURNING id");
-                    query.build_query_scalar().fetch_optional(&mut *connection).await?
-                };
-                match inserted {
-                    Some(scope) => Ok(scope),
-                    None => {
+                for _ in 0..4 {
+                    let scope: Option<i64> = {
                         let mut query = sqlx::QueryBuilder::<$db>::new(
                             "SELECT id FROM content_scopes WHERE principal = ",
                         );
                         query.push_bind(principal);
-                        query
-                            .build_query_scalar()
-                            .fetch_one(&mut *connection)
-                            .await
-                            .map_err(anyhow::Error::from)
+                        query.push($key_share);
+                        query.build_query_scalar().fetch_optional(&mut *connection).await?
+                    };
+                    if let Some(scope) = scope {
+                        return Ok(scope);
+                    }
+                    let inserted: Option<i64> = {
+                        let mut query = sqlx::QueryBuilder::<$db>::new(
+                            "INSERT INTO content_scopes(principal) VALUES(",
+                        );
+                        query.push_bind(principal);
+                        query.push(") ON CONFLICT(principal) DO NOTHING RETURNING id");
+                        query.build_query_scalar().fetch_optional(&mut *connection).await?
+                    };
+                    if let Some(scope) = inserted {
+                        return Ok(scope);
                     }
                 }
+                anyhow::bail!("content scope could not be resolved")
             }
 
             /// 只读的 scope 查询。
@@ -302,6 +319,11 @@ macro_rules! backend {
             }
 
             /// 引用方删除引用后，在同一事务内登记失去最后引用的内容。
+            ///
+            /// 行锁后端先对候选行加 `FOR NO KEY UPDATE`：它与回收方的 `FOR UPDATE`、以及另一个
+            /// 同时删除兄弟引用的事务互斥。这样既不会在回收方「仍有引用→移出队列」的同一刻
+            /// 因冲突而漏登记，也不会因看不到兄弟事务尚未提交的删除而两边都漏登记。锁取得
+            /// 之后才做引用重检（新语句，新快照）。
             pub(crate) async fn enqueue_unreferenced(
                 connection: &mut $conn,
                 ids: &[i64],
@@ -314,6 +336,18 @@ macro_rules! backend {
                 unique.dedup();
                 let mut enqueued = 0;
                 for chunk in unique.chunks(400) {
+                    if !$no_key_update.is_empty() {
+                        let mut lock = sqlx::QueryBuilder::<$db>::new(
+                            "SELECT id FROM contents WHERE id IN (",
+                        );
+                        let mut list = lock.separated(",");
+                        for id in chunk {
+                            list.push_bind(*id);
+                        }
+                        list.push_unseparated(") ORDER BY id");
+                        lock.push($no_key_update);
+                        lock.build().execute(&mut *connection).await?;
+                    }
                     let mut query = sqlx::QueryBuilder::<$db>::new(
                         "INSERT INTO content_gc(content_id) SELECT c.id FROM contents c WHERE c.id IN (",
                     );
@@ -335,6 +369,10 @@ macro_rules! backend {
             }
 
             /// 删除既无节点、也无正文的 scope。
+            ///
+            /// 行锁后端先以 `FOR UPDATE SKIP LOCKED` 领取：写入方持有的 `FOR KEY SHARE`
+            /// 会让对应 scope 被跳过（留给之后的回收），因此不会撞上外键错误；领取之后
+            /// 的删除语句使用新快照重检节点与正文。
             pub(crate) async fn prune_scopes(
                 connection: &mut $conn,
                 scopes: &[i64],
@@ -346,11 +384,28 @@ macro_rules! backend {
                 unique.sort_unstable();
                 unique.dedup();
                 for chunk in unique.chunks(400) {
+                    let claimed: Vec<i64> = if $skip_locked.is_empty() {
+                        chunk.to_vec()
+                    } else {
+                        let mut claim = sqlx::QueryBuilder::<$db>::new(
+                            "SELECT id FROM content_scopes WHERE id IN (",
+                        );
+                        let mut list = claim.separated(",");
+                        for scope in chunk {
+                            list.push_bind(*scope);
+                        }
+                        list.push_unseparated(") ORDER BY id");
+                        claim.push($skip_locked);
+                        claim.build_query_scalar().fetch_all(&mut *connection).await?
+                    };
+                    if claimed.is_empty() {
+                        continue;
+                    }
                     let mut query = sqlx::QueryBuilder::<$db>::new(
                         "DELETE FROM content_scopes WHERE id IN (",
                     );
                     let mut list = query.separated(",");
-                    for scope in chunk {
+                    for scope in &claimed {
                         list.push_bind(*scope);
                     }
                     list.push_unseparated(")");
@@ -363,13 +418,14 @@ macro_rules! backend {
                 Ok(())
             }
 
-            /// 内容回收：领取候选，重检四类反向引用后删除。批次数量与字节上限
-            /// 沿用 ADR-0076。
+            /// 内容回收：循环领取一批、提交、释放写协调，直到队列排空。每批至多
+            /// [`CONTENT_BATCH`] 行或 [`CONTENT_BYTES`] 字节（ADR-0076），因此单次事务与
+            /// 写租约占用都有界；ADR-0076 要求批次之间让出写协调。
             pub(crate) async fn sweep(pool: &$pool) -> anyhow::Result<u64> {
-                let mut connection = pool.acquire_write().await?;
-                let mut transaction = connection.begin_with($begin).await?;
                 let mut removed = 0u64;
                 loop {
+                    let mut connection = pool.acquire_write().await?;
+                    let mut transaction = connection.begin_with($begin).await?;
                     let claim_sql = sqlx::AssertSqlSafe(format!(
                         "{}{CONTENT_BATCH}{}",
                         $claim_before, $claim_after
@@ -378,7 +434,9 @@ macro_rules! backend {
                         .fetch_all(&mut *transaction)
                         .await?;
                     if rows.is_empty() {
-                        break;
+                        transaction.commit().await?;
+                        connection.finish().await?;
+                        return Ok(removed);
                     }
                     let mut selected = Vec::with_capacity(rows.len());
                     let mut bytes = 0i64;
@@ -413,12 +471,11 @@ macro_rules! backend {
                     }
                     list.push_unseparated(")");
                     queue.build().execute(&mut *transaction).await?;
-                    let mut scopes: Vec<i64> = selected.iter().map(|row| row.1).collect();
-                    prune_scopes(&mut transaction, &mut scopes).await?;
+                    let scopes: Vec<i64> = selected.iter().map(|row| row.1).collect();
+                    prune_scopes(&mut transaction, &scopes).await?;
+                    transaction.commit().await?;
+                    connection.finish().await?;
                 }
-                transaction.commit().await?;
-                connection.finish().await?;
-                Ok(removed)
             }
         }
     };
@@ -432,13 +489,14 @@ backend!(
     sqlx::SqliteConnection<'_>,
     "BEGIN IMMEDIATE",
     "",
+    "",
+    "",
     "WITH candidates AS MATERIALIZED (SELECT content_id FROM content_gc ORDER BY content_id LIMIT ",
-    ") SELECT c.id, c.scope_id, CASE WHEN EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=c.id) \
-        THEN 0 ELSE length(c.body) END \
-        FROM candidates g JOIN contents c ON c.id=g.content_id ORDER BY c.id"
+    concat!(
+        ") ",
+        claim_columns!("length(c.body)"),
+        " FROM candidates g JOIN contents c ON c.id=g.content_id ORDER BY c.id"
+    )
 );
 // PostgreSQL：行锁协议；GC 跳过在途写入锁住的行。`FOR UPDATE` 必须位于 LIMIT 之后。
 backend!(
@@ -448,11 +506,11 @@ backend!(
     sqlx::PgConnection<'_>,
     "BEGIN",
     " FOR KEY SHARE",
-    "SELECT c.id, c.scope_id, CASE WHEN EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=c.id) \
-        OR EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=c.id) \
-        THEN 0 ELSE CAST(octet_length(c.body) AS BIGINT) END \
-        FROM content_gc g JOIN contents c ON c.id=g.content_id ORDER BY c.id LIMIT ",
+    " FOR NO KEY UPDATE",
+    " FOR UPDATE SKIP LOCKED",
+    concat!(
+        claim_columns!("CAST(octet_length(c.body) AS BIGINT)"),
+        " FROM content_gc g JOIN contents c ON c.id=g.content_id ORDER BY c.id LIMIT "
+    ),
     " FOR UPDATE OF c SKIP LOCKED"
 );

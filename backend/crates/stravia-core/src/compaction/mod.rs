@@ -226,6 +226,8 @@ impl Compaction {
             return Err(CompactionError::Conflict);
         }
         let record_ids = ids.into_iter().collect::<Vec<_>>();
+        // 客户端回传即视为交付确认（规格：首次交付确认或回传解析，取先到者）。
+        self.store.confirm_pending(principal, &record_ids).await?;
         Ok(Some(ResolvedCompaction {
             record_ids,
             source_generation_id: tip.source_generation_id.clone(),

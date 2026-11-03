@@ -1091,7 +1091,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let threshold =
             now.saturating_sub(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:literal, $skip_locked:literal, $enqueue:path) => {{
+            ($pool:expr, $begin:literal, $lock:expr, $skip_locked:literal, $enqueue:path) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
@@ -1135,7 +1135,9 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                     let mut tx = connection.begin_with($begin).await.map_err(storage)?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                     let claim = format!(
-                        "SELECT reference FROM history_marker_gc ORDER BY reference LIMIT {SWEEP_BATCH}{}",
+                        "SELECT g.reference FROM history_marker_gc g \
+                         JOIN history_markers m ON m.reference = g.reference \
+                         ORDER BY g.reference LIMIT {SWEEP_BATCH}{}",
                         $skip_locked,
                     );
                     let claimed: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(claim.as_str()))
@@ -1171,9 +1173,6 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                     }
                     tx.commit().await.map_err(storage)?;
                     connection.finish().await.map_err(storage)?;
-                    if i64::try_from(claimed.len()).unwrap_or(i64::MAX) < SWEEP_BATCH {
-                        break;
-                    }
                 }
                 Ok(removed)
             }};
@@ -1189,8 +1188,8 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             Self::Postgres(pool) => sweep!(
                 pool,
                 "BEGIN",
-                "",
-                " FOR UPDATE SKIP LOCKED",
+                crate::history_retention::PG_GC_LOCK,
+                " FOR UPDATE OF g, m SKIP LOCKED",
                 crate::content_store::postgres::enqueue_unreferenced
             ),
         }

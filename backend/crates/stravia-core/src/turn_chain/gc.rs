@@ -27,7 +27,7 @@ impl Candidate {
 }
 
 macro_rules! backend {
-    ($scan:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $begin:literal, $lock:literal, $skip_locked:literal) => {
+    ($scan:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $begin:literal, $locks:expr, $skip_locked:literal) => {
         async fn $prune(connection: &mut $conn, scopes: &mut Vec<i64>) -> anyhow::Result<()> {
             let scopes = std::mem::take(scopes);
             $prune_scopes(connection, &scopes).await
@@ -71,7 +71,8 @@ macro_rules! backend {
             let mut connection = pool.acquire_write().await?;
             let mut transaction = connection.begin_with($begin).await?;
             // 与提交共享的锁序：turn_nodes -> content_scopes；SHARE ROW EXCLUSIVE 阻止写入穿插。
-            if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
+            // 咨询锁在前，使并发回收事务的释放触发器取锁顺序串行（见 `PG_GC_LOCK`）。
+            for lock in $locks { sqlx::query(lock).execute(&mut *transaction).await?; }
             let mut query = sqlx::QueryBuilder::<$db>::new(
                 "SELECT n.node_pk,n.created_at,n.scope_id,r.deleting,\
                  EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=n.node_pk) AS has_child,\
@@ -161,7 +162,7 @@ backend!(
     sqlx::SqliteConnection<'_>,
     sqlx::Sqlite,
     "BEGIN IMMEDIATE",
-    "",
+    [] as [&str; 0],
     ""
 );
 backend!(
@@ -174,7 +175,7 @@ backend!(
     sqlx::PgConnection<'_>,
     sqlx::Postgres,
     "BEGIN",
-    "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE",
+    [crate::history_retention::PG_GC_LOCK, "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE"],
     " FOR UPDATE OF n SKIP LOCKED"
 );
 
