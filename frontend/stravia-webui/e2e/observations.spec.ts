@@ -1,11 +1,9 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 
-import {
-  observation_no_visible_output,
-  observation_output_delivered_no_preview,
-} from '../src/lib/paraglide/messages.js'
+import { observation_no_visible_output, observation_output_delivered_no_text } from '../src/lib/paraglide/messages.js'
 import type {
   ClientErrorSummary,
   ConfirmedUsage,
@@ -43,10 +41,14 @@ function contentBody(summary: ObservationContentSummary, separator: string): str
 const inputText = (item: InteractionSummary) => contentBody(item.input, '\n')
 const outputText = (item: InteractionSummary) => contentBody(item.output, '\n\n')
 
-function contentsPage(ids: number[]): { contents: ObservationContent[] } {
+function contentsPage(
+  ids: number[],
+  rewrites: ReadonlyMap<string, string> = new Map(),
+): { contents: ObservationContent[] } {
   return {
     contents: ids.flatMap((id) => {
-      const body = contentTexts.get(id)
+      let body = contentTexts.get(id)
+      for (const [from, to] of rewrites) body = body?.replaceAll(from, to)
       return body === undefined
         ? []
         : [{ content_id: id, format: 'text' as const, raw_len: new TextEncoder().encode(body).length, body }]
@@ -216,7 +218,12 @@ interface ObservationFixture {
   summaryRequests: URL[]
   detailRequests: URL[]
   eventRequests: URL[]
-  contentRequests: number[][]
+  /** 每次内容请求的 id、客户端带来的验证器、服务端签发的 ETag 与答复状态码。 */
+  contentRequests: Array<{ ids: number[]; ifNoneMatch: string | null; etag: string | null; status: number }>
+  /** 之后的内容请求答复 500，用于验证读取失败与重试。 */
+  failContents(failing: boolean): void
+  /** 改写某段正文（模拟凭据映射变化后重新遮蔽）；ETag 随之变化。 */
+  rewriteContent(from: string, to: string): void
   failureRequests: URL[]
   failureDetailRequests: URL[]
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
@@ -359,7 +366,10 @@ async function installObservationFixture(
   const summaryRequests: URL[] = []
   const detailRequests: URL[] = []
   const eventRequests: URL[] = []
-  const contentRequests: number[][] = []
+  const contentRequests: ObservationFixture['contentRequests'] = []
+  let contentsFailing = false
+  // 凭据映射变化后的重新遮蔽：只作用于本夹具，不污染其他用例共享的正文表。
+  const contentRewrites = new Map<string, string>()
   const heldDetails = new Map<string, Promise<void>>()
   let resetRequired = false
   const debugWrites: Array<{ enabled: boolean; confirmed: boolean }> = []
@@ -420,8 +430,18 @@ async function installObservationFixture(
 
     if (path === '/observations/contents') {
       const ids = (url.searchParams.get('ids') ?? '').split(',').map(Number)
-      contentRequests.push(ids)
-      await route.fulfill({ json: { data: contentsPage(ids) } })
+      const ifNoneMatch = request.headers()['if-none-match'] ?? null
+      if (contentsFailing) {
+        contentRequests.push({ ids, ifNoneMatch, etag: null, status: 500 })
+        await route.fulfill({ status: 500, json: { error: 'content store offline', code: 'internal' } })
+        return
+      }
+      const body = contentsPage(ids, contentRewrites)
+      const etag = `"${createHash('sha256').update(JSON.stringify(body)).digest('hex')}"`
+      const status = ifNoneMatch === etag ? 304 : 200
+      contentRequests.push({ ids, ifNoneMatch, etag, status })
+      if (status === 304) await route.fulfill({ status, headers: { etag } })
+      else await route.fulfill({ headers: { etag }, json: { data: body } })
       return
     }
 
@@ -725,6 +745,12 @@ async function installObservationFixture(
     detailRequests,
     eventRequests,
     contentRequests,
+    failContents: (failing) => {
+      contentsFailing = failing
+    },
+    rewriteContent: (from, to) => {
+      contentRewrites.set(from, to)
+    },
     failureRequests,
     failureDetailRequests,
     debugWrites,
@@ -2058,7 +2084,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByRole('definition').filter({ hasText: 'Failed' })).toBeVisible()
   })
 
-  test('separates completed state from failed history and distinguishes delivered output without a text preview', async ({
+  test('separates completed state from failed history and distinguishes delivered output without text', async ({
     page,
   }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -2094,15 +2120,15 @@ test.describe('Interaction Observation canvas', () => {
     await expect(opalNode).toBeVisible()
     await expect(opalNode.getByText('Completed', { exact: true })).toBeVisible()
     await expect(opalNode.getByText('Earlier request failed', { exact: true })).toBeVisible()
-    const deliveredPreview = opalNode.getByRole('button', { name: 'Model output preview', exact: true })
-    const deliveredEmpty = observation_output_delivered_no_preview({}, { locale: 'en-US' })
+    const deliveredPreview = opalNode.getByRole('button', { name: 'Model output', exact: true })
+    const deliveredEmpty = observation_output_delivered_no_text({}, { locale: 'en-US' })
     await expect(deliveredPreview).toContainText(deliveredEmpty)
     await deliveredPreview.click()
     await expect(page.getByRole('tooltip')).toContainText(deliveredEmpty)
     await page.keyboard.press('Escape')
 
     const undeliveredPreview = node(page, 'Quartz', 'running').getByRole('button', {
-      name: 'Model output preview',
+      name: 'Model output',
       exact: true,
     })
     await expect(undeliveredPreview).toContainText(observation_no_visible_output({}, { locale: 'en-US' }))
@@ -2669,11 +2695,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(processGroup).toHaveAccessibleName(/^2 process events/)
     await expect(diagnostics.locator('pre:visible')).toHaveCount(0)
     await expect(diagnostics.getByText('interaction-cinder', { exact: true })).toBeVisible()
-    for (const value of [
-      'run-interaction-atlas',
-      'interaction-atlas',
-      'uninterpreted payload',
-    ]) {
+    for (const value of ['run-interaction-atlas', 'interaction-atlas', 'uninterpreted payload']) {
       await expect(diagnostics.getByText(value, { exact: true })).toBeHidden()
     }
     for (const event of events) await expect(diagnostics.getByText(event.kind, { exact: true })).toBeHidden()
@@ -3073,8 +3095,7 @@ test.describe('Interaction Observation canvas', () => {
             content: 'platform failure evidence',
           }),
         )
-      if (phase >= 2)
-        owner.events.push(ordinary(457, 'run_state_changed', {}))
+      if (phase >= 2) owner.events.push(ordinary(457, 'run_state_changed', {}))
       const child = {
         ...owner,
         id: 'run-results',
@@ -3819,7 +3840,7 @@ test.describe('Interaction Observation canvas', () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.getByRole('button', { name: 'Close', exact: true }).click()
-    const preview = node(page, 'Cinder', 'running').getByRole('button', { name: 'Model output preview', exact: true })
+    const preview = node(page, 'Cinder', 'running').getByRole('button', { name: 'Model output', exact: true })
     await preview.focus()
     const tooltip = page.getByRole('tooltip')
     await expect(tooltip.getByRole('columnheader')).toHaveText(['项目', '详情'])
@@ -4028,6 +4049,66 @@ test.describe('Interaction Observation canvas', () => {
     }
   })
 
+  test('revalidates content with If-None-Match and shows re-masked text after the credential mapping changes', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    const input = node(page, 'Atlas', 'completed').getByRole('button', { name: 'User input', exact: true })
+    const tooltip = page.getByRole('tooltip')
+    await expect(input.locator('strong')).toHaveText('Atlas user question')
+    // 指针仍在卡片上时再次 hover 不会产生新的指针事件，每次读取前先移开。
+    const openTooltip = async (text: string) => {
+      await page.mouse.move(0, 0)
+      await input.hover()
+      await expect(tooltip.locator('strong')).toHaveText(text)
+      const request = fixture.contentRequests.at(-1)!
+      await page.keyboard.press('Escape')
+      await page.mouse.move(0, 0)
+      await expect(tooltip).toBeHidden()
+      return request
+    }
+
+    const first = await openTooltip('Atlas user question')
+    expect(first.status).toBe(200)
+    // 同一请求键再次读取：带上服务端签发的验证器，正文未变时答复 304。
+    const second = await openTooltip('Atlas user question')
+    expect(second).toMatchObject({ ids: first.ids, ifNoneMatch: first.etag, status: 304 })
+
+    // 凭据映射变化后服务端重新遮蔽：ETag 改变，客户端展示新文本而不是缓存的旧文本。
+    fixture.rewriteContent('Atlas user question', 'Atlas masked question')
+    const third = await openTooltip('Atlas masked question')
+    expect(third).toMatchObject({ ids: first.ids, ifNoneMatch: first.etag, status: 200 })
+    expect(third.etag).not.toBe(first.etag)
+  })
+
+  test('a failed content read is styled as an error with its reason and Retry recovers it', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    fixture.failContents(true)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    const input = node(page, 'Atlas', 'completed').getByRole('button', { name: 'User input', exact: true })
+    await expect(input).toContainText('Could not load this text: content store offline')
+    await expect(input.locator('.preview-viewport')).toHaveClass(/text-destructive/)
+    await expect(input.locator('.preview-viewport')).not.toHaveClass(/text-muted-foreground/)
+    await expect(input.locator('.preview-error-mark')).toBeVisible()
+
+    await input.hover()
+    const tooltip = page.getByRole('tooltip')
+    await expect(tooltip).toContainText('Could not load this text: content store offline')
+    fixture.failContents(false)
+    await tooltip.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(input.locator('strong')).toHaveText('Atlas user question')
+    // 成功后重新打开：全文可读，不再出现 Retry。
+    await page.keyboard.press('Escape')
+    await page.mouse.move(0, 0)
+    await expect(tooltip).toBeHidden()
+    await input.hover()
+    await expect(tooltip.locator('strong')).toHaveText('Atlas user question')
+    await expect(tooltip.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+  })
+
   test('input and recent output previews expand without opening details and remain readable outside the scaled canvas', async ({
     page,
   }) => {
@@ -4035,14 +4116,14 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const card = node(page, 'Atlas', 'completed')
-    const input = card.getByRole('button', { name: 'User input preview', exact: true })
-    const output = card.getByRole('button', { name: 'Model output preview', exact: true })
+    const input = card.getByRole('button', { name: 'User input', exact: true })
+    const output = card.getByRole('button', { name: 'Model output', exact: true })
     await expect(input.locator('strong')).toHaveText('Atlas user question')
     await expect(output).toContainText('Atlas client-visible answer')
     await expect(input).not.toContainText('Atlas client-visible answer')
     await expect(
-      node(page, 'Boreal', 'waiting_client').getByRole('button', { name: 'User input preview' }),
-    ).toContainText('No text input preview recorded.')
+      node(page, 'Boreal', 'waiting_client').getByRole('button', { name: 'User input', exact: true }),
+    ).toContainText('No text input recorded.')
     await input.hover()
     const tooltip = page.getByRole('tooltip')
     await expect(tooltip).toBeVisible()
@@ -4773,8 +4854,8 @@ test.describe('Interaction Observation canvas', () => {
       const card = node(page, 'Atlas', 'completed')
       const tooltip = page.getByRole('tooltip')
       for (const [label, text] of [
-        ['User input preview', 'Atlas user question'],
-        ['Model output preview', 'Atlas client-visible answer'],
+        ['User input', 'Atlas user question'],
+        ['Model output', 'Atlas client-visible answer'],
       ]) {
         await card.getByRole('button', { name: label, exact: true }).tap()
         await expect(tooltip).toContainText(text)
@@ -4788,7 +4869,7 @@ test.describe('Interaction Observation canvas', () => {
         await page.touchscreen.tap(4, 4)
         await expect(tooltip).toBeHidden()
       }
-      await card.getByRole('button', { name: 'User input preview', exact: true }).tap()
+      await card.getByRole('button', { name: 'User input', exact: true }).tap()
       await page.keyboard.press('Escape')
       await expect(tooltip).toBeHidden()
       await expect(page.getByRole('dialog', { name: 'Observation details' })).toBeHidden()

@@ -186,8 +186,8 @@ test('localized Request Records keep one local timestamp across canvas and detai
   await expect(page.getByText(localTimestamp, { exact: true })).toBeVisible()
   const interactionNode = page.getByRole('button', { name: 'GPT 5.6，已完成，先前请求失败', exact: true })
   await expect(interactionNode.getByText('先前请求失败', { exact: true })).toBeVisible()
-  await expect(interactionNode.getByRole('button', { name: '模型输出预览', exact: true })).toContainText(
-    '已交付输出，暂无文本预览。',
+  await expect(interactionNode.getByRole('button', { name: '模型输出', exact: true })).toContainText(
+    '已交付输出，没有可显示的文本。',
   )
   await interactionNode.click()
   const inspector = page.getByRole('complementary', { name: '观测详情' })

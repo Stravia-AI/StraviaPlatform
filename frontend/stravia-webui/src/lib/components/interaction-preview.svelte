@@ -1,11 +1,15 @@
 <script lang="ts">
 import MarkdownContent from '#lib/components/markdown-content.svelte'
 import StreamingMarkdown from '#lib/components/streaming-markdown.svelte'
-import { tick } from 'svelte'
+import { tick, untrack } from 'svelte'
+import { Button } from '#lib/components/ui/button/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 import * as m from '#lib/paraglide/messages.js'
+import { contentRefsKey } from '#lib/observation-contents.js'
 import { observationContents } from '#lib/observation-contents-client.js'
 import type { ObservationContentSummary } from '#lib/types.js'
+
+type ContentStatus = 'ready' | 'loading' | 'failed'
 
 /** 卡片视口只容纳两到三行；输入取开头、输出取结尾，各自读取到足够的非空文本为止。 */
 const INPUT_PREVIEW_CHARS = 600
@@ -37,16 +41,21 @@ let {
   textStart?: number
   snapshotKey?: number
 } = $props()
-const refsKey = $derived(summary.refs.map((ref) => ref.content_id).join(','))
+const refsKey = $derived(contentRefsKey(summary))
 const empty = $derived(summary.refs.length === 0)
 let previewText = $state<string | null>(null)
-let previewFailed = $state(false)
+let previewError = $state<string | null>(null)
 let fullText = $state<{ key: string; text: string } | null>(null)
-let fullFailed = $state(false)
+let fullError = $state<string | null>(null)
+// 重试计数：读取失败后由用户触发，使两个读取副作用重新运行。
+let attempt = $state(0)
 // 流式进行中的 Tooltip 沿用实时尾窗：摘要引用尚不含未提交正文。
 const liveTooltip = $derived(active && liveText !== undefined)
 const cardText = $derived(liveText ?? (empty ? '' : previewText))
-const cardStatus = $derived(cardText !== null ? 'ready' : previewFailed ? 'failed' : 'loading')
+// 失败优先于可能已过期的旧文本：引用变化后新读取失败时不再把旧预览当作当前内容。
+const cardStatus = $derived<ContentStatus>(
+  liveText === undefined && previewError !== null ? 'failed' : cardText !== null ? 'ready' : 'loading',
+)
 const hasVisibleText = $derived(/\S/.test(cardText ?? ''))
 let open = $state(false)
 let pinned = $state(false)
@@ -54,52 +63,64 @@ let trigger = $state<HTMLButtonElement | null>(null)
 let content = $state<HTMLDivElement | null>(null)
 const contentId = $props.id()
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error)
+}
+
 $effect(() => {
   void refsKey
+  void attempt
   if (liveText !== undefined || empty) return
-  const refs = summary.refs
-  let current = true
-  previewFailed = false
-  observationContents
-    .preview(refs, {
-      separator,
-      edge: tail ? 'tail' : 'head',
-      limit: tail ? OUTPUT_PREVIEW_CHARS : INPUT_PREVIEW_CHARS,
-    })
-    .then((text) => {
-      if (current) previewText = text
-    })
-    .catch(() => {
-      if (current) previewFailed = true
-    })
-  return () => {
-    current = false
-  }
+  return untrack(() => {
+    const refs = summary.refs
+    let current = true
+    previewError = null
+    observationContents
+      .preview(refs, {
+        separator,
+        edge: tail ? 'tail' : 'head',
+        limit: tail ? OUTPUT_PREVIEW_CHARS : INPUT_PREVIEW_CHARS,
+      })
+      .then((text) => {
+        if (current) previewText = text
+      })
+      .catch((error: unknown) => {
+        if (current) previewError = errorMessage(error)
+      })
+    return () => {
+      current = false
+    }
+  })
 })
 
 $effect(() => {
   if (!open || liveTooltip || empty) return
   const key = refsKey
-  const refs = summary.refs
-  let current = true
-  fullFailed = false
-  observationContents
-    .read(refs, separator)
-    .then((text) => {
-      if (current) fullText = { key, text }
-    })
-    .catch(() => {
-      if (current) fullFailed = true
-    })
-  return () => {
-    current = false
-  }
+  void attempt
+  return untrack(() => {
+    const refs = summary.refs
+    let current = true
+    fullError = null
+    observationContents
+      .read(refs, separator)
+      .then((text) => {
+        if (current) fullText = { key, text }
+      })
+      .catch((error: unknown) => {
+        if (current) fullError = errorMessage(error)
+      })
+    return () => {
+      current = false
+    }
+  })
 })
 
-const tooltipText = $derived(
-  liveTooltip ? liveText! : empty ? '' : fullText?.key === refsKey ? fullText.text : null,
+const tooltipText = $derived(liveTooltip ? liveText! : empty ? '' : fullText?.key === refsKey ? fullText.text : null)
+const tooltipStatus = $derived<ContentStatus>(
+  !liveTooltip && fullError !== null ? 'failed' : tooltipText !== null ? 'ready' : 'loading',
 )
-const tooltipStatus = $derived(tooltipText !== null ? 'ready' : fullFailed ? 'failed' : 'loading')
+// 卡片与 Tooltip 任一读取失败都可在 Tooltip 内重试。
+const failure = $derived(tooltipStatus === 'failed' ? fullError : cardStatus === 'failed' ? previewError : null)
 
 function close() {
   pinned = false
@@ -132,19 +153,28 @@ async function handleKeydown(event: KeyboardEvent) {
 }
 </script>
 
-{#snippet markdown(text: string | null, status: 'ready' | 'loading' | 'failed', animate: boolean, streamed: boolean)}
+{#snippet markdown(
+  text: string | null,
+  status: ContentStatus,
+  animate: boolean,
+  streamed: boolean,
+  reason: string | null,
+)}
   <div class="preview-markdown" style:--markdown-first-margin={contextLabel ? '0.35rem' : '0'}>
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
-    {#if text !== null && /\S/.test(text)}
+    {#if status === 'failed'}
+      <span class="preview-error"
+        ><span class="preview-error-mark" aria-hidden="true"></span>{m.observation_content_load_failed({
+          reason: reason ?? '',
+        })}</span>
+    {:else if text !== null && /\S/.test(text)}
       {#if streamed}
         <StreamingMarkdown {text} active={animate} streaming={active} {textStart} {snapshotKey} />
       {:else}
         <MarkdownContent {text} streaming={active} />
       {/if}
     {:else if status === 'loading'}
-      {m.observation_loading_details()}
-    {:else if status === 'failed'}
-      {m.observation_content_load_failed()}
+      {m.observation_loading_content()}
     {:else if !contextLabel}
       {emptyLabel}
     {/if}
@@ -181,9 +211,11 @@ async function handleKeydown(event: KeyboardEvent) {
           class={[
             'preview-viewport',
             tail ? 'tail-preview' : 'input-preview',
-            (cardStatus !== 'ready' || !hasVisibleText) && 'text-muted-foreground',
+            cardStatus === 'failed'
+              ? 'text-destructive'
+              : (cardStatus === 'loading' || !hasVisibleText) && 'text-muted-foreground',
           ]}>
-          {@render markdown(cardText, cardStatus, active, tail)}
+          {@render markdown(cardText, cardStatus, active, tail, previewError)}
         </div>
       </button>
     {/snippet}
@@ -219,7 +251,11 @@ async function handleKeydown(event: KeyboardEvent) {
       aria-label={label}
       tabindex="-1">
       <p class="preview-label">{label}</p>
-      {@render markdown(tooltipText, tooltipStatus, active && open, liveTooltip && tail)}
+      {@render markdown(tooltipText, tooltipStatus, active && open, liveTooltip && tail, fullError)}
+      {#if failure !== null}
+        <Button class="preview-retry" variant="outline" size="sm" onclick={() => (attempt += 1)}
+          >{m.common_retry()}</Button>
+      {/if}
     </div>
   </Tooltip.Content>
 </Tooltip.Root>
@@ -267,6 +303,23 @@ async function handleKeydown(event: KeyboardEvent) {
 .preview-label {
   margin-bottom: 0.5rem;
   font-weight: 600;
+}
+.preview-error {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  color: var(--destructive);
+}
+.preview-error-mark {
+  flex: none;
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 1px;
+  background: var(--destructive);
+  transform: translateY(-0.05rem) rotate(45deg);
+}
+.expanded-preview :global(.preview-retry) {
+  margin-top: 0.5rem;
 }
 .preview-markdown {
   flex: none;

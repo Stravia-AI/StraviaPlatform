@@ -6,9 +6,9 @@ import * as m from '#lib/paraglide/messages.js'
 import type { ClientErrorDetail, InteractionDetail, ObservationEvent, RunDetail } from '#lib/types/observation.js'
 
 export type StreamItem =
-  | { type: 'event'; event: ObservationEvent }
-  | { type: 'tools'; name: string | null; events: ObservationEvent[] }
-  | { type: 'process'; events: ObservationEvent[] }
+  | { type: 'event'; event: TimelineEvent }
+  | { type: 'tools'; name: string | null; events: TimelineEvent[] }
+  | { type: 'process'; events: TimelineEvent[] }
 
 export interface ObservationTimeline {
   title: string
@@ -16,7 +16,7 @@ export interface ObservationTimeline {
   /** 已加载事件页覆盖的 Run；更早事件未加载时，排在最早已加载 Run 之前的 Run 暂不展示。 */
   visibleRuns: RunDetail[]
   runIndex: Map<string, number>
-  timelines: Map<string, ObservationEvent[]>
+  timelines: Map<string, TimelineEvent[]>
   streams: Map<string, StreamItem[]>
   metrics: Map<string, RunMetrics>
   failureItems: StreamItem[]
@@ -27,28 +27,41 @@ export interface ObservationTimeline {
 const TURN_ATTEMPT_FIELDS = ['attempt', 'attempt_at', 'usage']
 
 /**
+ * 时间线上的一行。合并事件展开出的行带 `stored`：原始存储事件（合并字段完整），
+ * 原始详情面板展示它而不是展开后的投影；`attempt` 标记由合并字段拆出的尝试行，
+ * 它与所属轮次行共用 sequence，不对应独立存储的事件。
+ */
+export interface TimelineEvent extends ObservationEvent {
+  stored?: ObservationEvent
+  attempt?: true
+}
+
+/**
  * 首个 Target attempt 的开始并入 `model_turn_started`，最后一个 attempt 的结束与用量并入
  * `model_turn_finished`。时间线仍按「轮次行 + 尝试行」展示：把合并字段拆回与分行时相同的
  * `target_attempt_started` / `target_attempt_finished` 行（沿用所属事件的 sequence，以 kind 区分），
  * 摘要与 Run 指标因此只需理解一种尝试形态。
  */
-export function expandAttemptRows(events: readonly ObservationEvent[]): ObservationEvent[] {
-  return events.flatMap((event) => {
+export function expandAttemptRows(events: readonly ObservationEvent[]): TimelineEvent[] {
+  return events.flatMap((event): TimelineEvent[] => {
     if (event.kind !== 'model_turn_started' && event.kind !== 'model_turn_finished') return [event]
     const payload = payloadRecord(event.payload)
     const attempt = payloadRecord(payload.attempt)
     if (Object.keys(attempt).length === 0) return [event]
     const started = event.kind === 'model_turn_started'
     const kind = started ? 'target_attempt_started' : 'target_attempt_finished'
-    const turn: ObservationEvent = {
+    const turn: TimelineEvent = {
       ...event,
       payload: Object.fromEntries(Object.entries(payload).filter(([key]) => !TURN_ATTEMPT_FIELDS.includes(key))),
+      stored: event,
     }
-    const row: ObservationEvent = {
+    const row: TimelineEvent = {
       ...event,
       kind,
       occurred_at: payloadCount(payload.attempt_at) ? payload.attempt_at : event.occurred_at,
       payload: { ...attempt, kind },
+      stored: event,
+      attempt: true,
     }
     return started ? [turn, row] : [row, turn]
   })
@@ -59,7 +72,7 @@ export function eventKey(event: ObservationEvent): string {
   return `${event.sequence}:${event.kind}`
 }
 
-function orderedEvents(events: readonly ObservationEvent[]): ObservationEvent[] {
+function orderedEvents(events: readonly ObservationEvent[]): TimelineEvent[] {
   // 因果子树会把晚发生的完成事件提前；阅读时间线按时间排序，原始关联仍保留在 payload。
   return expandAttemptRows(events).toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
 }
@@ -83,7 +96,7 @@ const PROCESS_KINDS: Record<string, true> = {
   model_thinking: true,
 }
 
-function streamItems(events: readonly ObservationEvent[]): StreamItem[] {
+function streamItems(events: readonly TimelineEvent[]): StreamItem[] {
   const items: StreamItem[] = []
   for (const event of events) {
     const process = event.kind in PROCESS_KINDS && observationEventSummary(event).tone === 'neutral'
@@ -107,7 +120,7 @@ export function deriveEventItems(events: readonly ObservationEvent[]): StreamIte
   return streamItems(orderedEvents(events))
 }
 
-export function itemEvents(item: StreamItem): ObservationEvent[] {
+export function itemEvents(item: StreamItem): TimelineEvent[] {
   return item.type === 'event' ? [item.event] : item.events
 }
 
