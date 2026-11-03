@@ -1044,7 +1044,7 @@ mod tests {
             Some(pool),
             None,
             directory.path().to_path_buf(),
-            7,
+            crate::history_retention::HistoryRetention::new(7),
             true,
             gateway.generation_chains.clone(),
         )

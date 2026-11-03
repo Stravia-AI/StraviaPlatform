@@ -476,7 +476,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        1,
+        crate::history_retention::HistoryRetention::new(1),
         true,
         crate::generation_chain::test_chain().await,
     )

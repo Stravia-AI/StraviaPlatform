@@ -157,7 +157,7 @@ impl Fixture {
             sqlite,
             postgres,
             observation_dir.path().to_path_buf(),
-            days,
+            crate::history_retention::HistoryRetention::new(days),
             false,
             chain.clone(),
         )
