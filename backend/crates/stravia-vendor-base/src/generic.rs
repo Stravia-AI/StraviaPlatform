@@ -48,7 +48,14 @@ pub(crate) fn execute(
             if vendor_id == "ollama" {
                 prepare_ollama_request(host, &provider, &mut request)?;
             }
-            execute_inference(vendor_id, host, &provider, request, &protocol)
+            execute_inference(
+                vendor_id,
+                host,
+                &provider,
+                request,
+                &protocol,
+                Operation::Infer,
+            )
         }
         OperationInput::Compact {
             mut provider,
@@ -56,10 +63,20 @@ pub(crate) fn execute(
         } if operation == Operation::Compact => {
             check_channel(vendor_id, channel, &provider)?;
             let protocol = protocol_for(vendor_id, &provider)?;
+            if protocol == ANTHROPIC_PROTOCOL {
+                return execute_inference(
+                    vendor_id,
+                    host,
+                    &provider,
+                    request,
+                    &protocol,
+                    Operation::Compact,
+                );
+            }
             if protocol != OPEN_RESPONSES_PROTOCOL {
                 return Err(common::plugin_error(
                     ErrorKind::Unsupported,
-                    "native compaction requires the Open Responses protocol",
+                    "native compaction requires the Open Responses or Anthropic Messages protocol",
                 ));
             }
             provider.protocol = protocol;
@@ -104,6 +121,7 @@ pub(crate) fn execute_inference(
     provider: &ProviderSnapshot,
     mut request: AiRequest,
     protocol: &str,
+    operation: Operation,
 ) -> Result<OperationOutput, PluginError> {
     let model = provider
         .model
@@ -112,6 +130,13 @@ pub(crate) fn execute_inference(
         .filter(|model| !model.is_empty())
         .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "inference requires a model"))?;
     request.model = model.to_owned();
+    let compaction_control = (operation == Operation::Compact)
+        .then(|| {
+            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
+                &mut request,
+            )
+        })
+        .flatten();
     if !matches!(protocol, COHERE_PROTOCOL | GATEWAY_PROTOCOL) {
         thinking::apply(
             vendor_id,
@@ -134,6 +159,15 @@ pub(crate) fn execute_inference(
     set_header(&mut headers, "content-type", "application/json".into());
     apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
     append_official_session_headers(vendor_id, provider, &mut headers);
+    if operation == Operation::Compact {
+        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
+            &mut encoded.body,
+            compaction_control,
+        )
+        .map_err(|error| common::plugin_error(ErrorKind::Invalid, error.to_string()))?;
+        stravia_protocol_codec::codec::compaction::add_anthropic_compaction_beta(&mut headers);
+        set_header(&mut headers, "accept", "application/json".into());
+    }
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
     prepare_gemini_imported_tool_history(protocol, model, &url, &mut encoded.body);
     let body = stravia_runtime_contract::json::to_vec(&encoded.body).map_err(|error| {
@@ -150,6 +184,10 @@ pub(crate) fn execute_inference(
         headers,
         body,
     })?;
+    if operation == Operation::Compact {
+        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
+            .map(OperationOutput::Compact);
+    }
     if protocol == OPEN_RESPONSES_PROTOCOL {
         let decoded = if preserve_upstream_errors {
             stravia_vendor_common::common::decode_ai_response_preserving_upstream_errors(

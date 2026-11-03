@@ -485,9 +485,12 @@ fn block_retained_bytes(block: &ContentBlock) -> usize {
                     .sum::<usize>(),
             )
             .saturating_add(encrypted_content.as_ref().map_or(0, String::len)),
-        ContentBlock::Compaction { encrypted_content } => {
-            bytes.saturating_add(encrypted_content.len())
-        }
+        ContentBlock::Compaction {
+            encrypted_content,
+            summary,
+        } => bytes
+            .saturating_add(encrypted_content.len())
+            .saturating_add(summary.as_ref().map_or(0, String::len)),
         ContentBlock::CompactionTrigger {} => bytes,
         ContentBlock::RedactedThinking { data } => bytes.saturating_add(data.len()),
         ContentBlock::ToolUse {

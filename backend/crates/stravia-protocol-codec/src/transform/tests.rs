@@ -966,6 +966,7 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     };
     blocks.push(ContentBlock::Compaction {
         encrypted_content: "compaction-secret".into(),
+        summary: None,
     });
     assert!(!super::prepare_thinking_replay(&mut request, |_, _| false));
     let body = pair.encode_request(request).unwrap().body;
@@ -1390,6 +1391,109 @@ fn native_compaction_state_is_dropped_from_requests_responses_and_streams() {
         }])
         .unwrap();
     assert!(events.iter().all(|event| !event.data.contains("opaque")));
+}
+
+#[test]
+fn anthropic_compaction_summary_survives_as_text_on_targets_without_the_block() {
+    let anthropic_history = json!({
+        "model": "claude",
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "assistant", "content": [{"type": "compaction", "content": "Refactored the parser", "signature": "sig-secret"}]},
+            {"role": "user", "content": "keep going"}
+        ]
+    });
+    for egress in [
+        OPEN_RESPONSES_2026_04_24,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+    ] {
+        let pair = ProtocolTransform::global()
+            .bind(ANTHROPIC_MESSAGES_2023_06_01, egress)
+            .unwrap();
+        let request = pair.decode_request(anthropic_history.clone()).unwrap();
+        let text = pair.encode_request(request).unwrap().body.to_string();
+        assert!(text.contains("Refactored the parser"), "{egress}: {text}");
+        assert!(text.contains("keep going"), "{egress}: {text}");
+        assert!(!text.contains("sig-secret"), "{egress}: {text}");
+        assert!(!text.contains("compaction"), "{egress}: {text}");
+    }
+}
+
+#[test]
+fn anthropic_target_replays_an_anthropic_state_a_responses_client_carried() {
+    let resource = crate::codec::compaction::responses_compaction_from_anthropic(&json!({
+        "type": "message",
+        "content": [{"type": "compaction", "content": "Refactored the parser", "signature": "sig-1"}],
+        "stop_reason": "compaction",
+        "usage": {"input_tokens": 0, "output_tokens": 0}
+    }))
+    .unwrap();
+    let responses_history = json!({
+        "model": "claude",
+        "input": [resource["output"][0].clone(), {"role": "user", "content": "keep going"}]
+    });
+    let to_anthropic = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+        .unwrap();
+    let request = to_anthropic
+        .decode_request(responses_history.clone())
+        .unwrap();
+    let body = to_anthropic.encode_request(request).unwrap().body;
+    let block = &body["messages"][0]["content"][0];
+    assert_eq!(block["type"], "compaction");
+    assert_eq!(block["signature"], "sig-1");
+    assert_eq!(block["content"], "Refactored the parser");
+
+    let to_chat = ProtocolTransform::global()
+        .bind(
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let request = to_chat.decode_request(responses_history).unwrap();
+    let text = to_chat.encode_request(request).unwrap().body.to_string();
+    assert!(
+        text.contains("Refactored the parser") && !text.contains("sig-1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn foreign_target_downgrade_applies_only_when_every_state_is_readable() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let anthropic_state = crate::codec::compaction::responses_compaction_from_anthropic(&json!({
+        "type": "message",
+        "content": [{"type": "compaction", "content": "Summary", "signature": "sig-1"}],
+        "stop_reason": "compaction",
+        "usage": {"input_tokens": 0, "output_tokens": 0}
+    }))
+    .unwrap()["output"][0]
+        .clone();
+    let responses_state =
+        json!({"type": "compaction", "id": "cmp_r", "encrypted_content": "opaque"});
+
+    let mut mixed = pair
+        .decode_request(json!({"model": "m", "input": [anthropic_state.clone(), responses_state, {"role": "user", "content": "hi"}]}))
+        .unwrap();
+    assert!(!super::downgrade_foreign_compaction(&mut mixed));
+    assert_eq!(
+        mixed
+            .items
+            .iter()
+            .filter(|item| item.is_compaction())
+            .count(),
+        2
+    );
+
+    let mut readable = pair
+        .decode_request(
+            json!({"model": "m", "input": [anthropic_state, {"role": "user", "content": "hi"}]}),
+        )
+        .unwrap();
+    assert!(super::downgrade_foreign_compaction(&mut readable));
+    assert!(readable.items.iter().all(|item| !item.is_compaction()));
 }
 
 #[test]

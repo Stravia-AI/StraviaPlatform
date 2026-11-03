@@ -153,6 +153,53 @@ pub(crate) struct ShapedRequest {
 /// 此时思考预算需让位于该上限。会话仅由宿主的 principal/target scoped
 /// operation metadata 派生。
 pub(crate) fn shape(
+    body: Value,
+    client_version: &str,
+    identity: &AccountIdentity<'_>,
+    caps: &ModelCapabilities,
+    auto_output_limit: bool,
+    fallback_session_id: impl FnOnce() -> String,
+) -> Result<ShapedRequest, String> {
+    shape_as(
+        Delivery::Streaming,
+        body,
+        client_version,
+        identity,
+        caps,
+        auto_output_limit,
+        fallback_session_id,
+    )
+}
+
+/// 独立压缩请求：一元响应，并携带已由编解码层整理好的 `compaction` 控制。
+/// 其余塑形与推理请求一致；压缩 beta 由 [`beta_header`] 随请求体推导。
+pub(crate) fn shape_compaction(
+    body: Value,
+    client_version: &str,
+    identity: &AccountIdentity<'_>,
+    caps: &ModelCapabilities,
+    auto_output_limit: bool,
+    fallback_session_id: impl FnOnce() -> String,
+) -> Result<ShapedRequest, String> {
+    shape_as(
+        Delivery::Unary,
+        body,
+        client_version,
+        identity,
+        caps,
+        auto_output_limit,
+        fallback_session_id,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    Streaming,
+    Unary,
+}
+
+fn shape_as(
+    delivery: Delivery,
     mut body: Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
@@ -163,9 +210,29 @@ pub(crate) fn shape(
     let object = body
         .as_object_mut()
         .ok_or("Anthropic request body must be a JSON object")?;
-    // Claude Code 只走流式推理；流式同时避开非流式请求的长输出时限。
-    object.insert("stream".into(), Value::Bool(true));
+    // `compaction` 不在 Claude Code 的闭合字段集内；字段限制期间暂存，随后原样放回。
+    let compaction = match delivery {
+        Delivery::Unary => Some(
+            object
+                .remove("compaction")
+                .ok_or("compaction request is missing its compaction control")?,
+        ),
+        Delivery::Streaming => None,
+    };
+    match delivery {
+        // Claude Code 只走流式推理；流式同时避开非流式请求的长输出时限。
+        Delivery::Streaming => {
+            object.insert("stream".into(), Value::Bool(true));
+        }
+        // 压缩响应是一次性的完整块，不存在增量流。
+        Delivery::Unary => {
+            object.remove("stream");
+        }
+    }
     restrict_to_claude_code_fields(object);
+    if let Some(compaction) = compaction {
+        object.insert("compaction".into(), compaction);
+    }
     let block_binding = object
         .get_mut("thinking")
         .and_then(Value::as_object_mut)
@@ -706,12 +773,37 @@ fn beta_header(object: &Map<String, Value>) -> String {
                 "server-side-fallback-2026-06-01"
             },
         ),
+        // 压缩请求参数与回放的压缩块都要求该 beta，缺失时上游把 `compaction`
+        // 当作未知内容块类型并以 400 拒绝。
+        (
+            carries_compaction(object),
+            stravia_protocol_codec::codec::compaction::ANTHROPIC_COMPACTION_BETA,
+        ),
     ] {
         if present && !betas.contains(&beta) {
             betas.push(beta);
         }
     }
     betas.join(",")
+}
+
+fn carries_compaction(object: &Map<String, Value>) -> bool {
+    object.contains_key("compaction")
+        || object
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block.get("type").and_then(Value::as_str) == Some("compaction")
+                            })
+                        })
+                })
+            })
 }
 
 fn key_rank(key: &str) -> usize {
@@ -791,6 +883,103 @@ mod tests {
 
     fn shaped(body: Value) -> (Value, ShapedRequest) {
         shaped_with(body, &ModelCapabilities::default())
+    }
+
+    fn shaped_compaction(body: Value) -> (Value, ShapedRequest) {
+        let shaped = shape_compaction(
+            body,
+            DEFAULT_CLIENT_VERSION,
+            &identity(),
+            &ModelCapabilities::default(),
+            false,
+            || "00000000-0000-4000-8000-000000000001".to_owned(),
+        )
+        .expect("compaction request shapes");
+        (serde_json::from_slice(&shaped.body).unwrap(), shaped)
+    }
+
+    #[test]
+    fn compaction_is_unary_keeps_its_control_and_declares_its_beta() {
+        let (body, shaped) = shaped_compaction(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "history"}],
+            "compaction": {"type": "summarize", "instructions": "Only file names"}
+        }));
+        assert_eq!(
+            body["compaction"],
+            json!({"type": "summarize", "instructions": "Only file names"})
+        );
+        assert!(
+            body.get("stream").is_none(),
+            "compaction responses are not streamed"
+        );
+        assert!(
+            shaped
+                .betas
+                .split(',')
+                .any(|beta| beta == "compact-2026-09-04"),
+            "{}",
+            shaped.betas
+        );
+        // 压缩 beta 之外仍是 Claude Code 形态：计费头与账号元数据照常存在。
+        assert!(body["metadata"]["user_id"].is_string());
+        assert!(
+            body["system"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header"))
+        );
+    }
+
+    #[test]
+    fn replayed_compaction_block_declares_its_beta_and_stays_byte_faithful() {
+        let block = json!({"type": "compaction", "content": "Summary", "signature": "sig-1"});
+        let (body, shaped) = shaped(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [block.clone()]},
+                {"role": "user", "content": "What was the codeword?"}
+            ]
+        }));
+        assert!(
+            shaped
+                .betas
+                .split(',')
+                .any(|beta| beta == "compact-2026-09-04"),
+            "{}",
+            shaped.betas
+        );
+        // 压缩块须逐字节回放：缓存断点或任何附加字段都会使上游拒绝签名。
+        assert_eq!(body["messages"][0]["content"][0], block);
+    }
+
+    #[test]
+    fn inference_never_gains_the_compaction_beta_or_field() {
+        let (body, shaped) = shaped(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hi"}],
+            "compaction": {"type": "summarize"}
+        }));
+        assert!(body.get("compaction").is_none());
+        assert_eq!(body["stream"], json!(true));
+        assert!(!shaped.betas.contains("compact-2026-09-04"));
+    }
+
+    #[test]
+    fn compaction_without_a_control_is_rejected_instead_of_sent_as_inference() {
+        let error = shape_compaction(
+            json!({"model": "m", "max_tokens": 1, "messages": []}),
+            DEFAULT_CLIENT_VERSION,
+            &identity(),
+            &ModelCapabilities::default(),
+            false,
+            || "s".to_owned(),
+        )
+        .err()
+        .expect("missing control is an error");
+        assert!(error.contains("compaction"), "{error}");
     }
 
     fn shaped_with(body: Value, caps: &ModelCapabilities) -> (Value, ShapedRequest) {

@@ -1438,6 +1438,11 @@ async fn prepare_attempt(
         .await
         .map_err(|error| AttemptFailure::terminal(error.code(), error.to_string()))?
         && resolved.target != binding
+        // Anthropic-origin state still carries a readable summary, so a different Target can
+        // keep the context as plain text; opaque Responses state cannot cross Targets.
+        && !stravia_protocol_codec::transform::downgrade_foreign_compaction(
+            Arc::make_mut(&mut provider_request),
+        )
     {
         return Err(AttemptFailure::reroutable(
             "compaction_target_mismatch",

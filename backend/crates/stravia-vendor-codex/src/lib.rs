@@ -1,6 +1,7 @@
 mod allowance;
 mod auth;
 mod codex;
+mod compaction;
 mod media_generation;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -265,26 +266,24 @@ fn infer(
     let codec_headers = encoded.headers;
     let egress_path = encoded.path;
     prepare_responses_body(&provider, &mut body)?;
-    if operation == Operation::Compact {
-        codex::prepare_operation_body(&mut body, codex::BodyOperation::Compact)?;
-    } else if websocket {
+    if websocket {
         codex::prepare_operation_body(&mut body, codex::BodyOperation::WebSocket)?;
     } else {
         codex::prepare_body(&mut body)?;
     }
-    if operation != Operation::Compact {
-        session.apply_body(&mut body);
-    }
+    // 独立压缩与官方客户端一致：普通流式 /responses + 末尾 compaction_trigger。
+    let retained = if operation == Operation::Compact {
+        compaction::arm(&mut body)?
+    } else {
+        Vec::new()
+    };
+    session.apply_body(&mut body);
     if websocket {
         return codex::infer_websocket(host, &provider, &body, &session, preserve_upstream_errors)
             .map(Box::new)
             .map(OperationOutput::Infer);
     }
-    let path = if operation == Operation::Compact {
-        "/responses/compact".to_owned()
-    } else {
-        strip_v1_prefix(&egress_path).to_owned()
-    };
+    let path = strip_v1_prefix(&egress_path).to_owned();
     let mut headers = common::header_pairs(&codec_headers)?;
     headers.retain(|(name, _)| {
         !name.eq_ignore_ascii_case("content-type") && !name.eq_ignore_ascii_case("accept")
@@ -298,11 +297,7 @@ fn infer(
         &provider,
         &body,
         &session,
-        if operation == Operation::Compact {
-            codex::BodyOperation::Compact
-        } else {
-            codex::BodyOperation::Http
-        },
+        codex::BodyOperation::Http,
         &mut headers,
     )?;
     host.emit_started()?;
@@ -341,8 +336,12 @@ fn infer(
             };
             decoded.map(Box::new).map(OperationOutput::Infer)
         }
-        Operation::Compact => common::decode_compaction_preserving_upstream_errors(host, response)
-            .map(OperationOutput::Compact),
+        Operation::Compact => {
+            common::preserve_compaction_upstream_errors(host, response, |response| {
+                compaction::decode(response, retained)
+            })
+            .map(OperationOutput::Compact)
+        }
         _ => Err(invalid(
             "Codex codec returned an unexpected operation result",
         )),

@@ -26,6 +26,7 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
 fn anthropic_descriptor() -> ProviderDescriptor {
     let capabilities = BTreeSet::from([
         Capability::Infer,
+        Capability::Compact,
         Capability::ModelDiscovery,
         Capability::ConfigValidation,
     ]);
@@ -95,7 +96,10 @@ pub(crate) fn execute(
     }
     match (channel, input) {
         (DEFAULT_CHANNEL, OperationInput::Infer { provider, request }) => {
-            infer(host, provider, request)
+            infer(host, provider, request, Operation::Infer)
+        }
+        (DEFAULT_CHANNEL, OperationInput::Compact { provider, request }) => {
+            infer(host, provider, request, Operation::Compact)
         }
         (DEFAULT_CHANNEL, OperationInput::Discover { provider, request }) => {
             discover(host, provider, request)
@@ -123,6 +127,7 @@ fn infer(
     host: &GuestHost,
     provider: ProviderSnapshot,
     mut request: stravia_runtime_contract::protocol::ir::AiRequest,
+    operation: Operation,
 ) -> Result<OperationOutput, PluginError> {
     let model = required_model(&provider)?;
     request.model = model.into();
@@ -155,6 +160,13 @@ fn infer(
         Some(_) => Some("summarized"),
         None => None,
     };
+    let compaction_control = (operation == Operation::Compact)
+        .then(|| {
+            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
+                &mut request,
+            )
+        })
+        .flatten();
     let encoded = crate::parameters::encode(
         &provider,
         &ANTHROPIC_MESSAGES_2023_06_01.to_string(),
@@ -175,9 +187,22 @@ fn infer(
     set_header(
         &mut headers,
         "accept",
-        "text/event-stream, application/json".into(),
+        if operation == Operation::Compact {
+            "application/json"
+        } else {
+            "text/event-stream, application/json"
+        }
+        .into(),
     );
     set_header(&mut headers, "anthropic-version", "2023-06-01".into());
+    if operation == Operation::Compact {
+        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
+            &mut body,
+            compaction_control,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        stravia_protocol_codec::codec::compaction::add_anthropic_compaction_beta(&mut headers);
+    }
     headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.push(("x-api-key".into(), api_key.into()));
@@ -190,6 +215,10 @@ fn infer(
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("Anthropic request could not be encoded"))?,
     })?;
+    if operation == Operation::Compact {
+        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
+            .map(OperationOutput::Compact);
+    }
     ensure_success(
         &response,
         "Anthropic inference",

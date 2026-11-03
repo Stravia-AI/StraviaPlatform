@@ -359,6 +359,30 @@ fn strip_provider_function_output_schemas(tools: &mut Value) {
     }
 }
 
+/// Decode a compact `output` window into provider-authored canonical items.
+///
+/// Shared by the upstream parser and by ingress decoders that unseal a window carried
+/// inside another protocol, so registration and replay always see identical items.
+pub fn decode_compaction_window(output: &[Value]) -> Result<Vec<AiItem>> {
+    let mut items = Vec::with_capacity(output.len());
+    for wire in output {
+        if wire.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
+            anyhow::bail!("compact window cannot contain a request compaction trigger");
+        }
+        let mut item = super::decoder::decode_input_item(wire)?
+            .ok_or_else(|| anyhow::anyhow!("compact window contains an empty item"))?;
+        super::decoder::set_input_graph_metadata(&mut item, wire);
+        item.set_graph_metadata(
+            wire.get("id").and_then(Value::as_str).map(str::to_owned),
+            None,
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        );
+        items.push(item);
+    }
+    Ok(items)
+}
+
 /// Decode the standalone compact resource without spoofing a generation response.
 pub fn parse_compaction_response(
     resp: &Value,
@@ -377,22 +401,7 @@ pub fn parse_compaction_response(
         .get("output")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("compact response requires an output window"))?;
-    let mut items = Vec::with_capacity(output.len());
-    for wire in output {
-        if wire.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
-            anyhow::bail!("compact window cannot contain a request compaction trigger");
-        }
-        let mut item = super::decoder::decode_input_item(wire)?
-            .ok_or_else(|| anyhow::anyhow!("compact window contains an empty item"))?;
-        super::decoder::set_input_graph_metadata(&mut item, wire);
-        item.set_graph_metadata(
-            wire.get("id").and_then(Value::as_str).map(str::to_owned),
-            None,
-            AiItemProvenance::Provider,
-            AiItemAudience::Client,
-        );
-        items.push(item);
-    }
+    let items = decode_compaction_window(output)?;
     if !items.iter().any(AiItem::is_compaction) {
         anyhow::bail!("compact window contains no native compaction state");
     }

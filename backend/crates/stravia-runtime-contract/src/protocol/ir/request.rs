@@ -145,9 +145,16 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
     },
-    /// Native Responses opaque context state, distinct from protected reasoning.
+    /// Native opaque context state, distinct from protected reasoning.
+    ///
+    /// Responses states carry only `encrypted_content`. An Anthropic on-demand
+    /// compaction block is signed and also readable: `encrypted_content` holds its
+    /// `signature` and `summary` its `content`, so `summary.is_some()` identifies
+    /// Anthropic-origin state.
     Compaction {
         encrypted_content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     /// Codex remote-v2 request control at its position in the input window.
     CompactionTrigger {},

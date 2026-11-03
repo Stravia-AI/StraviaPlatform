@@ -506,7 +506,7 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 
 已登记原生状态在生成完成前回放时只关联其已确认来源。生成完整交付后，若回放包含该节点的完整客户端前缀与平台签发输出身份，即使本轮省略原压缩阈值或更改控制，也应关联该已完成后代，而不是退回状态最初来源；该后代的祖先链必须包含已确认来源。控制不匹配时只采用祖先关系及 Target 亲和，不继承旧控制、旧执行窗口或上游 response continuation；本轮显式重置仍有效。普通自动父发现与 Target Continuation 的严格控制匹配规则不变。
 
-Codex 官方客户端已[移除旧 `/responses/compact` 实现](https://github.com/openai/codex/commit/1ac689cc7de0e637d35271edbbc132d1553d1767)，改用普通 Responses 上的 V2 压缩。独立 compact 仍按当前 Target 的原生端点转发；端点不可用时原样返回上游错误，包括 404，不在平台内把 V1 改写成 V2。
+Codex 官方客户端已[移除旧 `/responses/compact` 实现](https://github.com/openai/codex/commit/1ac689cc7de0e637d35271edbbc132d1553d1767)，改用普通 Responses 上的 V2 压缩：在流式请求末尾追加 `compaction_trigger`，从 `response.output_item.done` 取唯一的 compaction item，由客户端拼装“保留的用户消息 + compaction item”作为新窗口。ChatGPT 后端对 `/responses/compact` 返回 404，因此 Codex Vendor 的独立 compact 以 V2 作为该 Target 的原生端点：Vendor 在 Target 侧发出流式 `/responses` + 触发器，并按官方保留规则（用户消息，最新优先，64k token 估算预算，边界消息截断文本，不保留图片/音频）折叠成 `response.compaction` 窗口返回客户端。这是同一 Target 内的协议实现，不是跨 Target 重试或本地摘要；上游错误（包括状态码与原生 error 字段）仍原样返回，窗口里不出现平台生成的内容。其他 Target 的原生 `/responses/compact` 行为不变。
 
 ---
 
