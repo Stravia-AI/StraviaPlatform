@@ -20,7 +20,7 @@ ALTER TABLE turn_node_retention DROP COLUMN expires_at;
 CREATE INDEX history_markers_pending_until_idx ON history_markers(pending_until);
 CREATE INDEX history_markers_published_at_idx ON history_markers(published_at);
 
-CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
+CREATE INDEX idx_reversible_redaction_mappings_principal_pending
 ON reversible_redaction_mappings(principal, pending_until);
 CREATE INDEX reversible_redaction_mappings_pending_until_idx
     ON reversible_redaction_mappings(pending_until);
@@ -33,15 +33,23 @@ CREATE INDEX native_compactions_confirmed_at_idx ON native_compactions(confirmed
 CREATE INDEX turn_nodes_created_at_idx ON turn_nodes(created_at, node_pk);
 
 -- 每张引用关系在最后一条引用删除时把对象放进回收队列；外键级联删除同样触发。
+--
+-- 释放触发器先对被引用对象的行加 `FOR NO KEY UPDATE`，再检查剩余引用并入队：
+-- 1. 回收方领取对象时持有 `FOR UPDATE`，触发器因此等待它提交，而不是在回收方即将
+--    「仍有引用→移出队列」的同一刻因队列行冲突而漏登记；
+-- 2. 两个事务同时删除同一对象的兄弟引用时互相等待，后者在新语句里看到前者已提交的
+--    删除，因此总有一方登记，不会因彼此看不到对方尚未提交的删除而双双漏登记。
+-- 写入方对对象只加 `FOR KEY SHARE`，与此锁不冲突。
 CREATE FUNCTION turn_nodes_release_parent() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF OLD.parent_pk IS NOT NULL
-       AND EXISTS (SELECT 1 FROM turn_nodes WHERE node_pk = OLD.parent_pk)
-       AND NOT EXISTS (SELECT 1 FROM turn_nodes WHERE parent_pk = OLD.parent_pk) THEN
-        INSERT INTO turn_node_gc(node_pk) VALUES (OLD.parent_pk)
-        ON CONFLICT (node_pk) DO NOTHING;
+    IF OLD.parent_pk IS NOT NULL THEN
+        PERFORM 1 FROM turn_nodes WHERE node_pk = OLD.parent_pk FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_nodes WHERE parent_pk = OLD.parent_pk) THEN
+            INSERT INTO turn_node_gc(node_pk) VALUES (OLD.parent_pk)
+            ON CONFLICT (node_pk) DO NOTHING;
+        END IF;
     END IF;
     RETURN OLD;
 END $$;
@@ -52,8 +60,8 @@ CREATE FUNCTION turn_node_markers_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM history_markers WHERE reference = OLD.reference)
-       AND NOT EXISTS (SELECT 1 FROM turn_node_markers WHERE reference = OLD.reference) THEN
+    PERFORM 1 FROM history_markers WHERE reference = OLD.reference FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_markers WHERE reference = OLD.reference) THEN
         INSERT INTO history_marker_gc(reference) VALUES (OLD.reference)
         ON CONFLICT (reference) DO NOTHING;
     END IF;
@@ -66,8 +74,8 @@ CREATE FUNCTION turn_node_redaction_mappings_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM reversible_redaction_mappings WHERE reference = OLD.reference)
-       AND NOT EXISTS (SELECT 1 FROM turn_node_redaction_mappings WHERE reference = OLD.reference) THEN
+    PERFORM 1 FROM reversible_redaction_mappings WHERE reference = OLD.reference FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_redaction_mappings WHERE reference = OLD.reference) THEN
         INSERT INTO redaction_mapping_gc(reference) VALUES (OLD.reference)
         ON CONFLICT (reference) DO NOTHING;
     END IF;
@@ -80,8 +88,8 @@ CREATE FUNCTION turn_node_compactions_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM native_compactions WHERE id = OLD.record_id)
-       AND NOT EXISTS (SELECT 1 FROM turn_node_compactions WHERE record_id = OLD.record_id) THEN
+    PERFORM 1 FROM native_compactions WHERE id = OLD.record_id FOR NO KEY UPDATE;
+    IF FOUND AND NOT EXISTS (SELECT 1 FROM turn_node_compactions WHERE record_id = OLD.record_id) THEN
         INSERT INTO native_compaction_gc(record_id) VALUES (OLD.record_id)
         ON CONFLICT (record_id) DO NOTHING;
     END IF;
@@ -94,10 +102,12 @@ CREATE FUNCTION native_compaction_sources_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM native_compactions WHERE id = OLD.source_id)
-       AND NOT EXISTS (SELECT 1 FROM native_compaction_sources WHERE source_id = OLD.source_id) THEN
-        INSERT INTO native_compaction_gc(record_id) VALUES (OLD.source_id)
-        ON CONFLICT (record_id) DO NOTHING;
+    IF OLD.source_id <> OLD.record_id THEN
+        PERFORM 1 FROM native_compactions WHERE id = OLD.source_id FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (SELECT 1 FROM native_compaction_sources WHERE source_id = OLD.source_id) THEN
+            INSERT INTO native_compaction_gc(record_id) VALUES (OLD.source_id)
+            ON CONFLICT (record_id) DO NOTHING;
+        END IF;
     END IF;
     RETURN OLD;
 END $$;
@@ -108,14 +118,16 @@ CREATE FUNCTION native_compactions_release_source_node() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF OLD.source_generation_id IS NOT NULL
-       AND NOT EXISTS (
-           SELECT 1 FROM native_compactions c
-           WHERE c.source_generation_id = OLD.source_generation_id
-       ) THEN
-        INSERT INTO turn_node_gc(node_pk)
-        SELECT n.node_pk FROM turn_nodes n WHERE n.id = OLD.source_generation_id
-        ON CONFLICT (node_pk) DO NOTHING;
+    IF OLD.source_generation_id IS NOT NULL THEN
+        PERFORM 1 FROM turn_nodes WHERE id = OLD.source_generation_id FOR NO KEY UPDATE;
+        IF FOUND AND NOT EXISTS (
+            SELECT 1 FROM native_compactions c
+            WHERE c.source_generation_id = OLD.source_generation_id
+        ) THEN
+            INSERT INTO turn_node_gc(node_pk)
+            SELECT n.node_pk FROM turn_nodes n WHERE n.id = OLD.source_generation_id
+            ON CONFLICT (node_pk) DO NOTHING;
+        END IF;
     END IF;
     RETURN OLD;
 END $$;
@@ -126,7 +138,8 @@ CREATE FUNCTION public_tool_executions_release_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM history_markers WHERE reference = OLD.marker_reference) THEN
+    PERFORM 1 FROM history_markers WHERE reference = OLD.marker_reference FOR NO KEY UPDATE;
+    IF FOUND THEN
         INSERT INTO history_marker_gc(reference) VALUES (OLD.marker_reference)
         ON CONFLICT (reference) DO NOTHING;
     END IF;

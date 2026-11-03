@@ -1,6 +1,6 @@
 import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, ObservationOutputPreview, RunDetail } from './types/observation'
-import { boundedTail } from './observation-contents'
+import { boundedTail } from './bounded-text'
 import { observationConversationActivities, type ObservationActivity } from './observation-activities'
 
 export type ObservationConversationBlock =

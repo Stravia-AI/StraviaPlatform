@@ -90,7 +90,7 @@ const usage = $derived([
     liveText={selected ? data.outputPreview?.text : undefined}
     label={m.observation_card_output()}
     emptyLabel={interaction.client_output_delivered
-      ? m.observation_output_delivered_no_preview()
+      ? m.observation_output_delivered_no_text()
       : m.observation_no_visible_output()}
     {contextLabel}
     active={selected && data.outputActive}

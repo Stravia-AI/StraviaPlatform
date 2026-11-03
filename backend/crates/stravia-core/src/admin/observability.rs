@@ -144,17 +144,10 @@ impl AdminService {
 
     /// 显式等待异步观测 writer 排空；查询接口本身不提供该保证。
     /// 批量读取 Observation 引用的正文；顺序按请求，不可见或不存在的内容直接省略。
-    pub async fn observation_contents(
-        &self,
-        ids: &[i64],
-    ) -> anyhow::Result<ObservationContents> {
+    pub async fn observation_contents(&self, ids: &[i64]) -> anyhow::Result<ObservationContents> {
         let mut contents = self.gw.observation.observation_contents(ids).await?;
         let owners = self.gw.observation.content_interactions(ids).await?;
-        let interactions: Vec<String> = owners
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
+        let interactions: Vec<String> = owners.values().flatten().cloned().collect();
         let masker = self.observation_masker(interactions).await?;
         masker.mask_contents(&mut contents, &owners);
         // ETag 同时覆盖返回正文与当前映射：正文按内容摘要，映射按主体版本。

@@ -335,7 +335,12 @@ describe('merged model turn attempts', () => {
     usage: { ...usage, output_tokens: 60 },
   }
   const merged = () => [
-    event(1, 'model_turn_started', { model_turn_id: 'turn', route_id: 'route', attempt: firstAttempt, attempt_at: 5 }, 4),
+    event(
+      1,
+      'model_turn_started',
+      { model_turn_id: 'turn', route_id: 'route', attempt: firstAttempt, attempt_at: 5 },
+      4,
+    ),
     event(2, 'target_attempt_started', { ...{ ...firstAttempt, attempt_id: 'a2' }, provider_name: 'Fallback' }, 8),
     event(
       3,
@@ -357,13 +362,41 @@ describe('merged model turn attempts', () => {
     ])
     const [turn, first, , last, done] = events
     expect(observationEventSummary(turn).facts.map((f) => f.value)).toEqual(['route'])
-    expect(observationEventSummary(first).facts).toContainEqual({ label: m.observation_event_model_service(), value: 'Primary' })
+    expect(observationEventSummary(first).facts).toContainEqual({
+      label: m.observation_event_model_service(),
+      value: 'Primary',
+    })
     expect(first.occurred_at).toBe(5)
-    expect(observationEventSummary(last).facts).toContainEqual({ label: m.observation_duration(), value: formatDuration(3000) })
+    expect(observationEventSummary(last).facts).toContainEqual({
+      label: m.observation_duration(),
+      value: formatDuration(3000),
+    })
     expect(observationEventSummary(last).facts.map((f) => f.label)).toContain(m.logs_token_speed())
     expect(observationEventSummary(done).tone).toBe('success')
     expect(done.payload).not.toHaveProperty('attempt')
     expect(new Set(view.streams.get('r1')!.map(itemKey)).size).toBe(events.length)
+  })
+
+  test('expanded rows point at the stored merged event and only the turn rows own the sequence', () => {
+    const stored = merged()
+    const events = deriveTimeline(detail([run('r1', 0, stored)]), undefined).timelines.get('r1')!
+    const [turn, first, failover, last, done] = events
+    // 轮次行与由它拆出的尝试行都指回存储的合并事件，原始详情不展示合成的 kind 与 payload。
+    expect(turn.stored).toBe(stored[0])
+    expect(first.stored).toBe(stored[0])
+    expect(last.stored).toBe(stored[2])
+    expect(done.stored).toBe(stored[2])
+    expect(first.stored!.payload).toHaveProperty('attempt')
+    // 独立存储的 failover 事件没有合并来源。
+    expect(failover.stored).toBeUndefined()
+    expect(failover.attempt).toBeUndefined()
+    // 同一 sequence 只有一行是存储事件的代表，另一行标记为拆出的尝试行。
+    expect(events.filter((e) => e.sequence === 1 && !e.attempt)).toHaveLength(1)
+    expect(events.filter((e) => e.sequence === 3 && !e.attempt)).toHaveLength(1)
+    expect(events.filter((e) => e.attempt).map((e) => e.kind)).toEqual([
+      'target_attempt_started',
+      'target_attempt_finished',
+    ])
   })
 
   test('run metrics read the serving upstream from merged and failover attempt rows', () => {

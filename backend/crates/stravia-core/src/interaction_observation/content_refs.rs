@@ -7,7 +7,7 @@
 use serde_json::Value;
 use sqlx::{PgConnection, SqliteConnection};
 
-use crate::content_store::{self, Body, Bodies, Content};
+use crate::content_store::{self, Bodies, Content};
 use stravia_runtime_contract::protocol::ir::content::{ContentUnit, ContentUnitBody};
 
 /// 交互 Principal 在共享内容存储里的 scope 键。
@@ -40,15 +40,6 @@ pub(super) fn unit_content(unit: &ContentUnit<'_>) -> Content {
         ContentUnitBody::Text(text) => Content::text(text),
         ContentUnitBody::Json(value) => Content::json(value.to_string().into_bytes()),
     }
-}
-
-/// 还原成调用方看到的 JSON 值：文本包装为字符串，JSON 原样解析。
-pub(super) fn body_value(body: &Body) -> anyhow::Result<Value> {
-    use stravia_runtime_contract::protocol::ir::content::ContentFormat;
-    Ok(match body.format {
-        ContentFormat::Text => Value::String(body.text()?.to_owned()),
-        ContentFormat::Json => body.json()?,
-    })
 }
 
 /// 在调用方事务内登记正文，返回与 `contents` 同序的 content id。

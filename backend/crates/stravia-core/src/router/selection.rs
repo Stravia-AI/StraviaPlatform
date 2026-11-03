@@ -1308,6 +1308,7 @@ mod tests {
             Arc::new(UnknownExpiryStore(crate::turn_chain::test_store().await)),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let owner = principal();
         let mut root = chain

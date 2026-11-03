@@ -193,8 +193,7 @@ async fn platform_tool_remote_bytes_and_header_redaction_survive_bundle_export()
 }
 
 #[tokio::test]
-async fn bundle_usage_revision_preserves_reported_fields() -> anyhow::Result<()>
-{
+async fn bundle_usage_revision_preserves_reported_fields() -> anyhow::Result<()> {
     let (_directory, pool, observation) = fixture().await?;
     let run = admit(&observation, "usage-run", None);
     run.record(RunEvent::ModelTurnStarted {

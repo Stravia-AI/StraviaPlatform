@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use serde_json::Value;
 
 use stravia_runtime_contract::protocol::ir::content::{
@@ -78,27 +78,13 @@ pub(super) fn restore_segment(
     bodies: &Bodies,
 ) -> anyhow::Result<HiddenHistorySegment> {
     let mut descriptor = content_store::decode_descriptor(envelope)?;
-    let mut seen = vec![false; mapping.len()];
-    for slot in &descriptor.slots {
-        ensure!(
-            slot.ordinal < mapping.len(),
-            "history marker slot ordinal out of range"
-        );
-        seen[slot.ordinal] = true;
-    }
-    ensure!(
-        seen.iter().all(|referenced| *referenced),
-        "unreferenced history marker content ordinal"
-    );
+    content_store::validate_slots(&descriptor, mapping.len())?;
     content_store::restore_slots(&mut descriptor.data, &descriptor.slots, |ordinal| {
         let id = *mapping
             .get(ordinal)
             .context("history marker slot ordinal out of range")?;
         let body = bodies.get(id).context("missing history marker content")?;
-        Ok(match body.format {
-            ContentFormat::Text => Value::String(body.text()?.to_owned()),
-            ContentFormat::Json => body.json()?,
-        })
+        body.value()
     })?;
     Ok(serde_json::from_value(descriptor.data)?)
 }

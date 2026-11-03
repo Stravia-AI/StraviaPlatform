@@ -175,7 +175,10 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("retention-owner");
     let live = TurnNodeId::response();
     let payload = serde_json::json!({"effective_system": "shared instructions ".repeat(100)});
@@ -329,7 +332,10 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("gc-queue-owner");
     let live = TurnNodeId::response();
     let payload = serde_json::json!({"system": "live content"});
@@ -407,7 +413,10 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("gc-reference-batch-owner");
     let key = owner.continuation_key();
     let live = TurnNodeId::response();
@@ -542,23 +551,29 @@ async fn sqlite_turn_chain_survives_store_reconstruction() {
         .expect("SQLite migrations");
     let id = TurnNodeId::response();
     // 同一池上的多个 store 自动共享写协调。
-    SqlTurnChainStore::sqlite(pool.clone())
-        .commit(TurnCommit {
-            id: id.clone(),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: principal("owner"),
-            payload_version: 1,
-            payload: serde_json::json!({"response": "persisted"}),
-            marker_references: Vec::new(),
-            redaction_references: Vec::new(),
-            compaction_record_ids: Vec::new(),
-            reusable_prefix: None,
-        })
-        .await
-        .expect("persist response Turn");
+    SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .commit(TurnCommit {
+        id: id.clone(),
+        kind: TurnNodeKind::Response,
+        parent_id: None,
+        principal: principal("owner"),
+        payload_version: 1,
+        payload: serde_json::json!({"response": "persisted"}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: None,
+    })
+    .await
+    .expect("persist response Turn");
 
-    let reconstructed = SqlTurnChainStore::sqlite(pool);
+    let reconstructed = SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let chain = reconstructed
         .materialize(&principal("owner"), TurnNodeKind::Response, &id)
         .await
@@ -1152,7 +1167,11 @@ async fn sqlite_reusable_prefix_store_contract() {
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
-    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(pool))).await;
+    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )))
+    .await;
 }
 
 async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
@@ -1412,10 +1431,14 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
     crate::migrations::migrate_postgres(&pool, None)
         .await
         .expect("PostgreSQL migrations");
-    let store = SqlTurnChainStore::postgres(pool.clone());
+    let store = SqlTurnChainStore::postgres(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     assert_prefix_rebuild_decodes_shared_ancestors_once(&store).await;
     assert_reusable_prefix_store_contract(Arc::new(store.clone())).await;
     assert_request_context_contract(&store).await;
+    assert_cached_prefix_keeps_the_head_expiry(&store).await;
     assert_expired_query_cutoff_proof_falls_back_to_current_facts(&store).await;
     assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_indexes(&store).await;
     assert_postgres_concurrent_commits_and_gc(&store).await;
@@ -1494,40 +1517,46 @@ async fn sqlite_reusable_prefix_metadata_survives_store_reconstruction() {
         .await
         .expect("SQLite migrations");
     // 同一池上的多个 store 自动共享写协调。
-    SqlTurnChainStore::sqlite(pool.clone())
-        .commit(TurnCommit {
-            id: TurnNodeId::new("resp_indexed"),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: principal("owner"),
-            payload_version: 1,
-            payload: serde_json::json!({"response": "persisted"}),
-            marker_references: Vec::new(),
-            redaction_references: Vec::new(),
-            compaction_record_ids: Vec::new(),
-            reusable_prefix: Some(ReusablePrefixMetadata {
-                projection: None,
-                namespace: "target-a".into(),
-                fingerprint: "hash-indexed".into(),
-                item_count: 6,
-                completed_at: 40,
-            }),
-        })
-        .await
-        .expect("commit indexed response");
+    SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .commit(TurnCommit {
+        id: TurnNodeId::new("resp_indexed"),
+        kind: TurnNodeKind::Response,
+        parent_id: None,
+        principal: principal("owner"),
+        payload_version: 1,
+        payload: serde_json::json!({"response": "persisted"}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: Some(ReusablePrefixMetadata {
+            projection: None,
+            namespace: "target-a".into(),
+            fingerprint: "hash-indexed".into(),
+            item_count: 6,
+            completed_at: 40,
+        }),
+    })
+    .await
+    .expect("commit indexed response");
 
-    let candidates = SqlTurnChainStore::sqlite(pool)
-        .find_reusable_prefixes(
-            &principal("owner"),
-            TurnNodeKind::Response,
-            &ReusablePrefixQuery {
-                projection: None,
-                namespace: "target-a".into(),
-                fingerprints: vec![("hash-indexed".into(), 6)],
-            },
-        )
-        .await
-        .expect("query indexed response");
+    let candidates = SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .find_reusable_prefixes(
+        &principal("owner"),
+        TurnNodeKind::Response,
+        &ReusablePrefixQuery {
+            projection: None,
+            namespace: "target-a".into(),
+            fingerprints: vec![("hash-indexed".into(), 6)],
+        },
+    )
+    .await
+    .expect("query indexed response");
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].node_id.as_str(), "resp_indexed");
@@ -1552,7 +1581,10 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .await
         .expect("SQLite migrations");
     let owner = principal("owner");
-    let setup = SqlTurnChainStore::sqlite(pool.clone());
+    let setup = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let mut head: Option<TurnNodeId> = None;
     for depth in 0..DEPTH {
         let id = TurnNodeId::agent();
@@ -1630,7 +1662,10 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let store = SqlTurnChainStore::sqlite(budgeted);
+    let store = SqlTurnChainStore::sqlite(
+        budgeted,
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
 
     let chain = store
         .materialize(&owner, TurnNodeKind::Agent, &head)
@@ -1738,20 +1773,23 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let candidates = SqlTurnChainStore::sqlite(budgeted)
-        .find_reusable_prefixes(
-            &owner,
-            TurnNodeKind::Response,
-            &ReusablePrefixQuery {
-                projection: None,
-                namespace: "budget".into(),
-                fingerprints: (1..=PAIRS)
-                    .map(|i| (format!("fingerprint-{i}"), i))
-                    .collect(),
-            },
-        )
-        .await
-        .expect("prefix lookup within VM-step budget");
+    let candidates = SqlTurnChainStore::sqlite(
+        budgeted,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .find_reusable_prefixes(
+        &owner,
+        TurnNodeKind::Response,
+        &ReusablePrefixQuery {
+            projection: None,
+            namespace: "budget".into(),
+            fingerprints: (1..=PAIRS)
+                .map(|i| (format!("fingerprint-{i}"), i))
+                .collect(),
+        },
+    )
+    .await
+    .expect("prefix lookup within VM-step budget");
     assert_eq!(
         candidates
             .into_iter()
@@ -1977,6 +2015,45 @@ async fn ancestor_suffix_rows(
     }
 }
 
+/// 整条链共用头节点（最新节点）的计时：命中缓存的祖先前缀不能把链的有效期拉回祖先自己的期限。
+async fn assert_cached_prefix_keeps_the_head_expiry(store: &SqlTurnChainStore) {
+    let owner = principal("head-expiry");
+    let root = TurnNodeId::response();
+    let child = TurnNodeId::response();
+    let commit = |id: &TurnNodeId, parent: Option<&TurnNodeId>| TurnCommit {
+        id: id.clone(),
+        parent_id: parent.cloned(),
+        principal: owner.clone(),
+        kind: TurnNodeKind::Response,
+        payload_version: 1,
+        payload: serde_json::json!({"node": id.as_str()}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: None,
+    };
+    store.commit(commit(&root, None)).await.unwrap();
+    let mut context = TurnReadContext::new(&owner, TurnNodeKind::Response);
+    let root_chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &root, &mut context)
+        .await
+        .unwrap();
+    let decoded: Arc<dyn std::any::Any + Send + Sync> = Arc::new("validated root");
+    context.admit(&root_chain, vec![(decoded, 128)]);
+    // 子节点创建得更晚，因此头节点的期限晚于祖先的期限。
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    store.commit(commit(&child, Some(&root))).await.unwrap();
+    let chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &child, &mut context)
+        .await
+        .unwrap();
+    assert_eq!(chain.nodes.len(), 2);
+    assert!(
+        chain.expires_at > root_chain.expires_at,
+        "the chain expires with its head, not with the cached ancestor"
+    );
+}
+
 async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &SqlTurnChainStore) {
     let owner = principal("query-cutoff-expiry");
     let root = TurnNodeId::response();
@@ -2072,6 +2149,11 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
         ),
         "a truly expired durable ancestor cannot be revived by the old proof"
     );
+}
+
+#[tokio::test]
+async fn cached_prefix_keeps_the_head_expiry() {
+    assert_cached_prefix_keeps_the_head_expiry(&test_store().await).await;
 }
 
 #[tokio::test]
@@ -2859,6 +2941,7 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
         seed_store.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut write = seed_chain
         .begin(owner.clone(), request(vec![question.clone()]))
@@ -2926,7 +3009,10 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .unwrap();
-    let store = Arc::new(SqlTurnChainStore::sqlite(pool.clone()));
+    let store = Arc::new(SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    ));
     let proof = expected.projection.clone().unwrap();
     let query = ReusablePrefixQuery {
         namespace: expected.namespace.clone(),
@@ -2948,6 +3034,7 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
         store.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     upgraded_chain.rebuild_prefixes().await.unwrap();
     let candidates = store

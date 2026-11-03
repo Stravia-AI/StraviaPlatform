@@ -217,7 +217,7 @@ test('inline settings commit only on Enter or Save, revert on Escape, and keep t
   await expect(retention).toHaveValue('7')
   await expect(save).toHaveCount(0)
   await expect(section).toContainText('kept for at least this many days after its last use')
-  await expect(section).toContainText('Saving starts cleanup immediately')
+  await expect(section).toContainText('Saving starts a cleanup right away')
 
   // Blur never commits: the draft stays, the row offers Save and Cancel, nothing is written.
   await retention.fill('30')

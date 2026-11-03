@@ -1469,3 +1469,51 @@ async fn postgres_marker_reclaims_only_after_pending_or_published_floor() {
         .expect("drop schema");
     admin.close().await;
 }
+
+#[cfg(test)]
+impl SqlHistoryMarkerStore {
+    /// 只供旧领域 payload fixture 使用：逐个 Marker 经领域编码重写段载荷，不依赖内部 descriptor 布局。
+    pub(crate) async fn rewrite_segments(
+        &self,
+        mut edit: impl FnMut(&mut serde_json::Value),
+    ) -> anyhow::Result<()> {
+        let Self::Sqlite(pool) = self else {
+            anyhow::bail!("rewrite_segments is only available for SQLite fixtures");
+        };
+        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT reference, principal, segment_payload FROM history_markers \
+             WHERE segment_payload IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        for (reference, principal, envelope) in rows {
+            let segment = super::payload::sqlite::read_segments(
+                pool,
+                &principal,
+                &[(reference.clone(), Some(envelope))],
+            )
+            .await?
+            .pop()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("history marker segment is missing"))?;
+            let mut value = serde_json::to_value(&segment)?;
+            edit(&mut value);
+            let segment: HiddenHistorySegment = serde_json::from_value(value)?;
+            let payload = super::content::encode_segment(&segment)?;
+            let mut connection = pool.acquire_write().await?;
+            let mut transaction = connection.begin().await?;
+            let (envelope, ids) =
+                super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
+                    .await?;
+            super::payload::sqlite::replace_refs(&mut transaction, &reference, &ids).await?;
+            sqlx::query("UPDATE history_markers SET segment_payload = ? WHERE reference = ?")
+                .bind(envelope)
+                .bind(&reference)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            connection.finish().await?;
+        }
+        Ok(())
+    }
+}

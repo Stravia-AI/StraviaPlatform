@@ -921,11 +921,13 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (1,0,?)")
-        .bind(content_ids[0])
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (1,0,?)",
+    )
+    .bind(content_ids[0])
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (2,?,'hit-interaction','hit-run','credential_mappings_created',?)")
         .bind(now - 8)
         .bind(attrs(serde_json::json!({

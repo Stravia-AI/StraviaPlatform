@@ -191,6 +191,7 @@ pub(crate) async fn test_chain() -> GenerationChain {
         std::sync::Arc::new(crate::turn_chain::test_store().await),
         None,
         RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 
@@ -321,24 +322,16 @@ impl GenerationChain {
         turn_chain: Arc<dyn TurnChainStore>,
         artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
         runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
     ) -> Self {
         Self {
-            store: GenerationChainStore::from_turn_chain(turn_chain, runtime_cache),
+            store: GenerationChainStore::from_turn_chain(turn_chain, runtime_cache, retention),
             pending_commits: PendingGenerationCommits::default(),
             artifacts,
             history_markers: None,
             redaction_mappings: None,
             compaction: None,
         }
-    }
-
-    /// 共享同一份内存保留期；缓存命中时按当前 N 复核头节点计时。
-    pub(crate) fn with_retention(
-        mut self,
-        retention: crate::history_retention::HistoryRetention,
-    ) -> Self {
-        self.store.retention = retention;
-        self
     }
 
     /// Rebuild derived Generation prefix indexes before accepting requests.

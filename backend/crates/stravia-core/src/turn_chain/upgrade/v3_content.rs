@@ -1,3 +1,7 @@
+//! 冻结的 0032→0033 历史实现：升级路径只用到提取与写入（`extract`、`prepare_missing`、
+//! `link`/`lookup`/`intern`）；整节点写入与恢复器仅供升级回归测试，均为 `#[cfg(test)]`。
+//! 新代码不得依赖本模块，运行期正文走 `crate::content_store`。
+//!
 //! Per-node semantic content externalization, principal-scoped content rows.
 //!
 //! A stored node payload is one descriptor:
@@ -14,10 +18,6 @@
 //! opaque leaves, shared system/instruction/tool values are units, and vendor
 //! profile containers are walked first and then externalized whole so their
 //! parent slot restores before its nested slots.
-//!
-//! 本模块冻结 0032→0033 的历史实现：升级路径只用到提取与写入部分，恢复器与 PostgreSQL
-//! 变体仅供回归测试使用，因此整体放行未使用项。
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use anyhow::{Context, ensure};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use stravia_runtime_contract::turn_chain::{TurnNode, TurnNodeId, TurnNodeKind, TurnReadContext};
 
 pub(super) type ContentDigest = [u8; 32];
@@ -71,11 +72,6 @@ impl Content {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn digest(&self) -> ContentDigest {
-        self.digest
-    }
-
     /// Releases the body once the row is known to exist inside the caller's
     /// locked transaction; recovery before that point still needs it.
     fn release(&mut self) {
@@ -90,17 +86,13 @@ pub(super) struct Extracted {
     pub contents: Vec<Content>,
 }
 
+#[cfg(test)]
 pub(super) struct Encoded {
     pub payload: Vec<u8>,
     pub contents: Vec<Content>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum LookupScope<'a> {
-    Id(i64),
-    Principal(&'a str),
-}
-
+#[cfg(test)]
 pub(super) struct StoredNode {
     pub node_pk: i64,
     pub scope_id: i64,
@@ -271,6 +263,7 @@ pub(super) fn encode_descriptor(
     crate::storage_codec::encode(std::borrow::Cow::Owned(descriptor))
 }
 
+#[cfg(test)]
 pub(super) fn encode(payload: Value) -> anyhow::Result<Encoded> {
     let Extracted {
         data,
@@ -369,6 +362,7 @@ impl DigestPositions {
     }
 }
 
+#[cfg(test)]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Descriptor {
@@ -376,11 +370,13 @@ struct Descriptor {
     slots: Vec<(String, usize)>,
 }
 
+#[cfg(test)]
 enum RestoredContent {
     Owned(Value),
     Shared(std::sync::Arc<Value>),
 }
 
+#[cfg(test)]
 impl RestoredContent {
     fn value(&self) -> &Value {
         match self {
@@ -398,7 +394,7 @@ impl RestoredContent {
 }
 
 macro_rules! backend {
-    ($put:ident, $lookup:ident, $intern:ident, $link:ident, $restore:ident, $restore_context:ident, $db:ty, $conn:ty, $lock:literal) => {
+    ($lookup:ident, $intern:ident, $link:ident, $db:ty, $conn:ty, $lock:literal) => {
         /// Links an already-interned node to distinct content ids. The ids
         /// array order is the descriptor ordinal. Callers hold the write
         /// transaction; PostgreSQL callers hold the contents table lock.
@@ -439,7 +435,7 @@ macro_rules! backend {
         /// is only a hint; `lock` adds a row lock on PostgreSQL.
         pub(super) async fn $lookup(
             connection: &mut $conn,
-            scope: LookupScope<'_>,
+            scope_id: i64,
             contents: &[Content],
             lock: bool,
         ) -> anyhow::Result<Vec<Option<i64>>> {
@@ -454,13 +450,7 @@ macro_rules! backend {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "SELECT id, digest FROM turn_contents WHERE scope_id = ",
                 );
-                match scope {
-                    LookupScope::Id(id) => { query.push_bind(id); }
-                    LookupScope::Principal(principal) => {
-                        query.push("(SELECT id FROM turn_scopes WHERE principal = ")
-                            .push_bind(principal).push(")");
-                    }
-                }
+                query.push_bind(scope_id);
                 query.push(" AND digest IN (");
                 let mut list = query.separated(",");
                 for digest in chunk {
@@ -490,7 +480,7 @@ macro_rules! backend {
             scope_id: i64,
             contents: &mut [Content],
         ) -> anyhow::Result<Vec<i64>> {
-            let mut ids = $lookup(connection, LookupScope::Id(scope_id), contents, true).await?;
+            let mut ids = $lookup(connection, scope_id, contents, true).await?;
             for (content, id) in contents.iter_mut().zip(&ids) {
                 if id.is_some() {
                     content.release();
@@ -533,9 +523,7 @@ macro_rules! backend {
                         .push_bind(contents[*index].digest.as_slice())
                         .push_bind(contents[*index].bytes.as_slice());
                 });
-                query.push(
-                    " ON CONFLICT (scope_id, digest) DO NOTHING RETURNING id, digest",
-                );
+                query.push(" ON CONFLICT (scope_id, digest) DO NOTHING RETURNING id, digest");
                 let inserted: Vec<(i64, Vec<u8>)> =
                     query.build_query_as().fetch_all(&mut *connection).await?;
                 for (id, digest) in inserted {
@@ -586,7 +574,12 @@ macro_rules! backend {
             }
             Ok(ids)
         }
-
+    };
+}
+/// 整节点写入与恢复器：仅供升级回归测试，因此只对 SQLite 实例化。
+#[cfg(test)]
+macro_rules! restore_backend {
+    ($put:ident, $intern:ident, $link:ident, $restore:ident, $restore_context:ident, $db:ty, $conn:ty, $lock:literal) => {
         /// Intern then link convenience for a node that already has its
         /// `turn_nodes` row.
         pub(super) async fn $put(
@@ -783,8 +776,24 @@ macro_rules! backend {
     };
 }
 backend!(
-    put_sqlite,
     lookup_sqlite,
+    intern_sqlite,
+    link_sqlite,
+    sqlx::Sqlite,
+    sqlx::SqliteConnection<'_>,
+    ""
+);
+backend!(
+    lookup_postgres,
+    intern_postgres,
+    link_postgres,
+    sqlx::Postgres,
+    sqlx::PgConnection<'_>,
+    " FOR KEY SHARE"
+);
+#[cfg(test)]
+restore_backend!(
+    put_sqlite,
     intern_sqlite,
     link_sqlite,
     restore_sqlite,
@@ -792,15 +801,4 @@ backend!(
     sqlx::Sqlite,
     sqlx::SqliteConnection<'_>,
     ""
-);
-backend!(
-    put_postgres,
-    lookup_postgres,
-    intern_postgres,
-    link_postgres,
-    restore_postgres,
-    restore_postgres_context,
-    sqlx::Postgres,
-    sqlx::PgConnection<'_>,
-    " FOR KEY SHARE"
 );

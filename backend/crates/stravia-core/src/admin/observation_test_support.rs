@@ -104,7 +104,8 @@ impl AdminService {
         secret: &str,
     ) -> anyhow::Result<()> {
         self.gw
-            .redaction.mappings
+            .redaction
+            .mappings
             .intern(&Principal::new(principal), &[secret.into()])
             .await?;
         Ok(())

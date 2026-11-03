@@ -1,44 +1,26 @@
-import type {
-  ObservationContent,
-  ObservationContentRef,
-  ObservationContentsPage,
-} from './types/observation'
+import { boundedHead, boundedTail } from './bounded-text'
+import type { ObservationContent, ObservationContentRef, ObservationContentsResponse } from './types/observation'
 
 /** 服务端单次请求最多接受的 id 数。 */
 export const CONTENTS_REQUEST_LIMIT = 256
-/** 内存缓存按原始字节数计的上限；超过后淘汰最久未使用的正文。 */
+/** 内存缓存按原始字节数计的上限；超过后淘汰最久未使用的请求快照。 */
 const CACHE_BUDGET_BYTES = 8 * 1024 * 1024
+/** 每份快照的固定开销（键、ETag、Map），避免只含「不存在」的快照不计入预算。 */
+const SNAPSHOT_OVERHEAD_BYTES = 256
 /** 预览逐窗口读取引用；窗口内的 id 合并为一次请求。 */
 const PREVIEW_WINDOW = 8
 
-export type ContentsFetcher = (ids: number[]) => Promise<ObservationContentsPage>
+/** 带验证器发起一次内容请求；`etag` 为 `null` 表示没有可验证的快照。 */
+export type ContentsFetcher = (ids: number[], etag: string | null) => Promise<ObservationContentsResponse>
+
+/** 引用的 content_id 序列；引用序列相同即卡片展示的正文相同。 */
+export function contentRefsKey(summary: { refs: readonly ObservationContentRef[] }): string {
+  return summary.refs.map((ref) => ref.content_id).join(',')
+}
 
 /** 文本单元直接取字符串，JSON 单元取紧凑序列化，与服务端拼接语义一致。 */
 export function contentText(content: ObservationContent): string {
   return content.format === 'text' && typeof content.body === 'string' ? content.body : JSON.stringify(content.body)
-}
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-
-/** 取尾部至多 `limit` 个 UTF-16 码元，起点对齐到字素边界，不切开代理对或组合字符。 */
-export function boundedTail(text: string, limit: number): string {
-  let start = text.length
-  for (let count = 0; count < limit && start > 0; count += 1) {
-    start -= 1
-    const unit = text.charCodeAt(start)
-    if (unit >= 0xdc00 && unit <= 0xdfff && start > 0) start -= 1
-  }
-  if (start === 0) return text
-  const boundary = segmenter.segment(text).containing(start)
-  if (boundary && boundary.index < start) start = boundary.index + boundary.segment.length
-  return text.slice(start)
-}
-
-/** 取头部至多 `limit` 个 UTF-16 码元，不切开代理对。 */
-export function boundedHead(text: string, limit: number): string {
-  if (text.length <= limit) return text
-  const end = text.charCodeAt(limit - 1) >= 0xd800 && text.charCodeAt(limit - 1) <= 0xdbff ? limit - 1 : limit
-  return text.slice(0, end)
 }
 
 interface Pending {
@@ -46,16 +28,26 @@ interface Pending {
   reject: (error: unknown) => void
 }
 
+/** 某个请求键（升序 id 块）最近一次成功响应：服务端 ETag 与当时返回的正文。 */
+interface Snapshot {
+  etag: string
+  bodies: Map<number, ObservationContent>
+  bytes: number
+}
+
 /**
- * 按 content_id 缓存并批量读取 Observation 正文。
- * content_id 不复用，同一 id 在一次会话内只请求一次；并发请求在同一微任务内合并，
- * 每次请求不超过服务端上限，id 升序以复用浏览器按 URL 的 ETag/304 缓存。
+ * 批量读取 Observation 正文。
+ * 正文按当前凭据映射遮蔽，同一 id 在映射变化后内容会不同，所以缓存不以 id 为键：
+ * 每次请求按「升序 id 块」缓存 ETag 与正文，并总是带 `If-None-Match` 重新验证，
+ * 304 复用快照正文，200 以新响应整体替换；服务端不返回的 id 不做记忆，下次读取重新询问。
+ * 同一 id 在请求进行中的重复读取共享该请求；并发读取在同一微任务内合并，
+ * 每次请求不超过服务端上限。
  */
 export class ObservationContents {
   readonly #fetch: ContentsFetcher
   readonly #budget: number
-  /** `null` 表示服务端按不存在处理（已过期或不可见），同样只请求一次。 */
-  readonly #cache = new Map<number, ObservationContent | null>()
+  /** 键为升序 id 用逗号连接；Map 的插入顺序即最近使用顺序。 */
+  readonly #snapshots = new Map<string, Snapshot>()
   readonly #inflight = new Map<number, Promise<ObservationContent | null>>()
   readonly #pending = new Map<number, Pending>()
   #size = 0
@@ -75,10 +67,12 @@ export class ObservationContents {
   /** 按引用顺序拼接全文；服务端不返回的单元跳过。 */
   async read(refs: readonly ObservationContentRef[], separator: string): Promise<string> {
     const loaded = await this.load(refs.map((ref) => ref.content_id))
-    return refs.flatMap((ref) => {
-      const content = loaded.get(ref.content_id)
-      return content ? [contentText(content)] : []
-    }).join(separator)
+    return refs
+      .flatMap((ref) => {
+        const content = loaded.get(ref.content_id)
+        return content ? [contentText(content)] : []
+      })
+      .join(separator)
   }
 
   /**
@@ -110,12 +104,6 @@ export class ObservationContents {
   }
 
   #one(id: number): Promise<ObservationContent | null> {
-    if (this.#cache.has(id)) {
-      const hit = this.#cache.get(id)!
-      this.#cache.delete(id)
-      this.#cache.set(id, hit)
-      return Promise.resolve(hit)
-    }
     const inflight = this.#inflight.get(id)
     if (inflight) return inflight
     const { promise: request, resolve, reject } = Promise.withResolvers<ObservationContent | null>()
@@ -139,14 +127,22 @@ export class ObservationContents {
   }
 
   async #request(ids: number[], waiting: Map<number, Pending>) {
+    const key = ids.join(',')
+    const known = this.#snapshots.get(key)
     try {
-      const page = await this.#fetch(ids)
-      const found = new Map(page.contents.map((content) => [content.content_id, content]))
+      const response = await this.#fetch(ids, known?.etag ?? null)
+      let bodies: Map<number, ObservationContent>
+      if (response.status === 'not-modified') {
+        if (!known) throw new Error('Observation contents answered 304 without a validator')
+        bodies = known.bodies
+        this.#touch(key, known)
+      } else {
+        bodies = new Map(response.contents.map((content) => [content.content_id, content]))
+        this.#replace(key, response.etag, bodies)
+      }
       for (const id of ids) {
-        const content = found.get(id) ?? null
-        this.#remember(id, content)
         this.#inflight.delete(id)
-        waiting.get(id)!.resolve(content)
+        waiting.get(id)!.resolve(bodies.get(id) ?? null)
       }
     } catch (error) {
       for (const id of ids) {
@@ -156,16 +152,33 @@ export class ObservationContents {
     }
   }
 
-  #remember(id: number, content: ObservationContent | null) {
-    const size = content?.raw_len ?? 0
-    if (size > this.#budget) return
-    this.#cache.set(id, content)
-    this.#size += size
-    for (const [oldest, entry] of this.#cache) {
+  #touch(key: string, snapshot: Snapshot) {
+    if (this.#snapshots.get(key) !== snapshot) return
+    this.#snapshots.delete(key)
+    this.#snapshots.set(key, snapshot)
+  }
+
+  /** 以新响应替换该键的快照；没有 ETag 的响应无法验证，直接丢弃旧快照。 */
+  #replace(key: string, etag: string | null, bodies: Map<number, ObservationContent>) {
+    this.#drop(key)
+    if (etag === null) return
+    let bytes = SNAPSHOT_OVERHEAD_BYTES
+    for (const content of bodies.values()) bytes += content.raw_len
+    if (bytes > this.#budget) return
+    this.#snapshots.set(key, { etag, bodies, bytes })
+    this.#size += bytes
+    for (const [oldest, snapshot] of this.#snapshots) {
       if (this.#size <= this.#budget) break
-      if (oldest === id) continue
-      this.#cache.delete(oldest)
-      this.#size -= entry?.raw_len ?? 0
+      if (oldest === key) continue
+      this.#snapshots.delete(oldest)
+      this.#size -= snapshot.bytes
     }
+  }
+
+  #drop(key: string) {
+    const previous = this.#snapshots.get(key)
+    if (!previous) return
+    this.#snapshots.delete(key)
+    this.#size -= previous.bytes
   }
 }

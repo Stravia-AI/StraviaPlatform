@@ -77,7 +77,7 @@ INSERT INTO reversible_redaction_mappings_reference
 DROP TABLE reversible_redaction_mappings;
 ALTER TABLE reversible_redaction_mappings_reference RENAME TO reversible_redaction_mappings;
 
-CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
+CREATE INDEX idx_reversible_redaction_mappings_principal_pending
 ON reversible_redaction_mappings(principal, pending_until);
 CREATE INDEX reversible_redaction_mappings_pending_until_idx
     ON reversible_redaction_mappings(pending_until);
@@ -169,7 +169,8 @@ BEGIN
     INSERT OR IGNORE INTO turn_node_gc(node_pk)
     SELECT n.node_pk
     FROM turn_nodes n
-    WHERE n.id = OLD.source_generation_id
+    WHERE OLD.source_generation_id IS NOT NULL
+      AND n.id = OLD.source_generation_id
       AND NOT EXISTS (
           SELECT 1 FROM native_compactions c
           WHERE c.source_generation_id = OLD.source_generation_id

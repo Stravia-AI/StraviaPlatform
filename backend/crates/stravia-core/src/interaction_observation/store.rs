@@ -1123,7 +1123,7 @@ impl ObservationStore {
             let Some(body) = bodies.get(content_id) else {
                 continue;
             };
-            let content = super::content_refs::body_value(body)?;
+            let content = body.value()?;
             // 空正文的结果只是占位，不作为去重基准。
             if content.is_null() {
                 continue;

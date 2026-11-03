@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 use sqlx::Row;
 
-use stravia_runtime_contract::protocol::ir::content::ContentFormat;
-
 use crate::content_store::Body;
 
 use super::{
@@ -111,10 +109,7 @@ pub(super) async fn hydrate(
                     .flatten()
                     .filter_map(|row| {
                         let body = contents.get(&row.content_id)?;
-                        let content = match body.format {
-                            ContentFormat::Text => Value::String(body.text().unwrap_or_default().to_owned()),
-                            ContentFormat::Json => body.json().unwrap_or(Value::Null),
-                        };
+                        let content = body.value().unwrap_or(Value::Null);
                         Some(json!({
                             "tool_id": row.tool_id,
                             "content": content,
@@ -174,7 +169,10 @@ async fn fill_run_payloads(
                 }
                 separated.push_unseparated(")");
                 for row in query.build().fetch_all(pool).await? {
-                    rows.insert(row.try_get("sequence")?, RunPayloadRow::from_postgres(&row)?);
+                    rows.insert(
+                        row.try_get("sequence")?,
+                        RunPayloadRow::from_postgres(&row)?,
+                    );
                 }
             }
         }
@@ -196,8 +194,7 @@ async fn fill_run_payloads(
             }
             "request_failed" => {
                 let error: Value = match row.failure_json.as_deref() {
-                    Some(json) => serde_json::from_str(json)
-                        .unwrap_or_else(|_| Value::Null),
+                    Some(json) => serde_json::from_str(json).unwrap_or_else(|_| Value::Null),
                     None => Value::Null,
                 };
                 event.payload["error"] = error;
@@ -253,10 +250,7 @@ impl BodySet {
     }
 }
 
-fn bodies_for<'a>(
-    refs: Option<&Vec<(i64, i64)>>,
-    contents: &'a BodySet,
-) -> Vec<&'a Body> {
+fn bodies_for<'a>(refs: Option<&Vec<(i64, i64)>>, contents: &'a BodySet) -> Vec<&'a Body> {
     refs.into_iter()
         .flatten()
         .filter_map(|(_, content_id)| contents.get(content_id))
@@ -281,7 +275,10 @@ async fn read_bodies(
         .collect();
     let principals = store.interaction_principals(&interactions).await?;
     let mut by_principal: HashMap<&str, Vec<i64>> = HashMap::new();
-    for event in events.iter().filter(|event| wanted.contains(&event.sequence)) {
+    for event in events
+        .iter()
+        .filter(|event| wanted.contains(&event.sequence))
+    {
         let Some(principal) = event
             .interaction_id
             .as_ref()

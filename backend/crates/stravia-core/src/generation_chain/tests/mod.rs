@@ -28,6 +28,7 @@ async fn generation_store() -> GenerationChainStore {
     GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 
@@ -36,6 +37,7 @@ async fn generation_chain() -> GenerationChain {
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 

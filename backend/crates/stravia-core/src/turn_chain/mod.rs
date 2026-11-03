@@ -29,7 +29,10 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite Turn Chain test database");
-    SqlTurnChainStore::sqlite(pool)
+    SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
 }
 
 #[cfg(test)]

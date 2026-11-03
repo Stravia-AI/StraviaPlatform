@@ -327,16 +327,16 @@ impl Gateway {
         let retention =
             crate::history_retention::HistoryRetention::from_setting(retention_setting.as_deref());
         let turn_chains = if let Some(pool) = history_sqlite_pool.as_ref() {
-            turn_chain::SqlTurnChainStore::sqlite(pool.clone())
+            turn_chain::SqlTurnChainStore::sqlite(pool.clone(), retention.clone())
         } else {
             turn_chain::SqlTurnChainStore::postgres(
                 postgres_pool
                     .as_ref()
                     .expect("Gateway requires a SQL history store")
                     .clone(),
+                retention.clone(),
             )
-        }
-        .with_retention(retention.clone());
+        };
         let history_content = turn_chains.content_gc();
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
             Arc::new(turn_chains);
@@ -459,8 +459,8 @@ impl Gateway {
             Arc::clone(&turn_chains),
             artifact_store.clone(),
             runtime_cache.clone(),
+            retention.clone(),
         )
-        .with_retention(retention.clone())
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_mappings(Arc::clone(&redaction.mappings))
         .with_compaction(compaction.clone());
