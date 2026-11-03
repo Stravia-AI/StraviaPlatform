@@ -110,12 +110,8 @@ pub(super) async fn hydrate(
                     .filter_map(|row| {
                         let body = contents.get(&row.content_id)?;
                         let content = match body.format {
-                            ContentFormat::Text => {
-                                Value::String(body.text().unwrap_or_default())
-                            }
-                            ContentFormat::Json => {
-                                body.json().unwrap_or(Value::Null)
-                            }
+                            ContentFormat::Text => Value::String(body.text().unwrap_or_default()),
+                            ContentFormat::Json => body.json().unwrap_or(Value::Null),
                         };
                         Some(json!({
                             "tool_id": row.tool_id,
@@ -187,9 +183,9 @@ async fn load_rows(
                             complete: row.try_get("complete")?,
                             envelope: envelope
                                 .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(
-                                        &crate::storage_codec::decode(&bytes)?,
-                                    )?)
+                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                        &bytes,
+                                    )?)?)
                                 })
                                 .transpose()?,
                         },
@@ -221,9 +217,9 @@ async fn load_rows(
                             complete: row.try_get("complete")?,
                             envelope: envelope
                                 .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(
-                                        &crate::storage_codec::decode(&bytes)?,
-                                    )?)
+                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                        &bytes,
+                                    )?)?)
                                 })
                                 .transpose()?,
                         },
@@ -254,7 +250,9 @@ async fn read_refs_sqlite(
         let sequence: i64 = row.try_get("sequence")?;
         let ordinal: i64 = row.try_get("ordinal")?;
         let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence).or_default().push((ordinal, content_id));
+        refs.entry(sequence)
+            .or_default()
+            .push((ordinal, content_id));
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
@@ -266,11 +264,14 @@ async fn read_refs_sqlite(
     separated.push_unseparated(") ORDER BY sequence,ordinal");
     for row in query.build().fetch_all(pool).await? {
         let sequence: i64 = row.try_get("sequence")?;
-        tool_results.entry(sequence).or_default().push(ToolResultRow {
-            tool_id: row.try_get("tool_id")?,
-            is_error: row.try_get("is_error")?,
-            content_id: row.try_get("content_id")?,
-        });
+        tool_results
+            .entry(sequence)
+            .or_default()
+            .push(ToolResultRow {
+                tool_id: row.try_get("tool_id")?,
+                is_error: row.try_get("is_error")?,
+                content_id: row.try_get("content_id")?,
+            });
     }
     Ok(())
 }
@@ -293,7 +294,9 @@ async fn read_refs_postgres(
         let sequence: i64 = row.try_get("sequence")?;
         let ordinal: i64 = row.try_get("ordinal")?;
         let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence).or_default().push((ordinal, content_id));
+        refs.entry(sequence)
+            .or_default()
+            .push((ordinal, content_id));
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
@@ -305,11 +308,14 @@ async fn read_refs_postgres(
     separated.push_unseparated(") ORDER BY sequence,ordinal");
     for row in query.build().fetch_all(pool).await? {
         let sequence: i64 = row.try_get("sequence")?;
-        tool_results.entry(sequence).or_default().push(ToolResultRow {
-            tool_id: row.try_get("tool_id")?,
-            is_error: row.try_get("is_error")?,
-            content_id: row.try_get("content_id")?,
-        });
+        tool_results
+            .entry(sequence)
+            .or_default()
+            .push(ToolResultRow {
+                tool_id: row.try_get("tool_id")?,
+                is_error: row.try_get("is_error")?,
+                content_id: row.try_get("content_id")?,
+            });
     }
     Ok(())
 }

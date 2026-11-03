@@ -98,28 +98,36 @@ pub(super) async fn resolve_scope_sqlite(
     connection: &mut SqliteConnection<'_>,
     principal: &str,
 ) -> anyhow::Result<i64> {
-    sqlx::query("INSERT INTO content_scopes(principal) VALUES (?) ON CONFLICT(principal) DO NOTHING")
-        .bind(principal)
-        .execute(&mut *connection)
-        .await?;
-    Ok(sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal=?")
-        .bind(principal)
-        .fetch_one(&mut *connection)
-        .await?)
+    sqlx::query(
+        "INSERT INTO content_scopes(principal) VALUES (?) ON CONFLICT(principal) DO NOTHING",
+    )
+    .bind(principal)
+    .execute(&mut *connection)
+    .await?;
+    Ok(
+        sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal=?")
+            .bind(principal)
+            .fetch_one(&mut *connection)
+            .await?,
+    )
 }
 
 pub(super) async fn resolve_scope_postgres(
     connection: &mut PgConnection<'_>,
     principal: &str,
 ) -> anyhow::Result<i64> {
-    sqlx::query("INSERT INTO content_scopes(principal) VALUES ($1) ON CONFLICT(principal) DO NOTHING")
-        .bind(principal)
-        .execute(&mut *connection)
-        .await?;
-    Ok(sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal=$1")
-        .bind(principal)
-        .fetch_one(&mut *connection)
-        .await?)
+    sqlx::query(
+        "INSERT INTO content_scopes(principal) VALUES ($1) ON CONFLICT(principal) DO NOTHING",
+    )
+    .bind(principal)
+    .execute(&mut *connection)
+    .await?;
+    Ok(
+        sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal=$1")
+            .bind(principal)
+            .fetch_one(&mut *connection)
+            .await?,
+    )
 }
 
 /// 在调用方事务内登记正文，返回与 `units` 同序的 content id。
@@ -163,13 +171,13 @@ pub(super) async fn intern_sqlite(
                 .await?;
                 match inserted {
                     Some(id) => id,
-                    None => sqlx::query_scalar(
-                        "SELECT id FROM contents WHERE scope_id=? AND digest=?",
-                    )
-                    .bind(scope)
-                    .bind(digest.as_slice())
-                    .fetch_one(&mut *connection)
-                    .await?,
+                    None => {
+                        sqlx::query_scalar("SELECT id FROM contents WHERE scope_id=? AND digest=?")
+                            .bind(scope)
+                            .bind(digest.as_slice())
+                            .fetch_one(&mut *connection)
+                            .await?
+                    }
                 }
             }
         };
@@ -209,13 +217,12 @@ async fn reuse_or_insert_postgres(
     unit: &StoreUnit,
 ) -> anyhow::Result<i64> {
     let digest = unit.digest();
-    let locked: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM contents WHERE scope_id=$1 AND digest=$2 FOR KEY SHARE",
-    )
-    .bind(scope)
-    .bind(digest.as_slice())
-    .fetch_optional(&mut *connection)
-    .await?;
+    let locked: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM contents WHERE scope_id=$1 AND digest=$2 FOR KEY SHARE")
+            .bind(scope)
+            .bind(digest.as_slice())
+            .fetch_optional(&mut *connection)
+            .await?;
     if let Some(id) = locked {
         return Ok(id);
     }
@@ -233,11 +240,13 @@ async fn reuse_or_insert_postgres(
     if let Some(id) = inserted {
         return Ok(id);
     }
-    Ok(sqlx::query_scalar("SELECT id FROM contents WHERE scope_id=$1 AND digest=$2 FOR KEY SHARE")
-        .bind(scope)
-        .bind(digest.as_slice())
-        .fetch_one(&mut *connection)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT id FROM contents WHERE scope_id=$1 AND digest=$2 FOR KEY SHARE")
+            .bind(scope)
+            .bind(digest.as_slice())
+            .fetch_one(&mut *connection)
+            .await?,
+    )
 }
 
 /// 删除观察引用后，把已无任何引用的正文登记进回收队列（同一事务）。
@@ -318,8 +327,9 @@ pub(super) async fn read_contents(
                     by_id.insert(
                         id,
                         StoredContent {
-                            format: ContentFormat::from_database_value(format)
-                                .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?,
+                            format: ContentFormat::from_database_value(format).ok_or_else(
+                                || anyhow::anyhow!("unknown content format {format}"),
+                            )?,
                             raw: storage_codec::decode(&body)?.to_vec(),
                         },
                     );
@@ -345,7 +355,9 @@ pub(super) async fn read_contents(
                         id,
                         StoredContent {
                             format: ContentFormat::from_database_value(i64::from(format))
-                                .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?,
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("unknown content format {format}")
+                                })?,
                             raw: storage_codec::decode(&body)?.to_vec(),
                         },
                     );
