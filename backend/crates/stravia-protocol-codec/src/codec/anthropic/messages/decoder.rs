@@ -32,6 +32,8 @@ use super::types::{
     AnthropicRequest, AnthropicSystem, CacheControl as WireCacheControl,
     DocumentSource as WireDocumentSource,
 };
+use crate::codec::compaction::{self, Envelope};
+use crate::codec::open_responses::parser as open_responses_parser;
 
 pub struct AnthropicDecoder;
 
@@ -122,6 +124,11 @@ impl AnthropicDecoder {
             } else {
                 false
             }
+        }) && !req.messages.iter().any(|m| {
+            // A compaction block may need re-sealing for the selected Target, which the
+            // raw wire snapshot would bypass.
+            matches!(&m.content, AnthropicContent::Blocks(blocks)
+                if blocks.iter().any(|b| matches!(b, AnthropicContentBlock::Compaction { .. })))
         });
 
         let needs_raw_system = match &req.system {
@@ -301,6 +308,9 @@ impl AnthropicDecoder {
         if let Some(v) = raw_system {
             ingress.insert("__anthropic_raw_system".into(), v);
         }
+        if let Some(v) = req.compaction.filter(|v| !v.is_null()) {
+            ingress.insert(compaction::ANTHROPIC_COMPACTION_REQUEST_META.into(), v);
+        }
         // ── Build AiRequest ───────────────────────────────────────────────────
         let tools_opt = if user_tools.is_empty() {
             None
@@ -392,6 +402,41 @@ impl AnthropicDecoder {
 // ── Message decoding helpers ──────────────────────────────────────────────────
 
 fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
+    let msg = match msg.content {
+        AnthropicContent::Blocks(blocks)
+            if blocks
+                .iter()
+                .any(|block| matches!(block, AnthropicContentBlock::Compaction { .. })) =>
+        {
+            // A compaction block replaces everything before it, so it leads its message;
+            // it expands to the state (and, for a Responses window, the retained items)
+            // and the remaining blocks keep their own message.
+            let mut items = Vec::new();
+            let mut rest = Vec::new();
+            for block in blocks {
+                match block {
+                    AnthropicContentBlock::Compaction {
+                        content,
+                        signature,
+                        extra,
+                    } => items.extend(decode_compaction_block(content, signature, extra)?),
+                    other => rest.push(other),
+                }
+            }
+            if rest.is_empty() {
+                return Ok(items);
+            }
+            items.extend(decode_message(AnthropicMessage {
+                role: msg.role,
+                content: AnthropicContent::Blocks(rest),
+            })?);
+            return Ok(items);
+        }
+        content => AnthropicMessage {
+            role: msg.role,
+            content,
+        },
+    };
     let role = match msg.role.as_str() {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -517,6 +562,9 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                             },
                         });
                     }
+                    AnthropicContentBlock::Compaction { .. } => {
+                        anyhow::bail!("compaction blocks are expanded before role decoding")
+                    }
                 }
             }
 
@@ -553,6 +601,35 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
         tool_call_id,
         meta: None,
     }])
+}
+
+/// Native Anthropic state is routed through the Responses compact-window decoder as a
+/// sealed item, so it is byte-identical to the state a Responses client replays and to
+/// what the upstream parser registered.
+fn decode_compaction_block(
+    content: Option<String>,
+    signature: Option<String>,
+    extra: serde_json::Map<String, Value>,
+) -> Result<Vec<AiItem>> {
+    let Some(signature) = signature.filter(|signature| !signature.is_empty()) else {
+        anyhow::bail!("compaction block requires a signature");
+    };
+    if let Some(Envelope::Responses { output }) = compaction::open(&signature) {
+        return open_responses_parser::decode_compaction_window(&output);
+    }
+    // `content: null` is a failed compaction the API treats as a no-op.
+    let Some(content) = content else {
+        return Ok(Vec::new());
+    };
+    let mut block = extra;
+    block.insert("type".into(), "compaction".into());
+    block.insert("content".into(), content.into());
+    block.insert("signature".into(), signature.clone().into());
+    open_responses_parser::decode_compaction_window(&[serde_json::json!({
+        "type": "compaction",
+        "id": compaction::anthropic_state_id(&signature),
+        "encrypted_content": compaction::seal_anthropic(&Value::Object(block)),
+    })])
 }
 
 /// Build `meta = {"reasoning_content": ...}` so the OpenAI-compat encoder can
@@ -689,6 +766,9 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                         data: source.data,
                     },
                 });
+            }
+            AnthropicContentBlock::Compaction { .. } => {
+                anyhow::bail!("compaction blocks are expanded before role decoding")
             }
         }
     }

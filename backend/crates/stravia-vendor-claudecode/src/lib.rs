@@ -47,6 +47,7 @@ const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([
         Capability::Infer,
+        Capability::Compact,
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
@@ -172,9 +173,12 @@ pub fn execute(
     }
     require_route(channel, input.provider())?;
     match input {
-        OperationInput::Infer { provider, request } => infer(host, &provider, request)
-            .map(Box::new)
-            .map(OperationOutput::Infer),
+        OperationInput::Infer { provider, request } => {
+            infer(host, &provider, request, Operation::Infer)
+        }
+        OperationInput::Compact { provider, request } => {
+            infer(host, &provider, request, Operation::Compact)
+        }
         OperationInput::Auth { provider, request } => {
             auth::execute(host, &provider, request).map(OperationOutput::Auth)
         }
@@ -216,7 +220,8 @@ fn infer(
     host: &GuestHost,
     provider: &ProviderSnapshot,
     mut request: AiRequest,
-) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
+    operation: Operation,
+) -> Result<OperationOutput, PluginError> {
     request.model = required_model(provider)?.to_owned();
     // `max_tokens` 是 Anthropic Messages 的必填线上字段。先归一化参数，区分客户端
     // 显式给出的上限与发现数据/编码器回退补出的上限：前者沿用既有抬高规则，
@@ -230,6 +235,13 @@ fn infer(
         .summary
         .as_ref()
         .map(thinking::summary_display);
+    let compaction_control = (operation == Operation::Compact)
+        .then(|| {
+            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
+                &mut request,
+            )
+        })
+        .flatten();
     let mut encoded = common::encode_inference_request(&protocol, request)?;
     // 通用 Anthropic 编码器不输出 `thinking.display`（部分兼容上游不认该字段）；
     // 本插件的上游是 Anthropic 本身，将统一的摘要意图映射为官方展示控制。
@@ -251,7 +263,17 @@ fn infer(
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
     thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
-    let shaped = request::shape(
+    let shape = if operation == Operation::Compact {
+        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
+            &mut encoded.body,
+            compaction_control,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        request::shape_compaction
+    } else {
+        request::shape
+    };
+    let shaped = shape(
         encoded.body,
         client_version,
         &identity,
@@ -287,6 +309,10 @@ fn infer(
             ],
         },
     )?;
+    if operation == Operation::Compact {
+        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
+            .map(OperationOutput::Compact);
+    }
     common::decode_ai_response_renaming_tools(
         host,
         &protocol,
@@ -294,6 +320,8 @@ fn infer(
         common::classify_anthropic_error,
         request::decode_tool_name,
     )
+    .map(Box::new)
+    .map(OperationOutput::Infer)
 }
 
 /// 仅从宿主 principal/target scoped 传输亲和键派生稳定的 UUID 形态会话 ID，

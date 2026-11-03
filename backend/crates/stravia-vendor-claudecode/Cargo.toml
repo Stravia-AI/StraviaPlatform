@@ -17,6 +17,7 @@ workspace = true
 stravia-vendor-sdk = { workspace = true }
 stravia-vendor-common = { workspace = true }
 stravia-runtime-contract = { workspace = true }
+stravia-protocol-codec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 semver = { workspace = true }
@@ -32,6 +33,5 @@ serde_json = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
-stravia-protocol-codec = { workspace = true }
 stravia-vendor-runtime = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }

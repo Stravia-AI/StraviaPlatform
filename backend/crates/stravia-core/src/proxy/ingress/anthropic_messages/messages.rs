@@ -72,6 +72,18 @@ pub async fn handler(
             );
         }
     };
+    // A top-level `compaction` object makes this a standalone remote compaction request:
+    // it must not create a Generation Chain node or run the agent loop, same as
+    // `/v1/responses/compact`.
+    if request
+        .meta
+        .vendor
+        .ingress
+        .contains_key(stravia_protocol_codec::codec::compaction::ANTHROPIC_COMPACTION_REQUEST_META)
+    {
+        ctx.extensions
+            .insert(crate::model_turn::ModelTurnPurpose::Compact);
+    }
     dispatch_pipeline(
         gw,
         observer,

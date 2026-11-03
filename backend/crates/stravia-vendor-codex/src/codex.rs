@@ -237,7 +237,6 @@ fn write_identities(
 pub(super) enum BodyOperation {
     Http,
     WebSocket,
-    Compact,
     Search,
     Image,
 }
@@ -297,19 +296,6 @@ const RESPONSE_FIELDS: &[&str] = &[
     "text",
     "client_metadata",
 ];
-// rust-v0.134.0 codex-api/src/common.rs::CompactionInput, the official
-// /responses/compact contract retained for this platform's compact operation.
-const COMPACT_FIELDS: &[&str] = &[
-    "model",
-    "input",
-    "instructions",
-    "tools",
-    "parallel_tool_calls",
-    "reasoning",
-    "service_tier",
-    "prompt_cache_key",
-    "text",
-];
 
 pub(super) fn prepare_body(body: &mut Value) -> Result<(), stravia_vendor_sdk::PluginError> {
     prepare_operation_body(body, BodyOperation::Http)
@@ -324,20 +310,14 @@ pub(super) fn prepare_operation_body(
         .ok_or_else(|| invalid("Codex Responses request body must be an object"))?;
     object.retain(|key, value| {
         !value.is_null()
-            && if operation == BodyOperation::Compact {
-                COMPACT_FIELDS.contains(&key.as_str())
-            } else {
-                RESPONSE_FIELDS.contains(&key.as_str())
-                    || (operation == BodyOperation::WebSocket
-                        && matches!(key.as_str(), "previous_response_id" | "generate"))
-            }
+            && (RESPONSE_FIELDS.contains(&key.as_str())
+                || (operation == BodyOperation::WebSocket
+                    && matches!(key.as_str(), "previous_response_id" | "generate")))
     });
-    if operation != BodyOperation::Compact {
-        object.insert("store".into(), Value::Bool(false));
-        // The native endpoint rejects stream:false. Client delivery remains
-        // host-owned; even a unary client request uses the official SSE wire.
-        object.insert("stream".into(), Value::Bool(true));
-    }
+    object.insert("store".into(), Value::Bool(false));
+    // The native endpoint rejects stream:false. Client delivery remains
+    // host-owned; even a unary client request uses the official SSE wire.
+    object.insert("stream".into(), Value::Bool(true));
     // Filter control envelopes, never user input, tool schemas, grammars or
     // image/search business data.
     retain_control_fields(object.get_mut("reasoning"), &["effort", "summary"]);
@@ -471,11 +451,7 @@ pub(super) fn append_runtime_headers(
     let request_id = session.metadata["thread_id"]
         .as_str()
         .expect("native thread ID");
-    // The retained rust-v0.134.0 unary compact profile has session/thread
-    // headers but no x-client-request-id.
-    if operation != BodyOperation::Compact {
-        set_header(headers, "x-client-request-id", request_id.to_owned());
-    }
+    set_header(headers, "x-client-request-id", request_id.to_owned());
     set_header(headers, "x-codex-routing-hint", routing_hint(body)?);
     Ok(())
 }
@@ -707,10 +683,28 @@ pub(super) fn search(
 }
 
 pub(super) fn parse_responses_body(bytes: &[u8]) -> Result<Value, stravia_vendor_sdk::PluginError> {
+    let (output_items, mut response) = scan_responses_body(bytes)?;
+    if response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+        && !output_items.is_empty()
+    {
+        response["output"] = Value::Array(output_items);
+    }
+    Ok(response)
+}
+
+/// 返回流内逐项完成的 output item 与终态 response；非 SSE 的 JSON 体没有逐项事件。
+pub(super) fn scan_responses_body(
+    bytes: &[u8],
+) -> Result<(Vec<Value>, Value), stravia_vendor_sdk::PluginError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| retryable("Codex returned non-UTF-8 response data"))?;
     if !text.trim_start().starts_with("data:") && !text.contains("\nevent:") {
-        return serde_json::from_str(text).map_err(|_| retryable("Codex returned malformed JSON"));
+        let response =
+            serde_json::from_str(text).map_err(|_| retryable("Codex returned malformed JSON"))?;
+        return Ok((Vec::new(), response));
     }
     let normalized = text.replace("\r\n", "\n");
     let mut output_items = Vec::new();
@@ -742,7 +736,7 @@ pub(super) fn parse_responses_body(bytes: &[u8]) -> Result<Value, stravia_vendor
                 }
             }
             "response.completed" | "response.done" => {
-                let mut response = payload.get("response").cloned().unwrap_or(payload);
+                let response = payload.get("response").cloned().unwrap_or(payload);
                 if response
                     .get("status")
                     .and_then(Value::as_str)
@@ -750,15 +744,7 @@ pub(super) fn parse_responses_body(bytes: &[u8]) -> Result<Value, stravia_vendor
                 {
                     return Err(retryable("Codex response was incomplete"));
                 }
-                if response
-                    .get("output")
-                    .and_then(Value::as_array)
-                    .is_none_or(Vec::is_empty)
-                    && !output_items.is_empty()
-                {
-                    response["output"] = Value::Array(output_items);
-                }
-                return Ok(response);
+                return Ok((output_items, response));
             }
             "error" | "response.failed" | "response.incomplete" => {
                 return Err(stravia_vendor_common::common::model_error(
@@ -1047,7 +1033,6 @@ mod tests {
         for operation in [
             BodyOperation::Http,
             BodyOperation::WebSocket,
-            BodyOperation::Compact,
             BodyOperation::Search,
             BodyOperation::Image,
         ] {
@@ -1077,13 +1062,7 @@ mod tests {
                 assert!(body.get("previous_response_id").is_none());
                 assert!(body.get("generate").is_none());
             }
-            if operation == BodyOperation::Compact {
-                assert!(body.get("stream").is_none());
-                assert!(body.get("store").is_none());
-                assert!(body.get("access_programs").is_none());
-            } else {
-                assert_eq!(body["store"], false);
-            }
+            assert_eq!(body["store"], false);
             assert_eq!(body["service_tier"], "priority");
         }
     }
@@ -1259,7 +1238,6 @@ mod tests {
         for operation in [
             BodyOperation::Http,
             BodyOperation::WebSocket,
-            BodyOperation::Compact,
             BodyOperation::Search,
             BodyOperation::Image,
         ] {
@@ -1269,11 +1247,7 @@ mod tests {
             append_runtime_headers(&provider, &body, &first, operation, &mut headers).unwrap();
             let headers: BTreeMap<_, _> = headers.into_iter().collect();
             assert_eq!(headers["thread-id"], "5d42eca3-00ce-7fd9-879a-2f189010d915");
-            if operation == BodyOperation::Compact {
-                assert!(!headers.contains_key("x-client-request-id"));
-            } else {
-                assert_eq!(headers["x-client-request-id"], headers["thread-id"]);
-            }
+            assert_eq!(headers["x-client-request-id"], headers["thread-id"]);
             assert!(
                 headers
                     .values()

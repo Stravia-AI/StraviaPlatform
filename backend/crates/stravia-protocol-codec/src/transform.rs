@@ -768,6 +768,11 @@ fn prune_request(pair: ProtocolPair, request: &mut AiRequest, capabilities: &End
     {
         request.tool_choice = None;
     }
+    if pair.egress.protocol != Protocol::AnthropicMessages {
+        // Only Anthropic can replay an Anthropic compaction block; elsewhere its readable
+        // summary is the only part of the state that still means anything.
+        downgrade_compaction_summaries(request);
+    }
     if pair.ingress != pair.egress {
         if !request.parameters.native_tools.is_empty()
             && !request.parameters.native_tools.iter().any(|tool| {
@@ -791,7 +796,10 @@ fn prune_request(pair: ProtocolPair, request: &mut AiRequest, capabilities: &End
         request.items.retain(|item| {
             item.unknown_ref().is_none()
                 && (pair.egress.protocol == Protocol::OpenResponses
-                    || (!item.is_compaction() && !item.is_compaction_trigger()))
+                    || (!item.is_compaction_trigger()
+                        && (!item.is_compaction()
+                            || pair.egress.protocol == Protocol::AnthropicMessages
+                                && compaction_summary(item).is_some())))
         });
     }
     prune_items(
@@ -801,6 +809,68 @@ fn prune_request(pair: ProtocolPair, request: &mut AiRequest, capabilities: &End
         false,
         pair.ingress == pair.egress,
     );
+}
+
+/// The readable summary of an Anthropic-origin compaction state, if `item` is one.
+fn compaction_summary(item: &stravia_runtime_contract::protocol::ir::AiItem) -> Option<&str> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
+    match &item.content {
+        MessageContent::Blocks(blocks) => match blocks.as_slice() {
+            [
+                ContentBlock::Compaction {
+                    summary: Some(summary),
+                    ..
+                },
+            ] => Some(summary),
+            _ => None,
+        },
+        MessageContent::Text(_) => None,
+    }
+}
+
+/// Replace every Anthropic-origin compaction state with its summary as ordinary user
+/// context. The signature cannot be verified outside the Target that issued it, but the
+/// summary is the upstream-generated record of the history it replaced, so keeping it
+/// preserves context without inventing anything. Returns how many states were replaced.
+fn downgrade_compaction_summaries(request: &mut AiRequest) -> usize {
+    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
+    let mut replaced = 0;
+    for item in &mut request.items {
+        let Some(summary) = compaction_summary(item) else {
+            continue;
+        };
+        *item = AiItem {
+            role: Role::User,
+            content: MessageContent::Text(
+                format!(
+                    "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{summary}\n</summary>"
+                )
+                .into(),
+            ),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        replaced += 1;
+    }
+    replaced
+}
+
+/// Target-mismatch fallback: if every compaction state in `request` carries a readable
+/// summary (Anthropic-origin), turn them all into plain summary context and return `true`.
+/// Otherwise leave the request untouched and return `false`, because opaque Responses state
+/// has no content that survives outside the Target that issued it.
+pub fn downgrade_foreign_compaction(request: &mut AiRequest) -> bool {
+    if !request
+        .items
+        .iter()
+        .filter(|item| item.is_compaction())
+        .all(|item| compaction_summary(item).is_some())
+    {
+        return false;
+    }
+    downgrade_compaction_summaries(request);
+    true
 }
 
 /// 对象入参无法表达的调用和它关联的结果必须一起省略；绝不补空对象。
@@ -1128,7 +1198,10 @@ fn request_block_representable(
             ContentBlock::Text { .. }
             | ContentBlock::Document { .. }
             | ContentBlock::ToolUse { .. }
-            | ContentBlock::ToolResult { .. } => true,
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Compaction {
+                summary: Some(_), ..
+            } => true,
             ContentBlock::Image { source, .. } => match source {
                 MediaSource::Url(_) | MediaSource::FileId { .. } => true,
                 MediaSource::Base64 { media_type, .. } => matches!(

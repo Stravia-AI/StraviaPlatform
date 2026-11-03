@@ -862,6 +862,8 @@ fn projection(
                 "__anthropic_raw_system",
                 "__anthropic_raw_messages",
                 "__anthropic_raw_tools",
+                // 独立压缩请求的 `compaction` 控制（如 instructions）只能由同协议上游表达。
+                "__anthropic_compaction_request",
             ],
             _ => &[],
         };

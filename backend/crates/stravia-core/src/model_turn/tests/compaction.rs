@@ -9,7 +9,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             ws::{Message, WebSocketUpgrade},
         },
         response::IntoResponse,
-        routing::{get, post},
+        routing::get,
     };
     use serde_json::{Value, json};
     fn compaction_error(code: &str) -> Value {
@@ -32,13 +32,44 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             )
                 .into_response();
         }
-        if body.get("stream").is_some() || body.get("input").and_then(Value::as_array).is_none() {
+        if body["stream"] != true
+            || body["input"]
+                .as_array()
+                .and_then(|input| input.last())
+                .is_none_or(|item| item["type"] != "compaction_trigger")
+        {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
-        Json(json!({"id":"compact-unary","object":"response.compaction","created_at":17,
-            "output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"retained"}]},
-                {"type":"compaction","id":"compact-state-unary","encrypted_content":"unary-state","rolling_identity":{"version":2}}],
-            "usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}})).into_response()
+        let state = json!({"type":"compaction","id":"compact-state-stream","encrypted_content":"stream-state","rolling_identity":{"version":2}});
+        let usage = json!({"input_tokens":9,"output_tokens":2,"total_tokens":11,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}});
+        let completed =
+            stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                "compact-stream",
+                "upstream-model",
+                "completed",
+                Vec::new(),
+                Value::Null,
+                Value::Null,
+                usage,
+            );
+        let events = [
+            json!({"type":"response.output_item.done","output_index":0,"item":state}),
+            json!({"type":"response.completed","response":completed}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect::<String>();
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            body,
+        )
+            .into_response()
     }
     async fn responses(
         State(calls): State<Arc<AtomicUsize>>,
@@ -88,8 +119,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
     let address = listener.local_addr().unwrap();
     let upstream_calls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
-        .route("/responses", get(responses))
-        .route("/responses/compact", post(compact))
+        .route("/responses", get(responses).post(compact))
         .with_state(Arc::clone(&upstream_calls));
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -200,12 +230,15 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
         .model_turn
         .execute(input)
         .await
-        .expect("standalone uses HTTP unary despite Codex stream-only generation");
+        .expect("standalone compaction runs as a trigger stream even for a unary caller");
     let CanonicalEvent::Compacted(result) = turn.output.next().await.unwrap().unwrap() else {
         panic!("native compact terminal required")
     };
-    assert_eq!(result.wire["id"], "compact-unary");
-    assert_eq!(result.wire["output"][0]["content"][0]["text"], "retained");
+    assert_eq!(result.wire["id"], "compact-stream");
+    assert_eq!(
+        result.wire["output"][0]["content"][0]["text"],
+        "compact this"
+    );
     assert_eq!(
         result.wire["output"][1]["rolling_identity"],
         json!({"version":2})

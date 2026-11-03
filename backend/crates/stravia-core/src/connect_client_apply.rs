@@ -546,6 +546,12 @@ fn plan_omp(
     // 可选参数改成必填；显式声明后 OMP 才发送与自身 schema 适配后的 `strict: true`。
     if let Some(object) = provider.as_object_mut() {
         object.insert("compat".to_owned(), json!({ "supportsStrictMode": true }));
+        // Stravia 已实现跨协议 Remote Compaction（`POST /v1/responses/compact`，端点由
+        // `baseUrl` 推导），但 OMP 只对内置 `openai` provider、显式配置 endpoint 的 Codex
+        // 和 Bedrock OpenAI 路由自动启用 V1 原生压缩；自定义 provider 必须显式 opt-in。
+        // 这里只开 V1：不设置 `v2StreamingEnabled`，因为 V2 需要上游支持
+        // `compaction_trigger` 流式压缩，Stravia 尚未实现。
+        object.insert("remoteCompaction".to_owned(), json!({ "enabled": true }));
     }
     upsert_json_path(
         &mut document,
@@ -1763,9 +1769,11 @@ name = "Other"
     }
 
     /// OMP 对自定义 Responses 模型默认不发 `strict`，而 Responses 上游省略时会自动严格化；
-    /// 配置必须显式声明支持，且只写在 OMP 自己的 provider 上。
+    /// 配置必须显式声明支持。OMP 也不会为自定义 provider 自动启用 V1 原生压缩，Stravia 已
+    /// 实现 `POST /v1/responses/compact`，因此同样要显式开启。两项都只写在 OMP 自己的
+    /// provider 上，Pi 的 `models.json` 不包含它们。
     #[test]
-    fn omp_declares_strict_tool_support_but_pi_does_not() {
+    fn omp_declares_strict_tool_support_and_remote_compaction_but_pi_does_not() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut environment = environment(temporary.path());
         environment.insert(
@@ -1779,13 +1787,19 @@ name = "Other"
             &BTreeMap::new(),
         )
         .expect("OMP plan");
-        let document =
-            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
-                .expect("OMP YAML");
+        let text = planned_text(&omp, "models.yml");
+        let document = serde_saphyr::from_str::<serde_json::Value>(&text).expect("OMP YAML");
+        let provider = &document["providers"]["stravia"];
         assert_eq!(
-            document["providers"]["stravia"]["compat"]["supportsStrictMode"],
+            provider["compat"]["supportsStrictMode"],
             serde_json::json!(true)
         );
+        // 整对象比较同时锁住“只开 V1”：任何 `v2StreamingEnabled` 等键都会让断言失败。
+        assert_eq!(
+            provider["remoteCompaction"],
+            serde_json::json!({ "enabled": true })
+        );
+        assert!(!text.contains("v2StreamingEnabled"));
 
         let pi = plan_connect_client_apply(
             &standard_input(ConnectClientId::Pi),
@@ -1795,7 +1809,56 @@ name = "Other"
         .expect("Pi plan");
         let document = serde_json::from_str::<serde_json::Value>(&planned_text(&pi, "models.json"))
             .expect("Pi JSON");
-        assert!(document["providers"]["stravia"].get("compat").is_none());
+        let provider = &document["providers"]["stravia"];
+        assert!(provider.get("compat").is_none());
+        assert!(provider.get("remoteCompaction").is_none());
+    }
+
+    /// OMP 的 `providers.<Stravia>` 由接入流程整体拥有：用户已有的 provider 级
+    /// `compat` / `remoteCompaction` 与其它同层键一样被生成结果替换，避免旧的
+    /// `enabled: false` 或 V2 开关继续生效；provider 之外的键必须原样保留。
+    #[test]
+    fn omp_replaces_user_remote_compaction_like_other_owned_provider_keys() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary
+            .path()
+            .join(".omp")
+            .join("agent")
+            .join("models.yml");
+        let existing = BTreeMap::from([(
+            path,
+            br#"providers:
+  stravia:
+    compat:
+      supportsStrictMode: false
+    remoteCompaction:
+      enabled: false
+      v2StreamingEnabled: true
+modelRoles:
+  default: other/current
+"#
+            .to_vec(),
+        )]);
+
+        let plan = plan_connect_client_apply(
+            &standard_input(ConnectClientId::Omp),
+            &environment(temporary.path()),
+            &existing,
+        )
+        .expect("OMP plan");
+        let document =
+            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&plan, "models.yml"))
+                .expect("OMP YAML");
+        assert_eq!(document["modelRoles"]["default"], "other/current");
+        let provider = &document["providers"]["stravia"];
+        assert_eq!(
+            provider["compat"],
+            serde_json::json!({ "supportsStrictMode": true })
+        );
+        assert_eq!(
+            provider["remoteCompaction"],
+            serde_json::json!({ "enabled": true })
+        );
     }
 
     /// OMP 默认只保留最近 5 张图片，超出时改写已发送历史并使上游缓存失效；预算只写给

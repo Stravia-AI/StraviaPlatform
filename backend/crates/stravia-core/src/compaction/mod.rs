@@ -367,8 +367,10 @@ mod tests {
         else {
             panic!("native state must be typed");
         };
-        let stravia_runtime_contract::protocol::ir::ContentBlock::Compaction { encrypted_content } =
-            &mut blocks[0]
+        let stravia_runtime_contract::protocol::ir::ContentBlock::Compaction {
+            encrypted_content,
+            ..
+        } = &mut blocks[0]
         else {
             panic!("native compaction block");
         };

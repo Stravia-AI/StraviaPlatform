@@ -474,3 +474,502 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         gateway.observation.shutdown().await;
     }).await.expect("native ingress WebSocket scenario timed out");
 }
+
+// ── Cross-protocol Remote Compaction (ADR-0089) ─────────────────────────────────
+
+/// Drives a client request against the scripted upstream. If the Gateway answers before
+/// the upstream was ever reached, the answer is the failure; waiting for the upstream
+/// would only hang.
+async fn exchange(
+    sending: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+    supply: impl std::future::Future<Output = ()>,
+) -> reqwest::Response {
+    tokio::pin!(sending);
+    tokio::pin!(supply);
+    tokio::select! {
+        response = &mut sending => {
+            let response = response.unwrap();
+            panic!(
+                "Gateway answered before reaching the upstream: {} {}",
+                response.status(),
+                response.text().await.unwrap()
+            );
+        }
+        () = &mut supply => {}
+    }
+    sending.await.unwrap()
+}
+
+struct SeenRequest {
+    path: String,
+    headers: axum::http::HeaderMap,
+    body: Value,
+    respond: oneshot::Sender<Value>,
+}
+
+async fn upstream_json(
+    State(requests): State<mpsc::Sender<SeenRequest>>,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let (respond, response) = oneshot::channel();
+    requests
+        .send(SeenRequest {
+            path: uri.path().to_owned(),
+            headers,
+            body,
+            respond,
+        })
+        .await
+        .unwrap();
+    Json(response.await.expect("test supplies upstream response"))
+}
+
+struct Harness {
+    gateway: Gateway,
+    address: std::net::SocketAddr,
+    token: String,
+    principal: Principal,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+    _directory: tempfile::TempDir,
+}
+
+impl Harness {
+    async fn start(protocol: &str, upstream: Router) -> Self {
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_address = provider_listener.local_addr().unwrap();
+        let provider_server = tokio::spawn(async move {
+            axum::serve(provider_listener, upstream).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new(GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let admin = gateway.admin();
+        let provider = admin
+            .create_provider(CreateProvider {
+                name: Some("local cross-protocol compaction Provider".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some(protocol.into()),
+                    base_url: format!("http://{provider_address}/v1"),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "local-provider-key".into(),
+                },
+                vendor_options: Default::default(),
+                use_proxy: false,
+            })
+            .await
+            .unwrap();
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                "upstream-model",
+                CreateManualProviderModel {
+                    metadata: json!({"id":"upstream-model","name":"upstream-model","modalities":{"input":["text"],"output":["text"]}}),
+                    template_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let route = admin
+            .create_model(CreateRoute {
+                output_modality: crate::db::models::RouteOutputModality::Text,
+                model_id: "cross".into(),
+                display_name: None,
+                balance: None,
+                targets: vec![crate::db::models::CreateTarget {
+                    provider_id: provider.id,
+                    model: "upstream-model".into(),
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
+                billing: None,
+                default_thinking_level: None,
+            })
+            .await
+            .unwrap();
+        let key = admin
+            .create_api_key(CreateApiKey {
+                key: None,
+                name: "local cross-protocol compaction client".into(),
+                rpm_limit: None,
+                expires_at: None,
+                mcp_access_enabled: false,
+                transparent_injection_enabled: false,
+                spend_limit: None,
+                inject_web_search: false,
+                inject_media_generation: false,
+                inject_media_understanding: false,
+                model_ids: vec![route.id.into()],
+            })
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = super::create_router(gateway.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Self {
+            gateway,
+            address,
+            token: key.token,
+            principal: Principal::new(key.id),
+            servers: vec![provider_server, server],
+            _directory: directory,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.address)
+    }
+
+    async fn finish(self) {
+        for server in &self.servers {
+            server.abort();
+        }
+        self.gateway.observation.shutdown().await;
+    }
+}
+
+fn anthropic_compaction_message(content: &str, signature: &str) -> Value {
+    json!({
+        "id": "msg_upstream",
+        "type": "message",
+        "role": "assistant",
+        "model": "upstream-model",
+        "content": [{"type": "compaction", "content": content, "signature": signature}],
+        "stop_reason": "compaction",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "iterations": [{"type": "compaction", "input_tokens": 1200, "output_tokens": 300}]
+        }
+    })
+}
+
+fn anthropic_text_message(text: &str) -> Value {
+    json!({
+        "id": "msg_followup",
+        "type": "message",
+        "role": "assistant",
+        "model": "upstream-model",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "output_tokens": 1}
+    })
+}
+
+#[tokio::test]
+async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the_block() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (requests, mut received) = mpsc::channel::<SeenRequest>(2);
+        let harness = Harness::start(
+            "anthropic-messages",
+            Router::new()
+                .route("/v1/messages", post(upstream_json))
+                .with_state(requests),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let upstream = anthropic_compaction_message("Summary of the work", "sig-abc");
+        let block = upstream["content"][0].clone();
+
+        let sending = client
+            .post(harness.url("/v1/responses/compact"))
+            .bearer_auth(&harness.token)
+            .json(&json!({
+                "model": "cross",
+                "input": "summarize this long history",
+                "instructions": "keep file names"
+            }))
+            .send();
+        let supply = async {
+            let seen = received.recv().await.unwrap();
+            assert_eq!(seen.path, "/v1/messages");
+            assert_eq!(seen.body["compaction"], json!({"type": "summarize"}));
+            assert!(seen.body.get("stream").is_none(), "{}", seen.body);
+            assert!(
+                seen.body["system"].to_string().contains("keep file names"),
+                "{}",
+                seen.body
+            );
+            assert!(
+                seen.body["messages"]
+                    .to_string()
+                    .contains("summarize this long history")
+            );
+            assert!(
+                seen.headers["anthropic-beta"]
+                    .to_str()
+                    .unwrap()
+                    .contains("compact-2026-09-04")
+            );
+            assert_eq!(seen.headers["x-api-key"], "local-provider-key");
+            seen.respond.send(upstream.clone()).unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        let resource: Value = response.json().await.unwrap();
+        assert_eq!(resource["object"], "response.compaction");
+        assert_eq!(resource["usage"]["input_tokens"], 1200);
+        assert_eq!(resource["usage"]["output_tokens"], 300);
+        let item = resource["output"][0].clone();
+        assert_eq!(item["type"], "compaction");
+        assert_eq!(
+            stravia_protocol_codec::codec::compaction::open(
+                item["encrypted_content"].as_str().unwrap()
+            ),
+            Some(
+                stravia_protocol_codec::codec::compaction::Envelope::Anthropic {
+                    block: block.clone()
+                }
+            ),
+            "the Anthropic block must travel intact inside the Responses state"
+        );
+        // Registered at compaction time under the same identity the client replays.
+        let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .unwrap();
+        let decoded = pair
+            .decode_request(json!({"model": "cross", "input": [item.clone()]}))
+            .unwrap();
+        assert!(
+            harness
+                .gateway
+                .compaction
+                .resolve(&harness.principal, &decoded.items)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Replay on the same Target sends the original block, byte for byte.
+        let sending = client
+            .post(harness.url("/v1/responses"))
+            .bearer_auth(&harness.token)
+            .json(&json!({
+                "model": "cross",
+                "input": [item, {"role": "user", "content": "next step"}]
+            }))
+            .send();
+        let supply = async {
+            let seen = received.recv().await.unwrap();
+            assert_eq!(seen.body["messages"][0]["role"], "assistant");
+            assert_eq!(seen.body["messages"][0]["content"], json!([block]));
+            assert_eq!(
+                seen.body["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"],
+                "next step"
+            );
+            assert!(
+                seen.headers["anthropic-beta"]
+                    .to_str()
+                    .unwrap()
+                    .contains("compact-2026-09-04")
+            );
+            seen.respond
+                .send(anthropic_text_message("continuing"))
+                .unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        harness.finish().await;
+    })
+    .await
+    .expect("Responses client over Anthropic upstream scenario timed out");
+}
+
+#[tokio::test]
+async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_window() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (compact_requests, mut compact_received) = mpsc::channel::<ProviderRequest>(2);
+        let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
+        let harness = Harness::start(
+            "open-responses",
+            Router::new()
+                .route(
+                    "/v1/responses/compact",
+                    post(publication_compact).with_state(compact_requests),
+                )
+                .route("/v1/responses", post(responses).with_state(requests)),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let retained = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"retained question"}]});
+        let upstream_resource = |id: &str, cipher: &str| {
+            json!({
+                "id": id,
+                "object": "response.compaction",
+                "created_at": 1730000001,
+                "output": [
+                    retained.clone(),
+                    {"type": "compaction", "id": format!("{id}_state"), "encrypted_content": cipher}
+                ],
+                "usage": {
+                    "input_tokens": 32, "output_tokens": 4, "total_tokens": 36,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0}
+                }
+            })
+        };
+
+        let sending = client
+            .post(harness.url("/v1/messages"))
+            .header("x-api-key", &harness.token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "cross",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": "summarize this long history"}],
+                "compaction": {"type": "summarize"}
+            }))
+            .send();
+        let supply = async {
+            let request = compact_received.recv().await.unwrap();
+            assert!(request.body.to_string().contains("summarize this long history"));
+            request.respond.send(upstream_resource("cmp_up_1", "opaque-cipher")).unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(response.status().is_success(), "{}", response.text().await.unwrap());
+        let message: Value = response.json().await.unwrap();
+        assert_eq!(message["type"], "message");
+        assert_eq!(message["stop_reason"], "compaction");
+        assert_eq!(message["usage"]["iterations"][0]["input_tokens"], 32);
+        let block = message["content"][0].clone();
+        assert_eq!(block["type"], "compaction");
+        let Some(stravia_protocol_codec::codec::compaction::Envelope::Responses { output }) =
+            stravia_protocol_codec::codec::compaction::open(block["signature"].as_str().unwrap())
+        else {
+            panic!("the Responses window must travel in the block signature: {block}");
+        };
+        assert_eq!(output[0], retained);
+        assert_eq!(output[1]["encrypted_content"], "opaque-cipher");
+
+        // `stream: true` still gets one whole block, framed as Anthropic SSE.
+        let sending = client
+            .post(harness.url("/v1/messages"))
+            .header("x-api-key", &harness.token)
+            .json(&json!({
+                "model": "cross",
+                "max_tokens": 1024,
+                "stream": true,
+                "messages": [{"role": "user", "content": "summarize this other history"}],
+                "compaction": {"type": "summarize"}
+            }))
+            .send();
+        let supply = async {
+            let request = compact_received.recv().await.unwrap();
+            request.respond.send(upstream_resource("cmp_up_2", "opaque-cipher-2")).unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(response.status().is_success());
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let wire = response.text().await.unwrap();
+        let order = ["message_start", "content_block_start", "content_block_stop", "message_delta", "message_stop"]
+            .map(|event| wire.find(&format!("event: {event}")).unwrap_or_else(|| panic!("{event} missing: {wire}")));
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{wire}");
+        assert!(wire.contains(r#""stop_reason":"compaction""#), "{wire}");
+        assert!(wire.contains(r#""type":"compaction""#), "{wire}");
+
+        // Replay: the window sealed in the block expands back to native Responses items.
+        let sending = client
+            .post(harness.url("/v1/messages"))
+            .header("x-api-key", &harness.token)
+            .json(&json!({
+                "model": "cross",
+                "max_tokens": 256,
+                "messages": [
+                    {"role": "assistant", "content": [block]},
+                    {"role": "user", "content": "next step"}
+                ]
+            }))
+            .send();
+        let supply = async {
+            let request = received.recv().await.unwrap();
+            let input = request.body["input"].as_array().unwrap();
+            assert_eq!(input[0]["content"][0]["text"], "retained question", "{input:?}");
+            assert_eq!(input[1]["type"], "compaction", "{input:?}");
+            assert_eq!(input[1]["encrypted_content"], "opaque-cipher");
+            assert!(input.last().unwrap().to_string().contains("next step"));
+            request.respond.send(completed("followup", json!([{
+                "type":"message","id":"accepted","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"replay accepted","annotations":[]}]
+            }]))).unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(response.status().is_success(), "{}", response.text().await.unwrap());
+        let reply: Value = response.json().await.unwrap();
+        assert_eq!(reply["content"][0]["text"], "replay accepted");
+        harness.finish().await;
+    })
+    .await
+    .expect("Anthropic client over Responses upstream scenario timed out");
+}
+
+#[tokio::test]
+async fn anthropic_client_gets_the_anthropic_upstream_compaction_verbatim() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (requests, mut received) = mpsc::channel::<SeenRequest>(1);
+        let harness = Harness::start(
+            "anthropic-messages",
+            Router::new()
+                .route("/v1/messages", post(upstream_json))
+                .with_state(requests),
+        )
+        .await;
+        let upstream = anthropic_compaction_message("Summary", "sig-same");
+        let sending = reqwest::Client::new()
+            .post(harness.url("/v1/messages"))
+            .header("x-api-key", &harness.token)
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .json(&json!({
+                "model": "cross",
+                "max_tokens": 1024,
+                "stop_sequences": ["END"],
+                "messages": [{"role": "user", "content": "history"}],
+                "compaction": {"type": "summarize", "instructions": "Only file names"}
+            }))
+            .send();
+        let supply = async {
+            let seen = received.recv().await.unwrap();
+            assert_eq!(
+                seen.body["compaction"],
+                json!({"type": "summarize", "instructions": "Only file names"})
+            );
+            assert!(
+                seen.body.get("stop_sequences").is_none(),
+                "incompatible with compaction"
+            );
+            let betas = seen.headers["anthropic-beta"].to_str().unwrap().to_owned();
+            assert!(betas.contains("compact-2026-09-04"), "{betas}");
+            seen.respond.send(upstream.clone()).unwrap();
+        };
+        let response = exchange(sending, supply).await;
+        assert!(response.status().is_success());
+        assert_eq!(response.json::<Value>().await.unwrap(), upstream);
+        harness.finish().await;
+    })
+    .await
+    .expect("Anthropic passthrough compaction scenario timed out");
+}

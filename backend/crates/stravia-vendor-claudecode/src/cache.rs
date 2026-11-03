@@ -22,12 +22,14 @@ const LONG_CACHE_TTL: &str = "1h";
 const DECIMATION_INTERVAL: usize = 15;
 
 /// 上游拒绝在这些块上携带 `cache_control`（生成的推理内容、回退边界、工具增删控制）。
-const UNCACHEABLE_BLOCK_TYPES: [&str; 5] = [
+const UNCACHEABLE_BLOCK_TYPES: [&str; 6] = [
     "thinking",
     "redacted_thinking",
     "fallback",
     "tool_addition",
     "tool_removal",
+    // 压缩块必须逐字节回放，附加 `cache_control` 会使上游拒绝其签名。
+    "compaction",
 ];
 
 fn breakpoint() -> Value {

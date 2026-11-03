@@ -120,6 +120,48 @@ fn reject_before_admission(
     response
 }
 
+/// Standalone compaction answer in the ingress protocol, whatever protocol the upstream
+/// spoke. A matching upstream body is relayed verbatim; a foreign one is translated so the
+/// client only ever sees its own wire format.
+fn compaction_response(
+    ingress: ProtocolId,
+    wire: &serde_json::Value,
+    model: &str,
+    stream: bool,
+) -> Response {
+    let wire = match stravia_protocol_codec::codec::compaction::client_compaction_wire(
+        ingress, wire, model,
+    ) {
+        Ok(wire) => wire,
+        Err(error) => {
+            return coded_error_response(
+                StatusCode::BAD_GATEWAY,
+                "invalid_compaction_response",
+                &error.to_string(),
+            );
+        }
+    };
+    if !stream || ingress != stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
+    {
+        return axum::Json(wire).into_response();
+    }
+    // Anthropic delivers a compaction block whole, so the unary upstream result streams
+    // exactly like a native one.
+    let body: String =
+        stravia_protocol_codec::codec::compaction::anthropic_compaction_events(&wire)
+            .into_iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect();
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 fn ai_response_to_deltas(
     response: &AiResponse,
 ) -> Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta> {
@@ -805,9 +847,12 @@ pub(super) async fn orchestrate(
             }
         };
         let response = match turn.output.next().await {
-            Some(Ok(CanonicalEvent::Compacted(response))) => {
-                axum::Json(response.wire).into_response()
-            }
+            Some(Ok(CanonicalEvent::Compacted(response))) => compaction_response(
+                ingress,
+                &response.wire,
+                &client_request.model,
+                client_request.stream.enabled,
+            ),
             Some(Err(error)) => {
                 return model_turn_error_response(error);
             }

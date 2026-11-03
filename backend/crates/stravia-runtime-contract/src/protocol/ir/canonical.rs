@@ -5,9 +5,14 @@ pub fn native_compaction_item(item: &crate::protocol::ir::AiItem) -> Option<serd
     let MessageContent::Blocks(blocks) = &item.content else {
         return None;
     };
-    let (kind, encrypted_content) = match blocks.as_slice() {
-        [ContentBlock::Compaction { encrypted_content }] => ("compaction", Some(encrypted_content)),
-        [ContentBlock::CompactionTrigger {}] => ("compaction_trigger", None),
+    let (kind, encrypted_content, summary) = match blocks.as_slice() {
+        [
+            ContentBlock::Compaction {
+                encrypted_content,
+                summary,
+            },
+        ] => ("compaction", Some(encrypted_content), summary.as_ref()),
+        [ContentBlock::CompactionTrigger {}] => ("compaction_trigger", None, None),
         _ => return None,
     };
     let mut wire = item
@@ -20,6 +25,10 @@ pub fn native_compaction_item(item: &crate::protocol::ir::AiItem) -> Option<serd
     wire.insert("type".into(), kind.into());
     if let Some(encrypted_content) = encrypted_content {
         wire.insert("encrypted_content".into(), encrypted_content.clone().into());
+    }
+    if let Some(summary) = summary {
+        // The readable half of a signed Anthropic block is part of the state's identity.
+        wire.insert("summary".into(), summary.clone().into());
     }
     if let Some(id) = item.id_ref() {
         wire.insert("id".into(), id.into());
@@ -840,8 +849,17 @@ fn history_content_block_value(block: &ContentBlock) -> serde_json::Value {
             "content": content,
             "encrypted_content": encrypted_content,
         }),
-        ContentBlock::Compaction { encrypted_content } => serde_json::json!({
+        ContentBlock::Compaction {
+            encrypted_content,
+            summary: None,
+        } => serde_json::json!({
             "type": "compaction", "encrypted_content": encrypted_content,
+        }),
+        ContentBlock::Compaction {
+            encrypted_content,
+            summary: Some(summary),
+        } => serde_json::json!({
+            "type": "compaction", "encrypted_content": encrypted_content, "summary": summary,
         }),
         ContentBlock::CompactionTrigger {} => serde_json::json!({"type": "compaction_trigger"}),
         ContentBlock::RedactedThinking { data } => serde_json::json!({
@@ -1236,6 +1254,7 @@ mod tests {
         });
         let native = item(ContentBlock::Compaction {
             encrypted_content: "opaque-state".into(),
+            summary: None,
         });
         let tool =
             AiItem::function_call_output("call", serde_json::json!({"nested": ["🙂", null]}));

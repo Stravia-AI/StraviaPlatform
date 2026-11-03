@@ -1393,3 +1393,72 @@ fn consuming_instruction_blocks_still_reserves_their_supplied_tool_ids() {
     assert_eq!(body["system"], "instruction");
     assert_eq!(body["messages"][0]["content"][0]["id"], "tc_2");
 }
+
+#[test]
+fn compaction_block_is_replayed_byte_faithfully_with_its_beta() {
+    let block = serde_json::json!({
+        "type": "compaction",
+        "content": "Summary of the work",
+        "signature": "sig-abc",
+        "encrypted_content": "opaque-extra",
+        "tool_changes": [{"name": "grep"}]
+    });
+    let request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [block.clone()]},
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .unwrap();
+    let (body, headers) = AnthropicEncoder.encode_request(request).unwrap();
+    assert_eq!(body["messages"][0]["role"], "assistant");
+    assert_eq!(body["messages"][0]["content"], serde_json::json!([block]));
+    assert_eq!(body["messages"][1]["content"][0]["text"], "continue");
+    assert_eq!(
+        headers.get("anthropic-beta").unwrap(),
+        crate::codec::compaction::ANTHROPIC_COMPACTION_BETA
+    );
+}
+
+#[test]
+fn only_the_latest_compaction_block_is_sent() {
+    let old = serde_json::json!({"type": "compaction", "content": "old", "signature": "sig-old"});
+    let new = serde_json::json!({"type": "compaction", "content": "new", "signature": "sig-new"});
+    let request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [old]},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [new.clone()]},
+                {"role": "user", "content": "go on"}
+            ]
+        }))
+        .unwrap();
+    let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
+    let blocks = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap().iter())
+        .filter(|block| block["type"] == "compaction")
+        .collect::<Vec<_>>();
+    assert_eq!(blocks, [&new]);
+}
+
+#[test]
+fn requests_without_compaction_do_not_gain_a_beta_header() {
+    let request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+    let (_, headers) = AnthropicEncoder.encode_request(request).unwrap();
+    assert!(headers.get("anthropic-beta").is_none());
+}

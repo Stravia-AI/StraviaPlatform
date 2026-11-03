@@ -63,8 +63,13 @@ impl AnthropicEncoder {
         } else {
             let mut generated_tool_id_seq = 0;
             let mut raw_messages = Vec::new();
-            for msg in req.items {
+            // The API takes exactly one compaction block; the last state supersedes the rest.
+            let last_compaction = req.items.iter().rposition(AiItem::is_compaction);
+            for (index, msg) in req.items.into_iter().enumerate() {
                 if matches!(msg.role, Role::System | Role::Developer) {
+                    continue;
+                }
+                if msg.is_compaction() && Some(index) != last_compaction {
                     continue;
                 }
                 raw_messages.push(encode_message(
@@ -75,6 +80,18 @@ impl AnthropicEncoder {
             }
             Value::Array(normalize_anthropic_messages(raw_messages))
         };
+        let compaction_replayed = messages_val.as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("compaction")
+                        })
+                    })
+            })
+        });
 
         // Messages 必须携带 max_tokens；已知型号上限由目标适配层填入，
         // 未知时沿用 omp 的 64,000 回退，不把上下文窗口当作输出上限。
@@ -250,6 +267,12 @@ impl AnthropicEncoder {
 
         let mut headers = HeaderMap::new();
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        if compaction_replayed {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(crate::codec::compaction::ANTHROPIC_COMPACTION_BETA),
+            );
+        }
 
         Ok((body, headers))
     }
@@ -505,6 +528,7 @@ const ALLOWED_BLOCK_TYPES: &[&str] = &[
     "bash_code_execution_tool_result",
     "text_editor_code_execution_tool_result",
     "tool_search_tool_result",
+    "compaction",
 ];
 
 fn validate_anthropic_payload(body: &Value) -> Result<()> {
@@ -608,11 +632,55 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
 
 // ── Message encoding helpers ──────────────────────────────────────────────────
 
+/// Native Anthropic state replays as the original block, byte-for-byte (the API
+/// rejects edits). State without a readable summary is another protocol's and has
+/// no Anthropic form, so the message is left empty and normalization drops it.
+fn encode_compaction_message(mut msg: AiItem) -> Value {
+    let summary_state = match &msg.content {
+        MessageContent::Blocks(blocks) => match blocks.as_slice() {
+            [
+                ContentBlock::Compaction {
+                    encrypted_content,
+                    summary: Some(summary),
+                },
+            ] => Some((encrypted_content.clone(), summary.clone())),
+            _ => None,
+        },
+        MessageContent::Text(_) => None,
+    };
+    let content = summary_state
+        .map(|(signature, summary)| {
+            msg.meta
+                .as_mut()
+                .and_then(|meta| {
+                    meta.remove_extension(crate::codec::compaction::ANTHROPIC_COMPACTION_BLOCK_META)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "type": "compaction",
+                        "content": summary,
+                        "signature": signature,
+                    })
+                })
+        })
+        .into_iter()
+        .collect();
+    object([
+        ("role", Value::String("assistant".into())),
+        ("content", Value::Array(content)),
+    ])
+}
+
 fn encode_message(
     mut msg: AiItem,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> Result<Value> {
+    if msg.is_compaction() {
+        return Ok(encode_compaction_message(msg));
+    }
     if let MessageContent::Blocks(blocks) = &mut msg.content {
         prepare_anthropic_media(blocks)?;
     }

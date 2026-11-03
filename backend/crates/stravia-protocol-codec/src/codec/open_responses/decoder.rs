@@ -626,6 +626,7 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
 
     match item_type {
         "compaction" | "compaction_trigger" => {
+            let mut sealed_block = None;
             let block = if item_type == "compaction" {
                 let encrypted_content = item
                     .get("encrypted_content")
@@ -634,8 +635,24 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                     .ok_or_else(|| {
                         anyhow::anyhow!("compaction requires non-empty encrypted_content")
                     })?;
-                ContentBlock::Compaction {
-                    encrypted_content: encrypted_content.to_owned(),
+                // A Stravia-sealed Anthropic block is the same native state seen through the
+                // Responses wire: expose its signature and readable summary, never the seal.
+                match crate::codec::compaction::open(encrypted_content) {
+                    Some(crate::codec::compaction::Envelope::Anthropic { block }) => {
+                        let state = ContentBlock::Compaction {
+                            encrypted_content: block["signature"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            summary: block["content"].as_str().map(str::to_owned),
+                        };
+                        sealed_block = Some(block);
+                        state
+                    }
+                    _ => ContentBlock::Compaction {
+                        encrypted_content: encrypted_content.to_owned(),
+                        summary: None,
+                    },
                 }
             } else {
                 ContentBlock::CompactionTrigger {}
@@ -646,16 +663,16 @@ pub fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
             {
                 anyhow::bail!("native compaction item id must be a non-empty string or null");
             }
+            let mut meta = serde_json::json!({"__open_responses_item": item});
+            if let Some(sealed) = sealed_block {
+                meta[crate::codec::compaction::ANTHROPIC_COMPACTION_BLOCK_META] = sealed;
+            }
             let mut canonical = AiItem {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![block]),
                 tool_calls: None,
                 tool_call_id: None,
-                meta: Some(
-                    stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
-                        serde_json::json!({"__open_responses_item": item}),
-                    ),
-                ),
+                meta: Some(stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(meta)),
             };
             set_input_graph_metadata(&mut canonical, item);
             Ok(Some(canonical))

@@ -422,3 +422,92 @@ fn nested_null_controls_reset_without_emitting_nulls() {
     );
     assert!(body["output_config"].get("format").is_none());
 }
+
+#[test]
+fn compaction_control_is_kept_for_the_standalone_path_and_null_is_ignored() {
+    use crate::codec::compaction::ANTHROPIC_COMPACTION_REQUEST_META as META;
+    let request = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "compaction": {"type": "summarize", "instructions": "Be brief"}
+        })))
+        .unwrap();
+    assert_eq!(
+        request.meta.vendor.ingress[META],
+        serde_json::json!({"type": "summarize", "instructions": "Be brief"})
+    );
+    let request = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({"compaction": null})))
+        .unwrap();
+    assert!(!request.meta.vendor.ingress.contains_key(META));
+}
+
+#[test]
+fn native_compaction_block_decodes_to_the_same_state_the_upstream_registered() {
+    use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
+    let upstream = serde_json::json!({
+        "type": "message",
+        "content": [{"type": "compaction", "content": "Summary", "signature": "sig-1"}],
+        "stop_reason": "compaction",
+        "usage": {"input_tokens": 0, "output_tokens": 0}
+    });
+    let registered =
+        crate::codec::compaction::parse_anthropic_compaction(upstream.clone()).unwrap();
+    let request = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": upstream["content"].clone()},
+                {"role": "user", "content": "go on"}
+            ]
+        })))
+        .unwrap();
+    let replayed = request
+        .items
+        .iter()
+        .find(|item| item.is_compaction())
+        .unwrap();
+    assert_eq!(
+        native_compaction_item(replayed),
+        native_compaction_item(&registered.items[0])
+    );
+}
+
+#[test]
+fn compaction_block_without_a_signature_is_rejected() {
+    let error = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": [{"type": "compaction", "content": "Summary"}]},
+                {"role": "user", "content": "go on"}
+            ]
+        })))
+        .unwrap_err();
+    assert!(error.to_string().contains("signature"), "{error}");
+}
+
+#[test]
+fn responses_window_sealed_in_a_block_expands_to_its_items() {
+    let output = vec![
+        serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "earlier question"}]}),
+        serde_json::json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"}),
+    ];
+    let signature = crate::codec::compaction::seal_responses(&output);
+    let request = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "messages": [
+                {"role": "assistant", "content": [{
+                    "type": "compaction",
+                    "content": crate::codec::compaction::ENVELOPE_PLACEHOLDER_CONTENT,
+                    "signature": signature
+                }]},
+                {"role": "user", "content": "go on"}
+            ]
+        })))
+        .unwrap();
+    assert_eq!(request.items.len(), 3);
+    assert!(request.items[1].is_compaction());
+    let replayed = stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
+        &request.items[1],
+    )
+    .unwrap();
+    assert_eq!(replayed["encrypted_content"], "enc");
+}

@@ -195,7 +195,7 @@ async fn http_non_success_json_keeps_status() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn http_compaction_remains_unary_and_preserves_error() {
+async fn http_compaction_uses_the_trigger_stream_and_preserves_error() {
     http_case("compact").await;
     http_case("compact-error").await;
 }
@@ -254,29 +254,32 @@ async fn http_case(case: &'static str) {
             Some(format!("{thread}:0").as_str())
         );
         if case.starts_with("compact") {
-            assert!(headers.starts_with("POST /responses/compact "));
-            assert!(body.get("stream").is_none());
-            assert!(header("x-client-request-id").is_none());
-        } else {
-            assert_eq!(body["stream"], true);
-            assert_eq!(header("x-client-request-id"), Some(thread));
-            assert_eq!(body["client_metadata"]["thread_id"], thread);
-            let turn: Value = serde_json::from_str(
-                body["client_metadata"]["x-codex-turn-metadata"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
+            // 独立压缩是普通流式 /responses，触发器是最后一个 input item。
+            assert!(headers.starts_with("POST /responses "), "{headers}");
             assert_eq!(
-                uuid::Uuid::parse_str(turn["turn_id"].as_str().unwrap())
-                    .unwrap()
-                    .get_version_num(),
-                7
+                body["input"].as_array().unwrap().last().unwrap(),
+                &serde_json::json!({"type": "compaction_trigger"})
             );
-            assert_ne!(turn["turn_id"], "injected-turn");
-            assert!(turn.get("parent_turn_id").is_none());
-            assert!(turn.get("root_turn_id").is_none());
+            assert!(body.get("context_management").is_none());
         }
+        assert_eq!(body["stream"], true);
+        assert_eq!(header("x-client-request-id"), Some(thread));
+        assert_eq!(body["client_metadata"]["thread_id"], thread);
+        let turn: Value = serde_json::from_str(
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            uuid::Uuid::parse_str(turn["turn_id"].as_str().unwrap())
+                .unwrap()
+                .get_version_num(),
+            7
+        );
+        assert_ne!(turn["turn_id"], "injected-turn");
+        assert!(turn.get("parent_turn_id").is_none());
+        assert!(turn.get("root_turn_id").is_none());
         if case == "logprobs"
             && body["include"].as_array().is_some_and(|include| {
                 include
@@ -305,7 +308,20 @@ async fn http_case(case: &'static str) {
             "error" | "malformed" | "truncated" | "compact" | "compact-error"
         ) {
             let payload = match case {
-                "compact" => serde_json::json!({"id":"cmp_response","object":"response.compaction","created_at":1790129810,"output":[{"type":"compaction","id":"cmp_1","encrypted_content":"synthetic-state"}]}).to_string(),
+                "compact" => {
+                    let state = serde_json::json!({"type":"compaction","id":"cmp_1","encrypted_content":"synthetic-state"});
+                    let ignored = serde_json::json!({"type":"message","id":"msg_ignored","status":"completed","role":"assistant","content":[{"type":"output_text","text":"IGNORED","annotations":[],"logprobs":[]}]});
+                    [
+                        serde_json::json!({"type":"response.created","sequence_number":0,"response":response_resource("in_progress",serde_json::json!([]),"resp_cmp")}),
+                        serde_json::json!({"type":"response.compaction.compacting","sequence_number":1}),
+                        serde_json::json!({"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":ignored}),
+                        serde_json::json!({"type":"response.output_item.done","sequence_number":3,"output_index":1,"item":state}),
+                        serde_json::json!({"type":"response.completed","sequence_number":4,"response":response_resource("completed",serde_json::json!([]),"resp_cmp")}),
+                    ]
+                    .iter()
+                    .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()))
+                    .collect::<String>()
+                }
                 "error" | "compact-error" => serde_json::json!({"error":{"type":"invalid_request_error","message":"synthetic upstream rejection"}}).to_string(),
                 "malformed" => "event: response.created\ndata: {not-json}\n\n".to_string(),
                 "truncated" => format!("event: response.created\ndata: {}\n\n", serde_json::json!({"type":"response.created","sequence_number":0,"response":response_resource("in_progress",serde_json::json!([]),"resp_http")})),
@@ -436,14 +452,22 @@ async fn http_case(case: &'static str) {
         return;
     }
     if case == "compact" {
-        let OperationOutput::Compact(response) = result.expect("unary compaction succeeds") else {
+        let OperationOutput::Compact(response) = result.expect("trigger compaction succeeds")
+        else {
             panic!("expected compaction")
         };
-        assert_eq!(response.wire["id"], "cmp_response");
+        assert_eq!(response.wire["object"], "response.compaction");
+        assert_eq!(response.wire["id"], "resp_cmp");
+        // 窗口 = 保留的用户消息 + 唯一的 compaction item；同流里的助手回复被忽略。
+        assert_eq!(response.wire["output"].as_array().unwrap().len(), 2);
+        assert_eq!(response.wire["output"][0]["role"], "user");
+        assert_eq!(response.wire["output"][0]["content"][0]["text"], "你好");
+        assert_eq!(response.wire["output"][1]["type"], "compaction");
         assert_eq!(
-            response.wire["output"][0]["encrypted_content"],
+            response.wire["output"][1]["encrypted_content"],
             "synthetic-state"
         );
+        assert!(response.usage.is_some());
         assert!(!services.deltas.lock().iter().any(|delta| matches!(
             delta,
             AiStreamDelta::TextDelta(_) | AiStreamDelta::TextDeltaWithMetadata { .. }
