@@ -1936,6 +1936,19 @@ impl ObservationStore {
                     next_sequence += 1;
                     current_sequence = sequence;
                     if let Some(mut block) = block {
+                        insert_event_sqlite(
+                            &mut tx,
+                            EventInsert {
+                                sequence,
+                                occurred_at: at,
+                                interaction_id: Some(interaction_id),
+                                run_id: Some(run_id),
+                                rejection_id: None,
+                                kind: &kind,
+                                payload: &Value::Null,
+                            },
+                        )
+                        .await?;
                         let content_ids =
                             super::content_refs::intern_sqlite(&mut tx, &principal, &mut block.units)
                                 .await?;
@@ -1960,19 +1973,7 @@ impl ObservationStore {
                             .execute(&mut *tx)
                             .await?;
                         insert_event_content_refs_sqlite(&mut tx, sequence, &content_ids).await?;
-                        insert_event_sqlite(
-                            &mut tx,
-                            EventInsert {
-                                sequence,
-                                occurred_at: at,
-                                interaction_id: Some(interaction_id),
-                                run_id: Some(run_id),
-                                rejection_id: None,
-                                kind: &kind,
-                                payload: &Value::Null,
-                            },
-                        )
-                        .await?;
+
                         result.push(event(
                             sequence,
                             at,
@@ -2177,6 +2178,19 @@ impl ObservationStore {
                     let sequence = sequences.next().expect("allocated durable event sequence");
                     current_sequence = sequence;
                     if let Some(mut block) = block {
+                        insert_event_postgres(
+                            &mut tx,
+                            EventInsert {
+                                sequence,
+                                occurred_at: at,
+                                interaction_id: Some(interaction_id),
+                                run_id: Some(run_id),
+                                rejection_id: None,
+                                kind: &kind,
+                                payload: &Value::Null,
+                            },
+                        )
+                        .await?;
                         let content_ids =
                             super::content_refs::intern_postgres(&mut tx, &principal, &mut block.units)
                                 .await?;
@@ -2201,19 +2215,7 @@ impl ObservationStore {
                             .execute(&mut *tx)
                             .await?;
                         insert_event_content_refs_postgres(&mut tx, sequence, &content_ids).await?;
-                        insert_event_postgres(
-                            &mut tx,
-                            EventInsert {
-                                sequence,
-                                occurred_at: at,
-                                interaction_id: Some(interaction_id),
-                                run_id: Some(run_id),
-                                rejection_id: None,
-                                kind: &kind,
-                                payload: &Value::Null,
-                            },
-                        )
-                        .await?;
+
                         result.push(event(
                             sequence,
                             at,
@@ -2911,7 +2913,7 @@ impl ObservationStore {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
                     .bind(&ingress.id)
                     .bind(now)
                     .bind(&ingress.method)
@@ -2959,7 +2961,7 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)")
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
                     .bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(i64::from(outcome.status_code)).bind(debug).bind(seq)
                     .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_postgres(

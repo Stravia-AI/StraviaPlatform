@@ -2543,7 +2543,6 @@ mod tests {
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
                     now: at,
-                    expires_at: i64::MAX,
                 })
                 .await?;
             store
@@ -2560,7 +2559,6 @@ mod tests {
                         generation_root_id: None,
                     },
                     at + 20,
-                    i64::MAX,
                     false,
                 )
                 .await?;
@@ -2581,7 +2579,6 @@ mod tests {
                     metadata: &metadata,
                     debug_enabled: false,
                     occurred_at: at,
-                    expires_at: i64::MAX,
                     started_at: at,
                     duration_ms: 0,
                 })
@@ -2689,7 +2686,6 @@ mod tests {
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
                     now: at,
-                    expires_at: i64::MAX,
                 })
                 .await?;
             if committed {
@@ -2714,7 +2710,6 @@ mod tests {
                         generation_root_id: None,
                     },
                     at + 10,
-                    i64::MAX,
                     false,
                 )
                 .await?;
@@ -2830,7 +2825,6 @@ mod tests {
                 diagnostic_source_run_id: None,
                 interrupt_parent: parent.is_some(),
                 now,
-                expires_at: i64::MAX,
             })
             .await?;
         Ok(())
@@ -2906,7 +2900,6 @@ mod tests {
                     estimated_input_tokens: None,
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         store
@@ -2925,7 +2918,6 @@ mod tests {
                     cost_basis: None,
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         store
@@ -2945,7 +2937,6 @@ mod tests {
                     },
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         Ok(())
@@ -3017,7 +3008,6 @@ mod tests {
                         ),
                     },
                     2,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3099,7 +3089,7 @@ mod tests {
             },
         ] {
             store
-                .persist_run_event("known-input", "known-input", &event, 2, i64::MAX)
+                .persist_run_event("known-input", "known-input", &event, 2)
                 .await?;
         }
         store
@@ -3123,7 +3113,6 @@ mod tests {
                     amounts: None,
                 },
                 3,
-                i64::MAX,
             )
             .await?;
         // 已有数据库列的投影不能把真实交付时间替换成更晚的观测完成时间。
@@ -3297,7 +3286,6 @@ mod tests {
                         estimated_input_tokens: estimate,
                     },
                     4,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3344,7 +3332,6 @@ mod tests {
                         cost_basis: None,
                     },
                     5,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3377,7 +3364,6 @@ mod tests {
                     },
                 },
                 6,
-                i64::MAX,
             )
             .await?;
         let page = store.query_forest(query.clone()).await?;
@@ -3401,7 +3387,6 @@ mod tests {
                     status: "failed".into(),
                 },
                 7,
-                i64::MAX,
             )
             .await?;
         assert_eq!(store.query_forest(query.clone()).await?.root_total, 0);
@@ -3423,7 +3408,6 @@ mod tests {
                     },
                 },
                 8,
-                i64::MAX,
             )
             .await?;
         let page = store.query_forest(query).await?;
@@ -3464,7 +3448,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 2,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -3531,7 +3514,6 @@ mod tests {
                         registration_id: id.clone(),
                     },
                     2,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3880,7 +3862,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 150,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -4182,7 +4163,6 @@ mod tests {
                     estimated_input_tokens: None,
                 },
                 11,
-                i64::MAX,
             )
             .await?;
         let changed = store
@@ -4209,7 +4189,6 @@ mod tests {
                     status: "completed".into(),
                 },
                 12,
-                i64::MAX,
             )
             .await?;
         store
@@ -4226,7 +4205,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 13,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -4300,7 +4278,6 @@ mod tests {
                     estimated_input_tokens: Some(9_000),
                 },
                 9_951,
-                i64::MAX,
             )
             .await?;
         admit_chain_node(
@@ -4438,7 +4415,6 @@ mod tests {
                     status: "completed".into(),
                 },
                 20_012,
-                i64::MAX,
             )
             .await?;
         store
@@ -4455,7 +4431,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 20_012,
-                i64::MAX,
                 false,
             )
             .await?;
