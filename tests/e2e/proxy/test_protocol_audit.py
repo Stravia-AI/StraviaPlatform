@@ -35,32 +35,31 @@ def test_completed_http_cannot_hide_broken_persistent_chain(corruption, reason):
            "delivery_completed_at": 123, "usage": {"input_tokens": 50_000, "output_tokens": 301,
                "coverage": {"missing_input_tokens": 0, "missing_output_tokens": 0}},
            "events": [
-               {"sequence": 1, "kind": "model_turn_started", "payload": {"model_turn_id": "turn", "route_id": "route"}},
-               {"sequence": 2, "kind": "target_attempt_started", "payload": {
-                   "attempt_id": "attempt", "model_turn_id": "turn", "provider_id": "provider",
-                   "target_id": "target", "upstream_model": "model"}},
-               {"sequence": 3, "kind": "target_attempt_finished",
-                "payload": {"attempt_id": "attempt", "status": "completed"}},
-               {"sequence": 4, "kind": "model_turn_finished",
-                "payload": {"model_turn_id": "turn", "status": "completed"}},
-               {"sequence": 5, "kind": "client_visible_content",
+               {"sequence": 1, "kind": "model_turn_started", "payload": {
+                   "model_turn_id": "turn", "route_id": "route",
+                   "attempt": {"attempt_id": "attempt", "model_turn_id": "turn", "provider_id": "provider",
+                               "target_id": "target", "upstream_model": "model"}}},
+               {"sequence": 2, "kind": "model_turn_finished",
+                "payload": {"model_turn_id": "turn", "status": "completed",
+                            "attempt": {"attempt_id": "attempt", "model_turn_id": "turn", "status": "completed"}}},
+               {"sequence": 3, "kind": "client_visible_content",
                 "payload": {"text": answer, "complete": True}},
-               {"sequence": 6, "kind": "run_finished", "payload": {"delivery": {"status": "delivered"}}},
+               {"sequence": 4, "kind": "run_finished", "payload": {"delivery": {"status": "delivered"}}},
            ]}
     detail = {"interaction": {"id": "interaction", "observation_gap": False}}
     assert _check(row, detail, run)["failures"] == []
     broken = copy.deepcopy(run)
     if corruption in {"provider", "target", "turn"}:
         field = {"provider": "provider_id", "target": "target_id", "turn": "model_turn_id"}[corruption]
-        broken["events"][1]["payload"][field] = "unrelated"
+        broken["events"][0]["payload"]["attempt"][field] = "unrelated"
     elif corruption == "parent":
         broken["generation_parent_id"] = "unrelated"
     elif corruption == "output":
-        broken["events"][4]["payload"]["text"] = "truncated"
+        broken["events"][2]["payload"]["text"] = "truncated"
     elif corruption == "commit":
         broken["client_output_committed"] = False
     else:
-        broken["events"][5]["payload"]["delivery"]["status"] = "failed"
+        broken["events"][3]["payload"]["delivery"]["status"] = "failed"
     assert reason in _check(row, detail, broken)["failures"]
 
 
@@ -162,11 +161,11 @@ def test_audit_waits_for_delivery_after_completed_trace(monkeypatch, identity, p
             return io.BytesIO(archive.getvalue())
 
     events = [
-        {"kind": "model_turn_started", "payload": {"model_turn_id": "turn", "route_id": "route"}},
-        {"kind": "target_attempt_started", "payload": {"attempt_id": "attempt", "model_turn_id": "turn",
-            "provider_id": "provider", "target_id": "target", "upstream_model": "model"}},
-        {"kind": "target_attempt_finished", "payload": {"attempt_id": "attempt", "status": "completed"}},
-        {"kind": "model_turn_finished", "payload": {"model_turn_id": "turn", "status": "completed"}},
+        {"kind": "model_turn_started", "payload": {"model_turn_id": "turn", "route_id": "route",
+            "attempt": {"attempt_id": "attempt", "model_turn_id": "turn", "provider_id": "provider",
+                        "target_id": "target", "upstream_model": "model"}}},
+        {"kind": "model_turn_finished", "payload": {"model_turn_id": "turn", "status": "completed",
+            "attempt": {"attempt_id": "attempt", "model_turn_id": "turn", "status": "completed"}}},
         discoveries["events"][0],
         {"kind": "client_visible_content", "payload": {"text": answer, "complete": True}},
         {"kind": "run_finished", "payload": {"delivery": {"status": "delivered"}}},
@@ -192,12 +191,12 @@ def test_audit_waits_for_delivery_after_completed_trace(monkeypatch, identity, p
                 self.revision = (2 if progress == "already_delivered" or
                                  progress == "pending_then_delivered" and self.revision else 1)
                 return 200, {"roots": [{"interactions": [{"id": "interaction",
-                    "last_event_sequence": 5 + self.revision, "debug_status": "complete"}]}]}
+                    "last_event_sequence": 3 + self.revision, "debug_status": "complete"}]}]}
             if path.endswith("/debug-bundle-tickets"):
                 return 200, {"download_url": "https://capture.test"}
             assert path == "/api/v1/observations/interactions/interaction"
             return 200, {"interaction": {"id": "interaction", "observation_gap": False},
-                         "snapshot_sequence": 5 + self.revision,
+                         "snapshot_sequence": 3 + self.revision,
                          "runs": [copy.deepcopy(before_delivery if self.revision == 1 else terminal)]}
 
     clock = [0.0]

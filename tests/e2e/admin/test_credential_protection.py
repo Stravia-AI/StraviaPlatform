@@ -15,7 +15,7 @@ import pytest
 
 from tests.common.helpers import http_request, stop_stravia_server
 from tests.e2e.admin.test_observation_failures import _start_initialized
-from tests.e2e.admin.test_observations import _create_route, _detail, _proxy, _route_interactions, _wait_for
+from tests.e2e.admin.test_observations import _create_route, _detail, _forest, _proxy, _route_interactions, _wait_for
 from tests.e2e.admin.test_reversible_redaction import SECRET, REFERENCE, echo_provider, mapping_sql, set_enabled
 
 
@@ -467,9 +467,19 @@ def test_hit_write_failure_keeps_the_request_and_marks_only_its_interaction(admi
             status, response = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
             assert status == 200, response
             assert response["choices"][0]["message"]["content"] == SECRET
+            # 轮次开始阶段（含命中事件）整体失败时，该阶段连同 model_turn 一起记为缺口，
+            # 所以 Interaction 没有 Model Turn 可供按模型过滤，直接按首个 Route 在全部时间线里找。
             interaction = _wait_for(
                 "Interaction with the missing hit event",
-                lambda: next((item for item in _route_interactions(env, route) if item["observation_gap"]), None),
+                lambda: next(
+                    (
+                        item
+                        for root in _forest(env, limit=100)["roots"]
+                        for item in root["interactions"]
+                        if item["first_route_id"] == route and item["observation_gap"]
+                    ),
+                    None,
+                ),
             )
             page = discoveries(env)
             assert "observation_gap" not in page

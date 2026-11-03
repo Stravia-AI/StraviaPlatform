@@ -33,6 +33,9 @@ from tests.common.helpers import (
     wait_for_setup_token,
     wait_until_ready,
 )
+from tests.common.observation_contents import (
+    assert_summary_has_only_refs, attempt_finishes, input_text, output_text,
+)
 
 
 def _create_route(
@@ -376,7 +379,7 @@ def test_failed_request_records_stream_error_after_http_success(
         "status": observed["runs"][0]["status"],
         "reason": observed["runs"][0]["terminal_reason"],
         "events": [(event["kind"], event["payload"]) for event in observed["runs"][0]["events"]
-                   if event["kind"] in ("run_finished", "target_attempt_finished")],
+                   if event["kind"] in ("run_finished", "model_turn_finished", "target_attempt_finished")],
     }
     finished = [event for event in observed["runs"][0]["events"] if event["kind"] == "run_finished"]
     assert finished
@@ -414,24 +417,19 @@ def test_failed_request_excludes_recovered_internal_retry(admin_env: dict[str, A
     )
     detail = _detail(admin_env, interaction["id"])
     assert len(detail["runs"]) == 1
-    attempts = [
-        event for event in detail["runs"][0]["events"]
-        if event["kind"] == "target_attempt_finished"
-    ]
-    assert [event["payload"]["status"] for event in attempts] == ["failed", "completed"]
-    error = attempts[0]["payload"]["error"]
+    # failover 的第一个 attempt 单独成行，最后一个 attempt 的结束并入 model_turn_finished。
+    attempts = attempt_finishes(detail["runs"][0]["events"])
+    assert [attempt["status"] for attempt in attempts] == ["failed", "completed"]
+    error = attempts[0]["error"]
     assert error["source"] == "upstream"
-    assert error["code"] == attempts[0]["payload"]["error_code"]
+    assert error["code"] == attempts[0]["error_code"]
     assert error["status_code"] == 503
     assert "retry" in error["message"]
-    assert attempts[1]["payload"].get("error") is None
+    assert attempts[1].get("error") is None
     _, _, archive = download_observation_bundle(admin_env, detail)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         exported = json.loads(bundle.read("interaction.json"))
-    exported_attempts = [
-        event for event in exported["events"] if event["kind"] == "target_attempt_finished"
-    ]
-    assert exported_attempts[0]["payload"]["error"] == error
+    assert attempt_finishes(exported["events"])[0]["error"] == error
     assert _client_errors(admin_env, model=route_id)["items"] == []
 
 
@@ -547,11 +545,11 @@ def test_failed_request_preserves_diagnostics_but_redacts_client_error(admin_env
         lambda: next(iter(_client_errors(admin_env, model=route_id)["items"]), None),
     )
     detail = _detail(admin_env, failure["interaction_id"])
-    attempts = [event for event in detail["runs"][0]["events"] if event["kind"] == "target_attempt_finished"]
+    attempts = attempt_finishes(detail["runs"][0]["events"])
     assert len(attempts) == 3
-    assert all(event["payload"]["status"] == "failed" for event in attempts)
+    assert all(attempt["status"] == "failed" for attempt in attempts)
     for attempt in attempts:
-        error = attempt["payload"]["error"]
+        error = attempt["error"]
         assert error["status_code"] == 503
         assert "long detail " * 200 in error["message"]
     assert "upstream-secret" in json.dumps(detail)
@@ -559,11 +557,8 @@ def test_failed_request_preserves_diagnostics_but_redacts_client_error(admin_env
     _, _, archive = download_observation_bundle(admin_env, detail)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         exported = json.loads(bundle.read("interaction.json"))
-    exported_attempts = [
-        event for event in exported["events"] if event["kind"] == "target_attempt_finished"
-    ]
-    assert [event["payload"]["error"] for event in exported_attempts] == [
-        event["payload"]["error"] for event in attempts
+    assert [attempt["error"] for attempt in attempt_finishes(exported["events"])] == [
+        attempt["error"] for attempt in attempts
     ]
     assert "long detail " * 200 in failure["error"]["message"]
     assert "upstream-secret" in json.dumps(failure)
@@ -856,16 +851,15 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     run_id = initial["runs"][0]["id"]
     database = Path(admin_env["data_dir"]) / "db" / "gateway.db"
     with closing(sqlite3.connect(database)) as connection:
-        expires = int(time.time() * 1000) + 86400000
         connection.executemany(
-            "INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
-            [(int(time.time() * 1000), interaction_id, run_id, "client_visible_content",
-              encode_storage_json({"kind": "client_visible_content", "text": f"part-{index}"}), expires)
+            "INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,attrs) VALUES(?,?,?,?,?)",
+            [(int(time.time() * 1000), interaction_id, run_id, "client_tool_handoff",
+              encode_storage_json({"kind": "client_tool_handoff", "tool_id": f"part-{index}", "name": "probe"}))
              for index in range(430)],
         )
         connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
         connection.commit()
-        stored = connection.execute("SELECT sequence,payload FROM observation_events WHERE interaction_id=? ORDER BY sequence", (interaction_id,)).fetchall()
+        stored = connection.execute("SELECT sequence,attrs FROM observation_events WHERE interaction_id=? ORDER BY sequence", (interaction_id,)).fetchall()
     status, body = http_request("GET", f"{admin_env['admin']}/api/v1/observations/interactions/{interaction_id}", headers=admin_env["auth"])
     assert status == 200, body
     bounded = body["data"]
@@ -875,9 +869,9 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     through = bounded["snapshot_sequence"]
     # Arrivals after the first page must not leak into this traversal.
     with closing(sqlite3.connect(database)) as connection:
-        connection.execute("INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
-                           (int(time.time() * 1000), interaction_id, run_id, "client_visible_content",
-                            encode_storage_json({"kind": "client_visible_content", "text": "late"}), expires))
+        connection.execute("INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,attrs) VALUES(?,?,?,?,?)",
+                           (int(time.time() * 1000), interaction_id, run_id, "client_tool_handoff",
+                            encode_storage_json({"kind": "client_tool_handoff", "tool_id": "late", "name": "probe"})))
         connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
         connection.commit()
     for direction in ("after_sequence", "before_sequence"):
@@ -898,7 +892,7 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     full = _detail(admin_env, interaction_id)
     assert any(event["kind"] == "run_admitted" for run in full["runs"] for event in run["events"])
     with closing(sqlite3.connect(database)) as connection:
-        unchanged = connection.execute("SELECT sequence,payload FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence", (interaction_id, through)).fetchall()
+        unchanged = connection.execute("SELECT sequence,attrs FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence", (interaction_id, through)).fetchall()
     assert unchanged == stored
     _, _, downloaded = download_observation_bundle(admin_env, bounded)
     with zipfile.ZipFile(io.BytesIO(downloaded)) as bundle:
@@ -992,8 +986,11 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert len(interactions) == 1
     summary = interactions[0]
     assert summary["status"] == "completed"
-    assert summary["input_preview"] == "observation contract"
-    assert summary["visible_tail"] == "mock-ok-0"
+    assert_summary_has_only_refs(summary)
+    assert input_text(admin_env, summary) == "observation contract"
+    assert output_text(admin_env, summary) == "mock-ok-0"
+    assert summary["input"]["raw_len"] == len("observation contract")
+    assert summary["output"]["raw_len"] == len("mock-ok-0")
     assert summary["usage"] == {
         "input_tokens": None,
         "output_tokens": 2,
@@ -1011,7 +1008,9 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     }
 
     detail = _detail(admin_env, summary["id"])
-    assert detail["interaction"]["input_preview"] == "observation contract"
+    assert detail["interaction"]["input"] == summary["input"]
+    assert detail["input_text"] == "observation contract"
+    assert detail["output_text"] == "mock-ok-0"
     assert detail["interaction"]["usage"] == summary["usage"]
     assert len(detail["runs"]) == 1
     run = detail["runs"][0]
@@ -1021,11 +1020,14 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))
     kinds = {event["kind"] for event in run["events"]}
-    assert {"run_admitted", "target_attempt_started", "target_attempt_finished", "run_finished"} <= kinds
-    # Confirmed usage rides on the attempt terminal (and its late higher-sequence
-    # revisions); the standalone usage_confirmed event kind is no longer persisted.
+    # 首个 attempt 并入 Model Turn 行：成功路径不再有独立的 attempt 行。
+    assert {"run_admitted", "model_turn_started", "user_input_recorded", "model_turn_finished", "run_finished"} <= kinds
+    assert not {"target_attempt_started", "target_attempt_finished", "input_preview_recorded"} & kinds
+    # Confirmed usage rides on the merged Model Turn row (and its late higher-sequence
+    # revisions); the standalone usage_confirmed event kind is not persisted.
     assert "usage_confirmed" not in kinds
-    attempt = [event for event in run["events"] if event["kind"] == "target_attempt_finished"][-1]
+    attempt = [event for event in run["events"] if event["kind"] == "model_turn_finished"][-1]
+    assert attempt["payload"]["usage"] == attempt["payload"]["attempt"]["usage"], attempt["payload"]
     assert attempt["payload"]["usage"] == {
         "input_tokens": None,
         "output_tokens": 2,
@@ -1051,7 +1053,7 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_input_preview_preserves_latest_user_before_unicode_limit_with_debug_off(
+def test_user_input_is_recorded_in_full_beyond_the_old_preview_limit_with_debug_off(
     admin_env: dict[str, Any],
 ) -> None:
     route_id, api_key = _create_route(admin_env, "observation-input-preview")
@@ -1060,24 +1062,45 @@ def test_input_preview_preserves_latest_user_before_unicode_limit_with_debug_off
     )
     assert status == 200, state
     assert state["data"]["enabled"] is False
+    first_unit = "api_key=" + "credential" * 60
+    second_unit = "文" * 4200
     status, response = _proxy(admin_env, api_key, "observation-input-preview", [
         {"role": "system", "content": "private-system-context"},
         {"role": "user", "content": "old-user-context"},
         {"role": "assistant", "content": "old-assistant-context"},
         {"role": "user", "content": [
-            {"type": "text", "text": "api_key=" + "credential" * 60},
-            {"type": "text", "text": "文" * 4200},
+            {"type": "text", "text": first_unit},
+            {"type": "text", "text": second_unit},
         ]},
     ])
     assert status == 200, response
     summary = _wait_for(
-        "ordinary-mode input preview",
+        "ordinary-mode user input",
         lambda: next((item for item in _route_interactions(admin_env, route_id)
-                      if item["input_preview"] is not None), None),
+                      if item["input"]["refs"]), None),
     )
-    preview = summary["input_preview"]
-    assert preview == ("api_key=" + "credential" * 60 + "\n" + "文" * 4200)[:4096]
-    assert _detail(admin_env, summary["id"])["interaction"]["input_preview"] == preview
+    assert_summary_has_only_refs(summary)
+    # 摘要只给引用：最近一条用户消息的两个文本单元各一个引用，不含系统与历史上下文。
+    assert [ref["raw_len"] for ref in summary["input"]["refs"]] == [
+        len(first_unit.encode()), len(second_unit.encode()),
+    ]
+    assert summary["input"]["raw_len"] == len(first_unit.encode()) + len(second_unit.encode())
+    full = first_unit + "\n" + second_unit
+    assert len(full) > 4096
+    assert input_text(admin_env, summary) == full
+
+    detail = _detail(admin_env, summary["id"])
+    assert detail["interaction"]["input"] == summary["input"]
+    assert detail["input_text"] == full
+    recorded = [
+        event for run in detail["runs"] for event in run["events"]
+        if event["kind"] == "user_input_recorded"
+    ]
+    assert len(recorded) == 1 and recorded[0]["payload"]["text"] == full, recorded
+    assert "private-system-context" not in json.dumps(detail)
+    assert "input_preview_recorded" not in {
+        event["kind"] for run in detail["runs"] for event in run["events"]
+    }
 
 
 @pytest.mark.e2e
@@ -1218,7 +1241,7 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
         ),
     )
     assert len(loop_detail["runs"]) == 4
-    assert loop_detail["interaction"]["input_preview"] == "observation-tool-loop"
+    assert loop_detail["input_text"] == "observation-tool-loop"
     assert "debug_events" not in loop_detail
     assert all(not run["debug_enabled"] and "debug_events" not in run for run in loop_detail["runs"])
     ordinary_events = [event for run in loop_detail["runs"] for event in run["events"]]
@@ -1226,10 +1249,18 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
         event["payload"]["input"]["round"]
         for event in ordinary_events if event["kind"] == "client_tool_handoff"
     ) == [1, 2, 3]
+    # 客户端工具结果按批一行：每个带结果的 Run 恰好一行，逐项结果放在 ``results`` 里。
+    tool_result_rows = [event for event in ordinary_events if event["kind"] == "client_tool_result"]
+    assert len(tool_result_rows) == 3
+    assert all(len(event["payload"]["results"]) == 1 for event in tool_result_rows)
     assert {
-        event["payload"]["content"]
-        for event in ordinary_events if event["kind"] == "client_tool_result"
+        result["content"]
+        for event in tool_result_rows for result in event["payload"]["results"]
     } == {"round 1", "round 2", "round 3"}
+    assert all(
+        set(result) == {"tool_id", "content", "is_error"} and result["is_error"] is False
+        for event in tool_result_rows for result in event["payload"]["results"]
+    )
 
     branch_route, branch_key = _create_route(admin_env, "observation-branch")
     root_messages = [{"role": "user", "content": "observation-branch"}]
@@ -1305,7 +1336,7 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     assert len(interactions) == 1
     quick_detail = quick_details[0]
-    assert quick_detail["interaction"]["input_preview"] == "finish this task"
+    assert quick_detail["input_text"] == "finish this task"
     assert all(not run["user_interrupted"] for run in quick_detail["runs"])
 
 

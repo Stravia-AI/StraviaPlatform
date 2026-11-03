@@ -250,12 +250,15 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
             assert calls or round_index == 5
         assert len(received) == 6
         events = [event for run in current_detail["runs"] for event in run["events"]]
-        previews = [event for event in events if event["kind"] == "input_preview_recorded"]
-        assert len(previews) == 1, previews
-        assert current_detail["interaction"]["input_preview"] == question
+        recorded_inputs = [event for event in events if event["kind"] == "user_input_recorded"]
+        assert len(recorded_inputs) == 1, recorded_inputs
+        assert current_detail["input_text"] == question
         tool_count = 10 if protocol == "google-gemini" else 11
         assert len([event for event in events if event["kind"] == "client_tool_handoff"]) == tool_count
-        assert len([event for event in events if event["kind"] == "client_tool_result"]) == tool_count
+        # 客户端工具结果按批一行：每个 Run 至多一行，逐项结果合计等于工具调用数。
+        result_rows = [event for event in events if event["kind"] == "client_tool_result"]
+        assert len(result_rows) <= len(current_detail["runs"])
+        assert sum(len(event["payload"]["results"]) for event in result_rows) == tool_count
         expected = (
             {"input_tokens": 76962, "output_tokens": 2287, "cache_read_tokens": 40676}
             if protocol == "google-gemini"
@@ -276,7 +279,8 @@ def exercise_continuation(env: dict[str, Any], protocol: str, mode: str) -> dict
         _, _, archive = download_observation_bundle(env, current_detail)
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             bundled = json.loads(bundle.read("interaction.json"))["events"]
-        assert len([event for event in bundled if event.get("kind") == "input_preview_recorded"]) == 1
+        assert len([event for event in bundled if event.get("kind") == "user_input_recorded"]) == 1
+        assert not [event for event in bundled if event.get("kind") == "input_preview_recorded"]
         return {"detail": current_detail, "model": model, "route": route, "key": key, "history": history}
 
 

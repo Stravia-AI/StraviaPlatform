@@ -22,6 +22,7 @@ from tests.common.helpers import (
     http_request,
     observation_bundle_events,
 )
+from tests.common.observation_contents import input_text
 from tests.e2e.admin.test_observations import (
     _create_route,
     _detail,
@@ -425,7 +426,7 @@ def _terminal_detail(
     env: dict[str, Any], route_id: str, prompt: str
 ) -> dict[str, Any] | None:
     for interaction in _route_interactions(env, route_id):
-        if interaction.get("input_preview") != prompt:
+        if input_text(env, interaction) != prompt:
             continue
         detail = _detail(env, interaction["id"])
         runs = detail.get("runs", [])
@@ -552,7 +553,7 @@ def test_wire_bundle_is_four_direction_raw_only_and_malformed_capture_stays_comp
         run = malformed["runs"][-1]
         assert run["trace"]["status"] == "complete"
         ordinary_kinds = {event["kind"] for event in run["events"]}
-        assert {"run_admitted", "target_attempt_started", "target_attempt_finished", "run_finished"} <= ordinary_kinds
+        assert {"run_admitted", "model_turn_started", "model_turn_finished", "run_finished"} <= ordinary_kinds
         assert "request_failed" in ordinary_kinds
 
         _, _, malformed_archive = download_observation_bundle(env, malformed)

@@ -21,6 +21,7 @@ from tests.common.helpers import (
     SERVER_STARTUP_TIMEOUT, find_free_port, http_request, initialize_server,
     stop_stravia_server, wait_for_setup_token, wait_until_ready,
 )
+from tests.common.observation_contents import input_text
 from tests.common.measure_protocol_http import Catalog
 from tests.e2e.admin.test_observations import (
     _create_route, _detail, _finished_detail, _forest, _route_interactions, _wait_for,
@@ -240,10 +241,12 @@ def test_observation_queue_preserves_model_event_times(
             assert run['status'] == 'completed', run
             assert not detail['interaction']['observation_gap'], detail
             assert run['delivery_completed_at'] <= delivered_by
+            # 首个 attempt 并入 Model Turn 行：单 attempt 成功路径只有开始与结束两行。
+            assert not {'target_attempt_started', 'target_attempt_finished'} & {
+                event['kind'] for event in run['events']
+            }
             for kind, upper_bound in [
                 ('model_turn_started', started_by),
-                ('target_attempt_started', started_by),
-                ('target_attempt_finished', delivered_by),
                 ('model_turn_finished', delivered_by),
             ]:
                 matching = [event for event in run['events'] if event['kind'] == kind]
@@ -440,7 +443,7 @@ def test_storage_failure_preserves_active_and_following_inference(
                 # must not convert that unknown consumption into fabricated zero.
                 interaction = _wait_for('following inference observation', lambda: next((
                     item for item in _route_interactions(env, route_id)
-                    if item['input_preview'] == 'following inference' and item['status'] == 'completed'
+                    if input_text(env, item) == 'following inference' and item['status'] == 'completed'
                 ), None))
                 detail = _wait_for('following inference terminal detail',
                                    lambda: _finished_detail(env, interaction['id']))

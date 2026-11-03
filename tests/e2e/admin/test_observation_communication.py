@@ -13,6 +13,7 @@ from tests.e2e.admin.test_observations import (
     _create_route, _detail, _forest, _proxy, _route_interactions, _sse_event, _wait_for,
 )
 from tests.common.helpers import http_request
+from tests.common.observation_contents import input_text
 
 
 def _next_live_event(response: Any) -> dict[str, Any]:
@@ -90,11 +91,11 @@ def test_scoped_current_snapshot_preserves_content_with_global_metadata_only(adm
             assert ready.wait(timeout=10), "controlled provider never emitted its first body"
         def observed_scopes() -> list[dict[str, Any]] | None:
             items = _route_interactions(env, route)
-            return items if {item["input_preview"] for item in items} == set(emitted) else None
+            return items if {input_text(env, item) for item in items} == set(emitted) else None
 
         interactions = _wait_for("two scoped interactions", observed_scopes)
         for marker in emitted:
-            interaction = next(item for item in interactions if item["input_preview"] == marker)
+            interaction = next(item for item in interactions if input_text(env, item) == marker)
             last_snapshot: dict[str, Any] | None = None
             def current_scope_body() -> dict[str, Any] | None:
                 nonlocal last_snapshot

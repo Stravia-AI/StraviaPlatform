@@ -18,9 +18,13 @@ from urllib.parse import urlsplit
 import zstandard
 
 
-CONTENT_DIGEST_DOMAIN = b"stravia.turn-content.v1\0"
-NORMALIZED_HISTORY = "normalized-v3"
-LEGACY_HISTORY = "legacy-format2"
+# ADR-0089 共享正文存储：SHA-256(域 || 格式字节 || 原始正文)，格式 0 = 文本、1 = 紧凑 JSON。
+CONTENT_DIGEST_DOMAIN = b"stravia.content.v1\0"
+TEXT_FORMAT, JSON_FORMAT = 0, 1
+# ADR-0076 冻结基线（aecfc21e）的 turn_contents：仅 JSON 正文，域前缀不含格式字节。
+LEGACY_CONTENT_DIGEST_DOMAIN = b"stravia.turn-content.v1\0"
+NORMALIZED_HISTORY = "content-store-v1"
+LEGACY_HISTORY = "legacy-adr0076-turn-contents"
 
 
 class InvalidHistory(ValueError):
@@ -32,9 +36,18 @@ def _require(condition, code):
         raise InvalidHistory(code)
 
 
-def content_digest(raw):
-    """Full SHA-256 over the fixed domain prefix and original JSON bytes."""
+def content_digest(format_code, raw):
+    """Full SHA-256 over the fixed domain prefix, one format byte and original bytes."""
+    _require(format_code in (TEXT_FORMAT, JSON_FORMAT), "content_format")
     digest = hashlib.sha256(CONTENT_DIGEST_DOMAIN)
+    digest.update(bytes((format_code,)))
+    digest.update(raw)
+    return digest.digest()
+
+
+def legacy_content_digest(raw):
+    """Frozen ADR-0076 digest: fixed domain prefix and original JSON bytes."""
+    digest = hashlib.sha256(LEGACY_CONTENT_DIGEST_DOMAIN)
     digest.update(raw)
     return digest.digest()
 
@@ -42,23 +55,15 @@ def content_digest(raw):
 def history_storage_schema(tables):
     """Select the persisted history layout by table presence.
 
-    Normalized v3 is authoritative whenever it exists. The legacy branch is a
-    measurement adapter for frozen pre-v3 binaries, never a runtime fallback.
+    The shared content store is authoritative whenever it exists. The legacy
+    branch is a measurement adapter for the frozen pre-ADR-0089 baseline binary,
+    never a runtime fallback.
     """
-    if "turn_nodes" in tables:
+    if "contents" in tables and "content_scopes" in tables:
         return NORMALIZED_HISTORY
-    if "turn_chain_nodes" in tables:
+    if "turn_contents" in tables and "turn_scopes" in tables:
         return LEGACY_HISTORY
     raise InvalidHistory("history_schema")
-
-
-def _legacy_digest(raw):
-    number = int.from_bytes(hashlib.sha256(raw).digest(), "big")
-    digits = []
-    for _ in range(55):
-        number, digit = divmod(number, 26)
-        digits.append(chr(97 + digit))
-    return "".join(reversed(digits))
 
 
 def _decode(encoded):
@@ -96,7 +101,53 @@ def _json(raw):
 
 
 def _restore(descriptor, contents):
-    """Restore a v3 descriptor from ordinal-ordered decoded content values."""
+    """Restore an ADR-0089 descriptor from ordinal-ordered decoded content units.
+
+    Slot wire forms: ``[pointer, ordinal]`` JSON unit, ``[pointer, ordinal, "t"]``
+    text unit, ``[pointer, ordinal, "t", prefix, suffix]`` prefix + text + suffix.
+    Text units are decoded UTF-8 strings; JSON units are parsed compact JSON.
+    """
+    _require(isinstance(descriptor, dict) and set(descriptor) == {"data", "slots"}, "envelope_shape")
+    slots = descriptor["slots"]
+    _require(isinstance(slots, list), "slots_shape")
+    _require(isinstance(contents, list), "contents_shape")
+    data = descriptor["data"]
+    seen, used = set(), set()
+    for slot in slots:
+        _require(isinstance(slot, list) and len(slot) in (2, 3, 5), "slot_shape")
+        pointer, ordinal = slot[0], slot[1]
+        _require(isinstance(pointer, str) and pointer.startswith("/") and pointer not in seen, "slot_pointer")
+        _require(type(ordinal) is int and 0 <= ordinal < len(contents), "slot_index")
+        if len(slot) > 2:
+            _require(slot[2] == "t", "slot_kind")
+        if len(slot) == 5:
+            _require(isinstance(slot[3], str) and isinstance(slot[4], str), "slot_concat")
+        seen.add(pointer)
+        used.add(ordinal)
+        value = copy.deepcopy(contents[ordinal])
+        if len(slot) > 2:
+            _require(isinstance(value, str), "slot_not_text")
+        if len(slot) == 5:
+            value = slot[3] + value + slot[4]
+        tokens = pointer[1:].split("/")
+        for token in tokens:
+            _require(not any(token[i] == "~" and (i + 1 == len(token) or token[i + 1] not in "01") for i in range(len(token))), "slot_escape")
+        tokens = [t.replace("~1", "/").replace("~0", "~") for t in tokens]
+        parent = data
+        for token in tokens[:-1]:
+            parent = _pointer_child(parent, token)
+        token = tokens[-1]
+        _require(_pointer_child(parent, token) is None, "slot_target")
+        if isinstance(parent, list):
+            parent[int(token)] = value
+        else:
+            parent[token] = value
+    _require(used == set(range(len(contents))), "unused_content")
+    return data
+
+
+def _legacy_restore(descriptor, contents):
+    """Restore an ADR-0076 descriptor (JSON slots only) from ordinal-ordered decoded content values."""
     _require(isinstance(descriptor, dict) and set(descriptor) == {"data", "slots"}, "envelope_shape")
     slots = descriptor["slots"]
     _require(isinstance(slots, list), "slots_shape")
@@ -124,38 +175,6 @@ def _restore(descriptor, contents):
         else:
             parent[token] = copy.deepcopy(contents[ordinal])
     _require(used == set(range(len(contents))), "unused_content")
-    return data
-
-
-def _legacy_restore(envelope, contents):
-    _require(isinstance(envelope, dict) and set(envelope) == {"data", "slots", "contents"}, "envelope_shape")
-    keys, slots = envelope["contents"], envelope["slots"]
-    _require(isinstance(keys, list) and all(isinstance(k, str) for k in keys), "contents_shape")
-    _require(len(set(keys)) == len(keys) and set(keys) == set(contents), "reference_set")
-    _require(isinstance(slots, list), "slots_shape")
-    data = envelope["data"]
-    seen, used = set(), set()
-    for slot in slots:
-        _require(isinstance(slot, list) and len(slot) == 2, "slot_shape")
-        pointer, index = slot
-        _require(isinstance(pointer, str) and pointer.startswith("/") and pointer not in seen, "slot_pointer")
-        _require(type(index) is int and 0 <= index < len(keys), "slot_index")
-        seen.add(pointer)
-        used.add(index)
-        tokens = pointer[1:].split("/")
-        for token in tokens:
-            _require(not any(token[i] == "~" and (i + 1 == len(token) or token[i + 1] not in "01") for i in range(len(token))), "slot_escape")
-        tokens = [t.replace("~1", "/").replace("~0", "~") for t in tokens]
-        parent = data
-        for token in tokens[:-1]:
-            parent = _pointer_child(parent, token)
-        token = tokens[-1]
-        _require(_pointer_child(parent, token) is None, "slot_target")
-        if isinstance(parent, list):
-            parent[int(token)] = copy.deepcopy(contents[keys[index]])
-        else:
-            parent[token] = copy.deepcopy(contents[keys[index]])
-    _require(used == set(range(len(keys))), "unused_content")
     return data
 
 
@@ -214,14 +233,16 @@ class _SqlReader:
         return self.connection.execute(query.replace("?", self.placeholder), values).fetchall()
 
 
-class HistoryReader(_SqlReader):
-    """Strict normalized-v3 reader shared by audit evidence and fixture export."""
+class _NodeReader(_SqlReader):
+    """Node identity, parent and output verification shared by both layouts."""
+
+    scope_table = None
 
     def node(self, identifier):
         rows = self.rows(
             "SELECT n.node_pk,n.id,n.parent_pk,parent.id,parent.scope_id,parent.kind,"
             "n.kind,n.scope_id,s.principal,n.payload_version,p.payload "
-            "FROM turn_nodes n JOIN turn_scopes s ON s.id=n.scope_id "
+            f"FROM turn_nodes n JOIN {self.scope_table} s ON s.id=n.scope_id "
             "LEFT JOIN turn_nodes parent ON parent.node_pk=n.parent_pk "
             "LEFT JOIN turn_node_payloads p ON p.node_pk=n.node_pk WHERE n.id=?",
             (identifier,),
@@ -238,8 +259,78 @@ class HistoryReader(_SqlReader):
                 "kind": kind, "scope_id": scope_id, "principal": principal,
                 "payload_version": payload_version, "payload": payload}
 
+    def identity(self, node):
+        return node["parent_id"], node["principal"]
+
+    def verify(self, identifier, principal):
+        node = self.node(identifier)
+        _require(node["id"] == identifier and node["principal"] == principal
+                 and node["kind"] == "response", "node_identity")
+        _require(node["payload_version"] == 6, "payload_version")
+        payload, count, slots = self.restore(node)
+        return node["parent_id"], _output(payload), count, slots
+
+
+def _unit(format_code, raw):
+    """Decode one verified content unit: text -> str, JSON -> parsed value."""
+    if format_code == TEXT_FORMAT:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InvalidHistory("text_invalid") from error
+    return _json(raw)
+
+
+def verified_unit(row):
+    """Verify one ``contents`` row (format, raw_len, digest, codec) and return its value.
+
+    row = (digest, format, raw_len, body). Shared by History and Observation proofs.
+    """
+    digest, format_code, raw_len, encoded = row
+    _require(isinstance(digest, (bytes, bytearray, memoryview)) and len(digest) == 32, "content_digest")
+    _require(format_code in (TEXT_FORMAT, JSON_FORMAT), "content_format")
+    raw = _decode(encoded)
+    _require(type(raw_len) is int and len(raw) == raw_len, "content_raw_len")
+    _require(content_digest(format_code, raw) == bytes(digest), "content_fingerprint")
+    return _unit(format_code, raw)
+
+
+class HistoryReader(_NodeReader):
+    """Strict ADR-0089 shared-content reader for audit evidence and fixture export."""
+
+    scope_table = "content_scopes"
+
     def restore(self, node):
         """Decode one descriptor and validate its complete ordinal/content set."""
+        rows = self.rows(
+            "SELECT c.ordinal,c.content_id,c.scope_id,t.scope_id,t.digest,t.format,t.raw_len,t.body "
+            "FROM turn_node_contents c "
+            "JOIN turn_nodes n ON n.node_pk=c.node_pk "
+            "JOIN content_scopes s ON s.id=n.scope_id "
+            "LEFT JOIN contents t ON t.id=c.content_id "
+            "WHERE c.node_pk=? AND s.principal=? ORDER BY c.ordinal",
+            (node["node_pk"], node["principal"]),
+        )
+        descriptor = _json(_decode(node["payload"]))
+        contents, content_ids = [], set()
+        for expected, (ordinal, content_id, mapping_scope, content_scope, *unit) in enumerate(rows):
+            _require(ordinal == expected, "ordinal_sequence")
+            _require(mapping_scope == node["scope_id"], "reference_scope")
+            _require(content_scope is not None and unit[3] is not None, "reference_missing")
+            _require(content_scope == node["scope_id"], "reference_scope")
+            _require(content_id not in content_ids, "reference_duplicate")
+            content_ids.add(content_id)
+            contents.append(verified_unit(unit))
+        data = _restore(descriptor, contents)
+        return data, len(rows), len(descriptor["slots"])
+
+
+class _LegacyHistoryReader(_NodeReader):
+    """Read-only adapter for the frozen pre-ADR-0089 ``turn_contents`` layout (baseline binary only)."""
+
+    scope_table = "turn_scopes"
+
+    def restore(self, node):
         rows = self.rows(
             "SELECT c.ordinal,c.content_id,c.scope_id,t.scope_id,t.digest,t.content "
             "FROM turn_node_contents c "
@@ -261,51 +352,10 @@ class HistoryReader(_SqlReader):
             _require(isinstance(digest, (bytes, bytearray, memoryview)) and len(digest) == 32,
                      "content_digest")
             raw = _decode(encoded)
-            _require(content_digest(raw) == bytes(digest), "content_fingerprint")
+            _require(legacy_content_digest(raw) == bytes(digest), "content_fingerprint")
             contents.append(_json(raw))
-        data = _restore(descriptor, contents)
+        data = _legacy_restore(descriptor, contents)
         return data, len(rows), len(descriptor["slots"])
-
-    def identity(self, node):
-        return node["parent_id"], node["principal"]
-
-    def verify(self, identifier, principal):
-        node = self.node(identifier)
-        _require(node["id"] == identifier and node["principal"] == principal
-                 and node["kind"] == "response", "node_identity")
-        _require(node["payload_version"] == 6, "payload_version")
-        payload, count, slots = self.restore(node)
-        return node["parent_id"], _output(payload), count, slots
-
-
-class _LegacyHistoryReader(_SqlReader):
-    """Read-only adapter for frozen pre-v3 benchmark binaries only."""
-
-    def node(self, identifier):
-        rows = self.rows("SELECT id,parent_id,kind,principal,payload_version,storage_format,payload FROM turn_chain_nodes WHERE id=?", (identifier,))
-        _require(len(rows) == 1, "node_missing")
-        return rows[0]
-
-    def identity(self, node):
-        return node[1], node[3]
-
-    def verify(self, identifier, principal):
-        node = self.node(identifier)
-        node_id, parent_id, kind, owner, version, storage_format, encoded = node
-        _require(node_id == identifier and owner == principal and kind == "response", "node_identity")
-        _require(version == 6 and storage_format == 2, "payload_version")
-        envelope = _json(_decode(encoded))
-        rows = self.rows("SELECT r.principal,c.principal,c.content_key,c.content FROM turn_chain_node_contents r LEFT JOIN turn_chain_contents c ON c.id=r.content_id WHERE r.node_id=?", (identifier,))
-        contents = {}
-        for ref_owner, content_owner, key, encoded_content in rows:
-            _require(ref_owner == principal and content_owner == principal and encoded_content is not None, "reference_principal")
-            _require(key not in contents, "reference_duplicate")
-            raw = _decode(encoded_content)
-            _require(_legacy_digest(raw) == key, "content_fingerprint")
-            contents[key] = _json(raw)
-        payload = _legacy_restore(envelope, contents)
-        output = _output(payload)
-        return parent_id, output, len(rows), len(envelope["slots"])
 
 
 def _history_tables(connection, placeholder):
@@ -314,11 +364,19 @@ def _history_tables(connection, placeholder):
     return {row[0] for row in connection.execute(query).fetchall()}
 
 
+def _table_columns(connection, placeholder, table):
+    if placeholder == "?":
+        return {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    return {row[0] for row in connection.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=%s",
+        (table,)).fetchall()}
+
+
 def _history_reader(connection, placeholder, allow_legacy=False):
     tables = _history_tables(connection, placeholder)
-    if not allow_legacy and "turn_nodes" not in tables:
-        raise InvalidHistory("history_schema")
     schema = history_storage_schema(tables)
+    if schema == LEGACY_HISTORY and not allow_legacy:
+        raise InvalidHistory("history_schema")
     reader = HistoryReader if schema == NORMALIZED_HISTORY else _LegacyHistoryReader
     return reader(connection, placeholder)
 
@@ -346,8 +404,8 @@ def _connect(args, directory):
 def read_history_evidence(args, directory, generation_ids, *, allow_legacy=False):
     """Verify every resolved generation and its complete principal-scoped ancestry.
 
-    ``allow_legacy`` is only for frozen pre-v3 benchmark binaries; current
-    product tests require the normalized schema.
+    ``allow_legacy`` is only for the frozen pre-ADR-0089 benchmark baseline binary;
+    current product tests require the shared content-store schema.
     """
     identifiers = list(dict.fromkeys(generation_ids))
     result = {}
@@ -394,6 +452,108 @@ def read_history_evidence(args, directory, generation_ids, *, allow_legacy=False
     return result
 
 
+def _observation_new(reader, run_id):
+    """ADR-0089 layout: blocks and event/tool-result references into the shared content store."""
+    owner = reader.rows(
+        "SELECT i.principal FROM inference_run_observations r "
+        "JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=?", (run_id,))
+    _require(len(owner) == 1, "observation_run_missing")
+    interaction_principal = owner[0][0]
+    sequences = [row[0] for row in reader.rows(
+        "SELECT sequence FROM observation_events WHERE run_id=? ORDER BY sequence", (run_id,))]
+    _require(bool(sequences), "observation_events_missing")
+    scopes, refs = set(), 0
+    units = {}
+    for table, ordinal_column in (("observation_event_contents", "ordinal"), ("observation_tool_results", "ordinal")):
+        for row in reader.rows(
+                f"SELECT r.sequence,r.{ordinal_column},c.id,s.principal,c.digest,c.format,c.raw_len,c.body "
+                f"FROM {table} r JOIN observation_events e ON e.sequence=r.sequence "
+                "LEFT JOIN contents c ON c.id=r.content_id "
+                "LEFT JOIN content_scopes s ON s.id=c.scope_id "
+                f"WHERE e.run_id=? ORDER BY r.sequence,r.{ordinal_column}", (run_id,)):
+            sequence, ordinal, content_id, principal, *unit = row
+            _require(content_id is not None and principal is not None and unit[3] is not None, "observation_reference_missing")
+            units.setdefault((table, sequence), []).append((ordinal, verified_unit(unit)))
+            scopes.add(principal)
+            refs += 1
+    for rows in units.values():
+        _require([ordinal for ordinal, _ in rows] == list(range(len(rows))), "observation_ordinal_sequence")
+    visible = []
+    blocks = reader.rows(
+        "SELECT sequence,channel,complete FROM observation_blocks WHERE run_id=? ORDER BY sequence", (run_id,))
+    for sequence, channel, complete in blocks:
+        _require(channel in ("thinking", "visible") and complete in (0, 1), "observation_block_shape")
+        if channel == "visible" and complete == 1:
+            text = [value for _, value in units.get(("observation_event_contents", sequence), [])]
+            _require(all(isinstance(value, str) for value in text), "observation_visible_not_text")
+            visible.extend(text)
+    return {"output_sha256": hashlib.sha256("".join(visible).encode()).hexdigest(),
+            "visible_blocks": sum(1 for _, channel, complete in blocks if channel == "visible" and complete == 1),
+            "content_refs": refs, "scopes": scopes, "interaction_principal": interaction_principal}
+
+
+def _observation_legacy(reader, run_id):
+    """Frozen baseline layout: whole event payloads are codec-encoded JSON rows."""
+    rows = reader.rows(
+        "SELECT sequence,kind,payload FROM observation_events WHERE run_id=? ORDER BY sequence", (run_id,))
+    _require(bool(rows), "observation_events_missing")
+    visible = []
+    for _sequence, kind, payload in rows:
+        value = _json(_decode(payload))
+        _require(isinstance(value, dict), "observation_payload_shape")
+        if kind == "client_visible_content" and value.get("complete") is True:
+            _require(isinstance(value.get("text"), str), "observation_visible_not_text")
+            visible.append(value["text"])
+    return {"output_sha256": hashlib.sha256("".join(visible).encode()).hexdigest(),
+            "visible_blocks": len(visible), "content_refs": 0, "scopes": set(), "interaction_principal": None}
+
+
+def read_observation_evidence(args, directory, run_ids, *, allow_legacy=False):
+    """Verify each Run's persisted Observation text straight from storage.
+
+    The ADR-0089 layout is read through ``observation_blocks`` and the event /
+    tool-result reference tables with the same digest, length and codec checks
+    as Turn Chain contents. ``allow_legacy`` additionally accepts the frozen
+    baseline payload-per-event layout. Text is hashed unmasked: admin reads
+    mask credentials (ADR-0088), the stored bytes must equal the client body.
+    """
+    identifiers = list(dict.fromkeys(run_ids))
+    backend = "postgres" if getattr(args, "database_url", None) else "sqlite"
+    result = {identifier: {"run_id": identifier, "backend": backend, "layout": None, "read_verified": False,
+                           "output_sha256": None, "visible_blocks": 0, "content_refs": 0,
+                           "content_scope_sha256": [], "interaction_principal_sha256": None, "failures": []}
+              for identifier in identifiers}
+    connection = None
+    try:
+        connection, placeholder, backend = _connect(args, directory)
+        tables = _history_tables(connection, placeholder)
+        reader = _SqlReader(connection, placeholder)
+        if "observation_event_contents" in tables and "observation_blocks" in tables:
+            layout, read = NORMALIZED_HISTORY, _observation_new
+        else:
+            layout, read = LEGACY_HISTORY, _observation_legacy
+            _require(allow_legacy and "observation_events" in tables, "observation_schema")
+        for identifier, proof in result.items():
+            proof.update(backend=backend, layout=layout)
+            try:
+                found = read(reader, identifier)
+                proof.update(output_sha256=found["output_sha256"], visible_blocks=found["visible_blocks"],
+                             content_refs=found["content_refs"], read_verified=True,
+                             content_scope_sha256=sorted(hashlib.sha256(scope.encode()).hexdigest() for scope in found["scopes"]))
+                if found["interaction_principal"] is not None:
+                    proof["interaction_principal_sha256"] = hashlib.sha256(found["interaction_principal"].encode()).hexdigest()
+            except Exception as error:
+                proof["failures"].append(str(error) if isinstance(error, InvalidHistory) else "observation_decode_failed")
+    except Exception as error:
+        code = str(error) if isinstance(error, InvalidHistory) else "observation_read_failed"
+        for proof in result.values():
+            proof["failures"] = [code]
+    finally:
+        if connection is not None:
+            connection.close()
+    return result
+
+
 def read_credential_evidence(args, directory, expectations):
     """Read committed plaintext mappings without exposing their values or identities.
 
@@ -415,6 +575,11 @@ def read_credential_evidence(args, directory, expectations):
         connection, placeholder, backend = _connect(args, directory)
         reader = _SqlReader(connection, placeholder)
         now = time.time_ns() // 1_000_000
+        legacy_expiry = "expires_at" in _table_columns(connection, placeholder, "reversible_redaction_mappings")
+        retention_ms = 0
+        if not legacy_expiry:
+            configured = reader.rows("SELECT value FROM settings WHERE name='log_retention_days'", ())
+            retention_ms = int(configured[0][0] if configured else 7) * 86_400_000
         identities, reverse_identities = {}, {}
         principal = None
         for nonce, expected in expectations.items():
@@ -442,19 +607,25 @@ def read_credential_evidence(args, directory, expectations):
                     _require(identities.get(secret, reference) == reference and
                              reverse_identities.get(reference, secret) == secret,
                              "credential_reused_identity")
+                    # ADR-0089 removed the mapping expires_at column: a published
+                    # mapping is kept for the retention window counted from published_at.
+                    deadline_column = "expires_at" if legacy_expiry else "pending_until"
                     rows = reader.rows(
-                        "SELECT principal,secret,published_at,expires_at "
+                        f"SELECT principal,secret,published_at,{deadline_column} "
                         "FROM reversible_redaction_mappings WHERE reference=?", (reference,))
                     _require(len(rows) == 1, "credential_mapping_missing")
-                    owner, stored_secret, published_at, expires_at = rows[0]
+                    owner, stored_secret, published_at, deadline = rows[0]
                     _require(isinstance(owner, str) and bool(owner), "credential_principal")
                     _require(principal is None or principal == owner, "credential_principal")
                     _require(isinstance(stored_secret, str) and stored_secret == secret,
                              "credential_secret")
                     _require(type(published_at) is int and 0 <= published_at <= now,
                              "credential_unpublished")
-                    _require(type(expires_at) is int and expires_at > now,
-                             "credential_expired")
+                    if legacy_expiry:
+                        _require(type(deadline) is int and deadline > now, "credential_expired")
+                    else:
+                        _require(deadline is None, "credential_unpublished")
+                        _require(published_at + retention_ms > now, "credential_expired")
                     principal = owner
                     identities[secret] = reference
                     reverse_identities[reference] = secret

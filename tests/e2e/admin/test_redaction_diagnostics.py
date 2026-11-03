@@ -190,12 +190,12 @@ def test_diagnostics_mask_restored_plaintext_but_raw_wire_preserves_it(
                 return None
 
             detail = _wait_for("plaintext finalized trace", finished)
-            assert detail["interaction"]["input_preview"] == reference.group()
+            assert detail["input_text"] == reference.group()
             masked = "ordinary-before *** ordinary-after"
             assert SECRET not in json.dumps(detail)
             assert masked in json.dumps(detail)
             if not tool:
-                assert detail["interaction"]["visible_tail"] == masked
+                assert detail["output_text"] == masked
             _, _, archive = download_observation_bundle(env, detail)
             events = observation_bundle_events(archive)
             wire_records = [event for event in events if event.get("layer") == "wire"]

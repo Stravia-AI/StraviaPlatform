@@ -373,6 +373,37 @@ def test_redaction_storage_failures_never_bypass_protection(
             set_enabled(env, False)
 
 
+def save_retention_days(env: dict[str, Any], days: str) -> None:
+    """保存保留天数会立即清扫一轮历史。"""
+    status, body = http_request(
+        "PUT", f"{env['admin']}/api/v1/settings/log_retention_days", payload={"value": days},
+        headers=env["auth"],
+    )
+    assert status == 200 and "error" not in body, body
+
+
+def age_out_mapping(env: dict[str, Any], reference: str) -> None:
+    """让映射落到“首次发布 + N”之外并被清扫回收。
+
+    期限列的扫描水位只向前推进，所以先保存 30 天把水位推到 30 天前，再把引用该映射的 Turn
+    节点与映射本身回拨到 20 天前，最后把 N 缩到 10 天：节点先被回收，映射随即失去最后一条引用。
+    只回拨与该映射相关的行，不影响同一服务端上其他测试的历史。
+    """
+    save_retention_days(env, "30")
+    old = int(time.time() * 1000) - 20 * 86_400_000
+    mapping_sql(
+        env,
+        "UPDATE turn_nodes SET created_at = ? WHERE node_pk IN "
+        "(SELECT node_pk FROM turn_node_redaction_mappings WHERE reference = ?)",
+        old, reference,
+    )
+    mapping_sql(env, "UPDATE reversible_redaction_mappings SET published_at = ? WHERE reference = ?", old, reference)
+    save_retention_days(env, "10")
+    assert mapping_sql(
+        env, "SELECT COUNT(*) FROM reversible_redaction_mappings WHERE reference = ?", reference,
+    ) == [(0,)]
+
+
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str, Any]) -> None:
@@ -391,16 +422,13 @@ def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str,
             reference = REFERENCE.search(json.dumps(received[-1]["body"]))
             assert reference is not None
             reference = reference.group()
-            mapping_sql(
-                env, "UPDATE reversible_redaction_mappings SET expires_at = 0 WHERE reference = ?",
-                reference,
-            )
+            age_out_mapping(env, reference)
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])
             assert status == 200, body
             assert body["choices"][0]["message"]["content"] == reference
             assert mapping_sql(
-                env, "SELECT expires_at FROM reversible_redaction_mappings WHERE reference = ?", reference,
+                env, "SELECT COUNT(*) FROM reversible_redaction_mappings WHERE reference = ?", reference,
             ) == [(0,)]
             set_enabled(env, True)
             status, body = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
@@ -417,6 +445,7 @@ def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str,
             assert len(rows) == 2
         finally:
             set_enabled(env, False)
+            save_retention_days(env, "7")
 
 
 @pytest.mark.e2e

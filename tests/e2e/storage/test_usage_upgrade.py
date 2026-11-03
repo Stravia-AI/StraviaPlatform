@@ -5,6 +5,7 @@ import os
 import sqlite3
 import struct
 import subprocess
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,20 @@ from tests.e2e.storage.test_usage_statistics import clear, stats
 pytestmark = [pytest.mark.e2e, pytest.mark.storage]
 
 WINDOW = {"start_at": 900000, "end_at": 3600000}
+
+
+def wait_until_observations_swept(env, path, description):
+    """升级后的首次历史扫描会检查全部存量一次：1970 年代的夹具明细早已越过保留期，随之删除。
+
+    扫描由启动后台任务异步触发，只能轮询可观察的结果；永久统计桶不随明细删除而变化。
+    """
+    deadline = time.monotonic() + 30
+    while True:
+        status, body = http_request("GET", f"{env['admin']}/api/v1/{path}", headers=env["auth"])
+        if status == 404 or (status == 200 and not body["data"]["items"]):
+            return
+        assert time.monotonic() < deadline, (description, status, body)
+        time.sleep(0.2)
 VIEWS = ("overview", "series", "models", "providers", "api-keys")
 
 
@@ -172,11 +187,8 @@ def test_supported0017_real_server_upgrade_retains_usage_without_duplicate_backf
             status, body = http_request("GET", f"{base}/api/v1/{resource}/{identity}", headers=env["auth"])
             assert status == 200, body
             assert body == {"error": error}
-        if fixture == "retained":
-            status, body = http_request(
-                "GET", f"{base}/api/v1/observations/interactions/historical", headers=env["auth"],
-            )
-            assert status == 200, body
+        wait_until_observations_swept(env, "observations/interactions/historical", "pre-retention interaction")
+        assert snapshot(env) == before
         clear(env)
         status, body = http_request(
             "GET", f"{base}/api/v1/observations/interactions/historical", headers=env["auth"],
@@ -308,14 +320,6 @@ def _seed_classification_fixture(backend, *, sqlite_path, pg_url, schema):
             )
 
 
-def _observation_page(env, path, **query):
-    status, body = http_request(
-        "GET", f"{env['admin']}/api/v1/{path}?{urlencode(query)}", headers=env["auth"],
-    )
-    assert status == 200, body
-    return body["data"]
-
-
 def assert_classification_contract(env, actual):
     # 保留期内的运行、尝试与拒绝按新口径回填；过期明细对应的桶保持未知（零）。
     # 等待客户端与接替终态按完成类终结计入，但不计失败；带 Target 尝试的
@@ -376,29 +380,9 @@ def assert_classification_contract(env, actual):
         "last_used_at": 4500000,
     }]
 
-    rejected = _observation_page(env, "observations/client-errors", **WINDOW,
-                                 type="rejected", limit=100)
-    assert [item["id"] for item in rejected["items"]] == ["retained-rejection", "rejected-run"]
-    assert all(item["type"] == "rejected" for item in rejected["items"])
-    failed = _observation_page(env, "observations/client-errors", **WINDOW,
-                               type="failed", limit=100)
-    assert [item["id"] for item in failed["items"]] == ["attempted-rejected-run", "upstream-run"]
-    assert all(item["type"] == "failed" for item in failed["items"])
-
-    upstream = _observation_page(env, "observations/upstream-errors", **WINDOW, limit=100)
-    assert [item["id"] for item in upstream["items"]] == ["upstream-attempt"]
-    item = upstream["items"][0]
-    assert item["outcome"] == "caused_failure"
-    assert item["error"] == {
-        "source": "upstream", "code": "upstream_error", "message": "upstream exploded",
-        "status_code": 503, "upstream_code": "server_error",
-    }
-    assert item["provider_id"] == "provider-1"
-    assert item["provider_name"] == "Provider One"
-    assert item["upstream_model"] == "upstream-1"
-    assert item["model"] == "route-x"
-    assert item["api_key_id"] == "key-1"
-    assert item["duration_ms"] == 200
+    # 明细（拒绝请求与上游失败）同样早已越过保留期，被首次扫描删除；分类计数留在永久桶里。
+    for path in ("observations/client-errors", "observations/upstream-errors"):
+        wait_until_observations_swept(env, f"{path}?{urlencode(WINDOW)}&limit=100", path)
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"], ids=["sqlite", "postgres"])

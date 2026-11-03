@@ -184,13 +184,18 @@ INSERT INTO rejected_request_observations(id,occurred_at,method,path,ingress_pro
 
 async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
     ensure!(
-        matches!(fixture, "retained" | "empty" | "cost-and-billing"),
+        matches!(
+            fixture,
+            "retained" | "empty" | "cost-and-billing" | "shared-content-history"
+        ),
         "invalid upgrade fixture"
     );
-    let last_migration = if fixture == "cost-and-billing" {
-        29
-    } else {
-        17
+    // `shared-content-history` 是 ADR-0089 之前的最后一版 schema（0036）：
+    // 只安装真实迁移，数据由 E2E 以旧版本服务端录制的 fixture 写入。
+    let last_migration = match fixture {
+        "cost-and-billing" => 29,
+        "shared-content-history" => 36,
+        _ => 17,
     };
     let backend = env::var("STRAVIA_STORAGE_BACKEND").context("STRAVIA_STORAGE_BACKEND")?;
     match backend.as_str() {
@@ -213,7 +218,12 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
                     .cloned()
                     .collect(),
             );
-            prefix.run(pool.migration_pool()).await?;
+            if fixture == "shared-content-history" {
+                // 0033 之前的 Turn 历史转换由宿主迁移器的钩子完成；只有经由它安装的 0036 才是真实旧库形态。
+                stravia_core::migrations::run_sqlite_migrator(&pool, &prefix, None).await?;
+            } else {
+                prefix.run(pool.migration_pool()).await?;
+            }
             if fixture == "retained" {
                 sqlx::raw_sql(RETAINED_USAGE_FIXTURE).execute(&pool).await?;
             }
@@ -233,7 +243,11 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
                     .cloned()
                     .collect(),
             );
-            prefix.run(pool.migration_pool()).await?;
+            if fixture == "shared-content-history" {
+                stravia_core::migrations::run_postgres_migrator(&pool, &prefix, None).await?;
+            } else {
+                prefix.run(pool.migration_pool()).await?;
+            }
             if fixture == "retained" {
                 sqlx::raw_sql(RETAINED_USAGE_FIXTURE).execute(&pool).await?;
             }

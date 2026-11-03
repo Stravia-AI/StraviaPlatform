@@ -1,4 +1,4 @@
-"""Storage evidence exercises real normalized-v3 SQLite rows and codec bytes."""
+"""Storage evidence exercises real ADR-0089 shared-content-store SQLite rows and codec bytes."""
 import hashlib
 import json
 import sqlite3
@@ -8,14 +8,14 @@ import pytest
 import zstandard
 
 from tests.common.protocol_history_audit import (
-    LEGACY_HISTORY, NORMALIZED_HISTORY, HistoryReader, content_digest,
+    JSON_FORMAT, LEGACY_HISTORY, NORMALIZED_HISTORY, HistoryReader, content_digest,
     history_storage_schema, read_credential_evidence, read_history_evidence,
 )
 
 
 def test_storage_schema_selection_prefers_normalized_and_keeps_baseline_adapter():
-    assert history_storage_schema({"turn_nodes", "turn_chain_nodes"}) == NORMALIZED_HISTORY
-    assert history_storage_schema({"turn_chain_nodes"}) == LEGACY_HISTORY
+    assert history_storage_schema({"turn_nodes", "contents", "content_scopes", "turn_scopes"}) == NORMALIZED_HISTORY
+    assert history_storage_schema({"turn_nodes", "turn_contents", "turn_scopes"}) == LEGACY_HISTORY
     with pytest.raises(ValueError):
         history_storage_schema(set())
 
@@ -25,8 +25,26 @@ def encode(raw, compressed=False):
     return body + bytes([int(compressed)]) + b"\0" * 4 + len(raw).to_bytes(8, "little") + b"\1"
 
 
+def add_content(connection, content_id, scope_id, body, compressed=False, format_code=JSON_FORMAT):
+    """写入一条共享内容：摘要覆盖格式字节与原文，``raw_len`` 是原文字节数。"""
+    connection.execute(
+        "INSERT INTO contents(id,scope_id,digest,format,raw_len,body) VALUES(?,?,?,?,?,?)",
+        (content_id, scope_id, content_digest(format_code, body), format_code, len(body),
+         encode(body, compressed)),
+    )
+
+
 def raw(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def add_content(connection, content_id, scope_id, body, compressed=False, format_code=JSON_FORMAT):
+    """写入一条共享内容：摘要覆盖格式字节与原文，``raw_len`` 是原文字节数。"""
+    connection.execute(
+        "INSERT INTO contents(id,scope_id,digest,format,raw_len,body) VALUES(?,?,?,?,?,?)",
+        (content_id, scope_id, content_digest(format_code, body), format_code, len(body),
+         encode(body, compressed)),
+    )
 
 
 @pytest.fixture
@@ -34,14 +52,15 @@ def history(tmp_path):
     (tmp_path / "db").mkdir()
     connection = sqlite3.connect(tmp_path / "db" / "gateway.db")
     connection.executescript("""
-        CREATE TABLE turn_scopes(id INTEGER PRIMARY KEY, principal TEXT UNIQUE);
+        CREATE TABLE content_scopes(id INTEGER PRIMARY KEY, principal TEXT UNIQUE);
         CREATE TABLE turn_nodes(
             node_pk INTEGER PRIMARY KEY, id TEXT UNIQUE, scope_id INTEGER NOT NULL,
             kind TEXT NOT NULL, parent_pk INTEGER, payload_version INTEGER NOT NULL);
         CREATE TABLE turn_node_payloads(node_pk INTEGER PRIMARY KEY, payload BLOB NOT NULL);
-        CREATE TABLE turn_contents(
+        CREATE TABLE contents(
             id INTEGER PRIMARY KEY, scope_id INTEGER NOT NULL, digest BLOB NOT NULL,
-            content BLOB NOT NULL, UNIQUE(scope_id, digest));
+            format INTEGER NOT NULL, raw_len INTEGER NOT NULL, body BLOB NOT NULL,
+            UNIQUE(scope_id, digest));
         CREATE TABLE turn_node_contents(
             node_pk INTEGER NOT NULL, scope_id INTEGER NOT NULL, ordinal INTEGER NOT NULL,
             content_id INTEGER NOT NULL, PRIMARY KEY(node_pk, ordinal),
@@ -59,12 +78,11 @@ def history(tmp_path):
                "trusted_media_turn_ids": [], "upstream_response_id": None,
                "effective_state": state, "effective_request": None}
     envelope = {"data": payload, "slots": [["/client_output/0", 0], ["/client_output/1", 0]]}
-    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (1, "private-owner"))
+    connection.execute("INSERT INTO content_scopes VALUES(?,?)", (1, "private-owner"))
     connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
                        (1, "generation", 1, "response", None, 6))
     connection.execute("INSERT INTO turn_node_payloads VALUES(?,?)", (1, encode(raw(envelope), True)))
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (1, 1, content_digest(item_raw), encode(item_raw, True)))
+    add_content(connection, 1, 1, item_raw, True)
     connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 0, 1))
     connection.commit()
     yield tmp_path, connection, envelope, item
@@ -89,9 +107,9 @@ def test_restores_repeated_slots_and_hashes_real_output(history):
 
 
 @pytest.mark.parametrize("mutation,code", [
-    ("DELETE FROM turn_contents", "reference_missing"),
-    ("UPDATE turn_contents SET digest=zeroblob(32)", "content_fingerprint"),
-    ("UPDATE turn_contents SET digest=zeroblob(31)", "content_digest"),
+    ("DELETE FROM contents", "reference_missing"),
+    ("UPDATE contents SET digest=zeroblob(32)", "content_fingerprint"),
+    ("UPDATE contents SET digest=zeroblob(31)", "content_digest"),
     ("UPDATE turn_node_contents SET content_id=99", "reference_missing"),
     ("UPDATE turn_node_contents SET scope_id=2", "reference_scope"),
     ("DELETE FROM turn_node_contents", "slot_index"),
@@ -111,7 +129,7 @@ def test_rejects_corrupt_storage(history, mutation, code):
 
 def test_parent_scope_is_checked(history):
     connection = history[1]
-    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (2, "another-owner"))
+    connection.execute("INSERT INTO content_scopes VALUES(?,?)", (2, "another-owner"))
     connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
                        (2, "parent", 2, "response", None, 6))
     connection.execute("INSERT INTO turn_node_payloads SELECT 2,payload FROM turn_node_payloads WHERE node_pk=1")
@@ -122,9 +140,8 @@ def test_parent_scope_is_checked(history):
 def test_content_scope_is_checked(history):
     connection = history[1]
     item_raw = raw(history[3])
-    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (2, "another-owner"))
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (2, 2, content_digest(item_raw), encode(item_raw)))
+    connection.execute("INSERT INTO content_scopes VALUES(?,?)", (2, "another-owner"))
+    add_content(connection, 2, 2, item_raw)
     connection.execute("UPDATE turn_node_contents SET content_id=2 WHERE node_pk=1")
     assert proof(history)["failures"] == ["reference_scope"]
 
@@ -135,8 +152,7 @@ def test_real_json_pointer_parent_before_child(history):
     profile_raw = raw(profile)
     envelope["data"]["__open_responses_response_profile"] = None
     envelope["slots"].extend([["/__open_responses_response_profile", 1], ["/__open_responses_response_profile/output/0", 0]])
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (2, 1, content_digest(profile_raw), encode(profile_raw)))
+    add_content(connection, 2, 1, profile_raw)
     connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
     connection.execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
     assert proof(history)["read_verified"]
@@ -150,7 +166,7 @@ def test_rejects_slot_ordinal_out_of_range(history):
 
 
 def test_rejects_unknown_codec(history):
-    history[1].execute("UPDATE turn_contents SET content=?", (b"invalid" + b"\0" * 13 + b"\2",))
+    history[1].execute("UPDATE contents SET body=?", (b"invalid" + b"\0" * 13 + b"\2",))
     assert proof(history)["failures"] == ["codec_version"]
 
 
@@ -161,8 +177,8 @@ def test_rejects_malformed_descriptor_json(history):
 
 def test_rejects_malformed_content_json(history):
     body = b"{"
-    history[1].execute("UPDATE turn_contents SET digest=?,content=?",
-                       (content_digest(body), encode(body)))
+    history[1].execute("UPDATE contents SET digest=?,raw_len=?,body=?",
+                       (content_digest(JSON_FORMAT, body), len(body), encode(body)))
     assert proof(history)["failures"] == ["json_invalid"]
 
 
@@ -184,8 +200,7 @@ def test_restore_preserves_arbitrary_precision_integers(history):
     number = b"1234567890123456789012345678901234567890"
     envelope["data"]["opaque_big"] = None
     envelope["slots"].append(["/opaque_big", 1])
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (2, 1, content_digest(number), encode(number)))
+    add_content(connection, 2, 1, number)
     connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
     connection.execute("UPDATE turn_node_payloads SET payload=? WHERE node_pk=1", (encode(raw(envelope)),))
     reader = HistoryReader(connection, "?")
@@ -209,8 +224,7 @@ def test_reference_rows_must_cover_descriptor_slots(history):
 
 def test_unreferenced_content_ordinal_is_rejected(history):
     directory, connection, envelope, item = history
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (2, 1, content_digest(b"null"), encode(b"null")))
+    add_content(connection, 2, 1, b"null")
     connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 1, 2))
     assert proof(history)["failures"] == ["unused_content"]
 
