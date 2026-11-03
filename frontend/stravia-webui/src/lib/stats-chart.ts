@@ -183,7 +183,8 @@ export interface ActivityCell {
   start: number
   /** null 表示该时段有请求但 Token 用量未知；无请求为 0。 */
   tokens: number | null
-  level: 0 | 1 | 2 | 3 | 4
+  /** 活跃格在全图用量中的相对强度 0–1（名次，不是线性比例）；无用量或用量未知为 null。 */
+  intensity: number | null
   col: number
   row: number
 }
@@ -356,25 +357,39 @@ export function buildActivityGrid(
   // Even grains that do not divide an hour/day/week use distinct integer positions.
   const rowsPerColumn = Math.max(1, Math.ceil(activityColumnMs(bucketMs) / bucketMs))
   const colStarts: number[] = []
-  const rawCells: Omit<ActivityCell, 'level'>[] = []
+  const rawCells: Omit<ActivityCell, 'intensity'>[] = []
   let rowCount = 0
-  let max = 0
   for (let start = startMs, index = 0; start < endMs; start += bucketMs, index++) {
     const col = Math.floor(index / rowsPerColumn)
     const row = index % rowsPerColumn
     if (row === 0) colStarts.push(start)
     rowCount = Math.max(rowCount, row + 1)
     const tokens = totals.has(start) ? totals.get(start)! : 0
-    if (tokens != null) max = Math.max(max, tokens)
     rawCells.push({ start, tokens, col, row })
   }
 
+  const intensities = activityIntensities(rawCells.map((cell) => cell.tokens))
   const cells = rawCells.map((cell): ActivityCell => ({
     ...cell,
-    level:
-      cell.tokens == null || cell.tokens === 0 || max === 0
-        ? 0
-        : (Math.min(4, Math.ceil((cell.tokens / max) * 4)) as 1 | 2 | 3 | 4),
+    intensity: cell.tokens ? (intensities.get(cell.tokens) ?? null) : null,
   }))
   return { cells, colStarts, colCount: colStarts.length, rowCount, bucketMs }
+}
+
+/**
+ * 把活跃格（用量为正）按用量名次映射到 0–1：最小为 0，最大为 1，其间按名次均匀分布；无用量与未知不入名次。
+ * 不按峰值线性缩放：用量分布有长尾，少数峰值会把其余格子都压到接近 0，整张图看不出强弱。
+ * 用量相同的格子必须同强度，并列取较低名次；峰值固定为 1，单个活跃格或全部相同时也是。
+ * 强度只表示相对强弱，精确用量看提示。
+ */
+function activityIntensities(usage: readonly (number | null)[]): Map<number, number> {
+  const active = usage.filter((tokens): tokens is number => tokens != null && tokens > 0).sort((a, b) => a - b)
+  const peak = active.at(-1)
+  const intensities = new Map<number, number>()
+  active.forEach((tokens, rank) => {
+    // 升序下同值首次出现的下标，恰为严格更小的格数；非峰值时至少有两个活跃格，除数不为 0。
+    if (intensities.has(tokens)) return
+    intensities.set(tokens, tokens === peak ? 1 : rank / (active.length - 1))
+  })
+  return intensities
 }

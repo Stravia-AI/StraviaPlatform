@@ -797,7 +797,7 @@ test.describe('statistics report without traffic', () => {
     const cells = activity.locator('.token-activity-cell')
     await expect(cells.first()).toBeVisible()
     expect(await cells.count()).toBeGreaterThan(8)
-    expect(await cells.evaluateAll((els) => els.every((el) => el.getAttribute('data-level') === '0'))).toBe(true)
+    expect(await cells.evaluateAll((els) => els.every((el) => !el.hasAttribute('data-intensity')))).toBe(true)
     expect(
       await cells.evaluateAll((els) => els.every((el) => /· 0 tokens$/.test(el.getAttribute('aria-label') ?? ''))),
     ).toBe(true)

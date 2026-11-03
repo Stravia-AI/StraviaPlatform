@@ -181,7 +181,9 @@ test('presets retain base grain while real history fills the available width', a
   }
 })
 
-test('historical peak sets the whole grid scale, missing buckets are zero and null stays unknown', async ({ page }) => {
+test('historical peak is the top level across the whole grid, missing buckets are zero and null stays unknown', async ({
+  page,
+}) => {
   await prepareApp(page)
   const requests = await stubStats(page)
   await page.setViewportSize({ width: 1600, height: 900 })
@@ -193,10 +195,10 @@ test('historical peak sets the whole grid scale, missing buckets are zero and nu
   expect(Number(await wrapper.getAttribute('data-activity-start'))).toBeLessThan(PEAK)
   const peak = page.locator(`.token-activity-cell[data-start="${PEAK}"]`)
   await expect(peak).toHaveAttribute('aria-label', /1M tokens$/)
-  await expect(peak).toHaveAttribute('data-level', '4')
+  await expect(peak).toHaveAttribute('data-intensity', '1')
   const newest = page.locator(`.token-activity-cell[data-start="${END - QUARTER}"]`)
   await expect(newest).toHaveAttribute('aria-label', /100 tokens$/)
-  await expect(newest).toHaveAttribute('data-level', '1')
+  await expect(newest).toHaveAttribute('data-intensity', '0')
   await expect(page.locator(`.token-activity-cell[data-start="${MISSING}"]`)).toHaveAttribute('aria-label', /0 tokens$/)
   await expect(page.locator(`.token-activity-cell[data-start="${UNKNOWN}"]`)).toHaveAttribute(
     'aria-label',
