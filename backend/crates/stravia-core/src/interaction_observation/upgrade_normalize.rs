@@ -249,9 +249,12 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let mut unit = super::content_refs::value_content(content);
-                let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
-                        .await?[0];
+                let content_id = super::content_refs::intern_sqlite(
+                    tx,
+                    &principal,
+                    std::slice::from_mut(&mut unit),
+                )
+                .await?[0];
                 sqlx::query("INSERT INTO observation_tool_results(sequence,ordinal,tool_id,is_error,content_id) VALUES (?,?,?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)
@@ -269,9 +272,12 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let mut unit = super::content_refs::text_content(text);
-                let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
-                        .await?[0];
+                let content_id = super::content_refs::intern_sqlite(
+                    tx,
+                    &principal,
+                    std::slice::from_mut(&mut unit),
+                )
+                .await?[0];
                 sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)
@@ -591,6 +597,53 @@ async fn merge_turn_start_sqlite(
     Ok(())
 }
 
+type TurnKey = (Option<String>, String);
+
+struct AttemptRow {
+    sequence: i64,
+    at: i64,
+    run_id: Option<String>,
+    attrs: Value,
+}
+
+/// 每个 Turn 只把「先于 Turn 结束行的最后一个 attempt 结束」并入结束行；更早的 attempt
+/// 结束（被 failover 取代）保持独立行，信息不丢。返回 `(Turn 结束行 sequence,
+/// 被并入的 attempt 行 sequence, 合并后的 attrs)`。
+fn merge_last_attempts(
+    finishes: &mut HashMap<TurnKey, (i64, Value)>,
+    attempts: Vec<AttemptRow>,
+) -> Vec<(i64, i64, Value)> {
+    // 输入按 sequence 升序，后到的覆盖先到的，剩下的就是每个 Turn 最后一个。
+    let mut last: HashMap<TurnKey, AttemptRow> = HashMap::new();
+    for attempt in attempts {
+        let Some(model_turn_id) = attempt.attrs["model_turn_id"].as_str() else {
+            continue;
+        };
+        let key = (attempt.run_id.clone(), model_turn_id.to_owned());
+        let Some((turn_sequence, _)) = finishes.get(&key) else {
+            continue;
+        };
+        if *turn_sequence < attempt.sequence {
+            continue;
+        }
+        last.insert(key, attempt);
+    }
+    let mut merged = Vec::with_capacity(last.len());
+    for (key, attempt) in last {
+        let (turn_sequence, turn_attrs) = finishes.get_mut(&key).expect("finish row exists");
+        let Value::Object(object) = turn_attrs else {
+            continue;
+        };
+        if let Some(usage) = attempt.attrs.get("usage") {
+            object.insert("usage".into(), usage.clone());
+        }
+        object.insert("attempt".into(), attempt.attrs);
+        object.insert("attempt_at".into(), Value::from(attempt.at));
+        merged.push((*turn_sequence, attempt.sequence, turn_attrs.clone()));
+    }
+    merged
+}
+
 /// 第三段：最后一个 attempt 的结束与用量并入 Turn 结束行。
 async fn merge_turn_finish_sqlite(
     connection: &mut sqlx::SqliteConnection<'_>,
@@ -611,40 +664,26 @@ async fn merge_turn_finish_sqlite(
             finishes.insert((run_id, model_turn_id.to_owned()), (sequence, attrs));
         }
     }
+    let mut candidates = Vec::new();
     for row in attempts {
-        let sequence: i64 = row.try_get("sequence")?;
-        let attempt_at: i64 = row.try_get("occurred_at")?;
-        let run_id: Option<String> = row.try_get("run_id")?;
-        let attrs = decode_attrs(row.try_get("attrs")?)?;
-        let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
-            continue;
-        };
-        let Some((turn_sequence, turn_attrs)) =
-            finishes.get_mut(&(run_id, model_turn_id.to_owned()))
-        else {
-            continue;
-        };
-        if *turn_sequence < sequence {
-            continue;
-        }
-        let Value::Object(object) = turn_attrs else {
-            continue;
-        };
-        if let Some(usage) = attrs.get("usage") {
-            object.insert("usage".into(), usage.clone());
-        }
-        object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(attempt_at));
+        candidates.push(AttemptRow {
+            sequence: row.try_get("sequence")?,
+            at: row.try_get("occurred_at")?,
+            run_id: row.try_get("run_id")?,
+            attrs: decode_attrs(row.try_get("attrs")?)?,
+        });
+    }
+    for (turn_sequence, attempt_sequence, merged) in merge_last_attempts(&mut finishes, candidates)
+    {
         sqlx::query("UPDATE observation_events SET attrs=? WHERE sequence=?")
-            .bind(encoded_attrs(turn_attrs)?)
-            .bind(*turn_sequence)
+            .bind(encoded_attrs(&merged)?)
+            .bind(turn_sequence)
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM observation_events WHERE sequence=?")
-            .bind(sequence)
+            .bind(attempt_sequence)
             .execute(&mut *tx)
             .await?;
-        *turn_sequence = i64::MAX;
     }
     sqlx::query("DELETE FROM observation_events WHERE kind='usage_confirmed'")
         .execute(&mut *tx)
@@ -722,40 +761,26 @@ async fn merge_turn_finish_postgres(connection: &mut sqlx::PgConnection<'_>) -> 
             finishes.insert((run_id, model_turn_id.to_owned()), (sequence, attrs));
         }
     }
+    let mut candidates = Vec::new();
     for row in attempts {
-        let sequence: i64 = row.try_get("sequence")?;
-        let attempt_at: i64 = row.try_get("occurred_at")?;
-        let run_id: Option<String> = row.try_get("run_id")?;
-        let attrs = decode_attrs(row.try_get("attrs")?)?;
-        let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
-            continue;
-        };
-        let Some((turn_sequence, turn_attrs)) =
-            finishes.get_mut(&(run_id, model_turn_id.to_owned()))
-        else {
-            continue;
-        };
-        if *turn_sequence < sequence {
-            continue;
-        }
-        let Value::Object(object) = turn_attrs else {
-            continue;
-        };
-        if let Some(usage) = attrs.get("usage") {
-            object.insert("usage".into(), usage.clone());
-        }
-        object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(attempt_at));
+        candidates.push(AttemptRow {
+            sequence: row.try_get("sequence")?,
+            at: row.try_get("occurred_at")?,
+            run_id: row.try_get("run_id")?,
+            attrs: decode_attrs(row.try_get("attrs")?)?,
+        });
+    }
+    for (turn_sequence, attempt_sequence, merged) in merge_last_attempts(&mut finishes, candidates)
+    {
         sqlx::query("UPDATE observation_events SET attrs=$1 WHERE sequence=$2")
-            .bind(encoded_attrs(turn_attrs)?)
-            .bind(*turn_sequence)
+            .bind(encoded_attrs(&merged)?)
+            .bind(turn_sequence)
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM observation_events WHERE sequence=$1")
-            .bind(sequence)
+            .bind(attempt_sequence)
             .execute(&mut *tx)
             .await?;
-        *turn_sequence = i64::MAX;
     }
     sqlx::query("DELETE FROM observation_events WHERE kind='usage_confirmed'")
         .execute(&mut *tx)
