@@ -65,7 +65,7 @@ impl ObservationStore {
                     ] {
                         sqlx::query(sql).bind(id).execute(&mut *tx).await?;
                     }
-                    super::content_refs::enqueue_unreferenced_sqlite(&mut tx, &content_ids).await?;
+                    crate::content_store::sqlite::enqueue_unreferenced(&mut tx, &content_ids).await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;
@@ -110,7 +110,7 @@ impl ObservationStore {
                     ] {
                         sqlx::query(sql).bind(id).execute(&mut *tx).await?;
                     }
-                    super::content_refs::enqueue_unreferenced_postgres(&mut tx, &content_ids)
+                    crate::content_store::postgres::enqueue_unreferenced(&mut tx, &content_ids)
                         .await?;
                 }
                 tx.commit().await?;

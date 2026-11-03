@@ -190,10 +190,10 @@ async fn split_event_sqlite(
             let text = row.payload["text"].as_str().unwrap_or_default();
             let item = &row.payload["item"];
             let item = (!item.is_null()).then_some(item);
-            let split = super::blocks::split(item, text);
+            let mut split = super::blocks::split(item, text);
             let principal = principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
             let content_ids =
-                super::content_refs::intern_sqlite(tx, &principal, &split.units).await?;
+                super::content_refs::intern_sqlite(tx, &principal, &mut split.units).await?;
             let envelope = split
                 .envelope
                 .map(|value| {
@@ -237,9 +237,9 @@ async fn split_event_sqlite(
             if !content.is_null() {
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
-                let unit = super::content_refs::StoreUnit::from_value(content);
+                let mut unit = super::content_refs::value_content(content);
                 let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_ref(&unit))
+                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
                         .await?[0];
                 sqlx::query("INSERT INTO observation_tool_results(sequence,ordinal,tool_id,is_error,content_id) VALUES (?,?,?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
@@ -257,9 +257,9 @@ async fn split_event_sqlite(
             if let Some(text) = row.payload["text"].as_str() {
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
-                let unit = super::content_refs::StoreUnit::text(text);
+                let mut unit = super::content_refs::text_content(text);
                 let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_ref(&unit))
+                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
                         .await?[0];
                 sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
@@ -385,11 +385,11 @@ async fn split_event_postgres(
             let text = row.payload["text"].as_str().unwrap_or_default();
             let item = &row.payload["item"];
             let item = (!item.is_null()).then_some(item);
-            let split = super::blocks::split(item, text);
+            let mut split = super::blocks::split(item, text);
             let principal =
                 principal_postgres(tx, row.interaction_id.as_deref(), principals).await?;
             let content_ids =
-                super::content_refs::intern_postgres(tx, &principal, &split.units).await?;
+                super::content_refs::intern_postgres(tx, &principal, &mut split.units).await?;
             let envelope = split
                 .envelope
                 .map(|value| {
@@ -433,11 +433,11 @@ async fn split_event_postgres(
             if !content.is_null() {
                 let principal =
                     principal_postgres(tx, row.interaction_id.as_deref(), principals).await?;
-                let unit = super::content_refs::StoreUnit::from_value(content);
+                let mut unit = super::content_refs::value_content(content);
                 let content_id = super::content_refs::intern_postgres(
                     tx,
                     &principal,
-                    std::slice::from_ref(&unit),
+                    std::slice::from_mut(&mut unit),
                 )
                 .await?[0];
                 sqlx::query("INSERT INTO observation_tool_results(sequence,ordinal,tool_id,is_error,content_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(sequence,ordinal) DO NOTHING")
@@ -456,11 +456,11 @@ async fn split_event_postgres(
             if let Some(text) = row.payload["text"].as_str() {
                 let principal =
                     principal_postgres(tx, row.interaction_id.as_deref(), principals).await?;
-                let unit = super::content_refs::StoreUnit::text(text);
+                let mut unit = super::content_refs::text_content(text);
                 let content_id = super::content_refs::intern_postgres(
                     tx,
                     &principal,
-                    std::slice::from_ref(&unit),
+                    std::slice::from_mut(&mut unit),
                 )
                 .await?[0];
                 sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES ($1,$2,$3) ON CONFLICT(sequence,ordinal) DO NOTHING")
