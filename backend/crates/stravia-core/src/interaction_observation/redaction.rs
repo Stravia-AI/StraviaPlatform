@@ -8,23 +8,21 @@ use sha2::{Digest, Sha256};
 pub(crate) const REDACTED: &str = "***";
 
 /// 最新用户 item 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
-///
-/// 多个文本单元按顺序以 `\n` 连接，不截断；JSON 单元不进入输入摘要。
-pub(crate) fn user_input_text(
+pub(crate) fn user_input_units(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
-) -> Option<String> {
+) -> Option<Vec<String>> {
     use stravia_runtime_contract::protocol::ir::Role;
     use stravia_runtime_contract::protocol::ir::content::{ContentUnitBody, item_content_units};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
     let units = item_content_units(item);
-    let texts: Vec<&str> = units
+    let texts: Vec<String> = units
         .iter()
         .filter_map(|unit| match &unit.body {
-            ContentUnitBody::Text(text) => Some(*text),
+            ContentUnitBody::Text(text) => Some((*text).to_owned()),
             ContentUnitBody::Json(_) => None,
         })
         .collect();
-    (!texts.is_empty()).then(|| texts.join("\n"))
+    (!texts.is_empty()).then_some(texts)
 }
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
@@ -1010,7 +1008,103 @@ fn text_wrapper(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn user_text_items(text: &str) -> Vec<stravia_runtime_contract::protocol::ir::AiItem> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
+        vec![AiItem {
+            role: Role::User,
+            content: MessageContent::Text(std::sync::Arc::new(text.to_owned())),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }]
+    }
+
+    #[test]
+    fn input_units_select_latest_user_text_without_history_or_tool_payloads() {
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"system","content":"system-secret"},
+                {"role":"user","content":"old-user"},
+                {"role":"assistant","content":"assistant-secret"},
+                {"role":"user","content":[
+                    {"type":"text","text":"first"},
+                    {"type":"thinking","thinking":"ignored"},
+                    {"type":"text","text":"second"}
+                ]},
+                {"role":"tool","content":"tool-secret","tool_call_id":"call"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec!["first".to_owned(), "second".to_owned()])
+        );
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":"old-user"},
+                {"role":"user","content":[]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_units(&items), None);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[{"type":"text","text":""}]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_units(&items), Some(vec![String::new()]));
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[
+                    {"type":"text","text":""},
+                    {"type":"text","text":""}
+                ]}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec![String::new(), String::new()])
+        );
+    }
+
+    #[test]
+    fn input_units_keep_the_complete_text_without_truncation() {
+        let long = "a".repeat(8192);
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":[
+                    {"type":"text","text":long},
+                    {"type":"text","text":"b"}
+                ]}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec![long, "b".to_owned()])
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn input_units_preserve_unicode_urls_and_credentials() {
+        let text = concat!(
+            "接口https://example.test/cb?api_key=never-persist&safe=yes ",
+            "🔗https://example.test/public ",
+            "éhttps://user:never-persist@example.test/private ",
+            "地址：https://example.test/path?token=never-persist"
+        );
+
+        let units = user_input_units(&user_text_items(text)).unwrap();
+
+        assert_eq!(units, vec![text.to_owned()]);
+    }
+
+    #[test]
+    fn input_units_preserve_header_schemes_in_semantic_text() {
+        let text = "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel";
+        let units = user_input_units(&user_text_items(text)).unwrap();
+
+        assert_eq!(units, vec![text.to_owned()]);
+    }
 
     #[test]
     fn credentials_are_removed_from_every_supported_location() {

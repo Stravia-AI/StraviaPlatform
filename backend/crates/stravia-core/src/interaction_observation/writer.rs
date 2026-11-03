@@ -280,7 +280,7 @@ pub(super) enum WriterCommand {
     },
     InputPreview {
         run_id: String,
-        preview: String,
+        units: Vec<String>,
         occurred_at: i64,
     },
     Purge {
@@ -593,9 +593,9 @@ impl WriterCommand {
             Self::ClientToolResults { run_id, events, .. } => {
                 run_id.len() + events.iter().map(event_bytes).sum::<usize>()
             }
-            Self::InputPreview {
-                run_id, preview, ..
-            } => run_id.len() + preview.len(),
+            Self::InputPreview { run_id, units, .. } => {
+                run_id.len() + units.iter().map(String::len).sum::<usize>()
+            }
             Self::ClientCompletion {
                 run_id,
                 principal,
@@ -712,6 +712,76 @@ struct WriterContext<'a> {
     live: &'a super::live::LiveState,
 }
 
+/// 轮次开始阶段：Turn 开始、凭据映射、首个 attempt、用户输入与待回传工具结果同批落盘。
+struct PendingTurn {
+    run_id: String,
+    turn: RunEvent,
+    at: i64,
+    attempt: Option<(RunEvent, i64)>,
+    input: Option<(Vec<String>, i64)>,
+    tool_results: Vec<(RunEvent, i64)>,
+    leading: Vec<(RunEvent, i64)>,
+}
+
+/// 轮次结算阶段：最后一个 attempt 结束与用量并入 Turn 结束行。
+struct PendingTurnFinish {
+    run_id: String,
+    model_turn_id: String,
+    attempt_id: Option<String>,
+    attempt: RunEvent,
+    at: i64,
+    usage: Option<ConfirmedUsage>,
+}
+
+async fn persist_turn_start_phase(
+    store: &ObservationStore,
+    interaction: &str,
+    pending: PendingTurn,
+) -> anyhow::Result<Vec<ObservationEvent>> {
+    let events = store
+        .persist_turn_start(
+            interaction,
+            &pending.run_id,
+            super::store::TurnStart {
+                turn: &pending.turn,
+                at: pending.at,
+                attempt: pending.attempt.as_ref().map(|(attempt, _)| attempt),
+                attempt_at: pending.attempt.as_ref().map_or(pending.at, |(_, at)| *at),
+                input: pending.input.as_ref().map(|(units, _)| units.as_slice()),
+                input_at: pending.input.as_ref().map_or(pending.at, |(_, at)| *at),
+                tool_results: &pending.tool_results,
+                leading: &pending.leading,
+            },
+        )
+        .await?;
+    debug_assert_eq!(
+        events.len(),
+        1 + pending.leading.len()
+            + usize::from(pending.input.is_some())
+            + usize::from(!pending.tool_results.is_empty())
+    );
+    Ok(events)
+}
+
+async fn persist_turn_finish_phase(
+    store: &ObservationStore,
+    interaction: &str,
+    pending: &PendingTurnFinish,
+    turn: &RunEvent,
+    at: i64,
+) -> anyhow::Result<Option<ObservationEvent>> {
+    store
+        .persist_turn_finish(
+            interaction,
+            &pending.run_id,
+            turn,
+            at,
+            Some((&pending.attempt, pending.at)),
+            pending.usage.as_ref(),
+        )
+        .await
+}
+
 pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<()>) {
     let WriterDeps {
         store,
@@ -759,6 +829,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         // A discarded stats-bearing transaction cannot be declared summarized by a later barrier.
         // Keep cleanup blocked for this runtime; ordinary diagnostic gaps do not set this state.
         let mut incomplete_usage = false;
+        let mut pending_turn: Option<PendingTurn> = None;
+        let mut buffered_finish: Option<PendingTurnFinish> = None;
         let context = WriterContext {
             store: &store,
             debug_trace_index: &debug_trace_index,
@@ -849,6 +921,197 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                 }
                 command => command,
             };
+            // 轮次开始：Turn 开始、凭据映射、首个 attempt、输入与工具结果在 attempt 开始时一次落盘。
+            let command = match command {
+                Some(WriterCommand::Event {
+                    run_id,
+                    event,
+                    occurred_at,
+                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id) => {
+                    let mut turn = pending_turn.take().expect("pending turn");
+                    match event {
+                        RunEvent::TargetAttemptStarted { .. } => {
+                            turn.attempt = Some((event, occurred_at));
+                            if let Some(interaction) = attribution.interaction_for_run(&run_id) {
+                                let interaction = interaction.to_owned();
+                                match persist_turn_start_phase(&store, &interaction, turn).await {
+                                    Ok(events) => {
+                                        for event in events {
+                                            publish(&updates, &trace_sequence, event);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        pending_gaps.insert(interaction, occurred_at);
+                                        tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
+                                    }
+                                }
+                            }
+                            return false;
+                        }
+                        event => {
+                            turn.leading.push((event, occurred_at));
+                            pending_turn = Some(turn);
+                            return false;
+                        }
+                    }
+                }
+                Some(WriterCommand::Event {
+                    run_id,
+                    event,
+                    occurred_at,
+                }) if matches!(event, RunEvent::ModelTurnStarted { .. })
+                    && pending_turn.is_none() =>
+                {
+                    pending_turn = Some(PendingTurn {
+                        run_id,
+                        turn: event,
+                        at: occurred_at,
+                        attempt: None,
+                        input: None,
+                        tool_results: Vec::new(),
+                        leading: Vec::new(),
+                    });
+                    return false;
+                }
+                Some(WriterCommand::InputPreview {
+                    run_id,
+                    units,
+                    occurred_at,
+                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
+                    && attribution.has_new_user(&run_id) =>
+                {
+                    let mut turn = pending_turn.take().expect("pending turn");
+                    turn.input = Some((units, occurred_at));
+                    pending_turn = Some(turn);
+                    return false;
+                }
+                Some(WriterCommand::ClientToolResults {
+                    run_id,
+                    events,
+                    occurred_at,
+                }) if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id) => {
+                    if replayed_tool_results.remove(&run_id) {
+                        return false;
+                    }
+                    let Some(interaction) = attribution.interaction_for_run(&run_id) else {
+                        return false;
+                    };
+                    match store
+                        .filter_client_tool_results(interaction, &run_id, events, occurred_at)
+                        .await
+                    {
+                        Ok(events) => {
+                            let mut turn = pending_turn.take().expect("pending turn");
+                            turn.tool_results
+                                .extend(events.into_iter().map(|event| (event, occurred_at)));
+                            pending_turn = Some(turn);
+                        }
+                        Err(error) => {
+                            pending_gaps.insert(interaction.to_owned(), occurred_at);
+                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
+                        }
+                    }
+                    return false;
+                }
+                Some(WriterCommand::Event {
+                    run_id,
+                    event,
+                    occurred_at,
+                }) if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id) => {
+                    let mut finish = buffered_finish.take().expect("pending finish");
+                    match event {
+                        RunEvent::UsageConfirmed {
+                            attempt_id, usage, ..
+                        } if finish.attempt_id.as_deref() == Some(attempt_id.as_str()) => {
+                            finish.usage = Some(usage);
+                            buffered_finish = Some(finish);
+                            return false;
+                        }
+                        RunEvent::ModelTurnFinished {
+                            ref model_turn_id,
+                            ..
+                        } if &finish.model_turn_id == model_turn_id => {
+                            if let Some(interaction) = attribution.interaction_for_run(&run_id) {
+                                let interaction = interaction.to_owned();
+                                match persist_turn_finish_phase(
+                                    &store,
+                                    &interaction,
+                                    &finish,
+                                    &event,
+                                    occurred_at,
+                                )
+                                .await
+                                {
+                                    Ok(Some(event)) => {
+                                        publish(&updates, &trace_sequence, event);
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        pending_gaps.insert(interaction, occurred_at);
+                                        tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn finish persistence failed");
+                                    }
+                                }
+                            }
+                            return false;
+                        }
+                        event => {
+                            if let Some(interaction) = attribution.interaction_for_run(&run_id) {
+                                let interaction = interaction.to_owned();
+                                match store
+                                    .persist_run_events(
+                                        &interaction,
+                                        &run_id,
+                                        &[(finish.attempt, None, finish.at)],
+                                    )
+                                    .await
+                                {
+                                    Ok(events) => {
+                                        for event in events {
+                                            publish(&updates, &trace_sequence, event);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        pending_gaps.insert(interaction, finish.at);
+                                        tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
+                                    }
+                                }
+                            }
+                            Some(WriterCommand::Event {
+                                run_id,
+                                event,
+                                occurred_at,
+                            })
+                        }
+                    }
+                }
+                Some(WriterCommand::Event {
+                    run_id,
+                    event,
+                    occurred_at,
+                }) if matches!(event, RunEvent::TargetAttemptFinished { .. })
+                    && buffered_finish.is_none() =>
+                {
+                    let (model_turn_id, attempt_id, usage) = match &event {
+                        RunEvent::TargetAttemptFinished {
+                            model_turn_id,
+                            attempt_id,
+                            usage,
+                            ..
+                        } => (model_turn_id.clone(), Some(attempt_id.clone()), usage.clone()),
+                        _ => unreachable!("guarded target attempt finish"),
+                    };
+                    buffered_finish = Some(PendingTurnFinish {
+                        run_id,
+                        model_turn_id,
+                        attempt_id,
+                        attempt: event,
+                        at: occurred_at,
+                        usage,
+                    });
+                    return false;
+                }
+                command => command,
+            };
             attribution.sweep(now());
             if let Some(WriterCommand::Finalize {
                 run_id: Some(run_id),
@@ -930,7 +1193,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                 }
                 Some(WriterCommand::InputPreview {
                     run_id,
-                    preview,
+                    units,
                     occurred_at,
                 }) => {
                     if !attribution.has_new_user(&run_id) {
@@ -941,7 +1204,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     };
                     let at = occurred_at;
                     match store
-                        .persist_user_input(interaction, &run_id, &preview, at)
+                        .persist_user_input(interaction, &run_id, &units, at)
                         .await
                     {
                         Ok(Some(event)) => {
@@ -1390,6 +1653,49 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     rejected_before_target,
                 }) => {
                     replayed_tool_results.remove(&run_id);
+                    // 收尾前先落盘尚未完成的轮次阶段，避免末轮输入或 attempt 事实丢失。
+                    if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
+                        && let Some(turn) = pending_turn.take()
+                        && let Some(interaction) = attribution.interaction_for_run(&run_id)
+                    {
+                        let interaction = interaction.to_owned();
+                        match persist_turn_start_phase(&store, &interaction, turn).await {
+                            Ok(events) => {
+                                for event in events {
+                                    publish(&updates, &trace_sequence, event);
+                                }
+                            }
+                            Err(error) => {
+                                pending_gaps.insert(interaction, finished_at);
+                                tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
+                            }
+                        }
+                    }
+                    if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id)
+                        && let Some(finish) = buffered_finish.take()
+                    {
+                        if let Some(interaction) = attribution.interaction_for_run(&run_id) {
+                            let interaction = interaction.to_owned();
+                            match store
+                                .persist_run_events(
+                                    &interaction,
+                                    &run_id,
+                                    &[(finish.attempt, None, finish.at)],
+                                )
+                                .await
+                            {
+                                Ok(events) => {
+                                    for event in events {
+                                        publish(&updates, &trace_sequence, event);
+                                    }
+                                }
+                                Err(error) => {
+                                    pending_gaps.insert(interaction, finish.at);
+                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
+                                }
+                            }
+                        }
+                    }
                     if let Some((delivery, committed)) = terminal_facts.remove(&run_id) {
                         outcome.client_output_committed |= committed;
                         if outcome.delivery.is_none() {
@@ -1444,7 +1750,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     occurred_at,
                 }) => {
                     let at = occurred_at;
-                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
+                    let _expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
                         .reject(super::store::Rejection {
                             ingress: &ingress,
@@ -1475,6 +1781,47 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     occurred_at,
                 }) => {
                     if let Some(run_id) = run_id.as_deref() {
+                        if pending_turn.as_ref().is_some_and(|turn| turn.run_id == run_id)
+                            && let Some(turn) = pending_turn.take()
+                            && let Some(interaction) = attribution.interaction_for_run(run_id)
+                        {
+                            let interaction = interaction.to_owned();
+                            match persist_turn_start_phase(&store, &interaction, turn).await {
+                                Ok(events) => {
+                                    for event in events {
+                                        publish(&updates, &trace_sequence, event);
+                                    }
+                                }
+                                Err(error) => {
+                                    pending_gaps.insert(interaction, occurred_at);
+                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
+                                }
+                            }
+                        }
+                        if buffered_finish.as_ref().is_some_and(|finish| finish.run_id == run_id)
+                            && let Some(finish) = buffered_finish.take()
+                            && let Some(interaction) = attribution.interaction_for_run(run_id)
+                        {
+                            let interaction = interaction.to_owned();
+                            match store
+                                .persist_run_events(
+                                    &interaction,
+                                    run_id,
+                                    &[(finish.attempt, None, finish.at)],
+                                )
+                                .await
+                            {
+                                Ok(events) => {
+                                    for event in events {
+                                        publish(&updates, &trace_sequence, event);
+                                    }
+                                }
+                                Err(error) => {
+                                    pending_gaps.insert(interaction, finish.at);
+                                    tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
+                                }
+                            }
+                        }
                         replayed_tool_results.remove(run_id);
                         if gap {
                             if let Some(trace) = &trace {
@@ -1821,13 +2168,7 @@ async fn persist_finish(
         let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
         let result = context
             .store
-            .finish_run(
-                interaction,
-                run_id,
-                outcome,
-                at,
-                rejected_before_target,
-            )
+            .finish_run(interaction, run_id, outcome, at, rejected_before_target)
             .instrument(span.clone())
             .await;
         span.record("status", if result.is_ok() { "completed" } else { "error" });

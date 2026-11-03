@@ -263,16 +263,20 @@ async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
             .query_forest(Default::default())
             .await
             .expect("observation forest");
-        let interaction = forest
-            .roots
-            .iter()
-            .flat_map(|root| &root.interactions)
-            .find(|interaction| {
-                interaction
-                    .visible_tail
-                    .ends_with(&format!("{prompt} answer"))
-            })
-            .expect("terminal response remains visible in its interaction");
+        let mut found = None;
+        for interaction in forest.roots.iter().flat_map(|root| &root.interactions) {
+            let detail = gateway
+                .observation
+                .get_interaction(&interaction.id, Default::default())
+                .await
+                .expect("interaction query")
+                .expect("interaction");
+            if detail.output_text.ends_with(&format!("{prompt} answer")) {
+                found = Some(interaction);
+                break;
+            }
+        }
+        let interaction = found.expect("terminal response remains visible in its interaction");
         assert_eq!(interaction.status, "completed");
         let detail = gateway
             .observation

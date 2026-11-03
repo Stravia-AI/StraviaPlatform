@@ -11,9 +11,11 @@ use sqlx::Row;
 
 use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 
+use crate::content_store::Body;
+
 use super::{
     blocks::{BlockChannel, fill},
-    content_refs::{StoredContent, read_contents},
+    content_refs::read_scoped,
     store::ObservationStore,
     types::{ObservationEvent, canonical_item_block_id},
 };
@@ -34,9 +36,6 @@ pub(super) async fn hydrate(
     store: &ObservationStore,
     events: &mut [ObservationEvent],
 ) -> anyhow::Result<()> {
-    if events.is_empty() {
-        return Ok(());
-    }
     let sequences: Vec<i64> = events
         .iter()
         .filter(|event| {
@@ -50,85 +49,76 @@ pub(super) async fn hydrate(
         })
         .map(|event| event.sequence)
         .collect();
-    if !sequences.is_empty() {
-        let (blocks, refs, tool_results) = load_rows(store, &sequences).await?;
-        let content_ids: Vec<i64> = refs
-            .values()
-            .flatten()
-            .map(|(_, content_id)| *content_id)
-            .chain(tool_results.values().flatten().map(|row| row.content_id))
-            .collect();
-        let contents = read_contents(store, &content_ids).await?;
+    if sequences.is_empty() {
+        return fill_run_payloads(store, events).await;
+    }
+    let (blocks, refs, tool_results) = load_rows(store, &sequences).await?;
+    let contents = read_bodies(store, events, &sequences, &refs, &tool_results).await?;
 
-        for event in events.iter_mut() {
-            match event.kind.as_str() {
-                "model_thinking" | "client_visible_content" => {
-                    let Some(block) = blocks.get(&event.sequence) else {
-                        continue;
-                    };
-                    let bodies = bodies_for(refs.get(&event.sequence), &contents);
-                    let channel = if block.channel == "thinking" {
-                        BlockChannel::Thinking
-                    } else {
-                        BlockChannel::Visible
-                    };
-                    let filled = fill(block.envelope.as_ref(), &bodies, channel);
-                    let scope = block.attempt_id.as_deref().unwrap_or(&block.run_id);
-                    let block_id = canonical_item_block_id(
-                        scope,
-                        usize::try_from(block.item_ordinal).unwrap_or(usize::MAX),
-                    );
-                    let mut payload = json!({
-                        "kind": event.kind,
-                        "text": filled.text,
-                        "parts": filled.parts,
-                        "block_id": block_id,
-                        "item": filled.item,
-                        "complete": block.complete,
-                    });
-                    if channel == BlockChannel::Thinking {
-                        payload["model_turn_id"] = json!(block.model_turn_id);
-                        payload["attempt_id"] = json!(block.attempt_id);
-                    }
-                    payload["interaction_id"] = json!(block.interaction_id);
-                    payload["run_id"] = json!(block.run_id);
-                    event.payload = payload;
+    for event in events.iter_mut() {
+        match event.kind.as_str() {
+            "model_thinking" | "client_visible_content" => {
+                let Some(block) = blocks.get(&event.sequence) else {
+                    continue;
+                };
+                let bodies = bodies_for(refs.get(&event.sequence), &contents);
+                let channel = if block.channel == "thinking" {
+                    BlockChannel::Thinking
+                } else {
+                    BlockChannel::Visible
+                };
+                let filled = fill(block.envelope.as_ref(), &bodies, channel);
+                let scope = block.attempt_id.as_deref().unwrap_or(&block.run_id);
+                let block_id = canonical_item_block_id(
+                    scope,
+                    usize::try_from(block.item_ordinal).unwrap_or(usize::MAX),
+                );
+                let mut payload = json!({
+                    "kind": event.kind,
+                    "text": filled.text,
+                    "parts": filled.parts,
+                    "block_id": block_id,
+                    "item": filled.item,
+                    "complete": block.complete,
+                });
+                if channel == BlockChannel::Thinking {
+                    payload["model_turn_id"] = json!(block.model_turn_id);
+                    payload["attempt_id"] = json!(block.attempt_id);
                 }
-                "user_input_recorded" => {
-                    let bodies = bodies_for(refs.get(&event.sequence), &contents);
-                    let text = bodies
-                        .iter()
-                        .map(|body| body.text().unwrap_or_default())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    event.payload["text"] = Value::String(text);
-                }
-                "client_tool_result" => {
-                    let results = tool_results
-                        .get(&event.sequence)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|row| {
-                            let body = contents.get(&row.content_id)?;
-                            let content = match body.format {
-                                ContentFormat::Text => {
-                                    Value::String(body.text().unwrap_or_default())
-                                }
-                                ContentFormat::Json => {
-                                    body.json().unwrap_or(Value::Null)
-                                }
-                            };
-                            Some(json!({
-                                "tool_id": row.tool_id,
-                                "content": content,
-                                "is_error": row.is_error,
-                            }))
-                        })
-                        .collect::<Vec<_>>();
-                    event.payload["results"] = Value::Array(results);
-                }
-                _ => {}
+                payload["interaction_id"] = json!(block.interaction_id);
+                payload["run_id"] = json!(block.run_id);
+                event.payload = payload;
             }
+            "user_input_recorded" => {
+                let bodies = bodies_for(refs.get(&event.sequence), &contents);
+                let text = bodies
+                    .iter()
+                    .map(|body| body.text().unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                event.payload["text"] = Value::String(text);
+            }
+            "client_tool_result" => {
+                let results = tool_results
+                    .get(&event.sequence)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| {
+                        let body = contents.get(&row.content_id)?;
+                        let content = match body.format {
+                            ContentFormat::Text => Value::String(body.text().unwrap_or_default().to_owned()),
+                            ContentFormat::Json => body.json().unwrap_or(Value::Null),
+                        };
+                        Some(json!({
+                            "tool_id": row.tool_id,
+                            "content": content,
+                            "is_error": row.is_error,
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                event.payload["results"] = Value::Array(results);
+            }
+            _ => {}
         }
     }
     fill_run_payloads(store, events).await
@@ -247,14 +237,69 @@ impl RunPayloadRow {
         })
     }
 }
-fn bodies_for(
+
+fn bodies_for<'a>(
     refs: Option<&Vec<(i64, i64)>>,
-    contents: &HashMap<i64, StoredContent>,
-) -> Vec<StoredContent> {
+    contents: &'a HashMap<i64, Body>,
+) -> Vec<&'a Body> {
     refs.into_iter()
         .flatten()
-        .filter_map(|(_, content_id)| contents.get(content_id).cloned())
+        .filter_map(|(_, content_id)| contents.get(content_id))
         .collect()
+}
+
+/// 正文按交互 Principal 所在的 scope 读取；content id 全局唯一，合并成一张表。
+async fn read_bodies(
+    store: &ObservationStore,
+    events: &[ObservationEvent],
+    sequences: &[i64],
+    refs: &HashMap<i64, Vec<(i64, i64)>>,
+    tool_results: &HashMap<i64, Vec<ToolResultRow>>,
+) -> anyhow::Result<HashMap<i64, Body>> {
+    let wanted: std::collections::HashSet<i64> = sequences.iter().copied().collect();
+    let interactions: Vec<String> = events
+        .iter()
+        .filter(|event| wanted.contains(&event.sequence))
+        .filter_map(|event| event.interaction_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let principals = store.interaction_principals(&interactions).await?;
+    let mut by_principal: HashMap<&str, Vec<i64>> = HashMap::new();
+    for event in events.iter().filter(|event| wanted.contains(&event.sequence)) {
+        let Some(principal) = event
+            .interaction_id
+            .as_ref()
+            .and_then(|id| principals.get(id))
+        else {
+            continue;
+        };
+        let ids = by_principal.entry(principal.as_str()).or_default();
+        ids.extend(
+            refs.get(&event.sequence)
+                .into_iter()
+                .flatten()
+                .map(|(_, content_id)| *content_id),
+        );
+        ids.extend(
+            tool_results
+                .get(&event.sequence)
+                .into_iter()
+                .flatten()
+                .map(|row| row.content_id),
+        );
+    }
+    let mut contents = HashMap::new();
+    for (principal, ids) in by_principal {
+        let mut bodies = read_scoped(store, principal, &ids).await?;
+        let found: Vec<i64> = bodies.ids().collect();
+        for id in found {
+            if let Some(body) = bodies.remove(id) {
+                contents.insert(id, body);
+            }
+        }
+    }
+    Ok(contents)
 }
 
 #[derive(Debug)]
@@ -302,9 +347,9 @@ async fn load_rows(
                             complete: row.try_get("complete")?,
                             envelope: envelope
                                 .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(
-                                        &crate::storage_codec::decode(&bytes)?,
-                                    )?)
+                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                        &bytes,
+                                    )?)?)
                                 })
                                 .transpose()?,
                         },
@@ -336,9 +381,9 @@ async fn load_rows(
                             complete: row.try_get("complete")?,
                             envelope: envelope
                                 .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(
-                                        &crate::storage_codec::decode(&bytes)?,
-                                    )?)
+                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                        &bytes,
+                                    )?)?)
                                 })
                                 .transpose()?,
                         },
@@ -369,7 +414,9 @@ async fn read_refs_sqlite(
         let sequence: i64 = row.try_get("sequence")?;
         let ordinal: i64 = row.try_get("ordinal")?;
         let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence).or_default().push((ordinal, content_id));
+        refs.entry(sequence)
+            .or_default()
+            .push((ordinal, content_id));
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
@@ -381,11 +428,14 @@ async fn read_refs_sqlite(
     separated.push_unseparated(") ORDER BY sequence,ordinal");
     for row in query.build().fetch_all(pool).await? {
         let sequence: i64 = row.try_get("sequence")?;
-        tool_results.entry(sequence).or_default().push(ToolResultRow {
-            tool_id: row.try_get("tool_id")?,
-            is_error: row.try_get("is_error")?,
-            content_id: row.try_get("content_id")?,
-        });
+        tool_results
+            .entry(sequence)
+            .or_default()
+            .push(ToolResultRow {
+                tool_id: row.try_get("tool_id")?,
+                is_error: row.try_get("is_error")?,
+                content_id: row.try_get("content_id")?,
+            });
     }
     Ok(())
 }
@@ -408,7 +458,9 @@ async fn read_refs_postgres(
         let sequence: i64 = row.try_get("sequence")?;
         let ordinal: i64 = row.try_get("ordinal")?;
         let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence).or_default().push((ordinal, content_id));
+        refs.entry(sequence)
+            .or_default()
+            .push((ordinal, content_id));
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
@@ -420,11 +472,14 @@ async fn read_refs_postgres(
     separated.push_unseparated(") ORDER BY sequence,ordinal");
     for row in query.build().fetch_all(pool).await? {
         let sequence: i64 = row.try_get("sequence")?;
-        tool_results.entry(sequence).or_default().push(ToolResultRow {
-            tool_id: row.try_get("tool_id")?,
-            is_error: row.try_get("is_error")?,
-            content_id: row.try_get("content_id")?,
-        });
+        tool_results
+            .entry(sequence)
+            .or_default()
+            .push(ToolResultRow {
+                tool_id: row.try_get("tool_id")?,
+                is_error: row.try_get("is_error")?,
+                content_id: row.try_get("content_id")?,
+            });
     }
     Ok(())
 }

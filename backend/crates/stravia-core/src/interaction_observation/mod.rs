@@ -401,8 +401,7 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         let cutoff = now.saturating_sub(
-            i64::from(self.inner.retention_days.load(Ordering::Acquire))
-                .saturating_mul(86_400_000),
+            i64::from(self.inner.retention_days.load(Ordering::Acquire)).saturating_mul(86_400_000),
         );
         self.purge_history(Some(cutoff)).await?;
         for event in self
@@ -1019,9 +1018,9 @@ struct RunObserverInner {
     queued_text: Mutex<Option<Arc<Mutex<writer::QueuedText>>>>,
     failure: Mutex<Option<FailureDiagnostic>>,
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
-    // Bounded canonical user preview retained until Model Turn protection
+    // Canonical user input units retained until Model Turn protection
     // succeeds; the observer no longer owns the request tree.
-    pending_preview: Mutex<Option<String>>,
+    pending_preview: Mutex<Option<Vec<String>>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
     active_thinking: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     protected: redaction::ProtectedSecrets,
@@ -1070,8 +1069,8 @@ impl RunObserver {
         // The received canonical window is immutable; Model Turn protection
         // rewrites the effective request, so extracting here is equivalent to
         // extracting at publish time while avoiding an extra request owner.
-        let preview = redaction::user_input_text(input);
-        *self.inner.pending_preview.lock() = preview;
+        let units = redaction::user_input_units(input);
+        *self.inner.pending_preview.lock() = units;
     }
 
     /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
@@ -1121,7 +1120,7 @@ impl RunObserver {
         let occurred_at = writer::now();
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
         self.send_tool_results(tool_results, occurred_at);
-        let Some(preview) = self.inner.pending_preview.lock().take() else {
+        let Some(units) = self.inner.pending_preview.lock().take() else {
             return;
         };
         self.inner.queued_text.lock().take();
@@ -1132,7 +1131,7 @@ impl RunObserver {
             .writer
             .try_send(WriterCommand::InputPreview {
                 run_id: self.inner.run_id.clone(),
-                preview,
+                units,
                 occurred_at,
             })
             .is_err()
@@ -3662,7 +3661,7 @@ mod snapshot_tests {
             .get_interaction(&id, ForestQuery::default())
             .await?
             .expect("committed interaction");
-        assert_eq!(detail.interaction.visible_tail, "saved answer");
+        assert_eq!(detail.output_text, "saved answer");
         let page = observation
             .get_interaction_events(
                 &id,
@@ -4148,6 +4147,63 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn input_preview_joins_large_text_blocks_only_up_to_the_limit() -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
+
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let first = "密".repeat(3000);
+        let second = "文".repeat(3000);
+        let user = AiItem {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: std::sync::Arc::new(first.clone()),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: std::sync::Arc::new(second.clone()),
+                    cache_control: None,
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        };
+        let run = test_run(
+            &observation,
+            "preview-bounded-blocks",
+            facts(vec![user.clone()]),
+        );
+        run.capture_input_preview(std::slice::from_ref(&user));
+        run.publish_input_preview();
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        let events = observation.inner.store.replay(0).await?;
+        let input = events
+            .iter()
+            .find(|event| {
+                event.run_id.as_deref() == Some("preview-bounded-blocks")
+                    && event.kind == "user_input_recorded"
+            })
+            .expect("完整输入事件");
+        assert_eq!(input.payload["text"], format!("{first}\n{second}"));
+        drop(run);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn credential_hit_events_bound_locators_without_losing_a_rule_source_pair()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -4427,96 +4483,83 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn input_preview_is_root_owned_and_recorded_once_per_run() -> anyhow::Result<()> {
+    async fn only_root_run_input_becomes_the_recovery_input() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let at = writer::now();
-        sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('historical','test','historical','initial','route','running',?,?,?)")
-            .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
-        let preview: Option<String> = sqlx::query_scalar(
-            "SELECT input_preview FROM interaction_observations WHERE id='historical'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(preview, None);
-        sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('initial','historical',NULL,'openai','route','running',0,?,?,?),('child','historical','initial','openai','route','running',0,?,?,?)")
-            .bind(at).bind(at).bind(at + 86_400_000)
-            .bind(at + 1).bind(at + 1).bind(at + 86_400_000).execute(&pool).await?;
         let store = store::ObservationStore::Sqlite(
             pool.clone(),
             Arc::new(manifest_index::DebugTraceIndex::load(directory.path())?),
         );
-        assert!(
+        for (id, parent, offset) in [("initial", None, 0), ("child", Some("initial"), 1)] {
             store
-                .persist_input_preview("historical", "missing", "not owned", at, at + 86_400_000)
-                .await?
-                .is_none()
-        );
+                .admit(store::Admission {
+                    metadata: None,
+                    start: &RunStart {
+                        id: id.into(),
+                        principal: "test".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "openai".into(),
+                    },
+                    interaction_id: "historical",
+                    generation_root_id: Some("historical"),
+                    generation_parent_id: parent,
+                    has_new_user: false,
+                    ingress_received_at: at + offset,
+                    parent_run_id: parent,
+                    parent_interaction_id: None,
+                    debug_enabled: false,
+                    inferred_retry: false,
+                    grouping_reason: "exact_parent",
+                    diagnostic_source_run_id: None,
+                    interrupt_parent: false,
+                    now: at + offset,
+                })
+                .await?;
+        }
         let initial = store
-            .persist_input_preview("historical", "initial", "first input", at, at + 86_400_000)
+            .persist_user_input("historical", "initial", &["first input".to_owned()], at)
             .await?
-            .expect("initial run input event");
-        assert!(
-            store
-                .persist_input_preview(
-                    "historical",
-                    "initial",
-                    "ignored duplicate",
-                    at,
-                    at + 86_400_000
-                )
-                .await?
-                .is_none()
-        );
+            .expect("初始 Run 输入事件");
         let child = store
-            .persist_input_preview(
+            .persist_user_input(
                 "historical",
                 "child",
-                "follow-up input",
+                &["follow-up".to_owned(), "input".to_owned()],
                 at + 1,
-                at + 86_400_000,
             )
             .await?
-            .expect("child run input event");
+            .expect("子 Run 输入事件");
         assert!(initial.sequence < child.sequence);
-        assert!(
-            store
-                .persist_input_preview(
-                    "historical",
-                    "child",
-                    "ignored duplicate",
-                    at + 1,
-                    at + 86_400_000
-                )
-                .await?
-                .is_none()
-        );
-        let preview: Option<String> = sqlx::query_scalar(
-            "SELECT input_preview FROM interaction_observations WHERE id='historical'",
+        let input_sequence: Option<i64> = sqlx::query_scalar(
+            "SELECT input_sequence FROM interaction_observations WHERE id='historical'",
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(preview.as_deref(), Some("first input"));
-        let events: Vec<(String, Vec<u8>)> = sqlx::query_as(
-            "SELECT run_id,payload FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
-        )
-        .fetch_all(&pool)
-        .await?;
+        assert_eq!(input_sequence, Some(initial.sequence));
+        let inputs: Vec<(String, String)> = store
+            .replay(0)
+            .await?
+            .into_iter()
+            .filter(|event| event.kind == "user_input_recorded")
+            .map(|event| {
+                (
+                    event.run_id.unwrap_or_default(),
+                    event.payload["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect();
         assert_eq!(
-            events
-                .iter()
-                .map(|(run_id, _)| run_id.as_str())
-                .collect::<Vec<_>>(),
-            ["initial", "child"]
-        );
-        assert_eq!(
-            events
-                .iter()
-                .map(|(_, payload)| stored_payload(payload))
-                .collect::<Result<Vec<_>, _>>()?,
+            inputs,
             [
-                serde_json::json!({"kind": "input_preview_recorded", "text": "first input"}),
-                serde_json::json!({"kind": "input_preview_recorded", "text": "follow-up input"}),
+                ("initial".to_owned(), "first input".to_owned()),
+                ("child".to_owned(), "follow-up\ninput".to_owned()),
             ]
         );
         pool.close().await;
@@ -5844,10 +5887,9 @@ mod snapshot_tests {
         run_id: &str,
         at: i64,
         event: RunEvent,
-        expires_at: i64,
     ) -> anyhow::Result<i64> {
         let mut persisted = store
-            .persist_run_events(interaction_id, run_id, &[(event, None, at)], expires_at)
+            .persist_run_events(interaction_id, run_id, &[(event, None, at)])
             .await?;
         anyhow::ensure!(persisted.len() == 1, "one event yields one row");
         Ok(persisted.remove(0).sequence)
@@ -5858,45 +5900,46 @@ mod snapshot_tests {
         store: &store::ObservationStore,
         now: i64,
     ) -> anyhow::Result<()> {
-        let live_until = now + 86_400_000;
+        let live_at = now - 50;
+        let stale_at = now - 5_000;
         let interactions = [
-            ("reuse-owner", "api-key:owner", "Owner Key", live_until),
-            ("reuse-other", "api-key:other", "Other Key", live_until),
-            ("reuse-expired", "api-key:owner", "Owner Key", 0),
+            ("reuse-owner", "api-key:owner", "Owner Key", live_at),
+            ("reuse-other", "api-key:other", "Other Key", live_at),
+            ("reuse-expired", "api-key:owner", "Owner Key", stale_at),
         ];
         let runs = [
-            ("reuse-run-1", "reuse-owner", live_until),
-            ("reuse-run-2", "reuse-owner", live_until),
-            ("reuse-run-other", "reuse-other", live_until),
-            ("reuse-run-expired", "reuse-expired", 0),
+            ("reuse-run-1", "reuse-owner", live_at),
+            ("reuse-run-2", "reuse-owner", live_at),
+            ("reuse-run-other", "reuse-other", live_at),
+            ("reuse-run-expired", "reuse-expired", stale_at),
         ];
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                for (id, principal, key, expires_at) in interactions {
-                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                for (id, principal, key, active_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES (?,?,?,?,?,?,?,?,?,?)")
                         .bind(id).bind(principal).bind(key).bind(id).bind(id)
-                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
-                        .bind(false).bind(expires_at).execute(pool).await?;
+                        .bind("test-route").bind("completed").bind(now - 100).bind(active_at)
+                        .bind(false).execute(pool).await?;
                 }
-                for (id, interaction, expires_at) in runs {
-                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                for (id, interaction, active_at) in runs {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES (?,?,?,?,?,?,?,?)")
                         .bind(id).bind(interaction).bind("test").bind("test-route")
-                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
-                        .bind(expires_at).execute(pool).await?;
+                        .bind("completed").bind(false).bind(now - 100).bind(active_at)
+                        .execute(pool).await?;
                 }
             }
             store::ObservationStore::Postgres(pool, _) => {
-                for (id, principal, key, expires_at) in interactions {
-                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                for (id, principal, key, active_at) in interactions {
+                    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
                         .bind(id).bind(principal).bind(key).bind(id).bind(id)
-                        .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
-                        .bind(false).bind(expires_at).execute(pool).await?;
+                        .bind("test-route").bind("completed").bind(now - 100).bind(active_at)
+                        .bind(false).execute(pool).await?;
                 }
-                for (id, interaction, expires_at) in runs {
-                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                for (id, interaction, active_at) in runs {
+                    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
                         .bind(id).bind(interaction).bind("test").bind("test-route")
-                        .bind("completed").bind(false).bind(now - 100).bind(now - 50)
-                        .bind(expires_at).execute(pool).await?;
+                        .bind("completed").bind(false).bind(now - 100).bind(active_at)
+                        .execute(pool).await?;
                 }
             }
         }
@@ -5923,7 +5966,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 1_000,
             created(Some("m-repeat")),
-            live_until,
         )
         .await?;
         persist_reuse_event(
@@ -5932,7 +5974,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 900,
             reused(Some("m-repeat"), user_input()),
-            live_until,
         )
         .await?;
         persist_reuse_event(
@@ -5941,7 +5982,6 @@ mod snapshot_tests {
             "reuse-run-2",
             now - 800,
             reused(Some("m-repeat"), user_input()),
-            live_until,
         )
         .await?;
         let record = store
@@ -5976,7 +6016,6 @@ mod snapshot_tests {
             "reuse-run-2",
             now - 400,
             created(Some("m-order")),
-            live_until,
         )
         .await?;
         let tool_ids = || vec![locator("tool_result", Some("call-a"), None)];
@@ -5986,7 +6025,6 @@ mod snapshot_tests {
             "reuse-run-2",
             now - 400,
             reused(Some("m-order"), tool_ids()),
-            live_until,
         )
         .await?;
         persist_reuse_event(
@@ -5995,7 +6033,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 500,
             reused(Some("m-order"), tool_ids()),
-            live_until,
         )
         .await?;
         let record = store
@@ -6020,7 +6057,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 600,
             created(Some("m-distinct")),
-            live_until,
         )
         .await?;
         persist_reuse_event(
@@ -6036,7 +6072,6 @@ mod snapshot_tests {
                     locator("user_message", None, Some(true)),
                 ],
             ),
-            live_until,
         )
         .await?;
         let record = store
@@ -6074,7 +6109,6 @@ mod snapshot_tests {
             "reuse-run-other",
             now - 1_500,
             created(Some("m-repeat")),
-            live_until,
         )
         .await?;
         let other = store
@@ -6100,7 +6134,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 600,
             created(Some("m-wide")),
-            live_until,
         )
         .await?;
         let wide: Vec<_> = (0..201)
@@ -6115,7 +6148,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 200,
             reused(Some("m-wide"), wide),
-            live_until,
         )
         .await?;
         let record = store
@@ -6143,7 +6175,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 600,
             created(None),
-            live_until,
         )
         .await?;
         persist_reuse_event(
@@ -6152,7 +6183,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 500,
             reused(None, user_input()),
-            live_until,
         )
         .await?;
         let record = store
@@ -6177,7 +6207,6 @@ mod snapshot_tests {
             "reuse-run-1",
             now - 600,
             created(Some("m-collide")),
-            live_until,
         )
         .await?;
         let mut colliding = vec![
@@ -6215,7 +6244,6 @@ mod snapshot_tests {
                 ],
                 omitted_discoveries: 0,
             },
-            live_until,
         )
         .await?;
         let record = store
@@ -6257,7 +6285,6 @@ mod snapshot_tests {
             "reuse-run-expired",
             now - 2_000,
             created(Some("m-purge")),
-            0,
         )
         .await?;
         persist_reuse_event(
@@ -6269,11 +6296,10 @@ mod snapshot_tests {
                 Some("m-purge"),
                 vec![locator("user_message", None, Some(false))],
             ),
-            0,
         )
         .await?;
         assert_eq!(reuse_row_count(store, "m-purge").await?, 1);
-        store.purge_expired_batch(now).await?;
+        store.purge_expired_batch(now - 500).await?;
         assert_eq!(reuse_row_count(store, "m-purge").await?, 0);
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
@@ -7360,7 +7386,7 @@ mod snapshot_tests {
             .get_interaction(&id, ForestQuery::default())
             .await?
             .expect("persisted interaction");
-        assert_eq!(detail.interaction.visible_tail, text);
+        assert_eq!(detail.output_text, text);
         let page = observation
             .get_interaction_events(
                 &id,

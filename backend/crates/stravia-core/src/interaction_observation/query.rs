@@ -842,13 +842,12 @@ impl ObservationStore {
         Ok(CredentialDiscoveryPage { items, next_cursor })
     }
 
-    /// 读取一行新建映射的落库事实；行不存在或已过期时返回 `None`。
+    /// 读取一行新建映射的落库事实；行不存在时返回 `None`。
     pub(super) async fn credential_discovery_record(
         &self,
         sequence: i64,
         index: usize,
     ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
-        let now = chrono::Utc::now().timestamp_millis();
         type DiscoveryRow = (
             i64,
             String,
@@ -1098,19 +1097,25 @@ impl ObservationStore {
                 if finished_sequence > sequence {
                     Ok(content_body(payload.get("content")))
                 } else {
-                    self.read_content_body(content_id).await
+                    self.read_content_body(&record.principal, content_id).await
                 }
             }
-            (Some((_, content_id)), None) => self.read_content_body(content_id).await,
+            (Some((_, content_id)), None) => self.read_content_body(&record.principal, content_id).await,
             (None, Some((_, payload))) => Ok(content_body(payload.get("content"))),
             (None, None) => Ok(CredentialDiscoveryBody::Missing),
         }
     }
 
-    async fn read_content_body(&self, content_id: i64) -> anyhow::Result<CredentialDiscoveryBody> {
-        let contents = super::content_refs::read_contents(self, &[content_id]).await?;
-        Ok(match contents.get(&content_id) {
-            Some(body) => CredentialDiscoveryBody::Retained(body.as_value()?),
+    async fn read_content_body(
+        &self,
+        principal: &str,
+        content_id: i64,
+    ) -> anyhow::Result<CredentialDiscoveryBody> {
+        let contents = super::content_refs::read_scoped(self, principal, &[content_id]).await?;
+        Ok(match contents.get(content_id) {
+            Some(body) => {
+                CredentialDiscoveryBody::Retained(super::content_refs::body_value(body)?)
+            }
             None => CredentialDiscoveryBody::Missing,
         })
     }
@@ -1131,7 +1136,7 @@ impl ObservationStore {
                     .fetch_one(pool)
                     .await?;
                     if sequence.is_some() {
-                        return self.user_input_text_at(sequence).await;
+                        return self.user_input_text_at(&record.principal, sequence).await;
                     }
                 }
                 sqlx::query_scalar(
@@ -1152,7 +1157,7 @@ impl ObservationStore {
                     .fetch_one(pool)
                     .await?;
                     if sequence.is_some() {
-                        return self.user_input_text_at(sequence).await;
+                        return self.user_input_text_at(&record.principal, sequence).await;
                     }
                 }
                 sqlx::query_scalar(
@@ -1164,10 +1169,14 @@ impl ObservationStore {
                 .await?
             }
         };
-        self.user_input_text_at(sequence).await
+        self.user_input_text_at(&record.principal, sequence).await
     }
 
-    async fn user_input_text_at(&self, sequence: Option<i64>) -> anyhow::Result<Option<String>> {
+    async fn user_input_text_at(
+        &self,
+        principal: &str,
+        sequence: Option<i64>,
+    ) -> anyhow::Result<Option<String>> {
         let Some(sequence) = sequence else {
             return Ok(None);
         };
@@ -1176,10 +1185,10 @@ impl ObservationStore {
             return Ok(Some(String::new()));
         };
         let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
-        let contents = super::content_refs::read_contents(self, &content_ids).await?;
+        let contents = super::content_refs::read_scoped(self, principal, &content_ids).await?;
         Ok(Some(
             refs.iter()
-                .filter_map(|(_, content_id)| contents.get(content_id))
+                .filter_map(|(_, content_id)| contents.get(*content_id))
                 .map(|body| body.text().unwrap_or_default())
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -1207,23 +1216,20 @@ impl ObservationStore {
                 next_cursor: None,
             });
         }
-        let now = chrono::Utc::now().timestamp_millis();
         // 总数与游标无关：同一调用者、同一占位符的可见位置数。
         let total: i64 = match self {
             Self::Sqlite(pool, _) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>?",
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=?",
             )
             .bind(marker)
             .bind(&record.principal)
-            .bind(now)
             .fetch_one(pool)
             .await?,
             Self::Postgres(pool, _) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3",
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2",
             )
             .bind(marker)
             .bind(&record.principal)
-            .bind(now)
             .fetch_one(pool)
             .await?,
         };
@@ -1246,9 +1252,7 @@ impl ObservationStore {
                 builder
                     .push_bind(marker)
                     .push(" AND i.principal=")
-                    .push_bind(&record.principal)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now);
+                    .push_bind(&record.principal);
                 push_reuse_cursor_sqlite(&mut builder, cursor.as_ref());
                 builder
                     .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
@@ -1262,9 +1266,7 @@ impl ObservationStore {
                 builder
                     .push_bind(marker)
                     .push(" AND i.principal=")
-                    .push_bind(&record.principal)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now);
+                    .push_bind(&record.principal);
                 push_reuse_cursor_postgres(&mut builder, cursor.as_ref());
                 builder
                     .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
@@ -2630,7 +2632,7 @@ impl ObservationStore {
             .flatten()
             .map(|(_, content_id)| *content_id)
             .collect();
-        let lengths = super::content_refs::content_lengths(self, &content_ids).await?;
+        let lengths = self.content_lengths(&content_ids).await?;
         for (id, sequence) in inputs {
             let summary = refs
                 .get(&sequence)
@@ -2646,6 +2648,56 @@ impl ObservationStore {
             summaries.output.insert(id, summary);
         }
         Ok(summaries)
+    }
+
+    /// 内容长度只查元数据，列表摘要不读取正文。
+    async fn content_lengths(
+        &self,
+        content_ids: &[i64],
+    ) -> anyhow::Result<std::collections::HashMap<i64, i64>> {
+        let mut lengths = std::collections::HashMap::new();
+        for chunk in content_ids.chunks(400) {
+            let rows: Vec<(i64, i64)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query =
+                        QueryBuilder::<sqlx::Sqlite>::new("SELECT id,raw_len FROM contents WHERE id IN (");
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT id,raw_len FROM contents WHERE id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+            };
+            lengths.extend(rows);
+        }
+        Ok(lengths)
+    }
+
+    /// 按 Interaction 所属 Principal 的 scope 读取正文；Interaction 不存在时没有正文。
+    async fn read_interaction_bodies(
+        &self,
+        interaction_id: &str,
+        content_ids: &[i64],
+    ) -> anyhow::Result<crate::content_store::Bodies> {
+        let principals = self
+            .interaction_principals(&[interaction_id.to_owned()])
+            .await?;
+        match principals.get(interaction_id) {
+            Some(principal) => super::content_refs::read_scoped(self, principal, content_ids).await,
+            None => Ok(crate::content_store::Bodies::from_rows(Vec::new())),
+        }
     }
 
     /// 按事件 sequence 批量读取有序引用；调用方保证 content id 只来自可见 Interaction。
@@ -2720,10 +2772,10 @@ impl ObservationStore {
             return Ok(String::new());
         };
         let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
-        let contents = super::content_refs::read_contents(self, &content_ids).await?;
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
         Ok(refs
             .iter()
-            .filter_map(|(_, content_id)| contents.get(content_id))
+            .filter_map(|(_, content_id)| contents.get(*content_id))
             .map(|body| body.text().unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n"))
@@ -2746,7 +2798,7 @@ impl ObservationStore {
             .flatten()
             .map(|(_, content_id)| *content_id)
             .collect();
-        let contents = super::content_refs::read_contents(self, &content_ids).await?;
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
         let turns = self.model_turn_start_sequences(interaction_id, through).await?;
         let mut output = String::new();
         let mut current_turn: Option<i64> = None;
@@ -2755,7 +2807,7 @@ impl ObservationStore {
                 .get(&block.sequence)
                 .into_iter()
                 .flatten()
-                .filter_map(|(_, content_id)| contents.get(content_id).cloned())
+                .filter_map(|(_, content_id)| contents.get(*content_id))
                 .collect();
             let text = super::blocks::fill(
                 block.envelope.as_ref(),
@@ -2934,12 +2986,12 @@ impl ObservationStore {
             .flatten()
             .map(|(_, content_id)| *content_id)
             .collect();
-        let contents = super::content_refs::read_contents(self, &content_ids).await?;
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
         let bodies: Vec<_> = refs
             .get(&block.sequence)
             .into_iter()
             .flatten()
-            .filter_map(|(_, content_id)| contents.get(content_id).cloned())
+            .filter_map(|(_, content_id)| contents.get(*content_id))
             .collect();
         Ok(super::blocks::fill(
             block.envelope.as_ref(),

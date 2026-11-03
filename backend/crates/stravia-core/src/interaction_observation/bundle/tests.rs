@@ -193,7 +193,7 @@ async fn platform_tool_remote_bytes_and_header_redaction_survive_bundle_export()
 }
 
 #[tokio::test]
-async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() -> anyhow::Result<()>
+async fn bundle_usage_revision_preserves_reported_fields() -> anyhow::Result<()>
 {
     let (_directory, pool, observation) = fixture().await?;
     let run = admit(&observation, "usage-run", None);
@@ -238,13 +238,6 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
         usage: None,
         amounts: None,
     });
-    run.record(RunEvent::ModelTurnFinished {
-        retention_detached: false,
-        model_turn_id: "turn".into(),
-        status: "completed".into(),
-    });
-    finish(&run, "completed", None);
-    let old = ticket(&observation).await?;
     run.record(RunEvent::UsageConfirmed {
         model_turn_id: "turn".into(),
         attempt_id: "attempt".into(),
@@ -254,55 +247,40 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
             ..Default::default()
         },
     });
-    let new = ticket(&observation).await?;
-    assert!(new.through_sequence > old.through_sequence);
-    for (issued, input, raw_input) in [(&old, 16, 20), (&new, 24, 30)] {
-        let (manifest, summary) = download(&observation, issued).await?;
-        assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
-        assert_eq!(summary["status"], "completed");
-        assert_eq!(summary["usage"]["input_tokens"], input);
-        assert_eq!(summary["usage"]["output_tokens"], 7);
-        assert_eq!(summary["usage"]["cache_write_tokens"], 0);
-        assert_eq!(summary["usage"]["reasoning_tokens"], Value::Null);
-        let coverage = &summary["usage"]["coverage"];
-        assert_eq!(coverage["attempt_count"], 1);
-        assert_eq!(coverage["missing_input_tokens"], 0);
-        assert_eq!(coverage["missing_output_tokens"], 0);
-        assert_eq!(coverage["missing_cache_read_tokens"], 0);
-        assert_eq!(coverage["missing_cache_write_tokens"], 0);
-        assert_eq!(coverage["missing_reasoning_tokens"], 1);
-        let events = summary["events"].as_array().expect("exported events");
-        assert!(
-            events
-                .iter()
-                .all(|event| event["sequence"].as_i64().unwrap() <= issued.through_sequence)
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event["kind"] == "target_attempt_finished")
-                .count(),
-            if issued.through_sequence == old.through_sequence {
-                1
-            } else {
-                2
-            },
-        );
-        let terminal = events
+    run.record(RunEvent::ModelTurnFinished {
+        retention_detached: false,
+        model_turn_id: "turn".into(),
+        status: "completed".into(),
+    });
+    finish(&run, "completed", None);
+    // 用量修订在 Turn 收尾前并入合并后的尾事件，不再追加行；导出只反映修订后的事实。
+    let issued = ticket(&observation).await?;
+    let (manifest, summary) = download(&observation, &issued).await?;
+    assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
+    assert_eq!(summary["status"], "completed");
+    assert_eq!(summary["usage"]["input_tokens"], 24);
+    assert_eq!(summary["usage"]["output_tokens"], 7);
+    assert_eq!(summary["usage"]["cache_write_tokens"], 0);
+    assert_eq!(summary["usage"]["reasoning_tokens"], Value::Null);
+    let coverage = &summary["usage"]["coverage"];
+    assert_eq!(coverage["attempt_count"], 1);
+    assert_eq!(coverage["missing_input_tokens"], 0);
+    assert_eq!(coverage["missing_output_tokens"], 0);
+    assert_eq!(coverage["missing_cache_read_tokens"], 0);
+    assert_eq!(coverage["missing_cache_write_tokens"], 0);
+    assert_eq!(coverage["missing_reasoning_tokens"], 1);
+    let events = summary["events"].as_array().expect("exported events");
+    assert!(
+        events
             .iter()
-            .rev()
-            .find(|event| event["kind"] == "target_attempt_finished")
-            .expect("attempt terminal");
-        assert_eq!(terminal["payload"]["usage"]["input_tokens"], raw_input);
-        assert_eq!(
-            terminal["payload"]["usage"]["output_tokens"],
-            if issued.through_sequence == old.through_sequence {
-                Value::from(7)
-            } else {
-                Value::Null
-            },
-        );
-    }
+            .all(|event| event["sequence"].as_i64().unwrap() <= issued.through_sequence)
+    );
+    let finished = events
+        .iter()
+        .rev()
+        .find(|event| event["kind"] == "model_turn_finished")
+        .expect("merged turn terminal");
+    assert_eq!(finished["payload"]["usage"]["input_tokens"], 30);
     drop(run);
     observation.shutdown().await;
     pool.close().await;
@@ -383,6 +361,19 @@ async fn bundle_net_input_clamps_attempts_and_preserves_unknown_operands() -> an
     Ok(())
 }
 
+/// 批量 `client_tool_result` 事件的 `results[]` 中是否含指定工具结果。
+fn tool_result_present(event: &Value, tool_id: &str, is_error: Option<bool>) -> bool {
+    event["kind"] == "client_tool_result"
+        && event["payload"]["results"]
+            .as_array()
+            .is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["tool_id"] == tool_id
+                        && is_error.is_none_or(|expected| result["is_error"] == expected)
+                })
+            })
+}
+
 #[tokio::test]
 async fn bundle_partial_public_tool_returns_keep_waiting_until_error_result_arrives()
 -> anyhow::Result<()> {
@@ -436,17 +427,14 @@ async fn bundle_partial_public_tool_returns_keep_waiting_until_error_result_arri
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|event| event["kind"] == "client_tool_result"
-                    && event["payload"]["tool_id"] == "b")
+                .any(|event| tool_result_present(event, "b", None))
         );
         assert!(
             new["events"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|event| event["kind"] == "client_tool_result"
-                    && event["payload"]["tool_id"] == "b"
-                    && event["payload"]["is_error"] == true)
+                .any(|event| tool_result_present(event, "b", Some(true)))
         );
         drop((parent, waiting, sibling));
         observation.shutdown().await;

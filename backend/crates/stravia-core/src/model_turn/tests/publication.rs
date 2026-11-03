@@ -916,21 +916,16 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
     .unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let expires = now + 86_400_000;
-    let encode = |value: serde_json::Value| {
-        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
-    };
     let pool = gateway._sqlite_pool.as_ref().unwrap();
-    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0,?)")
+    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0)")
         .bind(now - 100)
         .bind(now - 50)
-        .bind(expires)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?,?)")
+    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?)")
         .bind(now - 100)
         .bind(now - 50)
-        .bind(expires)
         .execute(pool)
         .await
         .unwrap();
@@ -943,43 +938,48 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .execute(pool)
         .await
         .unwrap();
-    for (sequence, kind, payload) in [
-        (
-            1,
-            "input_preview_recorded",
-            encode(serde_json::json!({
-                "kind": "input_preview_recorded",
-                "text": format!("please use {secret} now")
-            })),
-        ),
-        (
-            2,
-            "credential_mappings_created",
-            encode(serde_json::json!({
-                "kind": "credential_mappings_created",
-                "discoveries": [{
-                    "rule_ids": ["github-pat"],
-                    "source_types": ["user_message"],
-                    "locators": [{
-                        "rule_id": "github-pat",
-                        "source_type": "user_message",
-                        "latest_input": true
-                    }],
-                    "marker": "m-secret"
-                }]
-            })),
-        ),
-    ] {
-        sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,'hit-interaction','hit-run',?,?,?)")
-            .bind(sequence)
-            .bind(now - 10 + sequence)
-            .bind(kind)
-            .bind(payload)
-            .bind(expires)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
+    let attrs = |value: serde_json::Value| {
+        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
+    };
+    let mut connection = pool.acquire().await.unwrap();
+    let scope = crate::content_store::sqlite::resolve_scope(&mut connection, "hit")
+        .await
+        .unwrap();
+    let mut contents = [crate::content_store::Content::text(format!(
+        "please use {secret} now"
+    ))];
+    let content_ids = crate::content_store::sqlite::intern(&mut connection, scope, &mut contents)
+        .await
+        .unwrap();
+    drop(connection);
+    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (1,?,'hit-interaction','hit-run','user_input_recorded',?)")
+        .bind(now - 9)
+        .bind(attrs(serde_json::json!({})))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (1,0,?)")
+        .bind(content_ids[0])
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (2,?,'hit-interaction','hit-run','credential_mappings_created',?)")
+        .bind(now - 8)
+        .bind(attrs(serde_json::json!({
+            "discoveries": [{
+                "rule_ids": ["github-pat"],
+                "source_types": ["user_message"],
+                "locators": [{
+                    "rule_id": "github-pat",
+                    "source_type": "user_message",
+                    "latest_input": true
+                }],
+                "marker": "m-secret"
+            }]
+        })))
+        .execute(pool)
+        .await
+        .unwrap();
 
     let detail = gateway
         .admin()
@@ -990,7 +990,6 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         CredentialDiscoveryHitDetail::Available {
             field,
             text,
-            truncated,
             hit_basis,
             masked,
             matches,
@@ -998,7 +997,6 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
             assert_eq!(field.source_type, "user_message");
             assert_eq!(field.tool_id, None);
             assert_eq!(field.tool_name, None);
-            assert!(!truncated);
             assert!(!masked);
             assert!(text.contains(secret));
             assert_eq!(hit_basis, "secret");

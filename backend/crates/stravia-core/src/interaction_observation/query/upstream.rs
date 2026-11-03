@@ -2,7 +2,7 @@ use super::*;
 
 // 上游错误按 Target 尝试计：尝试终态失败且错误来源为上游，含 capability 尝试。
 // 本地准备失败、未发送、取消、中断与观察丢失的尝试 error_source 不是上游或状态
-// 不是 failed，因此不会出现。明细随所属运行过期（尝试表本身不存 expires_at）。
+// 不是 failed，因此不会出现。明细随所属运行由保留期扫描删除。
 fn upstream_error_select() -> String {
     format!(
         "
@@ -26,7 +26,7 @@ CASE
  ELSE 'in_progress'
 END AS outcome,
 CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
-i.observation_gap AS observation_gap,r.expires_at
+i.observation_gap AS observation_gap
 FROM target_attempt_observations a
 JOIN inference_run_observations r ON r.id=a.run_id
 JOIN interaction_observations i ON i.id=a.interaction_id
@@ -108,14 +108,12 @@ macro_rules! upstream_error_rows {
         let window: &QueryWindow = $window;
         let identity: Option<&str> = $identity;
         let select = upstream_error_select();
-        let now = chrono::Utc::now().timestamp_millis();
         let filtered = |columns: &str| {
             let mut sql = QueryBuilder::<$db>::new("SELECT ");
             sql.push(columns)
                 .push(" FROM (")
                 .push(&select)
-                .push(") f WHERE f.expires_at>")
-                .push_bind(now);
+                .push(") f WHERE 1=1");
             if let Some(id) = identity {
                 sql.push(" AND f.id=").push_bind(id);
             } else {

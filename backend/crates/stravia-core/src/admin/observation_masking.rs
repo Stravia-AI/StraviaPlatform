@@ -1113,9 +1113,8 @@ mod tests {
         .execute(&pool)
         .await?;
         sqlx::query(
-            "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('other','other','other-root','other-run','route','completed',0,0,?)",
+            "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('other','other','other-root','other-run','route','completed',0,0)",
         )
-        .bind(i64::MAX)
         .execute(&pool)
         .await?;
         Ok((directory, pool, observation))

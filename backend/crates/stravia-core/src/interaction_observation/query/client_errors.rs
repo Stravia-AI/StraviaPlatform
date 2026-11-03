@@ -15,7 +15,7 @@ r.duration_ms,r.api_key_id,r.api_key_name,r.request_model AS model,
 NULL AS model_display_name,NULL AS interaction_id,NULL AS root_id,NULL AS run_id,
 r.failure_json,r.code,CAST(r.status_code AS BIGINT) AS status_code,
 CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
-r.started_at IS NULL AS observation_gap,r.expires_at
+r.started_at IS NULL AS observation_gap
 FROM rejected_request_observations r
 WHERE r.status_code<>499 AND r.code NOT IN ('request_aborted','cancelled','client_disconnected')
 UNION ALL
@@ -26,7 +26,7 @@ i.api_key_id,i.api_key_name,r.request_model AS model,r.route_id,r.model_display_
 i.id AS interaction_id,i.root_id,r.id AS run_id,r.failure_json,r.terminal_reason AS code,
 CAST(NULL AS BIGINT) AS status_code,
 CASE WHEN NOT r.debug_enabled THEN 'none' ELSE 'partial' END AS debug_status,
-i.observation_gap OR r.failure_json IS NULL AS observation_gap,r.expires_at
+i.observation_gap OR r.failure_json IS NULL AS observation_gap
 FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id
 WHERE r.status='failed' AND r.finished_at IS NOT NULL
 AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ({CANCELLED_TERMINAL_REASONS}))"
@@ -106,10 +106,9 @@ macro_rules! client_error_rows {
         let window: &QueryWindow = $window;
         let identity: Option<(&str, &str)> = $identity;
         let select = client_error_select();
-        let now = chrono::Utc::now().timestamp_millis();
         let filtered = |columns: &str| {
             let mut sql = QueryBuilder::<$db>::new("SELECT ");
-            sql.push(columns).push(" FROM (").push(&select).push(") f WHERE f.expires_at>").push_bind(now);
+            sql.push(columns).push(" FROM (").push(&select).push(") f WHERE 1=1");
             if let Some((kind, id)) = identity {
                 sql.push(" AND f.kind=").push_bind(kind).push(" AND f.id=").push_bind(id);
             } else {

@@ -10,7 +10,8 @@ use stravia_runtime_contract::protocol::ir::{
     content::{ContentFormat, item_content_units},
 };
 
-use super::content_refs::{StoreUnit, StoredContent};
+use super::content_refs::{text_content, unit_content};
+use crate::content_store::{Body, Content};
 
 /// 块的展示通道。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +31,7 @@ impl BlockChannel {
 
 /// 拆分结果：正文单元按指针顺序排列，外壳里对应位置留空。
 pub(super) struct SplitBlock {
-    pub units: Vec<StoreUnit>,
+    pub units: Vec<Content>,
     pub envelope: Option<Value>,
 }
 
@@ -38,13 +39,13 @@ pub(super) struct SplitBlock {
 pub(super) fn split(item: Option<&Value>, fallback_text: &str) -> SplitBlock {
     let Some(item) = item else {
         return SplitBlock {
-            units: vec![StoreUnit::text(fallback_text)],
+            units: vec![text_content(fallback_text)],
             envelope: None,
         };
     };
     let Ok(typed) = serde_json::from_value::<AiItem>(item.clone()) else {
         return SplitBlock {
-            units: vec![StoreUnit::text(fallback_text)],
+            units: vec![text_content(fallback_text)],
             envelope: None,
         };
     };
@@ -52,7 +53,7 @@ pub(super) fn split(item: Option<&Value>, fallback_text: &str) -> SplitBlock {
     let mut pointers = Vec::new();
     for unit in item_content_units(&typed) {
         pointers.push(unit.pointer.clone());
-        units.push(StoreUnit::from_unit(&unit));
+        units.push(unit_content(&unit));
     }
     let mut shell = item.clone();
     for pointer in &pointers {
@@ -74,7 +75,7 @@ pub(super) struct FilledBlock {
 /// 把正文按指针顺序填回外壳，并派生展示字段。
 pub(super) fn fill(
     envelope: Option<&Value>,
-    bodies: &[StoredContent],
+    bodies: &[&Body],
     channel: BlockChannel,
 ) -> FilledBlock {
     let Some(envelope) = envelope else {
@@ -120,7 +121,7 @@ pub(super) fn fill(
     }
 }
 
-fn join_text(bodies: &[StoredContent]) -> String {
+fn join_text(bodies: &[&Body]) -> String {
     bodies
         .iter()
         .map(|body| body.text().unwrap_or_default())
@@ -161,13 +162,13 @@ fn clear_pointer(shell: &mut Value, pointer: &str) {
     }
 }
 
-fn set_pointer(shell: &mut Value, pointer: &str, body: &StoredContent) -> anyhow::Result<()> {
+fn set_pointer(shell: &mut Value, pointer: &str, body: &Body) -> anyhow::Result<()> {
     let Some(target) = navigate_mut(shell, pointer) else {
         return Ok(());
     };
     match body.format {
         ContentFormat::Text => {
-            *target = Value::String(body.text()?);
+            *target = Value::String(body.text()?.to_owned());
         }
         ContentFormat::Json => {
             *target = body.json()?;

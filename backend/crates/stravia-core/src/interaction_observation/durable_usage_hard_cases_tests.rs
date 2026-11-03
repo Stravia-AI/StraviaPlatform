@@ -546,7 +546,7 @@ async fn persist_batch(
         .map(|event| (event, None, BATCH))
         .collect();
     observation
-        .persist_ordered_run_events(run, run, &batch, &[], i64::MAX)
+        .persist_ordered_run_events(run, run, &batch)
         .await?;
     Ok(())
 }
