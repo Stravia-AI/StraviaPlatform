@@ -5969,6 +5969,10 @@ mod tests {
                 2,
             )
             .await?;
+        // 客户端收到工具调用后的交付结算先于 Run 收尾，已写过一次状态转换（重启前即存在）。
+        store
+            .persist_client_completion("pending", "pending", 3, true, None)
+            .await?;
         finish_scenario_run(store, "pending", "pending", "waiting_client").await?;
         admit_waiting_scenario_run(store, "active", "active", None).await?;
         let before = store
@@ -5980,6 +5984,17 @@ mod tests {
             .await?
             .unwrap();
         let activity_before = run_activity_snapshot(store).await?;
+        let transitions = |events: &[ObservationEvent], id: &str| -> Vec<i64> {
+            events
+                .iter()
+                .filter(|event| {
+                    event.kind == "run_state_changed" && event.run_id.as_deref() == Some(id)
+                })
+                .map(|event| event.sequence)
+                .collect()
+        };
+        let transitions_before = transitions(&store.replay(0).await?, "pending");
+        assert_eq!(transitions_before.len(), 1, "交付结算的状态转换");
         let delivery_before = store
             .replay(0)
             .await?
@@ -6068,8 +6083,23 @@ mod tests {
             );
         }
         let sequence = store.max_sequence().await?;
+        // 每次重启恰好为被中断的等待 Run 追加一次状态转换；已有的转换行原样保留，再次对账不重复追加。
+        let transitions_after = transitions(&events, "pending");
+        assert_eq!(
+            transitions_after.len(),
+            transitions_before.len() + 1,
+            "{transitions_before:?} -> {transitions_after:?}"
+        );
+        assert_eq!(
+            transitions_after[..transitions_before.len()],
+            transitions_before[..]
+        );
         store.recover_after_restart().await?;
         assert_eq!(store.max_sequence().await?, sequence);
+        assert_eq!(
+            transitions(&store.replay(0).await?, "pending"),
+            transitions_after
+        );
         admit_waiting_scenario_run(store, "pending", "continuation", Some("pending")).await?;
         assert_eq!(
             store
