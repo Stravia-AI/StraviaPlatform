@@ -37,37 +37,19 @@ pub(super) struct BundleTicketInput {
     through_sequence: Option<i64>,
 }
 
-const MAX_CONTENT_IDS: usize = 256;
-
-fn parse_content_ids(raw: Option<String>) -> Option<Vec<i64>> {
-    let raw = raw?;
-    if raw.is_empty() {
-        return None;
-    }
-    let mut ids = Vec::new();
-    for part in raw.split(',') {
-        let part = part.trim();
-        let id: i64 = part.parse().ok()?;
-        if id <= 0 {
-            return None;
-        }
-        ids.push(id);
-    }
-    if ids.is_empty() || ids.len() > MAX_CONTENT_IDS {
-        return None;
-    }
-    Some(ids)
-}
-
-fn invalid_content_ids() -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({
-            "error": "invalid observation content ids",
-            "code": "invalid_observation_ids",
-        })),
-    )
-        .into_response()
+/// 传输层解析：`ids` 缺失按空列表处理，任何无法解析成整数的片段都判为非法 id；
+/// 数量上限与正数约束由 Core 校验。
+fn parse_content_ids(raw: Option<&str>) -> Result<Vec<i64>, ObservationQueryError> {
+    let Some(raw) = raw.filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(|part| {
+            part.trim()
+                .parse()
+                .map_err(|_| ObservationQueryError::InvalidContentIds)
+        })
+        .collect()
 }
 
 fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
@@ -77,25 +59,37 @@ fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
         .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
 }
 
+/// 正文按当前凭据映射遮蔽，同一 id 的响应会随映射变化：浏览器可以缓存，
+/// 但每次使用前必须带 `If-None-Match` 重新验证（`no-cache`），不得直接复用。
+fn revalidated_headers(response: &mut Response, etag: &str) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+}
+
 pub(super) async fn observation_contents(
     State(gateway): State<Gateway>,
     request_headers: HeaderMap,
     Query(query): Query<ContentQuery>,
 ) -> Response {
-    let Some(ids) = parse_content_ids(query.ids) else {
-        return invalid_content_ids();
+    let ids = match parse_content_ids(query.ids.as_deref()) {
+        Ok(ids) => ids,
+        Err(error) => return observation_query_error(error.into()),
     };
     match gateway.admin().observation_contents(&ids).await {
-        Ok(data) => {
-            let etag = format!("\"{}\"", data.version);
-            if request_matches_etag(&request_headers, &etag) {
-                return StatusCode::NOT_MODIFIED.into_response();
-            }
-            let mut response =
-                Json(serde_json::json!({ "data": { "contents": data.contents } })).into_response();
-            if let Ok(value) = HeaderValue::from_str(&etag) {
-                response.headers_mut().insert(header::ETAG, value);
-            }
+        Ok(batch) => {
+            let etag = format!("\"{}\"", batch.etag);
+            let mut response = if request_matches_etag(&request_headers, &etag) {
+                StatusCode::NOT_MODIFIED.into_response()
+            } else {
+                Json(serde_json::json!({ "data": { "contents": batch.contents } })).into_response()
+            };
+            revalidated_headers(&mut response, &etag);
             response
         }
         Err(error) => observation_query_error(error),

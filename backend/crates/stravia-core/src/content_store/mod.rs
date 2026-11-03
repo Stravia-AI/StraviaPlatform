@@ -134,6 +134,8 @@ impl Content {
 pub(crate) struct Body {
     pub(crate) id: i64,
     pub(crate) format: ContentFormat,
+    /// 读取时已校验过的内容身份；管理端内容端点的 ETag 以它为输入。
+    pub(crate) digest: ContentDigest,
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -183,6 +185,16 @@ impl Bodies {
 
     pub(crate) fn get(&self, id: i64) -> Option<&Body> {
         self.by_id.get(&id)
+    }
+
+    /// 按给定顺序取出全部正文；任何一个缺失都是引用悬空，返回错误而不是少拼一段。
+    pub(crate) fn require(&self, ids: impl IntoIterator<Item = i64>) -> anyhow::Result<Vec<&Body>> {
+        ids.into_iter()
+            .map(|id| {
+                self.get(id)
+                    .with_context(|| format!("referenced content {id} is missing"))
+            })
+            .collect()
     }
 }
 

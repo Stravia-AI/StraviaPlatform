@@ -42,6 +42,7 @@ fn body_reads_text_without_json() {
     let body = Body {
         id: 1,
         format: ContentFormat::Text,
+        digest: content_digest(ContentFormat::Text, b"a\"b\\c d"),
         bytes: b"a\"b\\c d".to_vec(),
     };
     assert_eq!(body.text().unwrap(), "a\"b\\c d");

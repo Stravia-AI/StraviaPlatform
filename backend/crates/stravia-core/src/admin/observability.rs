@@ -142,10 +142,15 @@ impl AdminService {
         Ok(detail)
     }
 
-    /// 显式等待异步观测 writer 排空；查询接口本身不提供该保证。
     /// 批量读取 Observation 引用的正文；顺序按请求，不可见或不存在的内容直接省略。
-    pub async fn observation_contents(&self, ids: &[i64]) -> anyhow::Result<ObservationContents> {
-        let mut contents = self.gw.observation.observation_contents(ids).await?;
+    /// id 非法（空、超过上限或含非正数）返回 [`ObservationQueryError::InvalidContentIds`]。
+    pub async fn observation_contents(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<ObservationContentBatch> {
+        let visible = self.gw.observation.observation_contents(ids).await?;
+        let digests: Vec<_> = visible.iter().map(|visible| visible.digest).collect();
+        let mut contents: Vec<_> = visible.into_iter().map(|visible| visible.content).collect();
         let owners = self.gw.observation.content_interactions(ids).await?;
         let interactions: Vec<String> = owners.values().flatten().cloned().collect();
         let masker = self.observation_masker(interactions).await?;
@@ -153,20 +158,15 @@ impl AdminService {
         // ETag 同时覆盖返回正文与当前映射：正文按内容摘要，映射按主体版本。
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
-        {
-            hasher.update(masker.version().as_bytes());
-            for content in &contents {
-                hasher.update(content.digest);
-            }
+        hasher.update(masker.version().as_bytes());
+        for digest in &digests {
+            hasher.update(digest);
         }
-        let version = hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        Ok(ObservationContents { contents, version })
+        let etag = crate::interaction_observation::hex(&hasher.finalize());
+        Ok(ObservationContentBatch { contents, etag })
     }
 
+    /// 显式等待异步观测 writer 排空；查询接口本身不提供该保证。
     pub async fn observation_flush(&self) -> anyhow::Result<()> {
         self.gw.observation.flush().await
     }

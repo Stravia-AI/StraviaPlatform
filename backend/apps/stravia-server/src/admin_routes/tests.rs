@@ -179,6 +179,56 @@ async fn observation_contents_etag_tracks_bodies_and_mapping_version() -> anyhow
 }
 
 #[tokio::test]
+async fn observation_contents_responses_require_revalidation_before_reuse() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, app, token) = contents_fixture(directory.path()).await?;
+    let seeded = gateway
+        .admin()
+        .seed_observation_input("owner-a", "cacheable body")
+        .await?;
+    let uri = format!(
+        "/api/v1/observations/contents?ids={}",
+        seeded.input_content_ids[0]
+    );
+    let request = |if_none_match: Option<&str>| -> anyhow::Result<Request<Body>> {
+        let mut request = Request::get(&uri).header("authorization", format!("Bearer {token}"));
+        if let Some(etag) = if_none_match {
+            request = request.header("if-none-match", etag);
+        }
+        Ok(request.body(Body::empty())?)
+    };
+
+    let full = app.clone().oneshot(request(None)?).await?;
+    assert_eq!(full.status(), StatusCode::OK);
+    let etag = full
+        .headers()
+        .get("etag")
+        .expect("etag header")
+        .to_str()?
+        .to_owned();
+    assert_eq!(
+        full.headers().get("cache-control").expect("cache-control"),
+        "private, no-cache",
+        "正文随凭据映射变化，必须每次重新验证"
+    );
+
+    let not_modified = app.clone().oneshot(request(Some(&etag))?).await?;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers().get("etag").expect("304 必须回带 ETag"),
+        etag.as_str()
+    );
+    assert_eq!(
+        not_modified
+            .headers()
+            .get("cache-control")
+            .expect("cache-control"),
+        "private, no-cache"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn observation_contents_accepts_the_id_cap_and_requires_admin() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let (_gateway, app, token) = contents_fixture(directory.path()).await?;

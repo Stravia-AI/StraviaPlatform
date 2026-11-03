@@ -2,6 +2,7 @@ use std::collections::HashSet;
 pub(super) mod client_errors;
 pub(super) mod upstream;
 
+use anyhow::Context;
 use futures::TryStreamExt;
 use sqlx::{FromRow, QueryBuilder, Row};
 
@@ -32,6 +33,10 @@ pub(super) struct BundleRejectionRecords {
     pub events: Vec<ObservationEvent>,
 }
 
+/// 单条语句 `IN (...)` 列表绑定的参数数，低于 SQLite 的绑定参数限制。
+const IN_LIST_BATCH: usize = 400;
+/// 语句只绑定根 ID 列表时的批大小，仍低于 SQLite 的绑定参数限制。
+const ROOT_ID_BATCH: usize = 900;
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
@@ -278,20 +283,20 @@ macro_rules! root_changes_reader {
             };
             // forest 的分页根已通过 Token 阈值；显式 root changes/detail 仍需
             // 用同一份局部聚合判定 matched，但成员本身必须全部返回。
-            for chunk in root_ids.chunks(900) {
+            for chunk in root_ids.chunks(ROOT_ID_BATCH) {
                 read.rows.extend($members(&mut *tx, chunk).await?);
             }
             if let Some(min_tokens) = filters.min_tokens.filter(|value| !forest && *value > 0) {
                 let totals = $tokens(&mut *tx, &root_ids).await?;
                 root_ids.retain(|root_id| totals.get(root_id).copied().unwrap_or(0) >= min_tokens);
             }
-            for chunk in root_ids.chunks(900) {
+            for chunk in root_ids.chunks(ROOT_ID_BATCH) {
                 read.matched
                     .extend($matching(&mut *tx, &filters, chunk).await?);
             }
             let ids: Vec<_> = read.rows.iter().map(|row| row.id.as_str()).collect();
             let mut runs = Vec::new();
-            for chunk in ids.chunks(900) {
+            for chunk in ids.chunks(ROOT_ID_BATCH) {
                 runs.extend($flags(&mut *tx, chunk).await?);
             }
             read.debug = ObservationStore::debug_statuses_from_runs(index, runs);
@@ -329,7 +334,7 @@ macro_rules! root_changes_reader {
                     .map(|row| row.id.as_str())
                     .collect()
             };
-            for chunk in context_ids.chunks(900) {
+            for chunk in context_ids.chunks(ROOT_ID_BATCH) {
                 read.events
                     .extend($context(&mut *tx, chunk, sequence).await?);
             }
@@ -467,10 +472,19 @@ struct RejectionRow {
 
 impl super::InteractionObservation {
     /// 内容端点：只返回被可见 Observation 引用的正文。
+    ///
+    /// `ids` 必须是 1 至 [`MAX_OBSERVATION_CONTENT_IDS`] 个正整数，否则返回
+    /// [`ObservationQueryError::InvalidContentIds`]；重复 id 合并，结果顺序遵循首次出现的请求顺序。
     pub(crate) async fn observation_contents(
         &self,
         ids: &[i64],
-    ) -> anyhow::Result<Vec<ObservationContent>> {
+    ) -> anyhow::Result<Vec<VisibleContent>> {
+        if ids.is_empty()
+            || ids.len() > MAX_OBSERVATION_CONTENT_IDS
+            || ids.iter().any(|id| *id <= 0)
+        {
+            return Err(ObservationQueryError::InvalidContentIds.into());
+        }
         self.inner.store.observation_contents(ids).await
     }
 
@@ -1194,13 +1208,12 @@ impl ObservationStore {
         };
         let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
         let contents = super::content_refs::read_scoped(self, principal, &content_ids).await?;
-        Ok(Some(
-            refs.iter()
-                .filter_map(|(_, content_id)| contents.get(*content_id))
-                .map(|body| body.text().unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ))
+        let texts = contents
+            .require(content_ids)?
+            .into_iter()
+            .map(|body| body.text())
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Some(texts.join("\n")))
     }
 
     /// 按占位符读取写入时登记的复用位置；登记行已按位置去重，只保留最新一次复用。
@@ -2546,17 +2559,20 @@ impl ContentSummaries {
 fn refs_summary(
     refs: &[(i64, i64)],
     lengths: &std::collections::HashMap<i64, i64>,
-) -> ContentSummary {
-    ContentSummary::new(
-        refs.iter()
-            .filter_map(|(_, content_id)| {
-                lengths.get(content_id).map(|raw_len| ContentRef {
-                    content_id: *content_id,
-                    raw_len: *raw_len,
-                })
+) -> anyhow::Result<ContentSummary> {
+    let refs = refs
+        .iter()
+        .map(|(_, content_id)| {
+            let raw_len = lengths
+                .get(content_id)
+                .with_context(|| format!("referenced content {content_id} is missing"))?;
+            Ok(ContentRef {
+                content_id: *content_id,
+                raw_len: *raw_len,
             })
-            .collect(),
-    )
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(ContentSummary::new(refs))
 }
 
 impl ObservationStore {
@@ -2568,7 +2584,7 @@ impl ObservationStore {
         }
         let mut inputs: Vec<(String, i64)> = Vec::new();
         let mut outputs: Vec<(String, i64)> = Vec::new();
-        for chunk in interactions.chunks(400) {
+        for chunk in interactions.chunks(IN_LIST_BATCH) {
             match self {
                 Self::Sqlite(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
@@ -2639,6 +2655,7 @@ impl ObservationStore {
             let summary = refs
                 .get(&sequence)
                 .map(|refs| refs_summary(refs, &lengths))
+                .transpose()?
                 .unwrap_or_default();
             summaries.input.insert(id, summary);
         }
@@ -2646,6 +2663,7 @@ impl ObservationStore {
             let summary = refs
                 .get(&sequence)
                 .map(|refs| refs_summary(refs, &lengths))
+                .transpose()?
                 .unwrap_or_default();
             summaries.output.insert(id, summary);
         }
@@ -2658,7 +2676,7 @@ impl ObservationStore {
         content_ids: &[i64],
     ) -> anyhow::Result<std::collections::HashMap<i64, i64>> {
         let mut lengths = std::collections::HashMap::new();
-        for chunk in content_ids.chunks(400) {
+        for chunk in content_ids.chunks(IN_LIST_BATCH) {
             let rows: Vec<(i64, i64)> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
@@ -2713,7 +2731,7 @@ impl ObservationStore {
         if sequences.is_empty() {
             return Ok(refs);
         }
-        for chunk in sequences.chunks(400) {
+        for chunk in sequences.chunks(IN_LIST_BATCH) {
             let rows: Vec<(i64, i64, i64)> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
@@ -2781,11 +2799,11 @@ impl ObservationStore {
         let contents = self
             .read_interaction_bodies(interaction_id, &content_ids)
             .await?;
-        Ok(refs
-            .iter()
-            .filter_map(|(_, content_id)| contents.get(*content_id))
-            .map(|body| body.text().unwrap_or_default())
-            .collect::<Vec<_>>()
+        Ok(contents
+            .require(content_ids)?
+            .into_iter()
+            .map(|body| body.text())
+            .collect::<anyhow::Result<Vec<_>>>()?
             .join("\n"))
     }
 
@@ -2815,17 +2833,17 @@ impl ObservationStore {
         let mut output = String::new();
         let mut current_turn: Option<i64> = None;
         for block in blocks {
-            let bodies: Vec<_> = refs
-                .get(&block.sequence)
-                .into_iter()
-                .flatten()
-                .filter_map(|(_, content_id)| contents.get(*content_id))
-                .collect();
+            let bodies = contents.require(
+                refs.get(&block.sequence)
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, content_id)| *content_id),
+            )?;
             let text = super::blocks::fill(
                 block.envelope.as_ref(),
                 &bodies,
                 super::blocks::BlockChannel::Visible,
-            )
+            )?
             .text;
             if text.is_empty() {
                 continue;
@@ -2929,7 +2947,7 @@ impl ObservationStore {
     ) -> anyhow::Result<std::collections::HashMap<i64, Vec<String>>> {
         let mut owners: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
-        for chunk in ids.chunks(400) {
+        for chunk in ids.chunks(IN_LIST_BATCH) {
             let rows: Vec<(i64, String)> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
@@ -3020,88 +3038,69 @@ impl ObservationStore {
         let contents = self
             .read_interaction_bodies(interaction_id, &content_ids)
             .await?;
-        let bodies: Vec<_> = refs
-            .get(&block.sequence)
-            .into_iter()
-            .flatten()
-            .filter_map(|(_, content_id)| contents.get(*content_id))
-            .collect();
+        let bodies = contents.require(content_ids)?;
         Ok(super::blocks::fill(
             block.envelope.as_ref(),
             &bodies,
             super::blocks::BlockChannel::Visible,
-        )
+        )?
         .text)
     }
 
-    /// 内容端点：只返回被 Observation 引用、属于可见 Interaction 的正文。
+    /// 内容端点：只返回被 Observation 引用、属于可见 Interaction 的正文；
+    /// 正文经共享内容存储读取并校验长度与摘要。
     pub(super) async fn observation_contents(
         &self,
         ids: &[i64],
-    ) -> anyhow::Result<Vec<ObservationContent>> {
-        let mut by_id: std::collections::HashMap<i64, ObservationContent> =
-            std::collections::HashMap::new();
-        for chunk in ids.chunks(400) {
-            let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> = match self {
+    ) -> anyhow::Result<Vec<VisibleContent>> {
+        let mut visible = Vec::new();
+        for chunk in ids.chunks(IN_LIST_BATCH) {
+            match self {
                 Self::Sqlite(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
-                    );
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(VISIBLE_CONTENT_HEAD);
                     let mut separated = query.separated(",");
                     for id in chunk {
                         separated.push_bind(*id);
                     }
-                    separated.push_unseparated(
-                        ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
-                         OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))",
-                    );
-                    query.build_query_as().fetch_all(pool).await?
+                    separated.push_unseparated(VISIBLE_CONTENT_TAIL);
+                    visible.extend(query.build_query_scalar::<i64>().fetch_all(pool).await?);
                 }
                 Self::Postgres(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
-                    );
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(VISIBLE_CONTENT_HEAD);
                     let mut separated = query.separated(",");
                     for id in chunk {
                         separated.push_bind(*id);
                     }
-                    separated.push_unseparated(
-                        ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
-                         OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))",
-                    );
-                    query.build_query_as().fetch_all(pool).await?
+                    separated.push_unseparated(VISIBLE_CONTENT_TAIL);
+                    visible.extend(query.build_query_scalar::<i64>().fetch_all(pool).await?);
                 }
-            };
-            for (content_id, digest, format, raw_len, raw) in rows {
-                let raw = crate::storage_codec::decode(&raw)?.into_owned();
-                let format = crate::content_store::format_from_code(format)
-                    .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?;
-                let body = match format {
-                    stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => {
-                        Value::String(String::from_utf8(raw)?)
-                    }
-                    stravia_runtime_contract::protocol::ir::content::ContentFormat::Json => {
-                        serde_json::from_slice(&raw)?
-                    }
-                };
-                by_id.insert(
-                    content_id,
-                    ObservationContent {
-                        content_id,
-                        format: match format {
-                            stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => "text",
-                            stravia_runtime_contract::protocol::ir::content::ContentFormat::Json => "json",
-                        }
-                        .into(),
-                        raw_len,
-                        body,
-                        digest: digest
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| anyhow::anyhow!("content digest is not 32 bytes"))?,
-                    },
-                );
             }
+        }
+        let bodies = match self {
+            Self::Sqlite(pool, _) => {
+                let mut connection = pool.acquire().await?;
+                crate::content_store::sqlite::read_any_scope(&mut connection, &visible).await?
+            }
+            Self::Postgres(pool, _) => {
+                let mut connection = pool.acquire().await?;
+                crate::content_store::postgres::read_any_scope(&mut connection, &visible).await?
+            }
+        };
+        let mut by_id = std::collections::HashMap::with_capacity(bodies.len());
+        for body in bodies {
+            let content = ObservationContent {
+                content_id: body.id,
+                format: body.format.into(),
+                raw_len: i64::try_from(body.bytes.len())?,
+                body: body.value()?,
+            };
+            by_id.insert(
+                body.id,
+                VisibleContent {
+                    content,
+                    digest: body.digest,
+                },
+            );
         }
         let mut seen = HashSet::new();
         Ok(ids
@@ -3111,6 +3110,11 @@ impl ObservationStore {
             .collect())
     }
 }
+
+/// 可见性查询：给定的内容 id 中被可见 Interaction 的 Observation 事件或工具结果引用者。
+const VISIBLE_CONTENT_HEAD: &str = "SELECT c.id FROM contents c WHERE c.id IN (";
+const VISIBLE_CONTENT_TAIL: &str = ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
+     OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))";
 
 struct VisibleBlockRow {
     sequence: i64,

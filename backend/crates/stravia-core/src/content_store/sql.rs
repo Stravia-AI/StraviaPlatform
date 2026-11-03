@@ -5,6 +5,8 @@
 use super::*;
 
 const CONTENT_BATCH: usize = 512;
+/// 单条读取语句的 `IN` 参数上限，低于 SQLite 的绑定参数限制。
+const READ_BATCH: usize = 256;
 const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
 
 /// 四类反向引用的唯一清单；新增引用类型时只改这里与 [`enqueue_unreferenced`] 的调用方。
@@ -274,26 +276,46 @@ macro_rules! backend {
                 Ok(ids)
             }
 
-            /// 批量读取正文并逐条校验身份与长度。
+            /// 批量读取同一 scope 内的正文并逐条校验身份与长度。
             pub(crate) async fn read(
                 connection: &mut $conn,
                 scope_id: i64,
+                ids: &[i64],
+            ) -> anyhow::Result<Vec<Body>> {
+                read_filtered(connection, Some(scope_id), ids).await
+            }
+
+            /// 不限 scope 的批量读取：调用方已自行确认这些内容对读者可见（管理端内容端点），
+            /// 校验与 `read` 完全一致。
+            pub(crate) async fn read_any_scope(
+                connection: &mut $conn,
+                ids: &[i64],
+            ) -> anyhow::Result<Vec<Body>> {
+                read_filtered(connection, None, ids).await
+            }
+
+            async fn read_filtered(
+                connection: &mut $conn,
+                scope_id: Option<i64>,
                 ids: &[i64],
             ) -> anyhow::Result<Vec<Body>> {
                 let mut unique: Vec<i64> = ids.to_vec();
                 unique.sort_unstable();
                 unique.dedup();
                 let mut bodies = Vec::with_capacity(unique.len());
-                for chunk in unique.chunks(256) {
+                for chunk in unique.chunks(READ_BATCH) {
                     let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT id, digest, CAST(format AS BIGINT), raw_len, body FROM contents WHERE scope_id = ",
+                        "SELECT id, digest, CAST(format AS BIGINT), raw_len, body FROM contents WHERE id IN (",
                     );
-                    query.push_bind(scope_id).push(" AND id IN (");
                     let mut list = query.separated(",");
                     for id in chunk {
                         list.push_bind(*id);
                     }
-                    list.push_unseparated(") ORDER BY id");
+                    list.push_unseparated(")");
+                    if let Some(scope_id) = scope_id {
+                        query.push(" AND scope_id = ").push_bind(scope_id);
+                    }
+                    query.push(" ORDER BY id");
                     let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> =
                         query.build_query_as().fetch_all(&mut *connection).await?;
                     for (id, digest, format, raw_len, encoded) in rows {
@@ -304,13 +326,12 @@ macro_rules! backend {
                             i64::try_from(raw.len()).unwrap_or(i64::MAX) == raw_len,
                             "stored content length mismatch"
                         );
-                        ensure!(
-                            content_digest(format, &raw) == digest.as_slice(),
-                            "damaged content"
-                        );
+                        let computed = content_digest(format, &raw);
+                        ensure!(computed == digest.as_slice(), "damaged content");
                         bodies.push(Body {
                             id,
                             format,
+                            digest: computed,
                             bytes: raw.into_owned(),
                         });
                     }

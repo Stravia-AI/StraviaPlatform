@@ -438,6 +438,7 @@ impl AdminService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction_observation::ObservationContentFormat;
     use async_trait::async_trait;
     use parking_lot::Mutex;
     use serde_json::json;
@@ -1059,10 +1060,9 @@ mod tests {
         .await?;
         let content = |content_id: i64| ObservationContent {
             content_id,
-            format: "text".into(),
+            format: ObservationContentFormat::Text,
             raw_len: PLAINTEXT.len() as i64,
             body: json!(PLAINTEXT),
-            digest: [0; 32],
         };
         let owners = HashMap::from([
             (1, vec!["interaction".to_owned()]),

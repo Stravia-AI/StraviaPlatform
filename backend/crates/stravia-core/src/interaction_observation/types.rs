@@ -869,7 +869,7 @@ pub enum ObservationQueryError {
     InvalidEventPage,
     #[error("invalid observation filter")]
     InvalidFilter,
-    #[error("invalid observation content ids")]
+    #[error("observation content ids must be 1 to 256 positive integers")]
     InvalidContentIds,
 }
 
@@ -914,21 +914,46 @@ impl ContentSummary {
     }
 }
 
-/// 内容端点的内部结果：正文 + 供 ETag 的映射版本。
-pub struct ObservationContents {
+/// 内容端点一次请求允许的最大 id 数。
+pub const MAX_OBSERVATION_CONTENT_IDS: usize = 256;
+
+/// 内容端点的结果：遮蔽后的正文与供条件请求使用的 ETag（不含引号）。
+pub struct ObservationContentBatch {
     pub contents: Vec<ObservationContent>,
-    pub version: String,
+    pub etag: String,
 }
 
-/// 内容端点返回的一项正文；`digest` 只用于 ETag，不进入响应。
+/// 内容的 JSON 形态：`text` 的 `body` 是字符串，`json` 的 `body` 是原样解析的 JSON。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObservationContentFormat {
+    Text,
+    Json,
+}
+
+impl From<stravia_runtime_contract::protocol::ir::content::ContentFormat> for ObservationContentFormat {
+    fn from(format: stravia_runtime_contract::protocol::ir::content::ContentFormat) -> Self {
+        use stravia_runtime_contract::protocol::ir::content::ContentFormat;
+        match format {
+            ContentFormat::Text => Self::Text,
+            ContentFormat::Json => Self::Json,
+        }
+    }
+}
+
+/// 内容端点返回的一项正文。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationContent {
     pub content_id: i64,
-    pub format: String,
+    pub format: ObservationContentFormat,
     pub raw_len: i64,
     pub body: Value,
-    #[serde(skip)]
-    pub digest: [u8; 32],
+}
+
+/// 读取侧的内部结果：对外正文加上只用于 ETag 的内容摘要，摘要不进入响应。
+pub(crate) struct VisibleContent {
+    pub(crate) content: ObservationContent,
+    pub(crate) digest: crate::content_store::ContentDigest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

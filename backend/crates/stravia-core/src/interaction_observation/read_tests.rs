@@ -354,16 +354,19 @@ async fn contents_are_visible_only_through_observation_refs(
     let contents = observation
         .observation_contents(&[output_id, orphan, input_id, missing, output_id])
         .await?;
-    let ids: Vec<i64> = contents.iter().map(|content| content.content_id).collect();
+    let ids: Vec<i64> = contents
+        .iter()
+        .map(|visible| visible.content.content_id)
+        .collect();
     assert_eq!(
         ids,
         vec![output_id, input_id],
         "未引用/未知/重复 id 必须被忽略并保持请求顺序"
     );
-    assert_eq!(contents[0].body, json!(seeded.output));
-    assert_eq!(contents[0].raw_len, seeded.output.len() as i64);
-    assert_eq!(contents[0].format, "text");
-    assert_eq!(contents[1].body, json!(seeded.input));
+    assert_eq!(contents[0].content.body, json!(seeded.output));
+    assert_eq!(contents[0].content.raw_len, seeded.output.len() as i64);
+    assert_eq!(contents[0].content.format, ObservationContentFormat::Text);
+    assert_eq!(contents[1].content.body, json!(seeded.input));
 
     let owners = observation
         .content_interactions(&[input_id, output_id, orphan])
@@ -374,6 +377,32 @@ async fn contents_are_visible_only_through_observation_refs(
 
     let none = observation.observation_contents(&[orphan, missing]).await?;
     assert!(none.is_empty());
+    Ok(())
+}
+
+/// 内容 id 的校验归 Core：空、含非正数或超过上限都是 `InvalidContentIds`。
+async fn content_ids_are_validated_by_the_query(
+    observation: &InteractionObservation,
+) -> anyhow::Result<()> {
+    let too_many: Vec<i64> = (1..=MAX_OBSERVATION_CONTENT_IDS as i64 + 1).collect();
+    for ids in [&[][..], &[1, 0], &[-3], &too_many] {
+        let error = observation
+            .observation_contents(ids)
+            .await
+            .err()
+            .expect("非法 id 必须被拒绝");
+        assert!(
+            matches!(
+                error.downcast_ref::<ObservationQueryError>(),
+                Some(ObservationQueryError::InvalidContentIds)
+            ),
+            "{} 个 id: {error}",
+            ids.len()
+        );
+    }
+    // 上限本身可接受；这些 id 不存在，因此结果为空。
+    let at_cap: Vec<i64> = (9_000_000_000..).take(MAX_OBSERVATION_CONTENT_IDS).collect();
+    assert!(observation.observation_contents(&at_cap).await?.is_empty());
     Ok(())
 }
 
@@ -440,9 +469,11 @@ async fn client_tool_results_are_batched(
     };
     let bodies = observation.observation_contents(&result_ids).await?;
     assert_eq!(bodies.len(), 2);
-    let formats: Vec<&str> = bodies.iter().map(|body| body.format.as_str()).collect();
+    let formats: Vec<ObservationContentFormat> =
+        bodies.iter().map(|visible| visible.content.format).collect();
     assert!(
-        formats.contains(&"text") && formats.contains(&"json"),
+        formats.contains(&ObservationContentFormat::Text)
+            && formats.contains(&ObservationContentFormat::Json),
         "{formats:?}"
     );
     Ok(())
@@ -762,6 +793,7 @@ async fn run_read_contract(observation: &InteractionObservation) -> anyhow::Resu
     summaries_carry_refs_and_raw_len(observation, &seeded).await?;
     detail_returns_full_text(observation, &seeded).await?;
     events_use_merged_turn_projection(observation, &seeded).await?;
+    content_ids_are_validated_by_the_query(observation).await?;
     contents_are_visible_only_through_observation_refs(observation, &seeded).await?;
     client_tool_results_are_batched(observation).await
 }
