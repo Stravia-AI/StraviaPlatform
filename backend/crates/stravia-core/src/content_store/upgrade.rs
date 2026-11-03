@@ -60,19 +60,19 @@ macro_rules! backend {
             use super::*;
 
             async fn state(connection: &mut $conn) -> anyhow::Result<UpgradeState> {
-                let row: Option<(i64, i64, Option<String>)> = sqlx::query_as(
-                    "SELECT CAST(stage AS BIGINT), last_node_pk, last_marker_reference \
-                     FROM content_upgrade WHERE phase = 1",
-                )
-                .fetch_optional(&mut *connection)
-                .await?;
-                Ok(match row {
-                    Some((stage, last_node_pk, last_marker_reference)) => UpgradeState {
-                        stage,
-                        last_node_pk,
-                        last_marker_reference,
-                    },
-                    None => UpgradeState::default(),
+                // 0037 插入唯一的进度行；缺失说明迁移状态已损坏，不能当作从头开始。
+                let (stage, last_node_pk, last_marker_reference): (i64, i64, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT CAST(stage AS BIGINT), last_node_pk, last_marker_reference \
+                         FROM content_upgrade WHERE phase = 1",
+                    )
+                    .fetch_one(&mut *connection)
+                    .await
+                    .context("content_upgrade progress row is missing")?;
+                Ok(UpgradeState {
+                    stage,
+                    last_node_pk,
+                    last_marker_reference,
                 })
             }
 
@@ -92,7 +92,8 @@ macro_rules! backend {
                     .push(", last_marker_reference = ")
                     .push_bind(marker)
                     .push(" WHERE phase = 1");
-                query.build().execute(&mut *transaction).await?;
+                let updated = query.build().execute(&mut *transaction).await?.rows_affected();
+                ensure!(updated == 1, "content_upgrade progress row was not updated");
                 Ok(())
             }
 
@@ -454,14 +455,19 @@ macro_rules! backend {
                             );
                             mapping.push(content_id);
                         }
-                        let scope = scope.context("converted marker content scope is missing")?;
-                        ensure_content_rows(
-                            connection,
-                            scope,
-                            &mapping,
-                            "converted marker content is missing",
-                        )
-                        .await?;
+                        // 没有正文单元的 Marker（空 Reasoning、RedactedThinking 等）从不创建 scope，
+                        // 只有存在引用时才要求 scope 与正文行。
+                        if !mapping.is_empty() {
+                            let scope =
+                                scope.context("converted marker content scope is missing")?;
+                            ensure_content_rows(
+                                connection,
+                                scope,
+                                &mapping,
+                                "converted marker content is missing",
+                            )
+                            .await?;
+                        }
                         let descriptor = decode_descriptor(&envelope)?;
                         validate_slots(&descriptor, mapping.len())
                             .context("converted marker slot validation")?;
