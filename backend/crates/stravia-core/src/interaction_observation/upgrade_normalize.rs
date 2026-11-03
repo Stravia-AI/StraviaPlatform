@@ -128,16 +128,40 @@ struct SplitRow {
     payload: Value,
 }
 
-/// 解码旧载荷。已损坏的历史诊断不得阻断整库升级：事件行保留，载荷按空对象迁移。
-fn legacy_payload(sequence: i64, bytes: &[u8]) -> Value {
-    match crate::storage_codec::decode(bytes)
-        .map_err(anyhow::Error::from)
-        .and_then(|raw| serde_json::from_slice(&raw).map_err(anyhow::Error::from))
-    {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!(sequence, %error, "observation payload unreadable during normalization; migrated as empty");
-            Value::Object(serde_json::Map::new())
+/// 无法解码而被按空对象迁移的历史载荷计数。
+///
+/// 已损坏的历史诊断不得阻断整库升级（既有升级测试要求无关升级不因历史诊断解码失败而失败），
+/// 因此事件行保留、载荷按空对象迁移；这是有损迁移，逐行与汇总都留下告警。
+#[derive(Default)]
+struct UnreadablePayloads {
+    count: u64,
+    first_sequence: Option<i64>,
+}
+
+impl UnreadablePayloads {
+    /// 解码旧载荷；失败时按空对象迁移并计数。
+    fn decode(&mut self, sequence: i64, bytes: &[u8]) -> Value {
+        match crate::storage_codec::decode(bytes)
+            .map_err(anyhow::Error::from)
+            .and_then(|raw| serde_json::from_slice(&raw).map_err(anyhow::Error::from))
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(sequence, %error, "observation payload unreadable during normalization; migrated as empty");
+                self.count += 1;
+                self.first_sequence.get_or_insert(sequence);
+                Value::Object(serde_json::Map::new())
+            }
+        }
+    }
+
+    fn report(&self) {
+        if let Some(first_sequence) = self.first_sequence {
+            tracing::warn!(
+                unreadable = self.count,
+                first_sequence,
+                "observation normalization migrated unreadable payloads as empty objects"
+            );
         }
     }
 }
@@ -150,6 +174,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
     .fetch_one(&mut *connection)
     .await?;
     let mut principals = HashMap::new();
+    let mut unreadable = UnreadablePayloads::default();
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>? ORDER BY sequence LIMIT ?")
@@ -171,7 +196,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    payload: legacy_payload(row.try_get("sequence")?, &payload),
+                    payload: unreadable.decode(row.try_get("sequence")?, &payload),
                 },
             ));
         }
@@ -185,6 +210,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
             .await?;
         tx.commit().await?;
     }
+    unreadable.report();
     Ok(())
 }
 
@@ -349,6 +375,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
     .fetch_one(&mut *connection)
     .await?;
     let mut principals = HashMap::new();
+    let mut unreadable = UnreadablePayloads::default();
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>$1 ORDER BY sequence LIMIT $2")
@@ -370,7 +397,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    payload: legacy_payload(row.try_get("sequence")?, &payload),
+                    payload: unreadable.decode(row.try_get("sequence")?, &payload),
                 },
             ));
         }
@@ -384,6 +411,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
             .await?;
         tx.commit().await?;
     }
+    unreadable.report();
     Ok(())
 }
 

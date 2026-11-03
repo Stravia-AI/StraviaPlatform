@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use anyhow::Context;
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -17,6 +18,9 @@ use super::{
     store::ObservationStore,
     types::{ObservationEvent, canonical_item_block_id},
 };
+
+/// 每条查询绑定的事件序号数，低于 SQLite 的绑定参数限制。
+const SEQUENCE_BATCH: usize = 400;
 
 struct BlockRow {
     interaction_id: String,
@@ -56,21 +60,22 @@ pub(super) async fn hydrate(
     for event in events.iter_mut() {
         match event.kind.as_str() {
             "model_thinking" | "client_visible_content" => {
-                let Some(block) = blocks.get(&event.sequence) else {
-                    continue;
-                };
-                let bodies = bodies_for(refs.get(&event.sequence), &contents);
+                let block = blocks.get(&event.sequence).with_context(|| {
+                    format!("observation block row missing for event {}", event.sequence)
+                })?;
+                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), &contents)?;
                 let channel = if block.channel == "thinking" {
                     BlockChannel::Thinking
                 } else {
                     BlockChannel::Visible
                 };
-                let filled = fill(block.envelope.as_ref(), &bodies, channel);
+                let filled = fill(block.envelope.as_ref(), &bodies, channel)
+                    .with_context(|| format!("restore block body of event {}", event.sequence))?;
                 let scope = block.attempt_id.as_deref().unwrap_or(&block.run_id);
-                let block_id = canonical_item_block_id(
-                    scope,
-                    usize::try_from(block.item_ordinal).unwrap_or(usize::MAX),
-                );
+                let item_ordinal = usize::try_from(block.item_ordinal).with_context(|| {
+                    format!("invalid block item ordinal {}", block.item_ordinal)
+                })?;
+                let block_id = canonical_item_block_id(scope, item_ordinal);
                 let mut payload = json!({
                     "kind": event.kind,
                     "text": filled.text,
@@ -94,11 +99,11 @@ pub(super) async fn hydrate(
                 event.payload = payload;
             }
             "user_input_recorded" => {
-                let bodies = bodies_for(refs.get(&event.sequence), &contents);
+                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), &contents)?;
                 let text = bodies
                     .iter()
-                    .map(|body| body.text().unwrap_or_default())
-                    .collect::<Vec<_>>()
+                    .map(|body| body.text())
+                    .collect::<anyhow::Result<Vec<_>>>()?
                     .join("\n");
                 event.payload["text"] = Value::String(text);
             }
@@ -107,16 +112,20 @@ pub(super) async fn hydrate(
                     .get(&event.sequence)
                     .into_iter()
                     .flatten()
-                    .filter_map(|row| {
-                        let body = contents.get(&row.content_id)?;
-                        let content = body.value().unwrap_or(Value::Null);
-                        Some(json!({
+                    .map(|row| {
+                        let body = contents.get(&row.content_id).with_context(|| {
+                            format!(
+                                "tool result content {} missing for event {}",
+                                row.content_id, event.sequence
+                            )
+                        })?;
+                        Ok(json!({
                             "tool_id": row.tool_id,
-                            "content": content,
+                            "content": body.value()?,
                             "is_error": row.is_error,
                         }))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 event.payload["results"] = Value::Array(results);
             }
             _ => {}
@@ -144,7 +153,7 @@ async fn fill_run_payloads(
         return Ok(());
     }
     let mut rows: HashMap<i64, RunPayloadRow> = HashMap::new();
-    for chunk in sequences.chunks(400) {
+    for chunk in sequences.chunks(SEQUENCE_BATCH) {
         match store {
             ObservationStore::Sqlite(pool, _) => {
                 let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
@@ -193,8 +202,11 @@ async fn fill_run_payloads(
                 event.payload["superseded_by"] = json!(row.superseded_by);
             }
             "request_failed" => {
+                // 没有失败记录的 request_failed 事件只是缺省为 null；有记录却无法解析是损坏。
                 let error: Value = match row.failure_json.as_deref() {
-                    Some(json) => serde_json::from_str(json).unwrap_or_else(|_| Value::Null),
+                    Some(json) => serde_json::from_str(json).with_context(|| {
+                        format!("invalid failure_json for event {}", event.sequence)
+                    })?,
                     None => Value::Null,
                 };
                 event.payload["error"] = error;
@@ -250,10 +262,19 @@ impl BodySet {
     }
 }
 
-fn bodies_for<'a>(refs: Option<&Vec<(i64, i64)>>, contents: &'a BodySet) -> Vec<&'a Body> {
+/// 事件引用的全部正文，按引用顺序；任何一个读不到都是存储损坏，不能静默少拼一段。
+fn bodies_for<'a>(
+    sequence: i64,
+    refs: Option<&Vec<(i64, i64)>>,
+    contents: &'a BodySet,
+) -> anyhow::Result<Vec<&'a Body>> {
     refs.into_iter()
         .flatten()
-        .filter_map(|(_, content_id)| contents.get(content_id))
+        .map(|(_, content_id)| {
+            contents.get(content_id).with_context(|| {
+                format!("content {content_id} referenced by event {sequence} is missing")
+            })
+        })
         .collect()
 }
 
@@ -279,20 +300,12 @@ async fn read_bodies(
         .iter()
         .filter(|event| wanted.contains(&event.sequence))
     {
-        let Some(principal) = event
-            .interaction_id
-            .as_ref()
-            .and_then(|id| principals.get(id))
-        else {
-            continue;
-        };
-        let ids = by_principal.entry(principal.as_str()).or_default();
-        ids.extend(
-            refs.get(&event.sequence)
-                .into_iter()
-                .flatten()
-                .map(|(_, content_id)| *content_id),
-        );
+        let mut ids: Vec<i64> = refs
+            .get(&event.sequence)
+            .into_iter()
+            .flatten()
+            .map(|(_, content_id)| *content_id)
+            .collect();
         ids.extend(
             tool_results
                 .get(&event.sequence)
@@ -300,6 +313,23 @@ async fn read_bodies(
                 .flatten()
                 .map(|row| row.content_id),
         );
+        if ids.is_empty() {
+            continue;
+        }
+        let principal = event
+            .interaction_id
+            .as_ref()
+            .and_then(|id| principals.get(id))
+            .with_context(|| {
+                format!(
+                    "event {} references content but has no interaction principal",
+                    event.sequence
+                )
+            })?;
+        by_principal
+            .entry(principal.as_str())
+            .or_default()
+            .extend(ids);
     }
     let mut contents = Vec::with_capacity(by_principal.len());
     for (principal, ids) in by_principal {
@@ -327,7 +357,7 @@ async fn load_rows(
     let mut blocks = HashMap::new();
     let mut refs: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
     let mut tool_results: HashMap<i64, Vec<ToolResultRow>> = HashMap::new();
-    for chunk in sequences.chunks(400) {
+    for chunk in sequences.chunks(SEQUENCE_BATCH) {
         match store {
             ObservationStore::Sqlite(pool, _) => {
                 let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
