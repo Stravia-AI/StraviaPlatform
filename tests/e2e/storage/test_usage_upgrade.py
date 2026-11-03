@@ -5,7 +5,6 @@ import os
 import sqlite3
 import struct
 import subprocess
-import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from tests.common.helpers import (
     WebSession, find_free_port, http_request, initialize_server, start_stravia_server,
     stop_stravia_server, wait_for_setup_token, wait_until_ready,
 )
+from tests.e2e.admin.test_observations import _wait_for
 from tests.e2e.storage.conftest import REPO_ROOT, storage_harness_binary
 from tests.e2e.storage.test_usage_statistics import clear, stats
 
@@ -30,13 +30,13 @@ def wait_until_observations_swept(env, path, description):
 
     扫描由启动后台任务异步触发，只能轮询可观察的结果；永久统计桶不随明细删除而变化。
     """
-    deadline = time.monotonic() + 30
-    while True:
+    def swept():
         status, body = http_request("GET", f"{env['admin']}/api/v1/{path}", headers=env["auth"])
-        if status == 404 or (status == 200 and not body["data"]["items"]):
-            return
-        assert time.monotonic() < deadline, (description, status, body)
-        time.sleep(0.2)
+        return status == 404 or (status == 200 and not body["data"]["items"])
+
+    _wait_for(description, swept, timeout=30)
+
+
 VIEWS = ("overview", "series", "models", "providers", "api-keys")
 
 

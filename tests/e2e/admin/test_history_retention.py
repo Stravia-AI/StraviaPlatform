@@ -130,9 +130,16 @@ def test_saving_retention_days_sweeps_aged_history_immediately(isolated: dict[st
     assert status == 200, body
     assert interaction_status(env, aged_id) == 404, "an aged Interaction is removed by the save itself"
     assert interaction_status(env, fresh_id) == 200, "a recent Interaction is kept"
-    assert gateway_sql(env, "SELECT COUNT(*) FROM observation_events WHERE interaction_id = ?", aged_id) == [(0,)]
-    assert gateway_sql(env, "SELECT COUNT(*) FROM inference_run_observations WHERE interaction_id = ?", aged_id) == [(0,)]
-    assert gateway_sql(env, "SELECT COUNT(*) FROM rejected_request_observations") == [(0,)], rejections
+    # 被清扫的 Interaction 连同事件页一起消失；拒绝记录同样不可再读取。
+    status, body = http_request(
+        "GET", f"{env['admin']}/api/v1/observations/interactions/{aged_id}/events", headers=env["auth"],
+    )
+    assert status == 404, body
+    for (rejection_id,) in rejections:
+        status, body = http_request(
+            "GET", f"{env['admin']}/api/v1/observations/rejections/{rejection_id}", headers=env["auth"],
+        )
+        assert status == 404, (rejection_id, body)
 
 
 def test_longer_retention_keeps_what_the_shorter_one_would_remove(isolated: dict[str, Any]) -> None:

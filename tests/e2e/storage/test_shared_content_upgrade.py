@@ -43,7 +43,10 @@ from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_pr
 from tests.e2e.storage.conftest import REPO_ROOT, storage_harness_binary
 from tests.e2e.storage.test_interaction_continuation import continuation_provider, replay_round
 
-pytestmark = [pytest.mark.e2e, pytest.mark.storage]
+# 原生压缩的 Target 指纹把 Provider 的 base_url 算进了命名空间，fixture 因此固定使用
+# COMPACTION_UPSTREAM_PORT；同一时刻只能有一个测试占用它。并行（xdist ``--dist loadgroup``）时
+# 用同一个 xdist_group 把本文件的用例串行到同一个 worker 上。
+pytestmark = [pytest.mark.e2e, pytest.mark.storage, pytest.mark.xdist_group("shared-content-upgrade-fixed-port")]
 
 FOLLOW_UP = "Follow-up question asked after the upgrade."
 BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "postgres"], ids=["sqlite", "postgres"])
@@ -323,6 +326,37 @@ def assert_observation_converted(env: dict[str, Any], fixture: dict[str, Any]) -
     assert not problems, "\n".join(problems)
 
 
+def assert_error_details_survive(env: dict[str, Any], fixture: dict[str, Any]) -> None:
+    """升级前最终失败的请求：客户端错误与上游错误的列表、详情仍给出旧服务端记录的错误对象与归属。"""
+    spec = fixture["expectations"]["upstream_failure"]
+    now = int(time.time() * 1000)
+    window = f"start_at={now - 3_600_000}&end_at={now + 60_000}&limit=100"
+
+    def fetch(path: str) -> Any:
+        status, body = http_request("GET", f"{env['admin']}/api/v1/observations/{path}", headers=env["auth"])
+        assert status == 200, (path, body)
+        return body["data"]
+
+    client = spec["client_error"]
+    listed = [item for item in fetch(f"client-errors?{window}&type=failed")["items"] if item["id"] == client["id"]]
+    assert len(listed) == 1, client["id"]
+    assert listed[0]["error"] == client["error"] and listed[0]["model"] == client["model"]
+    request = fetch(f"client-errors/{client['kind']}/{client['id']}")["request"]
+    assert request["error"] == client["detail_error"] and request["type"] == client["type"]
+
+    upstream = spec["upstream_error"]
+    listed = [item for item in fetch(f"upstream-errors?{window}")["items"] if item["id"] == upstream["id"]]
+    assert len(listed) == 1, upstream["id"]
+    assert {key: listed[0][key] for key in (
+        "outcome", "error", "provider_id", "provider_name", "upstream_model", "model", "api_key_name",
+    )} == {key: upstream[key] for key in (
+        "outcome", "error", "provider_id", "provider_name", "upstream_model", "model", "api_key_name",
+    )}
+    detail = fetch(f"upstream-errors/{upstream['id']}")
+    assert detail["error"]["id"] == upstream["id"] and detail["error"]["error"] == upstream["error"]
+    assert [attempt["status"] for attempt in detail["attempts"]] == upstream["detail_attempt_statuses"]
+
+
 def assert_native_compaction_survives(env: dict[str, Any], fixture: dict[str, Any]) -> None:
     compaction = fixture["expectations"]["compaction"]
     status, continued = http_request(
@@ -347,6 +381,7 @@ def test_upgrade_keeps_turn_content_markers_mappings_and_compactions(
         assert status == 200 and str(body["data"]) == fixture["settings"]["log_retention_days"], body
         # 先读升级后的原始时间线：随后的续接请求会给同一 Interaction 追加新 Run。
         assert_observation_converted(env, fixture)
+        assert_error_details_survive(env, fixture)
         assert_turn_content_and_markers(env, fixture)
         assert_dependency_resolution(env, fixture)
         assert_mapping_and_hit_detail(env, fixture)
@@ -366,6 +401,7 @@ def test_upgrade_does_not_shorten_dependency_expiry_across_retention_sweep(
         )
         assert status == 200, body
         assert_observation_converted(env, fixture)
+        assert_error_details_survive(env, fixture)
         assert_dependency_resolution(env, fixture)
         assert_turn_content_and_markers(env, fixture)
         assert_mapping_and_hit_detail(env, fixture)
