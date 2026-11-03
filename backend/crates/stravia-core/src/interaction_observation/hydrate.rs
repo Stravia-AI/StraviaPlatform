@@ -238,9 +238,18 @@ impl RunPayloadRow {
     }
 }
 
+/// 按 Principal 分批读到的正文；content id 全局唯一，查找时逐批尝试。
+struct BodySet(Vec<crate::content_store::Bodies>);
+
+impl BodySet {
+    fn get(&self, id: &i64) -> Option<&Body> {
+        self.0.iter().find_map(|bodies| bodies.get(*id))
+    }
+}
+
 fn bodies_for<'a>(
     refs: Option<&Vec<(i64, i64)>>,
-    contents: &'a HashMap<i64, Body>,
+    contents: &'a BodySet,
 ) -> Vec<&'a Body> {
     refs.into_iter()
         .flatten()
@@ -255,7 +264,7 @@ async fn read_bodies(
     sequences: &[i64],
     refs: &HashMap<i64, Vec<(i64, i64)>>,
     tool_results: &HashMap<i64, Vec<ToolResultRow>>,
-) -> anyhow::Result<HashMap<i64, Body>> {
+) -> anyhow::Result<BodySet> {
     let wanted: std::collections::HashSet<i64> = sequences.iter().copied().collect();
     let interactions: Vec<String> = events
         .iter()
@@ -289,17 +298,11 @@ async fn read_bodies(
                 .map(|row| row.content_id),
         );
     }
-    let mut contents = HashMap::new();
+    let mut contents = Vec::with_capacity(by_principal.len());
     for (principal, ids) in by_principal {
-        let mut bodies = read_scoped(store, principal, &ids).await?;
-        let found: Vec<i64> = bodies.ids().collect();
-        for id in found {
-            if let Some(body) = bodies.remove(id) {
-                contents.insert(id, body);
-            }
-        }
+        contents.push(read_scoped(store, principal, &ids).await?);
     }
-    Ok(contents)
+    Ok(BodySet(contents))
 }
 
 #[derive(Debug)]

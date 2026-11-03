@@ -17,7 +17,7 @@ struct StoredAncestorRow {
     expires_at: Option<i64>,
 }
 
-mod content;
+pub(crate) mod content;
 mod gc;
 mod sql;
 pub(crate) mod upgrade;
@@ -32,7 +32,5 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
     SqlTurnChainStore::sqlite(pool)
 }
 
-#[cfg(test)]
-mod content_tests;
 #[cfg(test)]
 mod tests;

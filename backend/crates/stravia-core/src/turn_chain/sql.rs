@@ -107,7 +107,7 @@ macro_rules! retain_parent {
             let rows: Vec<(i64, Option<i64>, Option<i64>, i64)> = sqlx::query_as(
                 "WITH RECURSIVE seed AS (\
                  SELECT n.node_pk,n.parent_pk,n.scope_id,n.kind,r.expires_at FROM turn_nodes n \
-                 JOIN turn_scopes s ON s.id=n.scope_id \
+                 JOIN content_scopes s ON s.id=n.scope_id \
                  LEFT JOIN turn_node_retention r ON r.node_pk=n.node_pk \
                  WHERE n.id=$1 AND s.principal=$2 AND n.kind=$3 AND (r.node_pk IS NULL OR NOT r.deleting)\
                  ), ancestors(node_pk,parent_pk,scope_id,kind,expires_at) AS (\
@@ -175,7 +175,7 @@ impl SqlTurnChainStore {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "WITH RECURSIVE ancestors(node_pk,parent_pk,scope_id,kind,expires_at) AS (\
                      SELECT n.node_pk,n.parent_pk,n.scope_id,n.kind,r.expires_at FROM turn_nodes n \
-                     JOIN turn_scopes s ON s.id=n.scope_id \
+                     JOIN content_scopes s ON s.id=n.scope_id \
                      LEFT JOIN turn_node_retention r ON r.node_pk=n.node_pk WHERE n.id=",
                 );
                 query.push_bind(id.as_str()).push(" AND s.principal=").push_bind(&principal)
@@ -513,10 +513,10 @@ impl TurnChainStore for SqlTurnChainStore {
                 let mut connection = $pool.acquire_write().await.map_err(commit_storage)?;
                 let mut transaction = connection.begin_with($begin).await.map_err(commit_storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
-                let scope_sql = concat!("SELECT id FROM turn_scopes WHERE principal=$1", $scope_lock);
+                let scope_sql = concat!("SELECT id FROM content_scopes WHERE principal=$1", $scope_lock);
                 let (duplicate, scope): (Option<i64>, Option<i64>) = sqlx::query_as(concat!(
                     "SELECT (SELECT node_pk FROM turn_nodes WHERE id=$1), ",
-                    "(SELECT id FROM turn_scopes WHERE principal=$2", $scope_lock, ")",
+                    "(SELECT id FROM content_scopes WHERE principal=$2", $scope_lock, ")",
                 )).bind(commit.id.as_str()).bind(&principal)
                     .fetch_one(&mut *transaction).await.map_err(commit_storage)?;
                 if duplicate.is_some() { return Err(TurnCommitError::AlreadyExists); }
@@ -524,7 +524,7 @@ impl TurnChainStore for SqlTurnChainStore {
                     Some(scope) => scope,
                     None => {
                         let inserted: Option<i64> = sqlx::query_scalar(
-                            "INSERT INTO turn_scopes(principal) VALUES($1) ON CONFLICT(principal) DO NOTHING RETURNING id",
+                            "INSERT INTO content_scopes(principal) VALUES($1) ON CONFLICT(principal) DO NOTHING RETURNING id",
                         ).bind(&principal).fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
                         match inserted {
                             Some(scope) => scope,
@@ -572,7 +572,7 @@ impl TurnChainStore for SqlTurnChainStore {
             Self::Postgres(pool) => persist!(
                 pool,
                 "BEGIN",
-                "LOCK TABLE turn_nodes,turn_contents IN ROW EXCLUSIVE MODE",
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
                 " FOR KEY SHARE",
                 retain_postgres,
                 put_postgres
@@ -603,7 +603,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 let mut builder = sqlx::QueryBuilder::<$db>::new(
                     "SELECT n.id,n.prefix_item_count,n.prefix_completed_at FROM turn_nodes n \
                      JOIN turn_node_retention r ON r.node_pk=n.node_pk \
-                     WHERE n.scope_id=(SELECT id FROM turn_scopes WHERE principal=",
+                     WHERE n.scope_id=(SELECT id FROM content_scopes WHERE principal=",
                 );
                 builder.push_bind(&principal).push(") AND n.kind=").push_bind(kind.as_str())
                     .push(" AND prefix_namespace=").push_bind(&query.namespace)
@@ -731,7 +731,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 pool,
                 restore_postgres,
                 postgres,
-                "LOCK TABLE turn_nodes,turn_contents IN ROW EXCLUSIVE MODE"
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }
         Ok(())
@@ -750,7 +750,7 @@ impl SqlTurnChainStore {
         mut edit: impl FnMut(&mut serde_json::Value),
     ) -> anyhow::Result<()> {
         macro_rules! rewrite {
-            ($pool:expr, $put:ident, $restore:ident, $backend:ident, $lock:literal) => {{
+            ($pool:expr, $put:ident, $restore:ident, $enqueue:path, $backend:ident, $lock:literal) => {{
                 let nodes: Vec<(i64,String,i64,String)> = sqlx::query_as(
                     "SELECT node_pk,id,scope_id,kind FROM turn_nodes",
                 ).fetch_all($pool).await?;
@@ -779,9 +779,13 @@ impl SqlTurnChainStore {
                     let mut connection = $pool.acquire_write().await?;
                     let mut transaction = connection.begin().await?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
-                    sqlx::query("INSERT INTO turn_content_gc(content_id) SELECT content_id FROM turn_node_contents WHERE node_pk=$1 ON CONFLICT(content_id) DO NOTHING")
-                        .bind(node_pk).execute(&mut *transaction).await?;
-                    sqlx::query("DELETE FROM turn_node_contents WHERE node_pk=$1").bind(node_pk).execute(&mut *transaction).await?;
+                    let removed: Vec<i64> = sqlx::query_scalar(
+                        "DELETE FROM turn_node_contents WHERE node_pk=$1 RETURNING content_id",
+                    )
+                    .bind(node_pk)
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                    $enqueue(&mut transaction, &removed).await?;
                     content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await?;
                     sqlx::query("UPDATE turn_node_payloads SET payload=$1 WHERE node_pk=$2")
                         .bind(encoded.payload).bind(node_pk).execute(&mut *transaction).await?;
@@ -792,13 +796,21 @@ impl SqlTurnChainStore {
             }};
         }
         match self {
-            Self::Sqlite(pool) => rewrite!(pool, put_sqlite, restore_sqlite, sqlite, ""),
+            Self::Sqlite(pool) => rewrite!(
+                pool,
+                put_sqlite,
+                restore_sqlite,
+                crate::content_store::sqlite::enqueue_unreferenced,
+                sqlite,
+                ""
+            ),
             Self::Postgres(pool) => rewrite!(
                 pool,
                 put_postgres,
                 restore_postgres,
+                crate::content_store::postgres::enqueue_unreferenced,
                 postgres,
-                "LOCK TABLE turn_nodes,turn_contents IN ROW EXCLUSIVE MODE"
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }
     }

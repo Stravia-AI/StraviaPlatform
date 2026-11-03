@@ -1023,7 +1023,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         RunEvent::UsageConfirmed {
                             attempt_id, usage, ..
                         } if finish.attempt_id.as_deref() == Some(attempt_id.as_str()) => {
-                            finish.usage = Some(usage);
+                            super::store::coalesce_usage(&mut finish.usage, &usage);
                             buffered_finish = Some(finish);
                             return false;
                         }

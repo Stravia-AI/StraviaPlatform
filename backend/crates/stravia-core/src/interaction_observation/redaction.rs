@@ -1028,7 +1028,6 @@ mod tests {
                 {"role":"assistant","content":"assistant-secret"},
                 {"role":"user","content":[
                     {"type":"text","text":"first"},
-                    {"type":"thinking","thinking":"ignored"},
                     {"type":"text","text":"second"}
                 ]},
                 {"role":"tool","content":"tool-secret","tool_call_id":"call"}

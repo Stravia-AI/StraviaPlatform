@@ -1373,11 +1373,29 @@ impl ObservationStore {
         usage: Option<&ConfirmedUsage>,
     ) -> anyhow::Result<Option<ObservationEvent>> {
         let mut attrs = attrs_without_kind(turn)?;
+        // 用量按时间顺序逐字段合并：先前已持久的确认 ← 结束事件自带 ← 缓冲期间的后续修订。
+        // 合并结果同时写入 attempt 行与合并事件的 attrs，二者字段一致。
+        let mut merged_usage: Option<ConfirmedUsage> = None;
+        if let Some((RunEvent::TargetAttemptFinished {
+            attempt_id,
+            usage: own,
+            ..
+        }, _)) = attempt
+        {
+            if let Some(durable) = self.attempt_usage(attempt_id).await? {
+                coalesce_usage(&mut merged_usage, &durable);
+            }
+            if let Some(own) = own {
+                coalesce_usage(&mut merged_usage, own);
+            }
+        }
+        if let Some(later) = usage {
+            coalesce_usage(&mut merged_usage, later);
+        }
+        let usage = merged_usage.as_ref();
         if let Some((attempt, attempt_at)) = attempt {
             let mut attempt_attrs = attrs_without_kind(attempt)?;
-            if let Some(usage) = usage
-                && !attempt_attrs.contains_key("usage")
-            {
+            if let Some(usage) = usage {
                 attempt_attrs.insert("usage".into(), serde_json::to_value(usage)?);
             }
             if let Some(usage) = attempt_attrs.get("usage") {
@@ -1929,6 +1947,9 @@ impl ObservationStore {
                                 None,
                             )
                             .await?;
+                            if let RunEvent::UsageConfirmed { attempt_id, usage, .. } = run_event {
+                                refresh_finished_usage_sqlite(&mut tx, run_id, attempt_id, usage).await?;
+                            }
                         }
                         continue;
                     }
@@ -1936,6 +1957,19 @@ impl ObservationStore {
                     next_sequence += 1;
                     current_sequence = sequence;
                     if let Some(mut block) = block {
+                        insert_event_sqlite(
+                            &mut tx,
+                            EventInsert {
+                                sequence,
+                                occurred_at: at,
+                                interaction_id: Some(interaction_id),
+                                run_id: Some(run_id),
+                                rejection_id: None,
+                                kind: &kind,
+                                payload: &Value::Null,
+                            },
+                        )
+                        .await?;
                         let content_ids =
                             super::content_refs::intern_sqlite(&mut tx, &principal, &mut block.units)
                                 .await?;
@@ -1960,19 +1994,7 @@ impl ObservationStore {
                             .execute(&mut *tx)
                             .await?;
                         insert_event_content_refs_sqlite(&mut tx, sequence, &content_ids).await?;
-                        insert_event_sqlite(
-                            &mut tx,
-                            EventInsert {
-                                sequence,
-                                occurred_at: at,
-                                interaction_id: Some(interaction_id),
-                                run_id: Some(run_id),
-                                rejection_id: None,
-                                kind: &kind,
-                                payload: &Value::Null,
-                            },
-                        )
-                        .await?;
+
                         result.push(event(
                             sequence,
                             at,
@@ -2171,12 +2193,28 @@ impl ObservationStore {
                                 None,
                             )
                             .await?;
+                            if let RunEvent::UsageConfirmed { attempt_id, usage, .. } = run_event {
+                                refresh_finished_usage_postgres(&mut tx, run_id, attempt_id, usage).await?;
+                            }
                         }
                         continue;
                     }
                     let sequence = sequences.next().expect("allocated durable event sequence");
                     current_sequence = sequence;
                     if let Some(mut block) = block {
+                        insert_event_postgres(
+                            &mut tx,
+                            EventInsert {
+                                sequence,
+                                occurred_at: at,
+                                interaction_id: Some(interaction_id),
+                                run_id: Some(run_id),
+                                rejection_id: None,
+                                kind: &kind,
+                                payload: &Value::Null,
+                            },
+                        )
+                        .await?;
                         let content_ids =
                             super::content_refs::intern_postgres(&mut tx, &principal, &mut block.units)
                                 .await?;
@@ -2201,19 +2239,7 @@ impl ObservationStore {
                             .execute(&mut *tx)
                             .await?;
                         insert_event_content_refs_postgres(&mut tx, sequence, &content_ids).await?;
-                        insert_event_postgres(
-                            &mut tx,
-                            EventInsert {
-                                sequence,
-                                occurred_at: at,
-                                interaction_id: Some(interaction_id),
-                                run_id: Some(run_id),
-                                rejection_id: None,
-                                kind: &kind,
-                                payload: &Value::Null,
-                            },
-                        )
-                        .await?;
+
                         result.push(event(
                             sequence,
                             at,
@@ -2911,7 +2937,7 @@ impl ObservationStore {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
                     .bind(&ingress.id)
                     .bind(now)
                     .bind(&ingress.method)
@@ -2959,7 +2985,7 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)")
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
                     .bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(i64::from(outcome.status_code)).bind(debug).bind(seq)
                     .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_postgres(
@@ -3706,6 +3732,105 @@ fn attempt_amount_columns(amounts: &AttemptAmounts) -> AttemptAmountColumns {
         billing_usd,
         billing_custom,
     )
+}
+
+/// 把较新的用量修订并入已落盘的 attempt 结束事实：独立的 `target_attempt_finished` 行，
+/// 或合并进 `model_turn_finished` 的 attempt 属性。找不到（结束尚未落盘）则无事可做。
+fn merge_usage_into_finish_attrs(
+    kind: &str,
+    attrs: &mut Value,
+    attempt_id: &str,
+    revision: &ConfirmedUsage,
+) -> anyhow::Result<bool> {
+    let target = match kind {
+        "target_attempt_finished" => Some(&mut *attrs),
+        "model_turn_finished" => attrs.get_mut("attempt"),
+        _ => None,
+    };
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    if target["attempt_id"].as_str() != Some(attempt_id) {
+        return Ok(false);
+    }
+    let mut merged = match target.get("usage") {
+        Some(existing) if !existing.is_null() => {
+            Some(serde_json::from_value::<ConfirmedUsage>(existing.clone())?)
+        }
+        _ => None,
+    };
+    coalesce_usage(&mut merged, revision);
+    let usage = serde_json::to_value(&merged)?;
+    target["usage"] = usage.clone();
+    if kind == "model_turn_finished" {
+        attrs["usage"] = usage;
+    }
+    Ok(true)
+}
+
+async fn refresh_finished_usage_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &str,
+    attempt_id: &str,
+    revision: &ConfirmedUsage,
+) -> anyhow::Result<()> {
+    let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as("SELECT sequence,kind,attrs FROM observation_events WHERE run_id=? AND kind IN ('target_attempt_finished','model_turn_finished') AND attrs IS NOT NULL ORDER BY sequence DESC")
+        .bind(run_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    for (sequence, kind, bytes) in rows {
+        let mut attrs: Value = serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?;
+        if merge_usage_into_finish_attrs(&kind, &mut attrs, attempt_id, revision)? {
+            sqlx::query("UPDATE observation_events SET attrs=? WHERE sequence=?")
+                .bind(encode_attrs(&attrs)?)
+                .bind(sequence)
+                .execute(&mut **tx)
+                .await?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_finished_usage_postgres(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    attempt_id: &str,
+    revision: &ConfirmedUsage,
+) -> anyhow::Result<()> {
+    let rows: Vec<(i64, String, Vec<u8>)> = sqlx::query_as("SELECT sequence,kind,attrs FROM observation_events WHERE run_id=$1 AND kind IN ('target_attempt_finished','model_turn_finished') AND attrs IS NOT NULL ORDER BY sequence DESC")
+        .bind(run_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    for (sequence, kind, bytes) in rows {
+        let mut attrs: Value = serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?;
+        if merge_usage_into_finish_attrs(&kind, &mut attrs, attempt_id, revision)? {
+            sqlx::query("UPDATE observation_events SET attrs=$1 WHERE sequence=$2")
+                .bind(encode_attrs(&attrs)?)
+                .bind(sequence)
+                .execute(&mut **tx)
+                .await?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// 把较新的用量修订并入累计值：已知字段覆盖旧值，未知字段保留旧值。
+pub(super) fn coalesce_usage(into: &mut Option<ConfirmedUsage>, newer: &ConfirmedUsage) {
+    match into {
+        Some(current) => {
+            current.input_tokens = newer.input_tokens.or(current.input_tokens);
+            current.output_tokens = newer.output_tokens.or(current.output_tokens);
+            current.cache_read_tokens = newer.cache_read_tokens.or(current.cache_read_tokens);
+            current.cache_write_tokens = newer.cache_write_tokens.or(current.cache_write_tokens);
+            current.reasoning_tokens = newer.reasoning_tokens.or(current.reasoning_tokens);
+            if newer.coverage.is_some() {
+                current.coverage = newer.coverage.clone();
+            }
+        }
+        None => *into = Some(newer.clone()),
+    }
 }
 
 /// 批内合并与逐事件 `COALESCE` 同义：后到的已知字段覆盖先前值，未知字段保留先前已知值。
@@ -4589,7 +4714,7 @@ mod tests {
         );
         confirmed_usage_scenario(&store).await?;
         let payloads: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE kind='target_attempt_finished'",
+            "SELECT attrs FROM observation_events WHERE kind='target_attempt_finished'",
         )
         .fetch_all(&pool)
         .await?;
@@ -5665,14 +5790,6 @@ mod tests {
         })
     }
 
-    async fn pending_expiry_snapshot(store: &ObservationStore) -> anyhow::Result<(i64, i64, i64)> {
-        let sql = "SELECT r.expires_at,i.expires_at,e.expires_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id JOIN observation_events e ON e.run_id=r.id AND e.kind='run_finished' WHERE r.id='pending'";
-        Ok(match store {
-            ObservationStore::Sqlite(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
-            ObservationStore::Postgres(pool, _) => sqlx::query_as(sql).fetch_one(pool).await?,
-        })
-    }
-
     async fn restart_reconciliation_scenario(store: &ObservationStore) -> anyhow::Result<()> {
         sibling_result_scenario(store, "resolved", "completed").await?;
         // 模拟旧版本已收齐结果但未重算的缓存投影。
@@ -5707,7 +5824,6 @@ mod tests {
             .get_interaction("pending", ForestQuery::default())
             .await?
             .unwrap();
-        let expiry_before = pending_expiry_snapshot(store).await?;
         let activity_before = run_activity_snapshot(store).await?;
         let delivery_before = store
             .replay(0)
@@ -5781,7 +5897,6 @@ mod tests {
             serde_json::to_value(&pending.runs[0].usage)?,
             serde_json::to_value(&old_pending.runs[0].usage)?
         );
-        assert_eq!(pending_expiry_snapshot(store).await?, expiry_before);
         let events = store.replay(0).await?;
         let delivery_after = events
             .iter()
@@ -5986,12 +6101,13 @@ mod tests {
                 .is_err()
         );
         assert!(store.replay(boundary).await?.is_empty());
-        let tail: String = sqlx::query_scalar(
-            "SELECT visible_tail FROM interaction_observations WHERE id='batch'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert!(!tail.contains("must rollback"));
+        assert!(
+            !store
+                .replay(0)
+                .await?
+                .iter()
+                .any(|event| event.payload.to_string().contains("must rollback"))
+        );
         store
             .persist_run_events(
                 "batch",
@@ -6332,12 +6448,14 @@ mod tests {
             let events: Vec<_> = batch.into_iter().map(|event| (event, None, 2)).collect();
             store.persist_run_events("turns", "turns", &events).await?;
         }
-        let tail: String = sqlx::query_scalar(
-            "SELECT visible_tail FROM interaction_observations WHERE id='turns'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(tail, "first\n\nsecond\n\nthird");
+        let visible: Vec<String> = store
+            .replay(0)
+            .await?
+            .into_iter()
+            .filter(|event| event.kind == "client_visible_content")
+            .map(|event| event.payload["text"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(visible, ["first", "second", "third"]);
         pool.close().await;
         Ok(())
     }
@@ -6568,12 +6686,14 @@ mod tests {
         );
         let committed = batch.await??;
         assert_eq!(committed[0].kind, "client_visible_content");
-        let tail: String = sqlx::query_scalar(
-            "SELECT visible_tail FROM interaction_observations WHERE id='batch-race'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(tail, "preserved output");
+        let visible: Vec<String> = store
+            .replay(0)
+            .await?
+            .into_iter()
+            .filter(|event| event.kind == "client_visible_content")
+            .map(|event| event.payload["text"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(visible, ["preserved output"]);
         pool.close().await;
         Ok(())
     }
@@ -6702,11 +6822,25 @@ mod tests {
         assert_eq!(parent.status, "superseded");
         assert_eq!(parent.terminal_reason.as_deref(), Some("superseded"));
         assert!(!parent.user_interrupted);
-        assert!(parent.events.iter().any(|event| {
-            event.kind == "run_state_changed"
-                && event.payload["status"] == "superseded"
-                && event.payload["superseded_by"] == "child"
-        }));
+        assert!(
+            parent
+                .events
+                .iter()
+                .any(|event| event.kind == "run_state_changed")
+        );
+        let superseded_by: Option<String> = match &store {
+            ObservationStore::Sqlite(pool, _) => {
+                sqlx::query_scalar("SELECT superseded_by FROM inference_run_observations WHERE id='parent'")
+                    .fetch_one(pool)
+                    .await?
+            }
+            ObservationStore::Postgres(pool, _) => {
+                sqlx::query_scalar("SELECT superseded_by FROM inference_run_observations WHERE id='parent'")
+                    .fetch_one(pool)
+                    .await?
+            }
+        };
+        assert_eq!(superseded_by.as_deref(), Some("child"));
         assert_eq!(
             detail
                 .runs
@@ -6743,8 +6877,8 @@ mod tests {
         admit_waiting_scenario_run(&store, "swept", "supwait", None).await?;
         finish_scenario_run(&store, "swept", "supwait", "waiting_client").await?;
         // 修复前的遗留形态：等待 Run 已有续接子节点但状态仍停在 waiting_client。
-        sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('supchild','swept','supwait','responses','route','running',0,1,1,?)")
-            .bind(i64::MAX).execute(&pool).await?;
+        sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ('supchild','swept','supwait','responses','route','running',0,1,1)")
+            .execute(&pool).await?;
         admit_waiting_scenario_run(&store, "swept", "crosswait", None).await?;
         finish_scenario_run(&store, "swept", "crosswait", "waiting_client").await?;
         // 其他 Interaction 的新分支不算续接，不解除本交互内的等待叶。

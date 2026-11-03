@@ -307,6 +307,25 @@ pub async fn run_sqlite_migrator(
             .await?;
         }
     }
+    if runner.version_exists(37) {
+        runner
+            .run_direct(Some(37), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "content_store",
+                "Converting shared content storage",
+                0,
+                None,
+            );
+            crate::content_store::upgrade::run_sqlite(&mut pinned.connection).await?;
+        }
+    }
     if runner.version_exists(41) {
         report(
             "observation_schema",
@@ -514,6 +533,23 @@ pub async fn run_postgres_migrator(
                 &mut connection,
             )
             .await?;
+        }
+    }
+    if runner.version_exists(37) {
+        runner.run_direct(Some(37), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "content_store",
+                "Converting shared content storage",
+                0,
+                None,
+            );
+            crate::content_store::upgrade::run_postgres(&mut connection).await?;
         }
     }
     if runner.version_exists(41) {
@@ -1554,13 +1590,6 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         assert_eq!(native_source, "child");
         assert_eq!(native_payload, "{}");
-        let stored_segment: String =
-            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=?")
-                .bind(marker_reference)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored_segment, segment_bytes);
         assert!(
             sqlx::query("DELETE FROM turn_nodes WHERE id='child'")
                 .execute(&pool)
@@ -1610,13 +1639,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        sqlx::query("INSERT INTO turn_scopes(principal) VALUES('api-key:bob') ON CONFLICT(principal) DO NOTHING")
+        sqlx::query("INSERT INTO content_scopes(principal) VALUES('api-key:bob') ON CONFLICT(principal) DO NOTHING")
             .execute(&pool).await.unwrap();
         for (id, kind, principal) in [
             ("foreign", "response", "api-key:bob"),
             ("wrong-kind", "agent", "api-key:alice"),
         ] {
-            let error = sqlx::query("INSERT INTO turn_nodes(id,kind,parent_pk,scope_id,payload_version,created_at) SELECT $1,$2,p.node_pk,s.id,1,1 FROM turn_nodes p CROSS JOIN turn_scopes s WHERE p.id='parent' AND s.principal=$3")
+            let error = sqlx::query("INSERT INTO turn_nodes(id,kind,parent_pk,scope_id,payload_version,created_at) SELECT $1,$2,p.node_pk,s.id,1,1 FROM turn_nodes p CROSS JOIN content_scopes s WHERE p.id='parent' AND s.principal=$3")
                 .bind(id).bind(kind).bind(principal).execute(&pool).await.unwrap_err();
             assert!(
                 error
@@ -2147,11 +2176,6 @@ mod tests {
             .unwrap();
         assert_eq!(restored[0].payload, parent_payload);
         assert_eq!(restored[1].payload, serde_json::json!({"items": [item]}));
-        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_contents")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(distinct, 1);
         use crate::history_marker::{
             HiddenHistorySegment, HistoryMarkerStore, SqlHistoryMarkerStore,
         };
@@ -2165,13 +2189,6 @@ mod tests {
             serde_json::to_value(marker.segment.unwrap()).unwrap(),
             serde_json::to_value(expected_segment).unwrap()
         );
-        let raw_segment: String =
-            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=$1")
-                .bind(marker_reference)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(raw_segment, segment_bytes);
         let source: String = sqlx::query_scalar(
             "SELECT source_generation_id FROM native_compactions WHERE id='pg-compaction'",
         )
