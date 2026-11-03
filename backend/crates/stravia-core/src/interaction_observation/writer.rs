@@ -292,7 +292,6 @@ pub(super) enum WriterCommand {
         principal: String,
         window: Option<super::tail::Window>,
         delivered_at: i64,
-        waiting_client: bool,
     },
     Admit(Box<AdmitPayload>),
     Event {
@@ -907,16 +906,14 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     };
                     let at = occurred_at;
-                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     let result = async {
                         let events = store
                             .filter_client_tool_results(interaction, &run_id, events, at)
                             .await?;
-                        let events: Vec<_> =
-                            events.into_iter().map(|event| (event, None, at)).collect();
+                        let events: Vec<_> = events.into_iter().map(|event| (event, at)).collect();
                         for chunk in events.chunks(64) {
-                            for event in store
-                                .persist_run_events(interaction, &run_id, chunk, expiry)
+                            if let Some(event) = store
+                                .persist_tool_results(interaction, &run_id, chunk)
                                 .await?
                             {
                                 publish(&updates, &trace_sequence, event);
@@ -943,9 +940,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     };
                     let at = occurred_at;
-                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
-                        .persist_input_preview(interaction, &run_id, &preview, at, expiry)
+                        .persist_user_input(interaction, &run_id, &preview, at)
                         .await
                     {
                         Ok(Some(event)) => {
@@ -954,7 +950,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         Ok(None) => {}
                         Err(error) => {
                             // Never include SQL bind values or input text in diagnostics.
-                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "input preview persistence failed");
+                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "user input persistence failed");
                             pending_gaps.insert(interaction.to_owned(), at);
                         }
                     }
@@ -1004,32 +1000,14 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     principal,
                     window,
                     delivered_at,
-                    waiting_client,
                 }) => {
                     let at = delivered_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
                     };
-                    // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获。
-                    match store
-                        .persist_client_completion(
-                            &run_id,
-                            interaction,
-                            delivered_at,
-                            waiting_client,
-                            expiry,
-                        )
-                        .await
-                    {
-                        Ok(Some(event)) => publish(&updates, &trace_sequence, event),
-                        Ok(None) => {}
-                        Err(error) => {
-                            incomplete_usage = true;
-                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
-                            pending_gaps.insert(interaction.to_owned(), at);
-                        }
-                    }
+                    // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获；
+                    // completion 事实随收尾事务合并进 run_finished。
                     if let Some(window) = window {
                         let pending = window.pending_tool_ids().unwrap_or_default();
                         if let Some(hash) = window.last_hash_hex()
@@ -1120,7 +1098,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             diagnostic_source_run_id: decision.diagnostic_source_run_id.as_deref(),
                             interrupt_parent: decision.interrupt_parent,
                             now,
-                            expires_at: expires,
                         })
                         .await
                     {
@@ -1163,7 +1140,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         &start.id,
                                         &gap,
                                         now,
-                                        expires,
                                     )
                                     .await
                                 {
@@ -1182,7 +1158,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         &start.id,
                                         &diagnostic_event,
                                         now,
-                                        expires,
                                     )
                                     .await
                                 {
@@ -1385,8 +1360,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 interaction,
                                 &run_id,
                                 &batch,
-                                &received,
-                                expires(at, retention_days.load(Ordering::Relaxed)),
                             )
                             .await
                         {
@@ -1479,7 +1452,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             metadata: &metadata,
                             debug_enabled,
                             occurred_at: at,
-                            expires_at: expiry,
                             started_at,
                             duration_ms,
                         })
@@ -1519,7 +1491,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         run_id,
                                         &event,
                                         at,
-                                        expires(at, retention_days.load(Ordering::Relaxed)),
                                     )
                                     .await
                                 {
@@ -1587,7 +1558,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     interaction,
                                     run_id,
                                     at,
-                                    expires(at, retention_days.load(Ordering::Relaxed)),
                                 )
                                 .await
                             {
@@ -1847,7 +1817,6 @@ async fn persist_finish(
     flush_one(pending_text, run_id);
     pending_text.retain(|run| run != run_id);
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
-        let expiry = expires(at, context.retention.load(Ordering::Relaxed));
         use tracing::Instrument as _;
         let span = tracing::info_span!(target: "stravia::perf", "observation.writer.finish_run", status = tracing::field::Empty);
         let result = context
@@ -1857,7 +1826,6 @@ async fn persist_finish(
                 run_id,
                 outcome,
                 at,
-                expiry,
                 rejected_before_target,
             )
             .instrument(span.clone())

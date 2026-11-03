@@ -1,9 +1,12 @@
 mod attribution;
+mod blocks;
 mod bundle;
 mod codec;
+mod content_refs;
 #[cfg(test)]
 mod durable_usage_hard_cases_tests;
 mod grouping;
+mod hydrate;
 mod live;
 mod manifest_index;
 mod query;
@@ -1139,7 +1142,7 @@ impl RunObserver {
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
         output: &[stravia_runtime_contract::protocol::ir::AiItem],
         delivered_at: i64,
-        waiting_client: bool,
+        _waiting_client: bool,
     ) {
         let _boundary = self.inner.event_boundary.lock();
         if self.inner.terminal.load(Ordering::Acquire) || self.inner.failure.lock().is_some() {
@@ -1160,7 +1163,6 @@ impl RunObserver {
             principal: self.inner.principal.clone(),
             window,
             delivered_at,
-            waiting_client,
         });
         if writer.is_closed() {
             self.inner.gap.store(true, Ordering::Release);
