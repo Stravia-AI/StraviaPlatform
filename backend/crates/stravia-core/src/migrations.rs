@@ -2235,9 +2235,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(source, "pg-child");
-        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
+        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1)")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at, expires_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, false, 1, 1, 100)")
+        sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, false, 1, 1)")
             .execute(&pool).await.unwrap();
         sqlx::query("UPDATE inference_run_observations SET background_active=3 WHERE id='run'")
             .execute(&pool)

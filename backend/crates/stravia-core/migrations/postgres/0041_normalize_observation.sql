@@ -30,7 +30,7 @@ CREATE INDEX interaction_observations_activity_idx
 
 CREATE TABLE observation_normalization_upgrade (
     phase integer PRIMARY KEY CHECK (phase = 1),
-    stage integer NOT NULL CHECK (stage BETWEEN 0 AND 4),
+    stage bigint NOT NULL CHECK (stage BETWEEN 0 AND 4),
     last_sequence bigint NOT NULL DEFAULT 0
 );
 INSERT INTO observation_normalization_upgrade(phase, stage, last_sequence) VALUES (1, 0, 0);

@@ -382,7 +382,7 @@ impl InteractionObservation {
     }
     /// 统一历史扫描入口：`now` 与 `retention` 都由调用方给定，与其他域同一轮扫描。
     /// 超过保留期且已结束的交互整体清理，过期调试 trace、空闲等待的客户端叶也在这里收口。
-    /// 返回被清理的调试 trace 数。
+    /// 返回本轮清理的交互与拒绝记录数。
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.maintenance.sweep",
@@ -403,7 +403,7 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         let cutoff = now.saturating_sub(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
-        self.purge_history(Some(cutoff)).await?;
+        let removed = self.purge_history(Some(cutoff)).await?;
         for event in self
             .inner
             .store
@@ -424,7 +424,7 @@ impl InteractionObservation {
         self.inner
             .partial_trace_count
             .store(partial, Ordering::Release);
-        Ok(u64::try_from(deleted.len()).unwrap_or(u64::MAX))
+        Ok(removed)
     }
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
@@ -565,7 +565,8 @@ impl InteractionObservation {
             .consume(ticket)
             .map_err(anyhow::Error::new)
     }
-    async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<()> {
+    async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<u64> {
+        let mut removed = 0_u64;
         loop {
             let (done, receiver) = oneshot::channel();
             self.inner
@@ -576,11 +577,12 @@ impl InteractionObservation {
                 })
                 .await
                 .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
-            let has_more = receiver
+            let progress = receiver
                 .await
                 .map_err(|_| anyhow::anyhow!("observation writer unavailable"))??;
-            if !has_more {
-                return Ok(());
+            removed = removed.saturating_add(progress.removed);
+            if !progress.has_more {
+                return Ok(removed);
             }
         }
     }

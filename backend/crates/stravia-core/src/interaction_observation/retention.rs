@@ -5,6 +5,7 @@ const REJECTION_BATCH_SIZE: i64 = 100;
 
 pub(super) struct RetentionBatch {
     pub(super) removed_interactions: Vec<String>,
+    pub(super) removed_rejections: u64,
     pub(super) has_more: bool,
 }
 
@@ -73,6 +74,7 @@ impl ObservationStore {
                 Ok(RetentionBatch {
                     has_more: rejected == REJECTION_BATCH_SIZE as u64 || interaction.is_some(),
                     removed_interactions: interaction.into_iter().collect(),
+                    removed_rejections: rejected,
                 })
             }
             Self::Postgres(p, _) => {
@@ -118,6 +120,7 @@ impl ObservationStore {
                 Ok(RetentionBatch {
                     has_more: rejected == REJECTION_BATCH_SIZE as u64 || interaction.is_some(),
                     removed_interactions: interaction.into_iter().collect(),
+                    removed_rejections: rejected,
                 })
             }
         }

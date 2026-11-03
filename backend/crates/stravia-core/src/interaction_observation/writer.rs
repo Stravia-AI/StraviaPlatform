@@ -285,7 +285,7 @@ pub(super) enum WriterCommand {
     },
     Purge {
         expired_before: Option<i64>,
-        done: oneshot::Sender<anyhow::Result<bool>>,
+        done: oneshot::Sender<anyhow::Result<PurgeProgress>>,
     },
     ClientCompletion {
         run_id: String,
@@ -702,6 +702,12 @@ pub(super) struct WriterDeps {
     pub partial_trace_count: Arc<AtomicU64>,
     pub live: Arc<super::live::LiveState>,
     pub generation_chains: crate::generation_chain::GenerationChain,
+}
+
+/// 一批保留期清理的进展：本批移除的交互与拒绝记录数，以及是否还有后续批。
+pub(super) struct PurgeProgress {
+    pub removed: u64,
+    pub has_more: bool,
 }
 
 struct WriterContext<'a> {
@@ -1259,12 +1265,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     }
                     let result = async {
-                        let (removed, has_more) = match expired_before {
+                        let (removed, rejections, has_more) = match expired_before {
                             Some(at) => {
                                 let batch = store.purge_expired_batch(at).await?;
-                                (batch.removed_interactions, batch.has_more)
+                                (batch.removed_interactions, batch.removed_rejections, batch.has_more)
                             }
-                            None => (store.purge_clear_rows().await?, false),
+                            None => (store.purge_clear_rows().await?, 0, false),
                         };
                         // 每批提交后立即失效；续批由调用方重新排队，不能独占 writer。
                         live.invalidate(&removed);
@@ -1285,7 +1291,10 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         if !has_more && expired_before.is_some() {
                             store.remove_orphan_manifests().await?;
                         }
-                        Ok::<_, anyhow::Error>(has_more)
+                        Ok::<_, anyhow::Error>(PurgeProgress {
+                            removed: u64::try_from(removed.len()).unwrap_or(u64::MAX).saturating_add(rejections),
+                            has_more,
+                        })
                     }
                     .await;
                     let _ = done.send(result);
