@@ -1794,12 +1794,42 @@ mod tests {
     /// 升级用的 failover Turn 夹具：首个 attempt 失败、第二个成功。
     fn failover_turn_events() -> [(i64, i64, &'static str, serde_json::Value); 6] {
         [
-            (1, 101, "model_turn_started", serde_json::json!({"kind": "model_turn_started", "model_turn_id": "turn", "route_id": "route", "retention_detached": false})),
-            (2, 102, "target_attempt_started", serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "first", "target_id": "t1"})),
-            (3, 103, "target_attempt_finished", serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "first", "status": "failed", "duration_ms": 1})),
-            (4, 104, "target_attempt_started", serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "second", "target_id": "t2"})),
-            (5, 105, "target_attempt_finished", serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "second", "status": "completed", "duration_ms": 2})),
-            (6, 106, "model_turn_finished", serde_json::json!({"kind": "model_turn_finished", "model_turn_id": "turn", "status": "completed", "retention_detached": false})),
+            (
+                1,
+                101,
+                "model_turn_started",
+                serde_json::json!({"kind": "model_turn_started", "model_turn_id": "turn", "route_id": "route", "retention_detached": false}),
+            ),
+            (
+                2,
+                102,
+                "target_attempt_started",
+                serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "first", "target_id": "t1"}),
+            ),
+            (
+                3,
+                103,
+                "target_attempt_finished",
+                serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "first", "status": "failed", "duration_ms": 1}),
+            ),
+            (
+                4,
+                104,
+                "target_attempt_started",
+                serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "second", "target_id": "t2"}),
+            ),
+            (
+                5,
+                105,
+                "target_attempt_finished",
+                serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "second", "status": "completed", "duration_ms": 2}),
+            ),
+            (
+                6,
+                106,
+                "model_turn_finished",
+                serde_json::json!({"kind": "model_turn_finished", "model_turn_id": "turn", "status": "completed", "retention_detached": false}),
+            ),
         ]
     }
 
@@ -1844,7 +1874,10 @@ mod tests {
             .run_to(36, pool.migration_pool())
             .await
             .unwrap();
-        sqlx::raw_sql(FAILOVER_PARENTS).execute(&pool).await.unwrap();
+        sqlx::raw_sql(FAILOVER_PARENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
         for (sequence, at, kind, payload) in failover_turn_events() {
             let encoded =
                 crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();
@@ -1902,7 +1935,10 @@ mod tests {
         super::run_postgres_migrator(&pool, &prefix, None)
             .await
             .unwrap();
-        sqlx::raw_sql(FAILOVER_PARENTS).execute(&pool).await.unwrap();
+        sqlx::raw_sql(FAILOVER_PARENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
         for (sequence, at, kind, payload) in failover_turn_events() {
             let encoded =
                 crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();

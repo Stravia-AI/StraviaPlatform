@@ -237,8 +237,7 @@ impl ObservationStore {
                     .execute(&mut *tx)
                     .await?;
                 let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
-                crate::content_store::postgres::enqueue_unreferenced(&mut tx, &content_ids)
-                    .await?;
+                crate::content_store::postgres::enqueue_unreferenced(&mut tx, &content_ids).await?;
                 tx.commit().await?;
 
                 self.remove_orphan_manifests().await?;

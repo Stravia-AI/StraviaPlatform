@@ -215,7 +215,10 @@ async fn observation_contents_responses_require_revalidation_before_reuse() -> a
     let not_modified = app.clone().oneshot(request(Some(&etag))?).await?;
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(
-        not_modified.headers().get("etag").expect("304 必须回带 ETag"),
+        not_modified
+            .headers()
+            .get("etag")
+            .expect("304 必须回带 ETag"),
         etag.as_str()
     );
     assert_eq!(

@@ -401,7 +401,9 @@ async fn content_ids_are_validated_by_the_query(
         );
     }
     // 上限本身可接受；这些 id 不存在，因此结果为空。
-    let at_cap: Vec<i64> = (9_000_000_000..).take(MAX_OBSERVATION_CONTENT_IDS).collect();
+    let at_cap: Vec<i64> = (9_000_000_000..)
+        .take(MAX_OBSERVATION_CONTENT_IDS)
+        .collect();
     assert!(observation.observation_contents(&at_cap).await?.is_empty());
     Ok(())
 }
@@ -469,8 +471,10 @@ async fn client_tool_results_are_batched(
     };
     let bodies = observation.observation_contents(&result_ids).await?;
     assert_eq!(bodies.len(), 2);
-    let formats: Vec<ObservationContentFormat> =
-        bodies.iter().map(|visible| visible.content.format).collect();
+    let formats: Vec<ObservationContentFormat> = bodies
+        .iter()
+        .map(|visible| visible.content.format)
+        .collect();
     assert!(
         formats.contains(&ObservationContentFormat::Text)
             && formats.contains(&ObservationContentFormat::Json),
@@ -688,7 +692,15 @@ async fn merged_turn_finish_usage_uses_management_net_input(
     assert_eq!(turn.payload["usage"], turn.payload["attempt"]["usage"]);
     assert_eq!(turn.payload["usage"]["output_tokens"], 2);
     assert_eq!(summary.usage.input_tokens, None);
-    assert_eq!(summary.usage.coverage.as_ref().unwrap().missing_input_tokens, 1);
+    assert_eq!(
+        summary
+            .usage
+            .coverage
+            .as_ref()
+            .unwrap()
+            .missing_input_tokens,
+        1
+    );
 
     let (summary, events) = run_events_of(observation, "route-usage-failover").await?;
     let separate = events

@@ -808,8 +808,8 @@ async fn admission_follow_ups_commit_with_the_admission(
         input_start: None,
         candidate_count: 0,
     };
-    let admitted = admit_with_follow_ups(observation, "follow-ok", &[gap.clone(), tail.clone()])
-        .await?;
+    let admitted =
+        admit_with_follow_ups(observation, "follow-ok", &[gap.clone(), tail.clone()]).await?;
     assert!(admitted.follow_up_failure.is_none());
     let published: Vec<_> = std::iter::once(&admitted.event)
         .chain(&admitted.follow_ups)
@@ -818,7 +818,11 @@ async fn admission_follow_ups_commit_with_the_admission(
     let kinds: Vec<_> = published.iter().map(|(_, kind)| kind.as_str()).collect();
     assert_eq!(
         kinds,
-        ["run_admitted", "observation_gap", "retained_tail_associated"]
+        [
+            "run_admitted",
+            "observation_gap",
+            "retained_tail_associated"
+        ]
     );
     assert!(published.windows(2).all(|pair| pair[0].0 < pair[1].0));
     assert_eq!(
@@ -885,7 +889,8 @@ async fn malformed_block_id_fails_the_write(
     db: &Database,
     observation: &ObservationStore,
 ) -> anyhow::Result<()> {
-    db.seed("malformed-block", BATCH, BATCH, 1000, 20, 0).await?;
+    db.seed("malformed-block", BATCH, BATCH, 1000, 20, 0)
+        .await?;
     let batch = [(
         RunEvent::ClientVisibleContent {
             text: "hi".into(),
@@ -906,10 +911,8 @@ async fn malformed_block_id_fails_the_write(
         "{error:#}"
     );
     assert_eq!(
-        db.scalar(
-            "SELECT COUNT(*) FROM observation_blocks WHERE run_id='malformed-block'"
-        )
-        .await?,
+        db.scalar("SELECT COUNT(*) FROM observation_blocks WHERE run_id='malformed-block'")
+            .await?,
         0
     );
     Ok(())

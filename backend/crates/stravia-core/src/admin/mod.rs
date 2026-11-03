@@ -49,11 +49,12 @@ pub use crate::interaction_observation::{
     CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuseQuery,
     CredentialDiscoveryReuses, DebugState, DownloadTicket, ForestPage, ForestQuery, ForestRoot,
     InteractionDetail, InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot,
-    InteractionSummary, KnownInteraction, ObservationChange, ObservationContentBatch, ObservationEvent,
-    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage,
-    RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming, UpstreamErrorDetail,
-    UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
+    InteractionSummary, KnownInteraction, ObservationChange, ObservationContentBatch,
+    ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
+    RejectionPage, RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline,
+    RootChangesPage, RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming,
+    UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary,
+    UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use money::{ProviderCostPlanInput, provider_cost_plan_value};

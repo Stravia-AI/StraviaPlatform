@@ -48,8 +48,7 @@ pub(super) async fn intern_sqlite(
     if contents.is_empty() {
         return Ok(Vec::new());
     }
-    let scope =
-        content_store::sqlite::resolve_scope(connection, &scope_key(principal)).await?;
+    let scope = content_store::sqlite::resolve_scope(connection, &scope_key(principal)).await?;
     content_store::sqlite::intern(connection, scope, contents).await
 }
 
@@ -61,8 +60,7 @@ pub(super) async fn intern_postgres(
     if contents.is_empty() {
         return Ok(Vec::new());
     }
-    let scope =
-        content_store::postgres::resolve_scope(connection, &scope_key(principal)).await?;
+    let scope = content_store::postgres::resolve_scope(connection, &scope_key(principal)).await?;
     content_store::postgres::intern(connection, scope, contents).await
 }
 

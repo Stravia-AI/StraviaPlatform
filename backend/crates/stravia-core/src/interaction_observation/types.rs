@@ -932,7 +932,9 @@ pub enum ObservationContentFormat {
     Json,
 }
 
-impl From<stravia_runtime_contract::protocol::ir::content::ContentFormat> for ObservationContentFormat {
+impl From<stravia_runtime_contract::protocol::ir::content::ContentFormat>
+    for ObservationContentFormat
+{
     fn from(format: stravia_runtime_contract::protocol::ir::content::ContentFormat) -> Self {
         use stravia_runtime_contract::protocol::ir::content::ContentFormat;
         match format {
@@ -1216,7 +1218,12 @@ mod tests {
             let id = canonical_item_block_id("run:turn", ordinal);
             assert_eq!(parse_item_block_id(&id).unwrap(), ordinal);
         }
-        for malformed in ["plain-block", "scope:item:", "scope:item:x", "scope:item:-1"] {
+        for malformed in [
+            "plain-block",
+            "scope:item:",
+            "scope:item:x",
+            "scope:item:-1",
+        ] {
             assert!(
                 parse_item_block_id(malformed).is_err(),
                 "{malformed:?} must not map to an item ordinal"

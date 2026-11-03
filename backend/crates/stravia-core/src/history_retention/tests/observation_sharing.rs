@@ -44,7 +44,10 @@ async fn three_parties_share_one_body(fx: Fixture) {
     let marker = fx.thinking_marker(&shared, true).await;
     let t_written = fx.tick().await;
 
-    assert!(fx.observed_interactions().await > 0, "interaction is readable");
+    assert!(
+        fx.observed_interactions().await > 0,
+        "interaction is readable"
+    );
     assert_eq!(
         fx.text_rows_in_any_scope(shared.len()).await,
         1,
@@ -92,7 +95,10 @@ async fn clearing_history_releases_observation_only_bodies(fx: Fixture) {
 
     let node = fx.commit(None, &Refs::answer(&shared)).await;
     fx.observe(&shared, &visible, &tool_output).await;
-    assert!(fx.observed_interactions().await > 0, "interaction is readable");
+    assert!(
+        fx.observed_interactions().await > 0,
+        "interaction is readable"
+    );
     assert_eq!(fx.text_rows_in_any_scope(shared.len()).await, 1);
     assert_eq!(fx.text_rows_in_any_scope(visible.len()).await, 1);
     assert_eq!(fx.text_rows_in_any_scope(tool_output.len()).await, 1);

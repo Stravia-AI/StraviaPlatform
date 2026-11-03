@@ -2337,7 +2337,12 @@ async fn commit_buffered_phases(
     selects: impl Fn(&str) -> bool,
     at: i64,
 ) {
-    let turn_runs: Vec<String> = buffers.turns.keys().filter(|run| selects(run)).cloned().collect();
+    let turn_runs: Vec<String> = buffers
+        .turns
+        .keys()
+        .filter(|run| selects(run))
+        .cloned()
+        .collect();
     for run_id in turn_runs {
         let Some(turn) = buffers.turns.remove(&run_id) else {
             continue;
@@ -2358,7 +2363,12 @@ async fn commit_buffered_phases(
             }
         }
     }
-    let finish_runs: Vec<String> = buffers.finishes.keys().filter(|run| selects(run)).cloned().collect();
+    let finish_runs: Vec<String> = buffers
+        .finishes
+        .keys()
+        .filter(|run| selects(run))
+        .cloned()
+        .collect();
     for run_id in finish_runs {
         let Some(finish) = buffers.finishes.remove(&run_id) else {
             continue;

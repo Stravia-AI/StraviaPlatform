@@ -1993,7 +1993,9 @@ async fn wait_until_blocked_by(pool: &PgPool, holder: i32) {
 /// 节点回收在等待在途提交（持有 `turn_nodes` 的 ROW EXCLUSIVE）结束期间，不得持有咨询锁：
 /// Marker 发布、映射发布与原生压缩确认（取咨询锁共享模式）照常完成，不排在回收等待之后。
 async fn publication_does_not_wait_for_node_reclaim_blocked_on_a_commit(fx: Fixture) {
-    let marker = fx.thinking_marker("publish beside node reclaim", false).await;
+    let marker = fx
+        .thinking_marker("publish beside node reclaim", false)
+        .await;
     let mapping = fx.mapping(false).await;
     let pending = fx.native_compaction(None, &[], false).await;
     let t = fx.tick().await;
@@ -2067,7 +2069,10 @@ async fn marker_reclaim_orders_content_locks_across_its_whole_batch(fx: Fixture)
         if let Some(pair) = inverted {
             break pair;
         }
-        assert!(created < 32, "random references never produced an inversion");
+        assert!(
+            created < 32,
+            "random references never produced an inversion"
+        );
     };
     let t = fx.tick().await;
     let n = fx.window();

@@ -117,7 +117,8 @@ impl<'a> EventWrites<'a> {
             tools.len() == content_ids.len(),
             "tool results and interned contents differ in length"
         );
-        for (ordinal, ((tool_id, is_error), content_id)) in tools.iter().zip(content_ids).enumerate()
+        for (ordinal, ((tool_id, is_error), content_id)) in
+            tools.iter().zip(content_ids).enumerate()
         {
             self.tools.push(ToolRow {
                 sequence,

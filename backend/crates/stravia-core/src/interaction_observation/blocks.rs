@@ -6,10 +6,7 @@
 
 use anyhow::{Context, ensure};
 use serde_json::Value;
-use stravia_runtime_contract::protocol::ir::{
-    AiItem,
-    content::item_content_units,
-};
+use stravia_runtime_contract::protocol::ir::{AiItem, content::item_content_units};
 
 use super::content_refs::{text_content, unit_content};
 use crate::content_store::{Body, Content};

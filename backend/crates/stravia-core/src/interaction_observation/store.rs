@@ -192,10 +192,8 @@ impl<'a> PreparedTurnStart<'a> {
         if let Some(tools) = &tools {
             latest_at = latest_at.max(tools.latest_at);
         }
-        let durable_count = 1
-            + leading.len()
-            + usize::from(input_units.is_some())
-            + usize::from(tools.is_some());
+        let durable_count =
+            1 + leading.len() + usize::from(input_units.is_some()) + usize::from(tools.is_some());
         Ok(Self {
             turn_payload: Value::Object(turn_attrs),
             leading,
@@ -741,8 +739,12 @@ impl ObservationStore {
                 if !admission.follow_ups.is_empty() {
                     // 随附事件是可选诊断：失败时只回滚到保存点，准入照常提交。
                     let mut savepoint = tx.begin().await?;
-                    match write_follow_ups_postgres(&mut savepoint, &admission, &follow_up_sequences)
-                        .await
+                    match write_follow_ups_postgres(
+                        &mut savepoint,
+                        &admission,
+                        &follow_up_sequences,
+                    )
+                    .await
                     {
                         Ok(events) => {
                             savepoint.commit().await?;

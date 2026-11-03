@@ -2484,13 +2484,19 @@ mod snapshot_tests {
             events_of(&events, Some("closeout-merged"), "run_state_changed").is_empty(),
             "delivery settlement shares the closeout transaction"
         );
-        assert_eq!(events_of(&events, Some("closeout-merged"), "run_finished").len(), 1);
+        assert_eq!(
+            events_of(&events, Some("closeout-merged"), "run_finished").len(),
+            1
+        );
         assert_eq!(
             events_of(&events, Some("closeout-barrier"), "run_state_changed").len(),
             1,
             "a barrier before closeout commits the settlement on its own"
         );
-        for (run, node) in [("closeout-merged", "node-merged"), ("closeout-barrier", "node-barrier")] {
+        for (run, node) in [
+            ("closeout-merged", "node-merged"),
+            ("closeout-barrier", "node-barrier"),
+        ] {
             let stored: (Option<i64>, Option<String>) = sqlx::query_as(
                 "SELECT r.delivery_completed_at,t.generation_node_id FROM inference_run_observations r JOIN observation_tail_sources t ON t.run_id=r.id WHERE r.id=?",
             )
@@ -2808,8 +2814,12 @@ mod snapshot_tests {
         let tool_at = at("client_tool_result");
         // 首个 attempt 的开始并入 Turn 开始行，它自己的来源时刻随行携带。
         let replayed_events = replayed(&observation).await?;
-        let attempt_at = only_event(&replayed_events, Some("backlog-lifecycle"), "model_turn_started")
-            .payload["attempt_at"]
+        let attempt_at = only_event(
+            &replayed_events,
+            Some("backlog-lifecycle"),
+            "model_turn_started",
+        )
+        .payload["attempt_at"]
             .as_i64()
             .expect("merged attempt start time");
         assert!(attempt_at <= delivered_at);
@@ -3696,7 +3706,8 @@ mod snapshot_tests {
         }
         observation.flush().await?;
         let events = replayed(&observation).await?;
-        for (run_id, turn, attempt) in [("interleave-1", "t1", "a1"), ("interleave-2", "t2", "a2")] {
+        for (run_id, turn, attempt) in [("interleave-1", "t1", "a1"), ("interleave-2", "t2", "a2")]
+        {
             let started = events_of(&events, Some(run_id), "model_turn_started");
             assert_eq!(started.len(), 1, "{run_id}: one turn start row");
             assert_eq!(
@@ -3724,7 +3735,8 @@ mod snapshot_tests {
 
     /// 等待（RPM 排队）之前生产方发出边界：Turn 开始单独落盘，不再与之后才开始的 attempt 合并。
     #[tokio::test]
-    async fn turn_start_before_a_wait_is_written_without_the_delayed_attempt() -> anyhow::Result<()> {
+    async fn turn_start_before_a_wait_is_written_without_the_delayed_attempt() -> anyhow::Result<()>
+    {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), false).await;

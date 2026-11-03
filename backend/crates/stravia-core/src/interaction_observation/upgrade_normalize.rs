@@ -926,6 +926,9 @@ mod tests {
             &stored(&serde_json::json!({"block_id": "plain-block"})),
         );
         assert_eq!(other.item_ordinal, 0);
-        assert_eq!(lossy.malformed_block_ids, 2, "non-block events carry no item ordinal");
+        assert_eq!(
+            lossy.malformed_block_ids, 2,
+            "non-block events carry no item ordinal"
+        );
     }
 }
