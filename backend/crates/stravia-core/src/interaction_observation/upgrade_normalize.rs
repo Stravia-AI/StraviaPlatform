@@ -125,7 +125,6 @@ struct SplitRow {
     sequence: i64,
     interaction_id: Option<String>,
     run_id: Option<String>,
-    occurred_at: i64,
     payload: Value,
 }
 
@@ -139,7 +138,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
     let mut principals = HashMap::new();
     loop {
         let mut tx = connection.begin().await?;
-        let rows = sqlx::query("SELECT sequence,interaction_id,run_id,occurred_at,kind,payload FROM observation_events WHERE sequence>? ORDER BY sequence LIMIT ?")
+        let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>? ORDER BY sequence LIMIT ?")
             .bind(last)
             .bind(BATCH)
             .fetch_all(&mut *tx)
@@ -158,7 +157,6 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    occurred_at: row.try_get("occurred_at")?,
                     payload: serde_json::from_slice(&crate::storage_codec::decode(&payload)?)
                         .context("observation payload is not JSON")?,
                 },
@@ -334,7 +332,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
     let mut principals = HashMap::new();
     loop {
         let mut tx = connection.begin().await?;
-        let rows = sqlx::query("SELECT sequence,interaction_id,run_id,occurred_at,kind,payload FROM observation_events WHERE sequence>$1 ORDER BY sequence LIMIT $2")
+        let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>$1 ORDER BY sequence LIMIT $2")
             .bind(last)
             .bind(BATCH)
             .fetch_all(&mut *tx)
@@ -353,7 +351,6 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
                     sequence: row.try_get("sequence")?,
                     interaction_id: row.try_get("interaction_id")?,
                     run_id: row.try_get("run_id")?,
-                    occurred_at: row.try_get("occurred_at")?,
                     payload: serde_json::from_slice(&crate::storage_codec::decode(&payload)?)
                         .context("observation payload is not JSON")?,
                 },

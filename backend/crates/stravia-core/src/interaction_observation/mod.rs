@@ -1146,7 +1146,7 @@ impl RunObserver {
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
         output: &[stravia_runtime_contract::protocol::ir::AiItem],
         delivered_at: i64,
-        _waiting_client: bool,
+        waiting_client: bool,
     ) {
         let _boundary = self.inner.event_boundary.lock();
         if self.inner.terminal.load(Ordering::Acquire) || self.inner.failure.lock().is_some() {
@@ -1167,6 +1167,7 @@ impl RunObserver {
             principal: self.inner.principal.clone(),
             window,
             delivered_at,
+            waiting_client,
         });
         if writer.is_closed() {
             self.inner.gap.store(true, Ordering::Release);
@@ -1805,12 +1806,6 @@ mod snapshot_tests {
             item: serde_json::json!({"id":id,"role":"assistant","content":text}),
             complete: true,
         }
-    }
-
-    fn stored_payload(bytes: &[u8]) -> anyhow::Result<Value> {
-        Ok(serde_json::from_slice(&crate::storage_codec::decode(
-            bytes,
-        )?)?)
     }
 
     /// 公共重放视图：事件正文已按内容引用还原，测试只经此观察持久结果。
@@ -2776,11 +2771,12 @@ mod snapshot_tests {
         observation.flush().await?;
 
         let events = replayed(&observation).await?;
-        // 合并后的文本块事件的发生时间就是首次接收时间。
         let first_received_at = events_of(&events, Some("backlog-text"), "client_visible_content")
             .last()
             .expect("visible text event")
-            .occurred_at;
+            .payload["first_received_at"]
+            .as_i64()
+            .expect("first received time");
         assert!(
             first_received_at <= delivered_at,
             "first text receive was sampled at writer dequeue: {first_received_at} > {delivered_at}"
@@ -3558,9 +3554,11 @@ mod snapshot_tests {
         assert_eq!(text.payload["text"], "文".repeat(16384));
         assert_eq!(text.payload["block_id"], block_id);
         assert_eq!(text.payload["complete"], true);
+        assert!(text.payload["first_received_at"].is_i64());
+        assert!(text.payload["receive_order"].is_u64());
         let tool = only_event(&events, Some("burst-parent"), "platform_tool_started");
         assert!(
-            text.sequence < tool.sequence,
+            text.payload["receive_order"].as_u64() < tool.payload["receive_order"].as_u64(),
             "late canonical close must retain the text block's first reception order"
         );
         let volatile_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE run_id='burst-parent' AND kind IN ('client_visible_content_delta','client_output_committed')")
@@ -7322,7 +7320,7 @@ mod snapshot_tests {
         let events: Vec<_> = page.runs.iter().flat_map(|run| &run.events).collect();
         assert!(
             events.iter().any(
-                |event| event.kind == "input_preview_recorded" && event.payload["text"] == text
+                |event| event.kind == "user_input_recorded" && event.payload["text"] == text
             )
         );
         assert!(

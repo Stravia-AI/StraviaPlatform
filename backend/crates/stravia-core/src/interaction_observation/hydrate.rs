@@ -87,6 +87,12 @@ pub(super) async fn hydrate(
                 }
                 payload["interaction_id"] = json!(block.interaction_id);
                 payload["run_id"] = json!(block.run_id);
+                // 首次接收时间与接收顺序在事件 attrs 里，块元数据重建时要带上。
+                for key in ["first_received_at", "receive_order"] {
+                    if let Some(value) = event.payload.get(key) {
+                        payload[key] = value.clone();
+                    }
+                }
                 event.payload = payload;
             }
             "user_input_recorded" => {

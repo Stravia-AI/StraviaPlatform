@@ -20,15 +20,6 @@ pub(super) enum BlockChannel {
     Visible,
 }
 
-impl BlockChannel {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Thinking => "thinking",
-            Self::Visible => "visible",
-        }
-    }
-}
-
 /// 拆分结果：正文单元按指针顺序排列，外壳里对应位置留空。
 pub(super) struct SplitBlock {
     pub units: Vec<Content>,

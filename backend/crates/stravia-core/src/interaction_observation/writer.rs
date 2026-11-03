@@ -15,7 +15,7 @@ use tracing::Instrument as _;
 
 use super::{
     attribution::{ObservationEvidence, RunAttribution},
-    store::{Admission, ObservationStore},
+    store::{Admission, ObservationStore, TailSource},
     types::*,
 };
 
@@ -292,6 +292,7 @@ pub(super) enum WriterCommand {
         principal: String,
         window: Option<super::tail::Window>,
         delivered_at: i64,
+        waiting_client: bool,
     },
     Admit(Box<AdmitPayload>),
     Event {
@@ -1263,6 +1264,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     principal,
                     window,
                     delivered_at,
+                    waiting_client,
                 }) => {
                     let at = delivered_at;
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
@@ -1270,24 +1272,37 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         return false;
                     };
                     // 客户端生命周期不依赖尾窗口或工具关联证据是否可捕获；
-                    // completion 事实随收尾事务合并进 run_finished。
-                    if let Some(window) = window {
-                        let pending = window.pending_tool_ids().unwrap_or_default();
-                        if let Some(hash) = window.last_hash_hex()
-                            && let Err(error) = store
-                                .persist_tail_source(
-                                    &run_id,
-                                    interaction,
-                                    &principal,
-                                    &hash,
-                                    &pending,
-                                    expiry,
-                                )
-                                .await
-                        {
-                            tracing::warn!(%run_id, %error, "tail source persistence failed");
+                    // 交付结算与尾源在同一事务里提交，失败时只记一个观察缺口。
+                    let pending = window
+                        .as_ref()
+                        .and_then(super::tail::Window::pending_tool_ids)
+                        .unwrap_or_default();
+                    let hash = window.as_ref().and_then(super::tail::Window::last_hash_hex);
+                    let tail_source = hash.as_deref().map(|hash| TailSource {
+                        principal: &principal,
+                        last_unit_hash: hash,
+                        pending_tool_ids: &pending,
+                        expires_at: expiry,
+                    });
+                    match store
+                        .persist_client_completion(
+                            &run_id,
+                            interaction,
+                            delivered_at,
+                            waiting_client,
+                            tail_source,
+                        )
+                        .await
+                    {
+                        Ok(Some(event)) => publish(&updates, &trace_sequence, event),
+                        Ok(None) => {}
+                        Err(error) => {
+                            incomplete_usage = true;
+                            tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
                             pending_gaps.insert(interaction.to_owned(), at);
                         }
+                    }
+                    if let Some(window) = window {
                         attribution.insert_tail_source(
                             run_id,
                             window,
@@ -1623,6 +1638,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 interaction,
                                 &run_id,
                                 &batch,
+                                &received,
                             )
                             .await
                         {
