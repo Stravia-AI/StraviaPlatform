@@ -480,10 +480,10 @@ rejected_request_observations -- 删除 expires_at
 
 | 阶段 | 同一事务内的写入 |
 |---|---|
-| 准入 | Admit、状态变化、客户端工具结果 |
+| 准入 | Admit、状态变化、客户端工具结果；Admit 附带的父链缺口与 Retained Tail 诊断事件在同一事务内、`run_admitted` 之后按序写入，经保存点：可选诊断失败只回滚它们，准入照常提交，缺口交给缺口重试 |
 | 轮次开始 | 合并后的 Model Turn 开始行与首个 attempt、用户输入 `user_input_recorded`（首轮；须等凭据映射登记完成后才发布），以及与它同批发布的待回传客户端工具结果；事件序号按生产方到达顺序分配。进入可能长时间阻塞的 RPM 排队等待之前，生产方调用 `RunObserver::commit_turn_start`（`model_turn/live.rs`），缓冲的 Turn 开始随即单独落盘，等待期间 Turn 已可读，等待之后的 attempt 另写自己的行；没有等待时仍与首个 attempt 合并 |
 | 流式 | item 收口事件（thinking、visible、handoff，含最后一个 item）按到达顺序合批，沿用队列中最多 64 条的合批 |
-| 结算 | 用量事务：合并后的 Model Turn 结束行与最后一个 attempt 的用量，单独提交，使可选诊断写入失败不能回滚用量事实；收尾事务（`finish_run_with_completion`）：ClientCompletion、tail 来源、`run_finished`、`finalize_activity` 在同一事务内提交 |
+| 结算 | 用量事务：合并后的 Model Turn 结束行与最后一个 attempt 的用量，单独提交，使可选诊断写入失败不能回滚用量事实；收尾事务（`finish_run_with_completion`）：ClientCompletion、tail 来源、`run_finished` 在同一事务内提交；`finalize_activity` 不在其中，它在最后一个观察句柄释放后单独执行，先读一次，仅当仍有残留运行中活动时才写入 `observation_gap`；此外 `UsageConfirmed` 在发布终态之前（先于 `send_vendor_output().await`）单独提交一次只更新 attempt 用量的事务，是独立同步点，不写事件行 |
 
 事件源顺序与 sequence 顺序不变；writer 对轮次开始、attempt 结束和客户端交付结算的缓冲按 Run 分开（`PhaseBuffers`），并发 Run 的阶段事件在队列中交错到达时互不占用、互不打断，各自仍合并成行。流式事件批次只合并同一 Run 连续到达的事件，遇到另一个 Run 的命令即交还主循环，所以多个 Run 逐事件交错时仍是每个事件行一次提交。`FlushInteraction`、`Barrier`、`Shutdown` 与 Run 收尾照旧立即提交已缓冲的阶段。轮次开始与结算阶段承载 Turn 与用量事实，其事务失败时该阶段的事件一起丢失，记为一个 `observation_gap`，仍归所属诊断任务处理，并阻止依赖这些事实的清理。
 
