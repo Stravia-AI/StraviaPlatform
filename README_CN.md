@@ -76,7 +76,7 @@ docker run --rm \
 
 **Nix / NixOS（仅 Linux Server）：** 在仓库根目录运行 `nix build .#stravia-server`，或导入 `nixosModules.default` 并启用 `services.stravia`。见 [Nix 部署说明](docs/design/architecture.md#nix-server-与-nixos-服务)。
 
-**已有实例升级：** 先停机并备份完整数据目录及外部数据库。路由输出用途迁移会使 **全部历史 Route 在逐条重新配置前不可执行**，SQLite 与 PostgreSQL 相同。见[升级与恢复说明](docs/design/media-generation.md#4-route-与-codex-接入)；回退须恢复备份。
+**已有实例升级：** 先停机并备份完整数据目录及外部数据库。路由输出用途迁移会使 **全部历史 Route 在逐条重新配置前不可执行**，SQLite 与 PostgreSQL 相同。见[升级与恢复说明](docs/design/media-generation.md#4-route-与-codex-接入)；回退须恢复备份。历史存储升级（迁移 0037–0042）会在启动时一次性改写已有的对话与请求历史，历史越多耗时越长、所需临时空间越大，旧版本无法读取升级后的数据库。历史保留现为单一设置（最后一次使用后至少保留 N 天，最小为 1）；保存后立即开始清理。
 
 **首次启动（两种形态相同）：**
 

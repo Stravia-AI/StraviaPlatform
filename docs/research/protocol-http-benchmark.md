@@ -241,7 +241,7 @@ heaptrack 通过只对 Server 子进程注入 preload 采集，不包裹 PID。�
 ### 后续降低内存的优先级
 
 1. **优先收敛检测器搜索缓存。** 当前全局 `OnceLock<Detector>` 已避免重复初始化；`expression.rs` / `kingfisher.rs` 的 `size_limit` 是编译结果上限，不是搜索缓存总预算。锁定的 regex 1.13.1 另有 `dfa_size_limit`；regex-automata 0.4.18 的搜索 scratch 池按同时使用峰值扩张、不主动收缩，不应误报成“每个历史线程永久一份”。应分别评估缓存容量、受控扫描并发、等价预过滤，以及相同模式/flags 的编译结果能否共享。减缓存可能增加重建与 fallback CPU；不得删规则、关闭 Unicode 语义或跳过凭据检测。
-2. **缩短整请求的额外持有。** `RunObserver::capture_input_preview` 的 `pending_input` 目前持有完整 `Arc<AiRequest>`；凭据保护可能因其他所有者而触发 `Arc::make_mut`。可研究只保留预览所需文本，避免观察者额外 pin 整请求；仍须先完整脱敏再截取，并保持映射注册后的发布时序。其他所有者仍可能要求 COW，尚未量化节省量。
+2. **缩短整请求的额外持有。** `RunObserver::capture_input_preview` 的 `pending_input` 目前持有完整 `Arc<AiRequest>`；凭据保护可能因其他所有者而触发 `Arc::make_mut`。可研究只保留最新用户输入所需文本（ADR-0089 起不再截断为预览，保存完整文本单元），避免观察者额外 pin 整请求；仍须先完整脱敏再写入，并保持映射注册后的发布时序。其他所有者仍可能要求 COW，尚未量化节省量。
 3. **用在途字节预算约束并发峰值。** 代理入口的 140MiB 是单请求 JSON 上限，RPM admission 不是活跃请求字节上限。Trace writer 的 1024 槽、普通 writer 的 2048 槽也不等于总字节预算。预算应覆盖形成大缓冲之前、queued 与 writing 的生命周期；保留 Admission/Finish/清理控制容量，不以丢历史、更多 partial 或降低成功请求负载美化成绩。代价是排队延迟或明确拒绝，必须同时报告。
 4. **实时订阅按共享正文与聚合预算治理。** Live mailbox 各有 8MiB 上限，当前为每个订阅者 clone 内容；多慢订阅者会放大内存。这是实际 UI/订阅负载的机会，不是没有实时订阅者的本次 HTTP 矩阵 RSS 的归因。
 5. **Wasm 与分配器分别测量。** 内置 Engine/编译结果已共享，owned host calls 已提前释放 lowered payload；不要重复列为待做。每操作仍独立 Store，不能为省内存复用权限状态。可测量实例化等待期间的载荷生命周期；Store 内存限额是防失控措施，不保证降低当前有效请求的 RSS，过低会导致 OOM。分配器驻留仍需同负载 `/proc/PID/smaps` 与 allocator 统计后再决定是否换分配器，不能把 malloc 存活量与 RSS 的差额全部归因于 glibc。
@@ -758,3 +758,47 @@ BLAKE3 默认同为 256-bit 输出，不代表摘要等于 SHA256。按 [ADR-007
 .venv/bin/python /tmp/stravia-memory-ejfi0vja/run-pairs.py \
   --label repeat-c8 --concurrency 8 --rounds 8 --pairs 2
 ```
+
+## 2026-11-03 ADR-0089：Observation 写入计数与存储字节
+
+本节只记录与机器负载无关的计数与字节；写租约排队、PostgreSQL 32 worker 尾延迟、升级耗时与资源成本、每轮扫描耗时与 PostgreSQL 并发争用的脚本已就绪但尚未运行，结果待机器空闲后填入 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)。合成负载（脚本化 mock 上游），不能与 ADR 按 6,919 个真实 Run 的估算（事件行 12.0 → 7.7、事务 10.0 → 4.7）直接比较。
+
+### 对比对象
+
+|角色|提交|二进制 SHA256|
+|---|---|---|
+|实施前|`aecfc21e`|`c8e9fda9974b69d451f982b82ce93abd7d73ea5066c02309ad8d3f390446ca6e`|
+|实施后|`589c6c33`|`afc310ae3fb861608af5cb1ddc0b2aad90d352e8bb9e72bdf5ba7d0acca64cb8`|
+
+升级库生成器使用的 `stravia-storage-test-harness`（`589c6c33`）SHA256 为 `dec61163a1d0d1b67164c9f24465a242e1d9a3c0a38c458058dfe5af7f261d4d`。两个二进制各在独立 worktree 与 target 目录以 `CARGO_BUILD_JOBS=8 cargo build --locked --release -p stravia-server --no-default-features --features test-harness --bin stravia-server` 构建，实施后一侧先 `cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors` 重建 Wasm。
+
+### 命令
+
+```bash
+# 单轮队列：2 个入口 × 2 个上游 × unary/stream，每 case 4 个请求，并发 1，fixed-workers
+tests/common/adr0089_measure.sh counts BINARY LABEL
+# 6 轮工具调用流：{openai-compatible, google-gemini} × {unary, stream}，每变体 6 个对话
+CONVERSATIONS=6 tests/common/adr0089_measure.sh toolflow BINARY LABEL
+# PostgreSQL 工具流（4 个对话；空库、专用 Redis 先 FLUSHALL）
+BACKEND=postgres CONVERSATIONS=4 tests/common/adr0089_measure.sh toolflow BINARY LABEL
+# 共享内容校验（只读）
+python -m tests.common.verify_content_sharing --data-dir DIR | --database-url URL --output FILE
+```
+
+`counts` 展开为 `tests.common.measure_protocol_http --mode fixed-workers --warmup 0 --concurrency 1 --requests-per-case 4 --seed 1 --data-dir … --save-performance-snapshots …`，随后 `analyze_observation_writes.py` 沿 perf span 的 `parent_id` 链，把 `sql.transaction.commit`、`sqlite.write_gate.hold` 与租约内 `sql.query` 归属到最近的 `observation.writer.*` 动作；一个 Debug epoch 的环形缓冲只容纳 10,000 个 span，因此每 case 只有 4 个 Run，任何 `dropped_*` 非零即作废该 case。本次全部 case 的 `dropped_*` 为 0，两个后端的全链路审计通过，工具流 24/24 个对话有效。
+
+### 审计的适配
+
+`protocol_history_audit.py` 现在读取新的存储布局：`contents`/`content_scopes`，摘要域 `stravia.content.v1\0` 加 format 字节，文本 slot 与拼接 slot，Observation 的 `observation_blocks` 与 `observation_event_contents`。旧布局（`turn_contents`，摘要域 `.turn-content.v1\0`）只通过显式的 `allow_legacy` 适配器读取，仅用于实施前二进制，与 format-2 的处理约定相同。API 摘要与存储摘要的口径分开：管理端 API 把凭据值遮成 `***`（ADR-0088），因此 API 输出摘要对照 `masked_output_sha256`，存储证明对照未遮蔽的 `output_sha256`。`protocol_storage_inventory.py` 同时读取两种布局的行数、编码载荷字节与每表字节（SQLite dbstat，PostgreSQL `pg_table_size + pg_indexes_size`）。
+
+### 结果摘要
+
+每 Inference Run 的事件行 11.0 → 8.0（单轮）、13.33 → 9.42（工具流）；Observation 写事务 12.56 → 7.41（单轮）、12.34 → 9.11（工具流 SQLite）、11.48 → 8.22（工具流 PostgreSQL）；编码载荷字节 924,759 → 735,242（工具流 SQLite）。ADR 估算的 4.7 事务/Run 没有复现；逐 kind 行数、事务按 writer 动作的拆分、共享内容查询与各表字节全表见 ADR 明细。
+
+### 已知限制
+
+- 合成 mock 上游：工具流每 Run 有 1.75 个 `client_tool_handoff` 与 1.42 个 `model_thinking`，真实流量的分布不同。
+- 小库：每表字节受页面粒度主导，PostgreSQL 页面总量在小库上反而增加 6.6%（见 ADR），不外推。
+- perf span 不带 SQL 文本，实施后单轮 Run 中 3.0 个仍各自提交的单事件命令无法从跟踪中确定 kind。
+- 工具流没有复制 e2e 的 bundle 下载检查、`omitted-tool-whitespace` 与 alternating 流模式。
+- 早期在 `7cbc0714`（Observation 使用裸 id 作用域）上的 smoke 只用于验证脚本，其数字不进入任何表。

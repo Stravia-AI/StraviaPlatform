@@ -23,4 +23,4 @@ Stravia 允许没有显式 response ID 的客户端重发完整历史，因此�
 - 只在完整 canonical item 边界切分；自动续接必须留下新 item，不根据连接推断父节点，也不把空 delta 当作自动 continuation。
 - 在当前可用的 Reusable Response Prefix 中先按前缀 item 数取最长，再按完成时间取最近。Fingerprint 只负责索引，复用前必须 materialize 并完整比较语义。
 - Target Continuation 的可用性服从 Provider 的 store、连接亲和、保留期与失效契约；本地 Response Chain 存在不表示 upstream state 仍可用。
-- Reusable Response Prefix 的索引元数据随 Turn Chain 节点原子持久化并共享七天保留期；升级前节点不回填自动索引，但显式 response ID 继续有效。
+- Reusable Response Prefix 的索引元数据随 Turn Chain 节点原子持久化并共享节点的保留期（原为固定七天，现由 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 改为统一的历史保留天数）；升级前节点不回填自动索引，但显式 response ID 继续有效。
