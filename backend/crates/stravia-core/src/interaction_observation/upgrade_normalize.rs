@@ -542,7 +542,7 @@ async fn merge_turn_start_sqlite(
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_started' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
-    let attempts = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='target_attempt_started' AND attrs IS NOT NULL ORDER BY sequence")
+    let attempts = sqlx::query("SELECT sequence,occurred_at,run_id,attrs FROM observation_events WHERE kind='target_attempt_started' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
     let mut starts: HashMap<(Option<String>, String), (i64, Value)> = HashMap::new();
@@ -556,6 +556,7 @@ async fn merge_turn_start_sqlite(
     }
     for row in attempts {
         let sequence: i64 = row.try_get("sequence")?;
+        let attempt_at: i64 = row.try_get("occurred_at")?;
         let run_id: Option<String> = row.try_get("run_id")?;
         let attrs = decode_attrs(row.try_get("attrs")?)?;
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
@@ -573,7 +574,7 @@ async fn merge_turn_start_sqlite(
             continue;
         };
         object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(sequence));
+        object.insert("attempt_at".into(), Value::from(attempt_at));
         sqlx::query("UPDATE observation_events SET attrs=? WHERE sequence=?")
             .bind(encoded_attrs(turn_attrs)?)
             .bind(*turn_sequence)
@@ -597,7 +598,7 @@ async fn merge_turn_finish_sqlite(
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_finished' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
-    let attempts = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='target_attempt_finished' AND attrs IS NOT NULL ORDER BY sequence")
+    let attempts = sqlx::query("SELECT sequence,occurred_at,run_id,attrs FROM observation_events WHERE kind='target_attempt_finished' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
     let mut finishes: HashMap<(Option<String>, String), (i64, Value)> = HashMap::new();
@@ -611,6 +612,7 @@ async fn merge_turn_finish_sqlite(
     }
     for row in attempts {
         let sequence: i64 = row.try_get("sequence")?;
+        let attempt_at: i64 = row.try_get("occurred_at")?;
         let run_id: Option<String> = row.try_get("run_id")?;
         let attrs = decode_attrs(row.try_get("attrs")?)?;
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
@@ -631,7 +633,7 @@ async fn merge_turn_finish_sqlite(
             object.insert("usage".into(), usage.clone());
         }
         object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(sequence));
+        object.insert("attempt_at".into(), Value::from(attempt_at));
         sqlx::query("UPDATE observation_events SET attrs=? WHERE sequence=?")
             .bind(encoded_attrs(turn_attrs)?)
             .bind(*turn_sequence)
@@ -657,7 +659,7 @@ async fn merge_turn_start_postgres(
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_started' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
-    let attempts = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='target_attempt_started' AND attrs IS NOT NULL ORDER BY sequence")
+    let attempts = sqlx::query("SELECT sequence,occurred_at,run_id,attrs FROM observation_events WHERE kind='target_attempt_started' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
     let mut starts: HashMap<(Option<String>, String), (i64, Value)> = HashMap::new();
@@ -671,6 +673,7 @@ async fn merge_turn_start_postgres(
     }
     for row in attempts {
         let sequence: i64 = row.try_get("sequence")?;
+        let attempt_at: i64 = row.try_get("occurred_at")?;
         let run_id: Option<String> = row.try_get("run_id")?;
         let attrs = decode_attrs(row.try_get("attrs")?)?;
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
@@ -688,7 +691,7 @@ async fn merge_turn_start_postgres(
             continue;
         };
         object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(sequence));
+        object.insert("attempt_at".into(), Value::from(attempt_at));
         sqlx::query("UPDATE observation_events SET attrs=$1 WHERE sequence=$2")
             .bind(encoded_attrs(turn_attrs)?)
             .bind(*turn_sequence)
@@ -711,7 +714,7 @@ async fn merge_turn_finish_postgres(
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_finished' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
-    let attempts = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='target_attempt_finished' AND attrs IS NOT NULL ORDER BY sequence")
+    let attempts = sqlx::query("SELECT sequence,occurred_at,run_id,attrs FROM observation_events WHERE kind='target_attempt_finished' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
         .await?;
     let mut finishes: HashMap<(Option<String>, String), (i64, Value)> = HashMap::new();
@@ -725,6 +728,7 @@ async fn merge_turn_finish_postgres(
     }
     for row in attempts {
         let sequence: i64 = row.try_get("sequence")?;
+        let attempt_at: i64 = row.try_get("occurred_at")?;
         let run_id: Option<String> = row.try_get("run_id")?;
         let attrs = decode_attrs(row.try_get("attrs")?)?;
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
@@ -745,7 +749,7 @@ async fn merge_turn_finish_postgres(
             object.insert("usage".into(), usage.clone());
         }
         object.insert("attempt".into(), attrs);
-        object.insert("attempt_at".into(), Value::from(sequence));
+        object.insert("attempt_at".into(), Value::from(attempt_at));
         sqlx::query("UPDATE observation_events SET attrs=$1 WHERE sequence=$2")
             .bind(encoded_attrs(turn_attrs)?)
             .bind(*turn_sequence)

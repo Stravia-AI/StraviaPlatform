@@ -6,74 +6,24 @@ use stravia_credential_protection::marker;
 
 pub(crate) const REDACTED: &str = "***";
 
-/// Maximum number of Unicode scalar values retained for an input preview.
-pub(crate) const INPUT_PREVIEW_CHARS: usize = 4096;
-
-/// Bounded preview of the latest user text in the received canonical window.
+/// 最新用户 item 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
 ///
-/// Runs when the preview is captured so the waiting state does not pin the
-/// request tree. Multiple text blocks are joined with `\n` while copying at
-/// most [`INPUT_PREVIEW_CHARS`] scalar values; the full joined body is never
-/// materialized.
-pub(crate) fn user_input_preview(
+/// 多个文本单元按顺序以 `\n` 连接，不截断；JSON 单元不进入输入摘要。
+pub(crate) fn user_input_text(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
 ) -> Option<String> {
-    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
+    use stravia_runtime_contract::protocol::ir::Role;
+    use stravia_runtime_contract::protocol::ir::content::{ContentUnitBody, item_content_units};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
-    match &item.content {
-        MessageContent::Text(text) => {
-            (!text.is_empty()).then(|| preview_prefix(text, INPUT_PREVIEW_CHARS).0.to_owned())
-        }
-        MessageContent::Blocks(blocks) => {
-            let texts = blocks.iter().filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            });
-            let mut remaining = INPUT_PREVIEW_CHARS;
-            let mut text_count = 0;
-            let mut bytes = 0;
-            let mut last_end = 0;
-            for text in texts.clone() {
-                if text_count > 0 {
-                    bytes += 1;
-                    remaining -= 1;
-                }
-                let (prefix, chars) = preview_prefix(text, remaining);
-                last_end = prefix.len();
-                bytes += last_end;
-                remaining -= chars;
-                text_count += 1;
-                if remaining == 0 {
-                    break;
-                }
-            }
-            if bytes == 0 {
-                return None;
-            }
-            let mut preview = String::with_capacity(bytes);
-            for (index, text) in texts.take(text_count).enumerate() {
-                if index > 0 {
-                    preview.push('\n');
-                }
-                if index + 1 == text_count {
-                    preview.push_str(&text[..last_end]);
-                } else {
-                    preview.push_str(text);
-                }
-            }
-            Some(preview)
-        }
-    }
-}
-
-fn preview_prefix(text: &str, limit: usize) -> (&str, usize) {
-    let mut end = 0;
-    let mut chars = 0;
-    for (offset, character) in text.char_indices().take(limit) {
-        end = offset + character.len_utf8();
-        chars += 1;
-    }
-    (&text[..end], chars)
+    let units = item_content_units(item);
+    let texts: Vec<&str> = units
+        .iter()
+        .filter_map(|unit| match &unit.body {
+            ContentUnitBody::Text(text) => Some(*text),
+            ContentUnitBody::Json(_) => None,
+        })
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
