@@ -956,10 +956,32 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             }
                             return false;
                         }
-                        event => {
+                        event if is_turn_leading(&event) => {
                             turn.leading.push((event, occurred_at));
                             pending_turn = Some(turn);
                             return false;
+                        }
+                        // 其余事件（正文块、工具结果、Turn 结束等）需要各自的块/引用写入路径，
+                        // 不能当作开始事务里的普通前置行：先把没有 attempt 的 Turn 开始落盘，
+                        // 再让该事件走常规路径。
+                        event => {
+                            pending_turn = Some(turn);
+                            commit_buffered_phases(
+                                &context,
+                                &attribution,
+                                &mut pending_gaps,
+                                &mut incomplete_usage,
+                                &mut pending_turn,
+                                &mut buffered_finish,
+                                |id| id == run_id,
+                                occurred_at,
+                            )
+                            .await;
+                            Some(WriterCommand::Event {
+                                run_id,
+                                event,
+                                occurred_at,
+                            })
                         }
                     }
                 }
@@ -2313,6 +2335,15 @@ fn flush_one(pending: &mut TextBuffer, run_id: &str) {
     {
         TextBuffer::publish_block(&pending.live, &mut pending.retained_bytes, block);
     }
+}
+
+/// Turn 开始与首个 attempt 开始之间可以并入开始事务的前置事件：只有凭据映射登记，
+/// 它们是不带块、引用与用量的普通事件行。
+fn is_turn_leading(event: &RunEvent) -> bool {
+    matches!(
+        event,
+        RunEvent::CredentialMappingsCreated { .. } | RunEvent::CredentialMappingsReused { .. }
+    )
 }
 
 /// attempt 结束与 Turn 结束之间可能到达、且不改变 Turn 内容的事件：

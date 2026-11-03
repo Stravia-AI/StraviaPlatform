@@ -3545,6 +3545,49 @@ mod snapshot_tests {
         Ok(())
     }
 
+    /// Turn 开始与 attempt 开始之间到达的正文块仍走块与内容引用路径：
+    /// 不能作为开始事务里的普通前置行把全文写进 attrs。
+    #[tokio::test]
+    async fn visible_content_between_turn_start_and_attempt_keeps_the_block_layout() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "leading-block", facts(Vec::new()));
+        let body = "b".repeat(6000);
+        run.record(flow_turn_started("t1"));
+        run.record(visible_item("leading-visible", &body));
+        run.record(flow_turn_finished("t1", "failed"));
+        run.finish(RunOutcome {
+            client_output_committed: false,
+            delivery: None,
+            delivery_completed_at: None,
+            status: "failed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        let blocks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_blocks WHERE run_id='leading-block' AND channel='visible'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(blocks, 1, "the visible block keeps its block row");
+        let inline: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observation_events WHERE run_id='leading-block' AND kind='client_visible_content' AND attrs IS NOT NULL AND length(attrs) > 1000",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(inline, 0, "the body lives in content refs, not in event attrs");
+        let events = replayed(&observation).await?;
+        let visible = events_of(&events, Some("leading-block"), "client_visible_content");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].payload["text"], body.as_str());
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn early_usage_updates_queries_without_advancing_event_sequence() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
