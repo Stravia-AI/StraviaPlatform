@@ -304,7 +304,7 @@ impl SqlHistoryMarkerStore {
                     super::payload::sqlite::intern_segment(&mut transaction, principal, payload)
                         .await
                         .map_err(segment_storage)?;
-                // 先更新 Marker 行、再替换正文引用：与回收一致，先锁 Marker 行、后锁正文行。
+                // 先更新 Marker 行、再替换正文引用：与回收一致，排他正文锁（释放旧正文）在 Marker 行锁之后。
                 let updated = sqlx::query(
                     "UPDATE history_markers SET execution_state = ?, segment_payload = ?, \
                      execution_owner = NULL, lease_expires_at = NULL, updated_at = ? \
@@ -341,7 +341,7 @@ impl SqlHistoryMarkerStore {
                     super::payload::postgres::intern_segment(&mut transaction, principal, payload)
                         .await
                         .map_err(segment_storage)?;
-                // 先更新 Marker 行、再替换正文引用：与回收一致，先锁 Marker 行、后锁正文行。
+                // 先更新 Marker 行、再替换正文引用：与回收一致，排他正文锁（释放旧正文）在 Marker 行锁之后。
                 let updated = sqlx::query(
                     "UPDATE history_markers SET execution_state = $1, segment_payload = $2, \
                      execution_owner = NULL, lease_expires_at = NULL, updated_at = $3 \

@@ -167,18 +167,18 @@ rejected_request_observations - expires_at
 - 释放触发器（`AFTER DELETE`）与 `enqueue_unreferenced` 先对被引用的对象行或候选内容行加 `FOR NO KEY UPDATE`，取得锁之后才重检剩余引用并入队。它与回收方的 `FOR UPDATE`、另一个同时删除兄弟引用的事务互斥，既不会在回收方「仍有引用，移出队列」的同一刻漏登记，也不会因为看不到兄弟事务尚未提交的删除而两边都漏登记。
 - 节点、Marker 与原生登记的回收事务取独占的事务级咨询锁 `PG_GC_LOCK`（`pg_advisory_xact_lock`）；批量更新对象行的写入方——Marker 发布、映射发布、原生登记确认与启动时的 `recover_public_executions`——先取同一把锁的共享模式（`PG_GC_LOCK_SHARED`）。原因是锁序环：回收删除一个节点时，释放触发器按行删除顺序对它引用的多个对象依次加 `FOR NO KEY UPDATE`；发布方的 `UPDATE` 按调用方给定的顺序锁同一批对象并持有先拿到的行，两边顺序不同就会互相等待。二者互斥后取锁顺序不会成环；回收与回收之间也因独占锁而串行。代价是一次发布可能等待一个有界的回收批次。提交路径只加 `FOR KEY SHARE`，不取咨询锁。映射回收与内容回收不取咨询锁，只靠 `SKIP LOCKED` 领取，不在持有他人所需的锁时等待。曾经的 `remove_source_tool_executions` 触发器（0023）已由 0024 删除，Observation 清理不再触发任何 Marker 行更新。
 - 节点回收**先取 `turn_nodes` 的 `SHARE ROW EXCLUSIVE` 表锁，再取 `PG_GC_LOCK`**。表锁要等所有在途提交（`ROW EXCLUSIVE`）结束，若咨询锁在前，这段等待期间持有的独占咨询锁会让 Marker 发布、映射发布与原生登记确认（含客户端回传解析路径上的确认）排队；表锁在前则等待提交期间不持有咨询锁，发布只会等待一个正在执行的回收批次。该顺序不成环，因为持有咨询锁的事务（Marker 回收、原生登记回收、发布、确认、恢复）从不申请 `turn_nodes` 的 `ROW EXCLUSIVE` 及以上表锁（它们对 `turn_nodes` 至多读取或 `FOR NO KEY UPDATE` 单行，对应 `ROW SHARE`，与 `SHARE ROW EXCLUSIVE` 不冲突）。
-- Marker 回收整批只调用一次 `enqueue_unreferenced`：先逐个删除本批 Marker 并收集其释放的正文 ID，全部删除之后一次性按 ID 升序加 `FOR NO KEY UPDATE`。逐 Marker 入队会让不同 Marker 的正文行锁在批内交叉，与 Observation 清理（一次调用、按 ID 升序、不取咨询锁）互相等待而死锁。写入 Marker 的单行事务（`interrupt_if_stale`、`finish_execution`）先 `UPDATE` Marker 行、后 `replace_refs` 登记正文，节点回收也把正文入队放在节点删除之后，因此所有事务一律“对象行在前、正文行在后”。
-- 各类 PostgreSQL 事务的取锁顺序（`→` 表示先后；方括号内是同一语句里的有序批）。全局层级为：表锁 → 咨询锁 → 对象行锁 → 正文行锁，每个事务只取其中若干层且不逆序：
+- Marker 回收整批只调用一次 `enqueue_unreferenced`：先逐个删除本批 Marker 并收集其释放的正文 ID，全部删除之后一次性按 ID 升序加 `FOR NO KEY UPDATE`。逐 Marker 入队会让不同 Marker 的正文行锁在批内交叉，与 Observation 清理（一次调用、按 ID 升序、不取咨询锁）互相等待而死锁。写入 Marker 的单行事务（`interrupt_if_stale`、`finish_execution`）先由 `intern_segment` 对复用的正文行加 `FOR KEY SHARE` 或插入新正文，再 `UPDATE` Marker 行，最后由 `replace_refs` 对释放的旧正文加 `FOR NO KEY UPDATE`；节点回收也把正文入队放在节点删除之后，因此排他正文锁（`FOR NO KEY UPDATE`）一律在对象行锁之后。前置的 `FOR KEY SHARE` 只与 `FOR UPDATE` 冲突，而持有 `FOR UPDATE` 的内容回收一律 `SKIP LOCKED`，不会等待它。
+- 各类 PostgreSQL 事务的取锁顺序（`→` 表示先后；方括号内是同一语句里的有序批）。全局层级为：表锁 → 咨询锁 → 对象行锁 → 排他正文行锁（`FOR NO KEY UPDATE`），每个事务只取其中若干层且不逆序；`FOR KEY SHARE` 不受该层级约束，理由见末项「无环依据」：
   - 节点提交（持久化）：`turn_nodes` ROW EXCLUSIVE → scope 行 `FOR KEY SHARE` → 新节点各行（插入）→ 依赖行 `FOR KEY SHARE` → 正文行 `FOR KEY SHARE`/插入。不取咨询锁。
   - 节点回收：`turn_nodes` SHARE ROW EXCLUSIVE → `PG_GC_LOCK` 独占 → 候选节点行 `FOR UPDATE SKIP LOCKED` → 删除节点及其引用行（触发器依次对父节点行、Marker/映射/原生登记行 `FOR NO KEY UPDATE`）→ [本轮释放的正文行 `FOR NO KEY UPDATE`，ID 升序，一次调用，放在对象行之后] → scope 行 `FOR UPDATE SKIP LOCKED`。
-  - Marker 回收：`PG_GC_LOCK` 独占 → 到期的 `public_tool_executions` 删除（触发器对 Marker 行 `FOR NO KEY UPDATE`）→ 队列行与 Marker 行 `FOR UPDATE OF g, m SKIP LOCKED` → 删除 Marker（级联引用行）→ [本批全部释放的正文行 `FOR NO KEY UPDATE`，ID 升序，一次调用]。
+  - Marker 回收：分两类事务，均先取 `PG_GC_LOCK` 独占。① 到期事务：到期的 `public_tool_executions` 删除（触发器对 Marker 行 `FOR NO KEY UPDATE`）→ 推进水位并把到期 Marker 入队，提交。② 之后每批一个事务：队列行与 Marker 行 `FOR UPDATE OF g, m SKIP LOCKED` → 删除 Marker（级联引用行）→ [本批全部释放的正文行 `FOR NO KEY UPDATE`，ID 升序，一次调用]。
   - 映射回收：不取咨询锁；队列行与映射行 `FOR UPDATE OF g, m SKIP LOCKED` → 删除。
   - 原生登记回收：`PG_GC_LOCK` 独占 → 队列行与登记行 `FOR UPDATE OF g, c SKIP LOCKED` → 删除登记（触发器依次对来源登记行、来源节点行 `FOR NO KEY UPDATE`）。
   - 内容回收：不取咨询锁；队列行与内容行 `FOR UPDATE SKIP LOCKED` → 重检后删除；scope 清理 `FOR UPDATE SKIP LOCKED`。
   - Marker 发布、映射发布、原生登记确认、启动恢复：`PG_GC_LOCK_SHARED` →（映射发布再取 Principal 咨询锁）→ 目标行 `UPDATE`。不取 `turn_nodes` 表锁。
-  - Marker 单行执行状态更新（`interrupt_if_stale`、`finish_execution`）：Marker 行 `UPDATE` → 正文行 `FOR NO KEY UPDATE`（登记释放的旧正文）。
+  - Marker 单行执行状态更新（`interrupt_if_stale`、`finish_execution`）：复用的正文行 `FOR KEY SHARE`/新正文插入（`intern_segment`）→ Marker 行 `UPDATE` → 释放的旧正文行 `FOR NO KEY UPDATE`（`replace_refs`）。不取咨询锁。
   - Observation 到期清理与「清除历史记录」：不取咨询锁；Observation 各表行删除 → [释放的正文行 `FOR NO KEY UPDATE`，ID 升序，一次调用]。不触及 Marker、映射、登记或 `turn_nodes`。
-  - 无环依据：表锁只出现在最前，且持有咨询锁的事务从不申请 ROW EXCLUSIVE 及以上表锁；咨询锁的独占/共享把所有“多行对象锁”事务（回收与发布类）互相排成串或隔开；正文行锁位于最末层，持有它的事务（含 Observation 清理）之后不再等待对象行，且各事务都在一次有序调用里取完，不同事务之间不会以相反顺序等待同一批正文行；提交路径对对象行与正文行只加 `FOR KEY SHARE`，只与 `FOR UPDATE` 冲突，而 `FOR UPDATE` 的持有者（各回收的领取）一律 `SKIP LOCKED`，从不等待它。
+  - 无环依据：表锁只出现在最前，且持有咨询锁的事务从不申请 ROW EXCLUSIVE 及以上表锁；咨询锁的独占/共享把所有“多行对象锁”事务（回收与发布类）互相排成串或隔开；正文排他锁位于最末层，持有它的事务（含 Observation 清理）之后不再等待对象行，且各事务都在一次有序调用里取完，不同事务之间不会以相反顺序等待同一批正文行；提交路径与 Marker 单行更新对对象行与正文行先加的锁只是 `FOR KEY SHARE`，只与 `FOR UPDATE` 冲突，而 `FOR UPDATE` 的持有者（各回收的领取）一律 `SKIP LOCKED`，从不等待它。
 - 清理 scope（`prune_scopes`）以 `FOR UPDATE SKIP LOCKED` 领取候选 scope，被写入方 `FOR KEY SHARE` 的 scope 留给之后的回收，再用新语句重检节点与正文后删除，不依赖外键错误。
 - 原生登记续期对 `turn_nodes` 取的 `ROW EXCLUSIVE` 表锁随续期一起删除；节点回收仍沿用 `LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE`，提交路径的 `turn_nodes` 锁序不变。
 - SQLite 继续使用共享写租约与 `BEGIN IMMEDIATE`。
