@@ -143,6 +143,37 @@ impl AdminService {
     }
 
     /// 显式等待异步观测 writer 排空；查询接口本身不提供该保证。
+    /// 批量读取 Observation 引用的正文；顺序按请求，不可见或不存在的内容直接省略。
+    pub async fn observation_contents(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<ObservationContents> {
+        let mut contents = self.gw.observation.observation_contents(ids).await?;
+        let owners = self.gw.observation.content_interactions(ids).await?;
+        let interactions: Vec<String> = owners
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let masker = self.observation_masker(interactions).await?;
+        masker.mask_contents(&mut contents, &owners);
+        // ETag 同时覆盖返回正文与当前映射：正文按内容摘要，映射按主体版本。
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        {
+            hasher.update(masker.version().as_bytes());
+            for content in &contents {
+                hasher.update(content.digest);
+            }
+        }
+        let version = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(ObservationContents { contents, version })
+    }
+
     pub async fn observation_flush(&self) -> anyhow::Result<()> {
         self.gw.observation.flush().await
     }
@@ -864,10 +895,12 @@ fn project_attempt_amounts(events: &mut [ObservationEvent], currency: Option<&Cu
     let display_currency = DisplayCurrency::from_snapshot(currency);
     let mut attempt_bases: BTreeMap<String, String> = BTreeMap::new();
     for event in events.iter() {
-        if event.kind != "target_attempt_started" {
-            continue;
-        }
-        let Some(payload) = event.payload.as_object() else {
+        let payload = match event.kind.as_str() {
+            "target_attempt_started" => Some(&event.payload),
+            "model_turn_started" => event.payload.get("attempt"),
+            _ => None,
+        };
+        let Some(payload) = payload.and_then(serde_json::Value::as_object) else {
             continue;
         };
         if let (Some(attempt_id), Some(cost_basis)) = (
@@ -882,78 +915,98 @@ fn project_attempt_amounts(events: &mut [ObservationEvent], currency: Option<&Cu
         }
     }
     for event in events {
-        if event.kind != "target_attempt_finished" {
-            continue;
-        }
-        let Some(payload) = event.payload.as_object_mut() else {
-            continue;
-        };
-        let amounts = payload.remove("amounts").and_then(|value| {
-            match serde_json::from_value::<AttemptAmounts>(value) {
-                Ok(amounts) => Some(amounts),
-                Err(error) => {
-                    tracing::warn!(%error, "malformed stored attempt amounts");
-                    None
+        match event.kind.as_str() {
+            "target_attempt_finished" => {
+                if let Some(payload) = event.payload.as_object_mut() {
+                    project_attempt_amount(payload, &attempt_bases, currency, &display_currency);
                 }
             }
-        });
-        let (cost_basis, cost, billing, billing_state) = match amounts {
-            Some(amounts) => {
-                // 不计算成本的尝试没有成本基准，投影为 null。
-                let cost_basis = match amounts.cost_basis.attempt_basis() {
-                    Some(basis) => match serde_json::to_value(basis) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to serialize attempt cost basis");
-                            None
-                        }
-                    },
-                    None => None,
-                };
-                let cost = amounts.cost.and_then(|amount| {
-                    amount.display(currency).map(|display| {
-                        serde_json::json!({
+            // 合并的 Turn 结束行把最后一个 attempt 放在 `attempt` 下，投影规则保持一致。
+            "model_turn_finished" => {
+                if let Some(attempt) = event
+                    .payload
+                    .get_mut("attempt")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    project_attempt_amount(attempt, &attempt_bases, currency, &display_currency);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn project_attempt_amount(
+    payload: &mut serde_json::Map<String, serde_json::Value>,
+    attempt_bases: &BTreeMap<String, String>,
+    currency: Option<&CustomCurrency>,
+    display_currency: &DisplayCurrency,
+) {
+    let amounts = payload.remove("amounts").and_then(|value| {
+        match serde_json::from_value::<AttemptAmounts>(value) {
+            Ok(amounts) => Some(amounts),
+            Err(error) => {
+                tracing::warn!(%error, "malformed stored attempt amounts");
+                None
+            }
+        }
+    });
+    let (cost_basis, cost, billing, billing_state) = match amounts {
+        Some(amounts) => {
+            // 不计算成本的尝试没有成本基准，投影为 null。
+            let cost_basis = match amounts.cost_basis.attempt_basis() {
+                Some(basis) => match serde_json::to_value(basis) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to serialize attempt cost basis");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let cost = amounts.cost.and_then(|amount| {
+                amount.display(currency).map(|display| {
+                    serde_json::json!({
+                        "amount": format_amount(display),
+                        "currency": display_currency.clone(),
+                    })
+                })
+            });
+            let (billing, billing_state) = match amounts.billing {
+                Some(BillingOutcome::Charged(amount)) => match amount.display(currency) {
+                    Some(display) => (
+                        Some(serde_json::json!({
                             "amount": format_amount(display),
                             "currency": display_currency.clone(),
-                        })
-                    })
-                });
-                let (billing, billing_state) = match amounts.billing {
-                    Some(BillingOutcome::Charged(amount)) => match amount.display(currency) {
-                        Some(display) => (
-                            Some(serde_json::json!({
-                                "amount": format_amount(display),
-                                "currency": display_currency.clone(),
-                            })),
-                            Some("charged"),
-                        ),
-                        None => (None, Some("unknown")),
-                    },
-                    Some(BillingOutcome::Unknown) => (None, Some("unknown")),
-                    None => (None, None),
-                };
-                (cost_basis, cost, billing, billing_state)
-            }
-            None => {
-                let cost_basis = payload
-                    .get("attempt_id")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|attempt_id| attempt_bases.get(attempt_id))
-                    .map(|basis| serde_json::Value::String(basis.clone()));
-                (cost_basis, None, None, None)
-            }
-        };
-        payload.insert(
-            "cost_basis".into(),
-            cost_basis.unwrap_or(serde_json::Value::Null),
-        );
-        payload.insert("cost".into(), cost.unwrap_or(serde_json::Value::Null));
-        payload.insert("billing".into(), billing.unwrap_or(serde_json::Value::Null));
-        payload.insert(
-            "billing_state".into(),
-            billing_state
-                .map(|state| serde_json::Value::String(state.into()))
-                .unwrap_or(serde_json::Value::Null),
-        );
-    }
+                        })),
+                        Some("charged"),
+                    ),
+                    None => (None, Some("unknown")),
+                },
+                Some(BillingOutcome::Unknown) => (None, Some("unknown")),
+                None => (None, None),
+            };
+            (cost_basis, cost, billing, billing_state)
+        }
+        None => {
+            let cost_basis = payload
+                .get("attempt_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|attempt_id| attempt_bases.get(attempt_id))
+                .map(|basis| serde_json::Value::String(basis.clone()));
+            (cost_basis, None, None, None)
+        }
+    };
+    payload.insert(
+        "cost_basis".into(),
+        cost_basis.unwrap_or(serde_json::Value::Null),
+    );
+    payload.insert("cost".into(), cost.unwrap_or(serde_json::Value::Null));
+    payload.insert("billing".into(), billing.unwrap_or(serde_json::Value::Null));
+    payload.insert(
+        "billing_state".into(),
+        billing_state
+            .map(|state| serde_json::Value::String(state.into()))
+            .unwrap_or(serde_json::Value::Null),
+    );
 }

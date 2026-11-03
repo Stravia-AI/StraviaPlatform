@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stravia_credential_protection::marker;
+use sha2::{Digest, Sha256};
 
 pub(crate) const REDACTED: &str = "***";
 
@@ -55,6 +56,23 @@ impl ProtectedSecrets {
             }
         }
         values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+    }
+
+    /// 已注册明文的稳定指纹；用于内容端点 ETag，映射新增或消失都会改变结果。
+    pub(crate) fn version(&self) -> [u8; 32] {
+        let mut raws: Vec<String> = self
+            .0
+            .read()
+            .iter()
+            .map(|secret| secret.raw.clone())
+            .collect();
+        raws.sort_unstable();
+        let mut hasher = Sha256::new();
+        for raw in raws {
+            hasher.update(raw.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.finalize().into()
     }
 
     pub(crate) fn text(&self, text: &mut String) {
@@ -992,137 +1010,7 @@ fn text_wrapper(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    fn user_text_items(text: &str) -> Vec<stravia_runtime_contract::protocol::ir::AiItem> {
-        use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
-        vec![AiItem {
-            role: Role::User,
-            content: MessageContent::Text(std::sync::Arc::new(text.to_owned())),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        }]
-    }
-
-    #[test]
-    fn input_preview_selects_latest_user_text_without_history_or_tool_payloads() {
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"system","content":"system-secret"},
-                {"role":"user","content":"old-user"},
-                {"role":"assistant","content":"assistant-secret"},
-                {"role":"user","content":[
-                    {"type":"text","text":"first"},
-                    {"type":"thinking","thinking":"ignored"},
-                    {"type":"text","text":"second"}
-                ]},
-                {"role":"tool","content":"tool-secret","tool_call_id":"call"}
-            ]))
-            .unwrap();
-        assert_eq!(
-            super::user_input_preview(&items),
-            Some("first\nsecond".into())
-        );
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":"old-user"},
-                {"role":"user","content":[]}
-            ]))
-            .unwrap();
-        assert_eq!(super::user_input_preview(&items), None);
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":[{"type":"text","text":""}]}
-            ]))
-            .unwrap();
-        assert_eq!(super::user_input_preview(&items), None);
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":[
-                    {"type":"text","text":""},
-                    {"type":"text","text":""}
-                ]}
-            ]))
-            .unwrap();
-        assert_eq!(super::user_input_preview(&items), Some("\n".into()));
-    }
-
-    #[test]
-    fn input_preview_stops_at_the_limit_without_an_extra_separator() {
-        let full = "a".repeat(4096);
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":[
-                    {"type":"text","text":full},
-                    {"type":"text","text":"b"}
-                ]}
-            ]))
-            .unwrap();
-        assert_eq!(super::user_input_preview(&items).unwrap(), full);
-
-        let almost = "a".repeat(4095);
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":[
-                    {"type":"text","text":almost},
-                    {"type":"text","text":"b"}
-                ]}
-            ]))
-            .unwrap();
-        assert_eq!(
-            super::user_input_preview(&items).unwrap(),
-            format!("{almost}\n")
-        );
-    }
-
-    #[test]
-    fn input_preview_preserves_literals_before_unicode_truncation() {
-        let secret = format!("{}private-ending", "密".repeat(4100));
-        let text = format!(
-            "start {secret}\napi_key=credential-sentinel\n{}",
-            "文".repeat(4200)
-        );
-        let items = user_text_items(&text);
-        let preview = super::user_input_preview(&items).unwrap();
-        assert!(preview.starts_with("start 密"));
-        assert!(preview.contains("密"));
-        assert!(!preview.contains("credential-sentinel"));
-        assert_eq!(preview.chars().count(), 4096);
-        assert!(preview.ends_with('密'));
-    }
-
     use super::*;
-
-    #[test]
-    fn input_preview_preserves_unicode_urls_and_credentials() {
-        let text = concat!(
-            "接口https://example.test/cb?api_key=never-persist&safe=yes ",
-            "🔗https://example.test/public ",
-            "éhttps://user:never-persist@example.test/private ",
-            "地址：https://example.test/path?token=never-persist"
-        );
-
-        let preview = user_input_preview(&user_text_items(text)).unwrap();
-
-        assert_eq!(preview, text);
-    }
-
-    #[test]
-    fn input_preview_preserves_header_schemes_in_semantic_text() {
-        let text = "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel";
-        let preview = user_input_preview(&user_text_items(text)).unwrap();
-
-        assert_eq!(preview, text);
-    }
-
-    #[test]
-    fn input_preview_limits_unprotected_unicode_text_to_whole_characters() {
-        let opening = "𠮷".repeat(4096);
-        let text = format!("{opening}last");
-
-        let preview = user_input_preview(&user_text_items(&text)).unwrap();
-
-        assert_eq!(preview, opening);
-    }
 
     #[test]
     fn credentials_are_removed_from_every_supported_location() {

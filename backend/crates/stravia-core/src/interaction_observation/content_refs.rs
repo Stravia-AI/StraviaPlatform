@@ -69,6 +69,8 @@ impl StoreUnit {
 #[derive(Debug, Clone)]
 pub(super) struct StoredContent {
     pub format: ContentFormat,
+    pub raw_len: i64,
+    pub digest: [u8; 32],
     pub raw: Vec<u8>,
 }
 
@@ -303,7 +305,7 @@ pub(super) async fn read_contents(
         ObservationStore::Sqlite(pool, _) => {
             for chunk in content_ids.chunks(500) {
                 let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                    "SELECT id,format,body FROM contents WHERE id IN (",
+                    "SELECT id,digest,format,raw_len,body FROM contents WHERE id IN (",
                 );
                 let mut separated = builder.separated(",");
                 for id in chunk {
@@ -315,11 +317,17 @@ pub(super) async fn read_contents(
                     let id: i64 = row.try_get("id")?;
                     let format: i64 = row.try_get("format")?;
                     let body: Vec<u8> = row.try_get("body")?;
+                    let digest: Vec<u8> = row.try_get("digest")?;
                     by_id.insert(
                         id,
                         StoredContent {
                             format: ContentFormat::from_database_value(format)
                                 .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?,
+                            raw_len: row.try_get("raw_len")?,
+                            digest: digest
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| anyhow::anyhow!("content digest is not 32 bytes"))?,
                             raw: storage_codec::decode(&body)?.to_vec(),
                         },
                     );
@@ -329,7 +337,7 @@ pub(super) async fn read_contents(
         ObservationStore::Postgres(pool, _) => {
             for chunk in content_ids.chunks(500) {
                 let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT id,format,body FROM contents WHERE id IN (",
+                    "SELECT id,digest,format,raw_len,body FROM contents WHERE id IN (",
                 );
                 let mut separated = builder.separated(',');
                 for id in chunk {
@@ -341,14 +349,65 @@ pub(super) async fn read_contents(
                     let id: i64 = row.try_get("id")?;
                     let format: i32 = row.try_get("format")?;
                     let body: Vec<u8> = row.try_get("body")?;
+                    let digest: Vec<u8> = row.try_get("digest")?;
                     by_id.insert(
                         id,
                         StoredContent {
                             format: ContentFormat::from_database_value(i64::from(format))
                                 .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?,
+                            raw_len: row.try_get("raw_len")?,
+                            digest: digest
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| anyhow::anyhow!("content digest is not 32 bytes"))?,
                             raw: storage_codec::decode(&body)?.to_vec(),
                         },
                     );
+                }
+            }
+        }
+    }
+    Ok(by_id)
+}
+
+/// 只读引用正文的原始字节数；摘要不需要解码正文。
+pub(super) async fn content_lengths(
+    store: &super::store::ObservationStore,
+    content_ids: &[i64],
+) -> anyhow::Result<HashMap<i64, i64>> {
+    use super::store::ObservationStore;
+    let mut by_id = HashMap::new();
+    if content_ids.is_empty() {
+        return Ok(by_id);
+    }
+    match store {
+        ObservationStore::Sqlite(pool, _) => {
+            for chunk in content_ids.chunks(500) {
+                let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT id,raw_len FROM contents WHERE id IN (",
+                );
+                let mut separated = builder.separated(",");
+                for id in chunk {
+                    separated.push_bind(*id);
+                }
+                separated.push_unseparated(")");
+                for row in builder.build().fetch_all(pool).await? {
+                    by_id.insert(row.try_get("id")?, row.try_get("raw_len")?);
+                }
+            }
+        }
+        ObservationStore::Postgres(pool, _) => {
+            for chunk in content_ids.chunks(500) {
+                let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT id,raw_len FROM contents WHERE id IN (",
+                );
+                let mut separated = builder.separated(',');
+                for id in chunk {
+                    separated.push_bind(*id);
+                }
+                separated.push_unseparated(")");
+                for row in builder.build().fetch_all(pool).await? {
+                    by_id.insert(row.try_get("id")?, row.try_get("raw_len")?);
                 }
             }
         }

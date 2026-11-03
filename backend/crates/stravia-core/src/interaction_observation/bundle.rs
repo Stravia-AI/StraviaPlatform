@@ -119,7 +119,11 @@ impl BundleExport {
                 {
                     anyhow::bail!("bundle snapshot unavailable");
                 }
-                let projection = BundleProjection::replay(&records.events);
+                let mut projection = BundleProjection::replay(&records.events);
+                projection.visible_tail = self
+                    .store
+                    .latest_visible_block_text(&request.resource_id, through)
+                    .await?;
                 let mut runs = Vec::with_capacity(records.runs.len());
                 for run in records.runs {
                     runs.push(
@@ -331,126 +335,135 @@ struct BundleProjection {
     observation_gap: bool,
 }
 
+/// 用量修订只覆盖新报告的字段；未知负载记为观察缺口，不撤销已确认值。
+fn record_usage<'a>(
+    attempts: &mut HashMap<&'a str, Option<ConfirmedUsage>>,
+    attempt_id: &'a str,
+    usage: Option<&Value>,
+    observation_gap: &mut bool,
+) {
+    let Some(usage) = usage.filter(|value| !value.is_null()) else {
+        return;
+    };
+    let recorded = attempts.entry(attempt_id).or_default();
+    match ConfirmedUsage::deserialize(usage) {
+        Ok(usage) => {
+            let previous = recorded.get_or_insert_with(ConfirmedUsage::default);
+            previous.input_tokens = usage.input_tokens.or(previous.input_tokens);
+            previous.output_tokens = usage.output_tokens.or(previous.output_tokens);
+            previous.cache_read_tokens = usage.cache_read_tokens.or(previous.cache_read_tokens);
+            previous.cache_write_tokens = usage.cache_write_tokens.or(previous.cache_write_tokens);
+            previous.reasoning_tokens = usage.reasoning_tokens.or(previous.reasoning_tokens);
+        }
+        Err(_) => {
+            *recorded = Some(ConfirmedUsage::default());
+            *observation_gap = true;
+        }
+    }
+}
+
 impl BundleProjection {
     fn replay(events: &[ObservationEvent]) -> Self {
         let mut runs = HashMap::new();
         let mut parents = HashSet::new();
         let mut active = HashSet::new();
         let mut attempts = HashMap::<&str, Option<ConfirmedUsage>>::new();
-        let mut visible_tail = String::new();
         let mut observation_gap = false;
-        let resolved =
-            super::grouping::resolved_client_tool_runs(events.iter().filter_map(|event| {
-                match event.kind.as_str() {
-                    "target_attempt_started" => {
-                        if let Some(id) = event.payload["attempt_id"].as_str() {
-                            attempts.entry(id).or_default();
-                        }
+        let mut evidence = Vec::new();
+        for event in events {
+            match event.kind.as_str() {
+                "target_attempt_started" => {
+                    if let Some(id) = event.payload["attempt_id"].as_str() {
+                        attempts.entry(id).or_default();
                     }
-                    "target_attempt_finished" => {
-                        if let Some(id) = event.payload["attempt_id"].as_str()
-                            && let Some(usage) =
-                                event.payload.get("usage").filter(|value| !value.is_null())
-                        {
-                            let recorded = attempts.entry(id).or_default();
-                            match ConfirmedUsage::deserialize(usage) {
-                                Ok(usage) => {
-                                    // 修订只更新新报告的字段；未知不能撤销已确认值，也不累加快照。
-                                    let previous =
-                                        recorded.get_or_insert_with(ConfirmedUsage::default);
-                                    previous.input_tokens =
-                                        usage.input_tokens.or(previous.input_tokens);
-                                    previous.output_tokens =
-                                        usage.output_tokens.or(previous.output_tokens);
-                                    previous.cache_read_tokens =
-                                        usage.cache_read_tokens.or(previous.cache_read_tokens);
-                                    previous.cache_write_tokens =
-                                        usage.cache_write_tokens.or(previous.cache_write_tokens);
-                                    previous.reasoning_tokens =
-                                        usage.reasoning_tokens.or(previous.reasoning_tokens);
-                                }
-                                Err(_) => {
-                                    *recorded = Some(ConfirmedUsage::default());
-                                    observation_gap = true;
-                                }
-                            }
-                        }
-                    }
-                    "client_visible_content" => {
-                        if let Some(text) = event.payload["text"].as_str() {
-                            visible_tail.push_str(text);
-                            if let Some((offset, _)) = visible_tail.char_indices().rev().nth(4095) {
-                                visible_tail.drain(..offset);
-                            }
-                        }
-                    }
-                    "model_turn_started"
-                        if !visible_tail.is_empty()
-                            && !visible_tail.ends_with(super::store::TURN_SEPARATOR) =>
-                    {
-                        visible_tail.push_str(super::store::TURN_SEPARATOR);
-                    }
-                    "observation_gap" => observation_gap = true,
-                    _ => {}
                 }
-                let run = event.run_id.as_deref()?;
-                match event.kind.as_str() {
-                    "run_admitted" => {
-                        runs.insert(run, "running");
-                        if let Some(parent) = event.payload["parent_run_id"].as_str() {
-                            parents.insert(parent);
-                        }
-                    }
-                    "client_tool_handoff" => {
-                        runs.insert(run, "waiting_client");
-                    }
-                    "run_finished" | "run_state_changed" => {
-                        runs.insert(
-                            run,
-                            event.payload["status"].as_str().unwrap_or("interrupted"),
+                "target_attempt_finished" => {
+                    if let Some(id) = event.payload["attempt_id"].as_str() {
+                        record_usage(
+                            &mut attempts,
+                            id,
+                            event.payload.get("usage"),
+                            &mut observation_gap,
                         );
-                        if event.kind == "run_state_changed"
-                            && event.payload["reason"].as_str() == Some("process_restarted")
-                        {
-                            active.retain(|(owner, _, _)| *owner != run);
-                        }
                     }
-                    "model_turn_started" | "target_attempt_started" | "platform_tool_started" => {
-                        let (kind, field) = match event.kind.as_str() {
-                            "model_turn_started" => ("turn", "model_turn_id"),
-                            "target_attempt_started" => ("attempt", "attempt_id"),
-                            _ => ("tool", "tool_id"),
-                        };
-                        if let Some(id) = event.payload[field].as_str() {
-                            active.insert((run, kind, id));
-                        }
-                    }
-                    "model_turn_finished"
-                    | "target_attempt_finished"
-                    | "platform_tool_finished" => {
-                        let (kind, field) = match event.kind.as_str() {
-                            "model_turn_finished" => ("turn", "model_turn_id"),
-                            "target_attempt_finished" => ("attempt", "attempt_id"),
-                            _ => ("tool", "tool_id"),
-                        };
-                        if let Some(id) = event.payload[field].as_str() {
-                            active.remove(&(run, kind, id));
-                        }
-                    }
-                    _ => {}
                 }
-                let is_handoff = match event.kind.as_str() {
-                    "client_tool_handoff" => true,
-                    "client_tool_result" => false,
-                    _ => return None,
-                };
-                Some(super::grouping::ClientToolEvidence {
+                "model_turn_finished" => {
+                    if let Some(attempt) = event.payload.get("attempt") {
+                        if let Some(id) = attempt["attempt_id"].as_str() {
+                            record_usage(&mut attempts, id, attempt.get("usage"), &mut observation_gap);
+                        }
+                    }
+                }
+                "observation_gap" => observation_gap = true,
+                _ => {}
+            }
+            let Some(run) = event.run_id.as_deref() else {
+                continue;
+            };
+            match event.kind.as_str() {
+                "run_admitted" => {
+                    runs.insert(run, "running");
+                    if let Some(parent) = event.payload["parent_run_id"].as_str() {
+                        parents.insert(parent);
+                    }
+                }
+                "client_tool_handoff" => {
+                    runs.insert(run, "waiting_client");
+                }
+                "run_finished" | "run_state_changed" => {
+                    runs.insert(
+                        run,
+                        event.payload["status"].as_str().unwrap_or("interrupted"),
+                    );
+                    if event.kind == "run_state_changed" && event.payload["status"].as_str() == Some("interrupted") {
+                        active.retain(|(owner, _, _)| *owner != run);
+                    }
+                }
+                "model_turn_started" | "target_attempt_started" | "platform_tool_started" => {
+                    let (kind, field) = match event.kind.as_str() {
+                        "model_turn_started" => ("turn", "model_turn_id"),
+                        "target_attempt_started" => ("attempt", "attempt_id"),
+                        _ => ("tool", "tool_id"),
+                    };
+                    if let Some(id) = event.payload[field].as_str() {
+                        active.insert((run, kind, id));
+                    }
+                }
+                "model_turn_finished"
+                | "target_attempt_finished"
+                | "platform_tool_finished" => {
+                    let (kind, field) = match event.kind.as_str() {
+                        "model_turn_finished" => ("turn", "model_turn_id"),
+                        "target_attempt_finished" => ("attempt", "attempt_id"),
+                        _ => ("tool", "tool_id"),
+                    };
+                    if let Some(id) = event.payload[field].as_str() {
+                        active.remove(&(run, kind, id));
+                    }
+                }
+                _ => {}
+            }
+            match event.kind.as_str() {
+                "client_tool_handoff" => evidence.push(super::grouping::ClientToolEvidence {
                     sequence: event.sequence,
                     run_id: run,
                     tool_id: event.payload["tool_id"].as_str(),
-                    is_handoff,
-                })
-            }));
+                    is_handoff: true,
+                }),
+                "client_tool_result" => {
+                    for result in event.payload["results"].as_array().into_iter().flatten() {
+                        evidence.push(super::grouping::ClientToolEvidence {
+                            sequence: event.sequence,
+                            run_id: run,
+                            tool_id: result["tool_id"].as_str(),
+                            is_handoff: false,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        let resolved = super::grouping::resolved_client_tool_runs(evidence);
         let status = if active.is_empty() {
             super::grouping::rollup_status(runs.into_iter().map(|(run, status)| {
                 (
@@ -470,7 +483,7 @@ impl BundleProjection {
                     .values()
                     .map(|usage| usage.as_ref().unwrap_or(&unknown)),
             ),
-            visible_tail,
+            visible_tail: String::new(),
             observation_gap,
         }
     }

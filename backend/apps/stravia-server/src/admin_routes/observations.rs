@@ -21,6 +21,11 @@ pub(super) struct EventQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ContentQuery {
+    ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct DebugUpdate {
     enabled: bool,
     #[serde(default)]
@@ -30,6 +35,73 @@ pub(super) struct DebugUpdate {
 #[derive(Debug, Deserialize)]
 pub(super) struct BundleTicketInput {
     through_sequence: Option<i64>,
+}
+
+const MAX_CONTENT_IDS: usize = 256;
+
+fn parse_content_ids(raw: Option<String>) -> Option<Vec<i64>> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut ids = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        let id: i64 = part.parse().ok()?;
+        if id <= 0 {
+            return None;
+        }
+        ids.push(id);
+    }
+    if ids.is_empty() || ids.len() > MAX_CONTENT_IDS {
+        return None;
+    }
+    Some(ids)
+}
+
+fn invalid_content_ids() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid observation content ids",
+            "code": "invalid_observation_ids",
+        })),
+    )
+        .into_response()
+}
+
+fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
+    request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| candidate.trim() == etag)
+        })
+}
+
+pub(super) async fn observation_contents(
+    State(gateway): State<Gateway>,
+    request_headers: HeaderMap,
+    Query(query): Query<ContentQuery>,
+) -> Response {
+    let Some(ids) = parse_content_ids(query.ids) else {
+        return invalid_content_ids();
+    };
+    match gateway.admin().observation_contents(&ids).await {
+        Ok(data) => {
+            let etag = format!("\"{}\"", data.version);
+            if request_matches_etag(&request_headers, &etag) {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            let mut response =
+                Json(serde_json::json!({ "data": { "contents": data.contents } })).into_response();
+            if let Ok(value) = HeaderValue::from_str(&etag) {
+                response.headers_mut().insert(header::ETAG, value);
+            }
+            response
+        }
+        Err(error) => observation_query_error(error),
+    }
 }
 
 pub(super) async fn interaction_forest(
@@ -367,6 +439,7 @@ fn observation_query_error(error: anyhow::Error) -> Response {
                 "code": match error {
                     ObservationQueryError::InvalidEventPage => "invalid_observation_event_page",
                     ObservationQueryError::InvalidFilter => "invalid_observation_filter",
+                    ObservationQueryError::InvalidContentIds => "invalid_observation_ids",
                     ObservationQueryError::IncompleteWindow | ObservationQueryError::InvalidWindow => {
                         "invalid_observation_window"
                     }

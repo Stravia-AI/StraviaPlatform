@@ -18,7 +18,8 @@ use stravia_runtime_contract::Principal;
 use crate::interaction_observation::{
     ClientErrorDetail, ClientErrorPage, ClientErrorSummary, FailureDiagnostic, ForestPage,
     InteractionDetail, InteractionEventsPage, InteractionObservation, InteractionSummary,
-    LiveContentBlock, ObservationEvent, ObservationStream, ObservationUpdate, ProtectedSecrets,
+    LiveContentBlock, ObservationContent, ObservationEvent, ObservationStream, ObservationUpdate,
+    ProtectedSecrets,
     RootChangesPage, RunDetail, UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorSummary,
 };
 
@@ -119,14 +120,40 @@ impl CredentialMasker {
         self.principals.get(principal)
     }
 
+    /// 内容端点：按引用该正文的 Interaction 逐个应用主体映射。
+    pub(super) fn mask_contents(
+        &self,
+        contents: &mut [ObservationContent],
+        owners: &HashMap<i64, Vec<String>>,
+    ) {
+        for content in contents {
+            let Some(interactions) = owners.get(&content.content_id) else {
+                continue;
+            };
+            for interaction in interactions {
+                if let Some(secrets) = self.secrets(Some(interaction)) {
+                    secrets.value(&mut content.body);
+                }
+            }
+        }
+    }
+
+    /// 当前已加载映射的稳定版本；无映射时是固定空版本。
+    pub(super) fn version(&self) -> String {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        for (principal, secrets) in &self.principals {
+            hasher.update(principal.as_bytes());
+            hasher.update([0]);
+            hasher.update(secrets.version());
+        }
+        hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     pub(super) fn mask_summary(&self, summary: &mut InteractionSummary) {
         let Some(secrets) = self.secrets(Some(summary.id.as_str())) else {
             return;
         };
-        if let Some(preview) = &mut summary.input_preview {
-            secrets.text(preview);
-        }
-        secrets.text(&mut summary.visible_tail);
         for event in &mut summary.context_events {
             if !carries_content(&event.kind) {
                 continue;
@@ -198,6 +225,10 @@ impl CredentialMasker {
 
     pub(super) fn mask_interaction_detail(&self, detail: &mut InteractionDetail) {
         self.mask_summary(&mut detail.interaction);
+        if let Some(secrets) = self.secrets(Some(detail.interaction.id.as_str())) {
+            secrets.text(&mut detail.input_text);
+            secrets.text(&mut detail.output_text);
+        }
         for summary in &mut detail.root.interactions {
             self.mask_summary(summary);
         }
@@ -564,8 +595,8 @@ mod tests {
             status: "completed".into(),
             started_at: 0,
             last_active_at: 1,
-            input_preview: Some(format!("prefix {text} suffix")),
-            visible_tail: format!("tail {text}"),
+            input: Default::default(),
+            output: Default::default(),
             failed_request: false,
             client_output_delivered: true,
             usage: Default::default(),
@@ -607,7 +638,10 @@ mod tests {
         assert!(mappings.active_calls().is_empty());
         let mut summary = summary("first", PLAINTEXT);
         masker.mask_summary(&mut summary);
-        assert_eq!(summary.visible_tail, format!("tail {PLAINTEXT}"));
+        assert_eq!(
+            summary.context_events[1].payload["content"],
+            json!(serde_json::to_string(PLAINTEXT).unwrap())
+        );
         Ok(())
     }
 
@@ -651,8 +685,6 @@ mod tests {
         let marker = marker();
         let mut owned = summary("first", PLAINTEXT);
         masker.mask_summary(&mut owned);
-        assert_eq!(owned.input_preview.as_deref(), Some("prefix *** suffix"));
-        assert_eq!(owned.visible_tail, "tail ***");
         assert_eq!(
             owned.context_events[0].payload,
             json!({"attempt_id": format!("{PLAINTEXT}-attempt")}),
@@ -673,11 +705,6 @@ mod tests {
 
         let mut untouched = summary("third", PLAINTEXT);
         masker.mask_summary(&mut untouched);
-        assert_eq!(
-            untouched.input_preview.as_deref(),
-            Some(format!("prefix {PLAINTEXT} suffix").as_str())
-        );
-        assert_eq!(untouched.visible_tail, format!("tail {PLAINTEXT}"));
         assert_eq!(
             untouched.context_events[1].payload["content"],
             json!(serde_json::to_string(PLAINTEXT).unwrap())
@@ -707,7 +734,10 @@ mod tests {
         assert!(masker.secrets(Some("owned")).is_some());
         let mut unprotected = summary("unprotected", PLAINTEXT);
         masker.mask_summary(&mut unprotected);
-        assert_eq!(unprotected.visible_tail, format!("tail {PLAINTEXT}"));
+        assert_eq!(
+            unprotected.context_events[1].payload["content"],
+            json!(serde_json::to_string(PLAINTEXT).unwrap())
+        );
         Ok(())
     }
 
@@ -1026,6 +1056,7 @@ mod tests {
             .execute(&pool)
             .await?;
         }
+        // 映射过期仍保留行；上表 expires_at 属于凭据映射，不受 Observation 迁移影响。
         assert!(store.any_active().await?);
 
         let ids = vec!["interaction".to_owned(), "other".to_owned()];
@@ -1040,14 +1071,23 @@ mod tests {
             lookup.interaction_principals(&lookup_ids).await
         })
         .await?;
-        let mut owned = summary("interaction", PLAINTEXT);
-        masker.mask_summary(&mut owned);
-        assert_eq!(owned.visible_tail, "tail ***");
-        let mut expired = summary("other", PLAINTEXT);
-        masker.mask_summary(&mut expired);
+        let content = |content_id: i64| ObservationContent {
+            content_id,
+            format: "text".into(),
+            raw_len: PLAINTEXT.len() as i64,
+            body: json!(PLAINTEXT),
+            digest: [0; 32],
+        };
+        let owners = HashMap::from([
+            (1, vec!["interaction".to_owned()]),
+            (2, vec!["other".to_owned()]),
+        ]);
+        let mut contents = vec![content(1), content(2)];
+        masker.mask_contents(&mut contents, &owners);
+        assert_eq!(contents[0].body, json!("***"));
         assert_eq!(
-            expired.visible_tail,
-            format!("tail {PLAINTEXT}"),
+            contents[1].body,
+            json!(PLAINTEXT),
             "expired mappings are no longer restorable and are not masked"
         );
         Ok(())
@@ -1068,9 +1108,8 @@ mod tests {
         )
         .await;
         sqlx::query(
-            "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('interaction','owner','root','run','route','completed',0,0,?)",
+            "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('interaction','owner','root','run','route','completed',0,0)",
         )
-        .bind(i64::MAX)
         .execute(&pool)
         .await?;
         sqlx::query(

@@ -329,12 +329,13 @@ impl ObservationStore {
                 self.manifest_for_rejection(id).await?,
             )
         } else {
-            let events = match self {
-                Self::Sqlite(pool, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id=? AND sequence<=? ORDER BY sequence")
+            let mut events = match self {
+                Self::Sqlite(pool, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE run_id=? AND sequence<=? ORDER BY sequence")
                     .bind(id).bind(snapshot_sequence).fetch_all(pool).await?)?,
-                Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id=$1 AND sequence<=$2 ORDER BY sequence")
+                Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE run_id=$1 AND sequence<=$2 ORDER BY sequence")
                     .bind(id).bind(snapshot_sequence).fetch_all(pool).await?)?,
             };
+            super::super::hydrate::hydrate(self, &mut events).await?;
             (events, self.manifest_for_run(id).await?)
         };
         Ok(Some(ClientErrorDetail {
