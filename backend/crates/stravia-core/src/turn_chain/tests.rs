@@ -55,29 +55,22 @@ async fn scoped_node_pk(pool: &sqlx::SqlitePool, id: &TurnNodeId) -> i64 {
         .expect("node primary key")
 }
 
-/// 把节点的创建时间放到很久以前，使其单独越过统一保留期 N；读取不受影响，只有回收会看到它。
-/// 仅用于需要“同一轮回收只淘汰其中一个节点”的场景——领域入口无法注入提交时间。
-async fn backdate_store_node(store: &SqlTurnChainStore, id: &TurnNodeId) {
-    let query = "UPDATE turn_nodes SET created_at = 0 WHERE id = $1";
-    match &store.backend {
-        Backend::Sqlite(pool) => {
-            sqlx::query(query)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-        Backend::Postgres(pool) => {
-            sqlx::query(query)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-        }
+/// 等墙钟推进到下一毫秒并返回边界：此前提交的节点 `created_at <= 边界`，此后提交的 `> 边界`。
+/// 回收的 `now` 只通过它推进，不改写任何时间戳。
+async fn tick() -> i64 {
+    let boundary = now_millis();
+    while now_millis() <= boundary {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
-    // 以回拨的时钟回收一轮：水位被拉回到最早的窗口，被改写的节点重新落入扫描区间；
-    // 此时没有任何节点越过保留期，回收本身不删除东西。
-    store.sweep_history(0).await.unwrap();
+    boundary
+}
+
+/// 回收时钟放在 `边界 + N`：只有边界之前提交的节点越过统一保留期。
+/// 同一个存储上较早的阶段可能把水位推到了未来；先让时钟回到边界（水位随之回退，
+/// 此时没有节点越过保留期），再前进到 `边界 + N`。返回第二轮的 `now`。
+async fn retreat_then_advance(store: &SqlTurnChainStore, boundary: i64) -> i64 {
+    store.sweep_history(boundary).await.unwrap();
+    boundary + store.retention.window_millis()
 }
 
 /// 比默认保留期（7 天）长得多的偏移；回收的 `now` 只通过它推进。
@@ -421,21 +414,6 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
     let expired = TurnNodeId::response();
     let shared = serde_json::json!({"text": "shared history ".repeat(100)});
     let live_payload = serde_json::json!({"items": [shared.clone()]});
-    store
-        .commit(TurnCommit {
-            id: live.clone(),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: owner.clone(),
-            payload_version: 6,
-            payload: live_payload.clone(),
-            marker_references: Vec::new(),
-            redaction_references: Vec::new(),
-            compaction_record_ids: Vec::new(),
-            reusable_prefix: None,
-        })
-        .await
-        .expect("live history");
     let expired_items: Vec<_> = std::iter::once(shared.clone())
         .chain((0..2500).map(|index| serde_json::json!({"text": format!("expired item {index}")})))
         .collect();
@@ -454,6 +432,23 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
         })
         .await
         .expect("expired history");
+    // 只有先提交的 expired 越过回收时钟；live 在边界之后提交。
+    let boundary = tick().await;
+    store
+        .commit(TurnCommit {
+            id: live.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: live_payload.clone(),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("live history");
     let expired_pk = scoped_node_pk(&pool, &expired).await;
     let before_refs: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM turn_node_contents WHERE node_pk = ?")
@@ -466,9 +461,14 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
         "fixture must exceed one reference cleanup batch"
     );
 
-    backdate_store_node(&store, &expired).await;
     // 一次 sweep 必须把超过单批上限的引用全部清空并删除节点。
-    assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 1);
+    assert_eq!(
+        store
+            .sweep_history(retreat_then_advance(&store, boundary).await)
+            .await
+            .expect("sweep"),
+        1
+    );
     assert_eq!(scoped_node_count(&store, &expired).await, 0);
     assert_eq!(content_counts(&pool, &key).await, (1, 1));
     let restored = store
@@ -694,6 +694,8 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
         })
         .await
         .expect("commit stale branch");
+    // stale 在边界之前提交，live 在边界之后；根节点有 live 子节点，不会被回收。
+    let boundary = tick().await;
     let live = TurnNodeId::agent();
     store
         .commit(TurnCommit {
@@ -711,8 +713,13 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
         .await
         .expect("commit live branch");
 
-    backdate_store_node(&store, &stale).await;
-    assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 1);
+    assert_eq!(
+        store
+            .sweep_history(retreat_then_advance(&store, boundary).await)
+            .await
+            .expect("sweep"),
+        1
+    );
     assert_eq!(
         store.materialize(&owner, TurnNodeKind::Agent, &stale).await,
         Err(TurnUnavailable::Unavailable)
@@ -1182,7 +1189,24 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
         })
         .await
         .expect("expired branch");
-    backdate_store_node(store, &expired).await;
+    let boundary = tick().await;
+    // 边界之后提交的锚点子节点始终保护根节点，回收时钟只让 expired 越过保留期。
+    store
+        .commit(TurnCommit {
+            id: TurnNodeId::response(),
+            kind: TurnNodeKind::Response,
+            parent_id: Some(root.clone()),
+            principal: owner.clone(),
+            payload_version: 1,
+            payload: serde_json::json!({"system": "anchor"}),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("anchor branch");
+    let sweep_now = retreat_then_advance(store, boundary).await;
 
     let writers: Vec<_> = (0..12)
         .map(|index| {
@@ -1213,7 +1237,7 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
         let store = SqlTurnChainStore::clone(store);
         async move {
             for _ in 0..3 {
-                store.sweep_history(now_millis()).await?;
+                store.sweep_history(sweep_now).await?;
                 tokio::task::yield_now().await;
             }
             Ok::<(), TurnUnavailable>(())
@@ -1232,10 +1256,7 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
         .await
         .expect("sweeper task")
         .expect("concurrent sweep");
-    store
-        .sweep_history(now_millis())
-        .await
-        .expect("final sweep");
+    store.sweep_history(sweep_now).await.expect("final sweep");
     let root_chain = store
         .materialize(&owner, TurnNodeKind::Response, &root)
         .await
@@ -2484,8 +2505,16 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
     let second = TurnNodeId::response();
     let expired = TurnNodeId::response();
     let item = serde_json::json!({"text": "shared external history ".repeat(100)});
-    for (id, parent_id, payload) in [
+    // expired 先于 first / second 提交；回收时钟放在两者之间的边界之后加 N，
+    // 只有 expired 越过保留期，根节点仍有 first / second 两个子节点。
+    let mut boundary = 0;
+    for (index, (id, parent_id, payload)) in [
         (root.clone(), None, serde_json::json!({"root": true})),
+        (
+            expired.clone(),
+            Some(root.clone()),
+            serde_json::json!({"items": [item.clone()]}),
+        ),
         (
             first.clone(),
             Some(root.clone()),
@@ -2496,12 +2525,10 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
             Some(root.clone()),
             serde_json::json!({"items": [item.clone()]}),
         ),
-        (
-            expired.clone(),
-            Some(root.clone()),
-            serde_json::json!({"items": [item.clone()]}),
-        ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         store
             .commit(TurnCommit {
                 id,
@@ -2517,6 +2544,12 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
             })
             .await
             .unwrap();
+        if index == 1 {
+            boundary = tick().await;
+        } else if index == 2 {
+            // 让 second 的创建时间严格晚于 first，下面的期限比较不依赖同一毫秒内的取整。
+            tick().await;
+        }
     }
     let key = store_content_id(store, &owner, &item).await;
     let mut context = TurnReadContext::new(&owner, TurnNodeKind::Response);
@@ -2564,8 +2597,15 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
         "每个头节点的期限来自自己的创建时间，较晚的兄弟不会更早到期"
     );
     // 超出保留期的叶子被回收后，上下文读取同样不可用。
-    backdate_store_node(store, &expired).await;
-    assert_eq!(store.sweep_history(now_millis()).await.unwrap(), 1);
+    // 共用的 PostgreSQL 存储里可能还有更早的断言留下的节点，它们同样越过了回收时钟，
+    // 所以只要求 expired 被回收（随后的读取断言它已不可用）。
+    assert!(
+        store
+            .sweep_history(retreat_then_advance(store, boundary).await)
+            .await
+            .unwrap()
+            >= 1
+    );
     assert!(matches!(
         store
             .materialize_in_context(&owner, TurnNodeKind::Response, &expired, &mut context)

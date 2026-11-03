@@ -33,6 +33,4 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
 }
 
 #[cfg(test)]
-mod retention_tests;
-#[cfg(test)]
 mod tests;

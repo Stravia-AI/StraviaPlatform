@@ -7,7 +7,7 @@ CREATE TABLE history_markers_reference (
     activity TEXT NOT NULL,
     tool_id TEXT,
     call_payload TEXT,
-    segment_payload TEXT,
+    segment_payload BLOB,
     execution_state TEXT CHECK (
         execution_state IS NULL OR
         execution_state IN ('pending', 'running', 'completed', 'failed', 'interrupted')
@@ -45,6 +45,18 @@ CREATE INDEX idx_history_markers_principal_reference
 ON history_markers(principal, reference);
 CREATE INDEX history_markers_pending_until_idx ON history_markers(pending_until);
 CREATE INDEX history_markers_published_at_idx ON history_markers(published_at);
+-- 重建表会连带删除表上的触发器，按 0038 的定义原样恢复；
+-- updated_at 取自终态写入，而不是之后的发布。
+CREATE TRIGGER retain_terminal_tool_execution AFTER UPDATE OF execution_state ON history_markers
+WHEN OLD.execution_state IN ('pending','running') AND NEW.execution_state IN ('completed','failed','interrupted')
+BEGIN
+    UPDATE public_tool_executions
+    SET terminal_at = NEW.updated_at,
+        retention_started_at = NEW.updated_at,
+        retention_ms = COALESCE((SELECT CAST(value AS BIGINT) * 86400000 FROM settings WHERE name = 'log_retention_days'), retention_ms),
+        expires_at = NEW.updated_at + COALESCE((SELECT CAST(value AS BIGINT) * 86400000 FROM settings WHERE name = 'log_retention_days'), retention_ms)
+    WHERE marker_reference = NEW.reference AND retention_started_at IS NULL;
+END;
 
 CREATE TABLE reversible_redaction_mappings_reference (
     reference TEXT PRIMARY KEY NOT NULL,
