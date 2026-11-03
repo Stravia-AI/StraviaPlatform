@@ -11,7 +11,7 @@ async fn fixture() -> anyhow::Result<(tempfile::TempDir, sqlx::SqlitePool, Inter
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        1,
+        crate::history_retention::HistoryRetention::new(1),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -193,7 +193,7 @@ async fn platform_tool_remote_bytes_and_header_redaction_survive_bundle_export()
 }
 
 #[tokio::test]
-async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() -> anyhow::Result<()>
+async fn bundle_usage_revision_preserves_reported_fields() -> anyhow::Result<()>
 {
     let (_directory, pool, observation) = fixture().await?;
     let run = admit(&observation, "usage-run", None);
@@ -238,13 +238,6 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
         usage: None,
         amounts: None,
     });
-    run.record(RunEvent::ModelTurnFinished {
-        retention_detached: false,
-        model_turn_id: "turn".into(),
-        status: "completed".into(),
-    });
-    finish(&run, "completed", None);
-    let old = ticket(&observation).await?;
     run.record(RunEvent::UsageConfirmed {
         model_turn_id: "turn".into(),
         attempt_id: "attempt".into(),
@@ -254,55 +247,40 @@ async fn bundle_usage_revision_preserves_reported_fields_and_ticket_watermark() 
             ..Default::default()
         },
     });
-    let new = ticket(&observation).await?;
-    assert!(new.through_sequence > old.through_sequence);
-    for (issued, input, raw_input) in [(&old, 16, 20), (&new, 24, 30)] {
-        let (manifest, summary) = download(&observation, issued).await?;
-        assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
-        assert_eq!(summary["status"], "completed");
-        assert_eq!(summary["usage"]["input_tokens"], input);
-        assert_eq!(summary["usage"]["output_tokens"], 7);
-        assert_eq!(summary["usage"]["cache_write_tokens"], 0);
-        assert_eq!(summary["usage"]["reasoning_tokens"], Value::Null);
-        let coverage = &summary["usage"]["coverage"];
-        assert_eq!(coverage["attempt_count"], 1);
-        assert_eq!(coverage["missing_input_tokens"], 0);
-        assert_eq!(coverage["missing_output_tokens"], 0);
-        assert_eq!(coverage["missing_cache_read_tokens"], 0);
-        assert_eq!(coverage["missing_cache_write_tokens"], 0);
-        assert_eq!(coverage["missing_reasoning_tokens"], 1);
-        let events = summary["events"].as_array().expect("exported events");
-        assert!(
-            events
-                .iter()
-                .all(|event| event["sequence"].as_i64().unwrap() <= issued.through_sequence)
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event["kind"] == "target_attempt_finished")
-                .count(),
-            if issued.through_sequence == old.through_sequence {
-                1
-            } else {
-                2
-            },
-        );
-        let terminal = events
+    run.record(RunEvent::ModelTurnFinished {
+        retention_detached: false,
+        model_turn_id: "turn".into(),
+        status: "completed".into(),
+    });
+    finish(&run, "completed", None);
+    // 用量修订在 Turn 收尾前并入合并后的尾事件，不再追加行；导出只反映修订后的事实。
+    let issued = ticket(&observation).await?;
+    let (manifest, summary) = download(&observation, &issued).await?;
+    assert_eq!(manifest["through_event_sequence"], issued.through_sequence);
+    assert_eq!(summary["status"], "completed");
+    assert_eq!(summary["usage"]["input_tokens"], 24);
+    assert_eq!(summary["usage"]["output_tokens"], 7);
+    assert_eq!(summary["usage"]["cache_write_tokens"], 0);
+    assert_eq!(summary["usage"]["reasoning_tokens"], Value::Null);
+    let coverage = &summary["usage"]["coverage"];
+    assert_eq!(coverage["attempt_count"], 1);
+    assert_eq!(coverage["missing_input_tokens"], 0);
+    assert_eq!(coverage["missing_output_tokens"], 0);
+    assert_eq!(coverage["missing_cache_read_tokens"], 0);
+    assert_eq!(coverage["missing_cache_write_tokens"], 0);
+    assert_eq!(coverage["missing_reasoning_tokens"], 1);
+    let events = summary["events"].as_array().expect("exported events");
+    assert!(
+        events
             .iter()
-            .rev()
-            .find(|event| event["kind"] == "target_attempt_finished")
-            .expect("attempt terminal");
-        assert_eq!(terminal["payload"]["usage"]["input_tokens"], raw_input);
-        assert_eq!(
-            terminal["payload"]["usage"]["output_tokens"],
-            if issued.through_sequence == old.through_sequence {
-                Value::from(7)
-            } else {
-                Value::Null
-            },
-        );
-    }
+            .all(|event| event["sequence"].as_i64().unwrap() <= issued.through_sequence)
+    );
+    let finished = events
+        .iter()
+        .rev()
+        .find(|event| event["kind"] == "model_turn_finished")
+        .expect("merged turn terminal");
+    assert_eq!(finished["payload"]["usage"]["input_tokens"], 30);
     drop(run);
     observation.shutdown().await;
     pool.close().await;
@@ -383,6 +361,19 @@ async fn bundle_net_input_clamps_attempts_and_preserves_unknown_operands() -> an
     Ok(())
 }
 
+/// 批量 `client_tool_result` 事件的 `results[]` 中是否含指定工具结果。
+fn tool_result_present(event: &Value, tool_id: &str, is_error: Option<bool>) -> bool {
+    event["kind"] == "client_tool_result"
+        && event["payload"]["results"]
+            .as_array()
+            .is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["tool_id"] == tool_id
+                        && is_error.is_none_or(|expected| result["is_error"] == expected)
+                })
+            })
+}
+
 #[tokio::test]
 async fn bundle_partial_public_tool_returns_keep_waiting_until_error_result_arrives()
 -> anyhow::Result<()> {
@@ -436,17 +427,14 @@ async fn bundle_partial_public_tool_returns_keep_waiting_until_error_result_arri
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|event| event["kind"] == "client_tool_result"
-                    && event["payload"]["tool_id"] == "b")
+                .any(|event| tool_result_present(event, "b", None))
         );
         assert!(
             new["events"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|event| event["kind"] == "client_tool_result"
-                    && event["payload"]["tool_id"] == "b"
-                    && event["payload"]["is_error"] == true)
+                .any(|event| tool_result_present(event, "b", Some(true)))
         );
         drop((parent, waiting, sibling));
         observation.shutdown().await;
@@ -520,6 +508,77 @@ async fn bundle_detached_activity_outlives_child_delivery_at_ticket_watermark() 
                 && event["payload"]["tool_id"] == "background")
     );
     drop((background, child));
+    observation.shutdown().await;
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bundle_exports_full_visible_output_and_expands_content_refs() -> anyhow::Result<()> {
+    let (_directory, pool, observation) = fixture().await?;
+    let run = admit(&observation, "visible-run", None);
+    let first = format!("first:{}", "a".repeat(6000));
+    let second = format!("second:{}", "b".repeat(6000));
+    for (turn, answer) in [("turn-1", &first), ("turn-2", &second)] {
+        run.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: turn.into(),
+            attempt_id: format!("{turn}-attempt"),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://127.0.0.1".into(),
+            cost_basis: None,
+        });
+        run.record(RunEvent::ClientVisibleContent {
+            text: answer.clone(),
+            parts: vec![serde_json::json!({"type": "text", "text": answer})],
+            block_id: format!("{turn}-block"),
+            item: serde_json::json!({"id": format!("{turn}-block"), "role": "assistant", "content": answer}),
+            complete: true,
+        });
+        run.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: turn.into(),
+            attempt_id: format!("{turn}-attempt"),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 10,
+            first_token_ms: Some(1),
+            usage: None,
+            amounts: None,
+        });
+        run.record(RunEvent::ModelTurnFinished {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            status: "completed".into(),
+        });
+    }
+    finish(&run, "completed", None);
+    let issued = ticket(&observation).await?;
+    let (_, summary) = download(&observation, &issued).await?;
+
+    // 摘要给出最近一个可见块的完整正文；旧的截断字段不存在。
+    assert_eq!(summary["latest_output_text"], second);
+    assert!(summary.get("visible_tail").is_none());
+    // 事件里的正文引用已展开为调用方可读的文本。
+    let events = summary["events"].as_array().expect("exported events");
+    let texts: Vec<&str> = events
+        .iter()
+        .filter(|event| event["kind"] == "client_visible_content")
+        .filter_map(|event| event["payload"]["text"].as_str())
+        .collect();
+    assert_eq!(texts, vec![first.as_str(), second.as_str()]);
+    drop(run);
     observation.shutdown().await;
     pool.close().await;
     Ok(())

@@ -215,10 +215,10 @@ impl AttributionEvidence for ObservationEvidence {
         &self,
         principal: &str,
         tool_ids: &[String],
-        now: i64,
+        _now: i64,
     ) -> anyhow::Result<Vec<(String, Option<String>)>> {
         self.store
-            .client_tool_result_sources(principal, tool_ids, now)
+            .client_tool_result_sources(principal, tool_ids)
             .await
     }
 

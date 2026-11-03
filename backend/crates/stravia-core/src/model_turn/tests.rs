@@ -845,15 +845,34 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
         matches!(result, Err(ModelTurnError { ref code, .. }) if code == "first_token_timeout")
     );
     gateway.observation.flush().await.unwrap();
-    let events: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT payload FROM observation_events WHERE kind='target_attempt_finished'",
-    )
-    .fetch_all(gateway._sqlite_pool.as_ref().unwrap())
-    .await
-    .unwrap();
-    assert_eq!(events.len(), 1);
-    let terminal: serde_json::Value =
-        serde_json::from_slice(&crate::storage_codec::decode(&events[0]).unwrap()).unwrap();
+    let forest = gateway
+        .observation
+        .query_forest(crate::interaction_observation::ForestQuery::default())
+        .await
+        .unwrap();
+    let detail = gateway
+        .observation
+        .get_interaction(
+            &forest.roots[0].interactions[0].id,
+            crate::interaction_observation::ForestQuery::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let events = &detail.runs[0].events;
+    let terminals = events
+        .iter()
+        .filter(|event| event.kind == "model_turn_finished")
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != "target_attempt_finished"),
+        "attempt terminal is folded into the Model Turn terminal: {:?}",
+        events.iter().map(|e| (e.sequence, e.kind.clone())).collect::<Vec<_>>()
+    );
+    let terminal = &terminals[0].payload["attempt"];
     assert_eq!(terminal["error_code"], "first_token_timeout");
     assert_eq!(terminal["status"], "failed");
     assert!(terminal["first_token_ms"].is_null());

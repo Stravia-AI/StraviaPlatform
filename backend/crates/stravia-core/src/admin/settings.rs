@@ -150,8 +150,8 @@ impl AdminService {
         }
         self.gw.storage.settings().set(key, value).await?;
         if let Some(days) = retention_days {
-            let days = self.gw.retention().set_days(days);
-            self.gw.observation.set_retention_days(days).await?;
+            self.gw.retention().set_days(days);
+            self.gw.observation.apply_retention_change().await?;
             self.gw.sweep_history().await?;
         }
         Ok(())

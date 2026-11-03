@@ -8,7 +8,7 @@ async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_proje
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         false,
         crate::generation_chain::test_chain().await,
     )
@@ -86,6 +86,29 @@ async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_proje
     }
 }
 
+/// 经公共查询读取已交付的可见内容事件，不依赖底层表布局。
+async fn visible_payloads(observation: &InteractionObservation) -> Vec<serde_json::Value> {
+    use crate::interaction_observation::ForestQuery;
+
+    observation.flush().await.unwrap();
+    let forest = observation
+        .query_forest(ForestQuery::default())
+        .await
+        .unwrap();
+    let detail = observation
+        .get_interaction(&forest.roots[0].interactions[0].id, ForestQuery::default())
+        .await
+        .unwrap()
+        .unwrap();
+    detail
+        .runs
+        .iter()
+        .flat_map(|run| &run.events)
+        .filter(|event| event.kind == "client_visible_content")
+        .map(|event| event.payload.clone())
+        .collect()
+}
+
 #[tokio::test]
 async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -101,7 +124,7 @@ async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -166,13 +189,7 @@ async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
     }
     terminal.finish_visible_items(&observer, false);
     observation.flush().await.unwrap();
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE kind = 'client_visible_content' ORDER BY sequence").fetch_all(&pool).await.unwrap();
-    let payloads: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|bytes| {
-            serde_json::from_slice(&crate::storage_codec::decode(&bytes).unwrap()).unwrap()
-        })
-        .collect();
+    let payloads = visible_payloads(&observation).await;
     assert_eq!(payloads.len(), 2);
     assert_eq!(payloads[0]["text"], "first delivered");
     assert_eq!(payloads[1]["text"], "second delivered");
@@ -197,7 +214,7 @@ async fn websocket_sent_partial_excludes_unsent_staged_output_and_preserves_item
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -277,13 +294,7 @@ async fn websocket_sent_partial_excludes_unsent_staged_output_and_preserves_item
     terminal.shared().canonical_output = Some(vec![stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"unsent staged suffix"}]})).unwrap().unwrap()]);
     delivery.finish("cancelled", Some("client_disconnected".into()));
     observation.flush().await.unwrap();
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT payload FROM observation_events WHERE kind = 'client_visible_content' ORDER BY sequence").fetch_all(&pool).await.unwrap();
-    let payloads: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|bytes| {
-            serde_json::from_slice(&crate::storage_codec::decode(&bytes).unwrap()).unwrap()
-        })
-        .collect();
+    let payloads = visible_payloads(&observation).await;
     assert_eq!(payloads.len(), 2);
     assert_eq!(payloads[0]["text"], "delivered partial");
     assert_eq!(payloads[1]["text"], "second delivered");
@@ -314,7 +325,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )

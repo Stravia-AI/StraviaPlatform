@@ -6,6 +6,7 @@ use futures::TryStreamExt;
 use sqlx::{FromRow, QueryBuilder, Row};
 
 use super::{store::ObservationStore, types::*};
+use serde_json::Value;
 
 /// 取消类终止原因：既不是失败的请求也不是错误的请求；客户端错误据此排除，
 /// 上游错误据此把所属运行判为“请求已中断”。
@@ -59,7 +60,7 @@ const ROOT_TOKEN_TOTAL_SQL: &str = concat!(
 // 判定按 400 分批，避免 UNION ALL 候选根触顶，同时远低于绑定变量上限。
 const TOKEN_ROOT_CHUNK: usize = 400;
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
-const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
+const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,
 CAST(SUM(CASE WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN CASE WHEN a.input_tokens>a.cache_read_tokens THEN a.input_tokens-a.cache_read_tokens ELSE 0 END END) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
@@ -159,8 +160,6 @@ struct InteractionRow {
     status: String,
     started_at: i64,
     last_active_at: i64,
-    input_preview: Option<String>,
-    visible_tail: String,
     failed_request: i64,
     client_output_delivered: i64,
     input_tokens: Option<i64>,
@@ -389,7 +388,7 @@ macro_rules! interaction_batch_queries {
         async fn $context(executor: &mut $connection, ids: &[&str], through: i64)
             -> anyhow::Result<Vec<ObservationEvent>> {
             let mut query = QueryBuilder::<$db>::new(
-                "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (");
+                "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id IN (");
             let mut separated = query.separated(",");
             for id in ids { separated.push_bind(*id); }
             query.push(") AND sequence<=").push_bind(through);
@@ -453,6 +452,22 @@ struct RejectionRow {
 }
 
 impl super::InteractionObservation {
+    /// 内容端点：只返回被可见 Observation 引用的正文。
+    pub(crate) async fn observation_contents(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<Vec<ObservationContent>> {
+        self.inner.store.observation_contents(ids).await
+    }
+
+    /// 内容 → 引用它的 Interaction，用于按主体遮蔽正文。
+    pub(crate) async fn content_interactions(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<std::collections::HashMap<i64, Vec<String>>> {
+        self.inner.store.content_interactions(ids).await
+    }
+
     /// 读取已落库的命中记录；排队中的命中可能暂不可见，不等待无关观测写入或 Debug 刷盘。
     pub async fn credential_discoveries(
         &self,
@@ -503,7 +518,7 @@ struct DiscoveryEventRow {
     interaction_id: String,
     run_id: Option<String>,
     api_key_name: Option<String>,
-    payload: Vec<u8>,
+    attrs: Option<Vec<u8>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -599,9 +614,14 @@ fn push_reuse_cursor_postgres(
         .push("))))))))");
 }
 
-fn decode_discovery_payload(payload: &[u8]) -> anyhow::Result<DiscoveryPayload> {
+fn decode_discovery_payload(attrs: Option<&[u8]>) -> anyhow::Result<DiscoveryPayload> {
+    let Some(attrs) = attrs else {
+        return Ok(DiscoveryPayload {
+            discoveries: Vec::new(),
+        });
+    };
     Ok(serde_json::from_slice(&crate::storage_codec::decode(
-        payload,
+        attrs,
     )?)?)
 }
 
@@ -691,16 +711,12 @@ fn encode_discovery_cursor(sequence: i64, index: usize) -> anyhow::Result<String
 
 fn discovery_event_sql(
     builder: &mut QueryBuilder<sqlx::Sqlite>,
-    now: i64,
     upper: i64,
     start_at: Option<i64>,
     end_at: Option<i64>,
 ) {
     builder
-        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
-        .push_bind(now)
-        .push(" AND i.expires_at>")
-        .push_bind(now);
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created'");
     // 时间窗在 SQL 内过滤：左闭右开，两端各自可选。
     if let Some(start) = start_at {
         builder.push(" AND e.occurred_at>=").push_bind(start);
@@ -717,16 +733,12 @@ fn discovery_event_sql(
 
 fn discovery_event_sql_postgres(
     builder: &mut QueryBuilder<sqlx::Postgres>,
-    now: i64,
     upper: i64,
     start_at: Option<i64>,
     end_at: Option<i64>,
 ) {
     builder
-        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created' AND e.expires_at>")
-        .push_bind(now)
-        .push(" AND i.expires_at>")
-        .push_bind(now);
+        .push("SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,i.api_key_name,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind='credential_mappings_created'");
     // 与 SQLite 版保持同一谓词。
     if let Some(start) = start_at {
         builder.push(" AND e.occurred_at>=").push_bind(start);
@@ -771,19 +783,18 @@ impl ObservationStore {
         let start_at = query.start_at;
         let end_at = query.end_at;
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
-        let now = chrono::Utc::now().timestamp_millis();
         let mut items = Vec::with_capacity(limit + 1);
         let mut upper = cursor.map_or(i64::MAX, |(sequence, _)| sequence);
         'scan: loop {
             let rows: Vec<DiscoveryEventRow> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-                    discovery_event_sql(&mut builder, now, upper, start_at, end_at);
+                    discovery_event_sql(&mut builder, upper, start_at, end_at);
                     builder.build_query_as().fetch_all(pool).await?
                 }
                 Self::Postgres(pool, _) => {
                     let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-                    discovery_event_sql_postgres(&mut builder, now, upper, start_at, end_at);
+                    discovery_event_sql_postgres(&mut builder, upper, start_at, end_at);
                     builder.build_query_as().fetch_all(pool).await?
                 }
             };
@@ -792,7 +803,7 @@ impl ObservationStore {
             };
             upper = last.sequence.saturating_sub(1);
             for row in rows {
-                let payload = decode_discovery_payload(&row.payload)?;
+                let payload = decode_discovery_payload(row.attrs.as_deref())?;
                 for (index, discovery) in payload.discoveries.iter().enumerate().rev() {
                     if cursor.is_some_and(|(sequence, index_cursor)| {
                         (row.sequence, index) >= (sequence, index_cursor)
@@ -831,36 +842,39 @@ impl ObservationStore {
         Ok(CredentialDiscoveryPage { items, next_cursor })
     }
 
-    /// 读取一行新建映射的落库事实；行不存在或已过期时返回 `None`。
+    /// 读取一行新建映射的落库事实；行不存在时返回 `None`。
     pub(super) async fn credential_discovery_record(
         &self,
         sequence: i64,
         index: usize,
     ) -> anyhow::Result<Option<CredentialDiscoveryRecord>> {
-        let now = chrono::Utc::now().timestamp_millis();
-        type DiscoveryRow = (i64, String, Option<String>, String, Option<String>, Vec<u8>);
+        type DiscoveryRow = (
+            i64,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<Vec<u8>>,
+        );
         let row: Option<DiscoveryRow> = match self {
             Self::Sqlite(pool, _) => sqlx::query_as(
-                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=? AND e.kind='credential_mappings_created' AND e.expires_at>? AND i.expires_at>?"
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=? AND e.kind='credential_mappings_created'"
             )
             .bind(sequence)
-            .bind(now)
-            .bind(now)
             .fetch_optional(pool)
             .await?,
             Self::Postgres(pool, _) => sqlx::query_as(
-                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=$1 AND e.kind='credential_mappings_created' AND e.expires_at>$2 AND i.expires_at>$2"
+                "SELECT e.occurred_at,e.interaction_id,e.run_id,i.principal,i.api_key_name,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.sequence=$1 AND e.kind='credential_mappings_created'"
             )
             .bind(sequence)
-            .bind(now)
             .fetch_optional(pool)
             .await?,
         };
-        let Some((_occurred_at, interaction_id, run_id, principal, _api_key_name, payload)) = row
+        let Some((_occurred_at, interaction_id, run_id, principal, _api_key_name, attrs)) = row
         else {
             return Ok(None);
         };
-        let payload = decode_discovery_payload(&payload)?;
+        let payload = decode_discovery_payload(attrs.as_deref())?;
         let Some(discovery) = payload.discoveries.get(index) else {
             return Ok(None);
         };
@@ -874,15 +888,13 @@ impl ObservationStore {
         }))
     }
 
-    /// 解析命中正文：工具来源按 `tool_id` 回溯，用户消息取输入预览；其余来源不保留。
+    /// 解析命中正文：工具来源按 `tool_id` 回溯，用户消息取完整登录文本；其余来源不保留。
     pub(super) async fn credential_discovery_hit_context(
         &self,
         record: &CredentialDiscoveryRecord,
         hit: &CredentialDiscoveryHit,
     ) -> anyhow::Result<CredentialDiscoveryHitContext> {
         const TOOL_NAME_KINDS: &str = "'platform_tool_started','client_tool_handoff'";
-        const TOOL_RESULT_KINDS: &str = "'client_tool_result','platform_tool_finished'";
-        let now = chrono::Utc::now().timestamp_millis();
         match hit.source_type.as_str() {
             "tool_arguments" | "tool_result" => {
                 let Some(tool_id) = hit.tool_id.as_deref() else {
@@ -891,43 +903,32 @@ impl ObservationStore {
                         body: CredentialDiscoveryBody::NotRetained,
                     });
                 };
-                let (body_kinds, field) = if hit.source_type == "tool_arguments" {
-                    (TOOL_NAME_KINDS, "input")
-                } else {
-                    (TOOL_RESULT_KINDS, "content")
-                };
-                let body_event = self
-                    .credential_tool_event(record, body_kinds, tool_id, now)
-                    .await?;
-                let tool_name = if body_kinds == TOOL_NAME_KINDS {
-                    body_event
-                        .as_ref()
-                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
-                } else {
-                    self.credential_tool_event(record, TOOL_NAME_KINDS, tool_id, now)
+                let tool_name = self
+                    .credential_tool_event(record, TOOL_NAME_KINDS, tool_id)
+                    .await?
+                    .and_then(|(_, payload)| payload["name"].as_str().map(str::to_owned));
+                let body = if hit.source_type == "tool_arguments" {
+                    match self
+                        .credential_tool_event(record, TOOL_NAME_KINDS, tool_id)
                         .await?
-                        .and_then(|payload| payload["name"].as_str().map(str::to_owned))
-                };
-                let body = match body_event {
-                    None => CredentialDiscoveryBody::Missing,
-                    Some(payload) => match payload.get(field) {
-                        Some(value) if !value.is_null() => {
-                            CredentialDiscoveryBody::Retained(value.clone())
-                        }
-                        _ => CredentialDiscoveryBody::NotRetained,
-                    },
+                    {
+                        None => CredentialDiscoveryBody::Missing,
+                        Some((_, payload)) => match payload.get("input") {
+                            Some(value) if !value.is_null() => {
+                                CredentialDiscoveryBody::Retained(value.clone())
+                            }
+                            _ => CredentialDiscoveryBody::NotRetained,
+                        },
+                    }
+                } else {
+                    self.credential_tool_result(record, tool_id).await?
                 };
                 Ok(CredentialDiscoveryHitContext { tool_name, body })
             }
             "user_message" if hit.latest_input == Some(true) => {
-                let body = match self.credential_input_preview(record, now).await? {
+                let body = match self.credential_input_text(record).await? {
                     None => CredentialDiscoveryBody::Missing,
-                    Some(payload) => {
-                        match payload.get("text").and_then(serde_json::Value::as_str) {
-                            Some(text) => CredentialDiscoveryBody::Retained(text.into()),
-                            None => CredentialDiscoveryBody::NotRetained,
-                        }
-                    }
+                    Some(text) => CredentialDiscoveryBody::Retained(text.into()),
                 };
                 Ok(CredentialDiscoveryHitContext {
                     tool_name: None,
@@ -941,17 +942,17 @@ impl ObservationStore {
         }
     }
 
+    /// 工具名称来自事件 attrs；先查同一 Interaction，再按主体回溯到记录事件之前。
     async fn credential_tool_event(
         &self,
         record: &CredentialDiscoveryRecord,
         kinds: &'static str,
         tool_id: &str,
-        now: i64,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let payload = match self {
+    ) -> anyhow::Result<Option<(i64, serde_json::Value)>> {
+        let attrs = match self {
             Self::Sqlite(pool, _) => {
                 let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                    "SELECT e.sequence,e.attrs FROM observation_events e WHERE e.interaction_id=",
                 );
                 builder
                     .push_bind(&record.interaction_id)
@@ -959,20 +960,16 @@ impl ObservationStore {
                     .push(kinds)
                     .push(") AND e.tool_id=")
                     .push_bind(tool_id)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
-                let payload: Option<Vec<u8>> = builder
-                    .build_query_scalar::<Vec<u8>>()
+                let found: Option<(i64, Option<Vec<u8>>)> = builder
+                    .build_query_as()
                     .fetch_optional(pool)
                     .await?;
-                if let Some(payload) = payload {
-                    return Ok(Some(serde_json::from_slice(
-                        &crate::storage_codec::decode(&payload)?,
-                    )?));
+                if let Some((sequence, attrs)) = found {
+                    return Ok(Some((sequence, decode_event_attrs(attrs.as_deref())?)));
                 }
                 let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                    "SELECT e.sequence,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
                 );
                 builder
                     .push(kinds)
@@ -982,19 +979,15 @@ impl ObservationStore {
                     .push_bind(&record.principal)
                     .push(" AND e.sequence<=")
                     .push_bind(record.sequence)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
                 builder
-                    .build_query_scalar::<Vec<u8>>()
+                    .build_query_as::<(i64, Option<Vec<u8>>)>()
                     .fetch_optional(pool)
                     .await?
             }
             Self::Postgres(pool, _) => {
                 let mut builder = QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT e.payload FROM observation_events e WHERE e.interaction_id=",
+                    "SELECT e.sequence,e.attrs FROM observation_events e WHERE e.interaction_id=",
                 );
                 builder
                     .push_bind(&record.interaction_id)
@@ -1002,20 +995,16 @@ impl ObservationStore {
                     .push(kinds)
                     .push(") AND e.tool_id=")
                     .push_bind(tool_id)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
-                let payload: Option<Vec<u8>> = builder
-                    .build_query_scalar::<Vec<u8>>()
+                let found: Option<(i64, Option<Vec<u8>>)> = builder
+                    .build_query_as()
                     .fetch_optional(pool)
                     .await?;
-                if let Some(payload) = payload {
-                    return Ok(Some(serde_json::from_slice(
-                        &crate::storage_codec::decode(&payload)?,
-                    )?));
+                if let Some((sequence, attrs)) = found {
+                    return Ok(Some((sequence, decode_event_attrs(attrs.as_deref())?)));
                 }
                 let mut builder = QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT e.payload FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
+                    "SELECT e.sequence,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN (",
                 );
                 builder
                     .push(kinds)
@@ -1025,90 +1014,185 @@ impl ObservationStore {
                     .push_bind(&record.principal)
                     .push(" AND e.sequence<=")
                     .push_bind(record.sequence)
-                    .push(" AND e.expires_at>")
-                    .push_bind(now)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
                 builder
-                    .build_query_scalar::<Vec<u8>>()
+                    .build_query_as::<(i64, Option<Vec<u8>>)>()
                     .fetch_optional(pool)
                     .await?
             }
         };
-        payload
-            .map(|payload| {
-                Ok(serde_json::from_slice(&crate::storage_codec::decode(
-                    &payload,
-                )?)?)
-            })
+        attrs
+            .map(|(sequence, attrs)| Ok((sequence, decode_event_attrs(attrs.as_deref())?)))
             .transpose()
     }
 
-    async fn credential_input_preview(
+    /// 工具结果正文：`client_tool_result` 在子表里，`platform_tool_finished` 仍在 attrs；
+    /// 两者取较新的那条，正文按引用批量读回。
+    async fn credential_tool_result(
         &self,
         record: &CredentialDiscoveryRecord,
-        now: i64,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let payload = match self {
+        tool_id: &str,
+    ) -> anyhow::Result<CredentialDiscoveryBody> {
+        let stored: Option<(i64, i64)> = match self {
+            Self::Sqlite(pool, _) => {
+                let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT tr.sequence,tr.content_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id=",
+                );
+                query
+                    .push_bind(&record.interaction_id)
+                    .push(" AND tr.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" ORDER BY tr.sequence DESC LIMIT 1");
+                let found: Option<(i64, i64)> =
+                    query.build_query_as().fetch_optional(pool).await?;
+                if found.is_some() {
+                    found
+                } else {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT tr.sequence,tr.content_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence JOIN interaction_observations i ON i.id=e.interaction_id WHERE tr.tool_id=",
+                    );
+                    query
+                        .push_bind(tool_id)
+                        .push(" AND i.principal=")
+                        .push_bind(&record.principal)
+                        .push(" AND e.sequence<=")
+                        .push_bind(record.sequence)
+                        .push(" ORDER BY tr.sequence DESC LIMIT 1");
+                    query.build_query_as().fetch_optional(pool).await?
+                }
+            }
+            Self::Postgres(pool, _) => {
+                let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT tr.sequence,tr.content_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id=",
+                );
+                query
+                    .push_bind(&record.interaction_id)
+                    .push(" AND tr.tool_id=")
+                    .push_bind(tool_id)
+                    .push(" ORDER BY tr.sequence DESC LIMIT 1");
+                let found: Option<(i64, i64)> =
+                    query.build_query_as().fetch_optional(pool).await?;
+                if found.is_some() {
+                    found
+                } else {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT tr.sequence,tr.content_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence JOIN interaction_observations i ON i.id=e.interaction_id WHERE tr.tool_id=",
+                    );
+                    query
+                        .push_bind(tool_id)
+                        .push(" AND i.principal=")
+                        .push_bind(&record.principal)
+                        .push(" AND e.sequence<=")
+                        .push_bind(record.sequence)
+                        .push(" ORDER BY tr.sequence DESC LIMIT 1");
+                    query.build_query_as().fetch_optional(pool).await?
+                }
+            }
+        };
+        let finished = self
+            .credential_tool_event(record, "'platform_tool_finished'", tool_id)
+            .await?;
+        match (stored, finished) {
+            (Some((sequence, content_id)), Some((finished_sequence, payload))) => {
+                if finished_sequence > sequence {
+                    Ok(content_body(payload.get("content")))
+                } else {
+                    self.read_content_body(&record.principal, content_id).await
+                }
+            }
+            (Some((_, content_id)), None) => self.read_content_body(&record.principal, content_id).await,
+            (None, Some((_, payload))) => Ok(content_body(payload.get("content"))),
+            (None, None) => Ok(CredentialDiscoveryBody::Missing),
+        }
+    }
+
+    async fn read_content_body(
+        &self,
+        principal: &str,
+        content_id: i64,
+    ) -> anyhow::Result<CredentialDiscoveryBody> {
+        let contents = super::content_refs::read_scoped(self, principal, &[content_id]).await?;
+        Ok(match contents.get(content_id) {
+            Some(body) => {
+                CredentialDiscoveryBody::Retained(super::content_refs::body_value(body)?)
+            }
+            None => CredentialDiscoveryBody::Missing,
+        })
+    }
+
+    /// 最新用户输入的完整文本：优先本 Run，其次本 Interaction 内记录事件之前的最近一条。
+    async fn credential_input_text(
+        &self,
+        record: &CredentialDiscoveryRecord,
+    ) -> anyhow::Result<Option<String>> {
+        let sequence: Option<i64> = match self {
             Self::Sqlite(pool, _) => {
                 if let Some(run_id) = &record.run_id {
-                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
-                        "SELECT payload FROM observation_events WHERE interaction_id=? AND run_id=? AND kind='input_preview_recorded' AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                    let sequence: Option<i64> = sqlx::query_scalar(
+                        "SELECT MAX(sequence) FROM observation_events WHERE interaction_id=? AND run_id=? AND kind='user_input_recorded'",
                     )
                     .bind(&record.interaction_id)
                     .bind(run_id)
-                    .bind(now)
-                    .fetch_optional(pool)
+                    .fetch_one(pool)
                     .await?;
-                    if let Some(payload) = payload {
-                        return Ok(Some(serde_json::from_slice(
-                            &crate::storage_codec::decode(&payload)?,
-                        )?));
+                    if sequence.is_some() {
+                        return self.user_input_text_at(&record.principal, sequence).await;
                     }
                 }
-                sqlx::query_scalar::<_, Vec<u8>>(
-                    "SELECT payload FROM observation_events WHERE interaction_id=? AND kind='input_preview_recorded' AND sequence<? AND expires_at>? ORDER BY sequence DESC LIMIT 1",
+                sqlx::query_scalar(
+                    "SELECT MAX(sequence) FROM observation_events WHERE interaction_id=? AND kind='user_input_recorded' AND sequence<?",
                 )
                 .bind(&record.interaction_id)
                 .bind(record.sequence)
-                .bind(now)
-                .fetch_optional(pool)
+                .fetch_one(pool)
                 .await?
             }
             Self::Postgres(pool, _) => {
                 if let Some(run_id) = &record.run_id {
-                    let payload: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
-                        "SELECT payload FROM observation_events WHERE interaction_id=$1 AND run_id=$2 AND kind='input_preview_recorded' AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                    let sequence: Option<i64> = sqlx::query_scalar(
+                        "SELECT MAX(sequence) FROM observation_events WHERE interaction_id=$1 AND run_id=$2 AND kind='user_input_recorded'",
                     )
                     .bind(&record.interaction_id)
                     .bind(run_id)
-                    .bind(now)
-                    .fetch_optional(pool)
+                    .fetch_one(pool)
                     .await?;
-                    if let Some(payload) = payload {
-                        return Ok(Some(serde_json::from_slice(
-                            &crate::storage_codec::decode(&payload)?,
-                        )?));
+                    if sequence.is_some() {
+                        return self.user_input_text_at(&record.principal, sequence).await;
                     }
                 }
-                sqlx::query_scalar::<_, Vec<u8>>(
-                    "SELECT payload FROM observation_events WHERE interaction_id=$1 AND kind='input_preview_recorded' AND sequence<$2 AND expires_at>$3 ORDER BY sequence DESC LIMIT 1",
+                sqlx::query_scalar(
+                    "SELECT MAX(sequence) FROM observation_events WHERE interaction_id=$1 AND kind='user_input_recorded' AND sequence<$2",
                 )
                 .bind(&record.interaction_id)
                 .bind(record.sequence)
-                .bind(now)
-                .fetch_optional(pool)
+                .fetch_one(pool)
                 .await?
             }
         };
-        payload
-            .map(|payload| {
-                Ok(serde_json::from_slice(&crate::storage_codec::decode(
-                    &payload,
-                )?)?)
-            })
-            .transpose()
+        self.user_input_text_at(&record.principal, sequence).await
+    }
+
+    async fn user_input_text_at(
+        &self,
+        principal: &str,
+        sequence: Option<i64>,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        let refs = self.event_refs(&[sequence]).await?;
+        let Some(refs) = refs.get(&sequence) else {
+            return Ok(Some(String::new()));
+        };
+        let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
+        let contents = super::content_refs::read_scoped(self, principal, &content_ids).await?;
+        Ok(Some(
+            refs.iter()
+                .filter_map(|(_, content_id)| contents.get(*content_id))
+                .map(|body| body.text().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
     }
 
     /// 按占位符读取写入时登记的复用位置；登记行已按位置去重，只保留最新一次复用。
@@ -1132,23 +1216,20 @@ impl ObservationStore {
                 next_cursor: None,
             });
         }
-        let now = chrono::Utc::now().timestamp_millis();
         // 总数与游标无关：同一调用者、同一占位符的可见位置数。
         let total: i64 = match self {
             Self::Sqlite(pool, _) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=? AND i.expires_at>?",
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=? AND i.principal=?",
             )
             .bind(marker)
             .bind(&record.principal)
-            .bind(now)
             .fetch_one(pool)
             .await?,
             Self::Postgres(pool, _) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2 AND i.expires_at>$3",
+                "SELECT COUNT(*) FROM credential_mapping_reuses r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.marker=$1 AND i.principal=$2",
             )
             .bind(marker)
             .bind(&record.principal)
-            .bind(now)
             .fetch_one(pool)
             .await?,
         };
@@ -1171,9 +1252,7 @@ impl ObservationStore {
                 builder
                     .push_bind(marker)
                     .push(" AND i.principal=")
-                    .push_bind(&record.principal)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now);
+                    .push_bind(&record.principal);
                 push_reuse_cursor_sqlite(&mut builder, cursor.as_ref());
                 builder
                     .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
@@ -1187,9 +1266,7 @@ impl ObservationStore {
                 builder
                     .push_bind(marker)
                     .push(" AND i.principal=")
-                    .push_bind(&record.principal)
-                    .push(" AND i.expires_at>")
-                    .push_bind(now);
+                    .push_bind(&record.principal);
                 push_reuse_cursor_postgres(&mut builder, cursor.as_ref());
                 builder
                     .push(" ORDER BY r.last_reused_at DESC,r.interaction_id,r.source_type,r.tool_id,r.latest_input LIMIT ")
@@ -1282,6 +1359,9 @@ impl ObservationStore {
             page.reset_required = true;
             return Ok(page);
         }
+        let interaction_ids: Vec<String> =
+            read.rows.iter().map(|row| row.id.clone()).collect();
+        let summaries = self.content_summaries(&interaction_ids).await?;
         let mut rows_by_root: std::collections::HashMap<String, Vec<InteractionRow>> =
             std::collections::HashMap::new();
         for row in read.rows {
@@ -1341,7 +1421,9 @@ impl ObservationStore {
                     if interaction_changed(&row, is_matched, debug_status, known) {
                         let events = context.remove(&row.id).unwrap_or_default();
                         let status = debug.remove(&row.id).unwrap_or(RunDebugStatus::None);
-                        let mut interaction = summary(row, is_matched);
+                        let input = summaries.input(&row.id);
+                        let output = summaries.output(&row.id);
+                        let mut interaction = summary(row, is_matched, input, output);
                         interaction.context_events = events;
                         interaction.debug_status = status.as_str().into();
                         change.interactions.push(interaction);
@@ -1380,6 +1462,8 @@ impl ObservationStore {
         let root_total = read.total;
         let root_rows = read.root_rows;
         let rows = read.rows;
+        let interaction_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let summaries = self.content_summaries(&interaction_ids).await?;
         let matched = read.matched;
         let mut roots: Vec<ForestRoot> = root_rows
             .iter()
@@ -1391,7 +1475,9 @@ impl ObservationStore {
                     .cloned()
                     .map(|row| {
                         let hit = matched.contains(&row.id);
-                        summary(row, hit)
+                        let input = summaries.input(&row.id);
+                        let output = summaries.output(&row.id);
+                        summary(row, hit, input, output)
                     })
                     .collect();
                 interactions.sort_by(|a, b| {
@@ -1463,12 +1549,23 @@ impl ObservationStore {
             return Ok(None);
         };
         let matched = read.matched;
-        let mut selected = summary(selected_row.clone(), matched.contains(id));
+        let interaction_ids: Vec<String> = root_rows.iter().map(|row| row.id.clone()).collect();
+        let summaries = self.content_summaries(&interaction_ids).await?;
+        let selected_input = summaries.input(id);
+        let selected_output = summaries.output(id);
+        let mut selected = summary(
+            selected_row.clone(),
+            matched.contains(id),
+            selected_input,
+            selected_output,
+        );
         let mut root_interactions: Vec<_> = root_rows
             .into_iter()
             .map(|row| {
                 let hit = matched.contains(&row.id);
-                summary(row, hit)
+                let input = summaries.input(&row.id);
+                let output = summaries.output(&row.id);
+                summary(row, hit, input, output)
             })
             .collect();
         let snapshot_sequence = read.sequence;
@@ -1523,10 +1620,14 @@ impl ObservationStore {
             .event_page(id, &InteractionEventsQuery::default(), snapshot_sequence)
             .await?;
         let runs = self.run_details(runs, events).await?;
+        let input_text = self.input_text(id, snapshot_sequence).await?;
+        let output_text = self.visible_output_text(id, snapshot_sequence).await?;
         Ok(Some(InteractionDetail {
             interaction: snapshot.interaction,
             root: snapshot.root,
             runs,
+            input_text,
+            output_text,
             snapshot_sequence,
             older_events_cursor,
         }))
@@ -1680,7 +1781,7 @@ impl ObservationStore {
         let mut events = match self {
             Self::Sqlite(pool, _) => {
                 let mut sql = QueryBuilder::<sqlx::Sqlite>::new(
-                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=",
+                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id=",
                 );
                 sql.push_bind(id).push(" AND sequence<=").push_bind(through);
                 if let Some(after) = query.after_sequence {
@@ -1703,7 +1804,7 @@ impl ObservationStore {
             }
             Self::Postgres(pool, _) => {
                 let mut sql = QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=",
+                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id=",
                 );
                 sql.push_bind(id).push(" AND sequence<=").push_bind(through);
                 if let Some(after) = query.after_sequence {
@@ -1727,6 +1828,7 @@ impl ObservationStore {
         };
         let more = events.len() > limit;
         events.truncate(limit);
+        super::hydrate::hydrate(self, &mut events).await?;
         let next_cursor = if more {
             events.last().map(|event| event.sequence)
         } else {
@@ -1779,14 +1881,16 @@ impl ObservationStore {
         };
         let events = match self {
             Self::Sqlite(pool, _) => map_sqlite_events(
-                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence")
+                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence")
                     .bind(id).bind(through).fetch_all(pool).await?,
             )?,
             Self::Postgres(pool, _) => map_postgres_events(
-                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=$1 AND sequence<=$2 ORDER BY sequence")
+                sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id=$1 AND sequence<=$2 ORDER BY sequence")
                     .bind(id).bind(through).fetch_all(pool).await?,
             )?,
         };
+        let mut events = events;
+        super::hydrate::hydrate(self, &mut events).await?;
         let runs = runs
             .into_iter()
             .map(|(id, debug_enabled)| BundleRunRecord {
@@ -1952,8 +2056,8 @@ impl ObservationStore {
         through: i64,
     ) -> anyhow::Result<Vec<ObservationEvent>> {
         match self {
-            Self::Sqlite(pool, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=? AND sequence<=? ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
-            Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=$1 AND sequence<=$2 ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+            Self::Sqlite(pool, _) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE rejection_id=? AND sequence<=? ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+            Self::Postgres(pool, _) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE rejection_id=$1 AND sequence<=$2 ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
         }
     }
 }
@@ -2414,7 +2518,579 @@ async fn rejection_postgres(p: &sqlx::PgPool, id: &str) -> anyhow::Result<Option
     Ok(b.build_query_as().fetch_optional(p).await?)
 }
 
-fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
+/// 一页 Interaction 的输入/输出引用摘要；正文按需经内容端点读取。
+#[derive(Default)]
+struct ContentSummaries {
+    input: std::collections::HashMap<String, ContentSummary>,
+    output: std::collections::HashMap<String, ContentSummary>,
+}
+
+impl ContentSummaries {
+    fn input(&self, id: &str) -> ContentSummary {
+        self.input.get(id).cloned().unwrap_or_default()
+    }
+
+    fn output(&self, id: &str) -> ContentSummary {
+        self.output.get(id).cloned().unwrap_or_default()
+    }
+}
+
+fn refs_summary(refs: &[(i64, i64)], lengths: &std::collections::HashMap<i64, i64>) -> ContentSummary {
+    ContentSummary::new(
+        refs.iter()
+            .filter_map(|(_, content_id)| {
+                lengths.get(content_id).map(|raw_len| ContentRef {
+                    content_id: *content_id,
+                    raw_len: *raw_len,
+                })
+            })
+            .collect(),
+    )
+}
+
+impl ObservationStore {
+    /// 输入取根 Run 最新 `user_input_recorded` 的引用，输出取最新可见块；只读引用与长度。
+    async fn content_summaries(
+        &self,
+        interactions: &[String],
+    ) -> anyhow::Result<ContentSummaries> {
+        let mut summaries = ContentSummaries::default();
+        if interactions.is_empty() {
+            return Ok(summaries);
+        }
+        let mut inputs: Vec<(String, i64)> = Vec::new();
+        let mut outputs: Vec<(String, i64)> = Vec::new();
+        for chunk in interactions.chunks(400) {
+            match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT id,input_sequence FROM interaction_observations WHERE input_sequence IS NOT NULL AND id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    separated.push_unseparated(")");
+                    for row in query.build().fetch_all(pool).await? {
+                        inputs.push((row.try_get("id")?, row.try_get("input_sequence")?));
+                    }
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT interaction_id,MAX(sequence) AS sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    separated.push_unseparated(") GROUP BY interaction_id");
+                    for row in query.build().fetch_all(pool).await? {
+                        outputs.push((
+                            row.try_get("interaction_id")?,
+                            row.try_get("sequence")?,
+                        ));
+                    }
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT id,input_sequence FROM interaction_observations WHERE input_sequence IS NOT NULL AND id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    separated.push_unseparated(")");
+                    for row in query.build().fetch_all(pool).await? {
+                        inputs.push((row.try_get("id")?, row.try_get("input_sequence")?));
+                    }
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT interaction_id,MAX(sequence) AS sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(id);
+                    }
+                    separated.push_unseparated(") GROUP BY interaction_id");
+                    for row in query.build().fetch_all(pool).await? {
+                        outputs.push((
+                            row.try_get("interaction_id")?,
+                            row.try_get("sequence")?,
+                        ));
+                    }
+                }
+            }
+        }
+        if inputs.is_empty() && outputs.is_empty() {
+            return Ok(summaries);
+        }
+        let sequences: Vec<i64> = inputs
+            .iter()
+            .map(|(_, sequence)| *sequence)
+            .chain(outputs.iter().map(|(_, sequence)| *sequence))
+            .collect();
+        let refs = self.event_refs(&sequences).await?;
+        let content_ids: Vec<i64> = refs
+            .values()
+            .flatten()
+            .map(|(_, content_id)| *content_id)
+            .collect();
+        let lengths = self.content_lengths(&content_ids).await?;
+        for (id, sequence) in inputs {
+            let summary = refs
+                .get(&sequence)
+                .map(|refs| refs_summary(refs, &lengths))
+                .unwrap_or_default();
+            summaries.input.insert(id, summary);
+        }
+        for (id, sequence) in outputs {
+            let summary = refs
+                .get(&sequence)
+                .map(|refs| refs_summary(refs, &lengths))
+                .unwrap_or_default();
+            summaries.output.insert(id, summary);
+        }
+        Ok(summaries)
+    }
+
+    /// 内容长度只查元数据，列表摘要不读取正文。
+    async fn content_lengths(
+        &self,
+        content_ids: &[i64],
+    ) -> anyhow::Result<std::collections::HashMap<i64, i64>> {
+        let mut lengths = std::collections::HashMap::new();
+        for chunk in content_ids.chunks(400) {
+            let rows: Vec<(i64, i64)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query =
+                        QueryBuilder::<sqlx::Sqlite>::new("SELECT id,raw_len FROM contents WHERE id IN (");
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT id,raw_len FROM contents WHERE id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+            };
+            lengths.extend(rows);
+        }
+        Ok(lengths)
+    }
+
+    /// 按 Interaction 所属 Principal 的 scope 读取正文；Interaction 不存在时没有正文。
+    async fn read_interaction_bodies(
+        &self,
+        interaction_id: &str,
+        content_ids: &[i64],
+    ) -> anyhow::Result<crate::content_store::Bodies> {
+        let principals = self
+            .interaction_principals(&[interaction_id.to_owned()])
+            .await?;
+        match principals.get(interaction_id) {
+            Some(principal) => super::content_refs::read_scoped(self, principal, content_ids).await,
+            None => Ok(crate::content_store::Bodies::from_rows(Vec::new())),
+        }
+    }
+
+    /// 按事件 sequence 批量读取有序引用；调用方保证 content id 只来自可见 Interaction。
+    async fn event_refs(
+        &self,
+        sequences: &[i64],
+    ) -> anyhow::Result<std::collections::HashMap<i64, Vec<(i64, i64)>>> {
+        let mut refs: std::collections::HashMap<i64, Vec<(i64, i64)>> =
+            std::collections::HashMap::new();
+        if sequences.is_empty() {
+            return Ok(refs);
+        }
+        for chunk in sequences.chunks(400) {
+            let rows: Vec<(i64, i64, i64)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for sequence in chunk {
+                        separated.push_bind(*sequence);
+                    }
+                    separated.push_unseparated(") ORDER BY sequence,ordinal");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for sequence in chunk {
+                        separated.push_bind(*sequence);
+                    }
+                    separated.push_unseparated(") ORDER BY sequence,ordinal");
+                    query.build_query_as().fetch_all(pool).await?
+                }
+            };
+            for (sequence, ordinal, content_id) in rows {
+                refs.entry(sequence).or_default().push((ordinal, content_id));
+            }
+        }
+        Ok(refs)
+    }
+
+    /// 完整登录文本：最新根 Run `user_input_recorded` 的引用按 `\n` 连接。
+    pub(super) async fn input_text(
+        &self,
+        interaction_id: &str,
+        through: i64,
+    ) -> anyhow::Result<String> {
+        let sequence: Option<i64> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_scalar(
+                "SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=? AND r.parent_run_id IS NULL AND e.kind='user_input_recorded' AND e.sequence<=?",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_one(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_scalar(
+                "SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=$1 AND r.parent_run_id IS NULL AND e.kind='user_input_recorded' AND e.sequence<=$2",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_one(pool)
+            .await?,
+        };
+        let Some(sequence) = sequence else {
+            return Ok(String::new());
+        };
+        let refs = self.event_refs(&[sequence]).await?;
+        let Some(refs) = refs.get(&sequence) else {
+            return Ok(String::new());
+        };
+        let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
+        Ok(refs
+            .iter()
+            .filter_map(|(_, content_id)| contents.get(*content_id))
+            .map(|body| body.text().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
+    /// 完整可见输出：从块表按 sequence 顺序展开正文，模型轮次之间以空行分隔。
+    pub(super) async fn visible_output_text(
+        &self,
+        interaction_id: &str,
+        through: i64,
+    ) -> anyhow::Result<String> {
+        let blocks = self.visible_blocks(interaction_id, through).await?;
+        if blocks.is_empty() {
+            return Ok(String::new());
+        }
+        let sequences: Vec<i64> = blocks.iter().map(|block| block.sequence).collect();
+        let refs = self.event_refs(&sequences).await?;
+        let content_ids: Vec<i64> = refs
+            .values()
+            .flatten()
+            .map(|(_, content_id)| *content_id)
+            .collect();
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
+        let turns = self.model_turn_start_sequences(interaction_id, through).await?;
+        let mut output = String::new();
+        let mut current_turn: Option<i64> = None;
+        for block in blocks {
+            let bodies: Vec<_> = refs
+                .get(&block.sequence)
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, content_id)| contents.get(*content_id))
+                .collect();
+            let text = super::blocks::fill(
+                block.envelope.as_ref(),
+                &bodies,
+                super::blocks::BlockChannel::Visible,
+            )
+            .text;
+            if text.is_empty() {
+                continue;
+            }
+            let turn = turns
+                .get(&block.run_id)
+                .and_then(|starts| {
+                    starts
+                        .iter()
+                        .rev()
+                        .find(|start| **start < block.sequence)
+                        .copied()
+                })
+                .unwrap_or(0);
+            if let Some(previous) = current_turn
+                && previous != turn
+                && !output.ends_with(super::store::TURN_SEPARATOR)
+            {
+                output.push_str(super::store::TURN_SEPARATOR);
+            }
+            output.push_str(&text);
+            current_turn = Some(turn);
+        }
+        Ok(output)
+    }
+
+    async fn visible_blocks(
+        &self,
+        interaction_id: &str,
+        through: i64,
+    ) -> anyhow::Result<Vec<VisibleBlockRow>> {
+        let rows: Vec<(i64, String, Option<Vec<u8>>)> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT sequence,run_id,envelope FROM observation_blocks WHERE interaction_id=? AND channel='visible' AND sequence<=? ORDER BY sequence",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT sequence,run_id,envelope FROM observation_blocks WHERE interaction_id=$1 AND channel='visible' AND sequence<=$2 ORDER BY sequence",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+        };
+        rows.into_iter()
+            .map(|(sequence, run_id, envelope)| {
+                Ok(VisibleBlockRow {
+                    sequence,
+                    run_id,
+                    envelope: envelope
+                        .map(|bytes| -> anyhow::Result<Value> {
+                            Ok(serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?)
+                        })
+                        .transpose()?,
+                })
+            })
+            .collect()
+    }
+
+    /// 每个 Run 的 `model_turn_started` 序列；块按最近的轮次起点归组。
+    async fn model_turn_start_sequences(
+        &self,
+        interaction_id: &str,
+        through: i64,
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<i64>>> {
+        let rows: Vec<(Option<String>, i64)> = match self {
+            Self::Sqlite(pool, _) => sqlx::query_as(
+                "SELECT run_id,sequence FROM observation_events WHERE interaction_id=? AND kind='model_turn_started' AND sequence<=? ORDER BY sequence",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+            Self::Postgres(pool, _) => sqlx::query_as(
+                "SELECT run_id,sequence FROM observation_events WHERE interaction_id=$1 AND kind='model_turn_started' AND sequence<=$2 ORDER BY sequence",
+            )
+            .bind(interaction_id)
+            .bind(through)
+            .fetch_all(pool)
+            .await?,
+        };
+        let mut starts: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+        for (run_id, sequence) in rows {
+            if let Some(run_id) = run_id {
+                starts.entry(run_id).or_default().push(sequence);
+            }
+        }
+        Ok(starts)
+    }
+
+    /// 内容 → 引用它的 Interaction 列表，用于按主体做正文遮蔽和缓存版本。
+    pub(super) async fn content_interactions(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<std::collections::HashMap<i64, Vec<String>>> {
+        let mut owners: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for chunk in ids.chunks(400) {
+            let rows: Vec<(i64, String)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT ec.content_id,e.interaction_id FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE e.interaction_id IS NOT NULL AND ec.content_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    let mut rows = query.build_query_as::<(i64, String)>().fetch_all(pool).await?;
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT tr.content_id,e.interaction_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id IS NOT NULL AND tr.content_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    rows.extend(query.build_query_as::<(i64, String)>().fetch_all(pool).await?);
+                    rows
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT ec.content_id,e.interaction_id FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE e.interaction_id IS NOT NULL AND ec.content_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    let mut rows = query.build_query_as::<(i64, String)>().fetch_all(pool).await?;
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT tr.content_id,e.interaction_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id IS NOT NULL AND tr.content_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(")");
+                    rows.extend(query.build_query_as::<(i64, String)>().fetch_all(pool).await?);
+                    rows
+                }
+            };
+            for (content_id, interaction_id) in rows {
+                let owners = owners.entry(content_id).or_default();
+                if !owners.contains(&interaction_id) {
+                    owners.push(interaction_id);
+                }
+            }
+        }
+        Ok(owners)
+    }
+
+    /// 最新可见块展开后的正文；Bundle 摘要与列表输出摘要共用同一取数规则。
+    pub(super) async fn latest_visible_block_text(
+        &self,
+        interaction_id: &str,
+        through: i64,
+    ) -> anyhow::Result<String> {
+        let blocks = self.visible_blocks(interaction_id, through).await?;
+        let Some(block) = blocks.last() else {
+            return Ok(String::new());
+        };
+        let refs = self.event_refs(&[block.sequence]).await?;
+        let content_ids: Vec<i64> = refs
+            .get(&block.sequence)
+            .into_iter()
+            .flatten()
+            .map(|(_, content_id)| *content_id)
+            .collect();
+        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
+        let bodies: Vec<_> = refs
+            .get(&block.sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, content_id)| contents.get(*content_id))
+            .collect();
+        Ok(super::blocks::fill(
+            block.envelope.as_ref(),
+            &bodies,
+            super::blocks::BlockChannel::Visible,
+        )
+        .text)
+    }
+
+    /// 内容端点：只返回被 Observation 引用、属于可见 Interaction 的正文。
+    pub(super) async fn observation_contents(
+        &self,
+        ids: &[i64],
+    ) -> anyhow::Result<Vec<ObservationContent>> {
+        let mut by_id: std::collections::HashMap<i64, ObservationContent> =
+            std::collections::HashMap::new();
+        for chunk in ids.chunks(400) {
+            let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> = match self {
+                Self::Sqlite(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(
+                        ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
+                         OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))",
+                    );
+                    query.build_query_as().fetch_all(pool).await?
+                }
+                Self::Postgres(pool, _) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in chunk {
+                        separated.push_bind(*id);
+                    }
+                    separated.push_unseparated(
+                        ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
+                         OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))",
+                    );
+                    query.build_query_as().fetch_all(pool).await?
+                }
+            };
+            for (content_id, digest, format, raw_len, raw) in rows {
+                let raw = crate::storage_codec::decode(&raw)?.into_owned();
+                let format = stravia_runtime_contract::protocol::ir::content::ContentFormat::from_database_value(format)
+                    .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?;
+                let body = match format {
+                    stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => {
+                        Value::String(String::from_utf8(raw)?)
+                    }
+                    stravia_runtime_contract::protocol::ir::content::ContentFormat::Json => {
+                        serde_json::from_slice(&raw)?
+                    }
+                };
+                by_id.insert(
+                    content_id,
+                    ObservationContent {
+                        content_id,
+                        format: match format {
+                            stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => "text",
+                            stravia_runtime_contract::protocol::ir::content::ContentFormat::Json => "json",
+                        }
+                        .into(),
+                        raw_len,
+                        body,
+                        digest: digest
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("content digest is not 32 bytes"))?,
+                    },
+                );
+            }
+        }
+        let mut seen = HashSet::new();
+        Ok(ids
+            .iter()
+            .filter(|id| seen.insert(**id))
+            .filter_map(|id| by_id.remove(id))
+            .collect())
+    }
+}
+
+struct VisibleBlockRow {
+    sequence: i64,
+    run_id: String,
+    envelope: Option<Value>,
+}
+
+fn summary(
+    r: InteractionRow,
+    matched: bool,
+    input: ContentSummary,
+    output: ContentSummary,
+) -> InteractionSummary {
     InteractionSummary {
         context_events: Vec::new(),
         id: r.id,
@@ -2426,8 +3102,8 @@ fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
         status: r.status,
         started_at: r.started_at,
         last_active_at: r.last_active_at,
-        input_preview: r.input_preview,
-        visible_tail: r.visible_tail,
+        input,
+        output,
         failed_request: r.failed_request != 0,
         client_output_delivered: r.client_output_delivered != 0,
         usage: ConfirmedUsage {
@@ -2458,20 +3134,32 @@ fn rejection_summary(r: RejectionRow) -> RejectionSummary {
         debug_status: r.debug_status,
     }
 }
+fn decode_event_attrs(attrs: Option<&[u8]>) -> anyhow::Result<Value> {
+    Ok(match attrs {
+        Some(attrs) => serde_json::from_slice(&crate::storage_codec::decode(attrs)?)?,
+        None => Value::Object(serde_json::Map::new()),
+    })
+}
+
+fn content_body(content: Option<&Value>) -> CredentialDiscoveryBody {
+    match content {
+        Some(value) if !value.is_null() => CredentialDiscoveryBody::Retained(value.clone()),
+        _ => CredentialDiscoveryBody::NotRetained,
+    }
+}
+
 fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
-                sequence: r.try_get(0)?,
-                occurred_at: r.try_get(1)?,
-                interaction_id: r.try_get(2)?,
-                run_id: r.try_get(3)?,
-                rejection_id: r.try_get(4)?,
-                kind: r.try_get(5)?,
-                payload: serde_json::from_slice(&crate::storage_codec::decode(
-                    &r.try_get::<Vec<u8>, _>(6)?,
-                )?)?,
-            })
+            super::store::observation_event_from_row(
+                r.try_get(0)?,
+                r.try_get(1)?,
+                r.try_get(2)?,
+                r.try_get(3)?,
+                r.try_get(4)?,
+                r.try_get(5)?,
+                r.try_get(6)?,
+            )
         })
         .collect()
 }
@@ -2479,17 +3167,15 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
 fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
-                sequence: r.try_get(0)?,
-                occurred_at: r.try_get(1)?,
-                interaction_id: r.try_get(2)?,
-                run_id: r.try_get(3)?,
-                rejection_id: r.try_get(4)?,
-                kind: r.try_get(5)?,
-                payload: serde_json::from_slice(&crate::storage_codec::decode(
-                    &r.try_get::<Vec<u8>, _>(6)?,
-                )?)?,
-            })
+            super::store::observation_event_from_row(
+                r.try_get(0)?,
+                r.try_get(1)?,
+                r.try_get(2)?,
+                r.try_get(3)?,
+                r.try_get(4)?,
+                r.try_get(5)?,
+                r.try_get(6)?,
+            )
         })
         .collect()
 }
@@ -2543,7 +3229,6 @@ mod tests {
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
                     now: at,
-                    expires_at: i64::MAX,
                 })
                 .await?;
             store
@@ -2560,7 +3245,6 @@ mod tests {
                         generation_root_id: None,
                     },
                     at + 20,
-                    i64::MAX,
                     false,
                 )
                 .await?;
@@ -2581,7 +3265,6 @@ mod tests {
                     metadata: &metadata,
                     debug_enabled: false,
                     occurred_at: at,
-                    expires_at: i64::MAX,
                     started_at: at,
                     duration_ms: 0,
                 })
@@ -2689,7 +3372,6 @@ mod tests {
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
                     now: at,
-                    expires_at: i64::MAX,
                 })
                 .await?;
             if committed {
@@ -2714,7 +3396,6 @@ mod tests {
                         generation_root_id: None,
                     },
                     at + 10,
-                    i64::MAX,
                     false,
                 )
                 .await?;
@@ -2830,7 +3511,6 @@ mod tests {
                 diagnostic_source_run_id: None,
                 interrupt_parent: parent.is_some(),
                 now,
-                expires_at: i64::MAX,
             })
             .await?;
         Ok(())
@@ -2906,7 +3586,6 @@ mod tests {
                     estimated_input_tokens: None,
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         store
@@ -2925,7 +3604,6 @@ mod tests {
                     cost_basis: None,
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         store
@@ -2945,7 +3623,6 @@ mod tests {
                     },
                 },
                 at,
-                i64::MAX,
             )
             .await?;
         Ok(())
@@ -3017,7 +3694,6 @@ mod tests {
                         ),
                     },
                     2,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3099,7 +3775,7 @@ mod tests {
             },
         ] {
             store
-                .persist_run_event("known-input", "known-input", &event, 2, i64::MAX)
+                .persist_run_event("known-input", "known-input", &event, 2)
                 .await?;
         }
         store
@@ -3123,7 +3799,6 @@ mod tests {
                     amounts: None,
                 },
                 3,
-                i64::MAX,
             )
             .await?;
         // 已有数据库列的投影不能把真实交付时间替换成更晚的观测完成时间。
@@ -3131,13 +3806,13 @@ mod tests {
             ObservationStore::Sqlite(pool, _) => {
                 sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=13916,finished_at=14000 WHERE id='known-input'")
                     .execute(pool).await?;
-                map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
+                map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
                     .fetch_all(pool).await?)?
             }
             ObservationStore::Postgres(pool, _) => {
                 sqlx::query("UPDATE inference_run_observations SET delivery_completed_at=13916,finished_at=14000 WHERE id='known-input'")
                     .execute(pool).await?;
-                map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
+                map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE run_id='known-input' AND kind='target_attempt_finished'")
                     .fetch_all(pool).await?)?
             }
         };
@@ -3297,7 +3972,6 @@ mod tests {
                         estimated_input_tokens: estimate,
                     },
                     4,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3344,7 +4018,6 @@ mod tests {
                         cost_basis: None,
                     },
                     5,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3377,7 +4050,6 @@ mod tests {
                     },
                 },
                 6,
-                i64::MAX,
             )
             .await?;
         let page = store.query_forest(query.clone()).await?;
@@ -3401,7 +4073,6 @@ mod tests {
                     status: "failed".into(),
                 },
                 7,
-                i64::MAX,
             )
             .await?;
         assert_eq!(store.query_forest(query.clone()).await?.root_total, 0);
@@ -3423,7 +4094,6 @@ mod tests {
                     },
                 },
                 8,
-                i64::MAX,
             )
             .await?;
         let page = store.query_forest(query).await?;
@@ -3464,7 +4134,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 2,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -3531,7 +4200,6 @@ mod tests {
                         registration_id: id.clone(),
                     },
                     2,
-                    i64::MAX,
                 )
                 .await?;
         }
@@ -3880,7 +4548,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 150,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -4182,7 +4849,6 @@ mod tests {
                     estimated_input_tokens: None,
                 },
                 11,
-                i64::MAX,
             )
             .await?;
         let changed = store
@@ -4209,7 +4875,6 @@ mod tests {
                     status: "completed".into(),
                 },
                 12,
-                i64::MAX,
             )
             .await?;
         store
@@ -4226,7 +4891,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 13,
-                i64::MAX,
                 false,
             )
             .await?;
@@ -4300,7 +4964,6 @@ mod tests {
                     estimated_input_tokens: Some(9_000),
                 },
                 9_951,
-                i64::MAX,
             )
             .await?;
         admit_chain_node(
@@ -4438,7 +5101,6 @@ mod tests {
                     status: "completed".into(),
                 },
                 20_012,
-                i64::MAX,
             )
             .await?;
         store
@@ -4455,7 +5117,6 @@ mod tests {
                     generation_root_id: None,
                 },
                 20_012,
-                i64::MAX,
                 false,
             )
             .await?;

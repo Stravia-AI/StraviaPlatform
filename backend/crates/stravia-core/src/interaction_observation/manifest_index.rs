@@ -514,11 +514,11 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('completed-owner','test','completed-owner','initial','route','failed',100,1000,2000)")
+        sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('completed-owner','test','completed-owner','initial','route','failed',100,1000)")
             .execute(&pool).await.unwrap();
         for entry in index.list() {
             if let Some(run_id) = entry.run_id {
-                sqlx::query("INSERT OR IGNORE INTO inference_run_observations(id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES (?, 'completed-owner',NULL,'openai','route','failed',0,100,1000,2000)")
+                sqlx::query("INSERT OR IGNORE INTO inference_run_observations(id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES (?, 'completed-owner',NULL,'openai','route','failed',0,100,1000)")
                     .bind(run_id).execute(&pool).await.unwrap();
             }
         }

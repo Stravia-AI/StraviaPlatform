@@ -78,8 +78,8 @@ impl Database {
         first: i64,
     ) -> anyhow::Result<()> {
         let finished = turn_at + duration;
-        self.execute(format!("INSERT INTO interaction_observations (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('{id}','owner','key','Test key','{id}','{id}','route','completed',{run_at},{finished},9223372036854775807);
-INSERT INTO inference_run_observations (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence,expires_at) VALUES ('{id}','{id}','responses','route','completed',false,{run_at},{finished},{finished},0,9223372036854775807);
+        self.execute(format!("INSERT INTO interaction_observations (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('{id}','owner','key','Test key','{id}','{id}','route','completed',{run_at},{finished});
+INSERT INTO inference_run_observations (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence) VALUES ('{id}','{id}','responses','route','completed',false,{run_at},{finished},{finished},0);
 INSERT INTO model_turn_observations (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,finished_at,last_event_sequence) VALUES ('{id}','{id}','{id}','route','Test model','key','Test key','completed',{turn_at},{finished},0);
 INSERT INTO target_attempt_observations (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,first_token_ms,input_tokens,output_tokens,cache_read_tokens,usage_recorded,last_event_sequence) VALUES ('{id}','{id}','{id}','{id}','target','provider','Provider','upstream','responses','completed',{turn_at},{finished},{duration},{first},12,{output},5,true,0);" )).await
     }
@@ -237,10 +237,9 @@ async fn retention_and_failed_clear(
     observation: &ObservationStore,
 ) -> anyhow::Result<()> {
     let selected = window(START, START + 4 * QUARTER);
-    // The real retention setting recalculates expiry. No TTL shortening or wall-clock sleeps.
+    // 清理只由调用方给的截止时间决定，不依赖到期列，也不缩短 TTL 或真实等待。
     db.execute("UPDATE interaction_observations SET status='running' WHERE id='long'; UPDATE inference_run_observations SET status='running',finished_at=NULL WHERE id='long'").await?;
-    observation.update_retention(7).await?;
-    let cutoff = START + 3 * QUARTER + 7 * 86_400_000;
+    let cutoff = START + 3 * QUARTER;
     let batch = observation
         .purge_expired_batch(cutoff - 2 * QUARTER)
         .await?;
@@ -362,14 +361,14 @@ async fn retention_across_batches(
         db.seed(id, START, START, 1000, 2, 0).await?;
     }
     db.execute(
-        "UPDATE interaction_observations SET expires_at=1 WHERE id LIKE 'batch-%';
+        "UPDATE interaction_observations SET last_active_at=1 WHERE id LIKE 'batch-%';
 UPDATE interaction_observations SET status='running' WHERE id='batch-running';
 UPDATE interaction_observations SET status='waiting_client' WHERE id='batch-waiting';
-UPDATE interaction_observations SET expires_at=2 WHERE id='batch-fresh';",
+UPDATE interaction_observations SET last_active_at=2 WHERE id='batch-fresh';",
     )
     .await?;
     for index in 0..305 {
-        db.execute(format!("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,expires_at) VALUES ('batch-rejected-{index:04}',{START},'POST','/v1/responses','responses','admission','rejected',400,false,0,1)"))
+        db.execute(format!("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence) VALUES ('batch-rejected-{index:04}',1,'POST','/v1/responses','responses','admission','rejected',400,false,0)"))
             .await?;
     }
     let before = stats.stats_overview(StatsWindow::default()).await?;
@@ -430,8 +429,8 @@ async fn failed_parent_delete_restores_children_and_usage(
         Database::Postgres(_) => "decode('7b7d','hex')",
     };
     db.execute(format!(
-        "UPDATE interaction_observations SET expires_at=0 WHERE id='atomic-retention';
-INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (900000,0,'atomic-retention','atomic-retention','fixture',{payload},0);
+        "UPDATE interaction_observations SET last_active_at=0 WHERE id='atomic-retention';
+INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (900000,0,'atomic-retention','atomic-retention','fixture',{payload});
 INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES ('owner','atomic-tool','atomic-retention','atomic-retention',0);
 INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ('atomic-retention','atomic-retention','owner','fixture',0);"
     ))
@@ -546,7 +545,7 @@ async fn persist_batch(
         .map(|event| (event, None, BATCH))
         .collect();
     observation
-        .persist_ordered_run_events(run, run, &batch, &[], i64::MAX)
+        .persist_ordered_run_events(run, run, &batch, &[])
         .await?;
     Ok(())
 }
@@ -688,19 +687,18 @@ async fn ordered_batch_usage_and_billing(
             event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
         })
         .count();
-    assert_eq!(revisions, 2, "late confirmation must persist a revision");
+    // 迟到确认并入既有的结束事实，不再追加行；结束事实随之逐字段合并。
+    assert_eq!(revisions, 1, "late confirmation revises the finish fact in place");
     let revised = split.runs[0]
         .events
         .iter()
-        .rev()
         .find(|event| {
             event.kind == "target_attempt_finished" && event.payload["attempt_id"] == "batch-split"
         })
         .unwrap();
-    // Management reads project input to net input, which needs a known cache
-    // read; this revision leaves cache read unknown and keeps the prior zero.
-    assert!(revised.payload["usage"]["input_tokens"].is_null());
+    assert_eq!(revised.payload["usage"]["input_tokens"], 15);
     assert_eq!(revised.payload["usage"]["output_tokens"], 9);
+    assert_eq!(revised.payload["usage"]["cache_read_tokens"], 0);
     assert_eq!(revised.payload["usage"]["cache_write_tokens"], 2);
 
     let after = stats.stats_overview(selected).await?;
