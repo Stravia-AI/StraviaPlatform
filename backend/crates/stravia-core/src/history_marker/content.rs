@@ -47,12 +47,8 @@ pub(crate) fn encode_segment(segment: &HiddenHistorySegment) -> anyhow::Result<S
             continue;
         }
         let (format, raw, text) = match unit.body {
-            ContentUnitBody::Text(text) => {
-                (ContentFormat::Text, text.as_bytes().to_vec(), true)
-            }
-            ContentUnitBody::Json(_) => {
-                (ContentFormat::Json, serde_json::to_vec(&*target)?, false)
-            }
+            ContentUnitBody::Text(text) => (ContentFormat::Text, text.as_bytes().to_vec(), true),
+            ContentUnitBody::Json(_) => (ContentFormat::Json, serde_json::to_vec(&*target)?, false),
         };
         let digest = content_store::content_digest(format, &raw);
         let ordinal = match index.get(&digest) {

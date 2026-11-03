@@ -557,7 +557,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: std::time::Duration::from_secs(60),
-                    pending_retention: std::time::Duration::from_secs(3600),
                 },
             )
             .await
@@ -952,7 +951,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: std::time::Duration::from_secs(60),
-                    pending_retention: std::time::Duration::from_secs(3600),
                 },
             )
             .await

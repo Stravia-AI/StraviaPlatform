@@ -160,11 +160,7 @@ async fn assert_abandoned_inference_delivery(cancel: bool) {
         .unwrap();
     gateway
         .history_markers
-        .publish(
-            &principal,
-            std::slice::from_ref(&marker.reference),
-            std::time::Duration::from_secs(3600),
-        )
+        .publish(&principal, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let delivery = gateway.start_history_marker_executions(principal.clone(), vec![execution]);
@@ -272,11 +268,7 @@ async fn marker_delivery_persistence_failure_returns_to_owning_inference_run() {
         .unwrap();
     gateway
         .history_markers
-        .publish(
-            &principal,
-            std::slice::from_ref(&marker.reference),
-            std::time::Duration::from_secs(3600),
-        )
+        .publish(&principal, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     sqlx::query(
@@ -372,11 +364,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
         .unwrap();
     gateway
         .history_markers
-        .publish(
-            &principal,
-            std::slice::from_ref(&marker.reference),
-            std::time::Duration::from_secs(3600),
-        )
+        .publish(&principal, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let delivery = gateway.start_history_marker_executions(principal.clone(), vec![execution]);

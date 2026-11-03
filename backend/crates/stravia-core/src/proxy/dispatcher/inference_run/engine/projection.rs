@@ -312,9 +312,6 @@ impl UploadProjection {
     }
 }
 
-const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
-const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PreviewCarrier {
     Unindexed,
@@ -933,9 +930,7 @@ impl ClientProjectionSession {
     }
 
     async fn publish(&self, references: &[String]) -> Result<(), HistoryMarkerError> {
-        self.marker_store
-            .publish(&self.principal, references, PUBLISHED_MARKER_RETENTION)
-            .await
+        self.marker_store.publish(&self.principal, references).await
     }
 
     /// Whether the current Model Leg's client output has been committed.
@@ -1919,7 +1914,6 @@ impl ClientProjectionSession {
             block,
             source,
             activity: "Preserving protected reasoning".into(),
-            pending_retention: THINKING_MARKER_PENDING_RETENTION,
         };
         if let Some(reserved) = reserved {
             self.marker_store
@@ -4508,7 +4502,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: Duration::from_secs(30),
-                    pending_retention: Duration::from_secs(60),
                 },
             )
             .await
@@ -4554,7 +4547,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: Duration::from_secs(30),
-                    pending_retention: Duration::from_secs(60),
                 },
             )
             .await

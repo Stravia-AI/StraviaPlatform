@@ -430,14 +430,12 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         Some("upstream_eof".into()),
         None,
     );
-    // Advance beyond pending retention, without sleeping or touching the record
-    // through resolve (which would itself renew it).
-    sqlx::query("UPDATE native_compactions SET expires_at = expires_at - $1")
-        .bind(2_i64 * 60 * 60 * 1000)
-        .execute(&pool)
+    // 越过 1 小时 pending 窗口但远小于保留天数：只靠 `now` 推进时间，不改写存储。
+    let two_hours = chrono::Utc::now().timestamp_millis() + 2 * 60 * 60 * 1000;
+    compaction
+        .sweep(two_hours, std::time::Duration::from_secs(7 * 24 * 60 * 60))
         .await
         .unwrap();
-    compaction.cleanup_expired().await.unwrap();
     let resumed = compaction
         .resolve(&principal, &states[..1])
         .await

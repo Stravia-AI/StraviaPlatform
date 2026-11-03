@@ -198,10 +198,7 @@ pub(crate) fn restore_slots(
         *target = match &slot.kind {
             SlotKind::Json => body,
             SlotKind::Text => {
-                ensure!(
-                    matches!(body, Value::String(_)),
-                    "content slot is not text"
-                );
+                ensure!(matches!(body, Value::String(_)), "content slot is not text");
                 body
             }
             SlotKind::Concat { prefix, suffix } => {

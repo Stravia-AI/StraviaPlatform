@@ -805,7 +805,6 @@ mod tests {
         let backend = Arc::new(crate::turn_chain::test_store().await);
         let chain = crate::generation_chain::GenerationChain::from_turn_chain(
             backend.clone(),
-            ttl,
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
         )
@@ -849,7 +848,6 @@ mod tests {
                         call: call.clone(),
                         activity: "Searching".into(),
                         execution_limit: ttl,
-                        pending_retention: ttl,
                     },
                 )
                 .await
@@ -869,7 +867,7 @@ mod tests {
                 .await
                 .unwrap();
             markers
-                .publish(&owner, std::slice::from_ref(&marker.reference), ttl)
+                .publish(&owner, std::slice::from_ref(&marker.reference))
                 .await
                 .unwrap();
 
@@ -925,7 +923,6 @@ mod tests {
         // A fresh cache forces the persisted delta/materialization path.
         let cold = crate::generation_chain::GenerationChain::from_turn_chain(
             backend,
-            ttl,
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
         )

@@ -45,7 +45,10 @@ use format2::{put_postgres_prepared, put_sqlite_prepared};
 
 mod format2;
 mod normalize;
+mod retention;
 pub(super) mod v3_content;
+
+pub(crate) use retention::{retention_postgres, retention_sqlite};
 
 /// Startup hook after migration 0032 and before migration 0033.
 pub(crate) async fn normalize_sqlite(

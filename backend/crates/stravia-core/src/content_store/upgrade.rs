@@ -40,9 +40,7 @@ struct NodeWork {
 }
 
 /// SQLite 钩子：先以开启外键的会话改表名，再转换数据。
-pub(crate) async fn run_sqlite(
-    connection: &mut sqlx::SqliteConnection<'_>,
-) -> anyhow::Result<()> {
+pub(crate) async fn run_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> anyhow::Result<()> {
     sqlite_rename::rename_scopes(connection).await?;
     sqlite::convert_nodes(connection).await?;
     sqlite::convert_markers(connection).await?;
@@ -508,7 +506,7 @@ backend!(sqlite, sqlx::Sqlite, sqlx::SqliteConnection<'_>);
 backend!(postgres, sqlx::Postgres, sqlx::PgConnection<'_>);
 
 mod sqlite_rename {
-    use anyhow::{ensure, Context};
+    use anyhow::{Context, ensure};
 
     /// SQLite 在 foreign_keys=OFF 时不会改写子表 REFERENCES，因此改表名必须在
     /// 开启外键的短会话内完成；随后恢复 OFF，交给迁移 runner 收尾。
@@ -548,4 +546,3 @@ mod sqlite_rename {
         Ok(())
     }
 }
-

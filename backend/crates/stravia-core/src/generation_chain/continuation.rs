@@ -1,5 +1,6 @@
 use super::*;
 use crate::router::{ContinuationLookup, ContinuationTarget};
+use std::time::Duration;
 
 /// Trusted request-local evidence; never constructed from client-writable IR.
 /// Only continuation metadata is retained, not the materialized history.

@@ -1343,14 +1343,13 @@ mod tests {
     #[tokio::test]
     async fn received_prefix_reconstructs_real_generation_input_without_output_or_graph_metadata() {
         use crate::generation_chain::{GenerationChain, GenerationSource};
-        use std::{sync::Arc, time::Duration};
+        use std::sync::Arc;
         use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
         use stravia_runtime_contract::protocol::ir::AiResponse;
 
         let backend = Arc::new(crate::turn_chain::test_store().await);
         let chain = GenerationChain::from_turn_chain(
             backend.clone(),
-            Duration::from_secs(60),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
         );
@@ -1388,7 +1387,6 @@ mod tests {
 
         let restarted = GenerationChain::from_turn_chain(
             backend,
-            Duration::from_secs(60),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
         );

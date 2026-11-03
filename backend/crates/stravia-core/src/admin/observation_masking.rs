@@ -480,7 +480,6 @@ mod tests {
                 .map(|secret| Mapping {
                     reference: format!("ref-{secret}"),
                     secret: secret.clone(),
-                    expires_at: i64::MAX,
                     rule_ids: Vec::new().into(),
                 })
                 .collect())
@@ -506,22 +505,16 @@ mod tests {
             &self,
             _principal: &Principal,
             _references: &[String],
-            _retention: std::time::Duration,
         ) -> Result<(), RedactionError> {
             unimplemented!("masker never publishes mappings")
         }
 
-        async fn extend_retention(
+        async fn sweep(
             &self,
-            _principal: &Principal,
-            _references: &[String],
+            _now: i64,
             _retention: std::time::Duration,
-        ) -> Result<(), RedactionError> {
-            unimplemented!("masker never extends mappings")
-        }
-
-        async fn cleanup_expired(&self) -> Result<u64, RedactionError> {
-            unimplemented!("masker never cleans mappings")
+        ) -> Result<u64, RedactionError> {
+            unimplemented!("masker never sweeps mappings")
         }
 
         async fn plaintext(&self, _reference: &str) -> Result<Option<String>, RedactionError> {
@@ -1010,22 +1003,17 @@ mod tests {
         assert!(!store.any_active().await?);
 
         let now = chrono::Utc::now().timestamp_millis();
-        for (reference, principal, expires_at) in [
-            ("ref-owner", "api-key:owner", now + 60_000),
-            ("ref-other", "api-key:other", now - 1),
-        ] {
-            sqlx::query(
-                "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,updated_at,expires_at) VALUES (?,?,?,?,?,?)",
-            )
-            .bind(reference)
-            .bind(principal)
-            .bind(PLAINTEXT)
-            .bind(now)
-            .bind(now)
-            .bind(expires_at)
-            .execute(&pool)
-            .await?;
-        }
+        sqlx::query(
+            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,updated_at,pending_until) VALUES (?,?,?,?,?,?)",
+        )
+        .bind("ref-owner")
+        .bind("api-key:owner")
+        .bind(PLAINTEXT)
+        .bind(now)
+        .bind(now)
+        .bind(now + 60_000)
+        .execute(&pool)
+        .await?;
         assert!(store.any_active().await?);
 
         let ids = vec!["interaction".to_owned(), "other".to_owned()];
@@ -1043,12 +1031,12 @@ mod tests {
         let mut owned = summary("interaction", PLAINTEXT);
         masker.mask_summary(&mut owned);
         assert_eq!(owned.visible_tail, "tail ***");
-        let mut expired = summary("other", PLAINTEXT);
-        masker.mask_summary(&mut expired);
+        let mut unmapped = summary("other", PLAINTEXT);
+        masker.mask_summary(&mut unmapped);
         assert_eq!(
-            expired.visible_tail,
+            unmapped.visible_tail,
             format!("tail {PLAINTEXT}"),
-            "expired mappings are no longer restorable and are not masked"
+            "没有映射的主体不应被遮蔽"
         );
         Ok(())
     }

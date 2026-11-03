@@ -318,7 +318,6 @@ impl Gateway {
                     call: call.clone(),
                     activity: tool.activity_label().to_owned(),
                     execution_limit: remaining,
-                    pending_retention: retention,
                 },
             )
             .await

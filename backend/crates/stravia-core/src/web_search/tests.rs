@@ -352,7 +352,6 @@ async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
         local.clone(),
         external.clone(),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let events = runner
@@ -383,7 +382,6 @@ async fn runner_is_lazy_and_drop_cancels_the_request_owned_run() {
         backend.clone(),
         backend.clone(),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let cancellation = CancellationToken::new();
@@ -413,7 +411,6 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
         backend,
         Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let mut stream = runner.run(WebSearchInput {
@@ -463,7 +460,6 @@ async fn external_uses_the_request_deadline_instead_of_saved_local_time_limit() 
         Arc::new(CountingBackend::local()),
         Arc::new(CountingBackend::delayed_external(Duration::from_millis(20))),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
 
@@ -505,7 +501,6 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         local.clone(),
         external.clone(),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let principal = Principal::new("owner");
@@ -592,7 +587,6 @@ async fn continuation_is_principal_scoped_and_never_uses_an_implicit_latest_turn
         backend.clone(),
         Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let root = completed(runner.run(WebSearchInput {
@@ -709,7 +703,6 @@ async fn continuation_report_cannot_relax_the_inherited_allowed_domains() {
         backend.clone(),
         Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let principal = Principal::new("owner");
@@ -811,7 +804,6 @@ async fn backend_failure_does_not_commit_a_search_turn() {
         Arc::new(FailingBackend),
         Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let principal = Principal::new("owner");
@@ -944,8 +936,8 @@ impl TurnChainStore for BlockingCommitStore {
         futures::future::pending().await
     }
 
-    async fn sweep_expired(&self) -> Result<u64, TurnUnavailable> {
-        self.inner.sweep_expired().await
+    async fn sweep_history(&self, now: i64) -> Result<u64, TurnUnavailable> {
+        self.inner.sweep_history(now).await
     }
 }
 
@@ -962,7 +954,6 @@ async fn cancellation_while_committing_does_not_create_a_search_turn() {
         backend.clone(),
         backend,
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(stravia_web_search::AllowSearchRun),
     );
     let cancellation = CancellationToken::new();
@@ -1013,7 +1004,6 @@ fn pending_runner(
         Arc::new(PendingBackend),
         Arc::new(CountingBackend::external()),
         Arc::new(SearchReportValidator),
-        Duration::from_secs(7 * 24 * 60 * 60),
         authorizer,
     )
 }

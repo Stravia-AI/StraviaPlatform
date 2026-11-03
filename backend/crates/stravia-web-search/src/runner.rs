@@ -245,7 +245,6 @@ pub struct WebSearchRunner {
     local: Arc<dyn SearchBackend>,
     external: Arc<dyn SearchBackend>,
     validator: Arc<SearchReportValidator>,
-    turn_ttl: Duration,
     authorizer: Arc<dyn SearchRunAuthorizer>,
 }
 
@@ -256,7 +255,6 @@ impl WebSearchRunner {
         local: Arc<dyn SearchBackend>,
         external: Arc<dyn SearchBackend>,
         validator: Arc<SearchReportValidator>,
-        turn_ttl: Duration,
         authorizer: Arc<dyn SearchRunAuthorizer>,
     ) -> Self {
         Self {
@@ -265,7 +263,6 @@ impl WebSearchRunner {
             local,
             external,
             validator,
-            turn_ttl,
             authorizer,
         }
     }
@@ -595,7 +592,9 @@ impl WebSearchRunner {
             payload: serde_json::to_value(&payload).map_err(|_| {
                 WebSearchError::new("storage_failed", "Search Turn could not be encoded")
             })?,
-            idle_ttl: self.turn_ttl,
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         });
         self.await_stage(&input, &snapshot.backend, deadline, events, commit, |_| {

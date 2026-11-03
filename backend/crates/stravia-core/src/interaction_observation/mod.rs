@@ -377,17 +377,34 @@ impl InteractionObservation {
             .store(partial, Ordering::Release);
         Ok(result)
     }
+    #[cfg(test)]
     pub(crate) async fn sweep_retention(&self) -> anyhow::Result<()> {
         self.sweep().await
     }
+
+    /// 统一历史扫描入口。观察保留期暂由写入侧配置驱动，`retention` 在
+    /// Observation 写入侧切换后接管；`now` 保证与其他域同一轮扫描。
+    pub(crate) async fn sweep_history(
+        &self,
+        now: i64,
+        _retention: std::time::Duration,
+    ) -> anyhow::Result<u64> {
+        self.sweep_at(now).await
+    }
+
+    async fn sweep(&self) -> anyhow::Result<()> {
+        self.sweep_at(chrono::Utc::now().timestamp_millis())
+            .await
+            .map(|_| ())
+    }
+
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.maintenance.sweep",
         skip_all
     )]
-    async fn sweep(&self) -> anyhow::Result<()> {
+    async fn sweep_at(&self, now: i64) -> anyhow::Result<u64> {
         self.flush().await?;
-        let now = chrono::Utc::now().timestamp_millis();
         let ids = self.inner.store.mark_expired_tombstones(now).await?;
         let mut deleted = Vec::new();
         for id in ids {
@@ -417,7 +434,7 @@ impl InteractionObservation {
         self.inner
             .partial_trace_count
             .store(partial, Ordering::Release);
-        Ok(())
+        Ok(u64::try_from(deleted.len()).unwrap_or(u64::MAX))
     }
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();

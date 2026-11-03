@@ -7,7 +7,6 @@ pub struct GatewayBuilder {
     tools: Vec<Arc<dyn PlatformTool>>,
     mcp_tools: Vec<Arc<dyn McpTool>>,
     agent_definitions: Vec<stravia_runtime_contract::agent::AgentDefinitionSpec>,
-    generation_chain_ttl: Duration,
 }
 
 impl GatewayBuilder {
@@ -19,7 +18,6 @@ impl GatewayBuilder {
             tools: Vec::new(),
             mcp_tools: Vec::new(),
             agent_definitions: Vec::new(),
-            generation_chain_ttl: Duration::from_secs(7 * 24 * 60 * 60),
         }
     }
 
@@ -50,11 +48,6 @@ impl GatewayBuilder {
         self
     }
 
-    pub fn generation_chain_ttl(mut self, ttl: Duration) -> Self {
-        self.generation_chain_ttl = ttl;
-        self
-    }
-
     pub async fn build(self) -> anyhow::Result<Gateway> {
         let Self {
             config,
@@ -63,7 +56,6 @@ impl GatewayBuilder {
             tools,
             mcp_tools,
             agent_definitions,
-            generation_chain_ttl,
         } = self;
         let mut gateway = if let Some(storage) = storage {
             Gateway::from_storage(config, storage).await?
@@ -72,10 +64,10 @@ impl GatewayBuilder {
         };
         gateway.generation_chains = generation_chain::GenerationChain::from_turn_chain(
             Arc::clone(&gateway.turn_chains),
-            generation_chain_ttl,
             gateway.artifact_store.clone(),
             gateway.runtime_cache.clone(),
         )
+        .with_retention(gateway.retention.clone())
         .with_history_markers(Arc::clone(&gateway.history_markers))
         .with_redaction_mappings(Arc::clone(&gateway.redaction.mappings));
         gateway.install_model_turn();

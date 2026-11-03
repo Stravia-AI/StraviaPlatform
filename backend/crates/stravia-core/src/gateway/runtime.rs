@@ -317,15 +317,16 @@ impl Gateway {
             paths.catalog_root(),
             config.catalog_base_url.clone(),
         )?;
-        let retention_days = match storage.settings().get("log_retention_days").await {
-            Ok(value) => value
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(7),
+        let retention_setting = match storage.settings().get("log_retention_days").await {
+            Ok(value) => value,
             Err(_) => {
-                tracing::warn!("observation retention setting unavailable; using seven days");
-                7
+                tracing::warn!("history retention setting unavailable; using the default");
+                None
             }
         };
+        let retention =
+            crate::history_retention::HistoryRetention::from_setting(retention_setting.as_deref());
+        let retention_days = retention.days();
         let turn_chains = if let Some(pool) = history_sqlite_pool.as_ref() {
             turn_chain::SqlTurnChainStore::sqlite(pool.clone())
         } else {
@@ -335,7 +336,9 @@ impl Gateway {
                     .expect("Gateway requires a SQL history store")
                     .clone(),
             )
-        };
+        }
+        .with_retention(retention.clone());
+        let history_content = turn_chains.content_gc();
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
             Arc::new(turn_chains);
         let history_markers: Arc<dyn history_marker::HistoryMarkerStore> =
@@ -455,10 +458,10 @@ impl Gateway {
         };
         let generation_chains = generation_chain::GenerationChain::from_turn_chain(
             Arc::clone(&turn_chains),
-            Duration::from_secs(7 * 24 * 60 * 60),
             artifact_store.clone(),
             runtime_cache.clone(),
         )
+        .with_retention(retention.clone())
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_mappings(Arc::clone(&redaction.mappings))
         .with_compaction(compaction.clone());
@@ -538,6 +541,8 @@ impl Gateway {
             route_policy_state: router::RoutePolicyState::new(runtime_cache),
             custom_currency: Arc::new(parking_lot::RwLock::new(custom_currency.map(Arc::new))),
             observation,
+            retention: retention.clone(),
+            history_content,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
             artifact_store,
@@ -784,12 +789,8 @@ impl Gateway {
         }
 
         {
-            let turn_chains = Arc::clone(&gw.turn_chains);
-            let compaction = gw.compaction.clone();
-            let history_markers = Arc::clone(&gw.history_markers);
-            let mappings = Arc::clone(&gw.redaction.mappings);
+            let maintenance = gw.history_maintenance();
             let artifact_store = gw.artifact_store.clone();
-            let observation = gw.observation.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
             gw.lifecycle.spawn(async move {
                 let mut interval = tokio::time::interval(STORE_SWEEP_INTERVAL);
@@ -799,42 +800,13 @@ impl Gateway {
                         _ = interval.tick() => {}
                     }
 
-                    let observation_result = tokio::select! {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let sweep = tokio::select! {
                         _ = cancellation.cancelled() => return,
-                        result = observation.sweep_retention() => result,
+                        result = maintenance.sweep_history(now) => result,
                     };
-                    if observation_result.is_err() {
-                        tracing::warn!("observation retention cleanup incomplete");
-                    }
-
-                    let compaction_result = tokio::select! {
-                        _ = cancellation.cancelled() => return,
-                        result = compaction.cleanup_expired() => result,
-                    };
-                    if compaction_result.is_err() {
-                        tracing::warn!("native compaction retention cleanup failed");
-                    }
-                    let turn_result = tokio::select! {
-                        _ = cancellation.cancelled() => return,
-                        result = turn_chains.sweep_expired() => result,
-                    };
-                    if let Err(error) = turn_result {
-                        tracing::warn!(error = ?error, "turn chain ttl cleanup failed");
-                    }
-
-                    let marker_result = tokio::select! {
-                        _ = cancellation.cancelled() => return,
-                        result = history_markers.cleanup_expired() => result,
-                    };
-                    if let Err(error) = marker_result {
-                        tracing::warn!(error = ?error, "history marker ttl cleanup failed");
-                    }
-                    let mapping_result = tokio::select! {
-                        _ = cancellation.cancelled() => return,
-                        result = mappings.cleanup_expired() => result,
-                    };
-                    if mapping_result.is_err() {
-                        tracing::warn!("reversible redaction retention cleanup failed");
+                    if let Err(error) = sweep {
+                        tracing::warn!(error = ?error, "history retention sweep failed");
                     }
 
                     if let Some(artifact_store) = artifact_store.as_ref() {
@@ -855,6 +827,29 @@ impl Gateway {
 
     pub fn admin(&self) -> admin::AdminService {
         admin::AdminService::new(self.clone())
+    }
+
+    pub(crate) fn retention(&self) -> &crate::history_retention::HistoryRetention {
+        &self.retention
+    }
+
+    pub(crate) fn history_maintenance(&self) -> crate::history_retention::HistoryMaintenance {
+        crate::history_retention::HistoryMaintenance {
+            retention: self.retention.clone(),
+            observation: self.observation.clone(),
+            turn_chain: Arc::clone(&self.turn_chains),
+            history_markers: Arc::clone(&self.history_markers),
+            mappings: Arc::clone(&self.redaction.mappings),
+            compaction: self.compaction.clone(),
+            content: self.history_content.clone(),
+        }
+    }
+
+    /// 设置保存后立即执行一轮扫描，让调小 N 立即生效。
+    pub(crate) async fn sweep_history(&self) -> anyhow::Result<u64> {
+        self.history_maintenance()
+            .sweep_history(chrono::Utc::now().timestamp_millis())
+            .await
     }
 
     /// Replace the in-memory currency snapshot after the management write has

@@ -11,10 +11,18 @@ const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
 macro_rules! unreferenced {
     ($c:literal) => {
         concat!(
-            "NOT EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=", $c, ")",
-            " AND NOT EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=", $c, ")",
-            " AND NOT EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=", $c, ")",
-            " AND NOT EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=", $c, ")"
+            "NOT EXISTS(SELECT 1 FROM turn_node_contents r WHERE r.content_id=",
+            $c,
+            ")",
+            " AND NOT EXISTS(SELECT 1 FROM history_marker_contents r WHERE r.content_id=",
+            $c,
+            ")",
+            " AND NOT EXISTS(SELECT 1 FROM observation_event_contents r WHERE r.content_id=",
+            $c,
+            ")",
+            " AND NOT EXISTS(SELECT 1 FROM observation_tool_results r WHERE r.content_id=",
+            $c,
+            ")"
         )
     };
 }

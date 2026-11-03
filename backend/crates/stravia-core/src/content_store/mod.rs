@@ -20,16 +20,15 @@ use sqlx::{PgPool, SqlitePool};
 use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 
 mod descriptor;
-pub(crate) mod sql;
-pub(crate) mod upgrade;
 #[cfg(test)]
 mod shared_tests;
+pub(crate) mod sql;
 #[cfg(test)]
 mod tests;
+pub(crate) mod upgrade;
 
 pub(crate) use descriptor::{
-    Descriptor, Slot, decode_descriptor, encode_descriptor, restore_slots,
-    validate_slots,
+    Descriptor, Slot, decode_descriptor, encode_descriptor, restore_slots, validate_slots,
 };
 
 // 对外稳定名称：content_store::sqlite::… 与 content_store::postgres::…。
@@ -81,21 +80,25 @@ impl Content {
     #[allow(dead_code)]
     pub(crate) fn text(text: impl Into<String>) -> Self {
         let raw = text.into().into_bytes();
-        Self::with_digest(content_digest(ContentFormat::Text, &raw), ContentFormat::Text, raw)
+        Self::with_digest(
+            content_digest(ContentFormat::Text, &raw),
+            ContentFormat::Text,
+            raw,
+        )
     }
 
     /// JSON 正文构造器；`raw` 必须是紧凑 JSON 字节。
     #[allow(dead_code)]
     pub(crate) fn json(raw: Vec<u8>) -> Self {
-        Self::with_digest(content_digest(ContentFormat::Json, &raw), ContentFormat::Json, raw)
+        Self::with_digest(
+            content_digest(ContentFormat::Json, &raw),
+            ContentFormat::Json,
+            raw,
+        )
     }
 
     /// 由调用方已计算的摘要构造，避免对同一批字节再次哈希。
-    pub(crate) fn with_digest(
-        digest: ContentDigest,
-        format: ContentFormat,
-        raw: Vec<u8>,
-    ) -> Self {
+    pub(crate) fn with_digest(digest: ContentDigest, format: ContentFormat, raw: Vec<u8>) -> Self {
         let raw_len = i64::try_from(raw.len()).unwrap_or(i64::MAX);
         Self {
             digest,
@@ -167,10 +170,7 @@ pub(crate) async fn prepare_missing(
     contents: &mut [Content],
     ids: &[Option<i64>],
 ) -> anyhow::Result<()> {
-    ensure!(
-        contents.len() == ids.len(),
-        "content id count mismatch"
-    );
+    ensure!(contents.len() == ids.len(), "content id count mismatch");
     let pending: Vec<_> = contents
         .iter_mut()
         .zip(ids)
@@ -225,9 +225,7 @@ impl DigestPositions {
     }
 
     fn observe(&self, ids: &mut [Option<i64>], digest: &[u8], id: i64) -> anyhow::Result<()> {
-        let digest: ContentDigest = digest
-            .try_into()
-            .context("invalid stored content digest")?;
+        let digest: ContentDigest = digest.try_into().context("invalid stored content digest")?;
         if let Some(index) = self.first.get(&digest) {
             ids[*index] = Some(id);
             if let Some(indices) = self.duplicates.get(&digest) {
