@@ -304,9 +304,7 @@ impl SqlHistoryMarkerStore {
                     super::payload::sqlite::intern_segment(&mut transaction, principal, payload)
                         .await
                         .map_err(segment_storage)?;
-                super::payload::sqlite::replace_refs(&mut transaction, reference, &ids)
-                    .await
-                    .map_err(segment_storage)?;
+                // 先更新 Marker 行、再替换正文引用：与回收一致，先锁 Marker 行、后锁正文行。
                 let updated = sqlx::query(
                     "UPDATE history_markers SET execution_state = ?, segment_payload = ?, \
                      execution_owner = NULL, lease_expires_at = NULL, updated_at = ? \
@@ -328,6 +326,9 @@ impl SqlHistoryMarkerStore {
                 .map_err(storage)?
                 .rows_affected();
                 if updated == 1 {
+                    super::payload::sqlite::replace_refs(&mut transaction, reference, &ids)
+                        .await
+                        .map_err(segment_storage)?;
                     transaction.commit().await.map_err(storage)?;
                 } else {
                     transaction.rollback().await.map_err(storage)?;
@@ -340,9 +341,7 @@ impl SqlHistoryMarkerStore {
                     super::payload::postgres::intern_segment(&mut transaction, principal, payload)
                         .await
                         .map_err(segment_storage)?;
-                super::payload::postgres::replace_refs(&mut transaction, reference, &ids)
-                    .await
-                    .map_err(segment_storage)?;
+                // 先更新 Marker 行、再替换正文引用：与回收一致，先锁 Marker 行、后锁正文行。
                 let updated = sqlx::query(
                     "UPDATE history_markers SET execution_state = $1, segment_payload = $2, \
                      execution_owner = NULL, lease_expires_at = NULL, updated_at = $3 \
@@ -362,6 +361,9 @@ impl SqlHistoryMarkerStore {
                 .map_err(storage)?
                 .rows_affected();
                 if updated == 1 {
+                    super::payload::postgres::replace_refs(&mut transaction, reference, &ids)
+                        .await
+                        .map_err(segment_storage)?;
                     transaction.commit().await.map_err(storage)?;
                 } else {
                     transaction.rollback().await.map_err(storage)?;
@@ -628,23 +630,41 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
     }
 
     async fn recover_public_executions(&self) -> Result<(), HistoryMarkerError> {
-        let interrupted: Vec<(String, String)> = backend!(self, pool, {
-            let mut connection = pool.acquire_write().await.map_err(storage)?;
-            // Reuse the existing stale-owner transition and payload construction.
-            // No owner from another process may finish or reclaim these markers.
-            let interrupted = sqlx::query_as(
-                "UPDATE history_markers SET execution_state = 'running', lease_expires_at = 0, \
-                 execution_owner = NULL WHERE execution_state IN ('pending', 'running') \
-                 AND reference IN (SELECT marker_reference FROM public_tool_executions WHERE process_id <> $1) \
-                 RETURNING principal, reference",
-            )
-            .bind(process_id())
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(storage)?;
-            connection.finish().await.map_err(storage)?;
-            interrupted
-        });
+        macro_rules! recover {
+            ($pool:expr, $begin:literal, $lock:expr) => {{
+                let mut connection = $pool.acquire_write().await.map_err(storage)?;
+                let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
+                // 多行更新 Marker：PostgreSQL 上与回收事务互斥（共享模式），行锁顺序不与
+                // 回收的释放触发器交叉。
+                if !$lock.is_empty() {
+                    sqlx::query($lock)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(storage)?;
+                }
+                // Reuse the existing stale-owner transition and payload construction.
+                // No owner from another process may finish or reclaim these markers.
+                let interrupted: Vec<(String, String)> = sqlx::query_as(
+                    "UPDATE history_markers SET execution_state = 'running', lease_expires_at = 0, \
+                     execution_owner = NULL WHERE execution_state IN ('pending', 'running') \
+                     AND reference IN (SELECT marker_reference FROM public_tool_executions WHERE process_id <> $1) \
+                     RETURNING principal, reference",
+                )
+                .bind(process_id())
+                .fetch_all(&mut *transaction)
+                .await
+                .map_err(storage)?;
+                transaction.commit().await.map_err(storage)?;
+                connection.finish().await.map_err(storage)?;
+                interrupted
+            }};
+        }
+        let interrupted: Vec<(String, String)> = match self {
+            Self::Sqlite(pool) => recover!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Postgres(pool) => {
+                recover!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+            }
+        };
         for (principal, reference) in interrupted {
             self.interrupt_if_stale(&principal, &reference).await?;
         }
@@ -921,9 +941,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 )
                 .await
                 .map_err(segment_storage)?;
-                super::payload::sqlite::replace_refs(&mut transaction, reference, &ids)
-                    .await
-                    .map_err(segment_storage)?;
+                // 先更新 Marker 行、再替换正文引用（与回收的锁序一致）。
                 let updated = sqlx::query(
                 "UPDATE history_markers SET execution_state = ?, segment_payload = ?, \
          execution_owner = NULL, lease_expires_at = NULL, updated_at = ? \
@@ -945,6 +963,9 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             .map_err(storage)?
             .rows_affected();
                 if updated == 1 {
+                    super::payload::sqlite::replace_refs(&mut transaction, reference, &ids)
+                        .await
+                        .map_err(segment_storage)?;
                     transaction.commit().await.map_err(storage)?;
                 } else {
                     transaction.rollback().await.map_err(storage)?;
@@ -961,9 +982,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 )
                 .await
                 .map_err(segment_storage)?;
-                super::payload::postgres::replace_refs(&mut transaction, reference, &ids)
-                    .await
-                    .map_err(segment_storage)?;
+                // 先更新 Marker 行、再替换正文引用（与回收的锁序一致）。
                 let updated = sqlx::query(
                 "UPDATE history_markers SET execution_state = $1, segment_payload = $2, \
          execution_owner = NULL, lease_expires_at = NULL, updated_at = $3 \
@@ -983,6 +1002,9 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             .map_err(storage)?
             .rows_affected();
                 if updated == 1 {
+                    super::payload::postgres::replace_refs(&mut transaction, reference, &ids)
+                        .await
+                        .map_err(segment_storage)?;
                     transaction.commit().await.map_err(storage)?;
                 } else {
                     transaction.rollback().await.map_err(storage)?;
@@ -1155,9 +1177,12 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                         connection.finish().await.map_err(storage)?;
                         break;
                     }
+                    // 整批释放的正文 ID：删除 Marker 会级联移除引用行，所以先取回；
+                    // 全批删除完之后只做一次入队，行锁因此在整个事务内按 ID 全局有序
+                    // （逐 Marker 入队会让不同 Marker 的正文锁交叉，与 Observation 清理互相死锁）。
+                    let mut released: Vec<i64> = Vec::new();
                     for reference in &claimed {
-                        // 先取回正文 ID：删除 Marker 会级联移除引用行，随后登记失去引用的正文。
-                        let released: Vec<i64> = sqlx::query_scalar(
+                        let contents: Vec<i64> = sqlx::query_scalar(
                             "SELECT content_id FROM history_marker_contents WHERE reference = $1",
                         )
                         .bind(reference)
@@ -1175,10 +1200,11 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                             sqlx::query("DELETE FROM history_marker_gc WHERE reference = $1")
                                 .bind(reference).execute(&mut *tx).await.map_err(storage)?;
                         } else {
-                            $enqueue(&mut tx, &released).await.map_err(segment_storage)?;
+                            released.extend(contents);
                             removed = removed.saturating_add(deleted);
                         }
                     }
+                    $enqueue(&mut tx, &released).await.map_err(segment_storage)?;
                     tx.commit().await.map_err(storage)?;
                     connection.finish().await.map_err(storage)?;
                 }
