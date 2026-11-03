@@ -215,9 +215,15 @@ impl Store {
         let principal = principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         macro_rules! confirm {
-            ($pool:expr, $begin:literal) => {{
+            ($pool:expr, $begin:literal, $lock:expr) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+                if !$lock.is_empty() {
+                    sqlx::query($lock)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                }
                 for id in ids {
                     let updated = sqlx::query(
                         "UPDATE native_compactions SET confirmed_at = COALESCE(confirmed_at, $3), \
@@ -240,8 +246,10 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => confirm!(pool, "BEGIN IMMEDIATE"),
-            Self::Postgres(pool) => confirm!(pool, "BEGIN"),
+            Self::Sqlite(pool) => confirm!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Postgres(pool) => {
+                confirm!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+            }
         }
     }
 

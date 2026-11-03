@@ -20,8 +20,11 @@ pub(crate) const MIN_RETENTION_DAYS: u32 = 1;
 ///
 /// 释放触发器会在事务内对被引用对象依次加 `FOR NO KEY UPDATE`；两个同时回收的事务
 /// 以不同顺序取得同一批对象的锁就会互相死锁。回收事务先取此锁，使取锁顺序总是
-/// 串行的。写入方不取此锁，只对依赖行加不冲突的 `FOR KEY SHARE`。
-pub(crate) const PG_GC_LOCK: &str = "SELECT pg_advisory_xact_lock(8900089)";
+/// 串行的。批量更新对象行的写入方取同一把锁的共享模式（见 [`PG_GC_LOCK_SHARED`]），
+/// 提交路径只对依赖行加不冲突的 `FOR KEY SHARE`，不取此锁。
+pub(crate) const PG_GC_LOCK: &str = stravia_credential_protection::store::PG_GC_LOCK;
+/// 批量更新对象行的写入方（Marker 发布、原生压缩确认、映射发布）取同一把锁的共享模式。
+pub(crate) const PG_GC_LOCK_SHARED: &str = stravia_credential_protection::store::PG_GC_LOCK_SHARED;
 
 /// 共享正文存储的回收入口；必须在所有引用方回收之后调用。
 #[derive(Clone)]

@@ -1053,9 +1053,15 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let principal = principal.continuation_key();
         let now = Self::now();
         macro_rules! publish {
-            ($pool:expr, $begin:literal) => {{
+            ($pool:expr, $begin:literal, $lock:expr) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
+                if !$lock.is_empty() {
+                    sqlx::query($lock)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(storage)?;
+                }
                 for reference in references {
                     let updated = sqlx::query(
                         "UPDATE history_markers SET published_at = COALESCE(published_at, $1), \
@@ -1080,8 +1086,10 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             }};
         }
         match self {
-            Self::Sqlite(pool) => publish!(pool, "BEGIN IMMEDIATE"),
-            Self::Postgres(pool) => publish!(pool, "BEGIN"),
+            Self::Sqlite(pool) => publish!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Postgres(pool) => {
+                publish!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+            }
         }
         Ok(())
     }

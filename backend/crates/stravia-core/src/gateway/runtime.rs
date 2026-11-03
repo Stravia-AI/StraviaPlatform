@@ -462,7 +462,7 @@ impl Gateway {
             retention.clone(),
         )
         .with_history_markers(Arc::clone(&history_markers))
-        .with_redaction_mappings(Arc::clone(&redaction.mappings))
+        .with_redaction_references()
         .with_compaction(compaction.clone());
         generation_chains.rebuild_prefixes().await?;
         let observation = interaction_observation::InteractionObservation::new(

@@ -1656,4 +1656,39 @@ mod tests {
         let calls = response.items[1].tool_calls.as_ref().unwrap();
         assert!(calls[0].arguments.contains(&mapping.secret));
     }
+
+    /// 映射不再有过期时间，快照条目失效的唯一形态是占位符不再合法（例如被篡改或截断）。
+    /// 外发替换命中这样的条目必须整体失败，而不是把明文放行；还原则保持字面。
+    /// 映射被回收之后的提交保护由历史保留期场景覆盖：引用已回收映射的提交按依赖不可用失败。
+    #[test]
+    fn inactive_outbound_snapshot_entry_fails_closed_but_restore_stays_literal() {
+        let mapping = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN - 1)),
+            secret: "synthetic snapshot secret".into(),
+            rule_ids: Default::default(),
+        };
+        let mut request = AiRequest::new("model", Vec::new());
+        request.instructions = Some(mapping.secret.clone());
+        assert!(matches!(
+            redact_request(&mut request, std::slice::from_ref(&mapping)),
+            Err(RedactionError::InvalidText)
+        ));
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            replace(
+                &mapping.reference,
+                std::slice::from_ref(&mapping),
+                true,
+                &mut used
+            ),
+            mapping.reference
+        );
+        assert!(used.is_empty());
+        request.instructions = Some("ordinary text".into());
+        assert_eq!(
+            redact_request(&mut request, &[mapping]).unwrap().references,
+            Vec::<String>::new()
+        );
+        assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
+    }
 }
