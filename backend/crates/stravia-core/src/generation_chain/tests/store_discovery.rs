@@ -270,6 +270,7 @@ async fn native_preparation_reuses_owned_workspace_for_diagnostic_source() {
         backend.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut root_request = responses_request(vec![user_message("exact question")]);
     set_generation_session_id(&mut root_request, "diagnostic-session");
@@ -323,6 +324,7 @@ async fn discovery_workspace_recovers_transient_errors_and_does_not_adopt_a_part
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     commit_observation_node(
         backend.as_ref(),
@@ -405,6 +407,7 @@ async fn discovery_workspace_budget_overflow_keeps_prior_evidence_without_partia
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     commit_observation_node(
         backend.as_ref(),
@@ -465,6 +468,7 @@ async fn discovery_workspace_rejects_structurally_large_response_metadata() {
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut payload = observation_payload(vec![user_message("root")], None, None, "answer");
     payload["effective_output"]["vendor"]["ingress"]["dense"] =
@@ -506,6 +510,7 @@ async fn discovery_workspace_preserves_each_overlapping_heads_exact_expiry() {
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     commit_observation_node(
         backend.as_ref(),
@@ -588,6 +593,7 @@ async fn discovery_workspace_preserves_candidate_order_and_distinct_complete_win
         let store = GenerationChainStore::from_turn_chain(
             Arc::new(crate::turn_chain::test_store().await),
             crate::runtime_cache::RuntimeCache::tinyufo(1),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let mut root = responses_request(vec![user_message("exact question")]);
         set_generation_session_id(&mut root, "workspace-session");
@@ -687,6 +693,7 @@ async fn discovery_workspace_replays_shared_ancestry_across_multiple_candidates(
     let store = GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut root_request = responses_request(vec![user_message("root question")]);
     set_generation_session_id(&mut root_request, "shared-session");
@@ -771,6 +778,7 @@ async fn discovery_workspace_rechecks_candidate_priority_after_a_previous_match(
     let store = GenerationChainStore::from_turn_chain(
         durable.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut root = responses_request(vec![user_message("question")]);
     set_generation_session_id(&mut root, "priority-session");
@@ -860,6 +868,7 @@ async fn discovery_projection_skips_only_proven_incompatible_corrupt_candidates(
         let store = GenerationChainStore::from_turn_chain(
             durable.clone(),
             crate::runtime_cache::RuntimeCache::tinyufo(1),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let mut root = responses_request(vec![user_message("question")]);
         set_generation_session_id(&mut root, "corrupt-candidate-session");
@@ -974,6 +983,7 @@ async fn discovery_workspace_does_not_retain_expired_or_invalid_ancestor_evidenc
     let store = GenerationChainStore::from_turn_chain(
         durable.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     commit_observation_node(
         durable.as_ref(),
@@ -1355,6 +1365,7 @@ async fn optimization_plain_parent_reads_chain_once_cold_and_not_at_all_warm() {
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     for (iteration, expected_reads) in [(0, 1), (1, 1)] {
         let mut request = continuation_to(
@@ -1443,6 +1454,7 @@ async fn optimization_references_resolve_old_ancestor_after_replace_with_one_col
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     // 首次冷读后 materialized 与引用目录同键缓存，后续命中不再触发存储读。
     for (iteration, expected_reads) in [(0, 1), (1, 1)] {
@@ -1513,6 +1525,7 @@ async fn optimization_reference_conflicts_across_ancestors_remain_ambiguous() {
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut request = continuation_to(
         "resp_optimization_conflict_child",
@@ -1546,6 +1559,7 @@ async fn blocked_generation_commit(
         backend.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("commit-fence-owner");
     let question = user_message("question");
@@ -1768,6 +1782,7 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
     let seed = GenerationChainStore::from_turn_chain(
         seed_backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let root_input = responses_request(vec![user_message("root question")]);
     let mut root_output = AiResponse::new("upstream-root", "model");
@@ -1879,6 +1894,7 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
         backend.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     chain.rebuild_prefixes().await.unwrap();
 
@@ -1935,6 +1951,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         backend.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -1994,6 +2011,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         backend.clone(),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut replay = history_a;
     replay.push(AiItem::reasoning(
@@ -2132,6 +2150,7 @@ async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -2184,6 +2203,7 @@ async fn edited_tool_history_does_not_merge_a_later_user_into_tool_continuation(
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -2252,6 +2272,7 @@ async fn materialization_cache_never_serves_an_expired_durable_chain() {
     let store = GenerationChainStore::from_turn_chain(
         backend.clone(),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     store
@@ -2298,7 +2319,11 @@ async fn shared_materialization_cache_preserves_arcs_deadlines_and_rebuilds_on_m
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024);
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("shared-cache-owner");
     let id = TurnNodeId::new("resp_shared_cache");
     let mut response = AiResponse::new("upstream", "model");
@@ -2383,7 +2408,11 @@ async fn materialization_cache_admits_small_effective_request_controls() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("effective-weight-small");
     let id = TurnNodeId::new("resp_effective_weight_small");
     let mut effective = responses_request(Vec::new());
@@ -2442,7 +2471,11 @@ async fn materialization_cache_rejects_oversized_effective_request_controls() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("effective-weight-oversized");
 
     // 32 KiB of serialized JSON, but 16K retained empty schema objects.
@@ -2530,7 +2563,11 @@ async fn materialization_cache_rejects_structurally_large_item_metadata() {
         materializations: std::sync::atomic::AtomicUsize::new(0),
     });
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(256 * 1024);
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("item-metadata-weight");
     let id = TurnNodeId::new("resp_item_metadata_weight");
     let metadata = serde_json::Value::Object(
@@ -2573,9 +2610,16 @@ async fn materialization_cache_does_not_outlive_the_retention_window() {
         .expect("SQLite database");
     let cache = crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024);
     let backend = Arc::new(ControlledDiscoveryTurnChainStore::new(
-        crate::turn_chain::SqlTurnChainStore::sqlite(pool),
+        crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool,
+            crate::history_retention::HistoryRetention::for_tests(),
+        ),
     ));
-    let store = GenerationChainStore::from_turn_chain(backend.clone(), cache.clone());
+    let store = GenerationChainStore::from_turn_chain(
+        backend.clone(),
+        cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("owner");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
@@ -2740,6 +2784,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         Arc::new(crate::turn_chain::test_store().await),
         Some(artifact_store),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let first_write = chain
         .begin(owner.clone(), request_for(&first.id))
@@ -2831,6 +2876,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         Arc::new(crate::turn_chain::test_store().await),
         Some(artifact_store),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
 
     let mut round_one = chain
@@ -3098,6 +3144,7 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -3166,6 +3213,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -3267,6 +3315,7 @@ async fn stable_session_does_not_link_semantically_changed_history() {
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let original_user = AiItem {
@@ -3326,6 +3375,7 @@ async fn controls_prefix_wins_when_same_session_candidate_does_not_match() {
         Arc::new(crate::turn_chain::test_store().await),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
 
@@ -3744,6 +3794,7 @@ async fn response_history_survives_adapter_reconstruction() {
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&turn_chain),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
@@ -3767,6 +3818,7 @@ async fn response_history_survives_adapter_reconstruction() {
     let reconstructed = GenerationChainStore::from_turn_chain(
         turn_chain,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut continuation = responses_request(vec![user_message("follow-up")]);
     crate::router::stamp_previous_response_id(&mut continuation, "resp_persisted");
@@ -3811,6 +3863,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     store
         .save(GenerationChainCommit {
@@ -3832,6 +3885,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let reconstructed = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut request = responses_request(Vec::new());
     crate::router::stamp_previous_response_id(&mut request, "resp_tool_semantics");
@@ -4563,6 +4617,7 @@ async fn ancestor_client_item_visitor_yields_each_complete_root_to_head_history(
         Arc::clone(&backend),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("observation-owner");
 
@@ -4668,6 +4723,7 @@ async fn ancestor_client_item_workspace_keeps_branches_and_principals_isolated()
         Arc::clone(&backend),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("workspace-observation-owner");
     for (id, parent, question, answer) in [
@@ -4759,6 +4815,7 @@ async fn ancestor_client_item_visitor_declines_unavailable_chains_without_partia
         Arc::clone(&backend),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("unavailable-observation-owner");
 
@@ -4804,6 +4861,7 @@ async fn ancestor_client_item_visitor_rejects_invalid_tail_before_yielding_root(
         Arc::clone(&backend),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("invalid-observation-owner");
 

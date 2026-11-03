@@ -16,6 +16,13 @@ use stravia_credential_protection::store::MappingStore;
 pub(crate) const DEFAULT_RETENTION_DAYS: u32 = 7;
 pub(crate) const MIN_RETENTION_DAYS: u32 = 1;
 
+/// PostgreSQL 依赖回收事务的全局互斥（事务级咨询锁）。
+///
+/// 释放触发器会在事务内对被引用对象依次加 `FOR NO KEY UPDATE`；两个同时回收的事务
+/// 以不同顺序取得同一批对象的锁就会互相死锁。回收事务先取此锁，使取锁顺序总是
+/// 串行的。写入方不取此锁，只对依赖行加不冲突的 `FOR KEY SHARE`。
+pub(crate) const PG_GC_LOCK: &str = "SELECT pg_advisory_xact_lock(8900089)";
+
 /// 共享正文存储的回收入口；必须在所有引用方回收之后调用。
 #[derive(Clone)]
 pub(crate) enum ContentGc {
@@ -47,11 +54,25 @@ impl HistoryRetention {
         }
     }
 
-    /// 启动时读取存储设置；缺失、无法解析或低于最小值的值按最小值处理。
+    /// 测试用的默认保留期：与生产默认值相同，但生产构造必须显式传入句柄。
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::new(DEFAULT_RETENTION_DAYS)
+    }
+
+    /// 启动时读取存储设置：缺失按默认值；无法解析时告警并回退默认值；
+    /// 低于最小值的值按最小值处理。
     pub(crate) fn from_setting(value: Option<&str>) -> Self {
-        let days = value
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .unwrap_or(DEFAULT_RETENTION_DAYS);
+        let days = match value {
+            None => DEFAULT_RETENTION_DAYS,
+            Some(raw) => raw.trim().parse::<u32>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = raw,
+                    "history retention setting is not a day count; using the default"
+                );
+                DEFAULT_RETENTION_DAYS
+            }),
+        };
         Self::new(days)
     }
 
@@ -98,16 +119,54 @@ impl HistoryMaintenance {
         skip_all,
         fields(deleted)
     )]
+    /// 每一步都会尝试：某一步失败只记录并在最后统一返回错误，不会让其余步骤
+    /// （尤其是依赖已成功回收之后的正文回收）被跳过。
     pub(crate) async fn sweep_history(&self, now: i64) -> anyhow::Result<u64> {
         let retention = self.retention.window();
-        let mut deleted = self.observation.sweep_history(now, retention).await?;
-        deleted = deleted.saturating_add(self.turn_chain.sweep_history(now).await?);
-        deleted = deleted.saturating_add(self.history_markers.sweep(now, retention).await?);
-        deleted = deleted.saturating_add(self.mappings.sweep(now, retention).await?);
-        deleted = deleted.saturating_add(self.compaction.sweep(now, retention).await?);
-        deleted = deleted.saturating_add(self.content.sweep().await?);
+        let mut failures: Vec<String> = Vec::new();
+        macro_rules! step {
+            ($name:literal, $call:expr) => {
+                match $call.await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let error = anyhow::Error::from(error);
+                        tracing::warn!(step = $name, error = %format!("{error:#}"), "history sweep step failed");
+                        failures.push(format!("{}: {error:#}", $name));
+                        0
+                    }
+                }
+            };
+        }
+        let mut deleted = step!(
+            "observation",
+            self.observation.sweep_history(now, retention)
+        );
+        // 原生登记删除会释放来源节点，节点删除又会释放 Marker 与映射，因此依赖回收
+        // 重复到某一轮没有任何删除为止（每轮至少删除一行，必然终止）；失败的一轮不再重复。
+        loop {
+            let failed_before = failures.len();
+            let mut round = step!("turn nodes", self.turn_chain.sweep_history(now));
+            round = round.saturating_add(step!(
+                "history markers",
+                self.history_markers.sweep(now, retention)
+            ));
+            round = round.saturating_add(step!("mappings", self.mappings.sweep(now, retention)));
+            round = round.saturating_add(step!(
+                "native compactions",
+                self.compaction.sweep(now, retention)
+            ));
+            deleted = deleted.saturating_add(round);
+            if round == 0 || failures.len() > failed_before {
+                break;
+            }
+        }
+        deleted = deleted.saturating_add(step!("content", self.content.sweep()));
         tracing::Span::current().record("deleted", deleted);
-        Ok(deleted)
+        if failures.is_empty() {
+            Ok(deleted)
+        } else {
+            anyhow::bail!("history sweep failed: {}", failures.join("; "))
+        }
     }
 }
 

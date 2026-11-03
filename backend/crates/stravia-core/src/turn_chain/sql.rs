@@ -156,28 +156,23 @@ fn order_ancestors(
 }
 
 impl SqlTurnChainStore {
-    pub fn sqlite(pool: SqlitePool) -> Self {
-        Self {
-            backend: Backend::Sqlite(pool),
-            retention: crate::history_retention::HistoryRetention::new(
-                crate::history_retention::DEFAULT_RETENTION_DAYS,
-            ),
-        }
-    }
-    pub fn postgres(pool: PgPool) -> Self {
-        Self {
-            backend: Backend::Postgres(pool),
-            retention: crate::history_retention::HistoryRetention::new(
-                crate::history_retention::DEFAULT_RETENTION_DAYS,
-            ),
-        }
-    }
-    pub(crate) fn with_retention(
-        mut self,
+    pub(crate) fn sqlite(
+        pool: SqlitePool,
         retention: crate::history_retention::HistoryRetention,
     ) -> Self {
-        self.retention = retention;
-        self
+        Self {
+            backend: Backend::Sqlite(pool),
+            retention,
+        }
+    }
+    pub(crate) fn postgres(
+        pool: PgPool,
+        retention: crate::history_retention::HistoryRetention,
+    ) -> Self {
+        Self {
+            backend: Backend::Postgres(pool),
+            retention,
+        }
     }
 
     /// 共享正文回收句柄，供 `HistoryMaintenance` 在所有引用方回收之后使用。
@@ -330,8 +325,9 @@ impl SqlTurnChainStore {
             context.begin_read();
             error.downcast::<TurnUnavailable>().unwrap_or_else(storage)
         })?;
+        // 整条链共用头节点的计时：缓存前缀来自更早的头节点，不能把链的有效期拉回祖先自己的期限。
+        prefix.expires_at = expires_at;
         for node in nodes {
-            prefix.expires_at = prefix.expires_at.min(node.expires_at);
             prefix.nodes.push(node);
         }
         Ok(prefix)
@@ -543,31 +539,18 @@ impl TurnChainStore for SqlTurnChainStore {
         compaction_record_ids.sort_unstable();
         compaction_record_ids.dedup();
         macro_rules! persist {
-            ($pool:expr, $begin:literal, $lock:literal, $key_share:literal, $deps:ident, $put:ident) => {{
+            ($pool:expr, $begin:literal, $lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
                 let mut connection = $pool.acquire_write().await.map_err(commit_storage)?;
                 let mut transaction = connection.begin_with($begin).await.map_err(commit_storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
-                let (duplicate, scope): (Option<i64>, Option<i64>) = sqlx::query_as(
-                    "SELECT (SELECT node_pk FROM turn_nodes WHERE id=$1), \
-                     (SELECT id FROM content_scopes WHERE principal=$2)",
-                ).bind(commit.id.as_str()).bind(&principal)
-                    .fetch_one(&mut *transaction).await.map_err(commit_storage)?;
+                let duplicate: Option<i64> = sqlx::query_scalar(
+                    "SELECT node_pk FROM turn_nodes WHERE id=$1",
+                ).bind(commit.id.as_str())
+                    .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
                 if duplicate.is_some() { return Err(TurnCommitError::AlreadyExists); }
-                let scope = match scope {
-                    Some(scope) => scope,
-                    None => {
-                        let inserted: Option<i64> = sqlx::query_scalar(
-                            "INSERT INTO content_scopes(principal) VALUES($1) ON CONFLICT(principal) DO NOTHING RETURNING id",
-                        ).bind(&principal).fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
-                        match inserted {
-                            Some(scope) => scope,
-                            None => sqlx::query_scalar(
-                                "SELECT id FROM content_scopes WHERE principal=$1",
-                            ).bind(&principal)
-                                .fetch_one(&mut *transaction).await.map_err(commit_storage)?,
-                        }
-                    }
-                };
+                // 共享正文存储的 scope 协议：已有 scope 加 `FOR KEY SHARE`，防止清理方在提交前删除它。
+                let scope = $resolve_scope(&mut transaction, &principal)
+                    .await.map_err(commit_storage)?;
                 // 祖先链只检查存在与 `deleting`；到期但未扫描的链仍可续接。
                 let parent_pk = match commit.parent_id.as_ref() {
                     Some(parent) => {
@@ -662,7 +645,7 @@ impl TurnChainStore for SqlTurnChainStore {
                     pool,
                     "BEGIN IMMEDIATE",
                     "",
-                    "",
+                    crate::content_store::sqlite::resolve_scope,
                     dependency_references_sqlite,
                     put_sqlite
                 )
@@ -671,7 +654,7 @@ impl TurnChainStore for SqlTurnChainStore {
                 pool,
                 "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
-                " FOR KEY SHARE",
+                crate::content_store::postgres::resolve_scope,
                 dependency_references_postgres,
                 put_postgres
             ),

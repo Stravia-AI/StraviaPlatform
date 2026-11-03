@@ -461,10 +461,13 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         // payloads are rewritten through the store so the format-2 envelope and
         // externalized contents stay consistent.
         let pool = gateway._sqlite_pool.as_ref().unwrap();
-        crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .rewrite_payloads(remove_payload_kinds)
-            .await
-            .unwrap();
+        crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .rewrite_payloads(remove_payload_kinds)
+        .await
+        .unwrap();
         crate::history_marker::SqlHistoryMarkerStore::sqlite(pool.clone())
             .rewrite_segments(remove_payload_kinds)
             .await

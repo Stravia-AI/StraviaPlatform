@@ -456,7 +456,9 @@ impl MappingStore for SqlMappingStore {
                         .await
                         .map_err(|error| store.storage(error))?;
                     let claim = format!(
-                        "SELECT reference FROM redaction_mapping_gc ORDER BY reference LIMIT {SWEEP_BATCH}{}",
+                        "SELECT g.reference FROM redaction_mapping_gc g \
+                         JOIN reversible_redaction_mappings m ON m.reference = g.reference \
+                         ORDER BY g.reference LIMIT {SWEEP_BATCH}{}",
                         $skip_locked,
                     );
                     let claimed: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(claim.as_str()))
@@ -484,16 +486,13 @@ impl MappingStore for SqlMappingStore {
                     }
                     tx.commit().await.map_err(|error| store.storage(error))?;
                     connection.finish().await.map_err(|error| store.storage(error))?;
-                    if i64::try_from(claimed.len()).unwrap_or(i64::MAX) < SWEEP_BATCH {
-                        break;
-                    }
                 }
                 Ok(removed)
             }};
         }
         match self {
             Self::Sqlite(pool) => sweep!(self, pool, "BEGIN IMMEDIATE", ""),
-            Self::Postgres(pool) => sweep!(self, pool, "BEGIN", " FOR UPDATE SKIP LOCKED"),
+            Self::Postgres(pool) => sweep!(self, pool, "BEGIN", " FOR UPDATE OF g, m SKIP LOCKED"),
         }
     }
 }

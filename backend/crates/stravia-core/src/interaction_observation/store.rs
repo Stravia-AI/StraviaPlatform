@@ -4,11 +4,11 @@ use sqlx::{PgPool, Row, SqlitePool};
 use std::{borrow::Cow, sync::Arc};
 
 use super::content_refs::{text_content, value_content};
-use crate::content_store::Content;
 use super::types::{
     ConfirmedUsage, CredentialDiscovery, IngressStart, ObservationEvent, RejectedOutcome, RunEvent,
     RunOutcome, RunStart,
 };
+use crate::content_store::Content;
 use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
 
 /// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
@@ -860,7 +860,8 @@ impl ObservationStore {
                         };
                         let mut units = vec![value_content(content)];
                         let content_ids =
-                            super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
+                            super::content_refs::intern_sqlite(&mut tx, &principal, &mut units)
+                                .await?;
                         insert_tool_result_sqlite(
                             &mut tx,
                             tool_sequence,
@@ -1016,7 +1017,8 @@ impl ObservationStore {
                     let input_sequence = sequences.next().expect("allocated input sequence");
                     let mut units = split_user_input(text);
                     let content_ids =
-                        super::content_refs::intern_postgres(&mut tx, &principal, &mut units).await?;
+                        super::content_refs::intern_postgres(&mut tx, &principal, &mut units)
+                            .await?;
                     insert_event_postgres(
                         &mut tx,
                         EventInsert {
@@ -1228,7 +1230,7 @@ impl ObservationStore {
             let Some(body) = bodies.get(content_id) else {
                 continue;
             };
-            let content = super::content_refs::body_value(body)?;
+            let content = body.value()?;
             // 空正文的结果只是占位，不作为去重基准。
             if content.is_null() {
                 continue;
@@ -1454,11 +1456,14 @@ impl ObservationStore {
         // 用量按时间顺序逐字段合并：先前已持久的确认 ← 结束事件自带 ← 缓冲期间的后续修订。
         // 合并结果同时写入 attempt 行与合并事件的 attrs，二者字段一致。
         let mut merged_usage: Option<ConfirmedUsage> = None;
-        if let Some((RunEvent::TargetAttemptFinished {
-            attempt_id,
-            usage: own,
-            ..
-        }, _)) = attempt
+        if let Some((
+            RunEvent::TargetAttemptFinished {
+                attempt_id,
+                usage: own,
+                ..
+            },
+            _,
+        )) = attempt
         {
             if let Some(durable) = self.attempt_usage(attempt_id).await? {
                 coalesce_usage(&mut merged_usage, &durable);
@@ -2006,8 +2011,12 @@ impl ObservationStore {
                                 None,
                             )
                             .await?;
-                            if let RunEvent::UsageConfirmed { attempt_id, usage, .. } = run_event {
-                                refresh_finished_usage_sqlite(&mut tx, run_id, attempt_id, usage).await?;
+                            if let RunEvent::UsageConfirmed {
+                                attempt_id, usage, ..
+                            } = run_event
+                            {
+                                refresh_finished_usage_sqlite(&mut tx, run_id, attempt_id, usage)
+                                    .await?;
                             }
                         }
                         continue;
@@ -2029,9 +2038,12 @@ impl ObservationStore {
                             },
                         )
                         .await?;
-                        let content_ids =
-                            super::content_refs::intern_sqlite(&mut tx, &principal, &mut block.units)
-                                .await?;
+                        let content_ids = super::content_refs::intern_sqlite(
+                            &mut tx,
+                            &principal,
+                            &mut block.units,
+                        )
+                        .await?;
                         let envelope = block
                             .envelope
                             .map(|envelope| {
@@ -2252,8 +2264,12 @@ impl ObservationStore {
                                 None,
                             )
                             .await?;
-                            if let RunEvent::UsageConfirmed { attempt_id, usage, .. } = run_event {
-                                refresh_finished_usage_postgres(&mut tx, run_id, attempt_id, usage).await?;
+                            if let RunEvent::UsageConfirmed {
+                                attempt_id, usage, ..
+                            } = run_event
+                            {
+                                refresh_finished_usage_postgres(&mut tx, run_id, attempt_id, usage)
+                                    .await?;
                             }
                         }
                         continue;
@@ -2274,9 +2290,12 @@ impl ObservationStore {
                             },
                         )
                         .await?;
-                        let content_ids =
-                            super::content_refs::intern_postgres(&mut tx, &principal, &mut block.units)
-                                .await?;
+                        let content_ids = super::content_refs::intern_postgres(
+                            &mut tx,
+                            &principal,
+                            &mut block.units,
+                        )
+                        .await?;
                         let envelope = block
                             .envelope
                             .map(|envelope| {
@@ -6183,7 +6202,12 @@ mod tests {
                 .into_iter()
                 .find(|candidate| candidate.sequence == written.sequence)
                 .expect("replayed result event");
-            stored.extend(event.payload["results"].as_array().cloned().unwrap_or_default());
+            stored.extend(
+                event.payload["results"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
         Ok(stored)
     }
@@ -6622,7 +6646,12 @@ mod tests {
             .await?
             .into_iter()
             .filter(|event| event.kind == "client_visible_content")
-            .map(|event| event.payload["text"].as_str().unwrap_or_default().to_owned())
+            .map(|event| {
+                event.payload["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
             .collect();
         assert_eq!(visible, ["first", "second", "third"]);
         pool.close().await;
@@ -6860,7 +6889,12 @@ mod tests {
             .await?
             .into_iter()
             .filter(|event| event.kind == "client_visible_content")
-            .map(|event| event.payload["text"].as_str().unwrap_or_default().to_owned())
+            .map(|event| {
+                event.payload["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
             .collect();
         assert_eq!(visible, ["preserved output"]);
         pool.close().await;
@@ -6999,14 +7033,18 @@ mod tests {
         );
         let superseded_by: Option<String> = match &store {
             ObservationStore::Sqlite(pool, _) => {
-                sqlx::query_scalar("SELECT superseded_by FROM inference_run_observations WHERE id='parent'")
-                    .fetch_one(pool)
-                    .await?
+                sqlx::query_scalar(
+                    "SELECT superseded_by FROM inference_run_observations WHERE id='parent'",
+                )
+                .fetch_one(pool)
+                .await?
             }
             ObservationStore::Postgres(pool, _) => {
-                sqlx::query_scalar("SELECT superseded_by FROM inference_run_observations WHERE id='parent'")
-                    .fetch_one(pool)
-                    .await?
+                sqlx::query_scalar(
+                    "SELECT superseded_by FROM inference_run_observations WHERE id='parent'",
+                )
+                .fetch_one(pool)
+                .await?
             }
         };
         assert_eq!(superseded_by.as_deref(), Some("child"));

@@ -10,7 +10,7 @@ use super::content::SegmentPayload;
 use crate::content_store::Bodies;
 
 macro_rules! backend {
-    ($module:ident, $db:ty, $pool:ty, $conn:ty, $begin:literal) => {
+    ($module:ident, $db:ty, $pool:ty, $conn:ty) => {
         pub(crate) mod $module {
             use super::*;
 
@@ -154,13 +154,11 @@ backend!(
     sqlite,
     sqlx::Sqlite,
     sqlx::SqlitePool,
-    sqlx::SqliteConnection<'_>,
-    "BEGIN IMMEDIATE"
+    sqlx::SqliteConnection<'_>
 );
 backend!(
     postgres,
     sqlx::Postgres,
     sqlx::PgPool,
-    sqlx::PgConnection<'_>,
-    "BEGIN"
+    sqlx::PgConnection<'_>
 );

@@ -39,9 +39,7 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 }
 
 /// 内容端点测试夹具：带管理员令牌的路由与同一个 Gateway。
-async fn contents_fixture(
-    directory: &Path,
-) -> anyhow::Result<(Gateway, axum::Router, String)> {
+async fn contents_fixture(directory: &Path) -> anyhow::Result<(Gateway, axum::Router, String)> {
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.to_path_buf(),
         ..Default::default()
@@ -66,11 +64,7 @@ async fn get_contents(
     ids: &[i64],
     if_none_match: Option<&str>,
 ) -> anyhow::Result<(StatusCode, Option<String>, serde_json::Value)> {
-    let joined = ids
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
+    let joined = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
     let mut request = Request::get(format!("/api/v1/observations/contents?ids={joined}"))
         .header("authorization", format!("Bearer {token}"));
     if let Some(value) = if_none_match {
@@ -168,7 +162,11 @@ async fn observation_contents_etag_tracks_bodies_and_mapping_version() -> anyhow
     assert_eq!(status, StatusCode::OK, "不匹配的 ETag 必须返回完整响应");
     let listed = format!("\"other\", {etag}");
     let (status, _, _) = get_contents(&app, &token, &ids, Some(&listed)).await?;
-    assert_eq!(status, StatusCode::NOT_MODIFIED, "If-None-Match 列表中任一命中即 304");
+    assert_eq!(
+        status,
+        StatusCode::NOT_MODIFIED,
+        "If-None-Match 列表中任一命中即 304"
+    );
 
     // 映射版本变化后，旧 ETag 失效，客户端必须重新拉取遮蔽后的正文。
     admin

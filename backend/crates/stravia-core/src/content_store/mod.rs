@@ -25,7 +25,6 @@ mod shared_tests;
 pub(crate) mod sql;
 #[cfg(test)]
 mod tests;
-pub(crate) mod upgrade;
 
 pub(crate) use descriptor::{
     Descriptor, Slot, decode_descriptor, encode_descriptor, restore_slots, validate_slots,
@@ -58,10 +57,27 @@ pub(crate) type ContentDigest = [u8; 32];
 pub(crate) fn content_digest(format: ContentFormat, raw: &[u8]) -> ContentDigest {
     Sha256::new()
         .chain_update(CONTENT_DIGEST_DOMAIN)
-        .chain_update([format.as_byte()])
+        .chain_update([format_code(format)])
         .chain_update(raw)
         .finalize()
         .into()
+}
+
+/// 正文格式的持久化编码：同时是摘要前缀字节与 `contents.format` 列的取值，
+/// 数值一经写入不得改动或复用。
+pub(crate) fn format_code(format: ContentFormat) -> u8 {
+    match format {
+        ContentFormat::Text => 0,
+        ContentFormat::Json => 1,
+    }
+}
+
+pub(crate) fn format_from_code(code: i64) -> Option<ContentFormat> {
+    match code {
+        0 => Some(ContentFormat::Text),
+        1 => Some(ContentFormat::Json),
+        _ => None,
+    }
 }
 
 /// 一份待写入的正文。`bytes` 在 `prepare_missing` 之前是原始字节，之后是 codec 字节；
@@ -77,7 +93,6 @@ pub(crate) struct Content {
 impl Content {
     /// 文本正文构造器，供 Observation 等引用方使用；Turn Chain 与 History Marker 已持有摘要，
     /// 走 `with_digest`。
-    #[allow(dead_code)]
     pub(crate) fn text(text: impl Into<String>) -> Self {
         let raw = text.into().into_bytes();
         Self::with_digest(
@@ -88,7 +103,6 @@ impl Content {
     }
 
     /// JSON 正文构造器；`raw` 必须是紧凑 JSON 字节。
-    #[allow(dead_code)]
     pub(crate) fn json(raw: Vec<u8>) -> Self {
         Self::with_digest(
             content_digest(ContentFormat::Json, &raw),
@@ -138,6 +152,14 @@ impl Body {
             "content row is not a JSON unit"
         );
         serde_json::from_slice(&self.bytes).context("invalid stored JSON content")
+    }
+
+    /// 调用方看到的 JSON 值：文本包装为字符串（保持原始 UTF-8），JSON 原样解析。
+    pub(crate) fn value(&self) -> anyhow::Result<serde_json::Value> {
+        match self.format {
+            ContentFormat::Text => Ok(serde_json::Value::String(self.text()?.to_owned())),
+            ContentFormat::Json => self.json(),
+        }
     }
 }
 

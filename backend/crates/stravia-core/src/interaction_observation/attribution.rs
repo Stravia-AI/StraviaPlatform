@@ -1352,6 +1352,7 @@ mod tests {
             backend.clone(),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let principal = Principal::new("owner");
         let request = |items| {
@@ -1389,6 +1390,7 @@ mod tests {
             backend,
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let mut replay = incoming.clone();
         replay.push(user("reminder"));

@@ -506,12 +506,11 @@ impl GenerationChainStore {
     pub fn from_turn_chain(
         turn_chain: Arc<dyn TurnChainStore>,
         runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
     ) -> Self {
         Self {
             turn_chain,
-            retention: crate::history_retention::HistoryRetention::new(
-                crate::history_retention::DEFAULT_RETENTION_DAYS,
-            ),
+            retention,
             runtime_cache,
         }
     }

@@ -1116,6 +1116,8 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
     ];
 
     let mut expected = Vec::new();
+    let contentless_reference = crate::history_marker::syntax::new_reference();
+    let contentless_expected;
     {
         let mut connection = pool.acquire().await?;
         migrator.run_direct(None, &mut *connection, false).await?;
@@ -1204,6 +1206,20 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
             "marker",
             serde_json::to_vec(&serde_json::from_value::<HiddenHistorySegment>(segment)?)?,
         ));
+        // 没有正文单元的 Marker：所属 Principal 没有任何节点或正文，因此不存在 scope。
+        let empty_segment = json!({
+            "kind": "thinking",
+            "block": {"type": "redacted_thinking", "data": "opaque-redacted"},
+        });
+        sqlx::query("INSERT INTO history_markers (reference, principal, kind, activity, segment_payload, published_at, created_at, updated_at, expires_at) VALUES (?, 'api-key:bob', 'thinking', 'Fixture redacted thinking', ?, 1, 1, 1, ?)")
+            .bind(&contentless_reference)
+            .bind(serde_json::to_string(&empty_segment)?)
+            .bind(expires_at)
+            .execute(&mut *connection)
+            .await?;
+        contentless_expected = serde_json::to_vec(
+            &serde_json::from_value::<HiddenHistorySegment>(empty_segment)?,
+        )?;
     }
 
     crate::migrations::migrate_sqlite(&pool, None).await?;
@@ -1218,7 +1234,10 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
     assert_eq!(retired, 0);
 
     let owner = Principal::new("alice");
-    let turns = SqlTurnChainStore::sqlite(pool.clone());
+    let turns = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let chain = turns
         .materialize(
             &owner,
@@ -1243,6 +1262,14 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
     assert_eq!(
         serde_json::to_vec(&marker.segment.expect("segment"))?,
         expected.last().expect("marker expectation").1
+    );
+    let contentless = SqlHistoryMarkerStore::sqlite(pool.clone())
+        .resolve(&Principal::new("bob"), &contentless_reference)
+        .await?
+        .expect("contentless marker after upgrade");
+    assert_eq!(
+        serde_json::to_vec(&contentless.segment.expect("segment"))?,
+        contentless_expected
     );
     Ok(())
 }

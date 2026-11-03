@@ -6,6 +6,7 @@ mod compaction;
 pub mod config;
 pub mod connect_client_apply;
 mod content_store;
+mod content_upgrade;
 pub mod data_paths;
 pub mod db;
 pub mod error;

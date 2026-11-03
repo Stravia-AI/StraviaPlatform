@@ -66,7 +66,8 @@ impl ObservationStore {
                     ] {
                         sqlx::query(sql).bind(id).execute(&mut *tx).await?;
                     }
-                    crate::content_store::sqlite::enqueue_unreferenced(&mut tx, &content_ids).await?;
+                    crate::content_store::sqlite::enqueue_unreferenced(&mut tx, &content_ids)
+                        .await?;
                 }
                 tx.commit().await?;
                 connection.finish().await?;

@@ -249,9 +249,12 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let mut unit = super::content_refs::value_content(content);
-                let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
-                        .await?[0];
+                let content_id = super::content_refs::intern_sqlite(
+                    tx,
+                    &principal,
+                    std::slice::from_mut(&mut unit),
+                )
+                .await?[0];
                 sqlx::query("INSERT INTO observation_tool_results(sequence,ordinal,tool_id,is_error,content_id) VALUES (?,?,?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)
@@ -269,9 +272,12 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let mut unit = super::content_refs::text_content(text);
-                let content_id =
-                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_mut(&mut unit))
-                        .await?[0];
+                let content_id = super::content_refs::intern_sqlite(
+                    tx,
+                    &principal,
+                    std::slice::from_mut(&mut unit),
+                )
+                .await?[0];
                 sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)

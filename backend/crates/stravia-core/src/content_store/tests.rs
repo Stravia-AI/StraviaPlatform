@@ -22,6 +22,16 @@ fn digest_depends_on_format_and_bytes() {
     );
 }
 
+/// 格式编码是持久化的：摘要前缀字节与 `contents.format` 列共用，取值不得改变。
+#[test]
+fn format_codes_are_the_persisted_encoding() {
+    assert_eq!(format_code(ContentFormat::Text), 0);
+    assert_eq!(format_code(ContentFormat::Json), 1);
+    assert_eq!(format_from_code(0), Some(ContentFormat::Text));
+    assert_eq!(format_from_code(1), Some(ContentFormat::Json));
+    assert_eq!(format_from_code(2), None);
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

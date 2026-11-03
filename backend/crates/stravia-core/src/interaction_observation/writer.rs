@@ -2183,7 +2183,9 @@ async fn commit_buffered_phases(
     selects: impl Fn(&str) -> bool,
     at: i64,
 ) {
-    if pending_turn.as_ref().is_some_and(|turn| selects(&turn.run_id))
+    if pending_turn
+        .as_ref()
+        .is_some_and(|turn| selects(&turn.run_id))
         && let Some(turn) = pending_turn.take()
         && let Some(interaction) = attribution.interaction_for_run(&turn.run_id)
     {
@@ -2202,7 +2204,9 @@ async fn commit_buffered_phases(
             }
         }
     }
-    if buffered_finish.as_ref().is_some_and(|finish| selects(&finish.run_id))
+    if buffered_finish
+        .as_ref()
+        .is_some_and(|finish| selects(&finish.run_id))
         && let Some(finish) = buffered_finish.take()
         && let Some(interaction) = attribution.interaction_for_run(&finish.run_id)
     {

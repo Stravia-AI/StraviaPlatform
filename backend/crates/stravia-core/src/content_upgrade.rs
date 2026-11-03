@@ -1,6 +1,9 @@
 //! 0037 与 0038 之间的离线数据转换：把 v3 `turn_contents` / 未压缩 Marker 段载荷
 //! 改写成共享正文存储。
 //!
+//! 转换需要理解 Turn Chain 与 History Marker 的载荷语义，因此放在共享正文存储之外，
+//! `content_store` 本身保持与语义无关。
+//!
 //! 转换是可恢复的：`content_upgrade` 只有一行，stage 0 按 `last_node_pk` 转换节点，
 //! stage 1 按 `last_marker_reference` 转换 Marker，stage 2 校验完成。每个批次的数据
 //! 与游标在同一事务提交；中断只会重做当前批次。旧表在 0038 才删除。
@@ -9,7 +12,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, ensure};
 
-use super::{Content, decode_descriptor, restore_slots, validate_slots};
+use crate::content_store::{Content, decode_descriptor, restore_slots, validate_slots};
 use crate::history_marker::HiddenHistorySegment;
 use crate::history_marker::content as marker_content;
 use crate::turn_chain::content;
@@ -17,7 +20,6 @@ use crate::turn_chain::content;
 const NODE_BATCH: usize = 64;
 const MARKER_BATCH: usize = 64;
 
-#[derive(Default)]
 struct UpgradeState {
     stage: i64,
     last_node_pk: i64,
@@ -60,19 +62,19 @@ macro_rules! backend {
             use super::*;
 
             async fn state(connection: &mut $conn) -> anyhow::Result<UpgradeState> {
-                let row: Option<(i64, i64, Option<String>)> = sqlx::query_as(
-                    "SELECT CAST(stage AS BIGINT), last_node_pk, last_marker_reference \
-                     FROM content_upgrade WHERE phase = 1",
-                )
-                .fetch_optional(&mut *connection)
-                .await?;
-                Ok(match row {
-                    Some((stage, last_node_pk, last_marker_reference)) => UpgradeState {
-                        stage,
-                        last_node_pk,
-                        last_marker_reference,
-                    },
-                    None => UpgradeState::default(),
+                // 0037 插入唯一的进度行；缺失说明迁移状态已损坏，不能当作从头开始。
+                let (stage, last_node_pk, last_marker_reference): (i64, i64, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT CAST(stage AS BIGINT), last_node_pk, last_marker_reference \
+                         FROM content_upgrade WHERE phase = 1",
+                    )
+                    .fetch_one(&mut *connection)
+                    .await
+                    .context("content_upgrade progress row is missing")?;
+                Ok(UpgradeState {
+                    stage,
+                    last_node_pk,
+                    last_marker_reference,
                 })
             }
 
@@ -92,7 +94,8 @@ macro_rules! backend {
                     .push(", last_marker_reference = ")
                     .push_bind(marker)
                     .push(" WHERE phase = 1");
-                query.build().execute(&mut *transaction).await?;
+                let updated = query.build().execute(&mut *transaction).await?.rows_affected();
+                ensure!(updated == 1, "content_upgrade progress row was not updated");
                 Ok(())
             }
 
@@ -454,14 +457,19 @@ macro_rules! backend {
                             );
                             mapping.push(content_id);
                         }
-                        let scope = scope.context("converted marker content scope is missing")?;
-                        ensure_content_rows(
-                            connection,
-                            scope,
-                            &mapping,
-                            "converted marker content is missing",
-                        )
-                        .await?;
+                        // 没有正文单元的 Marker（空 Reasoning、RedactedThinking 等）从不创建 scope，
+                        // 只有存在引用时才要求 scope 与正文行。
+                        if !mapping.is_empty() {
+                            let scope =
+                                scope.context("converted marker content scope is missing")?;
+                            ensure_content_rows(
+                                connection,
+                                scope,
+                                &mapping,
+                                "converted marker content is missing",
+                            )
+                            .await?;
+                        }
                         let descriptor = decode_descriptor(&envelope)?;
                         validate_slots(&descriptor, mapping.len())
                             .context("converted marker slot validation")?;

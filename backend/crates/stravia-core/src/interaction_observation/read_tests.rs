@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 use serde_json::{Value, json};
+use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 
 use super::*;
 use crate::content_store::Content;
@@ -228,8 +228,14 @@ async fn summaries_carry_refs_and_raw_len(
 
     // 列表只有引用与长度，不得夹带正文。
     let wire = serde_json::to_string(&forest)?;
-    assert!(!wire.contains(&seeded.input), "list must not embed input text");
-    assert!(!wire.contains(&seeded.output), "list must not embed output text");
+    assert!(
+        !wire.contains(&seeded.input),
+        "list must not embed input text"
+    );
+    assert!(
+        !wire.contains(&seeded.output),
+        "list must not embed output text"
+    );
     assert!(wire.contains("\"raw_len\""));
     for banned in ["input_preview", "visible_tail", "truncated"] {
         assert!(!wire.contains(banned), "removed field {banned} leaked");
@@ -327,13 +333,19 @@ async fn contents_are_visible_only_through_observation_refs(
         .observation_contents(&[output_id, orphan, input_id, missing, output_id])
         .await?;
     let ids: Vec<i64> = contents.iter().map(|content| content.content_id).collect();
-    assert_eq!(ids, vec![output_id, input_id], "未引用/未知/重复 id 必须被忽略并保持请求顺序");
+    assert_eq!(
+        ids,
+        vec![output_id, input_id],
+        "未引用/未知/重复 id 必须被忽略并保持请求顺序"
+    );
     assert_eq!(contents[0].body, json!(seeded.output));
     assert_eq!(contents[0].raw_len, seeded.output.len() as i64);
     assert_eq!(contents[0].format, "text");
     assert_eq!(contents[1].body, json!(seeded.input));
 
-    let owners = observation.content_interactions(&[input_id, output_id, orphan]).await?;
+    let owners = observation
+        .content_interactions(&[input_id, output_id, orphan])
+        .await?;
     assert_eq!(owners[&input_id], vec![a.id.clone()]);
     assert_eq!(owners[&output_id], vec![a.id.clone()]);
     assert!(!owners.contains_key(&orphan));
@@ -383,7 +395,12 @@ async fn client_tool_results_are_batched(
     let results: Vec<Value> = all_events(&page)
         .into_iter()
         .filter(|event| event.kind == "client_tool_result")
-        .flat_map(|event| event.payload["results"].as_array().cloned().unwrap_or_default())
+        .flat_map(|event| {
+            event.payload["results"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
         .collect();
     assert_eq!(
         results,
@@ -402,7 +419,10 @@ async fn client_tool_results_are_batched(
     let bodies = observation.observation_contents(&result_ids).await?;
     assert_eq!(bodies.len(), 2);
     let formats: Vec<&str> = bodies.iter().map(|body| body.format.as_str()).collect();
-    assert!(formats.contains(&"text") && formats.contains(&"json"), "{formats:?}");
+    assert!(
+        formats.contains(&"text") && formats.contains(&"json"),
+        "{formats:?}"
+    );
     Ok(())
 }
 

@@ -323,7 +323,7 @@ pub async fn run_sqlite_migrator(
                 0,
                 None,
             );
-            crate::content_store::upgrade::run_sqlite(&mut pinned.connection).await?;
+            crate::content_upgrade::run_sqlite(&mut pinned.connection).await?;
         }
     }
     if runner.version_exists(39) {
@@ -564,7 +564,7 @@ pub async fn run_postgres_migrator(
                 0,
                 None,
             );
-            crate::content_store::upgrade::run_postgres(&mut connection).await?;
+            crate::content_upgrade::run_postgres(&mut connection).await?;
         }
     }
     if runner.version_exists(39) {
@@ -600,7 +600,8 @@ pub async fn run_postgres_migrator(
                 0,
                 None,
             );
-            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection).await?;
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection)
+                .await?;
         }
     }
     report(
@@ -1043,12 +1044,11 @@ mod tests {
                 assert_eq!(retained, [0xff]);
             } else {
                 // 无法解码的历史诊断不阻断升级：事件行保留，载荷按空对象迁移。
-                let kept: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM observation_events WHERE sequence=1",
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+                let kept: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE sequence=1")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
                 assert_eq!(kept, 1);
             }
             let source: Option<String> = sqlx::query_scalar(
@@ -1584,14 +1584,17 @@ mod tests {
         assert!(sqlx::query("UPDATE provider_models SET snapshot_state='not json' WHERE provider_id='p' AND model_id='upstream'")
             .execute(&pool).await.is_err());
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
-        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .materialize(
-                &stravia_runtime_contract::Principal::new("alice"),
-                TurnNodeKind::Response,
-                &TurnNodeId::new("child"),
-            )
-            .await
-            .unwrap();
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .materialize(
+            &stravia_runtime_contract::Principal::new("alice"),
+            TurnNodeKind::Response,
+            &TurnNodeId::new("child"),
+        )
+        .await
+        .unwrap();
         assert_eq!(nodes[0].payload, serde_json::json!({"items":[1]}));
         assert_eq!(nodes[1].payload, serde_json::json!({"items":[historical]}));
         use crate::history_marker::{
@@ -1728,14 +1731,17 @@ mod tests {
             .unwrap();
         assert_eq!(version, SQLITE_MIGRATOR.iter().last().unwrap().version);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
-        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .materialize(
-                &stravia_runtime_contract::Principal::new("alice"),
-                TurnNodeKind::Response,
-                &TurnNodeId::new("legacy-node"),
-            )
-            .await
-            .unwrap();
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .materialize(
+            &stravia_runtime_contract::Principal::new("alice"),
+            TurnNodeKind::Response,
+            &TurnNodeId::new("legacy-node"),
+        )
+        .await
+        .unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].payload, serde_json::json!({"slot": true}));
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
@@ -2205,7 +2211,7 @@ mod tests {
         assert_eq!(parent_projection, None);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
         let principal = stravia_runtime_contract::Principal::new("alice");
-        let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone())
+        let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone(), crate::history_retention::HistoryRetention::for_tests())
             .materialize(
                 &principal,
                 TurnNodeKind::Response,

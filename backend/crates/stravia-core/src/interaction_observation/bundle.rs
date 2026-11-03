@@ -390,7 +390,12 @@ impl BundleProjection {
                 "model_turn_finished" => {
                     if let Some(attempt) = event.payload.get("attempt") {
                         if let Some(id) = attempt["attempt_id"].as_str() {
-                            record_usage(&mut attempts, id, attempt.get("usage"), &mut observation_gap);
+                            record_usage(
+                                &mut attempts,
+                                id,
+                                attempt.get("usage"),
+                                &mut observation_gap,
+                            );
                         }
                     }
                 }
@@ -415,7 +420,9 @@ impl BundleProjection {
                         run,
                         event.payload["status"].as_str().unwrap_or("interrupted"),
                     );
-                    if event.kind == "run_state_changed" && event.payload["status"].as_str() == Some("interrupted") {
+                    if event.kind == "run_state_changed"
+                        && event.payload["status"].as_str() == Some("interrupted")
+                    {
                         active.retain(|(owner, _, _)| *owner != run);
                     }
                 }
@@ -429,9 +436,7 @@ impl BundleProjection {
                         active.insert((run, kind, id));
                     }
                 }
-                "model_turn_finished"
-                | "target_attempt_finished"
-                | "platform_tool_finished" => {
+                "model_turn_finished" | "target_attempt_finished" | "platform_tool_finished" => {
                     let (kind, field) = match event.kind.as_str() {
                         "model_turn_finished" => ("turn", "model_turn_id"),
                         "target_attempt_finished" => ("attempt", "attempt_id"),

@@ -123,16 +123,14 @@ impl Fixture {
             ContentGc,
         ) = match &db {
             Db::Sqlite(pool) => (
-                Arc::new(SqlTurnChainStore::sqlite(pool.clone()).with_retention(retention.clone())),
+                Arc::new(SqlTurnChainStore::sqlite(pool.clone(), retention.clone())),
                 Arc::new(SqlHistoryMarkerStore::sqlite(pool.clone())),
                 Arc::new(SqlMappingStore::sqlite(pool.clone())),
                 Compaction::sqlite(pool.clone()),
                 ContentGc::Sqlite(pool.clone()),
             ),
             Db::Postgres(pool) => (
-                Arc::new(
-                    SqlTurnChainStore::postgres(pool.clone()).with_retention(retention.clone()),
-                ),
+                Arc::new(SqlTurnChainStore::postgres(pool.clone(), retention.clone())),
                 Arc::new(SqlHistoryMarkerStore::postgres(pool.clone())),
                 Arc::new(SqlMappingStore::postgres(pool.clone())),
                 Compaction::postgres(pool.clone()),
@@ -143,8 +141,8 @@ impl Fixture {
             Arc::clone(&turns),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            retention.clone(),
         )
-        .with_retention(retention.clone())
         .with_history_markers(Arc::clone(&markers))
         .with_redaction_mappings(Arc::clone(&mappings))
         .with_compaction(compaction.clone());
@@ -609,19 +607,18 @@ impl Fixture {
                     },
                 )
         };
-        let finish = |run: &crate::interaction_observation::RunObserver,
-                      node: &str,
-                      status: &str| {
-            run.finish(RunOutcome {
-                client_output_committed: true,
-                delivery: None,
-                delivery_completed_at: Some(now_ms()),
-                status: status.into(),
-                terminal_reason: None,
-                generation_node_id: Some(node.to_owned()),
-                generation_root_id: Some(node.to_owned()),
-            });
-        };
+        let finish =
+            |run: &crate::interaction_observation::RunObserver, node: &str, status: &str| {
+                run.finish(RunOutcome {
+                    client_output_committed: true,
+                    delivery: None,
+                    delivery_completed_at: Some(now_ms()),
+                    status: status.into(),
+                    terminal_reason: None,
+                    generation_node_id: Some(node.to_owned()),
+                    generation_root_id: Some(node.to_owned()),
+                });
+            };
 
         let tool_id = self.unique("observed-call");
         let source_node = self.commit(None, &Refs::default()).await;
@@ -1032,13 +1029,14 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
     assert!(!fx.turn_readable(&late_node).await);
     assert!(fx.marker_readable(&late_marker).await);
     assert!(fx.mapping_readable(&late_mapping).await);
-    assert!(fx.compaction_readable(&late_compaction.state).await);
+    // 原生压缩登记在提交解析它时即被确认（回传解析即确认），下限随提交起算，
+    // 与节点同一轮删除；它不像 Marker / 映射那样等到之后的发布。
+    assert!(!fx.compaction_readable(&late_compaction.state).await);
 
     // 下限窗口过去后的那一轮删除。
     fx.sweep(t_published + n).await;
     assert!(!fx.marker_readable(&late_marker).await);
     assert!(!fx.mapping_readable(&late_mapping).await);
-    assert!(!fx.compaction_readable(&late_compaction.state).await);
 }
 both_backends!(
     sqlite_dependencies_are_reclaimed_after_their_floor_window,
@@ -1065,7 +1063,7 @@ async fn floor_windows_are_independent_of_the_retention_days(fx: Fixture) {
         "inside the pending window"
     );
     assert!(fx.mapping_readable(&unpublished_mapping).await);
-    assert!(fx.compaction_readable(&unpublished_compaction.state).await);
+    // 不在窗口内解析未确认的登记：解析即确认，会改变它的下限。
     fx.sweep(t_created + 2 * HOUR).await;
     assert!(!fx.marker_readable(&unpublished_marker).await);
     assert!(!fx.mapping_readable(&unpublished_mapping).await);
@@ -1351,14 +1349,13 @@ async fn native_compaction_sources_follow_their_record(fx: Fixture) {
         "the source record is resolvable"
     );
 
-    // 引用方到期：登记随之删除，来源在随后一轮回收。
+    // 引用方到期：登记随之删除，来源在同一次扫描里回收。
     fx.sweep(t_referrer + n).await;
     assert!(!fx.turn_readable(&referrer).await);
     assert!(!fx.compaction_readable(&second.state).await);
-    fx.sweep(t_referrer + n).await;
     assert!(
         !fx.turn_readable(&source).await,
-        "sources are reclaimed in the next sweep"
+        "sources are reclaimed in the same sweep"
     );
     assert!(!fx.compaction_readable(&first.state).await);
 }
@@ -1432,8 +1429,15 @@ async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
     let t_node = fx.tick().await;
     fx.observe(&shared, &visible, &tool_output).await;
     let t_observed = fx.tick().await;
-    assert!(fx.observed_interactions().await > 0, "interaction is readable");
-    assert_eq!(fx.text_body_rows(shared.len()).await, 1, "one shared body row");
+    assert!(
+        fx.observed_interactions().await > 0,
+        "interaction is readable"
+    );
+    assert_eq!(
+        fx.text_body_rows(shared.len()).await,
+        1,
+        "one shared body row"
+    );
     assert_eq!(fx.text_body_rows(visible.len()).await, 1);
     assert_eq!(fx.text_body_rows(tool_output.len()).await, 1);
 
@@ -1452,7 +1456,11 @@ async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
     fx.sweep_to_completion(t_observed + n).await;
     assert_eq!(fx.observed_interactions().await, 0);
     for body in [&shared, &visible, &tool_output] {
-        assert_eq!(fx.text_body_rows(body.len()).await, 0, "last referrer removed");
+        assert_eq!(
+            fx.text_body_rows(body.len()).await,
+            0,
+            "last referrer removed"
+        );
     }
 }
 both_backends!(
@@ -1672,3 +1680,348 @@ both_backends!(
     1,
     commit_rejects_a_dependency_that_was_already_reclaimed
 );
+
+// ---------------------------------------------------------------------------
+// 回收的链式进展（单次扫描即可完成）
+// ---------------------------------------------------------------------------
+
+/// 一条 ≥3 的原生压缩来源链：引用方到期后，同一次扫描就沿链回收全部登记与来源节点，
+/// 不依赖多轮扫描（ADR：同一轮释放的依赖与正文在同一轮删除）。
+async fn one_sweep_reclaims_a_whole_compaction_chain(fx: Fixture) {
+    let n = fx.window();
+    let source = fx.commit(None, &Refs::default()).await;
+    let first = fx.native_compaction(Some(&source), &[], true).await;
+    let second = fx
+        .native_compaction(None, &[first.record.id.as_str()], true)
+        .await;
+    let third = fx
+        .native_compaction(None, &[second.record.id.as_str()], true)
+        .await;
+    let fourth = fx
+        .native_compaction(None, &[third.record.id.as_str()], true)
+        .await;
+    let referrer = fx
+        .commit(
+            None,
+            &Refs {
+                compaction: Some(fourth.state.clone()),
+                ..Refs::default()
+            },
+        )
+        .await;
+    let t_referrer = fx.tick().await;
+
+    fx.sweep(t_referrer + n).await;
+    assert!(!fx.turn_readable(&referrer).await);
+    for (label, state) in [
+        ("first", &first.state),
+        ("second", &second.state),
+        ("third", &third.state),
+        ("fourth", &fourth.state),
+    ] {
+        assert!(
+            !fx.compaction_readable(state).await,
+            "the {label} record is reclaimed in the same sweep"
+        );
+    }
+    assert!(
+        !fx.turn_readable(&source).await,
+        "the source node is reclaimed in the same sweep"
+    );
+}
+both_backends!(
+    sqlite_one_sweep_reclaims_a_whole_compaction_chain,
+    postgres_one_sweep_reclaims_a_whole_compaction_chain,
+    1,
+    one_sweep_reclaims_a_whole_compaction_chain
+);
+
+/// 未确认的原生压缩登记被客户端回传并解析时即视为已确认：保留期从解析时刻起算 N，
+/// 不再按 1 小时的未确认下限回收。
+async fn resolving_a_pending_compaction_confirms_it(fx: Fixture) {
+    let n = fx.window();
+    let pending = fx.native_compaction(None, &[], false).await;
+    let t_registered = fx.tick().await;
+    assert!(
+        fx.compaction_readable(&pending.state).await,
+        "a pending record resolves"
+    );
+    let t_resolved = fx.tick().await;
+
+    // 未确认下限（1 小时）已过：解析过的登记不再按它回收。
+    fx.sweep(t_registered + HOUR).await;
+    assert!(
+        fx.compaction_readable(&pending.state).await,
+        "resolving confirmed the record"
+    );
+    fx.sweep(t_resolved + n).await;
+    assert!(!fx.compaction_readable(&pending.state).await);
+}
+both_backends!(
+    sqlite_resolving_a_pending_compaction_confirms_it,
+    postgres_resolving_a_pending_compaction_confirms_it,
+    1,
+    resolving_a_pending_compaction_confirms_it
+);
+
+/// 某一步（Observation）失败不得让其余步骤被跳过：Turn 节点照常回收，
+/// 最终统一返回错误。
+async fn a_failing_step_does_not_skip_the_remaining_steps(fx: Fixture) {
+    let n = fx.window();
+    let node = fx.commit(None, &Refs::default()).await;
+    let t = fx.tick().await;
+    let statement =
+        "ALTER TABLE interaction_observations RENAME TO interaction_observations_broken";
+    match &fx.db {
+        Db::Sqlite(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+        Db::Postgres(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+    }
+    .expect("break the observation store");
+
+    let failure = fx
+        .maintenance
+        .sweep_history(t + n)
+        .await
+        .expect_err("the broken observation step is reported");
+    assert!(
+        format!("{failure:#}").contains("observation"),
+        "{failure:#}"
+    );
+    assert!(
+        !fx.turn_readable(&node).await,
+        "the Turn step still ran after the Observation step failed"
+    );
+}
+both_backends!(
+    sqlite_a_failing_step_does_not_skip_the_remaining_steps,
+    postgres_a_failing_step_does_not_skip_the_remaining_steps,
+    1,
+    a_failing_step_does_not_skip_the_remaining_steps
+);
+
+// ---------------------------------------------------------------------------
+// PostgreSQL 并发：回收不依赖外键错误，也不丢失入队
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    fn pg(&self) -> &PgPool {
+        match &self.db {
+            Db::Postgres(pool) => pool,
+            Db::Sqlite(_) => panic!("this scenario needs PostgreSQL"),
+        }
+    }
+
+    /// 与回收并发的“写入方”：只加行锁，等价于提交时外键检查持有的 `FOR KEY SHARE`。
+    async fn hold_key_share<'k, K>(
+        &self,
+        holder: &mut sqlx::PgConnection<'_>,
+        table: &str,
+        column: &str,
+        key: K,
+    ) where
+        K: sqlx::Encode<'k, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + 'k,
+    {
+        let sql = format!("SELECT 1 FROM {table} WHERE {column} = $1 FOR KEY SHARE");
+        sqlx::query_scalar::<_, i32>(sqlx::AssertSqlSafe(sql))
+            .bind(key)
+            .fetch_one(&mut *holder)
+            .await
+            .expect("hold FOR KEY SHARE");
+    }
+
+    /// 带超时的扫描：等待写入方的锁就是失败，而不是无限期挂起。
+    async fn sweep_without_waiting(&self, now: i64) -> u64 {
+        tokio::time::timeout(Duration::from_secs(20), self.maintenance.sweep_history(now))
+            .await
+            .expect("reclaim must not wait for a writer's row lock")
+            .expect("reclaim must not fail on a writer's row lock")
+    }
+}
+
+/// 提交正在引用一个已过下限的依赖（持有它的 `FOR KEY SHARE`、尚未提交）时，
+/// 回收必须跳过它：不等待、不因外键报错；写入方结束后下一轮才回收。
+async fn reclaim_skips_dependencies_held_by_a_committing_writer(fx: Fixture) {
+    let n = fx.window();
+    let marker = fx.thinking_marker("held dependency body", true).await;
+    let mapping = fx.mapping(true).await;
+    let compacted = fx.native_compaction(None, &[], true).await;
+    let t = fx.tick().await;
+
+    let mut holder = fx.pg().begin().await.expect("writer transaction");
+    fx.hold_key_share(&mut holder, "history_markers", "reference", marker.as_str())
+        .await;
+    fx.hold_key_share(
+        &mut holder,
+        "reversible_redaction_mappings",
+        "reference",
+        mapping.as_str(),
+    )
+    .await;
+    fx.hold_key_share(
+        &mut holder,
+        "native_compactions",
+        "id",
+        compacted.record.id.as_str(),
+    )
+    .await;
+
+    fx.sweep_without_waiting(t + n).await;
+    assert!(fx.marker_readable(&marker).await, "held marker is kept");
+    assert!(fx.mapping_readable(&mapping).await, "held mapping is kept");
+    assert!(
+        fx.compaction_readable(&compacted.state).await,
+        "held compaction is kept"
+    );
+
+    holder.rollback().await.expect("writer rolls back");
+    fx.sweep(t + n).await;
+    assert!(!fx.marker_readable(&marker).await);
+    assert!(!fx.mapping_readable(&mapping).await);
+    assert!(!fx.compaction_readable(&compacted.state).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_reclaim_skips_dependencies_held_by_a_committing_writer() {
+    run_postgres(1, reclaim_skips_dependencies_held_by_a_committing_writer).await;
+}
+
+/// 正文行与它所属的 scope 同理：写入方（内容写入或节点提交）持有它们的 `FOR KEY SHARE`
+/// 时，正文回收与 scope 清理都跳过，写入方结束后再回收。
+async fn content_reclaim_skips_rows_held_by_a_writer(fx: Fixture) {
+    let n = fx.window();
+    let body = "content held by a writer ".repeat(27);
+    let marker = fx.thinking_marker(&body, true).await;
+    let t = fx.tick().await;
+    let (content, scope): (i64, i64) = sqlx::query_as(
+        "SELECT c.id, c.scope_id FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
+         WHERE s.principal = $1 AND c.format = 0 AND c.raw_len = $2",
+    )
+    .bind(fx.owner.continuation_key())
+    .bind(i64::try_from(body.len()).unwrap())
+    .fetch_one(fx.pg())
+    .await
+    .expect("marker body content");
+
+    let mut holder = fx.pg().begin().await.expect("writer transaction");
+    fx.hold_key_share(&mut holder, "contents", "id", content)
+        .await;
+    fx.hold_key_share(&mut holder, "content_scopes", "id", scope)
+        .await;
+
+    fx.sweep_without_waiting(t + n).await;
+    assert!(fx.marker_text(&marker).await.is_none());
+    assert_eq!(
+        fx.text_body_rows(body.len()).await,
+        1,
+        "the held body survives the sweep"
+    );
+
+    holder.rollback().await.expect("writer rolls back");
+    fx.sweep(t + n).await;
+    assert_eq!(fx.text_body_rows(body.len()).await, 0);
+
+    // 只有 scope 被写入方持有：正文照常回收，scope 清理跳过它而不是等待。
+    let scope_body = "scope held by a writer ".repeat(29);
+    let marker = fx.thinking_marker(&scope_body, true).await;
+    let t = fx.tick().await;
+    let mut holder = fx.pg().begin().await.expect("writer transaction");
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = $1")
+        .bind(fx.owner.continuation_key())
+        .fetch_one(fx.pg())
+        .await
+        .expect("the scope exists while its body does");
+    fx.hold_key_share(&mut holder, "content_scopes", "id", scope)
+        .await;
+    fx.sweep_without_waiting(t + n).await;
+    assert!(fx.marker_text(&marker).await.is_none());
+    assert_eq!(fx.text_body_rows(scope_body.len()).await, 0);
+    holder.rollback().await.expect("writer rolls back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_content_reclaim_skips_rows_held_by_a_writer() {
+    run_postgres(1, content_reclaim_skips_rows_held_by_a_writer).await;
+}
+
+/// 两个事务各自删除同一来源的兄弟引用（互相看不到对方尚未提交的删除）：
+/// 释放触发器对来源行加锁串行化它们，后者看到前者的提交，来源因此必定入队。
+/// 来源的期限扫描窗口已经越过，入队只可能来自释放触发器。
+async fn sibling_source_edges_released_concurrently_still_enqueue_the_source(fx: Fixture) {
+    let n = fx.window();
+    let source = fx.native_compaction(None, &[], true).await;
+    let t_source = fx.tick().await;
+    let left = fx
+        .native_compaction(None, &[source.record.id.as_str()], true)
+        .await;
+    let right = fx
+        .native_compaction(None, &[source.record.id.as_str()], true)
+        .await;
+    // 来源已到期但仍被引用：扫描越过它，却不入队。
+    fx.sweep(t_source + n).await;
+    assert!(fx.compaction_readable(&source.state).await);
+
+    let mut first = fx.pg().begin().await.expect("first transaction");
+    sqlx::query("DELETE FROM native_compactions WHERE id = $1")
+        .bind(&left.record.id)
+        .execute(&mut *first)
+        .await
+        .expect("delete left referrer");
+
+    let pool = fx.pg().clone();
+    let right_id = right.record.id.clone();
+    let second = tokio::spawn(async move {
+        let mut second = pool.begin().await.expect("second transaction");
+        sqlx::query("DELETE FROM native_compactions WHERE id = $1")
+            .bind(&right_id)
+            .execute(&mut *second)
+            .await
+            .expect("delete right referrer");
+        second
+    });
+    // 第二个事务应当卡在来源行的锁上；等它确实在等锁（或已经完成）再提交第一个事务。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !second.is_finished() {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' \
+             AND query LIKE 'DELETE FROM native_compactions%'",
+        )
+        .fetch_one(fx.pg())
+        .await
+        .expect("lock waiters");
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the second delete neither waits nor finishes"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    first.commit().await.expect("first commit");
+    second
+        .await
+        .expect("second transaction task")
+        .commit()
+        .await
+        .expect("second commit");
+
+    // 来源失去最后一条引用后可以回收：既没有漏入队，也没有留下残余。
+    fx.sweep(t_source + n).await;
+    assert!(
+        !fx.compaction_readable(&source.state).await,
+        "the source record is reclaimed once both referrers are gone"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_sibling_source_edges_released_concurrently_still_enqueue_the_source() {
+    run_postgres(
+        1,
+        sibling_source_edges_released_concurrently_still_enqueue_the_source,
+    )
+    .await;
+}

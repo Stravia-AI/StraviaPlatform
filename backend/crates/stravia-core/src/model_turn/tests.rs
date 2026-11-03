@@ -870,7 +870,10 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             .iter()
             .all(|event| event.kind != "target_attempt_finished"),
         "attempt terminal is folded into the Model Turn terminal: {:?}",
-        events.iter().map(|e| (e.sequence, e.kind.clone())).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| (e.sequence, e.kind.clone()))
+            .collect::<Vec<_>>()
     );
     let terminal = &terminals[0].payload["attempt"];
     assert_eq!(terminal["error_code"], "first_token_timeout");
