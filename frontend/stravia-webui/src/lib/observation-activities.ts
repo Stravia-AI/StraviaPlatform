@@ -166,14 +166,20 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
             runId: run.id,
           })
         }
-      } else if (event.kind === 'client_tool_result' && Object.hasOwn(payload, 'content')) {
-        clientResults.push({
-          run,
-          sequence: event.sequence,
-          at: event.occurred_at,
-          block: { tool_use_id: id, content: payload.content, is_error: payload.is_error },
-          index: 0,
-        })
+      } else if (event.kind === 'client_tool_result') {
+        // 一行事件一批结果；逐项以 tool_id 匹配调用，序号保证同批结果身份稳定。
+        const results = Array.isArray(payload.results) ? payload.results : []
+        for (const [index, item] of results.entries()) {
+          const result = object(item)
+          if (!Object.hasOwn(result, 'content')) continue
+          clientResults.push({
+            run,
+            sequence: event.sequence,
+            at: event.occurred_at,
+            block: { tool_use_id: string(result.tool_id), content: result.content, is_error: result.is_error },
+            index,
+          })
+        }
       }
     }
     for (const entry of calls) {
@@ -181,24 +187,20 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
         entry.activity.live = run.status === 'waiting_client'
         if (!entry.activity.live) {
           entry.activity.status = 'missing-result'
-          const state = events.findLast((event) => event.kind === 'run_state_changed')
-          entry.activity.reason = run.terminal_reason || string(object(state?.payload).reason) || run.status
+          entry.activity.reason = run.terminal_reason || run.status
         }
       } else if (
         entry.activity.live &&
-        events.some(
-          (event) =>
-            (event.kind === 'observation_gap' && object(event.payload).reason === 'unfinished_observation_activity') ||
-            (event.kind === 'run_state_changed' && object(event.payload).reason === 'process_restarted'),
-        )
+        (run.terminal_reason === 'process_restarted' ||
+          events.some(
+            (event) =>
+              event.kind === 'observation_gap' && object(event.payload).reason === 'unfinished_observation_activity',
+          ))
       ) {
         entry.activity.live = false
         entry.activity.status = 'missing-result'
-        entry.activity.reason = events.some(
-          (event) => event.kind === 'run_state_changed' && object(event.payload).reason === 'process_restarted',
-        )
-          ? 'process_restarted'
-          : 'unfinished_observation_activity'
+        entry.activity.reason =
+          run.terminal_reason === 'process_restarted' ? 'process_restarted' : 'unfinished_observation_activity'
       }
     }
     activities.sort((a, b) => a.at - b.at)

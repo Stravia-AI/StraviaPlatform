@@ -51,6 +51,7 @@ import type {
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
+  ObservationContentsPage,
   DebugState,
   ClearHistoryResult,
   DownloadTicket,
@@ -392,6 +393,9 @@ export const admin = {
         'GET',
         `/observations/interactions/${encodeURIComponent(id)}/events${queryString(query) || '?'}`,
       ),
+    /** 批量读取 Observation 引用的正文；调用方保证 ids 不超过 256 个。ETag/304 由浏览器 HTTP 缓存处理。 */
+    contents: (ids: number[]) =>
+      request<ObservationContentsPage>('GET', `/observations/contents${queryString({ ids: ids.join(',') })}`),
     debug: () => request<DebugState>('GET', '/observations/debug'),
     setDebug: (enabled: boolean) => request<DebugState>('PUT', '/observations/debug', { enabled, confirmed: enabled }),
     clearDebug: () => request<DebugState>('DELETE', '/observations/debug'),

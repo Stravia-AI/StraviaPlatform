@@ -26,6 +26,7 @@ import { observationEventSummary, observationStatusTone } from '#lib/observation
 import {
   deriveEventItems,
   deriveTimeline,
+  eventKey,
   itemEvents,
   itemKey,
   processGroup,
@@ -192,7 +193,7 @@ async function showRunInDiagnostics(runId: string) {
             <div {...props}>
               {#if open}
                 <ol class="branch sub">
-                  {#each events as event (event.sequence)}
+                  {#each events as event (eventKey(event))}
                     {@render eventRow(event)}
                   {/each}
                 </ol>

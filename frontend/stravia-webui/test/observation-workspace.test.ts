@@ -30,6 +30,15 @@ const usage: ConfirmedUsage = {
   reasoning_tokens: 0,
 }
 
+// 同一文本对应同一个 content_id：引用序列相同即预览没有变化。
+const contentIds = new Map<string, number>()
+function content(text: string): InteractionSummary['output'] {
+  const id = contentIds.get(text) ?? contentIds.size + 1
+  contentIds.set(text, id)
+  const raw_len = new TextEncoder().encode(text).length
+  return { refs: [{ content_id: id, raw_len }], raw_len }
+}
+
 function summary(id: string, extra: Partial<InteractionSummary> = {}): InteractionSummary {
   return {
     context_events: [],
@@ -42,8 +51,8 @@ function summary(id: string, extra: Partial<InteractionSummary> = {}): Interacti
     status: 'completed',
     started_at: 1_000,
     last_active_at: 1_000,
-    input_preview: null,
-    visible_tail: '',
+    input: { refs: [], raw_len: 0 },
+    output: { refs: [], raw_len: 0 },
     failed_request: false,
     client_output_delivered: true,
     usage,
@@ -77,6 +86,8 @@ function detailFor(id: string, snapshotSequence = 10): InteractionDetail {
   return {
     older_events_cursor: null,
     interaction: summary(id),
+    input_text: '',
+    output_text: '',
     root: root('root1', [summary(id)]),
     runs: [],
     snapshot_sequence: snapshotSequence,
@@ -479,24 +490,24 @@ describe('stream updates', () => {
     await update(summary('i1', { status: 'running' }))
     expect(h.focusNodeCalls).toEqual([])
     // 跟随有更新的卡片，而不是最新卡片：i2 的输出预览追加，i1 的用户输入预览出现。
-    await update(summary('i2', { visible_tail: 'answer' }))
+    await update(summary('i2', { output: content('answer') }))
     expect(h.focusNodeCalls).toEqual(['i2'])
-    await update(summary('i1', { input_preview: 'question' }))
+    await update(summary('i1', { input: content('question') }))
     expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
     // 预览文本没变的重复刷新不算更新。
-    await update(summary('i1', { input_preview: 'question' }))
+    await update(summary('i1', { input: content('question') }))
     expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
     // 新卡片出现时还没有预览不抢视口；带上预览后才跟随。
     await update(summary('i3'))
     expect(h.focusNodeCalls).toEqual(['i2', 'i1'])
-    await update(summary('i3', { visible_tail: 'hello' }))
+    await update(summary('i3', { output: content('hello') }))
     expect(h.focusNodeCalls).toEqual(['i2', 'i1', 'i3'])
 
     // 暂停后只点亮「新活动·跟随」，不移动视口；非预览变化不点亮。
     h.controller.pauseFollow()
-    await update(summary('i3', { status: 'running', visible_tail: 'hello' }))
+    await update(summary('i3', { status: 'running', output: content('hello') }))
     expect(h.snap().hasNewActivity).toBe(false)
-    await update(summary('i3', { visible_tail: 'hello world' }))
+    await update(summary('i3', { output: content('hello world') }))
     expect(h.snap().hasNewActivity).toBe(true)
     expect(h.focusNodeCalls).toEqual(['i2', 'i1', 'i3'])
   })
@@ -678,7 +689,7 @@ describe('bounded refresh orchestration', () => {
       {
         root_id: 'root1',
         last_active_at: 999_500,
-        interactions: [summary('i1', { last_event_sequence: sequence, visible_tail: text })],
+        interactions: [summary('i1', { last_event_sequence: sequence, output: content(text) })],
         removed_interaction_ids: [],
         removal_reason: null,
       },
@@ -703,7 +714,7 @@ describe('bounded refresh orchestration', () => {
               ...changePage(11, 'updated').changes[0],
               interactions: [
                 summary('new', { last_event_sequence: 11 }),
-                summary('i1', { last_event_sequence: 11, visible_tail: 'updated' }),
+                summary('i1', { last_event_sequence: 11, output: content('updated') }),
               ],
             },
           ],
@@ -713,7 +724,7 @@ describe('bounded refresh orchestration', () => {
     await h.emit(streamEvent(11, 'i1', 999_500))
     expect(h.snap().canvasRoots.map((root) => root.id)).toEqual(['root1', 'root2'])
     expect(h.snap().canvasRoots[0].interactions.map((item) => item.id)).toEqual(['first', 'i1', 'last', 'new'])
-    expect(h.snap().canvasRoots[0].interactions[1].visible_tail).toBe('updated')
+    expect(h.snap().canvasRoots[0].interactions[1].output).toEqual(content('updated'))
     h.controller.dispose()
   })
 
@@ -735,7 +746,7 @@ describe('bounded refresh orchestration', () => {
     await h.emit(streamEvent(15, 'i1', 999_500, 'model_thinking'))
     await h.advance(1)
     expect(h.calls.filter((call) => call.method === 'changes')).toHaveLength(1)
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('latest')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('latest'))
     expect(requestedAt - startedAt).toBe(100)
     console.log(`frontend_merge_wait_ms=${requestedAt - startedAt}`)
     h.controller.dispose()
@@ -823,7 +834,7 @@ describe('bounded refresh orchestration', () => {
     await h.advance(0)
     expect(forests).toBe(2)
     expect(h.calls.filter((call) => call.method === 'changes')).toHaveLength(1)
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('latest after recovery')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('latest after recovery'))
     h.controller.dispose()
   })
 
@@ -910,14 +921,14 @@ describe('bounded refresh orchestration', () => {
           ...changePage(11, 'server-ahead final').changes[0],
           last_active_at: 1_050_000,
           interactions: [
-            summary('i1', { last_active_at: 1_050_000, last_event_sequence: 11, visible_tail: 'server-ahead final' }),
+            summary('i1', { last_active_at: 1_050_000, last_event_sequence: 11, output: content('server-ahead final') }),
           ],
         },
       ],
     })
     await h.advance(0)
     expect(h.snap().canvasRoots[0].last_active_at).toBeGreaterThan(h.snap().windowEnd)
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('server-ahead final')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('server-ahead final'))
     expect(h.snap().migratedRoots.size).toBe(0)
     h.controller.dispose()
   })
@@ -1021,12 +1032,12 @@ describe('bounded refresh orchestration', () => {
     expect(calls).toBe(1)
     first.resolve(changePage(11, 'partial'))
     await h.advance(0)
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('partial')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('partial'))
     await h.advance(100)
     expect(calls).toBe(2)
     second.resolve(changePage(12, 'final'))
     await h.advance(0)
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('final')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('final'))
     h.controller.dispose()
   })
 
@@ -1043,7 +1054,7 @@ describe('bounded refresh orchestration', () => {
     await h.controller.reloadForest()
     await h.advance(0)
     expect(h.snap().loadError).toBeUndefined()
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('recovered')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('recovered'))
     h.controller.dispose()
   })
 
@@ -1134,7 +1145,7 @@ describe('bounded refresh orchestration', () => {
               root_id: 'root1',
               last_active_at: 999_500,
               interactions:
-                calls === 1 ? [summary('i1', { last_event_sequence: 11, visible_tail: 'migrated final' })] : [],
+                calls === 1 ? [summary('i1', { last_event_sequence: 11, output: content('migrated final') })] : [],
               removed_interaction_ids: calls === 1 ? [] : ['i1'],
               removal_reason: calls === 1 ? 'window' : 'deleted',
             },
@@ -1145,7 +1156,7 @@ describe('bounded refresh orchestration', () => {
     await h.controller.changeWindow(1)
     await h.emit(streamEvent(11, 'i1', 999_500))
     expect(h.snap().canvasRoots[0].interactions.map((item) => item.id)).toEqual(['i1'])
-    expect(h.snap().canvasRoots[0].interactions[0].visible_tail).toBe('migrated final')
+    expect(h.snap().canvasRoots[0].interactions[0].output).toEqual(content('migrated final'))
     expect(h.snap().migratedRoots.has('root1')).toBe(true)
     await h.emit(streamEvent(12, 'i1', 999_500))
     expect(h.snap().canvasRoots).toEqual([])

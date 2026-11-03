@@ -24,9 +24,44 @@ export interface ObservationTimeline {
   gapLabel(previous: RunDetail, next: RunDetail): string | null
 }
 
-function orderedEvents(events: ObservationEvent[]): ObservationEvent[] {
+const TURN_ATTEMPT_FIELDS = ['attempt', 'attempt_at', 'usage']
+
+/**
+ * 首个 Target attempt 的开始并入 `model_turn_started`，最后一个 attempt 的结束与用量并入
+ * `model_turn_finished`。时间线仍按「轮次行 + 尝试行」展示：把合并字段拆回与分行时相同的
+ * `target_attempt_started` / `target_attempt_finished` 行（沿用所属事件的 sequence，以 kind 区分），
+ * 摘要与 Run 指标因此只需理解一种尝试形态。
+ */
+export function expandAttemptRows(events: readonly ObservationEvent[]): ObservationEvent[] {
+  return events.flatMap((event) => {
+    if (event.kind !== 'model_turn_started' && event.kind !== 'model_turn_finished') return [event]
+    const payload = payloadRecord(event.payload)
+    const attempt = payloadRecord(payload.attempt)
+    if (Object.keys(attempt).length === 0) return [event]
+    const started = event.kind === 'model_turn_started'
+    const kind = started ? 'target_attempt_started' : 'target_attempt_finished'
+    const turn: ObservationEvent = {
+      ...event,
+      payload: Object.fromEntries(Object.entries(payload).filter(([key]) => !TURN_ATTEMPT_FIELDS.includes(key))),
+    }
+    const row: ObservationEvent = {
+      ...event,
+      kind,
+      occurred_at: payloadCount(payload.attempt_at) ? payload.attempt_at : event.occurred_at,
+      payload: { ...attempt, kind },
+    }
+    return started ? [turn, row] : [row, turn]
+  })
+}
+
+/** 同一 sequence 可展开为多行；行标识需带上 kind。 */
+export function eventKey(event: ObservationEvent): string {
+  return `${event.sequence}:${event.kind}`
+}
+
+function orderedEvents(events: readonly ObservationEvent[]): ObservationEvent[] {
   // 因果子树会把晚发生的完成事件提前；阅读时间线按时间排序，原始关联仍保留在 payload。
-  return events.toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
+  return expandAttemptRows(events).toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
 }
 
 function toolName(event: ObservationEvent): string | null {
@@ -39,7 +74,7 @@ function toolName(event: ObservationEvent): string | null {
 const PROCESS_KINDS: Record<string, true> = {
   retained_tail_associated: true,
   native_compaction_associated: true,
-  input_preview_recorded: true,
+  user_input_recorded: true,
   credential_mappings_created: true,
   credential_mappings_reused: true,
   checkpoint: true,
@@ -69,15 +104,15 @@ function streamItems(events: readonly ObservationEvent[]): StreamItem[] {
 
 /** 上游错误详情的事件没有 Run 归属；按与失败详情相同的顺序和分组规则拍平。 */
 export function deriveEventItems(events: readonly ObservationEvent[]): StreamItem[] {
-  return streamItems(orderedEvents([...events]))
+  return streamItems(orderedEvents(events))
 }
 
 export function itemEvents(item: StreamItem): ObservationEvent[] {
   return item.type === 'event' ? [item.event] : item.events
 }
 
-export function itemKey(item: StreamItem): number {
-  return item.type === 'event' ? item.event.sequence : item.events[0].sequence
+export function itemKey(item: StreamItem): string {
+  return eventKey(itemEvents(item)[0])
 }
 
 // 相邻请求之间的等待是一等事实：小于后端 rapid_continuation 窗口（2s）的间隔属于流水线噪声。
@@ -117,7 +152,7 @@ export function runMetrics(run: RunDetail): RunMetrics {
   const started = new Map<string, RunUpstream>()
   const finished = new Map<string, Record<string, unknown>>()
   let lastStarted: string | null = null
-  for (const event of run.events) {
+  for (const event of expandAttemptRows(run.events)) {
     const payload = payloadRecord(event.payload)
     const id = payloadString(payload.attempt_id)
     if (!id) continue

@@ -54,8 +54,8 @@ function detail(runs: RunDetail[], tail = ''): InteractionDetail {
     status: 'completed',
     started_at: 0,
     last_active_at: 10,
-    input_preview: 'Actual user question',
-    visible_tail: tail,
+    input: { refs: [], raw_len: 0 },
+    output: { refs: [], raw_len: 0 },
     failed_request: false,
     client_output_delivered: tail !== '',
     usage,
@@ -67,6 +67,8 @@ function detail(runs: RunDetail[], tail = ''): InteractionDetail {
   }
   return {
     interaction,
+    input_text: 'Actual user question',
+    output_text: tail,
     root: { id: 'root', last_active_at: 10, interactions: [interaction] },
     runs,
     snapshot_sequence: 10,
@@ -138,7 +140,7 @@ describe('observation conversation', () => {
     expect(before).toMatchObject([{ kind: 'tool', status: 'waiting', live: true, results: [] }])
 
     const child = {
-      ...run('child', 3, [event('child', 4, 'client_tool_result', { tool_id: 'read', content: 'ok' })]),
+      ...run('child', 3, [event('child', 4, 'client_tool_result', { results: [{ tool_id: 'read', content: 'ok' }] })]),
       parent_run_id: 'root',
     }
     const blocks = observationConversationBlocks(detail([{ ...waiting, status: 'completed' }, child]))
@@ -256,15 +258,15 @@ describe('observation conversation', () => {
     const current = detail([
       run('root-run', 1, [
         event('root-run', 1, 'run_admitted', { has_new_user: true }),
-        event('root-run', 2, 'input_preview_recorded', {
-          kind: 'input_preview_recorded',
+        event('root-run', 2, 'user_input_recorded', {
+          kind: 'user_input_recorded',
           text: 'Actual user question',
         }),
         event('root-run', 3, 'client_visible_content', { text: 'First response' }),
       ]),
       run('tool-continuation', 2, [
         event('tool-continuation', 4, 'run_admitted', { has_new_user: false }),
-        event('tool-continuation', 5, 'input_preview_recorded', { kind: 'input_preview_recorded' }),
+        event('tool-continuation', 5, 'user_input_recorded', { kind: 'user_input_recorded' }),
         event('tool-continuation', 6, 'client_visible_content', { text: 'Tool continuation' }),
       ]),
       run('pending-tool-result-with-user', 3, [
@@ -272,8 +274,8 @@ describe('observation conversation', () => {
           has_new_user: true,
           grouping_reason: 'pending_tool_result',
         }),
-        event('pending-tool-result-with-user', 8, 'input_preview_recorded', {
-          kind: 'input_preview_recorded',
+        event('pending-tool-result-with-user', 8, 'user_input_recorded', {
+          kind: 'user_input_recorded',
           text: 'Actual user question',
         }),
         event('pending-tool-result-with-user', 9, 'client_visible_content', { text: 'Follow-up response' }),
@@ -296,8 +298,8 @@ describe('observation conversation', () => {
       ...detail([
         run('root-run', 1, [event('root-run', 3, 'client_visible_content', { text: 'First response' })]),
         run('follow-up', 2, [
-          event('follow-up', 4, 'input_preview_recorded', {
-            kind: 'input_preview_recorded',
+          event('follow-up', 4, 'user_input_recorded', {
+            kind: 'user_input_recorded',
             text: 'Visible follow-up',
           }),
           event('follow-up', 5, 'client_visible_content', { text: 'Follow-up response' }),
@@ -335,7 +337,7 @@ describe('observation conversation', () => {
 
   test('keeps missing historical input and retained tail empty', () => {
     const historical = detail([], 'Only the preserved ending')
-    historical.interaction.input_preview = null
+    historical.input_text = ''
     const messages = observationConversationMessages(historical)
     expect(messages.map(({ role, text }) => ({ role, text }))).toEqual([
       { role: 'user', text: '' },

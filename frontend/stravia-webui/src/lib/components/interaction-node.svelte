@@ -9,6 +9,9 @@ import { observationStatusLabel } from '#lib/observation-labels.js'
 import type { InteractionNodeData } from '#lib/types.js'
 
 type InteractionNode = import('@xyflow/svelte').Node<InteractionNodeData, 'interaction'>
+// 与服务端拼接 refs 的分隔符一致：输入以单换行，输出以空行。
+const INPUT_SEPARATOR = '\n'
+const OUTPUT_SEPARATOR = '\n\n'
 let { data, selected }: NodeProps<InteractionNode> = $props()
 
 const interaction = $derived(data.interaction)
@@ -66,8 +69,9 @@ const usage = $derived([
   </header>
 
   <InteractionPreview
-    text={interaction.input_preview}
-    label={m.observation_input_preview()}
+    summary={interaction.input}
+    separator={INPUT_SEPARATOR}
+    label={m.observation_card_input()}
     emptyLabel={m.observation_input_not_recorded()} />
 
   <div class="usage-grid" aria-label={m.observation_confirmed_usage()}>
@@ -81,8 +85,10 @@ const usage = $derived([
   </div>
 
   <InteractionPreview
-    text={selected ? (data.outputPreview?.text ?? interaction.visible_tail) : interaction.visible_tail}
-    label={m.observation_output_preview()}
+    summary={interaction.output}
+    separator={OUTPUT_SEPARATOR}
+    liveText={selected ? data.outputPreview?.text : undefined}
+    label={m.observation_card_output()}
     emptyLabel={interaction.client_output_delivered
       ? m.observation_output_delivered_no_preview()
       : m.observation_no_visible_output()}

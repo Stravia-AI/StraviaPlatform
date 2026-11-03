@@ -48,11 +48,15 @@ export function isValidObservationRange(startMs: number, endMs: number): boolean
   )
 }
 
-// 卡片上的用户输入预览或模型输出预览是否有更新；新出现的卡片只在已带预览文本时算更新，
+// 卡片上的用户输入预览或模型输出预览是否有更新（引用的正文 id 序列变化）；新出现的卡片只在已带引用时算更新，
 // 避免刚创建、尚无内容的卡片抢走视口。
+function contentKey(summary: InteractionSummary['input']): string {
+  return summary.refs.map((ref) => ref.content_id).join(',')
+}
+
 function previewUpdated(before: InteractionSummary | undefined, after: InteractionSummary): boolean {
-  if (!before) return Boolean(after.input_preview) || after.visible_tail !== ''
-  return before.input_preview !== after.input_preview || before.visible_tail !== after.visible_tail
+  if (!before) return after.input.refs.length > 0 || after.output.refs.length > 0
+  return contentKey(before.input) !== contentKey(after.input) || contentKey(before.output) !== contentKey(after.output)
 }
 
 /** logs 页需要的 admin.observations 窄面；admin.observations 结构满足此接口。 */
@@ -1390,7 +1394,7 @@ export class ObservationWorkspaceController {
       }
       if (
         this.#activeTab === 'upstream-errors' &&
-        streamEvent.kind === 'target_attempt_finished' &&
+        (streamEvent.kind === 'target_attempt_finished' || streamEvent.kind === 'model_turn_finished') &&
         streamEvent.error_source === 'upstream'
       ) {
         this.#upstreamErrorList.pending = Math.max(this.#upstreamErrorList.pending, streamEvent.sequence)

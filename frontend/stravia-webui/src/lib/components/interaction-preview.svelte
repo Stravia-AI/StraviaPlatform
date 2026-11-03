@@ -3,9 +3,18 @@ import MarkdownContent from '#lib/components/markdown-content.svelte'
 import StreamingMarkdown from '#lib/components/streaming-markdown.svelte'
 import { tick } from 'svelte'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
+import * as m from '#lib/paraglide/messages.js'
+import { observationContents } from '#lib/observation-contents-client.js'
+import type { ObservationContentSummary } from '#lib/types.js'
+
+/** 卡片视口只容纳两到三行；输入取开头、输出取结尾，各自读取到足够的非空文本为止。 */
+const INPUT_PREVIEW_CHARS = 600
+const OUTPUT_PREVIEW_CHARS = 4096
 
 let {
-  text,
+  summary,
+  separator,
+  liveText,
   label,
   emptyLabel,
   contextLabel = '',
@@ -14,7 +23,12 @@ let {
   textStart = 0,
   snapshotKey = 0,
 }: {
-  text: string | null
+  /** 列表摘要：有序正文引用。卡片与 Tooltip 都按引用经内容端点读取。 */
+  summary: ObservationContentSummary
+  /** 引用正文的拼接分隔符，与服务端 `input_text` / `output_text` 一致。 */
+  separator: string
+  /** 选中卡片的实时尾窗（含尚未提交的正文）；提供时替代按引用读取的卡片预览。 */
+  liveText?: string
   label: string
   emptyLabel: string
   contextLabel?: string
@@ -23,12 +37,69 @@ let {
   textStart?: number
   snapshotKey?: number
 } = $props()
-const hasVisibleText = $derived(/\S/.test(text ?? ''))
+const refsKey = $derived(summary.refs.map((ref) => ref.content_id).join(','))
+const empty = $derived(summary.refs.length === 0)
+let previewText = $state<string | null>(null)
+let previewFailed = $state(false)
+let fullText = $state<{ key: string; text: string } | null>(null)
+let fullFailed = $state(false)
+// 流式进行中的 Tooltip 沿用实时尾窗：摘要引用尚不含未提交正文。
+const liveTooltip = $derived(active && liveText !== undefined)
+const cardText = $derived(liveText ?? (empty ? '' : previewText))
+const cardStatus = $derived(cardText !== null ? 'ready' : previewFailed ? 'failed' : 'loading')
+const hasVisibleText = $derived(/\S/.test(cardText ?? ''))
 let open = $state(false)
 let pinned = $state(false)
 let trigger = $state<HTMLButtonElement | null>(null)
 let content = $state<HTMLDivElement | null>(null)
 const contentId = $props.id()
+
+$effect(() => {
+  void refsKey
+  if (liveText !== undefined || empty) return
+  const refs = summary.refs
+  let current = true
+  previewFailed = false
+  observationContents
+    .preview(refs, {
+      separator,
+      edge: tail ? 'tail' : 'head',
+      limit: tail ? OUTPUT_PREVIEW_CHARS : INPUT_PREVIEW_CHARS,
+    })
+    .then((text) => {
+      if (current) previewText = text
+    })
+    .catch(() => {
+      if (current) previewFailed = true
+    })
+  return () => {
+    current = false
+  }
+})
+
+$effect(() => {
+  if (!open || liveTooltip || empty) return
+  const key = refsKey
+  const refs = summary.refs
+  let current = true
+  fullFailed = false
+  observationContents
+    .read(refs, separator)
+    .then((text) => {
+      if (current) fullText = { key, text }
+    })
+    .catch(() => {
+      if (current) fullFailed = true
+    })
+  return () => {
+    current = false
+  }
+})
+
+const tooltipText = $derived(
+  liveTooltip ? liveText! : empty ? '' : fullText?.key === refsKey ? fullText.text : null,
+)
+const tooltipStatus = $derived(tooltipText !== null ? 'ready' : fullFailed ? 'failed' : 'loading')
 
 function close() {
   pinned = false
@@ -61,15 +132,19 @@ async function handleKeydown(event: KeyboardEvent) {
 }
 </script>
 
-{#snippet markdown(animate: boolean)}
+{#snippet markdown(text: string | null, status: 'ready' | 'loading' | 'failed', animate: boolean, streamed: boolean)}
   <div class="preview-markdown" style:--markdown-first-margin={contextLabel ? '0.35rem' : '0'}>
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
-    {#if text !== null && hasVisibleText}
-      {#if tail}
+    {#if text !== null && /\S/.test(text)}
+      {#if streamed}
         <StreamingMarkdown {text} active={animate} streaming={active} {textStart} {snapshotKey} />
       {:else}
         <MarkdownContent {text} streaming={active} />
       {/if}
+    {:else if status === 'loading'}
+      {m.observation_loading_details()}
+    {:else if status === 'failed'}
+      {m.observation_content_load_failed()}
     {:else if !contextLabel}
       {emptyLabel}
     {/if}
@@ -106,9 +181,9 @@ async function handleKeydown(event: KeyboardEvent) {
           class={[
             'preview-viewport',
             tail ? 'tail-preview' : 'input-preview',
-            !hasVisibleText && 'text-muted-foreground',
+            (cardStatus !== 'ready' || !hasVisibleText) && 'text-muted-foreground',
           ]}>
-          {@render markdown(active)}
+          {@render markdown(cardText, cardStatus, active, tail)}
         </div>
       </button>
     {/snippet}
@@ -144,7 +219,7 @@ async function handleKeydown(event: KeyboardEvent) {
       aria-label={label}
       tabindex="-1">
       <p class="preview-label">{label}</p>
-      {@render markdown(active && open)}
+      {@render markdown(tooltipText, tooltipStatus, active && open, liveTooltip && tail)}
     </div>
   </Tooltip.Content>
 </Tooltip.Root>

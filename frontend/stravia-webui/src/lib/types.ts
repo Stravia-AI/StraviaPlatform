@@ -117,7 +117,6 @@ export type CredentialHitDetail =
       state: 'available'
       field: CredentialHitField
       text: string
-      truncated: boolean
       hit_basis: 'secret' | 'rule'
       /** 文本与匹配偏移已由服务端遮罩；只有明确请求且获准时为 false。 */
       masked: boolean

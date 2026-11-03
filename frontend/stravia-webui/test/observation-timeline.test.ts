@@ -55,6 +55,8 @@ function run(
 function detail(runs: RunDetail[], started_at = 0): InteractionDetail {
   return {
     older_events_cursor: null,
+    input_text: '',
+    output_text: '',
     interaction: {
       context_events: [],
       id: 'i1',
@@ -66,8 +68,8 @@ function detail(runs: RunDetail[], started_at = 0): InteractionDetail {
       status: 'completed',
       started_at,
       last_active_at: started_at,
-      input_preview: null,
-      visible_tail: '',
+      input: { refs: [], raw_len: 0 },
+      output: { refs: [], raw_len: 0 },
       failed_request: false,
       client_output_delivered: true,
       usage,
@@ -186,8 +188,8 @@ describe('stream item grouping', () => {
     expect(itemEvents(items[0]).map((e) => e.sequence)).toEqual([1, 2])
     expect(itemEvents(items[1]).map((e) => e.sequence)).toEqual([3, 4])
     expect(itemEvents(items[2]).map((e) => e.sequence)).toEqual([5])
-    expect(itemKey(items[0])).toBe(1)
-    expect(itemKey(items[3])).toBe(6)
+    expect(itemKey(items[0])).toBe('1:checkpoint')
+    expect(itemKey(items[3])).toBe('6:run_finished')
   })
 
   test('process-kind events with a non-neutral tone stay on the main stream', () => {
@@ -311,8 +313,71 @@ describe('failure items', () => {
     ])
     const view = deriveTimeline(undefined, failure)
     expect(view.failureItems.map((i) => i.type)).toEqual(['tools', 'process'])
-    expect(view.failureItems.map(itemKey)).toEqual([1, 2])
+    expect(view.failureItems.map(itemKey)).toEqual(['1:client_tool_handoff', '2:checkpoint'])
     expect(itemEvents(view.failureItems[1]).map((e) => e.sequence)).toEqual([2, 3])
+  })
+})
+
+describe('merged model turn attempts', () => {
+  const firstAttempt = {
+    model_turn_id: 'turn',
+    attempt_id: 'a1',
+    provider_name: 'Primary',
+    upstream_model: 'primary-model',
+    protocol: 'openai',
+  }
+  const lastAttempt = {
+    model_turn_id: 'turn',
+    attempt_id: 'a2',
+    status: 'completed',
+    duration_ms: 3000,
+    first_token_ms: 1000,
+    usage: { ...usage, output_tokens: 60 },
+  }
+  const merged = () => [
+    event(1, 'model_turn_started', { model_turn_id: 'turn', route_id: 'route', attempt: firstAttempt, attempt_at: 5 }, 4),
+    event(2, 'target_attempt_started', { ...{ ...firstAttempt, attempt_id: 'a2' }, provider_name: 'Fallback' }, 8),
+    event(
+      3,
+      'model_turn_finished',
+      { model_turn_id: 'turn', status: 'completed', attempt: lastAttempt, attempt_at: 20, usage: lastAttempt.usage },
+      21,
+    ),
+  ]
+
+  test('renders the first and last attempt rows from the merged turn rows like separate rows', () => {
+    const view = deriveTimeline(detail([run('r1', 0, merged())]), undefined)
+    const events = view.timelines.get('r1')!
+    expect(events.map((e) => e.kind)).toEqual([
+      'model_turn_started',
+      'target_attempt_started',
+      'target_attempt_started',
+      'target_attempt_finished',
+      'model_turn_finished',
+    ])
+    const [turn, first, , last, done] = events
+    expect(observationEventSummary(turn).facts.map((f) => f.value)).toEqual(['route'])
+    expect(observationEventSummary(first).facts).toContainEqual({ label: m.observation_event_model_service(), value: 'Primary' })
+    expect(first.occurred_at).toBe(5)
+    expect(observationEventSummary(last).facts).toContainEqual({ label: m.observation_duration(), value: formatDuration(3000) })
+    expect(observationEventSummary(last).facts.map((f) => f.label)).toContain(m.logs_token_speed())
+    expect(observationEventSummary(done).tone).toBe('success')
+    expect(done.payload).not.toHaveProperty('attempt')
+    expect(new Set(view.streams.get('r1')!.map(itemKey)).size).toBe(events.length)
+  })
+
+  test('run metrics read the serving upstream from merged and failover attempt rows', () => {
+    const metrics = runMetrics(run('r1', 0, merged(), { delivery_completed_at: 5000 }))
+    expect(metrics.upstream).toEqual([{ model: 'primary-model', provider: 'Fallback' }])
+    expect(metrics.firstTokenMs).toBe(1000)
+  })
+
+  test('a merged turn without an attempt stays a single row', () => {
+    const view = deriveTimeline(
+      detail([run('r1', 0, [event(1, 'model_turn_finished', { model_turn_id: 'turn', status: 'failed' })])]),
+      undefined,
+    )
+    expect(view.timelines.get('r1')!.map((e) => e.kind)).toEqual(['model_turn_finished'])
   })
 })
 
@@ -404,7 +469,7 @@ describe('run metrics', () => {
   })
 
   test('a run without attempts reports nothing instead of zeros', () => {
-    expect(runMetrics(run('r1', 0, [event(1, 'run_admitted', { route_id: 'route' })]))).toEqual({
+    expect(runMetrics(run('r1', 0, [event(1, 'run_admitted', { inferred_retry: false })]))).toEqual({
       upstream: [],
       durationMs: null,
       firstTokenMs: null,

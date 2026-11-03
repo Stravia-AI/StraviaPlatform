@@ -374,14 +374,33 @@ test('real gateway accepts original images and persisted reasoning replay under 
         // sent within the rapid-continuation window may instead share one.
         // Verify both delivered answers and their accounting independently of
         // the browser reload's incidental timing relative to that boundary.
-        const completed = interactions.filter(
-          (item) =>
-            item.status === 'completed' &&
-            typeof item.visible_tail === 'string' &&
-            (item.visible_tail.includes('First real gateway answer') ||
-              item.visible_tail.includes('Second real gateway answer')),
+        // 列表只返回输出的内容引用；正文经 /observations/contents 读回，按空行拼接。
+        const outputText = async (item: Record<string, unknown>): Promise<string> => {
+          const refs = record(item.output).refs
+          if (!Array.isArray(refs) || refs.length === 0) return ''
+          const ids = refs.map((ref) => record(ref).content_id).join(',')
+          const page = record(await api(`/observations/contents?ids=${ids}`))
+          if (!Array.isArray(page.contents)) throw new Error('Observation contents omitted contents')
+          const bodies = new Map(
+            page.contents.map((entry) => {
+              const body = record(entry).body
+              if (typeof body !== 'string') throw new Error('Expected a text content body')
+              return [record(entry).content_id, body]
+            }),
+          )
+          return refs.map((ref) => bodies.get(record(ref).content_id) ?? '').join('\n\n')
+        }
+        const answered = await Promise.all(
+          interactions
+            .filter((item) => item.status === 'completed')
+            .map(async (item) => ({ item, tail: await outputText(item) })),
         )
-        const tails = completed.map((item) => item.visible_tail as string)
+        const completed = answered
+          .filter(
+            ({ tail }) => tail.includes('First real gateway answer') || tail.includes('Second real gateway answer'),
+          )
+          .map(({ item }) => item)
+        const tails = answered.map(({ tail }) => tail)
         if (
           !tails.some((tail) => tail.includes('First real gateway answer')) ||
           !tails.some((tail) => tail.includes('Second real gateway answer'))

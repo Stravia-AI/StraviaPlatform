@@ -216,6 +216,8 @@ test('inline settings commit only on Enter or Save, revert on Escape, and keep t
   const cancel = section.getByRole('button', { name: 'Cancel', exact: true })
   await expect(retention).toHaveValue('7')
   await expect(save).toHaveCount(0)
+  await expect(section).toContainText('kept for at least this many days after its last use')
+  await expect(section).toContainText('Saving starts cleanup immediately')
 
   // Blur never commits: the draft stays, the row offers Save and Cancel, nothing is written.
   await retention.fill('30')
@@ -260,10 +262,12 @@ test('inline settings commit only on Enter or Save, revert on Escape, and keep t
 
   // A value outside 1–365 is rejected locally without a request.
   const before = writes.length
-  await retention.fill('400')
-  await retention.press('Enter')
-  await expect(section.getByRole('alert')).toBeVisible()
-  expect(writes).toHaveLength(before)
+  for (const invalid of ['400', '0']) {
+    await retention.fill(invalid)
+    await retention.press('Enter')
+    await expect(section.getByRole('alert')).toBeVisible()
+    expect(writes).toHaveLength(before)
+  }
 })
 
 test('setup prefills its entry and preserves an edited complete client address after failure', async ({ page }) => {
@@ -2594,7 +2598,7 @@ test('switching settings groups with a dirty inline input asks first and stays q
   await nav.getByRole('link', { name: 'Data' }).click()
   await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
   await expect(page).toHaveURL(/view=data$/)
-  await expect(page.getByRole('heading', { level: 2, name: 'Request history' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 2, name: 'History retention' })).toBeVisible()
 
   // The discarded draft is gone, and leaving the page is guarded the same way once dirty again.
   await nav.getByRole('link', { name: 'Network' }).click()
