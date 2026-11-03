@@ -144,7 +144,7 @@ rejected_request_observations - expires_at
 |现在|12.0|10.0|
 |阶段合并 + 事件合并|7.7|4.7|
 
-表中只计会写事件行的事务。ClientCompletion、tail 来源与 `finalize_activity` 现在每个 Run 至少还有 2 个不写事件行的事务，阶段合并会把它们并入收尾事务，所以实际降幅应更大（推断，未实测）。语句精简的效果未单独估算。已知限制：流式事件批次只合并同一 Run 连续到达的事件，遇到另一个 Run 的命令即把它交回主循环，所以多个 Run 逐事件交错到达时仍是每个事件行一次提交，阶段合并对这种形态不减少事务数（上表是单 Run 近似，不描述这种交错）。实施后以 `stravia::perf` span 实测确认。
+表中只计会写事件行的事务。ClientCompletion、tail 来源与 `finalize_activity` 现在每个 Run 至少还有 2 个不写事件行的事务，阶段合并会把它们并入收尾事务，当时据此推断实际降幅应更大；合成负载的实测没有复现 4.7（单轮 6.25、工具流 8.01 个 Observation 写事务/Run，口径差异见「实施后实测」）。语句精简的效果未单独估算。已知限制：流式事件批次只合并同一 Run 连续到达的事件，遇到另一个 Run 的命令即把它交回主循环，所以多个 Run 逐事件交错到达时仍是每个事件行一次提交，阶段合并对这种形态不减少事务数（上表是单 Run 近似，不描述这种交错）。实施后以 `stravia::perf` span 实测确认。
 
 ## 管理面读取：摘要带引用，正文按需取
 
@@ -183,7 +183,7 @@ rejected_request_observations - expires_at
 - 原生登记续期对 `turn_nodes` 取的 `ROW EXCLUSIVE` 表锁随续期一起删除；节点回收仍沿用 `LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE`，提交路径的 `turn_nodes` 锁序不变。
 - SQLite 继续使用共享写租约与 `BEGIN IMMEDIATE`。
 
-这样，Observation 写入与内容写入不再等待 GC 的表锁（Turn 提交沿用 `turn_nodes` 的 `ROW EXCLUSIVE`，仍与节点回收的 `SHARE ROW EXCLUSIVE` 互斥，推断，须压测确认）；Marker 发布、映射发布与原生登记确认只会等待一个正在执行的回收批次（上文咨询锁），不会因节点回收等待在途提交而排队。并发行为由 `history_retention` 的 PostgreSQL 并发测试（`publication_waits_for_an_in_flight_reclaim`、`reclaim_waits_for_an_in_flight_publication`、`publication_does_not_wait_for_node_reclaim_blocked_on_a_commit`、`marker_reclaim_orders_content_locks_across_its_whole_batch`、`startup_recovery_waits_for_an_in_flight_reclaim` 等）覆盖，延迟未测。
+这样，Observation 写入与内容写入不再等待 GC 的表锁（Turn 提交沿用 `turn_nodes` 的 `ROW EXCLUSIVE`，仍与节点回收的 `SHARE ROW EXCLUSIVE` 互斥）；Marker 发布、映射发布与原生登记确认只会等待一个正在执行的回收批次（上文咨询锁），不会因节点回收等待在途提交而排队。并发行为由 `history_retention` 的 PostgreSQL 并发测试（`publication_waits_for_an_in_flight_reclaim`、`reclaim_waits_for_an_in_flight_publication`、`publication_does_not_wait_for_node_reclaim_blocked_on_a_commit`、`marker_reclaim_orders_content_locks_across_its_whole_batch`、`startup_recovery_waits_for_an_in_flight_reclaim` 等）覆盖；并发写入加强制扫描的争用压测中死锁为 0，请求尾延迟与实施前相当（见「实施后实测」），发布等待回收批次的时长没有单独测量。
 
 ## 升级
 
@@ -231,8 +231,8 @@ _Contradicts ADR-0076（`turn_contents` 由 Turn Chain 拥有，「此格式不�
 
 ## Consequences
 
-- 单个 item 的写入由 1 行变为事件、块、引用 3 行（正文首次出现时另加内容行），单个事务更重，靠事务数下降来抵消，净效果须实测。正文单元不设门槛也会增加内容行与引用行，增幅未测。
-- SQLite 单写租约下事务变长，需压测 Turn Chain 与统计写入的排队时间；PostgreSQL 行级锁协议需要并发压测。
+- 单个 item 的写入由 1 行变为事件、块、引用 3 行（正文首次出现时另加内容行），单个事务更重，靠事务数下降来抵消。正文单元不设门槛也会增加内容行与引用行，行数增幅没有单独统计；合成负载上的各表字节与编码载荷见「实施后实测」。
+- SQLite 单写租约下单次持有变长；实测中 Observation 每 Run 的持有与排队总时长下降，Turn Chain 与统计写入的排队均值没有变差，但新二进制有 2 个 case 出现原因未定的提交停顿。PostgreSQL 行级锁协议的并发压测见「实施后实测」。
 - 清理 Observation 历史只删除 Observation 的引用；仍被 Turn Chain 或 Marker 引用的正文，要等那些引用删除后才回收。界面与文档须写明。
 - 与其他事件同时发生的 Run 状态转移不再单独留行，时间线不能显示这些中间状态；SSE 的 kind 集合发生变化，前端时间线与摘要映射需同步修改。
 - 到期不再立即不可读：到期后最多一个扫描周期内仍可读、可续接，续接后旧链继续保留。修改天数不重写任何行，在保存后触发的扫描中生效；缩短天数会让这次扫描删除大批数据。

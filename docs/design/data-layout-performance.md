@@ -77,7 +77,7 @@ metadata 的扩展对象同样复用 JSON map 的保守条目估重，而不只�
 
 ## 5. 升级、已取得证据与限制
 
-> 本节的转换、审计与测量记录的是 0001–0033 路径（含当时的 `expires_at`、创建/到期时间审计与祖先续期口径），作为带日期的历史证据保留，未针对 0037–0042 重新测量。0037–0042 的升级方式与待测项见第 10 节。
+> 本节的转换、审计与测量记录的是 0001–0033 路径（含当时的 `expires_at`、创建/到期时间审计与祖先续期口径），作为带日期的历史证据保留，未针对 0037–0042 重新测量。0037–0042 的升级方式与实测见第 10 节。
 
 ### 转换与回退
 
@@ -525,17 +525,17 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 
 ## 10. ADR-0089 的共享内容存储、引用保留与 Observation 写入合并
 
-迁移 0037–0042 落实 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)，取代前文第 1–9 节中关于 `turn_scopes` / `turn_contents` / `turn_content_gc`、`turn-content.v1` 哈希域、`turn_node_retention.expires_at`、祖先续期、到期索引 GC 与 Observation `payload` / `expires_at` / `input_preview` / `visible_tail` 的描述。本节只记录设计取舍和成本模型；本节没有任何实测数字，数字一律等待 10.4 的“实施后实测”填写。ADR 中的估算会明确标注为 ADR 的推断。
+迁移 0037–0042 落实 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)，取代前文第 1–9 节中关于 `turn_scopes` / `turn_contents` / `turn_content_gc`、`turn-content.v1` 哈希域、`turn_node_retention.expires_at`、祖先续期、到期索引 GC 与 Observation `payload` / `expires_at` / `input_preview` / `visible_tail` 的描述。10.1–10.3 只记录设计取舍和成本模型，不含实测数字；实测集中在 10.4。ADR 中的估算明确标注为 ADR 的推断。
 
 ### 10.1 共享内容存储
 
-- **来源与目的。** Turn Chain、History Marker 与 Observation 此前各存一份相同的 thinking / 可见正文；ADR-0089 估计跨协议思考正文由 5 份变为 1 份，同协议思考正文与可见正文由 4 份变为 1 份（ADR 的估计，实施后未测）。
+- **来源与目的。** Turn Chain、History Marker 与 Observation 此前各存一份相同的 thinking / 可见正文；ADR-0089 估计跨协议思考正文由 5 份变为 1 份，同协议思考正文与可见正文由 4 份变为 1 份（ADR 的估计。合成负载上的实测只验证了共享本身：Observation 引用的正文都与 Turn 共用 `contents` 行，没有只被 Observation 引用的正文，见 ADR-0089 §实施后实测；份数没有按开发库分布复测）。
 - **表与身份。** `content_scopes`（Principal 字典）、`contents(id, scope_id, digest, format, raw_len, body)` 与 `content_gc` 从 `turn_chain` 迁出，成为 crate 私有的内容存储模块；Turn、Marker、Observation 是同级使用方，内容存储只按引用判活，不理解任何一方的语义，也不保存到期时间。身份为 `SHA256(b"stravia.content.v1\0" + format + 原文)`，`format` 计入摘要（0 文本、1 紧凑 JSON）；文本单元存原始 UTF-8，不经 `serde_json`，`raw_len` 让展示长度和返回摘要不必解码。
 - **引用表。** `turn_node_contents`、`history_marker_contents`、`observation_event_contents`、`observation_tool_results` 统一为 `(owner, ordinal) → content_id`，`RESTRICT` 并有 `content_id` 反向索引。引用方在删除引用的同一事务里把失去最后引用的内容登记进 `content_gc`，最终删除在锁协议内重检四个反向引用。
 - **正文单元。** 哪些值算正文由 `ir/content.rs` 的单个函数定义；三方共用，不再靠键名推断。没有大小门槛，空字符串也寻址。Turn 的 descriptor 槽位按第 2 节所述扩展；跨协议投影文本用 `history_marker::syntax::split_projected_text` 拆为字面量与正文，拼回逐字节校验，不同则整串存为一个文本单元。外壳（item、系统、工具等 JSON；Marker 的 signature / encrypted_content）各存各的，只共享正文。
-- **并发协议。** PostgreSQL 不再用内容表锁：写入方 `INSERT … ON CONFLICT DO NOTHING RETURNING id`，已有行用 `FOR KEY SHARE` 取得并保护到引用提交（读取 scope 同样 `FOR KEY SHARE`）；GC 用 `FOR UPDATE OF c SKIP LOCKED` 领取并重检，每批最多 512 行或 8 MiB，逐批提交并释放写协调，一次调用内排空队列；`enqueue_unreferenced` 先对候选内容行取 `FOR NO KEY UPDATE` 再重检；`prune_scopes` 以 `FOR UPDATE SKIP LOCKED` 领取 scope 后重检节点与正文。依赖（Marker、映射、原生登记）同理：提交只加 `FOR KEY SHARE`，回收以 `FOR UPDATE OF g, m SKIP LOCKED` 同时锁队列行与对象行后重检，释放触发器取 `FOR NO KEY UPDATE`。节点、Marker 与原生登记的回收事务取独占的事务级咨询锁 `PG_GC_LOCK`，Marker 发布、映射发布、原生登记确认与启动恢复取同一把锁的共享模式：释放触发器按行删除顺序取多行 `FOR NO KEY UPDATE`，发布方按调用方顺序更新同一批行并持有已得的行锁，两边顺序不同会死锁，互斥后取锁顺序不会成环；代价是一次发布可能等待一个有界的回收批次，延迟未测。节点回收先取 `turn_nodes` 的 `SHARE ROW EXCLUSIVE` 表锁、再取咨询锁，所以等待在途提交期间不持有咨询锁，发布不会排在这段等待之后；Marker 回收整批只做一次按 ID 升序的正文入队（节点回收把入队放在节点删除之后），各事务的排他正文锁（`FOR NO KEY UPDATE`）一律在对象行锁之后，与 Observation 清理的一次有序入队不交叉，完整顺序见 ADR-0089 §PostgreSQL 锁协议。因此 Observation 写入不再等待 GC 的表锁（Turn 提交沿用 `turn_nodes` 的 `ROW EXCLUSIVE`；ADR 的推断，须压测确认）。SQLite 仍是共享写租约加 `BEGIN IMMEDIATE`。
-- **升级。** 0037 之后由顶层模块 `content_upgrade`（不在语义无关的 `content_store` 内）的 Rust 钩子逐批转换节点与 Marker，进度记在 `content_upgrade`，可中断续跑，校验完成后 0038 切换并删除旧表；耗时与并存期空间待测，见 10.4。Observation 的正文 scope 键是 `api-key:<principal>`，与 Turn、Marker 的 `Principal::continuation_key()` 相同，三方才共享同一行。
-- **影响。** 一个 item 的写入可能由 1 行变为事件、块、引用 3 行，首次出现的正文再加 1 个内容行；正文单元不设门槛也会增加内容行与引用行，增幅未测。清理 Observation（到期回收与「清除历史记录」）只删除 Observation 的引用并在同一事务登记失去引用的正文，仍被 Turn 或 Marker 引用的正文要等那些引用删除后才回收。
+- **并发协议。** PostgreSQL 不再用内容表锁：写入方 `INSERT … ON CONFLICT DO NOTHING RETURNING id`，已有行用 `FOR KEY SHARE` 取得并保护到引用提交（读取 scope 同样 `FOR KEY SHARE`）；GC 用 `FOR UPDATE OF c SKIP LOCKED` 领取并重检，每批最多 512 行或 8 MiB，逐批提交并释放写协调，一次调用内排空队列；`enqueue_unreferenced` 先对候选内容行取 `FOR NO KEY UPDATE` 再重检；`prune_scopes` 以 `FOR UPDATE SKIP LOCKED` 领取 scope 后重检节点与正文。依赖（Marker、映射、原生登记）同理：提交只加 `FOR KEY SHARE`，回收以 `FOR UPDATE OF g, m SKIP LOCKED` 同时锁队列行与对象行后重检，释放触发器取 `FOR NO KEY UPDATE`。节点、Marker 与原生登记的回收事务取独占的事务级咨询锁 `PG_GC_LOCK`，Marker 发布、映射发布、原生登记确认与启动恢复取同一把锁的共享模式：释放触发器按行删除顺序取多行 `FOR NO KEY UPDATE`，发布方按调用方顺序更新同一批行并持有已得的行锁，两边顺序不同会死锁，互斥后取锁顺序不会成环；代价是一次发布可能等待一个有界的回收批次，延迟未测。节点回收先取 `turn_nodes` 的 `SHARE ROW EXCLUSIVE` 表锁、再取咨询锁，所以等待在途提交期间不持有咨询锁，发布不会排在这段等待之后；Marker 回收整批只做一次按 ID 升序的正文入队（节点回收把入队放在节点删除之后），各事务的排他正文锁（`FOR NO KEY UPDATE`）一律在对象行锁之后，与 Observation 清理的一次有序入队不交叉，完整顺序见 ADR-0089 §PostgreSQL 锁协议。因此 Observation 写入不再等待 GC 的表锁（Turn 提交沿用 `turn_nodes` 的 `ROW EXCLUSIVE`）。PostgreSQL 并发写入加强制扫描的争用压测中死锁由 18 / 10 次降为 0 / 0，请求尾延迟两侧相当，见 10.4；发布等待回收批次的时长没有单独测量。SQLite 仍是共享写租约加 `BEGIN IMMEDIATE`。
+- **升级。** 0037 之后由顶层模块 `content_upgrade`（不在语义无关的 `content_store` 内）的 Rust 钩子逐批转换节点与 Marker，进度记在 `content_upgrade`，可中断续跑，校验完成后 0038 切换并删除旧表；耗时与并存期空间见 10.4。Observation 的正文 scope 键是 `api-key:<principal>`，与 Turn、Marker 的 `Principal::continuation_key()` 相同，三方才共享同一行。
+- **影响。** 一个 item 的写入可能由 1 行变为事件、块、引用 3 行，首次出现的正文再加 1 个内容行；正文单元不设门槛也会增加内容行与引用行，行数增幅没有单独统计，各表字节见 10.4。清理 Observation（到期回收与「清除历史记录」）只删除 Observation 的引用并在同一事务登记失去引用的正文，仍被 Turn 或 Marker 引用的正文要等那些引用删除后才回收。
 
 ### 10.2 引用保留与扫描成本模型
 
@@ -547,7 +547,7 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 
 **为什么不是每轮重扫。** ADR-0089 评估过“每轮按下限窗口重扫、反连接排除仍被引用的行”：实现最简单，但已过期限却仍被引用的行每轮都要重新检查，长期活跃的会话越多成本越高，而现有种子扫描在写事务内执行。ADR 按 1,000 个连续活跃 30 天、每天提交 200 次的会话、N = 7 **推断**每轮约重扫 460 万行（即 (30 − 7) 天 × 200 次 × 1,000 个会话；这是 ADR 的推断，不是测量，实施后也没有对该备选方案做实测）。开发库中这类行只有个位数到十几行，但链都很短，所以开发库不能证明这个风险不存在。维护叶子集合或引用计数则需要每次提交写父节点或依赖行，重新引入提交期的写入和热点行争用，也被否决。
 
-**待测的风险。** 触发器的“已无剩余引用”判断在 SQLite 逐行执行、在 PostgreSQL 的 AFTER ROW 触发器里于语句结束时执行，须各自测试“最后一条引用删除时才入队”。漏挂触发器的后果是记录无法回收而非误删，以“时钟越过全部下限窗口后扫描至结束，节点、依赖、正文与所有队列均为空”的不变量测试防止新增引用类型时遗漏。缩短天数会让触发的那次扫描删除大批数据。
+**风险与对应测试。** 触发器的“已无剩余引用”判断在 SQLite 逐行执行、在 PostgreSQL 的 AFTER ROW 触发器里于语句结束时执行，两种后端都由 `history_retention` 测试覆盖“最后一条引用删除时才入队”（`only_the_last_reference_removal_releases_a_dependency`，PostgreSQL 另有并发释放同一来源的 `sibling_source_edges_released_concurrently_still_enqueue_the_source`）。漏挂触发器的后果是记录无法回收而非误删，由不变量测试 `nothing_is_left_behind_once_every_floor_has_passed`（时钟越过全部下限窗口后扫描至结束，节点、依赖、正文与所有 `*_gc` 队列均为空）防止新增引用类型时遗漏。缩短天数会让触发的那次扫描删除大批数据，大批删除的耗时未测（10.4）。
 
 ### 10.3 Observation 写入阶段合并
 
@@ -555,8 +555,8 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 - **事件合并。** `run_admitted`、`request_failed`、`run_state_changed` 不带 payload；`model_turn_started` 携带首个 attempt 的开始，`model_turn_finished` 携带最后一个 attempt 的结束与用量，`usage_confirmed` 不再是事件；后续 failover attempt 仍各自写事件；升级时同样只把先于结束行的最后一个 attempt 并入结束行，被取代的 attempt 保留自己的行，无法解码的历史载荷按空对象迁移并告警。开发库 99.9% 的 Model Turn 只有一个 attempt，所以合并覆盖绝大多数轮次；`model_turn_observations` 与 `target_attempt_observations` 仍是状态与用量的权威。
 - **按阶段提交。** 阶段边界由 `RunObserver` 在已有同步点确定，每个阶段一个命令、一个事务，不引入等待窗口或定时器：准入（Admit、状态变化、客户端工具结果；Admit 附带的父链缺口与 Retained Tail 诊断事件在同一事务内经保存点写入，失败只回滚它们）、轮次开始（含首轮 `user_input_recorded` 与同批发布的客户端工具结果；进入 RPM 排队等待之前生产方调用 `RunObserver::commit_turn_start`，缓冲的 Turn 开始随即单独落盘，等待之后的 attempt 另写自己的行）、流式（item 收口事件，沿用队列中最多 64 条的合批，只合并同一 Run 连续到达的事件）、结算（用量事务单独提交，可选诊断写入失败不能回滚用量事实；收尾事务 `finish_run_with_completion` 含 ClientCompletion、tail 来源、`run_finished`；`finalize_activity` 不在其中，它在最后一个观察句柄释放后单独执行，仅当仍有残留运行中活动时才写入，否则只是一次读；`UsageConfirmed` 在发布终态之前另有一次只更新 attempt 用量的独立事务，不写事件行）。writer 对轮次开始、attempt 结束与客户端交付结算的缓冲按 Run 分开，并发 Run 互不占用；多个 Run 逐事件交错到达时，流式批次遇到另一个 Run 的命令即中断，仍是每个事件行一次提交。事件源顺序与 sequence 顺序不变，`FlushInteraction`、`Barrier`、`Shutdown` 屏障照旧立即提交。一个阶段事务失败时，该阶段的事件一起丢失，记为一个 `observation_gap`。
 - **语句精简。** 删除每批对 `visible_tail` 的 UPDATE；事件 INSERT 与 Run/Interaction UPDATE 不写 `expires_at`；同一事务内每个 Run 及其 Interaction 只更新一次 `last_active_at` 与 `last_event_sequence`；事件、块、内容与引用行用多行 INSERT；首个 attempt 与 turn 同行写入，不再需要父 Turn EXISTS 检查。`interaction_observations_expiry_idx (expires_at, id)` 换成 `(last_active_at, id)` 索引（`last_active_at` 每批都会变，所以只是转移而不是消除索引维护），`rejected_requests_expiry_idx` 删除。
-- **ADR 的估算（非实测）。** ADR-0089 按开发库 10-29 之后 6,919 个 Run，以同一 Run 内相邻事件间隔小于 50 ms 近似为同一阶段，估得“现在 → 阶段合并 + 事件合并”为事件行/Run 12.0 → 7.7、事务/Run 10.0 → 4.7。该估算只计会写事件行的事务；ClientCompletion、tail 来源与 `finalize_activity` 现在每个 Run 至少还有 2 个不写事件行的事务，阶段合并会并入收尾事务，所以实际降幅应更大（推断，未实测）。语句精简的效果未单独估算。
-- **取舍。** 单个事务更重，靠事务数下降抵消，净效果待测；SQLite 单写租约下事务变长，需压测 Turn Chain 与统计写入的排队时间；与其他事件同时发生的 Run 状态转移不再单独留行，时间线不能显示这些中间状态。
+- **ADR 的估算（非实测）。** ADR-0089 按开发库 10-29 之后 6,919 个 Run，以同一 Run 内相邻事件间隔小于 50 ms 近似为同一阶段，估得“现在 → 阶段合并 + 事件合并”为事件行/Run 12.0 → 7.7、事务/Run 10.0 → 4.7。该估算只计会写事件行的事务；ClientCompletion、tail 来源与 `finalize_activity` 现在每个 Run 至少还有 2 个不写事件行的事务，阶段合并会并入收尾事务，当时据此推断实际降幅应更大。合成负载的实测（10.4，口径与估算不同）为 Observation 写事务/Run 单轮 12.50 → 6.25、工具流 11.49 → 8.01，没有复现 4.7。语句精简的效果未单独估算。
+- **取舍。** 单个事务更重，靠事务数下降抵消。SQLite 写租约实测（10.4）：Observation 的租约数减半，每 Run 持有总时长与排队总时长下降，单次持有变长；Turn Chain 与统计等非 Observation 写入的排队均值没有变差；新二进制 8 个 case 中有 2 个出现原因未定的提交停顿。与其他事件同时发生的 Run 状态转移不再单独留行，时间线不能显示这些中间状态。
 
 ### 10.4 实施后实测
 
