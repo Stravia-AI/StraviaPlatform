@@ -278,7 +278,7 @@ pub(super) enum WriterCommand {
         events: Vec<RunEvent>,
         occurred_at: i64,
     },
-    InputPreview {
+    UserInput {
         run_id: String,
         units: Vec<String>,
         occurred_at: i64,
@@ -600,7 +600,7 @@ impl WriterCommand {
             Self::ClientToolResults { run_id, events, .. } => {
                 run_id.len() + events.iter().map(event_bytes).sum::<usize>()
             }
-            Self::InputPreview { run_id, units, .. } => {
+            Self::UserInput { run_id, units, .. } => {
                 run_id.len() + units.iter().map(String::len).sum::<usize>()
             }
             Self::CommitTurnStart { run_id, .. } => run_id.len(),
@@ -676,7 +676,7 @@ fn command_kind(command: Option<&WriterCommand>) -> &'static str {
         Some(WriterCommand::ClearDebug { .. }) => "clear_debug",
         Some(WriterCommand::ClientDisconnected { .. }) => "client_disconnected",
         Some(WriterCommand::ClientToolResults { .. }) => "client_tool_results",
-        Some(WriterCommand::InputPreview { .. }) => "input_preview",
+        Some(WriterCommand::UserInput { .. }) => "user_input",
         Some(WriterCommand::CommitTurnStart { .. }) => "commit_turn_start",
         Some(WriterCommand::Purge { .. }) => "purge",
         Some(WriterCommand::ClientCompletion { .. }) => "client_completion",
@@ -1018,7 +1018,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     });
                     return false;
                 }
-                Some(WriterCommand::InputPreview {
+                Some(WriterCommand::UserInput {
                     run_id,
                     units,
                     occurred_at,
@@ -1303,7 +1303,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     )
                     .await;
                 }
-                Some(WriterCommand::InputPreview {
+                Some(WriterCommand::UserInput {
                     run_id,
                     units,
                     occurred_at,

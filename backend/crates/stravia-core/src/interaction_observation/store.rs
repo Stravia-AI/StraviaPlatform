@@ -12,7 +12,7 @@ use super::types::{
 use crate::content_store::Content;
 use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
 
-/// 每个 Model Turn 的输出在 `visible_tail` 中以空行分隔，预览才能按 Markdown 段落换行。
+/// 读取侧拼接可见输出时，不同 Model Turn 的输出以空行分隔，才能按 Markdown 段落换行。
 pub(super) const TURN_SEPARATOR: &str = "\n\n";
 
 #[derive(Clone)]
@@ -6609,7 +6609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_turns_separate_visible_tail_paragraphs() -> anyhow::Result<()> {
+    async fn replay_lists_client_visible_content_across_model_turns() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::db::init_pool(directory.path()).await?;
         crate::migrations::migrate_sqlite(&pool, None).await?;

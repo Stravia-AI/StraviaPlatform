@@ -886,7 +886,7 @@ impl IngressObserver {
             queued_text: Mutex::new(None),
             failure: Mutex::new(None),
             generation_commit_fences: Mutex::new(Vec::new()),
-            pending_preview: Mutex::new(None),
+            pending_user_input: Mutex::new(None),
             pending_tool_results: Mutex::new(Vec::new()),
             active_thinking: Mutex::new(std::collections::BTreeMap::new()),
             protected,
@@ -1028,7 +1028,7 @@ struct RunObserverInner {
     generation_commit_fences: Mutex<Vec<crate::generation_chain::GenerationCommitFence>>,
     // Canonical user input units retained until Model Turn protection
     // succeeds; the observer no longer owns the request tree.
-    pending_preview: Mutex<Option<Vec<String>>>,
+    pending_user_input: Mutex<Option<Vec<String>>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
     active_thinking: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     protected: redaction::ProtectedSecrets,
@@ -1066,8 +1066,8 @@ impl RunObserver {
 
     /// Admission only: use the received canonical window, never effective model history.
     /// The observer does not retain the request after this call; waiting for
-    /// protection keeps only its bounded preview.
-    pub(crate) fn capture_input_preview(
+    /// protection keeps only the extracted user input units.
+    pub(crate) fn capture_user_input(
         &self,
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
@@ -1078,10 +1078,10 @@ impl RunObserver {
         // rewrites the effective request, so extracting here is equivalent to
         // extracting at publish time while avoiding an extra request owner.
         let units = redaction::user_input_units(input);
-        *self.inner.pending_preview.lock() = units;
+        *self.inner.pending_user_input.lock() = units;
     }
 
-    /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
+    /// 客户端返回先留在内存，和用户输入共用凭据映射完成后的发布边界。
     pub(crate) fn capture_client_tool_results(
         &self,
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
@@ -1121,14 +1121,14 @@ impl RunObserver {
     }
 
     /// Publish once, only after all active and newly discovered mappings are registered.
-    pub(crate) fn publish_input_preview(&self) {
+    pub(crate) fn publish_user_input(&self) {
         if !self.inner.admission_queued {
             return;
         }
         let occurred_at = writer::now();
         let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
         self.send_tool_results(tool_results, occurred_at);
-        let Some(units) = self.inner.pending_preview.lock().take() else {
+        let Some(units) = self.inner.pending_user_input.lock().take() else {
             return;
         };
         self.inner.queued_text.lock().take();
@@ -1137,7 +1137,7 @@ impl RunObserver {
             .observation
             .inner
             .writer
-            .try_send(WriterCommand::InputPreview {
+            .try_send(WriterCommand::UserInput {
                 run_id: self.inner.run_id.clone(),
                 units,
                 occurred_at,
@@ -3007,7 +3007,7 @@ mod snapshot_tests {
         ];
         let child = test_run(&observation, "early-tool-child", facts(items.clone()));
         child.capture_client_tool_results(&items);
-        child.publish_input_preview();
+        child.publish_user_input();
         child.finish(RunOutcome {
             client_output_committed: true,
             delivery: None,
@@ -3134,7 +3134,7 @@ mod snapshot_tests {
             continuation_facts(original.clone(), false),
         );
         first.capture_client_tool_results(&original);
-        first.publish_input_preview();
+        first.publish_user_input();
         first.observe_client_completion(
             &original,
             &[AiItem::output_text(
@@ -3169,7 +3169,7 @@ mod snapshot_tests {
             continuation_facts(replay.clone(), true),
         );
         replay_run.capture_client_tool_results(&replay);
-        replay_run.publish_input_preview();
+        replay_run.publish_user_input();
         finish(&replay_run, "completed");
         observation.flush().await?;
 
@@ -3198,7 +3198,7 @@ mod snapshot_tests {
         ] {
             let branch = test_run(&observation, id, continuation_facts(input.clone(), false));
             branch.capture_client_tool_results(&input);
-            branch.publish_input_preview();
+            branch.publish_user_input();
             finish(&branch, "completed");
             observation.flush().await?;
             let events = replayed(&observation).await?;
@@ -4525,7 +4525,7 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn historical_user_preview_requires_received_prefix_evidence() -> anyhow::Result<()> {
+    async fn historical_user_input_requires_received_prefix_evidence() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role, ToolCall};
 
         let directory = tempfile::tempdir()?;
@@ -4540,11 +4540,11 @@ mod snapshot_tests {
         };
         let publish = |id: &str, input: &[AiItem]| {
             let run = test_run(&observation, id, facts(input.to_vec()));
-            run.capture_input_preview(input);
+            run.capture_user_input(input);
             run.capture_client_tool_results(input);
             run.protect_secrets(["preview-secret"]);
-            run.publish_input_preview();
-            run.publish_input_preview();
+            run.publish_user_input();
+            run.publish_user_input();
             run
         };
         let deliver = |run: &RunObserver, input: &[AiItem], id: &str| {
@@ -4631,9 +4631,9 @@ mod snapshot_tests {
         observation.shutdown().await;
         let observation = test_observation(&pool, directory.path(), false).await;
         let unknown = test_run(&observation, "preview-unavailable", facts(input.clone()));
-        unknown.capture_input_preview(&input);
+        unknown.capture_user_input(&input);
         unknown.protect_secrets(["preview-secret"]);
-        unknown.publish_input_preview();
+        unknown.publish_user_input();
         observation.flush().await?;
         let events = replayed(&observation).await?;
         assert_eq!(
@@ -4691,7 +4691,7 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn input_preview_joins_large_text_blocks_only_up_to_the_limit() -> anyhow::Result<()> {
+    async fn user_input_keeps_every_large_text_block_whole() -> anyhow::Result<()> {
         use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
 
         let directory = tempfile::tempdir()?;
@@ -4717,11 +4717,11 @@ mod snapshot_tests {
         };
         let run = test_run(
             &observation,
-            "preview-bounded-blocks",
+            "user-input-large-blocks",
             facts(vec![user.clone()]),
         );
-        run.capture_input_preview(std::slice::from_ref(&user));
-        run.publish_input_preview();
+        run.capture_user_input(std::slice::from_ref(&user));
+        run.publish_user_input();
         run.finish(RunOutcome {
             client_output_committed: false,
             delivery: None,
@@ -4736,7 +4736,7 @@ mod snapshot_tests {
         let input = events
             .iter()
             .find(|event| {
-                event.run_id.as_deref() == Some("preview-bounded-blocks")
+                event.run_id.as_deref() == Some("user-input-large-blocks")
                     && event.kind == "user_input_recorded"
             })
             .expect("完整输入事件");
@@ -4856,8 +4856,8 @@ mod snapshot_tests {
             "preview-verified-parent",
             facts(vec![question.clone()]),
         );
-        parent.capture_input_preview(std::slice::from_ref(&question));
-        parent.publish_input_preview();
+        parent.capture_user_input(std::slice::from_ref(&question));
+        parent.publish_user_input();
         parent.finish(RunOutcome {
             client_output_committed: true,
             delivery: None,
@@ -4887,8 +4887,8 @@ mod snapshot_tests {
             let mut admission = facts(input.clone());
             admission.generation_parent_id = Some("preview-verified-node".into());
             let child = test_run(&observation, id, admission);
-            child.capture_input_preview(&input);
-            child.publish_input_preview();
+            child.capture_user_input(&input);
+            child.publish_user_input();
         }
         observation.flush().await?;
         let events = replayed(&observation).await?;
@@ -4942,9 +4942,9 @@ mod snapshot_tests {
             let mut admission = facts(input.to_vec());
             admission.generation_parent_id = Some(parent.into());
             let run = test_run(&observation, id, admission);
-            run.capture_input_preview(input);
+            run.capture_user_input(input);
             run.capture_client_tool_results(input);
-            run.publish_input_preview();
+            run.publish_user_input();
             run
         };
         let deliver = |run: &RunObserver, input: &[AiItem], call: &AiItem, node: Option<&str>| {
@@ -4967,8 +4967,8 @@ mod snapshot_tests {
 
         let root_input = vec![user("task")];
         let root = test_run(&observation, "image-root", facts(root_input.clone()));
-        root.capture_input_preview(&root_input);
-        root.publish_input_preview();
+        root.capture_user_input(&root_input);
+        root.publish_user_input();
         deliver(&root, &root_input, &call("call-1"), Some("image-root-node"));
         observation.flush().await?;
 
@@ -5782,7 +5782,7 @@ mod snapshot_tests {
                     0,
                 )?,
             ),
-            // 本 Run 没有输入预览，且同 Interaction 此前也没有。
+            // 本 Run 没有用户输入，且同 Interaction 此前也没有。
             (
                 35,
                 Some("tied"),
@@ -6139,7 +6139,7 @@ mod snapshot_tests {
             _ => panic!("input preview should be retained"),
         }
 
-        // 没有该 Run 的预览时取同 Interaction 此前最近一条。
+        // 没有该 Run 的用户输入时取同 Interaction 此前最近一条。
         let context = hit_context(store, 24, 0).await?;
         match context.body {
             CredentialDiscoveryBody::Retained(value) => {
@@ -7767,8 +7767,8 @@ mod snapshot_tests {
         }];
         let run = test_run(&observation, "raw-observation", facts(input.clone()));
         run.protect_secrets(["known-mapping"]);
-        run.capture_input_preview(&input);
-        run.publish_input_preview();
+        run.capture_user_input(&input);
+        run.publish_user_input();
         for chunk in [
             "https://user:pass",
             "word@example.test/v1/artifacts/downloads/artifact-",
@@ -7906,9 +7906,9 @@ mod snapshot_tests {
         .await?;
         assert_eq!(unpublished, 0);
         observer.protect_secrets(["restored-tool-secret"]);
-        // 工具续跑没有用户预览也必须发布，重复保护边界不得重复记录。
-        observer.publish_input_preview();
-        observer.publish_input_preview();
+        // 工具续跑没有用户输入也必须发布，重复保护边界不得重复记录。
+        observer.publish_user_input();
+        observer.publish_user_input();
         observer.record(RunEvent::ClientToolHandoff {
             tool_id: "client".into(),
             name: "local_probe".into(),

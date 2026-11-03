@@ -203,8 +203,8 @@ async fn seed_text(observation: &InteractionObservation) -> anyhow::Result<Seede
         vec![user_item(&input)],
         None,
     );
-    run.capture_input_preview(&[user_item(&input)]);
-    run.publish_input_preview();
+    run.capture_user_input(&[user_item(&input)]);
+    run.publish_user_input();
     record_turn(&run, "turn-a", "attempt-a", &output);
     finish(&run, "completed", None);
 
@@ -216,8 +216,8 @@ async fn seed_text(observation: &InteractionObservation) -> anyhow::Result<Seede
         vec![user_item("beta question")],
         None,
     );
-    other.capture_input_preview(&[user_item("beta question")]);
-    other.publish_input_preview();
+    other.capture_user_input(&[user_item("beta question")]);
+    other.publish_user_input();
     record_turn(&other, "turn-b", "attempt-b", &other_output);
     finish(&other, "completed", None);
 

@@ -63,8 +63,8 @@ impl AdminService {
                     generation_parent_id: None,
                 },
             );
-        run.capture_input_preview(&[item]);
-        run.publish_input_preview();
+        run.capture_user_input(&[item]);
+        run.publish_user_input();
         run.finish(RunOutcome {
             client_output_committed: true,
             delivery: None,

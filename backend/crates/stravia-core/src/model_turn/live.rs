@@ -167,7 +167,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
-                        observer.publish_input_preview();
+                        observer.publish_user_input();
                     }
                     // Redaction can change item bytes; otherwise reuse the serialized estimate
                     // from Model Turn start instead of serializing a large prompt twice.

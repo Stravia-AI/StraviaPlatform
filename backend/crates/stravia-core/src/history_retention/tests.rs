@@ -642,8 +642,8 @@ impl Fixture {
             model_display_name: None,
             estimated_input_tokens: None,
         });
-        source.capture_input_preview(std::slice::from_ref(&question));
-        source.publish_input_preview();
+        source.capture_user_input(std::slice::from_ref(&question));
+        source.publish_user_input();
         source.record(RunEvent::TargetAttemptStarted {
             model_turn_id: "observed-turn".into(),
             attempt_id: "observed-attempt".into(),
@@ -701,7 +701,7 @@ impl Fixture {
         let followup_id = self.unique("observed-followup");
         let followup = admit(&followup_id, items.clone(), Some(&source_node), false);
         followup.capture_client_tool_results(&items);
-        followup.publish_input_preview();
+        followup.publish_user_input();
         finish(&followup, &source_node, "completed");
         observation.flush().await.expect("observation flush");
         followup_id

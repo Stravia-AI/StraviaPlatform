@@ -726,7 +726,7 @@ pub(super) async fn orchestrate(
         });
     observer.capture_client_tool_results(submitted_items);
     if has_new_user {
-        observer.capture_input_preview(&client_request.items);
+        observer.capture_user_input(&client_request.items);
     }
     if let Some(root_id) = generation_root_id.clone() {
         observer.record(RunEvent::GenerationAssociated {

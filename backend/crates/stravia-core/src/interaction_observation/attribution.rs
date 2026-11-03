@@ -484,7 +484,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             diagnostic.as_ref(),
         );
         // Placement remains governed by ADR-0053. The stricter input-origin
-        // decision only controls observation metadata and preview publication.
+        // decision only controls observation metadata and user input publication.
         let has_new_user = has_new_user && !assignment.inferred_retry;
         self.grouping.set_has_new_user(&start.id, has_new_user);
         Attribution {
