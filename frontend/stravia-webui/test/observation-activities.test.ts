@@ -308,7 +308,9 @@ describe('observation activities', () => {
       event(value, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
     }
     event(left, 3, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
-    event(unrelated, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: 'must not attach to self or sibling' }] })
+    event(unrelated, 2, 'client_tool_result', {
+      results: [{ tool_id: 'call', content: 'must not attach to self or sibling' }],
+    })
     event(reusedChild, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: 'nearest call' }] })
     const value = detail([replay, reusedChild, unrelated, right, reused, left, root])
     const rootTool = tools(value, 'root')[0]

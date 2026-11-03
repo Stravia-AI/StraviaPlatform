@@ -921,7 +921,11 @@ describe('bounded refresh orchestration', () => {
           ...changePage(11, 'server-ahead final').changes[0],
           last_active_at: 1_050_000,
           interactions: [
-            summary('i1', { last_active_at: 1_050_000, last_event_sequence: 11, output: content('server-ahead final') }),
+            summary('i1', {
+              last_active_at: 1_050_000,
+              last_event_sequence: 11,
+              output: content('server-ahead final'),
+            }),
           ],
         },
       ],

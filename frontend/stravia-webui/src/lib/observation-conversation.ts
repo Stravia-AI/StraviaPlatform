@@ -128,9 +128,7 @@ function runText(run: RunDetail): string {
 }
 
 function runInputText(run: RunDetail): string | undefined {
-  const payload = run.events.find(
-    (event) => event.kind === 'user_input_recorded' && event.run_id === run.id,
-  )?.payload
+  const payload = run.events.find((event) => event.kind === 'user_input_recorded' && event.run_id === run.id)?.payload
   return payloadString(payloadRecord(payload).text)
 }
 

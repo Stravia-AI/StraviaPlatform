@@ -258,10 +258,7 @@ describe('observation conversation', () => {
     const current = detail([
       run('root-run', 1, [
         event('root-run', 1, 'run_admitted', { has_new_user: true }),
-        event('root-run', 2, 'user_input_recorded', {
-          kind: 'user_input_recorded',
-          text: 'Actual user question',
-        }),
+        event('root-run', 2, 'user_input_recorded', { kind: 'user_input_recorded', text: 'Actual user question' }),
         event('root-run', 3, 'client_visible_content', { text: 'First response' }),
       ]),
       run('tool-continuation', 2, [
@@ -298,10 +295,7 @@ describe('observation conversation', () => {
       ...detail([
         run('root-run', 1, [event('root-run', 3, 'client_visible_content', { text: 'First response' })]),
         run('follow-up', 2, [
-          event('follow-up', 4, 'user_input_recorded', {
-            kind: 'user_input_recorded',
-            text: 'Visible follow-up',
-          }),
+          event('follow-up', 4, 'user_input_recorded', { kind: 'user_input_recorded', text: 'Visible follow-up' }),
           event('follow-up', 5, 'client_visible_content', { text: 'Follow-up response' }),
         ]),
       ]),
