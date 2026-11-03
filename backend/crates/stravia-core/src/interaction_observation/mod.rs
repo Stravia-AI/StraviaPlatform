@@ -5,6 +5,7 @@ mod codec;
 mod content_refs;
 #[cfg(test)]
 mod durable_usage_hard_cases_tests;
+mod event_writes;
 mod grouping;
 mod hydrate;
 mod live;
