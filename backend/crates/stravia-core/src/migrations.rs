@@ -572,7 +572,8 @@ pub async fn run_postgres_migrator(
                 0,
                 None,
             );
-            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection).await?;
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection)
+                .await?;
         }
     }
     report(

@@ -12,11 +12,10 @@ const BATCH: i64 = 512;
 pub(crate) async fn normalize_sqlite(
     connection: &mut sqlx::SqliteConnection<'_>,
 ) -> anyhow::Result<()> {
-    let stage: i64 = sqlx::query_scalar(
-        "SELECT stage FROM observation_normalization_upgrade WHERE phase=1",
-    )
-    .fetch_one(&mut *connection)
-    .await?;
+    let stage: i64 =
+        sqlx::query_scalar("SELECT stage FROM observation_normalization_upgrade WHERE phase=1")
+            .fetch_one(&mut *connection)
+            .await?;
     if stage < 1 {
         split_events_sqlite(connection).await?;
         set_stage_sqlite(connection, 1).await?;
@@ -39,11 +38,10 @@ pub(crate) async fn normalize_sqlite(
 pub(crate) async fn normalize_postgres(
     connection: &mut sqlx::PgConnection<'_>,
 ) -> anyhow::Result<()> {
-    let stage: i64 = sqlx::query_scalar(
-        "SELECT stage FROM observation_normalization_upgrade WHERE phase=1",
-    )
-    .fetch_one(&mut *connection)
-    .await?;
+    let stage: i64 =
+        sqlx::query_scalar("SELECT stage FROM observation_normalization_upgrade WHERE phase=1")
+            .fetch_one(&mut *connection)
+            .await?;
     if stage < 1 {
         split_events_postgres(connection).await?;
         set_stage_postgres(connection, 1).await?;
@@ -67,10 +65,12 @@ async fn set_stage_sqlite(
     connection: &mut sqlx::SqliteConnection<'_>,
     stage: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE observation_normalization_upgrade SET stage=?,last_sequence=0 WHERE phase=1")
-        .bind(stage)
-        .execute(&mut *connection)
-        .await?;
+    sqlx::query(
+        "UPDATE observation_normalization_upgrade SET stage=?,last_sequence=0 WHERE phase=1",
+    )
+    .bind(stage)
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -78,10 +78,12 @@ async fn set_stage_postgres(
     connection: &mut sqlx::PgConnection<'_>,
     stage: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE observation_normalization_upgrade SET stage=$1,last_sequence=0 WHERE phase=1")
-        .bind(stage)
-        .execute(&mut *connection)
-        .await?;
+    sqlx::query(
+        "UPDATE observation_normalization_upgrade SET stage=$1,last_sequence=0 WHERE phase=1",
+    )
+    .bind(stage)
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -166,12 +168,10 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
             last = row.sequence;
             split_event_sqlite(&mut tx, &kind, &row, &mut principals).await?;
         }
-        sqlx::query(
-            "UPDATE observation_normalization_upgrade SET last_sequence=? WHERE phase=1",
-        )
-        .bind(last)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE observation_normalization_upgrade SET last_sequence=? WHERE phase=1")
+            .bind(last)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
     }
     Ok(())
@@ -192,7 +192,8 @@ async fn split_event_sqlite(
             let item = (!item.is_null()).then_some(item);
             let split = super::blocks::split(item, text);
             let principal = principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
-            let content_ids = super::content_refs::intern_sqlite(tx, &principal, &split.units).await?;
+            let content_ids =
+                super::content_refs::intern_sqlite(tx, &principal, &split.units).await?;
             let envelope = split
                 .envelope
                 .map(|value| {
@@ -237,12 +238,9 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let unit = super::content_refs::StoreUnit::from_value(content);
-                let content_id = super::content_refs::intern_sqlite(
-                    tx,
-                    &principal,
-                    std::slice::from_ref(&unit),
-                )
-                .await?[0];
+                let content_id =
+                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_ref(&unit))
+                        .await?[0];
                 sqlx::query("INSERT INTO observation_tool_results(sequence,ordinal,tool_id,is_error,content_id) VALUES (?,?,?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)
@@ -260,12 +258,9 @@ async fn split_event_sqlite(
                 let principal =
                     principal_sqlite(tx, row.interaction_id.as_deref(), principals).await?;
                 let unit = super::content_refs::StoreUnit::text(text);
-                let content_id = super::content_refs::intern_sqlite(
-                    tx,
-                    &principal,
-                    std::slice::from_ref(&unit),
-                )
-                .await?[0];
+                let content_id =
+                    super::content_refs::intern_sqlite(tx, &principal, std::slice::from_ref(&unit))
+                        .await?[0];
                 sqlx::query("INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (?,?,?) ON CONFLICT(sequence,ordinal) DO NOTHING")
                     .bind(row.sequence)
                     .bind(0_i64)
@@ -289,10 +284,9 @@ async fn split_event_sqlite(
             attrs = None;
         }
         "run_state_changed" => {
-            if let (Some(run_id), Some(superseded)) = (
-                row.run_id.as_deref(),
-                row.payload["superseded_by"].as_str(),
-            ) {
+            if let (Some(run_id), Some(superseded)) =
+                (row.run_id.as_deref(), row.payload["superseded_by"].as_str())
+            {
                 sqlx::query("UPDATE inference_run_observations SET superseded_by=? WHERE id=?")
                     .bind(superseded)
                     .bind(run_id)
@@ -369,12 +363,10 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
             last = row.sequence;
             split_event_postgres(&mut tx, &kind, &row, &mut principals).await?;
         }
-        sqlx::query(
-            "UPDATE observation_normalization_upgrade SET last_sequence=$1 WHERE phase=1",
-        )
-        .bind(last)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE observation_normalization_upgrade SET last_sequence=$1 WHERE phase=1")
+            .bind(last)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
     }
     Ok(())
@@ -394,8 +386,10 @@ async fn split_event_postgres(
             let item = &row.payload["item"];
             let item = (!item.is_null()).then_some(item);
             let split = super::blocks::split(item, text);
-            let principal = principal_postgres(tx, row.interaction_id.as_deref(), principals).await?;
-            let content_ids = super::content_refs::intern_postgres(tx, &principal, &split.units).await?;
+            let principal =
+                principal_postgres(tx, row.interaction_id.as_deref(), principals).await?;
+            let content_ids =
+                super::content_refs::intern_postgres(tx, &principal, &split.units).await?;
             let envelope = split
                 .envelope
                 .map(|value| {
@@ -492,10 +486,9 @@ async fn split_event_postgres(
             attrs = None;
         }
         "run_state_changed" => {
-            if let (Some(run_id), Some(superseded)) = (
-                row.run_id.as_deref(),
-                row.payload["superseded_by"].as_str(),
-            ) {
+            if let (Some(run_id), Some(superseded)) =
+                (row.run_id.as_deref(), row.payload["superseded_by"].as_str())
+            {
                 sqlx::query("UPDATE inference_run_observations SET superseded_by=$1 WHERE id=$2")
                     .bind(superseded)
                     .bind(run_id)
@@ -562,8 +555,7 @@ async fn merge_turn_start_sqlite(
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
             continue;
         };
-        let Some((turn_sequence, turn_attrs)) =
-            starts.get_mut(&(run_id, model_turn_id.to_owned()))
+        let Some((turn_sequence, turn_attrs)) = starts.get_mut(&(run_id, model_turn_id.to_owned()))
         else {
             continue;
         };
@@ -652,9 +644,7 @@ async fn merge_turn_finish_sqlite(
     Ok(())
 }
 
-async fn merge_turn_start_postgres(
-    connection: &mut sqlx::PgConnection<'_>,
-) -> anyhow::Result<()> {
+async fn merge_turn_start_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyhow::Result<()> {
     let mut tx = connection.begin().await?;
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_started' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
@@ -679,8 +669,7 @@ async fn merge_turn_start_postgres(
         let Some(model_turn_id) = attrs["model_turn_id"].as_str() else {
             continue;
         };
-        let Some((turn_sequence, turn_attrs)) =
-            starts.get_mut(&(run_id, model_turn_id.to_owned()))
+        let Some((turn_sequence, turn_attrs)) = starts.get_mut(&(run_id, model_turn_id.to_owned()))
         else {
             continue;
         };
@@ -707,9 +696,7 @@ async fn merge_turn_start_postgres(
     Ok(())
 }
 
-async fn merge_turn_finish_postgres(
-    connection: &mut sqlx::PgConnection<'_>,
-) -> anyhow::Result<()> {
+async fn merge_turn_finish_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyhow::Result<()> {
     let mut tx = connection.begin().await?;
     let turns = sqlx::query("SELECT sequence,run_id,attrs FROM observation_events WHERE kind='model_turn_finished' AND attrs IS NOT NULL ORDER BY sequence")
         .fetch_all(&mut *tx)
