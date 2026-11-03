@@ -326,7 +326,6 @@ impl Gateway {
         };
         let retention =
             crate::history_retention::HistoryRetention::from_setting(retention_setting.as_deref());
-        let retention_days = retention.days();
         let turn_chains = if let Some(pool) = history_sqlite_pool.as_ref() {
             turn_chain::SqlTurnChainStore::sqlite(pool.clone())
         } else {
@@ -470,7 +469,7 @@ impl Gateway {
             history_sqlite_pool.clone(),
             postgres_pool.clone(),
             paths.diagnostics(),
-            retention_days,
+            retention.clone(),
             !matches!(storage_kind, RuntimeStorageKind::Memory),
             generation_chains.clone(),
         )

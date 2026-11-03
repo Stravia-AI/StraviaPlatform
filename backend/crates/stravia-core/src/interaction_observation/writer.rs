@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -694,7 +694,7 @@ fn metadata_bytes(metadata: &super::RequestMetadata) -> usize {
 pub(super) struct WriterDeps {
     pub store: ObservationStore,
     pub debug_trace_index: Arc<super::manifest_index::DebugTraceIndex>,
-    pub retention_days: Arc<AtomicU32>,
+    pub retention: crate::history_retention::HistoryRetention,
     pub updates: broadcast::Sender<ObservationUpdate>,
     pub trace_sequence: Arc<AtomicI64>,
     pub traces: super::trace::TraceManager,
@@ -713,7 +713,7 @@ pub(super) struct PurgeProgress {
 struct WriterContext<'a> {
     store: &'a ObservationStore,
     debug_trace_index: &'a super::manifest_index::DebugTraceIndex,
-    retention: &'a AtomicU32,
+    retention: &'a crate::history_retention::HistoryRetention,
     updates: &'a broadcast::Sender<ObservationUpdate>,
     trace_sequence: &'a AtomicI64,
     live: &'a super::live::LiveState,
@@ -793,7 +793,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
     let WriterDeps {
         store,
         debug_trace_index,
-        retention_days,
+        retention,
         updates,
         trace_sequence,
         traces,
@@ -841,7 +841,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         let context = WriterContext {
             store: &store,
             debug_trace_index: &debug_trace_index,
-            retention: retention_days.as_ref(),
+            retention: &retention,
             updates: &updates,
             trace_sequence: trace_sequence.as_ref(),
             live: live.as_ref(),
@@ -856,7 +856,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             // 仅重试缺失标记及可重算的覆盖，不重放发现，避免重复计数。
             let mut gap_projection_failed = false;
             for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
-                if expires(occurred_at, retention_days.load(Ordering::Acquire)) <= now() {
+                if retention.deadline(occurred_at) <= now() {
                     continue;
                 }
                 let persisted = match store.mark_observation_gap(&interaction_id).await {
@@ -1091,6 +1091,16 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             buffered_finish = Some(finish);
                             return false;
                         }
+                        // 与 Turn/attempt 生命周期无关的客户端交付与诊断事件：先于合并后的
+                        // Turn 结束行落盘，缓冲的 attempt 结束继续等待 Turn 结束。
+                        event if is_turn_independent(&event) => {
+                            buffered_finish = Some(finish);
+                            Some(WriterCommand::Event {
+                                run_id,
+                                event,
+                                occurred_at,
+                            })
+                        }
                         event => {
                             if let Some(interaction) = attribution.interaction_for_run(&run_id) {
                                 let interaction = interaction.to_owned();
@@ -1307,7 +1317,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     waiting_client,
                 }) => {
                     let at = delivered_at;
-                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
+                    let expiry = retention.deadline(at);
                     let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         return false;
                     };
@@ -1395,7 +1405,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     for run in affected {
                         flush_one(&mut pending_text, &run);
                     }
-                    let expires = expires(now, retention_days.load(Ordering::Relaxed));
+                    let expires = retention.deadline(now);
                     if decision.replayed_client_tool_results {
                         replayed_tool_results.insert(start.id.clone());
                     }
@@ -1743,7 +1753,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 None,
                                 &manifest,
                                 at,
-                                expires(at, retention_days.load(Ordering::Relaxed)),
+                                retention.deadline(at),
                                 true,
                             )
                             .await
@@ -1781,7 +1791,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     occurred_at,
                 }) => {
                     let at = occurred_at;
-                    let _expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
                         .reject(super::store::Rejection {
                             ingress: &ingress,
@@ -1864,7 +1873,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     None,
                                     &manifest,
                                     at,
-                                    expires(at, retention_days.load(Ordering::Relaxed)),
+                                    retention.deadline(at),
                                     true,
                                 )
                                 .await
@@ -1924,7 +1933,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         // before publishing the terminal durable manifest boundary.
                         let manifest = trace.finish().await;
                         let at = occurred_at;
-                        let expiry = expires(at, retention_days.load(Ordering::Relaxed));
+                        let expiry = retention.deadline(at);
                         // The index retains terminal manifests in memory even when
                         // the durable write fails, so the finalized partial count
                         // covers indexed failures as well as persisted manifests.
@@ -2102,7 +2111,7 @@ async fn flush_active_manifests(
                 None,
                 &manifest,
                 at,
-                expires(at, context.retention.load(Ordering::Relaxed)),
+                context.retention.deadline(at),
                 false,
             )
             .await
@@ -2306,11 +2315,21 @@ fn flush_one(pending: &mut TextBuffer, run_id: &str) {
     }
 }
 
+/// attempt 结束与 Turn 结束之间可能到达、且不改变 Turn 内容的事件：
+/// 客户端输出提交、可见正文增量、交付结果与调试线路记录。
+/// 其余事件（新 attempt、其他 Turn、工具等）仍先落盘缓冲的 attempt 结束，保持来源顺序。
+fn is_turn_independent(event: &RunEvent) -> bool {
+    matches!(
+        event,
+        RunEvent::ClientOutputCommitted
+            | RunEvent::ClientVisibleContentDelta { .. }
+            | RunEvent::DeliveryFinished { .. }
+            | RunEvent::Wire { .. }
+    )
+}
+
 pub(super) fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-pub(super) fn expires(at: i64, days: u32) -> i64 {
-    at.saturating_add(i64::from(days).saturating_mul(86_400_000))
 }
 
 struct TextBlock {

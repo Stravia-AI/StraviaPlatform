@@ -34,7 +34,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
 };
 use stravia_protocol_codec::accumulator::CanonicalPartIndex;
@@ -124,7 +124,7 @@ struct Inner {
     trace_sequence: Arc<AtomicI64>,
     debug: Arc<AtomicBool>,
     metrics_upkeep: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    retention_days: Arc<AtomicU32>,
+    retention: crate::history_retention::HistoryRetention,
     traces: TraceManager,
     bundles: BundleExport,
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
@@ -143,7 +143,7 @@ impl InteractionObservation {
         sqlite: Option<SqlitePool>,
         postgres: Option<PgPool>,
         data_dir: PathBuf,
-        retention_days: u32,
+        retention: crate::history_retention::HistoryRetention,
         persistent: bool,
         generation_chains: crate::generation_chain::GenerationChain,
     ) -> Self {
@@ -194,14 +194,13 @@ impl InteractionObservation {
         }));
         let (updates, _) = broadcast::channel(2048);
         let live_content = Arc::new(live::LiveState::default());
-        let retention_days = Arc::new(AtomicU32::new(retention_days));
         let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
         let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
         let (writer, task) = writer::spawn(writer::WriterDeps {
             store: store.clone(),
             debug_trace_index: Arc::clone(&debug_trace_index),
-            retention_days: Arc::clone(&retention_days),
+            retention: retention.clone(),
             updates: updates.clone(),
             trace_sequence: Arc::clone(&trace_sequence),
             traces: traces.clone(),
@@ -232,7 +231,7 @@ impl InteractionObservation {
                     performance_sqlite_pool,
                     performance_postgres_pool,
                 )),
-                retention_days,
+                retention,
                 traces,
                 bundles,
                 active_traces,
@@ -324,7 +323,7 @@ impl InteractionObservation {
                 .partial_trace_count
                 .load(Ordering::Acquire)
                 .saturating_add(active_partial),
-            retention_days: self.inner.retention_days.load(Ordering::Relaxed),
+            retention_days: self.inner.retention.days(),
         }
     }
     pub(crate) fn set_debug_enabled(&self, enabled: bool) -> DebugState {
@@ -345,9 +344,13 @@ impl InteractionObservation {
             .map_err(|_| anyhow::anyhow!("observation writer stopped during debug clear"))??;
         Ok(self.debug_state())
     }
-    pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
-        self.inner.store.update_retention(days).await?;
-        self.inner.retention_days.store(days, Ordering::Release);
+    /// 共享保留期（`HistoryRetention`）变更后调用：Debug manifest 的到期水位按当前天数重算，
+    /// 并丢弃按旧窗口缓存的尾部来源。保留天数本身只存在于共享句柄里。
+    pub(crate) async fn apply_retention_change(&self) -> anyhow::Result<DebugState> {
+        self.inner
+            .store
+            .update_retention(self.inner.retention.days())
+            .await?;
         if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
             tracing::debug!(%error, "observation writer unavailable during retention update");
         }
@@ -1964,7 +1967,7 @@ mod snapshot_tests {
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), false).await;
         // 活动时间取 0..=1024，清理时间固定在保留窗口之后 10 秒，窗口两侧都由数据决定。
-        let sweep_at = i64::from(observation.inner.retention_days.load(Ordering::Acquire))
+        let sweep_at = i64::from(observation.inner.retention.days())
             * 86_400_000
             + 10_000;
         sqlx::query(
@@ -2229,9 +2232,7 @@ mod snapshot_tests {
 
     /// 当前配置的保留窗口；扫描入口的保留期由调用方给定。
     fn retention_window(observation: &InteractionObservation) -> std::time::Duration {
-        std::time::Duration::from_secs(
-            u64::from(observation.inner.retention_days.load(Ordering::Acquire)) * 86_400,
-        )
+        observation.inner.retention.window()
     }
 
     async fn test_observation(
@@ -2243,7 +2244,7 @@ mod snapshot_tests {
             Some(pool.clone()),
             None,
             directory.to_path_buf(),
-            1,
+            crate::history_retention::HistoryRetention::new(1),
             persistent,
             crate::generation_chain::test_chain().await,
         )
@@ -3311,6 +3312,234 @@ mod snapshot_tests {
         assert_eq!(usage["usage"]["input_tokens"], 7);
         observation.shutdown().await;
         pool.close().await;
+        Ok(())
+    }
+
+    fn flow_turn_started(turn: &str) -> RunEvent {
+        RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        }
+    }
+
+    fn flow_attempt_started(turn: &str, attempt: &str) -> RunEvent {
+        RunEvent::TargetAttemptStarted {
+            model_turn_id: turn.into(),
+            attempt_id: attempt.into(),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://upstream.invalid".into(),
+            cost_basis: None,
+        }
+    }
+
+    fn flow_attempt_finished(turn: &str, attempt: &str, status: &str) -> RunEvent {
+        RunEvent::TargetAttemptFinished {
+            model_turn_id: turn.into(),
+            attempt_id: attempt.into(),
+            status: status.into(),
+            status_code: Some(if status == "completed" { 200 } else { 502 }),
+            error_code: None,
+            error: None,
+            duration_ms: 3,
+            first_token_ms: None,
+            usage: None,
+            amounts: None,
+        }
+    }
+
+    fn flow_turn_finished(turn: &str, status: &str) -> RunEvent {
+        RunEvent::ModelTurnFinished {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            status: status.into(),
+        }
+    }
+
+    /// 常见流程里 attempt 结束与 Turn 结束之间到达的事件（客户端输出提交、可见正文增量、
+    /// 交付结果、请求失败；其中客户端输出提交与交付结果只更新内存终态、不产生事件行）不能拆散合并布局：每个 Turn 最后一个 attempt 的结束都并入
+    /// `model_turn_finished`，只有被故障转移取代的 attempt 单独成行。
+    #[tokio::test]
+    async fn normal_flows_merge_the_last_attempt_finish_into_the_turn_finish() -> anyhow::Result<()> {
+        let delta = RunEvent::ClientVisibleContentDelta {
+            text: "hello".into(),
+            item_ordinal: 0,
+            part_index: (false, 0),
+        };
+        let handoff = RunEvent::ClientToolHandoff {
+            tool_id: "tool-1".into(),
+            name: "lookup".into(),
+            input: Some(serde_json::json!({"q": 1})),
+        };
+        let failure = RunEvent::RequestFailed {
+            error: FailureDiagnostic {
+                source: Some("upstream".into()),
+                code: Some("upstream_error".into()),
+                message: Some("boom".into()),
+                status_code: Some(502),
+                upstream_code: None,
+            },
+        };
+        // (名称, 事件序列, 合并的 (turn, attempt, status), 单独成行的 attempt 数)
+        type Case = (
+            &'static str,
+            Vec<RunEvent>,
+            Vec<(&'static str, &'static str, &'static str)>,
+            usize,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "streamed-success",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    delta.clone(),
+                    RunEvent::ClientOutputCommitted,
+                    flow_attempt_finished("t1", "a1", "completed"),
+                    delta.clone(),
+                    RunEvent::ClientOutputCommitted,
+                    flow_turn_finished("t1", "completed"),
+                    RunEvent::DeliveryFinished { status: "delivered".into(), reason: None },
+                ],
+                vec![("t1", "a1", "completed")],
+                0,
+            ),
+            (
+                "non-streamed-success",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "completed"),
+                    RunEvent::ClientOutputCommitted,
+                    flow_turn_finished("t1", "completed"),
+                    RunEvent::DeliveryFinished { status: "delivered".into(), reason: None },
+                ],
+                vec![("t1", "a1", "completed")],
+                0,
+            ),
+            (
+                "client-tool-call-turn",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "completed"),
+                    flow_turn_finished("t1", "completed"),
+                    handoff.clone(),
+                    RunEvent::ClientOutputCommitted,
+                ],
+                vec![("t1", "a1", "completed")],
+                0,
+            ),
+            (
+                "platform-tool-turns",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "completed"),
+                    flow_turn_finished("t1", "completed"),
+                    flow_turn_started("t2"),
+                    flow_attempt_started("t2", "a2"),
+                    delta.clone(),
+                    flow_attempt_finished("t2", "a2", "completed"),
+                    RunEvent::ClientOutputCommitted,
+                    flow_turn_finished("t2", "completed"),
+                ],
+                vec![("t1", "a1", "completed"), ("t2", "a2", "completed")],
+                0,
+            ),
+            (
+                "failover-success",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "failed"),
+                    flow_attempt_started("t1", "a2"),
+                    flow_attempt_finished("t1", "a2", "completed"),
+                    RunEvent::ClientOutputCommitted,
+                    flow_turn_finished("t1", "completed"),
+                ],
+                vec![("t1", "a2", "completed")],
+                1,
+            ),
+            (
+                "terminal-upstream-failure",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "failed"),
+                    failure,
+                    flow_turn_finished("t1", "upstream_error"),
+                ],
+                vec![("t1", "a1", "failed")],
+                0,
+            ),
+            (
+                "client-disconnect",
+                vec![
+                    flow_turn_started("t1"),
+                    flow_attempt_started("t1", "a1"),
+                    flow_attempt_finished("t1", "a1", "completed"),
+                    RunEvent::DeliveryFinished {
+                        status: "client_disconnected".into(),
+                        reason: Some("client_disconnected".into()),
+                    },
+                    flow_turn_finished("t1", "cancelled"),
+                ],
+                vec![("t1", "a1", "completed")],
+                0,
+            ),
+        ];
+        for (name, flow, merged, separate) in cases {
+            let directory = tempfile::tempdir()?;
+            let pool = crate::test_support::migrated_sqlite_pool().await?;
+            let observation = test_observation(&pool, directory.path(), false).await;
+            let run_id = format!("flow-{name}");
+            let run = test_run(&observation, &run_id, facts(Vec::new()));
+            for event in flow {
+                run.record(event);
+            }
+            run.finish(RunOutcome {
+                client_output_committed: true,
+                delivery: None,
+                delivery_completed_at: None,
+                status: "completed".into(),
+                terminal_reason: None,
+                generation_node_id: None,
+                generation_root_id: None,
+            });
+            observation.flush().await?;
+            let events = replayed(&observation).await?;
+            let finished = events_of(&events, Some(&run_id), "model_turn_finished");
+            let actual: Vec<(String, String, String)> = finished
+                .iter()
+                .map(|event| {
+                    let attempt = &event.payload["attempt"];
+                    (
+                        event.payload["model_turn_id"].as_str().unwrap_or_default().to_owned(),
+                        attempt["attempt_id"].as_str().unwrap_or_default().to_owned(),
+                        attempt["status"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect();
+            let expected: Vec<(String, String, String)> = merged
+                .iter()
+                .map(|(turn, attempt, status)| ((*turn).into(), (*attempt).into(), (*status).into()))
+                .collect();
+            assert_eq!(actual, expected, "{name}: the last attempt finish rides on the turn finish row");
+            assert_eq!(
+                events_of(&events, Some(&run_id), "target_attempt_finished").len(),
+                separate,
+                "{name}: only attempts superseded by failover keep their own finish row"
+            );
+            observation.shutdown().await;
+            pool.close().await;
+        }
         Ok(())
     }
 

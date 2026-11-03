@@ -8,7 +8,7 @@ async fn confirmed_sent_receipt_uses_terminal_waiting_fact_without_history_proje
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         false,
         crate::generation_chain::test_chain().await,
     )
@@ -124,7 +124,7 @@ async fn delivered_model_legs_keep_distinct_ordinals_after_late_item_ids() {
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -214,7 +214,7 @@ async fn websocket_sent_partial_excludes_unsent_staged_output_and_preserves_item
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -325,7 +325,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        7,
+        crate::history_retention::HistoryRetention::new(7),
         true,
         crate::generation_chain::test_chain().await,
     )

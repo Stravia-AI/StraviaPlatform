@@ -1089,7 +1089,7 @@ mod tests {
             Some(pool.clone()),
             None,
             directory.path().to_path_buf(),
-            1,
+            crate::history_retention::HistoryRetention::new(1),
             false,
             crate::generation_chain::test_chain().await,
         )
