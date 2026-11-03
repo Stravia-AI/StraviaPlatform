@@ -41,6 +41,18 @@ def fetch_contents(env: dict[str, Any], ids: list[int]) -> dict[int, dict[str, A
     return {item["content_id"]: item for item in body["data"]["contents"]}
 
 
+def scan_contents(env: dict[str, Any], low: int, high: int) -> dict[int, dict[str, Any]]:
+    """读取 ``[low, high]`` 内所有对管理员可见的正文（每次最多 256 个 id）。
+
+    用来证明“范围内其余正文都不可见”：Turn Chain / Marker 独有的正文与 Observation 的引用
+    共用同一个内容 id 空间，扫一段范围即可覆盖相邻写入的那些行。
+    """
+    found: dict[int, dict[str, Any]] = {}
+    for start in range(max(low, 1), high + 1, 256):
+        found.update(fetch_contents(env, list(range(start, min(start + 256, high + 1)))))
+    return found
+
+
 def text_of(content: dict[str, Any]) -> str:
     """文本单元取字符串，JSON 单元取紧凑 JSON 文本。"""
     if content["format"] == "text":
@@ -90,8 +102,9 @@ def assert_summary_has_only_refs(summary: dict[str, Any]) -> None:
 
 def etag_of(headers: dict[str, str]) -> str:
     etag = headers.get("etag")
-    assert etag and etag.startswith('"') and etag.endswith('"'), headers
-    assert len(etag) == 66 and all(char in "0123456789abcdef" for char in etag[1:-1]), etag
+    # ETag 的内部构成（摘要、映射版本）不是契约；只要求它是带引号的不透明强校验值。
+    assert etag and len(etag) > 2 and etag.startswith('"') and etag.endswith('"'), headers
+    assert not etag.startswith("W/"), etag
     return etag
 
 

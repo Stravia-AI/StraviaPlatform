@@ -241,7 +241,7 @@ heaptrack 通过只对 Server 子进程注入 preload 采集，不包裹 PID。�
 ### 后续降低内存的优先级
 
 1. **优先收敛检测器搜索缓存。** 当前全局 `OnceLock<Detector>` 已避免重复初始化；`expression.rs` / `kingfisher.rs` 的 `size_limit` 是编译结果上限，不是搜索缓存总预算。锁定的 regex 1.13.1 另有 `dfa_size_limit`；regex-automata 0.4.18 的搜索 scratch 池按同时使用峰值扩张、不主动收缩，不应误报成“每个历史线程永久一份”。应分别评估缓存容量、受控扫描并发、等价预过滤，以及相同模式/flags 的编译结果能否共享。减缓存可能增加重建与 fallback CPU；不得删规则、关闭 Unicode 语义或跳过凭据检测。
-2. **缩短整请求的额外持有。** `RunObserver::capture_input_preview` 的 `pending_input` 目前持有完整 `Arc<AiRequest>`；凭据保护可能因其他所有者而触发 `Arc::make_mut`。可研究只保留最新用户输入所需文本（ADR-0089 起不再截断为预览，保存完整文本单元），避免观察者额外 pin 整请求；仍须先完整脱敏再写入，并保持映射注册后的发布时序。其他所有者仍可能要求 COW，尚未量化节省量。
+2. **整请求的额外持有已消除。** `RunObserver::capture_user_input` 在准入时只从收到的 canonical 窗口抽取最新用户输入的文本单元（ADR-0089 起不再截断为预览），观察者不再持有 `Arc<AiRequest>`；发布仍在映射登记完成之后（`publish_user_input`）。节省量未单独测量。
 3. **用在途字节预算约束并发峰值。** 代理入口的 140MiB 是单请求 JSON 上限，RPM admission 不是活跃请求字节上限。Trace writer 的 1024 槽、普通 writer 的 2048 槽也不等于总字节预算。预算应覆盖形成大缓冲之前、queued 与 writing 的生命周期；保留 Admission/Finish/清理控制容量，不以丢历史、更多 partial 或降低成功请求负载美化成绩。代价是排队延迟或明确拒绝，必须同时报告。
 4. **实时订阅按共享正文与聚合预算治理。** Live mailbox 各有 8MiB 上限，当前为每个订阅者 clone 内容；多慢订阅者会放大内存。这是实际 UI/订阅负载的机会，不是没有实时订阅者的本次 HTTP 矩阵 RSS 的归因。
 5. **Wasm 与分配器分别测量。** 内置 Engine/编译结果已共享，owned host calls 已提前释放 lowered payload；不要重复列为待做。每操作仍独立 Store，不能为省内存复用权限状态。可测量实例化等待期间的载荷生命周期；Store 内存限额是防失控措施，不保证降低当前有效请求的 RSS，过低会导致 OOM。分配器驻留仍需同负载 `/proc/PID/smaps` 与 allocator 统计后再决定是否换分配器，不能把 malloc 存活量与 RSS 的差额全部归因于 glibc。

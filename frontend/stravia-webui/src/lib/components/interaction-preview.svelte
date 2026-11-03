@@ -5,6 +5,7 @@ import { tick, untrack } from 'svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 import * as m from '#lib/paraglide/messages.js'
+import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { contentRefsKey } from '#lib/observation-contents.js'
 import { observationContents } from '#lib/observation-contents-client.js'
 import type { ObservationContentSummary } from '#lib/types.js'
@@ -63,10 +64,6 @@ let trigger = $state<HTMLButtonElement | null>(null)
 let content = $state<HTMLDivElement | null>(null)
 const contentId = $props.id()
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error && error.message ? error.message : String(error)
-}
-
 $effect(() => {
   void refsKey
   void attempt
@@ -85,7 +82,7 @@ $effect(() => {
         if (current) previewText = text
       })
       .catch((error: unknown) => {
-        if (current) previewError = errorMessage(error)
+        if (current) previewError = localizeBackendErrorMessage(error)
       })
     return () => {
       current = false
@@ -107,7 +104,7 @@ $effect(() => {
         if (current) fullText = { key, text }
       })
       .catch((error: unknown) => {
-        if (current) fullError = errorMessage(error)
+        if (current) fullError = localizeBackendErrorMessage(error)
       })
     return () => {
       current = false

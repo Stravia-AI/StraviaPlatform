@@ -57,10 +57,9 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $begin:literal, $lock:expr, $for_key_share:literal) => {{
+            ($pool:expr, $begin:literal, $for_key_share:literal) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
-                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                 if let Some(source) = record.source_generation_id.as_deref() {
                     let query = format!(
                         "SELECT CAST(1 AS BIGINT) FROM turn_nodes n \
@@ -101,8 +100,8 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", "", ""),
-            Self::Postgres(pool) => insert!(pool, "BEGIN", "", " FOR KEY SHARE"),
+            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Postgres(pool) => insert!(pool, "BEGIN", " FOR KEY SHARE"),
         }
     }
 
@@ -176,25 +175,35 @@ impl Store {
         ids: &[String],
     ) -> Result<(), CompactionError> {
         let key = principal.continuation_key();
-        const SQL: &str =
-            "SELECT confirmed_at IS NULL FROM native_compactions WHERE id = $1 AND principal = $2";
+        // 一次读取取回全部登记的确认状态（超长列表按 400 个一批）；缺失的 ID 整体不可用。
         macro_rules! fetch {
-            ($pool:expr, $id:expr) => {
-                sqlx::query_scalar::<_, bool>(SQL)
-                    .bind($id)
-                    .bind(&key)
-                    .fetch_optional($pool)
-                    .await
-                    .map_err(storage)?
-            };
+            ($pool:expr, $db:ty) => {{
+                let mut states: std::collections::HashMap<String, bool> =
+                    std::collections::HashMap::with_capacity(ids.len());
+                for chunk in ids.chunks(400) {
+                    let mut query = sqlx::QueryBuilder::<$db>::new(
+                        "SELECT id, confirmed_at IS NULL FROM native_compactions WHERE principal = ",
+                    );
+                    query.push_bind(&key).push(" AND id IN (");
+                    let mut list = query.separated(",");
+                    for id in chunk {
+                        list.push_bind(id.as_str());
+                    }
+                    list.push_unseparated(")");
+                    let rows: Vec<(String, bool)> =
+                        query.build_query_as().fetch_all($pool).await.map_err(storage)?;
+                    states.extend(rows);
+                }
+                states
+            }};
         }
+        let states = match self {
+            Self::Sqlite(pool) => fetch!(pool, sqlx::Sqlite),
+            Self::Postgres(pool) => fetch!(pool, sqlx::Postgres),
+        };
         let mut pending = Vec::new();
         for id in ids {
-            let is_pending = match self {
-                Self::Sqlite(pool) => fetch!(pool, id),
-                Self::Postgres(pool) => fetch!(pool, id),
-            };
-            match is_pending {
+            match states.get(id) {
                 Some(true) => pending.push(id.clone()),
                 Some(false) => {}
                 None => return Err(CompactionError::Unavailable),

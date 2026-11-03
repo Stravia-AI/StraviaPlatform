@@ -310,6 +310,52 @@ def principal_of(connection: sqlite3.Connection, token: str) -> str:
     return "api-key:" + connection.execute("SELECT id FROM api_keys WHERE token = ?", (token,)).fetchone()[0]
 
 
+def scenario_upstream_failure(env: dict[str, Any]) -> dict[str, Any]:
+    """一次最终失败的请求：产生客户端错误（failed）与导致失败的上游错误。"""
+    from tests.common.helpers import find_free_port, minimal_mock_provider
+    from tests.e2e.admin.test_observations import _create_route
+
+    port = find_free_port()
+    mock_server, _ = minimal_mock_provider(port)
+    try:
+        model = "observation-always-failed-upgrade"
+        route, key = _create_route({**env, "mock": f"http://127.0.0.1:{port}"}, model, retry_budget=0)
+        status, _body = http_request("POST", f"{env['proxy']}/v1/responses", payload={
+            "model": model, "input": [{"role": "user", "content": model}]},
+            headers={"authorization": f"Bearer {key}"})
+        assert status >= 500, status
+        return {"route": route, "key": key, "model": model}
+    finally:
+        mock_server.shutdown()
+        mock_server.server_close()
+
+
+def capture_errors(env: dict[str, Any], expectations: dict[str, Any]) -> None:
+    """旧服务端自己的错误明细：升级后的同一端点必须给出同样的错误对象与归属。"""
+    spec = expectations["upstream_failure"]
+    now = int(time.time() * 1000)
+    window = f"start_at={now - 3_600_000}&end_at={now + 60_000}&limit=100"
+    client = admin(env, "GET", f"observations/client-errors?{window}&type=failed")["items"]
+    upstream = admin(env, "GET", f"observations/upstream-errors?{window}")["items"]
+    matching = [item for item in client if item["model"] == spec["model"]]
+    assert len(matching) == 1, (client, spec)
+    client_item = matching[0]
+    (upstream_item,) = [item for item in upstream if item["model"] == spec["model"]]
+    client_detail = admin(env, "GET", f"observations/client-errors/{client_item['kind']}/{client_item['id']}")
+    upstream_detail = admin(env, "GET", f"observations/upstream-errors/{upstream_item['id']}")
+    spec["client_error"] = {
+        "id": client_item["id"], "kind": client_item["kind"], "type": client_item["type"],
+        "error": client_item["error"], "model": client_item["model"],
+        "detail_request_keys": sorted(client_detail["request"]),
+        "detail_error": client_detail["request"].get("error"),
+    }
+    spec["upstream_error"] = {
+        key: upstream_item[key]
+        for key in ("id", "outcome", "error", "provider_id", "provider_name", "upstream_model", "model", "api_key_name")
+    }
+    spec["upstream_error"]["detail_attempt_statuses"] = [a["status"] for a in upstream_detail["attempts"]]
+
+
 def observation_expectations(connection: sqlite3.Connection) -> dict[str, Any]:
     """旧事件的语义摘要：升级后必须能从新形态逐项还原。"""
     result: dict[str, Any] = {}
@@ -399,6 +445,24 @@ def capture_follow_ups(binary: Path, data_dir: Path, expectations: dict[str, Any
                     spec["follow_up_upstream"] = received[0]
 
 
+def drain_observations(env: dict[str, Any]) -> None:
+    """等每个 Interaction 的 Run 收尾，并经 Bundle 导出屏障确认 writer 已落库。"""
+    from tests.common.helpers import download_observation_bundle
+    from tests.e2e.admin.test_observations import _detail, _forest, _wait_for
+
+    interactions = [item["id"] for root in _forest(env, limit=100)["roots"] for item in root["interactions"]]
+    assert interactions, "no recorded interactions"
+    for interaction_id in interactions:
+        detail = _wait_for(
+            f"interaction {interaction_id} finished",
+            lambda: (lambda d: d if any(e["kind"] == "run_finished" for r in d["runs"] for e in r["events"]) else None)(
+                _detail(env, interaction_id)
+            ),
+            timeout=30,
+        )
+        download_observation_bundle(env, detail)
+
+
 def record(binary: Path, data_dir: Path) -> dict[str, Any]:
     with old_server(binary, data_dir) as env:
         # 非默认保留天数；可逆脱敏开关一并保留在旧库中。
@@ -409,8 +473,10 @@ def record(binary: Path, data_dir: Path) -> dict[str, Any]:
         expectations["redaction"] = scenario_redaction(env)
         expectations["compaction"] = scenario_native_compaction(env)
         expectations["failover"] = scenario_failover(env)
+        expectations["upstream_failure"] = scenario_upstream_failure(env)
         # 排空 writer：客户端响应先于 Observation 落库。
-        time.sleep(1.0)
+        drain_observations(env)
+        capture_errors(env, expectations)
     capture_follow_ups(binary, data_dir, expectations)
     return export_fixture(data_dir / "db" / "gateway.db", expectations)
 

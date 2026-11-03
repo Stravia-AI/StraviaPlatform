@@ -28,7 +28,8 @@ SQLITE_SINGLETON_TABLES = ("observation_sequence",)
 SETTINGS_KEYS = ("log_retention_days", "reversible_redaction_enabled")
 COMPACTION_REMOVED_HISTORY = "compaction fixture removed history"
 # 原生压缩的 Target 绑定指纹包含 Provider 的 base_url：录制与回放必须使用同一个地址，
-# 因此该 mock 固定在非临时端口范围内的端口，而不是随机端口。
+# 因此该 mock 固定在非临时端口范围内的端口，而不是随机端口（指纹是哈希，无法在加载时改写）。
+# 使用方必须保证同一时刻只有一个测试占用该端口：见 test_shared_content_upgrade 的 xdist_group。
 COMPACTION_UPSTREAM_PORT = 28431
 COMPACTION_STATE = {"type": "compaction", "id": "cmp_state_fixture", "encrypted_content": "opaque-fixture-state"}
 

@@ -38,15 +38,6 @@ def raw(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def add_content(connection, content_id, scope_id, body, compressed=False, format_code=JSON_FORMAT):
-    """写入一条共享内容：摘要覆盖格式字节与原文，``raw_len`` 是原文字节数。"""
-    connection.execute(
-        "INSERT INTO contents(id,scope_id,digest,format,raw_len,body) VALUES(?,?,?,?,?,?)",
-        (content_id, scope_id, content_digest(format_code, body), format_code, len(body),
-         encode(body, compressed)),
-    )
-
-
 @pytest.fixture
 def history(tmp_path):
     (tmp_path / "db").mkdir()

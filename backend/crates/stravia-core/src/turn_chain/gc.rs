@@ -71,7 +71,10 @@ macro_rules! backend {
             let mut connection = pool.acquire_write().await?;
             let mut transaction = connection.begin_with($begin).await?;
             // 与提交共享的锁序：turn_nodes -> content_scopes；SHARE ROW EXCLUSIVE 阻止写入穿插。
-            // 咨询锁在前，使并发回收事务的释放触发器取锁顺序串行（见 `PG_GC_LOCK`）。
+            // 表锁在前、咨询锁在后：等待在途提交结束期间不持有咨询锁，Marker/映射发布与原生压缩
+            // 确认（取咨询锁共享模式）不会排在这次等待之后；取得表锁后再取咨询锁，使并发回收事务的
+            // 释放触发器取锁顺序串行（见 `PG_GC_LOCK`）。持咨询锁的事务从不申请 turn_nodes 的
+            // ROW EXCLUSIVE 及以上表锁，所以这个顺序不会成环。
             for lock in $locks { sqlx::query(lock).execute(&mut *transaction).await?; }
             let mut query = sqlx::QueryBuilder::<$db>::new(
                 "SELECT n.node_pk,n.created_at,n.scope_id,r.deleting,\
@@ -92,6 +95,9 @@ macro_rules! backend {
             }
             let mut removed_refs = 0u64;
             let mut marked = 0u64;
+            // 本轮释放的正文 ID。入队放在节点删除之后：先对象行（节点删除触发器锁的 Marker/映射/
+            // 登记行）、后正文行，与 Marker 回收和 Marker 单行写入的锁序一致。
+            let mut released: Vec<i64> = Vec::new();
             let with_contents: Vec<_> = nodes.iter()
                 .filter(|node| node.eligible(threshold) && node.has_contents)
                 .map(|node| node.node_pk)
@@ -104,7 +110,7 @@ macro_rules! backend {
                 for node_pk in &with_contents { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
                 marked = mark.build().execute(&mut *transaction).await?.rows_affected();
-                // 删除引用并取回失去引用的正文 ID，再在同一事务内重检入队；
+                // 删除引用并取回失去引用的正文 ID（稍后在同一事务内重检入队）；
                 // 一个巨大节点的级联删除会长时间占用写锁，所以按批移除。
                 let mut remove = sqlx::QueryBuilder::<$db>::new(
                     "DELETE FROM turn_node_contents WHERE (node_pk,ordinal) IN \
@@ -114,9 +120,8 @@ macro_rules! backend {
                 for node_pk in &with_contents { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
                 remove.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push(") RETURNING content_id");
-                let released: Vec<i64> = remove.build_query_scalar().fetch_all(&mut *transaction).await?;
+                released = remove.build_query_scalar().fetch_all(&mut *transaction).await?;
                 removed_refs = released.len() as u64;
-                $enqueue(&mut *transaction, &released).await?;
                 // 本轮不删除带正文的节点；它们留在队列里由后续轮次继续。
                 targets.retain(|node_pk| !with_contents.contains(node_pk));
             }
@@ -143,7 +148,8 @@ macro_rules! backend {
                 .map(|node| node.scope_id)
                 .collect();
             ensure!(visited == 0 || removed > 0 || removed_refs > 0 || marked > 0 || !blocked.is_empty(), "history collection made no progress");
-            // 正文回收在节点收集结束后由共享内容存储单独进行。
+            // 正文回收在节点收集结束后由共享内容存储单独进行；这里只登记失去引用的正文。
+            $enqueue(&mut *transaction, &released).await?;
             $prune(&mut transaction, &mut scopes).await?;
             transaction.commit().await?;
             connection.finish().await?;
@@ -176,8 +182,8 @@ backend!(
     sqlx::Postgres,
     "BEGIN",
     [
-        crate::history_retention::PG_GC_LOCK,
-        "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE"
+        "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE",
+        crate::history_retention::PG_GC_LOCK
     ],
     " FOR UPDATE OF n SKIP LOCKED"
 );

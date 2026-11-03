@@ -1960,6 +1960,188 @@ async fn postgres_reclaim_waits_for_an_in_flight_publication() {
     run_postgres(1, reclaim_waits_for_an_in_flight_publication).await;
 }
 
+/// 持锁事务的后端进程号；`wait_until_blocked_by` 据此精确识别被它阻塞的后端。
+async fn backend_pid(holder: &mut sqlx::PgConnection<'_>) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("holder backend pid")
+}
+
+/// 等到有后端被 `holder` 阻塞。按持锁者精确识别，不受并行测试里别的等待者干扰；
+/// 轮询的是可观察状态，不是掩盖竞态的睡眠。
+async fn wait_until_blocked_by(pool: &PgPool, holder: i32) {
+    for _ in 0..1000 {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .expect("count blocked backends");
+        if blocked > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no transaction became blocked by the lock holder");
+}
+
+/// 节点回收在等待在途提交（持有 `turn_nodes` 的 ROW EXCLUSIVE）结束期间，不得持有咨询锁：
+/// Marker 发布、映射发布与原生压缩确认（取咨询锁共享模式）照常完成，不排在回收等待之后。
+async fn publication_does_not_wait_for_node_reclaim_blocked_on_a_commit(fx: Fixture) {
+    let marker = fx.thinking_marker("publish beside node reclaim", false).await;
+    let mapping = fx.mapping(false).await;
+    let pending = fx.native_compaction(None, &[], false).await;
+    let t = fx.tick().await;
+    let n = fx.window();
+    let pool = fx.pg().clone();
+
+    let mut commit = pool.begin().await.expect("in-flight commit transaction");
+    sqlx::query("LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE")
+        .execute(&mut *commit)
+        .await
+        .expect("commit holds the turn_nodes table lock");
+    let holder = backend_pid(&mut commit).await;
+
+    let reclaiming = fx.maintenance.sweep_history(t + n);
+    let observing = async {
+        wait_until_blocked_by(&pool, holder).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            fx.publish_marker(&marker).await;
+            fx.publish_mapping(&mapping).await;
+            fx.confirm_compaction(&pending.record).await;
+        })
+        .await
+        .expect("publication must not queue behind a node reclaim that waits for a commit");
+        commit.commit().await.expect("finish commit");
+    };
+    let (swept, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(reclaiming, observing)
+    })
+    .await
+    .expect("node reclaim resumes once the commit ends");
+    swept.expect("sweep_history");
+    assert!(fx.marker_readable(&marker).await);
+    assert!(fx.mapping_readable(&mapping).await);
+    assert!(fx.compaction_readable(&pending.state).await);
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_publication_does_not_wait_for_node_reclaim_blocked_on_a_commit() {
+    run_postgres(
+        1,
+        publication_does_not_wait_for_node_reclaim_blocked_on_a_commit,
+    )
+    .await;
+}
+
+/// Marker 回收整批释放的正文按 ID 全局有序入队：同批里先处理的 Marker 的正文 ID 更大时，
+/// 回收在等待一个更小 ID 的行锁期间不得已持有更大 ID 的锁。Observation 清理按升序一次性
+/// 取同类行锁（这里的持锁者），否则两边互相等待，PostgreSQL 会中止其中一个事务。
+async fn marker_reclaim_orders_content_locks_across_its_whole_batch(fx: Fixture) {
+    let pool = fx.pg().clone();
+    let mut created = 0;
+    // 处理顺序是 reference 升序；找一对“先处理的正文 ID 更大”的 Marker。
+    let (high, low) = loop {
+        fx.thinking_marker(&format!("{} body", fx.unique("ordered")), true)
+            .await;
+        created += 1;
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT m.reference, c.content_id FROM history_markers m \
+             JOIN history_marker_contents c ON c.reference = m.reference ORDER BY m.reference",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("marker contents in sweep order");
+        assert_eq!(rows.len(), created, "one body per thinking marker");
+        let inverted = rows.iter().enumerate().find_map(|(index, (_, first))| {
+            rows[index + 1..]
+                .iter()
+                .find(|(_, later)| later < first)
+                .map(|(_, later)| (*first, *later))
+        });
+        if let Some(pair) = inverted {
+            break pair;
+        }
+        assert!(created < 32, "random references never produced an inversion");
+    };
+    let t = fx.tick().await;
+    let n = fx.window();
+
+    let mut purge = pool.begin().await.expect("purge transaction");
+    sqlx::query("SELECT id FROM contents WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(low)
+        .fetch_one(&mut *purge)
+        .await
+        .expect("purge locks the lower content id first");
+    let holder = backend_pid(&mut purge).await;
+
+    let reclaiming = fx.maintenance.sweep_history(t + n);
+    let purging = async {
+        wait_until_blocked_by(&pool, holder).await;
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            sqlx::query("SELECT id FROM contents WHERE id = $1 FOR NO KEY UPDATE")
+                .bind(high)
+                .fetch_one(&mut *purge),
+        )
+        .await
+        .expect("purge must not wait for the marker reclaim")
+        .expect("purge must not be chosen as a deadlock victim");
+        purge.commit().await.expect("finish purge");
+    };
+    let (swept, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(reclaiming, purging)
+    })
+    .await
+    .expect("marker reclaim resumes once the purge ends");
+    swept.expect("marker reclaim must not be chosen as a deadlock victim");
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM history_markers")
+        .fetch_one(&pool)
+        .await
+        .expect("remaining markers");
+    assert_eq!(remaining, 0, "every expired marker is reclaimed");
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_marker_reclaim_orders_content_locks_across_its_whole_batch() {
+    run_postgres(
+        1,
+        marker_reclaim_orders_content_locks_across_its_whole_batch,
+    )
+    .await;
+}
+
+/// 启动恢复多行更新 Marker：与回收事务互斥，回收事务在途时等待，结束后完成。
+async fn startup_recovery_waits_for_an_in_flight_reclaim(fx: Fixture) {
+    let pool = fx.pg().clone();
+    let mut reclaim = pool.begin().await.expect("reclaim transaction");
+    sqlx::query(PG_GC_LOCK)
+        .execute(&mut *reclaim)
+        .await
+        .expect("take the reclaim lock");
+    let holder = backend_pid(&mut reclaim).await;
+    let markers = Arc::clone(&fx.markers);
+    let recovering = tokio::spawn(async move { markers.recover_public_executions().await });
+    wait_until_blocked_by(&pool, holder).await;
+    assert!(
+        !recovering.is_finished(),
+        "recovery must wait for the in-flight reclaim"
+    );
+    reclaim.commit().await.expect("finish reclaim");
+    tokio::time::timeout(Duration::from_secs(30), recovering)
+        .await
+        .expect("recovery resumes once the reclaim transaction ends")
+        .expect("recovery task")
+        .expect("recover public executions");
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_startup_recovery_waits_for_an_in_flight_reclaim() {
+    run_postgres(1, startup_recovery_waits_for_an_in_flight_reclaim).await;
+}
+
 /// 提交正在引用一个已过下限的依赖（持有它的 `FOR KEY SHARE`、尚未提交）时，
 /// 回收必须跳过它：不等待、不因外键报错；写入方结束后下一轮才回收。
 async fn reclaim_skips_dependencies_held_by_a_committing_writer(fx: Fixture) {

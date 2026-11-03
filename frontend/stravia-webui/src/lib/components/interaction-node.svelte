@@ -6,12 +6,10 @@ import InteractionPreview from './interaction-preview.svelte'
 import { formatCompactCount, formatLogTime } from '#lib/format.js'
 import { hasHistoricalFailure, interactionDisplayStatus } from '#lib/observation-chain-visibility.js'
 import { observationStatusLabel } from '#lib/observation-labels.js'
+import { INPUT_SEPARATOR, OUTPUT_SEPARATOR } from '#lib/observation-separators.js'
 import type { InteractionNodeData } from '#lib/types.js'
 
 type InteractionNode = import('@xyflow/svelte').Node<InteractionNodeData, 'interaction'>
-// 与服务端拼接 refs 的分隔符一致：输入以单换行，输出以空行。
-const INPUT_SEPARATOR = '\n'
-const OUTPUT_SEPARATOR = '\n\n'
 let { data, selected }: NodeProps<InteractionNode> = $props()
 
 const interaction = $derived(data.interaction)
