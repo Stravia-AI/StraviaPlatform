@@ -1577,6 +1577,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     RunEvent::ClientVisibleContentDelta { .. }
                                         | RunEvent::ModelThinkingDelta { .. }
                                         | RunEvent::NativeCompactionAssociated { .. }
+                                        // 轮次与 attempt 的开始/结束是阶段边界：交回主循环，
+                                        // 由写入端缓冲按阶段合并，不并进流式批次。
+                                        | RunEvent::ModelTurnStarted { .. }
+                                        | RunEvent::TargetAttemptStarted { .. }
+                                        | RunEvent::TargetAttemptFinished { .. }
+                                        | RunEvent::ModelTurnFinished { .. }
                                 ) =>
                             {
                                 batch_spans.push(tracing::info_span!(
