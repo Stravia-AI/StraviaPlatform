@@ -46,7 +46,7 @@ use format2::{put_postgres_prepared, put_sqlite_prepared};
 mod format2;
 mod normalize;
 mod retention;
-pub(super) mod v3_content;
+mod v3_content;
 
 pub(crate) use retention::{retention_postgres, retention_sqlite};
 

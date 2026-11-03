@@ -210,7 +210,7 @@ macro_rules! backend {
                         query.push_values(chunk.iter(), |mut row, index| {
                             row.push_bind(scope_id)
                                 .push_bind(contents[*index].digest.as_slice())
-                                .push_bind(contents[*index].format.as_database_value())
+                                .push_bind(i64::from(format_code(contents[*index].format)))
                                 .push_bind(contents[*index].raw_len)
                                 .push_bind(contents[*index].bytes.as_slice());
                         });
@@ -297,7 +297,7 @@ macro_rules! backend {
                     let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> =
                         query.build_query_as().fetch_all(&mut *connection).await?;
                     for (id, digest, format, raw_len, encoded) in rows {
-                        let format = ContentFormat::from_database_value(format)
+                        let format = format_from_code(format)
                             .context("invalid stored content format")?;
                         let raw = crate::storage_codec::decode(&encoded)?;
                         ensure!(

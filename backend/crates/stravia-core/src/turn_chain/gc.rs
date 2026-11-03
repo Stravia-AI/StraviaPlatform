@@ -175,7 +175,10 @@ backend!(
     sqlx::PgConnection<'_>,
     sqlx::Postgres,
     "BEGIN",
-    [crate::history_retention::PG_GC_LOCK, "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE"],
+    [
+        crate::history_retention::PG_GC_LOCK,
+        "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE"
+    ],
     " FOR UPDATE OF n SKIP LOCKED"
 );
 

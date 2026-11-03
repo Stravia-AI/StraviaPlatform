@@ -19,8 +19,8 @@ use crate::interaction_observation::{
     ClientErrorDetail, ClientErrorPage, ClientErrorSummary, FailureDiagnostic, ForestPage,
     InteractionDetail, InteractionEventsPage, InteractionObservation, InteractionSummary,
     LiveContentBlock, ObservationContent, ObservationEvent, ObservationStream, ObservationUpdate,
-    ProtectedSecrets,
-    RootChangesPage, RunDetail, UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorSummary,
+    ProtectedSecrets, RootChangesPage, RunDetail, UpstreamErrorDetail, UpstreamErrorPage,
+    UpstreamErrorSummary,
 };
 
 use super::AdminService;
@@ -147,7 +147,11 @@ impl CredentialMasker {
             hasher.update([0]);
             hasher.update(secrets.version());
         }
-        hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     pub(super) fn mask_summary(&self, summary: &mut InteractionSummary) {

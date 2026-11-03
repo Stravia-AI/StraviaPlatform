@@ -1,6 +1,9 @@
 //! 0037 与 0038 之间的离线数据转换：把 v3 `turn_contents` / 未压缩 Marker 段载荷
 //! 改写成共享正文存储。
 //!
+//! 转换需要理解 Turn Chain 与 History Marker 的载荷语义，因此放在共享正文存储之外，
+//! `content_store` 本身保持与语义无关。
+//!
 //! 转换是可恢复的：`content_upgrade` 只有一行，stage 0 按 `last_node_pk` 转换节点，
 //! stage 1 按 `last_marker_reference` 转换 Marker，stage 2 校验完成。每个批次的数据
 //! 与游标在同一事务提交；中断只会重做当前批次。旧表在 0038 才删除。
@@ -9,7 +12,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, ensure};
 
-use super::{Content, decode_descriptor, restore_slots, validate_slots};
+use crate::content_store::{Content, decode_descriptor, restore_slots, validate_slots};
 use crate::history_marker::HiddenHistorySegment;
 use crate::history_marker::content as marker_content;
 use crate::turn_chain::content;
@@ -17,7 +20,6 @@ use crate::turn_chain::content;
 const NODE_BATCH: usize = 64;
 const MARKER_BATCH: usize = 64;
 
-#[derive(Default)]
 struct UpgradeState {
     stage: i64,
     last_node_pk: i64,

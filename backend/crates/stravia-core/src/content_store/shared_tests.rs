@@ -40,8 +40,10 @@ impl Stores {
     fn sqlite(pool: SqlitePool) -> Self {
         Self {
             backend: Backend::Sqlite(pool.clone()),
-            turns: SqlTurnChainStore::sqlite(pool.clone())
-                .with_retention(HistoryRetention::new(TURN_RETENTION_DAYS)),
+            turns: SqlTurnChainStore::sqlite(
+                pool.clone(),
+                HistoryRetention::new(TURN_RETENTION_DAYS),
+            ),
             markers: SqlHistoryMarkerStore::sqlite(pool),
         }
     }
@@ -49,8 +51,10 @@ impl Stores {
     fn postgres(pool: PgPool) -> Self {
         Self {
             backend: Backend::Postgres(pool.clone()),
-            turns: SqlTurnChainStore::postgres(pool.clone())
-                .with_retention(HistoryRetention::new(TURN_RETENTION_DAYS)),
+            turns: SqlTurnChainStore::postgres(
+                pool.clone(),
+                HistoryRetention::new(TURN_RETENTION_DAYS),
+            ),
             markers: SqlHistoryMarkerStore::postgres(pool),
         }
     }

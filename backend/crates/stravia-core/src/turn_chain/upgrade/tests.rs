@@ -1217,8 +1217,9 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
             .bind(expires_at)
             .execute(&mut *connection)
             .await?;
-        contentless_expected =
-            serde_json::to_vec(&serde_json::from_value::<HiddenHistorySegment>(empty_segment)?)?;
+        contentless_expected = serde_json::to_vec(
+            &serde_json::from_value::<HiddenHistorySegment>(empty_segment)?,
+        )?;
     }
 
     crate::migrations::migrate_sqlite(&pool, None).await?;
@@ -1233,7 +1234,10 @@ async fn shared_content_upgrade_preserves_turn_history_and_markers() -> anyhow::
     assert_eq!(retired, 0);
 
     let owner = Principal::new("alice");
-    let turns = SqlTurnChainStore::sqlite(pool.clone());
+    let turns = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let chain = turns
         .materialize(
             &owner,

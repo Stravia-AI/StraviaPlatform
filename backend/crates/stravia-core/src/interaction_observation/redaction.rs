@@ -2,8 +2,8 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use stravia_credential_protection::marker;
 use sha2::{Digest, Sha256};
+use stravia_credential_protection::marker;
 
 pub(crate) const REDACTED: &str = "***";
 

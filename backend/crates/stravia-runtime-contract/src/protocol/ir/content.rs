@@ -9,32 +9,13 @@ use serde_json::Value;
 
 use super::{AiItem, ContentBlock, MessageContent};
 
-/// 正文的存储格式；数值是持久化编码，不得复用。
+/// 正文的存储格式。持久化编码由共享正文存储定义，不属于 IR。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
 pub enum ContentFormat {
     /// 原始 UTF-8 文本，不做 JSON 转义。
-    Text = 0,
+    Text,
     /// 紧凑 serde JSON。
-    Json = 1,
-}
-
-impl ContentFormat {
-    pub fn as_byte(self) -> u8 {
-        self as u8
-    }
-
-    pub fn as_database_value(self) -> i64 {
-        i64::from(self.as_byte())
-    }
-
-    pub fn from_database_value(value: i64) -> Option<Self> {
-        match value {
-            0 => Some(Self::Text),
-            1 => Some(Self::Json),
-            _ => None,
-        }
-    }
+    Json,
 }
 
 /// 正文内容本身；JSON 单元借用原值，避免序列化前复制。
@@ -61,6 +42,7 @@ pub struct ContentUnit<'a> {
 }
 
 impl ContentUnit<'_> {
+    #[cfg(test)]
     pub fn format(&self) -> ContentFormat {
         self.body.format()
     }
@@ -278,23 +260,6 @@ mod tests {
             "meta": {"reference": "abcdefghijklmnopqrstuvwxyzab"}
         }));
         assert!(item_content_units(&item).is_empty());
-    }
-
-    #[test]
-    fn format_values_are_the_persisted_encoding() {
-        assert_eq!(ContentFormat::Text.as_byte(), 0);
-        assert_eq!(ContentFormat::Json.as_byte(), 1);
-        assert_eq!(ContentFormat::Text.as_database_value(), 0);
-        assert_eq!(ContentFormat::Json.as_database_value(), 1);
-        assert_eq!(
-            ContentFormat::from_database_value(0),
-            Some(ContentFormat::Text)
-        );
-        assert_eq!(
-            ContentFormat::from_database_value(1),
-            Some(ContentFormat::Json)
-        );
-        assert_eq!(ContentFormat::from_database_value(2), None);
     }
 
     #[test]

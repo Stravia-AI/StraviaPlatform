@@ -961,10 +961,8 @@ impl ObservationStore {
                     .push(") AND e.tool_id=")
                     .push_bind(tool_id)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
-                let found: Option<(i64, Option<Vec<u8>>)> = builder
-                    .build_query_as()
-                    .fetch_optional(pool)
-                    .await?;
+                let found: Option<(i64, Option<Vec<u8>>)> =
+                    builder.build_query_as().fetch_optional(pool).await?;
                 if let Some((sequence, attrs)) = found {
                     return Ok(Some((sequence, decode_event_attrs(attrs.as_deref())?)));
                 }
@@ -996,10 +994,8 @@ impl ObservationStore {
                     .push(") AND e.tool_id=")
                     .push_bind(tool_id)
                     .push(" ORDER BY e.sequence DESC LIMIT 1");
-                let found: Option<(i64, Option<Vec<u8>>)> = builder
-                    .build_query_as()
-                    .fetch_optional(pool)
-                    .await?;
+                let found: Option<(i64, Option<Vec<u8>>)> =
+                    builder.build_query_as().fetch_optional(pool).await?;
                 if let Some((sequence, attrs)) = found {
                     return Ok(Some((sequence, decode_event_attrs(attrs.as_deref())?)));
                 }
@@ -1043,8 +1039,7 @@ impl ObservationStore {
                     .push(" AND tr.tool_id=")
                     .push_bind(tool_id)
                     .push(" ORDER BY tr.sequence DESC LIMIT 1");
-                let found: Option<(i64, i64)> =
-                    query.build_query_as().fetch_optional(pool).await?;
+                let found: Option<(i64, i64)> = query.build_query_as().fetch_optional(pool).await?;
                 if found.is_some() {
                     found
                 } else {
@@ -1070,8 +1065,7 @@ impl ObservationStore {
                     .push(" AND tr.tool_id=")
                     .push_bind(tool_id)
                     .push(" ORDER BY tr.sequence DESC LIMIT 1");
-                let found: Option<(i64, i64)> =
-                    query.build_query_as().fetch_optional(pool).await?;
+                let found: Option<(i64, i64)> = query.build_query_as().fetch_optional(pool).await?;
                 if found.is_some() {
                     found
                 } else {
@@ -1100,7 +1094,9 @@ impl ObservationStore {
                     self.read_content_body(&record.principal, content_id).await
                 }
             }
-            (Some((_, content_id)), None) => self.read_content_body(&record.principal, content_id).await,
+            (Some((_, content_id)), None) => {
+                self.read_content_body(&record.principal, content_id).await
+            }
             (None, Some((_, payload))) => Ok(content_body(payload.get("content"))),
             (None, None) => Ok(CredentialDiscoveryBody::Missing),
         }
@@ -1113,9 +1109,7 @@ impl ObservationStore {
     ) -> anyhow::Result<CredentialDiscoveryBody> {
         let contents = super::content_refs::read_scoped(self, principal, &[content_id]).await?;
         Ok(match contents.get(content_id) {
-            Some(body) => {
-                CredentialDiscoveryBody::Retained(super::content_refs::body_value(body)?)
-            }
+            Some(body) => CredentialDiscoveryBody::Retained(body.value()?),
             None => CredentialDiscoveryBody::Missing,
         })
     }
@@ -1359,8 +1353,7 @@ impl ObservationStore {
             page.reset_required = true;
             return Ok(page);
         }
-        let interaction_ids: Vec<String> =
-            read.rows.iter().map(|row| row.id.clone()).collect();
+        let interaction_ids: Vec<String> = read.rows.iter().map(|row| row.id.clone()).collect();
         let summaries = self.content_summaries(&interaction_ids).await?;
         let mut rows_by_root: std::collections::HashMap<String, Vec<InteractionRow>> =
             std::collections::HashMap::new();
@@ -2535,7 +2528,10 @@ impl ContentSummaries {
     }
 }
 
-fn refs_summary(refs: &[(i64, i64)], lengths: &std::collections::HashMap<i64, i64>) -> ContentSummary {
+fn refs_summary(
+    refs: &[(i64, i64)],
+    lengths: &std::collections::HashMap<i64, i64>,
+) -> ContentSummary {
     ContentSummary::new(
         refs.iter()
             .filter_map(|(_, content_id)| {
@@ -2550,10 +2546,7 @@ fn refs_summary(refs: &[(i64, i64)], lengths: &std::collections::HashMap<i64, i6
 
 impl ObservationStore {
     /// 输入取根 Run 最新 `user_input_recorded` 的引用，输出取最新可见块；只读引用与长度。
-    async fn content_summaries(
-        &self,
-        interactions: &[String],
-    ) -> anyhow::Result<ContentSummaries> {
+    async fn content_summaries(&self, interactions: &[String]) -> anyhow::Result<ContentSummaries> {
         let mut summaries = ContentSummaries::default();
         if interactions.is_empty() {
             return Ok(summaries);
@@ -2583,10 +2576,7 @@ impl ObservationStore {
                     }
                     separated.push_unseparated(") GROUP BY interaction_id");
                     for row in query.build().fetch_all(pool).await? {
-                        outputs.push((
-                            row.try_get("interaction_id")?,
-                            row.try_get("sequence")?,
-                        ));
+                        outputs.push((row.try_get("interaction_id")?, row.try_get("sequence")?));
                     }
                 }
                 Self::Postgres(pool, _) => {
@@ -2610,10 +2600,7 @@ impl ObservationStore {
                     }
                     separated.push_unseparated(") GROUP BY interaction_id");
                     for row in query.build().fetch_all(pool).await? {
-                        outputs.push((
-                            row.try_get("interaction_id")?,
-                            row.try_get("sequence")?,
-                        ));
+                        outputs.push((row.try_get("interaction_id")?, row.try_get("sequence")?));
                     }
                 }
             }
@@ -2659,8 +2646,9 @@ impl ObservationStore {
         for chunk in content_ids.chunks(400) {
             let rows: Vec<(i64, i64)> = match self {
                 Self::Sqlite(pool, _) => {
-                    let mut query =
-                        QueryBuilder::<sqlx::Sqlite>::new("SELECT id,raw_len FROM contents WHERE id IN (");
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT id,raw_len FROM contents WHERE id IN (",
+                    );
                     let mut separated = query.separated(",");
                     for id in chunk {
                         separated.push_bind(*id);
@@ -2736,7 +2724,9 @@ impl ObservationStore {
                 }
             };
             for (sequence, ordinal, content_id) in rows {
-                refs.entry(sequence).or_default().push((ordinal, content_id));
+                refs.entry(sequence)
+                    .or_default()
+                    .push((ordinal, content_id));
             }
         }
         Ok(refs)
@@ -2772,7 +2762,9 @@ impl ObservationStore {
             return Ok(String::new());
         };
         let content_ids: Vec<i64> = refs.iter().map(|(_, content_id)| *content_id).collect();
-        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
+        let contents = self
+            .read_interaction_bodies(interaction_id, &content_ids)
+            .await?;
         Ok(refs
             .iter()
             .filter_map(|(_, content_id)| contents.get(*content_id))
@@ -2798,8 +2790,12 @@ impl ObservationStore {
             .flatten()
             .map(|(_, content_id)| *content_id)
             .collect();
-        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
-        let turns = self.model_turn_start_sequences(interaction_id, through).await?;
+        let contents = self
+            .read_interaction_bodies(interaction_id, &content_ids)
+            .await?;
+        let turns = self
+            .model_turn_start_sequences(interaction_id, through)
+            .await?;
         let mut output = String::new();
         let mut current_turn: Option<i64> = None;
         for block in blocks {
@@ -2868,7 +2864,9 @@ impl ObservationStore {
                     run_id,
                     envelope: envelope
                         .map(|bytes| -> anyhow::Result<Value> {
-                            Ok(serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?)
+                            Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                &bytes,
+                            )?)?)
                         })
                         .transpose()?,
                 })
@@ -2898,7 +2896,8 @@ impl ObservationStore {
             .fetch_all(pool)
             .await?,
         };
-        let mut starts: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+        let mut starts: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
         for (run_id, sequence) in rows {
             if let Some(run_id) = run_id {
                 starts.entry(run_id).or_default().push(sequence);
@@ -2925,7 +2924,10 @@ impl ObservationStore {
                         separated.push_bind(*id);
                     }
                     separated.push_unseparated(")");
-                    let mut rows = query.build_query_as::<(i64, String)>().fetch_all(pool).await?;
+                    let mut rows = query
+                        .build_query_as::<(i64, String)>()
+                        .fetch_all(pool)
+                        .await?;
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
                         "SELECT tr.content_id,e.interaction_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id IS NOT NULL AND tr.content_id IN (",
                     );
@@ -2934,7 +2936,12 @@ impl ObservationStore {
                         separated.push_bind(*id);
                     }
                     separated.push_unseparated(")");
-                    rows.extend(query.build_query_as::<(i64, String)>().fetch_all(pool).await?);
+                    rows.extend(
+                        query
+                            .build_query_as::<(i64, String)>()
+                            .fetch_all(pool)
+                            .await?,
+                    );
                     rows
                 }
                 Self::Postgres(pool, _) => {
@@ -2946,7 +2953,10 @@ impl ObservationStore {
                         separated.push_bind(*id);
                     }
                     separated.push_unseparated(")");
-                    let mut rows = query.build_query_as::<(i64, String)>().fetch_all(pool).await?;
+                    let mut rows = query
+                        .build_query_as::<(i64, String)>()
+                        .fetch_all(pool)
+                        .await?;
                     let mut query = QueryBuilder::<sqlx::Postgres>::new(
                         "SELECT tr.content_id,e.interaction_id FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE e.interaction_id IS NOT NULL AND tr.content_id IN (",
                     );
@@ -2955,7 +2965,12 @@ impl ObservationStore {
                         separated.push_bind(*id);
                     }
                     separated.push_unseparated(")");
-                    rows.extend(query.build_query_as::<(i64, String)>().fetch_all(pool).await?);
+                    rows.extend(
+                        query
+                            .build_query_as::<(i64, String)>()
+                            .fetch_all(pool)
+                            .await?,
+                    );
                     rows
                 }
             };
@@ -2986,7 +3001,9 @@ impl ObservationStore {
             .flatten()
             .map(|(_, content_id)| *content_id)
             .collect();
-        let contents = self.read_interaction_bodies(interaction_id, &content_ids).await?;
+        let contents = self
+            .read_interaction_bodies(interaction_id, &content_ids)
+            .await?;
         let bodies: Vec<_> = refs
             .get(&block.sequence)
             .into_iter()
@@ -3041,7 +3058,7 @@ impl ObservationStore {
             };
             for (content_id, digest, format, raw_len, raw) in rows {
                 let raw = crate::storage_codec::decode(&raw)?.into_owned();
-                let format = stravia_runtime_contract::protocol::ir::content::ContentFormat::from_database_value(format)
+                let format = crate::content_store::format_from_code(format)
                     .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?;
                 let body = match format {
                     stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => {

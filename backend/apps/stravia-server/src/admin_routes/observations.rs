@@ -74,9 +74,7 @@ fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
     request_headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.split(',').any(|candidate| candidate.trim() == etag)
-        })
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
 }
 
 pub(super) async fn observation_contents(

@@ -688,7 +688,10 @@ async fn ordered_batch_usage_and_billing(
         })
         .count();
     // 迟到确认并入既有的结束事实，不再追加行；结束事实随之逐字段合并。
-    assert_eq!(revisions, 1, "late confirmation revises the finish fact in place");
+    assert_eq!(
+        revisions, 1,
+        "late confirmation revises the finish fact in place"
+    );
     let revised = split.runs[0]
         .events
         .iter()

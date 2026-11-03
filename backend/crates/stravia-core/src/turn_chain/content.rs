@@ -513,10 +513,7 @@ fn load_bodies(
     context: &mut Option<&mut TurnReadContext>,
 ) -> anyhow::Result<()> {
     for body in bodies {
-        let value = match body.format {
-            ContentFormat::Text => Value::String(body.text()?.to_owned()),
-            ContentFormat::Json => body.json()?,
-        };
+        let value = body.value()?;
         let admit = context
             .as_deref()
             .is_some_and(|context| context.admission_open());

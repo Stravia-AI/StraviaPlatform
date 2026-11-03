@@ -123,16 +123,14 @@ impl Fixture {
             ContentGc,
         ) = match &db {
             Db::Sqlite(pool) => (
-                Arc::new(SqlTurnChainStore::sqlite(pool.clone()).with_retention(retention.clone())),
+                Arc::new(SqlTurnChainStore::sqlite(pool.clone(), retention.clone())),
                 Arc::new(SqlHistoryMarkerStore::sqlite(pool.clone())),
                 Arc::new(SqlMappingStore::sqlite(pool.clone())),
                 Compaction::sqlite(pool.clone()),
                 ContentGc::Sqlite(pool.clone()),
             ),
             Db::Postgres(pool) => (
-                Arc::new(
-                    SqlTurnChainStore::postgres(pool.clone()).with_retention(retention.clone()),
-                ),
+                Arc::new(SqlTurnChainStore::postgres(pool.clone(), retention.clone())),
                 Arc::new(SqlHistoryMarkerStore::postgres(pool.clone())),
                 Arc::new(SqlMappingStore::postgres(pool.clone())),
                 Compaction::postgres(pool.clone()),
@@ -143,8 +141,8 @@ impl Fixture {
             Arc::clone(&turns),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            retention.clone(),
         )
-        .with_retention(retention.clone())
         .with_history_markers(Arc::clone(&markers))
         .with_redaction_mappings(Arc::clone(&mappings))
         .with_compaction(compaction.clone());
@@ -609,19 +607,18 @@ impl Fixture {
                     },
                 )
         };
-        let finish = |run: &crate::interaction_observation::RunObserver,
-                      node: &str,
-                      status: &str| {
-            run.finish(RunOutcome {
-                client_output_committed: true,
-                delivery: None,
-                delivery_completed_at: Some(now_ms()),
-                status: status.into(),
-                terminal_reason: None,
-                generation_node_id: Some(node.to_owned()),
-                generation_root_id: Some(node.to_owned()),
-            });
-        };
+        let finish =
+            |run: &crate::interaction_observation::RunObserver, node: &str, status: &str| {
+                run.finish(RunOutcome {
+                    client_output_committed: true,
+                    delivery: None,
+                    delivery_completed_at: Some(now_ms()),
+                    status: status.into(),
+                    terminal_reason: None,
+                    generation_node_id: Some(node.to_owned()),
+                    generation_root_id: Some(node.to_owned()),
+                });
+            };
 
         let tool_id = self.unique("observed-call");
         let source_node = self.commit(None, &Refs::default()).await;
@@ -1432,8 +1429,15 @@ async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
     let t_node = fx.tick().await;
     fx.observe(&shared, &visible, &tool_output).await;
     let t_observed = fx.tick().await;
-    assert!(fx.observed_interactions().await > 0, "interaction is readable");
-    assert_eq!(fx.text_body_rows(shared.len()).await, 1, "one shared body row");
+    assert!(
+        fx.observed_interactions().await > 0,
+        "interaction is readable"
+    );
+    assert_eq!(
+        fx.text_body_rows(shared.len()).await,
+        1,
+        "one shared body row"
+    );
     assert_eq!(fx.text_body_rows(visible.len()).await, 1);
     assert_eq!(fx.text_body_rows(tool_output.len()).await, 1);
 
@@ -1452,7 +1456,11 @@ async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
     fx.sweep_to_completion(t_observed + n).await;
     assert_eq!(fx.observed_interactions().await, 0);
     for body in [&shared, &visible, &tool_output] {
-        assert_eq!(fx.text_body_rows(body.len()).await, 0, "last referrer removed");
+        assert_eq!(
+            fx.text_body_rows(body.len()).await,
+            0,
+            "last referrer removed"
+        );
     }
 }
 both_backends!(
@@ -1762,7 +1770,8 @@ async fn a_failing_step_does_not_skip_the_remaining_steps(fx: Fixture) {
     let n = fx.window();
     let node = fx.commit(None, &Refs::default()).await;
     let t = fx.tick().await;
-    let statement = "ALTER TABLE interaction_observations RENAME TO interaction_observations_broken";
+    let statement =
+        "ALTER TABLE interaction_observations RENAME TO interaction_observations_broken";
     match &fx.db {
         Db::Sqlite(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
         Db::Postgres(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
@@ -1774,7 +1783,10 @@ async fn a_failing_step_does_not_skip_the_remaining_steps(fx: Fixture) {
         .sweep_history(t + n)
         .await
         .expect_err("the broken observation step is reported");
-    assert!(format!("{failure:#}").contains("observation"), "{failure:#}");
+    assert!(
+        format!("{failure:#}").contains("observation"),
+        "{failure:#}"
+    );
     assert!(
         !fx.turn_readable(&node).await,
         "the Turn step still ran after the Observation step failed"

@@ -468,13 +468,7 @@ mod tests {
                 Some("upstream_error"),
                 false,
             ),
-            (
-                "expired",
-                "failed",
-                "failed",
-                Some("upstream_error"),
-                true,
-            ),
+            ("expired", "failed", "failed", Some("upstream_error"), true),
             (
                 "upstream-error",
                 "failed",

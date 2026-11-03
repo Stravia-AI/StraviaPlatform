@@ -16,17 +16,14 @@ use std::collections::HashSet;
 use stravia_runtime_contract::turn_chain::{TurnNodeId, TurnNodeKind};
 
 use super::super::content::{self, StoredNode};
+use crate::history_retention::HistoryRetention;
 
-const DEFAULT_PRE_UPGRADE_DAYS: i64 = 7;
-const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
 const NODE_BATCH: i64 = 16;
 
-/// `log_retention_days` 是升级前生效的保留天数；缺失或难解析时沿用默认七天。
-fn pre_upgrade_days(value: Option<String>) -> i64 {
-    value
-        .and_then(|value| value.trim().parse::<i64>().ok())
-        .unwrap_or(DEFAULT_PRE_UPGRADE_DAYS)
-        .saturating_mul(DAY_MILLIS)
+/// `log_retention_days` 是升级前生效的保留期；解析规则与运行期完全一致，
+/// 返回毫秒窗口。
+fn pre_upgrade_window_millis(value: Option<String>) -> i64 {
+    HistoryRetention::from_setting(value.as_deref()).window_millis()
 }
 
 pub(crate) async fn retention_sqlite(connection: &mut SqliteConnection<'_>) -> anyhow::Result<()> {
@@ -34,7 +31,7 @@ pub(crate) async fn retention_sqlite(connection: &mut SqliteConnection<'_>) -> a
         sqlx::query_scalar("SELECT value FROM settings WHERE name = 'log_retention_days'")
             .fetch_optional(&mut *connection)
             .await?;
-    let window = pre_upgrade_days(days);
+    let window = pre_upgrade_window_millis(days);
     sqlx::query(
         "UPDATE history_markers SET \
              pending_until = CASE WHEN published_at IS NULL THEN expires_at ELSE NULL END, \
@@ -74,7 +71,7 @@ pub(crate) async fn retention_postgres(connection: &mut PgConnection<'_>) -> any
         sqlx::query_scalar("SELECT value FROM settings WHERE name = 'log_retention_days'")
             .fetch_optional(&mut *connection)
             .await?;
-    let window = pre_upgrade_days(days);
+    let window = pre_upgrade_window_millis(days);
     sqlx::query(
         "UPDATE history_markers SET \
              pending_until = CASE WHEN published_at IS NULL THEN expires_at ELSE NULL END, \
@@ -309,14 +306,15 @@ async fn insert_references_postgres(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history_retention::{DAY_MILLIS, DEFAULT_RETENTION_DAYS};
 
     #[test]
     fn pre_upgrade_window_uses_the_configured_days() {
-        assert_eq!(pre_upgrade_days(None), 7 * DAY_MILLIS);
-        assert_eq!(pre_upgrade_days(Some("3".into())), 3 * DAY_MILLIS);
+        assert_eq!(pre_upgrade_window_millis(None), 7 * DAY_MILLIS);
+        assert_eq!(pre_upgrade_window_millis(Some("3".into())), 3 * DAY_MILLIS);
         assert_eq!(
-            pre_upgrade_days(Some("invalid".into())),
-            DEFAULT_PRE_UPGRADE_DAYS * DAY_MILLIS
+            pre_upgrade_window_millis(Some("invalid".into())),
+            i64::from(DEFAULT_RETENTION_DAYS) * DAY_MILLIS
         );
     }
 

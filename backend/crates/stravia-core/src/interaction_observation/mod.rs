@@ -1816,7 +1816,9 @@ mod snapshot_tests {
     }
 
     /// 公共重放视图：事件正文已按内容引用还原，测试只经此观察持久结果。
-    async fn replayed(observation: &InteractionObservation) -> anyhow::Result<Vec<types::ObservationEvent>> {
+    async fn replayed(
+        observation: &InteractionObservation,
+    ) -> anyhow::Result<Vec<types::ObservationEvent>> {
         observation.flush().await?;
         observation.inner.store.replay(0).await
     }
@@ -1828,7 +1830,9 @@ mod snapshot_tests {
     ) -> Vec<&'a types::ObservationEvent> {
         events
             .iter()
-            .filter(|event| event.kind == kind && run_id.is_none_or(|id| event.run_id.as_deref() == Some(id)))
+            .filter(|event| {
+                event.kind == kind && run_id.is_none_or(|id| event.run_id.as_deref() == Some(id))
+            })
             .collect()
     }
 
@@ -1969,9 +1973,7 @@ mod snapshot_tests {
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), false).await;
         // 活动时间取 0..=1024，清理时间固定在保留窗口之后 10 秒，窗口两侧都由数据决定。
-        let sweep_at = i64::from(observation.inner.retention.days())
-            * 86_400_000
-            + 10_000;
+        let sweep_at = i64::from(observation.inner.retention.days()) * 86_400_000 + 10_000;
         sqlx::query(
             "WITH RECURSIVE seeds(n) AS (
                  VALUES(0) UNION ALL SELECT n+1 FROM seeds WHERE n<1024
@@ -2436,10 +2438,11 @@ mod snapshot_tests {
         let run = test_run(&observation, "during-retention", facts(Vec::new()));
         observation.flush().await?;
         purge.await?;
-        let retained: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM interaction_observations WHERE last_active_at<=1")
-                .fetch_one(&pool)
-                .await?;
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM interaction_observations WHERE last_active_at<=1",
+        )
+        .fetch_one(&pool)
+        .await?;
         assert_eq!(retained, 0);
         let status: String = sqlx::query_scalar(
             "SELECT status FROM inference_run_observations WHERE id='during-retention'",
@@ -2733,7 +2736,8 @@ mod snapshot_tests {
         assert_eq!(started, (turn_at, attempt_at));
 
         let events = replayed(&observation).await?;
-        let finish_payload = &only_event(&events, Some("backlog-lifecycle"), "run_finished").payload;
+        let finish_payload =
+            &only_event(&events, Some("backlog-lifecycle"), "run_finished").payload;
         assert_eq!(
             finish_payload["delivery"]["status"].as_str(),
             Some("delivered")
@@ -3307,10 +3311,17 @@ mod snapshot_tests {
         let events = replayed(&observation).await?;
         let finished = events_of(&events, Some("missing-finish"), "model_turn_finished")
             .into_iter()
-            .chain(events_of(&events, Some("missing-finish"), "target_attempt_finished"))
+            .chain(events_of(
+                &events,
+                Some("missing-finish"),
+                "target_attempt_finished",
+            ))
             .next()
             .expect("attempt finish fact");
-        let usage = finished.payload.get("attempt").map_or(&finished.payload, |attempt| attempt);
+        let usage = finished
+            .payload
+            .get("attempt")
+            .map_or(&finished.payload, |attempt| attempt);
         assert_eq!(usage["usage"]["input_tokens"], 7);
         observation.shutdown().await;
         pool.close().await;
@@ -3368,7 +3379,8 @@ mod snapshot_tests {
     /// 交付结果、请求失败；其中客户端输出提交与交付结果只更新内存终态、不产生事件行）不能拆散合并布局：每个 Turn 最后一个 attempt 的结束都并入
     /// `model_turn_finished`，只有被故障转移取代的 attempt 单独成行。
     #[tokio::test]
-    async fn normal_flows_merge_the_last_attempt_finish_into_the_turn_finish() -> anyhow::Result<()> {
+    async fn normal_flows_merge_the_last_attempt_finish_into_the_turn_finish() -> anyhow::Result<()>
+    {
         let delta = RunEvent::ClientVisibleContentDelta {
             text: "hello".into(),
             item_ordinal: 0,
@@ -3407,7 +3419,10 @@ mod snapshot_tests {
                     delta.clone(),
                     RunEvent::ClientOutputCommitted,
                     flow_turn_finished("t1", "completed"),
-                    RunEvent::DeliveryFinished { status: "delivered".into(), reason: None },
+                    RunEvent::DeliveryFinished {
+                        status: "delivered".into(),
+                        reason: None,
+                    },
                 ],
                 vec![("t1", "a1", "completed")],
                 0,
@@ -3420,7 +3435,10 @@ mod snapshot_tests {
                     flow_attempt_finished("t1", "a1", "completed"),
                     RunEvent::ClientOutputCommitted,
                     flow_turn_finished("t1", "completed"),
-                    RunEvent::DeliveryFinished { status: "delivered".into(), reason: None },
+                    RunEvent::DeliveryFinished {
+                        status: "delivered".into(),
+                        reason: None,
+                    },
                 ],
                 vec![("t1", "a1", "completed")],
                 0,
@@ -3523,17 +3541,28 @@ mod snapshot_tests {
                 .map(|event| {
                     let attempt = &event.payload["attempt"];
                     (
-                        event.payload["model_turn_id"].as_str().unwrap_or_default().to_owned(),
-                        attempt["attempt_id"].as_str().unwrap_or_default().to_owned(),
+                        event.payload["model_turn_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        attempt["attempt_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
                         attempt["status"].as_str().unwrap_or_default().to_owned(),
                     )
                 })
                 .collect();
             let expected: Vec<(String, String, String)> = merged
                 .iter()
-                .map(|(turn, attempt, status)| ((*turn).into(), (*attempt).into(), (*status).into()))
+                .map(|(turn, attempt, status)| {
+                    ((*turn).into(), (*attempt).into(), (*status).into())
+                })
                 .collect();
-            assert_eq!(actual, expected, "{name}: the last attempt finish rides on the turn finish row");
+            assert_eq!(
+                actual, expected,
+                "{name}: the last attempt finish rides on the turn finish row"
+            );
             assert_eq!(
                 events_of(&events, Some(&run_id), "target_attempt_finished").len(),
                 separate,
@@ -3548,7 +3577,8 @@ mod snapshot_tests {
     /// Turn 开始与 attempt 开始之间到达的正文块仍走块与内容引用路径：
     /// 不能作为开始事务里的普通前置行把全文写进 attrs。
     #[tokio::test]
-    async fn visible_content_between_turn_start_and_attempt_keeps_the_block_layout() -> anyhow::Result<()> {
+    async fn visible_content_between_turn_start_and_attempt_keeps_the_block_layout()
+    -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), false).await;
@@ -3578,7 +3608,10 @@ mod snapshot_tests {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(inline, 0, "the body lives in content refs, not in event attrs");
+        assert_eq!(
+            inline, 0,
+            "the body lives in content refs, not in event attrs"
+        );
         let events = replayed(&observation).await?;
         let visible = events_of(&events, Some("leading-block"), "client_visible_content");
         assert_eq!(visible.len(), 1);
@@ -4022,7 +4055,10 @@ mod snapshot_tests {
         observation.clear_debug().await?;
         observation.flush().await?;
         observation
-            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .sweep_history(
+                chrono::Utc::now().timestamp_millis(),
+                retention_window(&observation),
+            )
             .await?;
         assert!(!old_directory.exists());
         assert!(
@@ -4036,7 +4072,10 @@ mod snapshot_tests {
         drop(active);
         observation.flush().await?;
         observation
-            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .sweep_history(
+                chrono::Utc::now().timestamp_millis(),
+                retention_window(&observation),
+            )
             .await?;
         assert!(!old_directory.exists());
         assert!(
@@ -4100,7 +4139,10 @@ mod snapshot_tests {
         drop(ingress);
         observation.flush().await?;
         observation
-            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .sweep_history(
+                chrono::Utc::now().timestamp_millis(),
+                retention_window(&observation),
+            )
             .await?;
         assert!(
             trace
@@ -4222,7 +4264,10 @@ mod snapshot_tests {
         let (_, partial) = observation.inner.store.debug_manifest_counts().await?;
         assert!(partial >= 1);
         observation
-            .sweep_history(chrono::Utc::now().timestamp_millis(), retention_window(&observation))
+            .sweep_history(
+                chrono::Utc::now().timestamp_millis(),
+                retention_window(&observation),
+            )
             .await?;
         assert!(observation.debug_state().partial_trace_count >= 1);
         // Clear and retention erase the retained state without durable files.
@@ -5228,9 +5273,7 @@ mod snapshot_tests {
                         .bind("completed").bind(false).bind(now - 100).bind(now - 50)
                         .execute(pool).await?;
                 }
-                for (sequence, interaction, run_id, kind, occurred_at, payload) in
-                    events
-                {
+                for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (?,?,?,?,?,?)")
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
                         .bind(kind).bind(payload).execute(pool).await?;
@@ -5249,9 +5292,7 @@ mod snapshot_tests {
                         .bind("completed").bind(false).bind(now - 100).bind(now - 50)
                         .execute(pool).await?;
                 }
-                for (sequence, interaction, run_id, kind, occurred_at, payload) in
-                    events
-                {
+                for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES ($1,$2,$3,$4,$5,$6)")
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
                         .bind(kind).bind(payload).execute(pool).await?;
@@ -5283,13 +5324,15 @@ mod snapshot_tests {
             store::ObservationStore::Sqlite(pool, _) => {
                 for seed in seeds {
                     let mut tx = pool.begin().await?;
-                    let principal: String =
-                        sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=?")
-                            .bind(seed.interaction)
-                            .fetch_one(&mut *tx)
-                            .await?;
+                    let principal: String = sqlx::query_scalar(
+                        "SELECT principal FROM interaction_observations WHERE id=?",
+                    )
+                    .bind(seed.interaction)
+                    .fetch_one(&mut *tx)
+                    .await?;
                     let mut contents = [content_refs::text_content(seed.text)];
-                    let ids = content_refs::intern_sqlite(&mut tx, &principal, &mut contents).await?;
+                    let ids =
+                        content_refs::intern_sqlite(&mut tx, &principal, &mut contents).await?;
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,tool_id) VALUES (?,?,?,?,?,?)")
                         .bind(seed.sequence).bind(seed.occurred_at).bind(seed.interaction)
                         .bind(seed.run_id).bind(seed.kind).bind(seed.tool_id)
@@ -5309,13 +5352,15 @@ mod snapshot_tests {
             store::ObservationStore::Postgres(pool, _) => {
                 for seed in seeds {
                     let mut tx = pool.begin().await?;
-                    let principal: String =
-                        sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=$1")
-                            .bind(seed.interaction)
-                            .fetch_one(&mut *tx)
-                            .await?;
+                    let principal: String = sqlx::query_scalar(
+                        "SELECT principal FROM interaction_observations WHERE id=$1",
+                    )
+                    .bind(seed.interaction)
+                    .fetch_one(&mut *tx)
+                    .await?;
                     let mut contents = [content_refs::text_content(seed.text)];
-                    let ids = content_refs::intern_postgres(&mut tx, &principal, &mut contents).await?;
+                    let ids =
+                        content_refs::intern_postgres(&mut tx, &principal, &mut contents).await?;
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,tool_id) VALUES ($1,$2,$3,$4,$5,$6)")
                         .bind(seed.sequence).bind(seed.occurred_at).bind(seed.interaction)
                         .bind(seed.run_id).bind(seed.kind).bind(seed.tool_id)
@@ -5609,9 +5654,7 @@ mod snapshot_tests {
         ];
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                for (sequence, interaction, run_id, kind, occurred_at, payload) in
-                    events
-                {
+                for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (?,?,?,?,?,?)")
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
                         .bind(kind).bind(payload).execute(pool).await?;
@@ -5620,9 +5663,7 @@ mod snapshot_tests {
                     .execute(pool).await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
-                for (sequence, interaction, run_id, kind, occurred_at, payload) in
-                    events
-                {
+                for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES ($1,$2,$3,$4,$5,$6)")
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
                         .bind(kind).bind(payload).execute(pool).await?;
@@ -6904,13 +6945,7 @@ mod snapshot_tests {
             Arc::new(manifest_index::DebugTraceIndex::empty(directory.path())),
         );
         let now = chrono::Utc::now().timestamp_millis();
-        seed_reuse_interaction(
-            &store,
-            "page-boundary",
-            "api-key:page-owner",
-            now,
-        )
-        .await?;
+        seed_reuse_interaction(&store, "page-boundary", "api-key:page-owner", now).await?;
         let locators = (0..6)
             .map(|index| {
                 let tool_id = format!("t{index}");
@@ -6968,8 +7003,7 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn credential_reuse_total_excludes_other_principal() -> anyhow::Result<()>
-    {
+    async fn credential_reuse_total_excludes_other_principal() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let store = store::ObservationStore::Sqlite(
@@ -7623,9 +7657,9 @@ mod snapshot_tests {
             .expect("persisted events");
         let events: Vec<_> = page.runs.iter().flat_map(|run| &run.events).collect();
         assert!(
-            events.iter().any(
-                |event| event.kind == "user_input_recorded" && event.payload["text"] == text
-            )
+            events
+                .iter()
+                .any(|event| event.kind == "user_input_recorded" && event.payload["text"] == text)
         );
         assert!(
             events

@@ -156,28 +156,23 @@ fn order_ancestors(
 }
 
 impl SqlTurnChainStore {
-    pub fn sqlite(pool: SqlitePool) -> Self {
-        Self {
-            backend: Backend::Sqlite(pool),
-            retention: crate::history_retention::HistoryRetention::new(
-                crate::history_retention::DEFAULT_RETENTION_DAYS,
-            ),
-        }
-    }
-    pub fn postgres(pool: PgPool) -> Self {
-        Self {
-            backend: Backend::Postgres(pool),
-            retention: crate::history_retention::HistoryRetention::new(
-                crate::history_retention::DEFAULT_RETENTION_DAYS,
-            ),
-        }
-    }
-    pub(crate) fn with_retention(
-        mut self,
+    pub(crate) fn sqlite(
+        pool: SqlitePool,
         retention: crate::history_retention::HistoryRetention,
     ) -> Self {
-        self.retention = retention;
-        self
+        Self {
+            backend: Backend::Sqlite(pool),
+            retention,
+        }
+    }
+    pub(crate) fn postgres(
+        pool: PgPool,
+        retention: crate::history_retention::HistoryRetention,
+    ) -> Self {
+        Self {
+            backend: Backend::Postgres(pool),
+            retention,
+        }
     }
 
     /// 共享正文回收句柄，供 `HistoryMaintenance` 在所有引用方回收之后使用。

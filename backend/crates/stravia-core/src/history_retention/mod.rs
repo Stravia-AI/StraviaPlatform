@@ -54,11 +54,25 @@ impl HistoryRetention {
         }
     }
 
-    /// 启动时读取存储设置；缺失、无法解析或低于最小值的值按最小值处理。
+    /// 测试用的默认保留期：与生产默认值相同，但生产构造必须显式传入句柄。
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::new(DEFAULT_RETENTION_DAYS)
+    }
+
+    /// 启动时读取存储设置：缺失按默认值；无法解析时告警并回退默认值；
+    /// 低于最小值的值按最小值处理。
     pub(crate) fn from_setting(value: Option<&str>) -> Self {
-        let days = value
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .unwrap_or(DEFAULT_RETENTION_DAYS);
+        let days = match value {
+            None => DEFAULT_RETENTION_DAYS,
+            Some(raw) => raw.trim().parse::<u32>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = raw,
+                    "history retention setting is not a day count; using the default"
+                );
+                DEFAULT_RETENTION_DAYS
+            }),
+        };
         Self::new(days)
     }
 
