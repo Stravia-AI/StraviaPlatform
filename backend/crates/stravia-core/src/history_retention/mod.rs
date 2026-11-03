@@ -112,24 +112,4 @@ impl HistoryMaintenance {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retention_days_are_clamped_to_the_documented_minimum() {
-        let retention = HistoryRetention::new(0);
-        assert_eq!(retention.days(), MIN_RETENTION_DAYS);
-        assert_eq!(retention.window_millis(), DAY_MILLIS);
-        assert_eq!(retention.set_days(0), MIN_RETENTION_DAYS);
-        assert_eq!(
-            HistoryRetention::from_setting(None).days(),
-            DEFAULT_RETENTION_DAYS
-        );
-        assert_eq!(
-            HistoryRetention::from_setting(Some("not-a-number")).days(),
-            DEFAULT_RETENTION_DAYS
-        );
-        assert_eq!(HistoryRetention::from_setting(Some("3")).days(), 3);
-        assert_eq!(retention.deadline(10), 10 + DAY_MILLIS);
-    }
-}
+mod tests;
