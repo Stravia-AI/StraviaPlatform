@@ -91,6 +91,20 @@ COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
 COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens
 FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
 
+/// 管理读取边界把 attempt 用量里的总输入投影为净输入（总输入 − cache-read，cache-read 未知
+/// 则为 null），与摘要由 attempt 行列聚合的口径一致。
+fn project_management_usage(usage: Option<&mut Value>) {
+    let Some(usage) = usage.and_then(Value::as_object_mut) else {
+        return;
+    };
+    let input = usage.get("input_tokens").and_then(Value::as_i64);
+    let cache_read = usage.get("cache_read_tokens").and_then(Value::as_i64);
+    usage.insert(
+        "input_tokens".into(),
+        management_input_tokens(input, cache_read).into(),
+    );
+}
+
 struct QueryWindow {
     anchor: i64,
     index: u32,
@@ -1635,20 +1649,21 @@ impl ObservationStore {
         for mut event in events {
             if let Some(run_id) = &event.run_id {
                 // 落盘和 Bundle 保持原始 payload；只在管理 RunDetail 读取边界投影一次。
-                if event.kind == "target_attempt_finished"
-                    && let Some(usage) = event
-                        .payload
-                        .get_mut("usage")
-                        .and_then(|value| value.as_object_mut())
-                {
-                    let input = usage.get("input_tokens").and_then(|value| value.as_i64());
-                    let cache_read = usage
-                        .get("cache_read_tokens")
-                        .and_then(|value| value.as_i64());
-                    usage.insert(
-                        "input_tokens".into(),
-                        management_input_tokens(input, cache_read).into(),
-                    );
+                // 并入 Turn 结束行的最后一个 attempt 带两份同值用量：顶层 `usage` 与 `attempt.usage`。
+                match event.kind.as_str() {
+                    "target_attempt_finished" => {
+                        project_management_usage(event.payload.get_mut("usage"));
+                    }
+                    "model_turn_finished" => {
+                        project_management_usage(event.payload.get_mut("usage"));
+                        project_management_usage(
+                            event
+                                .payload
+                                .get_mut("attempt")
+                                .and_then(|attempt| attempt.get_mut("usage")),
+                        );
+                    }
+                    _ => {}
                 }
                 by_run.entry(run_id.clone()).or_default().push(event);
             }
