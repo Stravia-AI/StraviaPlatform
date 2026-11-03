@@ -73,7 +73,7 @@ impl<'a> ModelProfile<'a> {
     }
 
     /// 只接受 `adaptive`，拒绝 `enabled` 与非默认采样参数的型号：Opus ≥ 4.7、
-    /// Sonnet ≥ 5、Fable/Mythos。对应 oh-my-pi `anthropicAdaptiveGenAtLeast("4.7")`。
+    /// Sonnet ≥ 5、Haiku ≥ 5.5、Fable/Mythos。
     pub(crate) fn adaptive_only(&self) -> bool {
         if let (Some(adaptive), Some(enabled)) = (self.caps.adaptive, self.caps.enabled) {
             return adaptive && !enabled;
@@ -81,17 +81,30 @@ impl<'a> ModelProfile<'a> {
         match self.known {
             Some((Family::Opus, revision)) => revision >= [4, 7, 0],
             Some((Family::Sonnet, revision)) => revision >= [5, 0, 0],
+            Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
             Some((Family::Fable | Family::Mythos, _)) => true,
-            Some((Family::Haiku, _)) | None => false,
+            None => false,
         }
     }
 
     fn supports_adaptive(&self) -> bool {
         self.caps.adaptive.unwrap_or(match self.known {
             Some((Family::Opus | Family::Sonnet, revision)) => revision >= [4, 6, 0],
+            Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
             Some((Family::Fable | Family::Mythos, _)) => true,
-            Some((Family::Haiku, _)) | None => false,
+            None => false,
         })
+    }
+
+    /// “缺省即开启”不等于“不能关闭”：Haiku 5.5 仍接受 high 以下的 disabled。
+    fn adaptive_by_default(&self) -> bool {
+        self.supports_adaptive()
+            && match self.known {
+                Some((Family::Opus | Family::Sonnet, revision)) => revision >= [5, 0, 0],
+                Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
+                Some((Family::Fable | Family::Mythos, _)) => true,
+                None => false,
+            }
     }
 
     /// 思考常开：`thinking: disabled` 在任何 effort 下都是 400。
@@ -108,12 +121,12 @@ impl<'a> ModelProfile<'a> {
         matches!(self.known, Some((Family::Sonnet, revision)) if revision >= [5, 5, 0])
     }
 
-    /// Opus 5 仅在 effort ≤ high 时接受 `disabled`。
+    /// Opus 5、Haiku 5.5 仅在 effort ≤ high 时接受 `disabled`。
     fn disabled_requires_effort_cap(&self) -> bool {
         matches!(
             self.known,
             Some((Family::Opus, revision)) if ([5, 0, 0]..[5, 5, 0]).contains(&revision)
-        )
+        ) || matches!(self.known, Some((Family::Haiku, revision)) if revision >= [5, 5, 0])
     }
 
     /// 强制 `tool_choice`（`any`/`tool`）在这些型号上无论思考设置都是 400。
@@ -136,7 +149,8 @@ impl<'a> ModelProfile<'a> {
             &[]
         } else {
             match self.known {
-                Some((Family::Haiku, _)) | None => &[],
+                None => &[],
+                Some((Family::Haiku, revision)) if revision < [5, 5, 0] => &[],
                 Some((Family::Sonnet, revision)) if revision < [4, 6, 0] => &[],
                 Some((Family::Opus, revision)) if revision < [4, 5, 0] => &[],
                 Some((Family::Opus, revision)) if revision < [4, 6, 0] => &EFFORTS[..3],
@@ -351,7 +365,7 @@ pub(crate) fn summary_display(
     }
 }
 
-/// Preserve explicit summary-only intent when reasoning is implicitly always on.
+/// Preserve explicit summary-only intent when reasoning is on by default.
 pub(crate) fn preserve_implicit_summary_intent(
     body: &mut Value,
     caps: &ModelCapabilities,
@@ -362,7 +376,8 @@ pub(crate) fn preserve_implicit_summary_intent(
         return;
     };
     if !object.contains_key("thinking")
-        && ModelProfile::of_request(object, caps).is_some_and(|profile| profile.always_on())
+        && ModelProfile::of_request(object, caps)
+            .is_some_and(|profile| profile.adaptive_by_default())
         && caps.thinking != Some(false)
     {
         object.insert(
@@ -470,7 +485,7 @@ pub(crate) fn normalize(
     }
 
     if !on {
-        if profile.always_on() {
+        if profile.adaptive_by_default() && kind.is_none() {
             let thinking = json!({
                 "type": "adaptive",
                 "display": display.as_deref().unwrap_or("summarized")
@@ -628,6 +643,49 @@ mod tests {
 
     fn adaptive(effort: &str) -> Value {
         json!({"thinking": {"type": "adaptive"}, "output_config": {"effort": effort}})
+    }
+
+    #[test]
+    fn haiku_five_five_preserves_adaptive_effort_and_limits_disabled_effort() {
+        for effort in EFFORTS {
+            let body = run_with_limit(
+                "claude-haiku-5-5",
+                128_000,
+                adaptive(effort),
+                &ModelCapabilities::default(),
+            );
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert!(body["thinking"].get("budget_tokens").is_none());
+            assert_eq!(body["output_config"]["effort"], effort);
+            assert_eq!(body["max_tokens"], 128_000);
+            let off = run(
+                "claude-haiku-5-5",
+                json!({
+                    "thinking":{"type":"disabled"}, "output_config":{"effort":effort}
+                }),
+            );
+            assert_eq!(off["thinking"]["type"], "disabled");
+            assert_eq!(off["output_config"]["effort"], cap_at_high(effort));
+        }
+        let old = run("claude-haiku-4-5", adaptive("medium"));
+        assert_eq!(old["thinking"]["type"], "enabled");
+        assert!(old.get("output_config").is_none());
+        let mut implicit = json!({"model":"claude-haiku-5-5"});
+        preserve_implicit_summary_intent(
+            &mut implicit,
+            &ModelCapabilities::default(),
+            Some("omitted"),
+        );
+        normalize(
+            implicit.as_object_mut().unwrap(),
+            &ModelCapabilities::default(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            implicit["thinking"],
+            json!({"type":"adaptive","display":"omitted"})
+        );
     }
 
     #[test]

@@ -1,14 +1,15 @@
 //! Claude 订阅（Claude Code OAuth）专用供应商插件。
 //!
-//! 使用 Claude Pro/Max 账号的 OAuth 令牌调用 Anthropic Messages API。上游只
-//! 放行形态与 Claude Code CLI 一致的请求，因此推理请求会被改写为 CLI 线上
-//! 形态（见 [`request`]）；该形态以 oh-my-pi v18.4.2 的实现与抓包为基准。
+//! 使用 Claude Pro/Max 账号的 OAuth 令牌调用 Anthropic Messages API。请求以
+//! 官方 2.1.317 的真实多轮流量为基准，并保留自定义工具的 `_` 名称隔离
+//! （见 [`request`]）；客户端仍使用原始工具名。
 
 mod allowance;
 mod auth;
 mod cache;
 mod capabilities;
 mod request;
+mod session;
 mod thinking;
 mod xxhash;
 mod messages {
@@ -34,6 +35,7 @@ use stravia_vendor_sdk::{
 };
 
 use request::{AccountIdentity, DEFAULT_CLIENT_VERSION};
+use session::{SessionStore, ThreadMode};
 
 const VENDOR_ID: &str = "claude-code";
 const CATALOG_ID: &str = "anthropic";
@@ -263,65 +265,213 @@ fn infer(
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
     thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
-    let shape = if operation == Operation::Compact {
+    let compact = operation == Operation::Compact;
+    if compact {
         stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
             &mut encoded.body,
             compaction_control,
         )
         .map_err(|error| invalid(error.to_string()))?;
-        request::shape_compaction
-    } else {
-        request::shape
-    };
-    let shaped = shape(
-        encoded.body,
-        client_version,
-        &identity,
-        &caps,
-        auto_output_limit,
-        || fallback_session_id(provider),
-    )
-    .map_err(invalid)?;
-    let headers = request::inference_headers(
-        access_token(provider)?,
-        client_version,
-        &shaped.session_id,
-        shaped.betas,
-    );
-    host.emit_started()?;
-    let response = host.http_start_with_compression(
-        HttpRequest {
-            method: "POST".into(),
-            url: format!(
-                "{}?beta=true",
-                common::endpoint_url(&provider.base_url, &encoded.path)?
-            ),
-            headers,
-            body: shaped.body,
-        },
-        stravia_vendor_sdk::HttpCompression {
-            request: None,
-            response: vec![
-                stravia_vendor_sdk::HttpContentCoding::Gzip,
-                stravia_vendor_sdk::HttpContentCoding::Deflate,
-                stravia_vendor_sdk::HttpContentCoding::Br,
-                stravia_vendor_sdk::HttpContentCoding::Zstd,
-            ],
-        },
-    )?;
-    if operation == Operation::Compact {
-        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
-            .map(OperationOutput::Compact);
     }
-    common::decode_ai_response_renaming_tools(
-        host,
-        &protocol,
-        response,
-        common::classify_anthropic_error,
-        request::decode_tool_name,
-    )
-    .map(Box::new)
-    .map(OperationOutput::Infer)
+    let body =
+        request::prepare(encoded.body, &caps, auto_output_limit, compact).map_err(invalid)?;
+    let session_id = fallback_session_id(provider);
+    let scope = thread_scope(provider, &session_id);
+    let state = if compact {
+        None
+    } else {
+        host.read_private_state()?
+    };
+    let store = SessionStore::from_bytes(state.as_deref()).map_err(invalid)?;
+    let mut plan = store
+        .plan(&scope, session_id, &body, now_ms()?)
+        .map_err(invalid)?;
+    if compact {
+        plan.context.mode = ThreadMode::Disabled;
+    }
+    let url = format!(
+        "{}?beta=true",
+        common::endpoint_url(&provider.base_url, &encoded.path)?
+    );
+    for attempt in 0..2 {
+        let shaped = request::encode(&body, client_version, &identity, &plan.context, compact)
+            .map_err(invalid)?;
+        let headers = request::inference_headers(
+            access_token(provider)?,
+            client_version,
+            &plan.context,
+            shaped.betas,
+        );
+        if attempt == 0 {
+            host.emit_started()?;
+        }
+        let response = host.http_start_with_compression(
+            HttpRequest {
+                method: "POST".into(),
+                url: url.clone(),
+                headers,
+                body: shaped.body,
+            },
+            stravia_vendor_sdk::HttpCompression {
+                request: None,
+                response: vec![
+                    stravia_vendor_sdk::HttpContentCoding::Gzip,
+                    stravia_vendor_sdk::HttpContentCoding::Deflate,
+                    stravia_vendor_sdk::HttpContentCoding::Br,
+                    stravia_vendor_sdk::HttpContentCoding::Zstd,
+                ],
+            },
+        )?;
+        if compact {
+            return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
+                .map(OperationOutput::Compact);
+        }
+        let status = response.status()?;
+        let response_headers = response.headers()?;
+        if !(200..300).contains(&status) {
+            let error_body = read_http_body(&response, 256 * 1024)?;
+            let error_value = serde_json::from_slice::<Value>(&error_body).ok();
+            if attempt == 0
+                && let Some(mode) = error_value
+                    .as_ref()
+                    .and_then(|value| thread_recovery(status, value, plan.context.mode))
+            {
+                // 这些拒绝发生在模型执行前。只做协议规定的一次全量重放；
+                // 网络/配额/认证错误及已经发出的流式输出不进入此路径。
+                plan.context.mode = mode;
+                plan.context.message_offset = 0;
+                plan.context.previous_message_id = None;
+                continue;
+            }
+            let mut error = error_value
+                .as_ref()
+                .and_then(|value| common::classify_anthropic_error(value, false))
+                .unwrap_or_else(|| common::upstream_error(status, &response_headers, &error_body));
+            error.upstream_status.get_or_insert(status);
+            return Err(error);
+        }
+        let complete = common::decode_ai_response_renaming_tools(
+            host,
+            &protocol,
+            response,
+            common::classify_anthropic_error,
+            request::strip_tool_prefix,
+        )?;
+        if provider
+            .operation_metadata
+            .get("transport_affinity")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            // 只投影本轮输出，不复制完整历史；和下轮请求复用同一个 Anthropic
+            // 编码器，避免签名、工具调用或内容块的另一套哈希表示。
+            let save = (|| {
+                let reusable = complete.error.is_none()
+                    && matches!(
+                        complete.stop_reason.as_deref(),
+                        Some("stop" | "tool_calls" | "pause_turn")
+                    );
+                let mut response_history = reusable
+                    .then(|| {
+                        common::encode_inference_request(
+                            &protocol,
+                            AiRequest::new(&complete.model, complete.items.clone()),
+                        )
+                    })
+                    .transpose()?;
+                let response_messages = match &mut response_history {
+                    Some(history) => {
+                        let messages = history
+                            .body
+                            .get_mut("messages")
+                            .and_then(Value::as_array_mut)
+                            .ok_or_else(|| {
+                                invalid("Claude Code response history is not an array")
+                            })?;
+                        request::prefix_message_tool_names(messages);
+                        messages.as_slice()
+                    }
+                    None => &[],
+                };
+                // 网络调用期间其它会话可能更新连接私有状态；提交前重新读取，
+                // 保留它们以及 OAuth 流程写入的非线程字段。
+                let latest = host.read_private_state()?;
+                let mut latest = SessionStore::from_bytes(latest.as_deref()).map_err(invalid)?;
+                let request_id = response_headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("request-id"))
+                    .map(|(_, value)| value.as_str());
+                latest
+                    .commit(
+                        plan,
+                        response_messages,
+                        &complete.id,
+                        request_id,
+                        now_ms()?,
+                        reusable,
+                    )
+                    .map_err(invalid)?;
+                host.write_private_state(&latest.to_bytes().map_err(invalid)?)
+            })();
+            if let Err(error) = save {
+                // 已完成的模型响应不因可丢弃的续接优化失效而变成生成失败。
+                host.log(
+                    stravia_vendor_sdk::LogLevel::Warn,
+                    &format!("Claude Code thread state was not saved: {error}"),
+                );
+            }
+        }
+        return Ok(OperationOutput::Infer(Box::new(complete)));
+    }
+    unreachable!("both attempts return or the first attempt explicitly replays")
+}
+
+fn thread_scope(provider: &ProviderSnapshot, session_id: &str) -> String {
+    let mut hash = Sha256::new();
+    for part in [
+        "interactive-cli",
+        session_id,
+        credential(provider, auth::ACCOUNT_UUID).unwrap_or_default(),
+        provider.base_url.as_str(),
+        client_version(provider),
+    ] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    stravia_runtime_contract::protocol::ir::canonical::hash_hex(&hash.finalize().into())
+}
+
+fn now_ms() -> Result<i64, PluginError> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| common::plugin_error(ErrorKind::Trapped, error.to_string()))?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|error| common::plugin_error(ErrorKind::Trapped, error.to_string()))
+}
+
+fn thread_recovery(status: u16, error: &Value, mode: ThreadMode) -> Option<ThreadMode> {
+    if mode == ThreadMode::Disabled || !matches!(status, 400 | 404) {
+        return None;
+    }
+    match error
+        .pointer("/error/details/error_code")
+        .and_then(Value::as_str)
+    {
+        Some(
+            "thread_not_found"
+            | "thread_already_continued"
+            | "thread_continue_in_flight"
+            | "thread_fingerprint_mismatch",
+        ) if mode == ThreadMode::Continue => Some(ThreadMode::Create),
+        Some("thread_unsupported_request") => Some(ThreadMode::Disabled),
+        _ => {
+            let message = error.pointer("/error/message").and_then(Value::as_str)?;
+            (status == 400
+                && message.contains("message-threads-2026-08-12")
+                && (message.contains("Unsupported") || message.contains("invalid beta")))
+            .then_some(ThreadMode::Disabled)
+        }
+    }
 }
 
 /// 仅从宿主 principal/target scoped 传输亲和键派生稳定的 UUID 形态会话 ID，
@@ -546,29 +696,39 @@ mod tests {
         assert_ne!(parent, session);
         provider.client_headers[0].1 = "other-raw-client-session".into();
         assert_eq!(fallback_session_id(&provider), session);
-        let shaped = request::shape(
+        let body = request::prepare(
             serde_json::json!({
                 "model":"claude-sonnet-4-5", "max_tokens":1024,
                 "messages":[{"role":"user", "content":"hi"}],
                 "metadata":{"user_id":"{\"session_id\":\"spoofed\",\"account_uuid\":\"spoofed\",\"device_id\":\"spoofed\"}"}
             }),
+            &capabilities::ModelCapabilities::default(),
+            false,
+            false,
+        ).unwrap();
+        let plan = SessionStore::from_bytes(None)
+            .unwrap()
+            .plan("test", fallback_session_id(&provider), &body, 0)
+            .unwrap();
+        let shaped = request::encode(
+            &body,
             DEFAULT_CLIENT_VERSION,
             &AccountIdentity {
                 account_uuid: Some("native-account"),
                 device_id: Some("native-device"),
                 parent_session_id: Some(&parent),
             },
-            &capabilities::ModelCapabilities::default(),
+            &plan.context,
             false,
-            || fallback_session_id(&provider),
-        ).unwrap();
+        )
+        .unwrap();
         let body: Value = serde_json::from_slice(&shaped.body).unwrap();
         let identity: Value =
             serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
         let headers = request::inference_headers(
             "test-token",
             DEFAULT_CLIENT_VERSION,
-            &shaped.session_id,
+            &plan.context,
             shaped.betas,
         );
         let header_session = headers
