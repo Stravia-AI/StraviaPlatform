@@ -364,7 +364,7 @@ pub async fn run_sqlite_migrator(
                 None,
             );
             crate::interaction_observation::upgrade_normalize::normalize_sqlite(
-                &mut *pinned.connection,
+                &mut pinned.connection,
             )
             .await?;
         }
@@ -600,7 +600,7 @@ pub async fn run_postgres_migrator(
                 0,
                 None,
             );
-            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut *connection)
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut connection)
                 .await?;
         }
     }

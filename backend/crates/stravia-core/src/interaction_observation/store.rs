@@ -932,7 +932,9 @@ impl ObservationStore {
         ids.dedup();
         let ids = serde_json::to_string(&ids)?;
         // 同一工具在血缘里只取最新一行结果；handoff 行用于确认这些结果确实被要求过。
-        let rows: Vec<(String, String, Option<bool>, Option<i64>, bool)> = match self {
+        // (tool_id, kind, is_error, content_id, 是否有 handoff)
+        type LineageResultRow = (String, String, Option<bool>, Option<i64>, bool);
+        let rows: Vec<LineageResultRow> = match self {
             Self::Sqlite(pool, _) => sqlx::query_as(
                 "WITH RECURSIVE lineage(id,parent_run_id,principal) AS (
                     SELECT r.id,r.parent_run_id,i.principal
@@ -4367,9 +4369,7 @@ macro_rules! backend_ordered_writer {
                     let envelope = block
                         .envelope
                         .map(|envelope| {
-                            Ok::<_, anyhow::Error>(crate::storage_codec::encode(
-                                serde_json::to_vec(&envelope)?.into(),
-                            )?)
+                            crate::storage_codec::encode(serde_json::to_vec(&envelope)?.into())
                         })
                         .transpose()?;
                     writes.push_block(BlockRow {

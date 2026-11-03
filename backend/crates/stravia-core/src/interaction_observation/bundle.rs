@@ -388,15 +388,15 @@ impl BundleProjection {
                     }
                 }
                 "model_turn_finished" => {
-                    if let Some(attempt) = event.payload.get("attempt") {
-                        if let Some(id) = attempt["attempt_id"].as_str() {
-                            record_usage(
-                                &mut attempts,
-                                id,
-                                attempt.get("usage"),
-                                &mut observation_gap,
-                            );
-                        }
+                    if let Some(attempt) = event.payload.get("attempt")
+                        && let Some(id) = attempt["attempt_id"].as_str()
+                    {
+                        record_usage(
+                            &mut attempts,
+                            id,
+                            attempt.get("usage"),
+                            &mut observation_gap,
+                        );
                     }
                 }
                 "observation_gap" => observation_gap = true,

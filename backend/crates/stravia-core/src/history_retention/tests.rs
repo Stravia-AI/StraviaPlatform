@@ -115,13 +115,14 @@ struct Fixture {
 impl Fixture {
     async fn new(db: Db, days: u32) -> Self {
         let retention = HistoryRetention::new(days);
-        let (turns, markers, mappings, compaction, content): (
+        type Stores = (
             Arc<dyn TurnChainStore>,
             Arc<dyn HistoryMarkerStore>,
             Arc<dyn MappingStore>,
             Compaction,
             ContentGc,
-        ) = match &db {
+        );
+        let (turns, markers, mappings, compaction, content): Stores = match &db {
             Db::Sqlite(pool) => (
                 Arc::new(SqlTurnChainStore::sqlite(pool.clone(), retention.clone())),
                 Arc::new(SqlHistoryMarkerStore::sqlite(pool.clone())),

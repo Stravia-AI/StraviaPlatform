@@ -140,7 +140,6 @@ impl LossyMigration {
     /// 解码旧载荷；失败时按空对象迁移并计数。
     fn decode(&mut self, sequence: i64, bytes: &[u8]) -> Value {
         match crate::storage_codec::decode(bytes)
-            .map_err(anyhow::Error::from)
             .and_then(|raw| serde_json::from_slice(&raw).map_err(anyhow::Error::from))
         {
             Ok(payload) => payload,
@@ -277,11 +276,7 @@ async fn split_event_sqlite(
                 super::content_refs::intern_sqlite(tx, &principal, &mut split.units).await?;
             let envelope = split
                 .envelope
-                .map(|value| {
-                    Ok::<_, anyhow::Error>(crate::storage_codec::encode(
-                        serde_json::to_vec(&value)?.into(),
-                    )?)
-                })
+                .map(|value| crate::storage_codec::encode(serde_json::to_vec(&value)?.into()))
                 .transpose()?;
             let (model_turn_id, attempt_id) = if kind == "model_thinking" {
                 (
@@ -478,11 +473,7 @@ async fn split_event_postgres(
                 super::content_refs::intern_postgres(tx, &principal, &mut split.units).await?;
             let envelope = split
                 .envelope
-                .map(|value| {
-                    Ok::<_, anyhow::Error>(crate::storage_codec::encode(
-                        serde_json::to_vec(&value)?.into(),
-                    )?)
-                })
+                .map(|value| crate::storage_codec::encode(serde_json::to_vec(&value)?.into()))
                 .transpose()?;
             let (model_turn_id, attempt_id) = if kind == "model_thinking" {
                 (
