@@ -1070,7 +1070,7 @@ impl RunObserver {
         // The received canonical window is immutable; Model Turn protection
         // rewrites the effective request, so extracting here is equivalent to
         // extracting at publish time while avoiding an extra request owner.
-        let preview = redaction::user_input_preview(input);
+        let preview = redaction::user_input_text(input);
         *self.inner.pending_preview.lock() = preview;
     }
 

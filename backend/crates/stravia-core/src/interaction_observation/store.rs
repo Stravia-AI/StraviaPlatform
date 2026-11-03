@@ -647,31 +647,23 @@ impl ObservationStore {
                     None,
                 )
                 .await?;
-                let mut turn_attrs = match start.attempt {
-                    Some(attempt) => {
-                        apply_sqlite(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            attempt,
-                            turn_sequence,
-                            start.attempt_at,
-                            None,
-                        )
-                        .await?;
-                        attrs_without_kind(attempt)?
-                    }
-                    None => serde_json::Map::new(),
-                };
-                if let RunEvent::ModelTurnStarted {
-                    retention_detached,
-                    ..
-                } = start.turn
-                {
+                let mut turn_attrs = attrs_without_kind(start.turn)?;
+                if let Some(attempt) = start.attempt {
+                    apply_sqlite(
+                        &mut tx,
+                        interaction_id,
+                        run_id,
+                        attempt,
+                        turn_sequence,
+                        start.attempt_at,
+                        None,
+                    )
+                    .await?;
                     turn_attrs.insert(
-                        "retention_detached".into(),
-                        Value::Bool(*retention_detached),
+                        "attempt".into(),
+                        Value::Object(attrs_without_kind(attempt)?),
                     );
+                    turn_attrs.insert("attempt_at".into(), Value::from(start.attempt_at));
                 }
                 let turn_payload = Value::Object(turn_attrs);
                 insert_event_sqlite(
@@ -830,31 +822,23 @@ impl ObservationStore {
                     None,
                 )
                 .await?;
-                let mut turn_attrs = match start.attempt {
-                    Some(attempt) => {
-                        apply_postgres(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            attempt,
-                            turn_sequence,
-                            start.attempt_at,
-                            None,
-                        )
-                        .await?;
-                        attrs_without_kind(attempt)?
-                    }
-                    None => serde_json::Map::new(),
-                };
-                if let RunEvent::ModelTurnStarted {
-                    retention_detached,
-                    ..
-                } = start.turn
-                {
+                let mut turn_attrs = attrs_without_kind(start.turn)?;
+                if let Some(attempt) = start.attempt {
+                    apply_postgres(
+                        &mut tx,
+                        interaction_id,
+                        run_id,
+                        attempt,
+                        turn_sequence,
+                        start.attempt_at,
+                        None,
+                    )
+                    .await?;
                     turn_attrs.insert(
-                        "retention_detached".into(),
-                        Value::Bool(*retention_detached),
+                        "attempt".into(),
+                        Value::Object(attrs_without_kind(attempt)?),
                     );
+                    turn_attrs.insert("attempt_at".into(), Value::from(start.attempt_at));
                 }
                 let turn_payload = Value::Object(turn_attrs);
                 insert_event_postgres(
@@ -1282,6 +1266,119 @@ impl ObservationStore {
                 )))
             }
         }
+    }
+
+    /// 轮次结算：最后一个 attempt 的结束与用量并入 Turn 结束行，同一事务只写一行事件。
+    /// 合入属性与 `upgrade_normalize` 产出的存量布局一致。
+    pub(super) async fn persist_turn_finish(
+        &self,
+        interaction_id: &str,
+        run_id: &str,
+        turn: &RunEvent,
+        at: i64,
+        attempt: Option<(&RunEvent, i64)>,
+        usage: Option<&ConfirmedUsage>,
+    ) -> anyhow::Result<Option<ObservationEvent>> {
+        let mut attrs = attrs_without_kind(turn)?;
+        if let Some((attempt, attempt_at)) = attempt {
+            let mut attempt_attrs = attrs_without_kind(attempt)?;
+            if let Some(usage) = usage
+                && !attempt_attrs.contains_key("usage")
+            {
+                attempt_attrs.insert("usage".into(), serde_json::to_value(usage)?);
+            }
+            if let Some(usage) = attempt_attrs.get("usage") {
+                attrs.insert("usage".into(), usage.clone());
+            }
+            attrs.insert("attempt".into(), Value::Object(attempt_attrs));
+            attrs.insert("attempt_at".into(), Value::from(attempt_at));
+        }
+        let payload = Value::Object(attrs);
+        let seq = match self {
+            Self::Sqlite(pool, _) => {
+                let mut connection = pool.acquire_write().await?;
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+                let seq = next_sqlite(&mut tx).await?;
+                apply_sqlite(&mut tx, interaction_id, run_id, turn, seq, at, None).await?;
+                if let Some((attempt, attempt_at)) = attempt {
+                    apply_sqlite(
+                        &mut tx,
+                        interaction_id,
+                        run_id,
+                        attempt,
+                        seq,
+                        attempt_at,
+                        usage,
+                    )
+                    .await?;
+                }
+                insert_event_sqlite(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "model_turn_finished",
+                        payload: &payload,
+                    },
+                )
+                .await?;
+                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
+                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                tx.commit().await?;
+                connection.finish().await?;
+                seq
+            }
+            Self::Postgres(pool, _) => {
+                let mut tx = pool.begin().await?;
+                let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                apply_postgres(&mut tx, interaction_id, run_id, turn, seq, at, None).await?;
+                if let Some((attempt, attempt_at)) = attempt {
+                    apply_postgres(
+                        &mut tx,
+                        interaction_id,
+                        run_id,
+                        attempt,
+                        seq,
+                        attempt_at,
+                        usage,
+                    )
+                    .await?;
+                }
+                insert_event_postgres(
+                    &mut tx,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "model_turn_finished",
+                        payload: &payload,
+                    },
+                )
+                .await?;
+                recompute_status_postgres(&mut tx, interaction_id, seq).await?;
+                sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(at).bind(seq).bind(interaction_id).execute(&mut *tx).await?;
+                tx.commit().await?;
+                seq
+            }
+        };
+        Ok(Some(event(
+            seq,
+            at,
+            Some(interaction_id),
+            Some(run_id),
+            None,
+            "model_turn_finished",
+            payload,
+        )))
     }
 
     /// 轮次开始前的用户输入登记；正文按内容单元寻址，只有根 Run 的输入成为中断恢复输入。
