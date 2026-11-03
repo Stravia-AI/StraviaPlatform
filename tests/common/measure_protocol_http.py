@@ -29,8 +29,9 @@ from urllib.parse import parse_qs, urlsplit
 from tests.common.helpers import initialize_server, start_stravia_server, stop_stravia_server, wait_for_setup_token
 from tests.common.protocol_audit import audit_requests
 from tests.common.protocol_history_audit import (
-    NORMALIZED_HISTORY, history_storage_schema, read_credential_evidence, read_history_evidence,
+    read_credential_evidence, read_history_evidence, read_observation_evidence,
 )
+from tests.common.protocol_storage_inventory import read_storage_inventory
 from tests.common.protocol_workload import (
     Message, Workload, build_request, canonical_digest,
     canonical_input, timed_response_frames,
@@ -668,6 +669,11 @@ def main() -> int:
     parser.add_argument("--source-commit", default="unspecified")
     parser.add_argument("--build-condition", default="unspecified")
     parser.add_argument("--config", type=Path, help="Optional server TOML (must not configure production storage)")
+    parser.add_argument("--data-dir", type=Path,
+                        help="Keep the SQLite data directory here (must not exist yet) instead of a temporary one; "
+                             "used to hand a baseline-generated database to an upgrade measurement")
+    parser.add_argument("--save-performance-snapshots", type=Path,
+                        help="Write each phase's raw /api/v1/performance/timeline snapshot into this directory")
     args = parser.parse_args()
     for name in ("duration", "qps", "concurrency", "sample_interval", "request_timeout",
                  "audit_timeout", "max_start_lag_ms", "max_pacing_lag_ms"):
@@ -739,7 +745,11 @@ def main() -> int:
     try:
         database = database_config(args)
         with ExitStack() as cleanup:
-            directory = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="stravia-protocol-bench-"))
+            if args.data_dir:
+                args.data_dir.mkdir(parents=True, exist_ok=False)
+                directory = str(args.data_dir.resolve())
+            else:
+                directory = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="stravia-protocol-bench-"))
             # Stop the child before TemporaryDirectory removes SQLite files,
             # including on setup/workload errors (important on Windows).
             cleanup.callback(lambda: stop_stravia_server(process, logs, print_tail=0) if process else None)
@@ -817,6 +827,10 @@ def main() -> int:
                 status, snapshot = session.request("GET", "/api/v1/performance/timeline", timeout=args.audit_timeout)
                 if status != 200:
                     raise RuntimeError(f"performance timeline HTTP {status}")
+                if args.save_performance_snapshots:
+                    args.save_performance_snapshots.mkdir(parents=True, exist_ok=True)
+                    (args.save_performance_snapshots / f"{context['case']}--{context['phase']}.json").write_text(
+                        json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
                 return snapshot
             for ingress in args.ingress:
                 for protocol, upstream in upstreams.items():
@@ -844,7 +858,9 @@ def main() -> int:
                                     history_evidence=lambda ids: read_history_evidence(
                                         args, directory, ids, allow_legacy=True),
                                     credential_expectations=upstream.credential_expectations,
-                                    credential_evidence=lambda expected: read_credential_evidence(args, directory, expected))
+                                    credential_evidence=lambda expected: read_credential_evidence(args, directory, expected),
+                                    observation_evidence=lambda ids: read_observation_evidence(
+                                        args, directory, ids, allow_legacy=True))
                                 upstream.credential_expectations.clear()
                                 if not case[phase]["chain_audit"]["full_chain_verified"]:
                                     case[phase]["valid"] = False
@@ -867,33 +883,12 @@ def main() -> int:
             context.update(case="shutdown", phase="drain")
             # Inventory is outside measured traffic; ordinary SQL/Observation
             # and Generation Chain storage remain enabled for the entire run.
+            inventory = read_storage_inventory(args, directory)
+            result["storage_inventory"] = inventory["row_counts"]
+            result["storage_bytes"] = {key: inventory[key] for key in (
+                "history_schema", "encoded_payload_bytes", "table_bytes_with_indexes", "table_bytes_error")}
             if args.backend == "sqlite":
                 database_path = Path(directory) / "db" / "gateway.db"
-                with closing(sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)) as connection:
-                    connection.execute("BEGIN")
-                    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    # Table presence selects normalized v3 or the frozen legacy
-                    # layout so baseline binaries remain measurable.
-                    schema = history_storage_schema(tables)
-                    if schema == NORMALIZED_HISTORY:
-                        history_tables = sorted(table for table in tables if table.startswith("turn_"))
-                        payload_sources = (("turn_node_payloads", "payload"), ("turn_contents", "content"))
-                    else:
-                        history_tables = sorted(table for table in tables if table.startswith("turn_chain_"))
-                        payload_sources = (("turn_chain_nodes", "payload"), ("turn_chain_contents", "content"))
-                    result["storage_inventory"] = {
-                        table: connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                        for table in sorted(tables)
-                        if "observation" in table or table in history_tables
-                    }
-                    result["storage_bytes"] = {
-                        "history_schema": schema,
-                        "encoded_payloads": {
-                            table: connection.execute(f'SELECT COALESCE(SUM(length("{column}")), 0) FROM "{table}"').fetchone()[0]
-                            for table, column in (*payload_sources, ("observation_events", "payload"))
-                        },
-                    }
-                    connection.execute("COMMIT")
                 sqlite_files = {}
                 for name, path in (
                     ("database", database_path),
