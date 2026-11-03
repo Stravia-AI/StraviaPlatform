@@ -835,7 +835,6 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             blocks: HashMap::new(),
             live: Arc::clone(&live),
         };
-        let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut terminal_facts: HashMap<String, (Option<DeliveryOutcome>, bool)> = HashMap::new();
         let mut replayed_tool_results = HashSet::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
@@ -846,7 +845,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         let mut next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
         // A discarded stats-bearing transaction cannot be declared summarized by a later barrier.
         // Keep cleanup blocked for this runtime; ordinary diagnostic gaps do not set this state.
-        let mut incomplete_usage = false;
+        let mut failures = PersistFailures::default();
         let mut phases = PhaseBuffers {
             turns: HashMap::new(),
             finishes: HashMap::new(),
@@ -869,7 +868,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             }
             // 仅重试缺失标记及可重算的覆盖，不重放发现，避免重复计数。
             let mut gap_projection_failed = false;
-            for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
+            for (interaction_id, occurred_at) in std::mem::take(&mut failures.gaps) {
                 if retention.deadline(occurred_at) <= now() {
                     continue;
                 }
@@ -882,7 +881,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                 };
                 if !persisted {
-                    pending_gaps.insert(interaction_id, occurred_at);
+                    failures.gaps.insert(interaction_id, occurred_at);
                 }
             }
             let command = if deferred.is_some() {
@@ -962,8 +961,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         }
                                     }
                                     Err(error) => {
-                                        incomplete_usage = true;
-                                        pending_gaps.insert(interaction, occurred_at);
+                                        failures.lose_usage(interaction, occurred_at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
                                     }
                                 }
@@ -983,8 +981,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             commit_buffered_phases(
                                 &context,
                                 &attribution,
-                                &mut pending_gaps,
-                                &mut incomplete_usage,
+                                &mut failures,
                                 &mut phases,
                                         |id| id == run_id,
                                 occurred_at,
@@ -1055,7 +1052,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             phases.turns.insert(run_id.clone(), turn);
                         }
                         Err(error) => {
-                            pending_gaps.insert(interaction.to_owned(), occurred_at);
+                            failures.gaps.insert(interaction.to_owned(), occurred_at);
                             tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
                         }
                     }
@@ -1095,8 +1092,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        incomplete_usage = true;
-                                        pending_gaps.insert(interaction, occurred_at);
+                                        failures.lose_usage(interaction, occurred_at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn finish persistence failed");
                                     }
                                 }
@@ -1122,8 +1118,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         }
                                     }
                                     Err(error) => {
-                                        incomplete_usage = true;
-                                        pending_gaps.insert(interaction, occurred_at);
+                                        failures.lose_usage(interaction, occurred_at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "request failure persistence failed");
                                     }
                                 }
@@ -1158,8 +1153,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                         }
                                     }
                                     Err(error) => {
-                                        incomplete_usage = true;
-                                        pending_gaps.insert(interaction, finish.at);
+                                        failures.lose_usage(interaction, finish.at);
                                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
                                     }
                                 }
@@ -1234,8 +1228,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                     )
@@ -1247,7 +1240,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             Err(error) => {
                                 if let Some(interaction) = attribution.interaction_for_run(&run_id)
                                 {
-                                    pending_gaps.insert(interaction.to_owned(), occurred_at);
+                                    failures.gaps.insert(interaction.to_owned(), occurred_at);
                                 }
                                 tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client disconnect persistence failed");
                             }
@@ -1271,7 +1264,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             .filter_client_tool_results(interaction, &run_id, events, at)
                             .await?;
                         let events: Vec<_> = events.into_iter().map(|event| (event, at)).collect();
-                        for chunk in events.chunks(64) {
+                        for chunk in events.chunks(TOOL_RESULT_BATCH) {
                             if let Some(event) = store
                                 .persist_tool_results(interaction, &run_id, chunk)
                                 .await?
@@ -1283,7 +1276,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     .await;
                     if let Err(error) = result {
-                        pending_gaps.insert(interaction.to_owned(), at);
+                        failures.gaps.insert(interaction.to_owned(), at);
                         // SQL errors may include result bind values; never log payloads.
                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
                     }
@@ -1295,8 +1288,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_phases(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |id| id == run_id,
                         occurred_at,
@@ -1326,7 +1318,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         Err(error) => {
                             // Never include SQL bind values or input text in diagnostics.
                             tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "user input persistence failed");
-                            pending_gaps.insert(interaction.to_owned(), at);
+                            failures.gaps.insert(interaction.to_owned(), at);
                         }
                     }
                 }
@@ -1337,13 +1329,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                     )
                     .await;
-                    if let Err(error) = ensure_usage_complete(incomplete_usage || gap_projection_failed) {
+                    if let Err(error) = ensure_usage_complete(failures.incomplete_usage || gap_projection_failed) {
                         let _ = done.send(Err(error));
                         return false;
                     }
@@ -1363,7 +1354,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             });
                         }
                         attribution.forget_interactions(&removed);
-                        pending_gaps.retain(|interaction, _| !removed.contains(interaction));
+                        failures.gaps.retain(|interaction, _| !removed.contains(interaction));
                         pending_text
                             .retain(|run| attribution.interaction_for_run(run).is_some());
                         persisted_manifests
@@ -1443,8 +1434,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                     )
@@ -1549,7 +1539,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                     Ok(None) => {}
                                     Err(error) => {
-                                        pending_gaps.insert(decision.interaction_id.clone(), now);
+                                        failures.gaps.insert(decision.interaction_id.clone(), now);
                                         tracing::warn!(run_id=%start.id, %error, "parent observation gap persistence failed");
                                     }
                                 }
@@ -1581,7 +1571,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         Err(error) => {
                             attribution.abandon_admission(&start.id);
                             replayed_tool_results.remove(&start.id);
-                            incomplete_usage = true;
+                            failures.incomplete_usage = true;
                             tracing::warn!(run_id=%start.id, %error, "observation admission persistence failed")
                         }
                     }
@@ -1780,9 +1770,9 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             }
                             Err(error) => {
                                 if batch.iter().any(|(event, _, _)| affects_usage(event)) {
-                                    incomplete_usage = true;
+                                    failures.incomplete_usage = true;
                                 }
-                                pending_gaps.insert(interaction.to_owned(), at);
+                                failures.gaps.insert(interaction.to_owned(), at);
                                 live.emit(ObservationUpdate::LiveGap {
                                     interaction_id: interaction.to_owned(),
                                     run_id: run_id.clone(),
@@ -1804,8 +1794,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_phases(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |buffered| buffered == run_id,
                         finished_at,
@@ -1842,7 +1831,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         }
                     }
                     persist_finish(
-                        &mut incomplete_usage,
+                        &mut failures,
                         &context,
                         &mut attribution,
                         &mut pending_text,
@@ -1882,7 +1871,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             publish(&updates, &trace_sequence, value);
                         }
                         Err(error) => {
-                            incomplete_usage = true;
+                            failures.incomplete_usage = true;
                             tracing::warn!(rejection_id=%ingress.id,%error,"rejection observation persistence failed")
                         }
                     }
@@ -1899,8 +1888,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         commit_buffered_phases(
                             &context,
                             &attribution,
-                            &mut pending_gaps,
-                            &mut incomplete_usage,
+                            &mut failures,
                             &mut phases,
                                 |buffered| buffered == run_id,
                             occurred_at,
@@ -1910,8 +1898,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             commit_buffered_completions(
                                 &context,
                                 &attribution,
-                                &mut pending_gaps,
-                                &mut incomplete_usage,
+                                &mut failures,
                                 &mut phases,
                                 |buffered| buffered == run_id,
                             )
@@ -1941,7 +1928,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        pending_gaps.insert(interaction.to_owned(), at);
+                                        failures.gaps.insert(interaction.to_owned(), at);
                                         tracing::warn!(%run_id,%error,"observation gap persistence failed")
                                     }
                                 }
@@ -1980,7 +1967,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 }
                             }
                             persist_finish(
-                                &mut incomplete_usage,
+                                &mut failures,
                                 &context,
                                 &mut attribution,
                                 &mut pending_text,
@@ -2007,7 +1994,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                                 Ok(None) => {}
                                 Err(error) => {
-                                    pending_gaps.insert(interaction.to_owned(), at);
+                                    failures.gaps.insert(interaction.to_owned(), at);
                                     tracing::warn!(%run_id, %error, "observation activity finalization failed");
                                 }
                             }
@@ -2077,8 +2064,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_phases(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |buffered| attribution.interaction_for_run(buffered) == Some(interaction_id.as_str()),
                         now(),
@@ -2087,8 +2073,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |buffered| attribution.interaction_for_run(buffered) == Some(interaction_id.as_str()),
                     )
@@ -2107,8 +2092,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_phases(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                         now(),
@@ -2117,8 +2101,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                     )
@@ -2132,14 +2115,13 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         None,
                     )
                     .await;
-                    let _ = done.send(ensure_usage_complete(incomplete_usage || gap_projection_failed));
+                    let _ = done.send(ensure_usage_complete(failures.incomplete_usage || gap_projection_failed));
                 }
                 Some(WriterCommand::Shutdown(done)) => {
                     commit_buffered_phases(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                         now(),
@@ -2148,8 +2130,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     commit_buffered_completions(
                         &context,
                         &attribution,
-                        &mut pending_gaps,
-                        &mut incomplete_usage,
+                        &mut failures,
                         &mut phases,
                         |_| true,
                     )
@@ -2300,8 +2281,7 @@ impl PendingCompletion {
 async fn commit_buffered_completions(
     context: &WriterContext<'_>,
     attribution: &RunAttribution<ObservationEvidence>,
-    pending_gaps: &mut HashMap<String, i64>,
-    incomplete_usage: &mut bool,
+    failures: &mut PersistFailures,
     buffers: &mut PhaseBuffers,
     selects: impl Fn(&str) -> bool,
 ) {
@@ -2334,11 +2314,32 @@ async fn commit_buffered_completions(
             Ok(Some(event)) => publish(context.updates, context.trace_sequence, event),
             Ok(None) => {}
             Err(error) => {
-                *incomplete_usage = true;
+                failures.incomplete_usage = true;
                 tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client completion persistence failed");
-                pending_gaps.insert(interaction, completion.delivered_at);
+                failures.gaps.insert(interaction, completion.delivered_at);
             }
         }
+    }
+}
+
+/// 客户端工具返回一次事务写入的条数。
+const TOOL_RESULT_BATCH: usize = 64;
+
+/// 落盘失败留下的后果：待补记的观察缺口，以及是否丢过承载用量的事务。
+///
+/// 被丢弃的用量事务不能被后来的屏障宣告为已汇总，因此 `incomplete_usage` 一旦置位就阻止清理，
+/// 直到本进程结束；普通诊断缺口只进 `gaps` 等待重试。
+#[derive(Default)]
+struct PersistFailures {
+    gaps: HashMap<String, i64>,
+    incomplete_usage: bool,
+}
+
+impl PersistFailures {
+    /// 承载 Turn/用量事实的写入失败：记缺口并阻止清理。
+    fn lose_usage(&mut self, interaction: String, at: i64) {
+        self.incomplete_usage = true;
+        self.gaps.insert(interaction, at);
     }
 }
 
@@ -2347,8 +2348,7 @@ async fn commit_buffered_completions(
 async fn commit_buffered_phases(
     context: &WriterContext<'_>,
     attribution: &RunAttribution<ObservationEvidence>,
-    pending_gaps: &mut HashMap<String, i64>,
-    incomplete_usage: &mut bool,
+    failures: &mut PersistFailures,
     buffers: &mut PhaseBuffers,
     selects: impl Fn(&str) -> bool,
     at: i64,
@@ -2369,8 +2369,7 @@ async fn commit_buffered_phases(
                 }
             }
             Err(error) => {
-                *incomplete_usage = true;
-                pending_gaps.insert(interaction, at);
+                failures.lose_usage(interaction, at);
                 tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "turn start persistence failed");
             }
         }
@@ -2395,8 +2394,7 @@ async fn commit_buffered_phases(
                 }
             }
             Err(error) => {
-                *incomplete_usage = true;
-                pending_gaps.insert(interaction, finish.at);
+                failures.lose_usage(interaction, finish.at);
                 tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "attempt finish persistence failed");
             }
         }
@@ -2449,7 +2447,7 @@ struct FinishFacts {
 }
 
 async fn persist_finish(
-    incomplete_usage: &mut bool,
+    failures: &mut PersistFailures,
     context: &WriterContext<'_>,
     attribution: &mut RunAttribution<ObservationEvidence>,
     pending_text: &mut TextBuffer,
@@ -2486,7 +2484,7 @@ async fn persist_finish(
                 publish(context.updates, context.trace_sequence, value);
             }
             Err(error) => {
-                *incomplete_usage = true;
+                failures.incomplete_usage = true;
                 if let Err(error) = context.store.mark_observation_gap(interaction).await {
                     tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
                 }

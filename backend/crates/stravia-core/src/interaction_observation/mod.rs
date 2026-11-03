@@ -26,6 +26,7 @@ pub(crate) mod upgrade_normalize;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
+pub(crate) use bundle::hex;
 pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;

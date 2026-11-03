@@ -53,7 +53,6 @@ fn carries_content(kind: &str) -> bool {
             | "model_turn_started"
             | "model_turn_finished"
             | "target_attempt_started"
-            | "usage_confirmed"
             | "model_thinking_finished"
             | "client_output_committed"
             | "delivery_finished"
@@ -147,11 +146,7 @@ impl CredentialMasker {
             hasher.update([0]);
             hasher.update(secrets.version());
         }
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        crate::interaction_observation::hex(&hasher.finalize())
     }
 
     pub(super) fn mask_summary(&self, summary: &mut InteractionSummary) {

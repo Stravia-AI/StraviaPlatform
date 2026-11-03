@@ -1,6 +1,7 @@
 -- 启动钩子已完成 0041 之后的数据转换；不保留正式双读路径。
-DROP INDEX IF EXISTS interaction_observations_expiry_idx;
-DROP INDEX IF EXISTS rejected_requests_expiry_idx;
+DROP INDEX interaction_observations_expiry_idx;
+DROP INDEX rejected_requests_expiry_idx;
+DROP INDEX observation_events_tool_idx;
 
 ALTER TABLE interaction_observations DROP COLUMN expires_at;
 ALTER TABLE interaction_observations DROP COLUMN input_preview;

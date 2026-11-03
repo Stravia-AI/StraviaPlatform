@@ -777,7 +777,8 @@ fn safe_archive_component(value: &str) -> String {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// 小写十六进制；管理端 ETag 与映射版本共用这一份实现。
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

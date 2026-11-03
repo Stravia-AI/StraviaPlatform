@@ -925,8 +925,6 @@ CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id
 
 CREATE INDEX observation_events_run_idx ON observation_events(run_id,sequence);
 
-CREATE INDEX observation_events_tool_idx ON observation_events(tool_id,sequence) WHERE tool_id IS NOT NULL;
-
 CREATE INDEX observation_pending_tools_expiry_idx
     ON observation_pending_tools(expires_at);
 
