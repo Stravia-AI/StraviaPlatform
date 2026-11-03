@@ -444,7 +444,7 @@ async fn sqlite_read_contract() -> anyhow::Result<()> {
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        1,
+        crate::history_retention::HistoryRetention::new(1),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -480,7 +480,7 @@ async fn postgres_read_contract() -> anyhow::Result<()> {
             None,
             Some(pool.clone()),
             directory.path().to_path_buf(),
-            1,
+            crate::history_retention::HistoryRetention::new(1),
             true,
             crate::generation_chain::test_chain().await,
         )
