@@ -512,3 +512,74 @@ async fn bundle_detached_activity_outlives_child_delivery_at_ticket_watermark() 
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn bundle_exports_full_visible_output_and_expands_content_refs() -> anyhow::Result<()> {
+    let (_directory, pool, observation) = fixture().await?;
+    let run = admit(&observation, "visible-run", None);
+    let first = format!("first:{}", "a".repeat(6000));
+    let second = format!("second:{}", "b".repeat(6000));
+    for (turn, answer) in [("turn-1", &first), ("turn-2", &second)] {
+        run.record(RunEvent::ModelTurnStarted {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            route_id: "route".into(),
+            model_display_name: None,
+            estimated_input_tokens: None,
+        });
+        run.record(RunEvent::TargetAttemptStarted {
+            model_turn_id: turn.into(),
+            attempt_id: format!("{turn}-attempt"),
+            target_id: "target".into(),
+            provider_id: "provider".into(),
+            provider_name: "Provider".into(),
+            upstream_model: "model".into(),
+            protocol: "responses".into(),
+            upstream_url: "http://127.0.0.1".into(),
+            cost_basis: None,
+        });
+        run.record(RunEvent::ClientVisibleContent {
+            text: answer.clone(),
+            parts: vec![serde_json::json!({"type": "text", "text": answer})],
+            block_id: format!("{turn}-block"),
+            item: serde_json::json!({"id": format!("{turn}-block"), "role": "assistant", "content": answer}),
+            complete: true,
+        });
+        run.record(RunEvent::TargetAttemptFinished {
+            model_turn_id: turn.into(),
+            attempt_id: format!("{turn}-attempt"),
+            status: "completed".into(),
+            status_code: Some(200),
+            error_code: None,
+            error: None,
+            duration_ms: 10,
+            first_token_ms: Some(1),
+            usage: None,
+            amounts: None,
+        });
+        run.record(RunEvent::ModelTurnFinished {
+            retention_detached: false,
+            model_turn_id: turn.into(),
+            status: "completed".into(),
+        });
+    }
+    finish(&run, "completed", None);
+    let issued = ticket(&observation).await?;
+    let (_, summary) = download(&observation, &issued).await?;
+
+    // 摘要给出最近一个可见块的完整正文；旧的截断字段不存在。
+    assert_eq!(summary["latest_output_text"], second);
+    assert!(summary.get("visible_tail").is_none());
+    // 事件里的正文引用已展开为调用方可读的文本。
+    let events = summary["events"].as_array().expect("exported events");
+    let texts: Vec<&str> = events
+        .iter()
+        .filter(|event| event["kind"] == "client_visible_content")
+        .filter_map(|event| event["payload"]["text"].as_str())
+        .collect();
+    assert_eq!(texts, vec![first.as_str(), second.as_str()]);
+    drop(run);
+    observation.shutdown().await;
+    pool.close().await;
+    Ok(())
+}

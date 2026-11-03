@@ -120,7 +120,7 @@ impl BundleExport {
                     anyhow::bail!("bundle snapshot unavailable");
                 }
                 let mut projection = BundleProjection::replay(&records.events);
-                projection.visible_tail = self
+                projection.latest_output_text = self
                     .store
                     .latest_visible_block_text(&request.resource_id, through)
                     .await?;
@@ -331,7 +331,7 @@ impl BundleExport {
 struct BundleProjection {
     status: String,
     usage: ConfirmedUsage,
-    visible_tail: String,
+    latest_output_text: String,
     observation_gap: bool,
 }
 
@@ -483,7 +483,7 @@ impl BundleProjection {
                     .values()
                     .map(|usage| usage.as_ref().unwrap_or(&unknown)),
             ),
-            visible_tail: String::new(),
+            latest_output_text: String::new(),
             observation_gap,
         }
     }
@@ -513,7 +513,7 @@ impl BundleProjection {
             "through_event_sequence": through,
             "status": self.status,
             "usage": self.usage,
-            "visible_tail": self.visible_tail,
+            "latest_output_text": self.latest_output_text,
             "observation_gap": self.observation_gap,
             "run_ids": run_ids,
             "events": events,

@@ -3009,10 +3009,10 @@ impl ObservationStore {
         let mut by_id: std::collections::HashMap<i64, ObservationContent> =
             std::collections::HashMap::new();
         for chunk in ids.chunks(400) {
-            let rows: Vec<(i64, Vec<u8>, i32, i64, Vec<u8>)> = match self {
+            let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> = match self {
                 Self::Sqlite(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                        "SELECT c.id,c.digest,c.format,c.raw_len,c.body FROM contents c WHERE c.id IN (",
+                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
                     );
                     let mut separated = query.separated(",");
                     for id in chunk {
@@ -3026,7 +3026,7 @@ impl ObservationStore {
                 }
                 Self::Postgres(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT c.id,c.digest,c.format,c.raw_len,c.body FROM contents c WHERE c.id IN (",
+                        "SELECT c.id,c.digest,CAST(c.format AS BIGINT),c.raw_len,c.body FROM contents c WHERE c.id IN (",
                     );
                     let mut separated = query.separated(",");
                     for id in chunk {
@@ -3041,7 +3041,7 @@ impl ObservationStore {
             };
             for (content_id, digest, format, raw_len, raw) in rows {
                 let raw = crate::storage_codec::decode(&raw)?.into_owned();
-                let format = stravia_runtime_contract::protocol::ir::content::ContentFormat::from_database_value(i64::from(format))
+                let format = stravia_runtime_contract::protocol::ir::content::ContentFormat::from_database_value(format)
                     .ok_or_else(|| anyhow::anyhow!("unknown content format {format}"))?;
                 let body = match format {
                     stravia_runtime_contract::protocol::ir::content::ContentFormat::Text => {

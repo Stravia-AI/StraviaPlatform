@@ -10,6 +10,8 @@ mod hydrate;
 mod live;
 mod manifest_index;
 mod query;
+#[cfg(test)]
+mod read_tests;
 mod redaction;
 mod retention;
 pub(crate) mod scope;

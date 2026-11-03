@@ -28,6 +28,10 @@ mod oauth;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
 mod observation_masking;
+#[cfg(feature = "test-support")]
+mod observation_test_support;
+#[cfg(feature = "test-support")]
+pub use observation_test_support::SeededInteraction;
 pub mod provider_allowance;
 mod provider_connection;
 pub(crate) mod routes;
