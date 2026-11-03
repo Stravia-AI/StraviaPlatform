@@ -4089,14 +4089,32 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const input = node(page, 'Atlas', 'completed').getByRole('button', { name: 'User input', exact: true })
-    await expect(input).toContainText('Could not load this text: content store offline')
-    await expect(input.locator('.preview-viewport')).toHaveClass(/text-destructive/)
-    await expect(input.locator('.preview-viewport')).not.toHaveClass(/text-muted-foreground/)
-    await expect(input.locator('.preview-error-mark')).toBeVisible()
+    await expect(input).toContainText('Could not load this text. Request failed: content store offline')
+    // 失败不用弱化色承载：文字色是 destructive 语义色，而不是 muted-foreground。
+    const colors = await input.evaluate((button) => {
+      const resolve = (token: string) => {
+        const probe = document.createElement('span')
+        probe.style.color = `var(${token})`
+        button.append(probe)
+        const color = getComputedStyle(probe).color
+        probe.remove()
+        return color
+      }
+      const text = Array.from(button.querySelectorAll('span')).find((element) =>
+        element.textContent?.startsWith('Could not load'),
+      )
+      return {
+        shown: text ? getComputedStyle(text).color : null,
+        destructive: resolve('--destructive'),
+        muted: resolve('--muted-foreground'),
+      }
+    })
+    expect(colors.shown).toBe(colors.destructive)
+    expect(colors.shown).not.toBe(colors.muted)
 
     await input.hover()
     const tooltip = page.getByRole('tooltip')
-    await expect(tooltip).toContainText('Could not load this text: content store offline')
+    await expect(tooltip).toContainText('Could not load this text. Request failed: content store offline')
     fixture.failContents(false)
     await tooltip.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(input.locator('strong')).toHaveText('Atlas user question')

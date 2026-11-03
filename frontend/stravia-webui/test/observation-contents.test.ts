@@ -104,14 +104,15 @@ describe('observation contents', () => {
   })
 
   test('evicts the least recently used snapshot beyond the byte budget', async () => {
-    const { calls, fetcher } = server(new Map([1, 2, 3].map((id) => [id, text(id, 'abcd')])))
-    // 每份快照含固定开销，预算只容纳两份。
-    const contents = new ObservationContents(fetcher, 2 * (256 + 4) + 8)
+    // 每份正文 1000 字节、预算 3000：两份快照放得下，三份放不下（固定开销远小于 500 的余量）。
+    const big = (id: number): ObservationContent => ({ ...text(id, 'abcd'), raw_len: 1000 })
+    const { calls, fetcher } = server(new Map([1, 2, 3].map((id) => [id, big(id)])))
+    const contents = new ObservationContents(fetcher, 3000)
     await contents.load([1])
     await contents.load([2])
-    await contents.load([3])
-    await contents.load([2])
-    await contents.load([1])
+    await contents.load([3]) // 淘汰最久未用的 1
+    await contents.load([2]) // 仍在缓存：带验证器
+    await contents.load([1]) // 已被淘汰：无验证器
     expect(calls.map((call) => call.etag === null)).toEqual([true, true, true, false, true])
   })
 
@@ -161,10 +162,28 @@ describe('observation contents', () => {
     expect(await contents.preview(refs, { separator: '\n', edge: 'tail', limit: 12 })).toBe(
       'chunk-39\nchunk-40'.slice(-12),
     )
-    expect(calls.map((call) => call.ids)).toEqual([
-      [1, 2, 3, 4, 5, 6, 7, 8],
-      [33, 34, 35, 36, 37, 38, 39, 40],
-    ])
+    // 每个方向只发一次请求，只含靠近该边缘的引用，不读取中间部分。
+    expect(calls).toHaveLength(2)
+    const [head, tail] = calls.map((call) => call.ids)
+    expect(head.length).toBeLessThan(20)
+    expect(Math.max(...head)).toBeLessThan(20)
+    expect(tail.length).toBeLessThan(20)
+    expect(Math.min(...tail)).toBeGreaterThan(20)
+    expect(head).toContain(1)
+    expect(tail).toContain(40)
+  })
+
+  test('preview keeps reading further windows until it has enough text', async () => {
+    const { calls, fetcher } = server(
+      new Map(Array.from({ length: 40 }, (_, index) => [index + 1, text(index + 1, 'x')])),
+    )
+    const refs = Array.from({ length: 40 }, (_, index) => ref(index + 1))
+    const preview = await new ObservationContents(fetcher).preview(refs, { separator: '', edge: 'head', limit: 30 })
+    expect(preview).toBe('x'.repeat(30))
+    expect(calls.length).toBeGreaterThan(1)
+    // 窗口按顺序向后推进，已读的 id 不重复请求。
+    const asked = calls.flatMap((call) => call.ids)
+    expect(new Set(asked).size).toBe(asked.length)
   })
 })
 

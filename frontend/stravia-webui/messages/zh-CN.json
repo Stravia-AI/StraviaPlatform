@@ -2014,7 +2014,7 @@
   "observation_event_observation_gap": "观察记录不完整",
   "observation_event_client_visible_content": "已记录响应文本",
   "observation_event_user_input_recorded": "已记录用户输入",
-  "observation_content_load_failed": "无法加载此文本：{reason}",
+  "observation_content_load_failed": "无法加载此文本。{reason}",
   "observation_event_credential_mappings_created": "已创建凭据保护映射",
   "observation_event_credential_mappings_reused": "已复用凭据保护映射",
   "observation_event_credentials_reused": "复用凭据映射",

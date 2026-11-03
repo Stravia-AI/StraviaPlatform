@@ -2024,7 +2024,7 @@
   "observation_event_observation_gap": "Observation incomplete",
   "observation_event_client_visible_content": "Response text recorded",
   "observation_event_user_input_recorded": "User input recorded",
-  "observation_content_load_failed": "Could not load this text: {reason}",
+  "observation_content_load_failed": "Could not load this text. {reason}",
   "observation_event_credential_mappings_created": "Credential protection mappings created",
   "observation_event_credential_mappings_reused": "Credential protection mappings reused",
   "observation_event_credentials_reused": "Reused credential mappings",
