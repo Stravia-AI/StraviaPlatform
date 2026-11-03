@@ -104,7 +104,7 @@ impl HistoryMaintenance {
         deleted = deleted.saturating_add(self.turn_chain.sweep_history(now).await?);
         deleted = deleted.saturating_add(self.history_markers.sweep(now, retention).await?);
         deleted = deleted.saturating_add(self.mappings.sweep(now, retention).await?);
-        self.compaction.sweep(now, retention).await?;
+        deleted = deleted.saturating_add(self.compaction.sweep(now, retention).await?);
         deleted = deleted.saturating_add(self.content.sweep().await?);
         tracing::Span::current().record("deleted", deleted);
         Ok(deleted)
