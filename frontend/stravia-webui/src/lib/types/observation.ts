@@ -188,6 +188,13 @@ export interface ObservationContentsPage {
   contents: ObservationContent[]
 }
 
+/**
+ * 内容端点的条件请求结果。正文按当前凭据映射遮蔽，ETag 随映射版本变化，
+ * 因此客户端只缓存「ETag + 正文」，每次读取都带 `If-None-Match` 重新验证。
+ */
+export type ObservationContentsResponse =
+  { status: 'not-modified' } | { status: 'modified'; etag: string | null; contents: ObservationContent[] }
+
 export interface InteractionSummary {
   context_events: ObservationEvent[]
   id: string

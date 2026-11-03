@@ -1,3 +1,4 @@
+import { contentRefsKey } from '#lib/observation-contents.js'
 import { CanvasLinkIndex } from '#lib/interaction-canvas-links.js'
 import { hiddenFailureNode } from '#lib/observation-chain-visibility.js'
 import { mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '#lib/observation-state.js'
@@ -50,13 +51,12 @@ export function isValidObservationRange(startMs: number, endMs: number): boolean
 
 // 卡片上的用户输入预览或模型输出预览是否有更新（引用的正文 id 序列变化）；新出现的卡片只在已带引用时算更新，
 // 避免刚创建、尚无内容的卡片抢走视口。
-function contentKey(summary: InteractionSummary['input']): string {
-  return summary.refs.map((ref) => ref.content_id).join(',')
-}
-
 function previewUpdated(before: InteractionSummary | undefined, after: InteractionSummary): boolean {
   if (!before) return after.input.refs.length > 0 || after.output.refs.length > 0
-  return contentKey(before.input) !== contentKey(after.input) || contentKey(before.output) !== contentKey(after.output)
+  return (
+    contentRefsKey(before.input) !== contentRefsKey(after.input) ||
+    contentRefsKey(before.output) !== contentRefsKey(after.output)
+  )
 }
 
 /** logs 页需要的 admin.observations 窄面；admin.observations 结构满足此接口。 */
