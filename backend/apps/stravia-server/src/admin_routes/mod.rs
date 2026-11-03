@@ -385,6 +385,14 @@ async fn healthz_handler() -> impl IntoResponse {
     (StatusCode::OK, r#"{"status":"ok"}"#)
 }
 
+/// `If-None-Match` 是否命中给定的（带引号的）ETag；目录与观测正文端点共用。
+fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
+    request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
+}
+
 async fn readyz_handler(State(gw): State<Gateway>) -> impl IntoResponse {
     match gw.storage.bootstrap().health().await {
         Ok(h) if h.can_connect && h.schema_compatible => (StatusCode::OK, r#"{"status":"ok"}"#),

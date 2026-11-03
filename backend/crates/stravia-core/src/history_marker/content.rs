@@ -10,9 +10,7 @@ use std::collections::HashMap;
 use anyhow::Context;
 use serde_json::Value;
 
-use stravia_runtime_contract::protocol::ir::content::{
-    ContentFormat, ContentUnitBody, block_content_units,
-};
+use stravia_runtime_contract::protocol::ir::content::{ContentFormat, block_content_units};
 
 use super::HiddenHistorySegment;
 use crate::content_store::{self, Bodies, Content, ContentDigest, Slot};
@@ -46,24 +44,21 @@ pub(crate) fn encode_segment(segment: &HiddenHistorySegment) -> anyhow::Result<S
         if target.is_null() {
             continue;
         }
-        let (format, raw, text) = match unit.body {
-            ContentUnitBody::Text(text) => (ContentFormat::Text, text.as_bytes().to_vec(), true),
-            ContentUnitBody::Json(_) => (ContentFormat::Json, serde_json::to_vec(&*target)?, false),
-        };
-        let digest = content_store::content_digest(format, &raw);
+        let content = Content::from_unit_body(unit.body);
+        let digest = content.digest();
+        let format = content.format();
         let ordinal = match index.get(&digest) {
             Some(ordinal) => *ordinal,
             None => {
                 let ordinal = contents.len();
                 index.insert(digest, ordinal);
-                contents.push(Content::with_digest(digest, format, raw));
+                contents.push(content);
                 ordinal
             }
         };
-        slots.push(if text {
-            Slot::text(unit.pointer, ordinal)
-        } else {
-            Slot::json(unit.pointer, ordinal)
+        slots.push(match format {
+            ContentFormat::Text => Slot::text(unit.pointer, ordinal),
+            ContentFormat::Json => Slot::json(unit.pointer, ordinal),
         });
         *target = Value::Null;
     }

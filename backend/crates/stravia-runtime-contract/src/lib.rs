@@ -17,4 +17,4 @@ pub mod wire_debug;
 
 pub use cancellation::CancellationToken;
 pub use deadline::Deadline;
-pub use identity::Principal;
+pub use identity::{Principal, continuation_key_for};

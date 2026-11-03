@@ -17,7 +17,7 @@ use anyhow::{Context, ensure};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, SqlitePool};
 
-use stravia_runtime_contract::protocol::ir::content::ContentFormat;
+use stravia_runtime_contract::protocol::ir::content::{ContentFormat, ContentUnitBody};
 
 mod descriptor;
 #[cfg(test)]
@@ -109,6 +109,24 @@ impl Content {
             ContentFormat::Json,
             raw,
         )
+    }
+
+    /// 由共享正文单元定义产出的单元构造：文本保存原始 UTF-8，JSON 保存紧凑 serde JSON。
+    /// Turn Chain、History Marker 与 Observation 对同一段正文必须得到同一份字节，
+    /// 所以三方都经由这里构造，不各自重复编码。
+    pub(crate) fn from_unit_body(body: ContentUnitBody<'_>) -> Self {
+        match body {
+            ContentUnitBody::Text(text) => Self::text(text),
+            ContentUnitBody::Json(value) => Self::json(value.to_string().into_bytes()),
+        }
+    }
+
+    pub(crate) fn digest(&self) -> ContentDigest {
+        self.digest
+    }
+
+    pub(crate) fn format(&self) -> ContentFormat {
+        self.format
     }
 
     /// 由调用方已计算的摘要构造，避免对同一批字节再次哈希。

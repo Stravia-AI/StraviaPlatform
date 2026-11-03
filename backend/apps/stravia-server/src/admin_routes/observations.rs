@@ -52,13 +52,6 @@ fn parse_content_ids(raw: Option<&str>) -> Result<Vec<i64>, ObservationQueryErro
         .collect()
 }
 
-fn request_matches_etag(request_headers: &HeaderMap, etag: &str) -> bool {
-    request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
-}
-
 /// 正文按当前凭据映射遮蔽，同一 id 的响应会随映射变化：浏览器可以缓存，
 /// 但每次使用前必须带 `If-None-Match` 重新验证（`no-cache`），不得直接复用。
 fn revalidated_headers(response: &mut Response, etag: &str) {
@@ -84,7 +77,7 @@ pub(super) async fn observation_contents(
     match gateway.admin().observation_contents(&ids).await {
         Ok(batch) => {
             let etag = format!("\"{}\"", batch.etag);
-            let mut response = if request_matches_etag(&request_headers, &etag) {
+            let mut response = if super::request_matches_etag(&request_headers, &etag) {
                 StatusCode::NOT_MODIFIED.into_response()
             } else {
                 Json(serde_json::json!({ "data": { "contents": batch.contents } })).into_response()

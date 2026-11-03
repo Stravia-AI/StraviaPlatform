@@ -8,17 +8,17 @@ use serde_json::Value;
 use sqlx::{PgConnection, SqliteConnection};
 
 use crate::content_store::{self, Bodies, Content};
-use stravia_runtime_contract::protocol::ir::content::{ContentUnit, ContentUnitBody};
+use stravia_runtime_contract::protocol::ir::content::ContentUnit;
 
 /// 交互 Principal 在共享内容存储里的 scope 键。
 ///
 /// `interaction_observations.principal` 保存的是 API key id（`Principal::api_key_id`），
 /// 而 Turn Chain 与 History Marker 的 scope 是 `Principal::continuation_key()`
-/// （`api-key:<id>`）。三方必须落在同一个 scope，同一段正文才只存一份。这里是
-/// Observation 侧唯一的换算点：写入、读取与升级转换都经由本模块的函数。
+/// （`api-key:<id>`）。三方必须落在同一个 scope，同一段正文才只存一份，所以这里直接
+/// 调用 runtime-contract 的 `continuation_key_for`，与 `continuation_key()` 共用一份拼接。
 /// 不能用 `Principal::new`：交互 Principal 可能是 `anonymous` 之类不满足其断言的值。
 pub(super) fn scope_key(interaction_principal: &str) -> String {
-    format!("api-key:{interaction_principal}")
+    stravia_runtime_contract::continuation_key_for(interaction_principal)
 }
 
 /// 一个文本内容单元。
@@ -36,10 +36,7 @@ pub(super) fn value_content(value: &Value) -> Content {
 
 /// 把共享定义产出的正文单元复制成可写入的内容。
 pub(super) fn unit_content(unit: &ContentUnit<'_>) -> Content {
-    match unit.body {
-        ContentUnitBody::Text(text) => Content::text(text),
-        ContentUnitBody::Json(value) => Content::json(value.to_string().into_bytes()),
-    }
+    Content::from_unit_body(unit.body)
 }
 
 /// 在调用方事务内登记正文，返回与 `contents` 同序的 content id。

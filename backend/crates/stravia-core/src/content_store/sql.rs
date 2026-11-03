@@ -294,6 +294,28 @@ macro_rules! backend {
                 read_filtered(connection, None, ids).await
             }
 
+            /// 内容的原始字节数（`id → raw_len`）；只读元数据列，不读取也不解码正文。
+            /// 列表摘要只需要长度，缺失的 id 不出现在结果里，由调用方判定为悬空引用。
+            pub(crate) async fn lengths(
+                connection: &mut $conn,
+                ids: &[i64],
+            ) -> anyhow::Result<HashMap<i64, i64>> {
+                let mut lengths = HashMap::with_capacity(ids.len());
+                for chunk in ids.chunks(READ_BATCH) {
+                    let mut query =
+                        sqlx::QueryBuilder::<$db>::new("SELECT id, raw_len FROM contents WHERE id IN (");
+                    let mut list = query.separated(",");
+                    for id in chunk {
+                        list.push_bind(*id);
+                    }
+                    list.push_unseparated(")");
+                    let rows: Vec<(i64, i64)> =
+                        query.build_query_as().fetch_all(&mut *connection).await?;
+                    lengths.extend(rows);
+                }
+                Ok(lengths)
+            }
+
             async fn read_filtered(
                 connection: &mut $conn,
                 scope_id: Option<i64>,

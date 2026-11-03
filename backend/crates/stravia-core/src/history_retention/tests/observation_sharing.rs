@@ -56,7 +56,7 @@ async fn three_parties_share_one_body(fx: Fixture) {
         "the shared body lives in the principal's continuation-key scope"
     );
 
-    fx.sweep_to_completion(t_observed + n).await;
+    fx.sweep(t_observed + n).await;
     assert_eq!(fx.observed_interactions().await, 0);
     assert!(fx.turn_mentions(&node, &shared).await);
     assert_eq!(
@@ -67,7 +67,7 @@ async fn three_parties_share_one_body(fx: Fixture) {
     assert_eq!(fx.text_rows_in_any_scope(visible.len()).await, 0);
     assert_eq!(fx.text_rows_in_any_scope(tool_output.len()).await, 0);
 
-    fx.sweep_to_completion(t_written + n).await;
+    fx.sweep(t_written + n).await;
     assert!(!fx.turn_readable(&node).await);
     assert!(fx.marker_text(&marker).await.is_none());
     assert_eq!(
@@ -104,7 +104,7 @@ async fn clearing_history_releases_observation_only_bodies(fx: Fixture) {
         .expect("clear observation history");
     assert_eq!(fx.observed_interactions().await, 0);
 
-    fx.sweep_to_completion(super::now_ms()).await;
+    fx.sweep(super::now_ms()).await;
     assert_eq!(
         fx.text_rows_in_any_scope(visible.len()).await,
         0,
