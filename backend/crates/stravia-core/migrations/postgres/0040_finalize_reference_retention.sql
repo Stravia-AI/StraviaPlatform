@@ -1,4 +1,4 @@
--- 回填完成后移除旧到期列：依赖只在未发布/未确认时保留 pending_until，
+-- 回填完成后移除旧到期列（PostgreSQL 删除列时随之删除引用它的索引）：依赖只在未发布/未确认时保留 pending_until，
 -- 已发布/已确认的行由 published_at/confirmed_at 与当前天数计算下限窗口。
 ALTER TABLE history_markers DROP COLUMN expires_at;
 ALTER TABLE history_markers ADD CONSTRAINT history_markers_pending_until_check
@@ -17,11 +17,9 @@ ALTER TABLE native_compactions ADD CONSTRAINT native_compactions_confirmation_ch
 -- 节点不再保存到期时间：读取只排除 deleting，回收只看 created_at + N。
 ALTER TABLE turn_node_retention DROP COLUMN expires_at;
 
-DROP INDEX idx_history_markers_expiry;
 CREATE INDEX history_markers_pending_until_idx ON history_markers(pending_until);
 CREATE INDEX history_markers_published_at_idx ON history_markers(published_at);
 
-DROP INDEX idx_reversible_redaction_mappings_expiry;
 CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
 ON reversible_redaction_mappings(principal, pending_until);
 CREATE INDEX reversible_redaction_mappings_pending_until_idx
@@ -29,15 +27,13 @@ CREATE INDEX reversible_redaction_mappings_pending_until_idx
 CREATE INDEX reversible_redaction_mappings_published_at_idx
     ON reversible_redaction_mappings(published_at);
 
-DROP INDEX idx_native_compactions_expiry;
 CREATE INDEX native_compactions_pending_until_idx ON native_compactions(pending_until);
 CREATE INDEX native_compactions_confirmed_at_idx ON native_compactions(confirmed_at);
 
-DROP INDEX turn_node_retention_expiry_idx;
 CREATE INDEX turn_nodes_created_at_idx ON turn_nodes(created_at, node_pk);
 
 -- 每张引用关系在最后一条引用删除时把对象放进回收队列；外键级联删除同样触发。
-CREATE FUNCTION public.turn_nodes_release_parent() RETURNS trigger
+CREATE FUNCTION turn_nodes_release_parent() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -50,9 +46,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER turn_nodes_release_parent AFTER DELETE ON turn_nodes
-    FOR EACH ROW EXECUTE FUNCTION public.turn_nodes_release_parent();
+    FOR EACH ROW EXECUTE FUNCTION turn_nodes_release_parent();
 
-CREATE FUNCTION public.turn_node_markers_release() RETURNS trigger
+CREATE FUNCTION turn_node_markers_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -64,9 +60,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER turn_node_markers_release AFTER DELETE ON turn_node_markers
-    FOR EACH ROW EXECUTE FUNCTION public.turn_node_markers_release();
+    FOR EACH ROW EXECUTE FUNCTION turn_node_markers_release();
 
-CREATE FUNCTION public.turn_node_redaction_mappings_release() RETURNS trigger
+CREATE FUNCTION turn_node_redaction_mappings_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -78,9 +74,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER turn_node_redaction_mappings_release AFTER DELETE ON turn_node_redaction_mappings
-    FOR EACH ROW EXECUTE FUNCTION public.turn_node_redaction_mappings_release();
+    FOR EACH ROW EXECUTE FUNCTION turn_node_redaction_mappings_release();
 
-CREATE FUNCTION public.turn_node_compactions_release() RETURNS trigger
+CREATE FUNCTION turn_node_compactions_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -92,9 +88,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER turn_node_compactions_release AFTER DELETE ON turn_node_compactions
-    FOR EACH ROW EXECUTE FUNCTION public.turn_node_compactions_release();
+    FOR EACH ROW EXECUTE FUNCTION turn_node_compactions_release();
 
-CREATE FUNCTION public.native_compaction_sources_release() RETURNS trigger
+CREATE FUNCTION native_compaction_sources_release() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -106,9 +102,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER native_compaction_sources_release AFTER DELETE ON native_compaction_sources
-    FOR EACH ROW EXECUTE FUNCTION public.native_compaction_sources_release();
+    FOR EACH ROW EXECUTE FUNCTION native_compaction_sources_release();
 
-CREATE FUNCTION public.native_compactions_release_source_node() RETURNS trigger
+CREATE FUNCTION native_compactions_release_source_node() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -124,9 +120,9 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER native_compactions_release_source_node AFTER DELETE ON native_compactions
-    FOR EACH ROW EXECUTE FUNCTION public.native_compactions_release_source_node();
+    FOR EACH ROW EXECUTE FUNCTION native_compactions_release_source_node();
 
-CREATE FUNCTION public.public_tool_executions_release_marker() RETURNS trigger
+CREATE FUNCTION public_tool_executions_release_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -137,4 +133,4 @@ BEGIN
     RETURN OLD;
 END $$;
 CREATE TRIGGER public_tool_executions_release_marker AFTER DELETE ON public_tool_executions
-    FOR EACH ROW EXECUTE FUNCTION public.public_tool_executions_release_marker();
+    FOR EACH ROW EXECUTE FUNCTION public_tool_executions_release_marker();

@@ -23,8 +23,8 @@ pub use syntax::{
 };
 pub(crate) use syntax::{
     client_shaped_request, history_marker_commit_references, history_marker_references_in_text,
-    history_marker_references_iter, mark_current_run_projected, new_reference,
-    render_preview_projection_end, render_preview_projection_span, render_preview_projection_start,
+    mark_current_run_projected, new_reference, render_preview_projection_end,
+    render_preview_projection_span, render_preview_projection_start,
     request_needs_marker_resolution, valid_reference,
 };
 #[cfg(test)]

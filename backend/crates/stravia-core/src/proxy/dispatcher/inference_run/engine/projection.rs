@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::history_marker::{
     HISTORY_MARKER_PREFIX, HistoryMarker, HistoryMarkerError, HistoryMarkerStore,
@@ -4501,7 +4500,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                     activity: "Searching".into(),
-                    execution_limit: Duration::from_secs(30),
+                    execution_limit: std::time::Duration::from_secs(30),
                 },
             )
             .await
@@ -4546,7 +4545,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                     activity: "Searching".into(),
-                    execution_limit: Duration::from_secs(30),
+                    execution_limit: std::time::Duration::from_secs(30),
                 },
             )
             .await

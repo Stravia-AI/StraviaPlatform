@@ -55,16 +55,8 @@ async fn scoped_node_pk(pool: &sqlx::SqlitePool, id: &TurnNodeId) -> i64 {
         .expect("node primary key")
 }
 
-/// 把节点的创建时间放到很久以前，使其在统一保留期 N 之外；读取不受影响，只有回收会看到它。
-async fn backdate_node(pool: &sqlx::SqlitePool, id: &TurnNodeId) {
-    sqlx::query("UPDATE turn_nodes SET created_at = 0 WHERE id = ?")
-        .bind(id.as_str())
-        .execute(pool)
-        .await
-        .expect("backdate node");
-}
-
-/// 同 `backdate_node`，但覆盖两种后端，供 SQLite/PostgreSQL 共用的契约断言使用。
+/// 把节点的创建时间放到很久以前，使其单独越过统一保留期 N；读取不受影响，只有回收会看到它。
+/// 仅用于需要“同一轮回收只淘汰其中一个节点”的场景——领域入口无法注入提交时间。
 async fn backdate_store_node(store: &SqlTurnChainStore, id: &TurnNodeId) {
     let query = "UPDATE turn_nodes SET created_at = 0 WHERE id = $1";
     match &store.backend {
@@ -83,6 +75,9 @@ async fn backdate_store_node(store: &SqlTurnChainStore, id: &TurnNodeId) {
                 .unwrap();
         }
     }
+    // 以回拨的时钟回收一轮：水位被拉回到最早的窗口，被改写的节点重新落入扫描区间；
+    // 此时没有任何节点越过保留期，回收本身不删除东西。
+    store.sweep_history(0).await.unwrap();
 }
 
 /// 比默认保留期（7 天）长得多的偏移；回收的 `now` 只通过它推进。
@@ -94,6 +89,13 @@ fn now_millis() -> i64 {
 
 fn beyond_retention() -> i64 {
     now_millis() + BEYOND_RETENTION_MS
+}
+
+/// 先以当前时刻回收一轮（时钟回拨会把水位拉回当前窗口），再跳到保留期之后回收，
+/// 使同一个存储上的多个阶段都能把新写入的节点推到保留期之外。
+async fn sweep_beyond_retention(store: &SqlTurnChainStore) {
+    store.sweep_history(now_millis()).await.unwrap();
+    store.sweep_history(beyond_retention()).await.unwrap();
 }
 
 async fn scoped_node_count(store: &SqlTurnChainStore, id: &TurnNodeId) -> i64 {
@@ -464,7 +466,7 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
         "fixture must exceed one reference cleanup batch"
     );
 
-    backdate_node(&pool, &expired).await;
+    backdate_store_node(&store, &expired).await;
     // 一次 sweep 必须把超过单批上限的引用全部清空并删除节点。
     assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 1);
     assert_eq!(scoped_node_count(&store, &expired).await, 0);
@@ -709,7 +711,7 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
         .await
         .expect("commit live branch");
 
-    backdate_node(&pool, &stale).await;
+    backdate_store_node(&store, &stale).await;
     assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 1);
     assert_eq!(
         store.materialize(&owner, TurnNodeKind::Agent, &stale).await,
@@ -766,7 +768,6 @@ async fn old_ancestor_is_retained_while_a_descendant_exists_and_collected_with_i
             .await
             .expect("commit ancestor");
     }
-    backdate_node(&pool, &root).await;
     assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 0);
     assert_eq!(
         scoped_node_count(&store, &root).await,
@@ -820,7 +821,6 @@ async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
     };
     let owner = principal("gc-chain-owner");
     let mut head = None;
-    let mut ids = Vec::with_capacity(DEPTH);
     for depth in 0..DEPTH {
         let id = TurnNodeId::agent();
         store
@@ -839,15 +839,11 @@ async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
             .await
             .expect("commit chain node");
         head = Some(id.clone());
-        ids.push(id);
     }
     let leaf = head.expect("chain leaf");
-    for id in &ids {
-        backdate_node(&pool, id).await;
-    }
     assert_eq!(
         store
-            .sweep_history(now_millis())
+            .sweep_history(beyond_retention())
             .await
             .expect("chain sweep"),
         DEPTH as u64
@@ -2039,9 +2035,7 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
     );
     assert!(chain.expires_at > cutoff_deadline);
     // 保留期过后整条链被回收；旧证明不能让已被删除的持久祖先复活。
-    backdate_store_node(store, &root).await;
-    backdate_store_node(store, &child).await;
-    store.sweep_history(beyond_retention()).await.unwrap();
+    sweep_beyond_retention(store).await;
     assert!(
         matches!(
             store

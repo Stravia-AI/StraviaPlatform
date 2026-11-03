@@ -39,7 +39,7 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         stravia_credential_protection::store::InternedMappings,
         stravia_runtime_contract::redaction::RedactionError,
     > {
-        let mut result = self.inner.intern(principal, secrets).await?;
+        let result = self.inner.intern(principal, secrets).await?;
         if let Some(held) = &self.held_intern {
             held.committed.notify_one();
             held.release.notified().await;
@@ -680,7 +680,7 @@ async fn consume_until_publication(turn: &mut ModelTurn, store: &HeldPublication
 
 #[tokio::test]
 async fn canonical_completion_publishes_after_trailing_output_and_is_permanently_terminal() {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _)) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
@@ -708,7 +708,7 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
 
 #[tokio::test]
 async fn canonical_completion_publishes_current_shared_trace_with_empty_local_mappings() {
-    let (_directory, _gateway, mut turn, store, principal, _) =
+    let (_directory, _gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, true).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
@@ -744,7 +744,7 @@ async fn canonical_completion_reports_publication_failure_without_success_or_ups
 #[tokio::test]
 async fn canonical_completion_cancellation_interrupts_publication_without_revoking_committed_mappings()
  {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _)) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     cancellation.cancel();
@@ -832,7 +832,7 @@ async fn assert_publication_observation(gateway: &Gateway, status: &str) {
 
 #[tokio::test]
 async fn dropping_pending_canonical_publication_records_cancelled_once() {
-    let (_directory, gateway, mut turn, store, principal, _) =
+    let (_directory, gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     drop(turn);
@@ -841,7 +841,7 @@ async fn dropping_pending_canonical_publication_records_cancelled_once() {
 
 #[tokio::test]
 async fn cancellation_in_publications_final_poll_preempts_completed() {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _)) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     *store.cancel_on_release.lock() = Some(cancellation);
@@ -857,7 +857,7 @@ async fn cancellation_in_publications_final_poll_preempts_completed() {
 
 #[tokio::test]
 async fn observation_writer_failure_does_not_change_canonical_publication_success() {
-    let (_directory, gateway, mut turn, store, principal, _) =
+    let (_directory, gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     gateway.observation.shutdown().await;

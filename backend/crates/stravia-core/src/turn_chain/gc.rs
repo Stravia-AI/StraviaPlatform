@@ -70,7 +70,7 @@ macro_rules! backend {
             let threshold = now.saturating_sub(window);
             let mut connection = pool.acquire_write().await?;
             let mut transaction = connection.begin_with($begin).await?;
-            // 与提交共享的锁序：turn_nodes -> turn_contents；SHARE ROW EXCLUSIVE 阻止写入穿插。
+            // 与提交共享的锁序：turn_nodes -> content_scopes；SHARE ROW EXCLUSIVE 阻止写入穿插。
             if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
             let mut query = sqlx::QueryBuilder::<$db>::new(
                 "SELECT n.node_pk,n.created_at,n.scope_id,r.deleting,\

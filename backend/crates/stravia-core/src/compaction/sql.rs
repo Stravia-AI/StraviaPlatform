@@ -64,7 +64,7 @@ impl Store {
                 if let Some(source) = record.source_generation_id.as_deref() {
                     let query = format!(
                         "SELECT CAST(1 AS BIGINT) FROM turn_nodes n \
-                         JOIN turn_scopes s ON s.id=n.scope_id \
+                         JOIN content_scopes s ON s.id=n.scope_id \
                          WHERE n.id=$1 AND s.principal=$2 AND n.kind='response' \
                          AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting){}",
                         $for_key_share,

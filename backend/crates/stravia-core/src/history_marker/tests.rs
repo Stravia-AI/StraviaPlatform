@@ -27,21 +27,6 @@ fn principal(id: &str) -> Principal {
     Principal::new(id)
 }
 
-// Retention facts are intentionally not exposed by the consumer response.
-fn legacy_public_migrator(sqlite: bool) -> sqlx::migrate::Migrator {
-    let all = if sqlite {
-        sqlx::migrate!("./migrations/sqlite")
-    } else {
-        sqlx::migrate!("./migrations/postgres")
-    };
-    sqlx::migrate::Migrator::with_migrations(
-        all.iter()
-            .filter(|migration| migration.version <= 23)
-            .cloned()
-            .collect(),
-    )
-}
-
 #[tokio::test]
 async fn gated_resolution_cleans_private_carriers_and_preserves_protected_blocks() {
     use stravia_runtime_contract::protocol::ir::Role;
@@ -310,9 +295,9 @@ async fn postgres_history_marker_store_contract_when_configured() {
         .connect_with(options)
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::run_postgres_migrator(&pool, &legacy_public_migrator(false), None)
+    crate::migrations::migrate_postgres(&pool, None)
         .await
-        .expect("legacy PostgreSQL migrations");
+        .expect("PostgreSQL migrations");
     assert_store_contract(Arc::new(SqlHistoryMarkerStore::postgres(pool.clone()))).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
