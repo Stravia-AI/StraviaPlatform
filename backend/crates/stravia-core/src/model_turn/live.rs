@@ -957,6 +957,10 @@ async fn select_with_rpm(
         drop(routes);
         let wait = admission.filter_candidates(&mut policy, &input.root_request, excluded);
         if let Some((next, preferred)) = wait {
+            // 排队等待可能持续很久：此前缓冲的 Turn 开始先落盘，等待期间 Turn 即可读。
+            if let Some(observer) = input.observer.as_ref() {
+                observer.commit_turn_start();
+            }
             admission
                 .wait(
                     &input.root_request,

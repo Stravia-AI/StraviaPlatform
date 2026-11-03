@@ -1148,6 +1148,28 @@ impl RunObserver {
         }
     }
 
+    /// Turn 开始之后、进入可能长时间阻塞的等待（RPM 排队）之前调用：
+    /// 缓冲中的 Turn 开始（连同输入与客户端工具结果）立即落盘，不再等待首个 attempt，
+    /// 等待期间 Turn 已可读。没有等待时不调用，Turn 开始仍与首个 attempt 合并写入。
+    pub(crate) fn commit_turn_start(&self) {
+        if !self.inner.admission_queued {
+            return;
+        }
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::CommitTurnStart {
+                run_id: self.inner.run_id.clone(),
+                occurred_at: writer::now(),
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+        }
+    }
+
     /// 仅在完整客户端交付成功后调用；归属证据不等待 Generation 提交。
     pub(crate) fn observe_client_completion(
         &self,
@@ -3694,6 +3716,40 @@ mod snapshot_tests {
             );
         }
         drop((first, second));
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// 等待（RPM 排队）之前生产方发出边界：Turn 开始单独落盘，不再与之后才开始的 attempt 合并。
+    #[tokio::test]
+    async fn turn_start_before_a_wait_is_written_without_the_delayed_attempt() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let waited = test_run(&observation, "waited", facts(Vec::new()));
+        let direct = test_run(&observation, "direct", facts(Vec::new()));
+        waited.record(flow_turn_started("t1"));
+        waited.commit_turn_start();
+        direct.record(flow_turn_started("t2"));
+        waited.record(flow_attempt_started("t1", "a1"));
+        direct.record(flow_attempt_started("t2", "a2"));
+        observation.flush().await?;
+        let events = replayed(&observation).await?;
+        let started = events_of(&events, Some("waited"), "model_turn_started");
+        assert_eq!(started.len(), 1);
+        assert!(
+            started[0].payload.get("attempt").is_none(),
+            "the turn start was committed at the boundary, before the attempt existed"
+        );
+        assert_eq!(
+            events_of(&events, Some("waited"), "target_attempt_started").len(),
+            1,
+            "the delayed attempt keeps its own row"
+        );
+        let merged = events_of(&events, Some("direct"), "model_turn_started");
+        assert_eq!(merged[0].payload["attempt"]["attempt_id"], "a2");
+        drop((waited, direct));
         observation.shutdown().await;
         pool.close().await;
         Ok(())

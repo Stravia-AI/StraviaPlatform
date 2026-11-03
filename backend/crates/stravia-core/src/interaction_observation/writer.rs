@@ -283,6 +283,12 @@ pub(super) enum WriterCommand {
         units: Vec<String>,
         occurred_at: i64,
     },
+    /// 生产方即将进入可能长时间阻塞的等待（如 RPM 排队）：
+    /// 缓冲中的 Turn 开始不能再等首个 attempt，立即单独落盘。
+    CommitTurnStart {
+        run_id: String,
+        occurred_at: i64,
+    },
     Purge {
         expired_before: Option<i64>,
         done: oneshot::Sender<anyhow::Result<PurgeProgress>>,
@@ -597,6 +603,7 @@ impl WriterCommand {
             Self::InputPreview { run_id, units, .. } => {
                 run_id.len() + units.iter().map(String::len).sum::<usize>()
             }
+            Self::CommitTurnStart { run_id, .. } => run_id.len(),
             Self::ClientCompletion {
                 run_id,
                 principal,
@@ -670,6 +677,7 @@ fn command_kind(command: Option<&WriterCommand>) -> &'static str {
         Some(WriterCommand::ClientDisconnected { .. }) => "client_disconnected",
         Some(WriterCommand::ClientToolResults { .. }) => "client_tool_results",
         Some(WriterCommand::InputPreview { .. }) => "input_preview",
+        Some(WriterCommand::CommitTurnStart { .. }) => "commit_turn_start",
         Some(WriterCommand::Purge { .. }) => "purge",
         Some(WriterCommand::ClientCompletion { .. }) => "client_completion",
         Some(WriterCommand::Admit(_)) => "admit",
@@ -1279,6 +1287,21 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         // SQL errors may include result bind values; never log payloads.
                         tracing::warn!(%run_id, cause=%redacted_persist_cause(&error), "client tool result persistence failed");
                     }
+                }
+                Some(WriterCommand::CommitTurnStart {
+                    run_id,
+                    occurred_at,
+                }) => {
+                    commit_buffered_phases(
+                        &context,
+                        &attribution,
+                        &mut pending_gaps,
+                        &mut incomplete_usage,
+                        &mut phases,
+                        |id| id == run_id,
+                        occurred_at,
+                    )
+                    .await;
                 }
                 Some(WriterCommand::InputPreview {
                     run_id,
