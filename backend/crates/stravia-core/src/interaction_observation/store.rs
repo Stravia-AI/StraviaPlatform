@@ -1,13 +1,14 @@
 use super::manifest_index::DebugTraceIndex;
+use anyhow::Context;
 use serde_json::Value;
 use sqlx::{PgPool, Row, SqlitePool};
 use std::{borrow::Cow, sync::Arc};
 
 use super::content_refs::{text_content, value_content};
-use super::event_writes::{BlockRow, EventWrites, ToolRow};
+use super::event_writes::{BlockRow, EventWrites};
 use super::types::{
     ConfirmedUsage, CredentialDiscovery, IngressStart, ObservationEvent, RejectedOutcome, RunEvent,
-    RunOutcome, RunStart,
+    RunOutcome, RunStart, parse_item_block_id,
 };
 use crate::content_store::Content;
 use crate::pricing::{AttemptAmounts, BillingOutcome, CostBasis};
@@ -39,6 +40,18 @@ pub(super) struct Admission<'a> {
     pub diagnostic_source_run_id: Option<&'a str>,
     pub interrupt_parent: bool,
     pub now: i64,
+    /// 与准入同一事务落库的随附事件（父链缺口、Retained Tail 诊断），按序紧随 `run_admitted`。
+    /// 它们是可选诊断：写入失败只回滚随附部分，准入本身照常提交。
+    pub follow_ups: &'a [RunEvent],
+}
+
+/// 准入结果。`event`（`run_admitted`）必定已提交；随附事件整体成败，失败原因留在
+/// `follow_up_failure`，由调用方决定记缺口还是只告警。
+#[derive(Debug)]
+pub(super) struct Admitted {
+    pub event: ObservationEvent,
+    pub follow_ups: Vec<ObservationEvent>,
+    pub follow_up_failure: Option<anyhow::Error>,
 }
 
 pub(super) struct Rejection<'a> {
@@ -74,6 +87,156 @@ fn extra_slots(start: &TurnStart<'_>) -> (usize, usize) {
         (usize::from(has_tools), 0)
     } else {
         (0, usize::from(has_input))
+    }
+}
+
+/// 一次收到的客户端工具结果在写入前的准备：逐项元数据与待登记正文。
+/// 首轮写入与独立的工具结果写入共用，保证两条路径对同一批事件的取舍一致。
+struct PreparedTools {
+    /// `(tool_id, is_error)`，与 `units` 同序，下标即 ordinal。
+    tools: Vec<(String, bool)>,
+    units: Vec<Content>,
+    /// 合成事件行的发生时间：批内首个结果的到达时间。
+    first_at: i64,
+    /// 批内最晚的到达时间。
+    latest_at: i64,
+}
+
+impl PreparedTools {
+    fn new(events: &[(RunEvent, i64)]) -> anyhow::Result<Self> {
+        let first_at = events
+            .first()
+            .map(|(_, at)| *at)
+            .context("client tool result batch is empty")?;
+        let mut tools = Vec::with_capacity(events.len());
+        let mut units = Vec::with_capacity(events.len());
+        let mut latest_at = first_at;
+        for (event, at) in events {
+            let RunEvent::ClientToolResult {
+                tool_id,
+                content,
+                is_error,
+            } = event
+            else {
+                anyhow::bail!("client tool result batch contains another event kind");
+            };
+            tools.push((tool_id.clone(), *is_error));
+            units.push(value_content(content));
+            latest_at = latest_at.max(*at);
+        }
+        Ok(Self {
+            tools,
+            units,
+            first_at,
+            latest_at,
+        })
+    }
+}
+
+/// Turn 开始前缓冲的普通事件（凭据映射），序列化在开启事务之前完成。
+struct PreparedLeading<'a> {
+    event: &'a RunEvent,
+    at: i64,
+    kind: String,
+    payload: Value,
+}
+
+/// 首轮写入里与后端无关的准备：序列化、拆分正文单元、汇总活动时间与事件条数。
+struct PreparedTurnStart<'a> {
+    /// 合并了首个 attempt 的 `model_turn_started` 载荷。
+    turn_payload: Value,
+    leading: Vec<PreparedLeading<'a>>,
+    input_units: Option<Vec<Content>>,
+    tools: Option<PreparedTools>,
+    /// 本次写入涉及的最晚事件时间（不含 attempt 开始时间）。
+    latest_at: i64,
+    /// 本次写入产生的事件行数，即需要预占的序号个数。
+    durable_count: usize,
+}
+
+impl<'a> PreparedTurnStart<'a> {
+    fn new(start: &TurnStart<'a>) -> anyhow::Result<Self> {
+        let mut turn_attrs = attrs_without_kind(start.turn)?;
+        if let Some(attempt) = start.attempt {
+            turn_attrs.insert(
+                "attempt".into(),
+                Value::Object(attrs_without_kind(attempt)?),
+            );
+            turn_attrs.insert("attempt_at".into(), Value::from(start.attempt_at));
+        }
+        let mut latest_at = start.at;
+        let mut leading = Vec::with_capacity(start.leading.len());
+        // 不携带发现的凭据映射没有可展示内容，与批量落库路径一样不占事件行。
+        for (event, at) in start
+            .leading
+            .iter()
+            .filter(|(event, _)| !is_empty_credential_mapping(event))
+        {
+            let payload = serde_json::to_value(event)?;
+            let kind = event_kind(&payload)?;
+            latest_at = latest_at.max(*at);
+            leading.push(PreparedLeading {
+                event,
+                at: *at,
+                kind,
+                payload,
+            });
+        }
+        let input_units = start.input.map(split_user_input);
+        if input_units.is_some() {
+            latest_at = latest_at.max(start.input_at);
+        }
+        let tools = (!start.tool_results.is_empty())
+            .then(|| PreparedTools::new(start.tool_results))
+            .transpose()?;
+        if let Some(tools) = &tools {
+            latest_at = latest_at.max(tools.latest_at);
+        }
+        let durable_count = 1
+            + leading.len()
+            + usize::from(input_units.is_some())
+            + usize::from(tools.is_some());
+        Ok(Self {
+            turn_payload: Value::Object(turn_attrs),
+            leading,
+            input_units,
+            tools,
+            latest_at,
+            durable_count,
+        })
+    }
+}
+
+/// 一次首轮写入分到的事件序号按角色排开：Turn 开始，随后是前置事件，
+/// 最后是输入与工具结果两个额外事件（先后按生产方到达顺序）。序号取自后端实际分配的值，不假设连续。
+struct TurnLayout<'s> {
+    turn: i64,
+    leading: &'s [i64],
+    /// 首个 attempt 并入 Turn 开始行，它的投影行记录最后一个前置事件（无前置则 Turn 开始）的序号。
+    attempt: i64,
+    input: Option<i64>,
+    tools: Option<i64>,
+    last: i64,
+}
+
+impl<'s> TurnLayout<'s> {
+    fn new(start: &TurnStart<'_>, leading: usize, sequences: &'s [i64]) -> anyhow::Result<Self> {
+        let has_input = start.input.is_some();
+        let has_tools = !start.tool_results.is_empty();
+        anyhow::ensure!(
+            sequences.len() == 1 + leading + usize::from(has_input) + usize::from(has_tools),
+            "turn start allocated an unexpected number of event sequences"
+        );
+        let (input_slot, tool_slot) = extra_slots(start);
+        let extras = &sequences[1 + leading..];
+        Ok(Self {
+            turn: sequences[0],
+            leading: &sequences[1..=leading],
+            attempt: sequences[leading],
+            input: has_input.then(|| extras[input_slot]),
+            tools: has_tools.then(|| extras[tool_slot]),
+            last: sequences.iter().copied().max().unwrap_or(sequences[0]),
+        })
     }
 }
 
@@ -429,7 +592,7 @@ impl ObservationStore {
         name = "observation.writer.admit_persist",
         skip_all
     )]
-    pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
+    pub(super) async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<Admitted> {
         match self {
             Self::Sqlite(pool, _) => {
                 // 先取得写锁，避免读取父状态后升级事务因并发写入而丢失子 Interaction。
@@ -452,7 +615,11 @@ impl ObservationStore {
                     )
                     .await?;
                 }
-                let sequence = next_sqlite(&mut tx).await?;
+                // 准入事件与随附事件一次预占连续序号。
+                let first = next_sqlite_batch(&mut tx, 1 + admission.follow_ups.len()).await?;
+                let sequence = first;
+                let follow_up_sequences: Vec<i64> =
+                    (first + 1..=first + i64::try_from(admission.follow_ups.len())?).collect();
                 sqlx::query("INSERT OR IGNORE INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?,?)")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
@@ -480,17 +647,39 @@ impl ObservationStore {
                     },
                 )
                 .await?;
+                let mut follow_ups = Vec::new();
+                let mut follow_up_failure = None;
+                if !admission.follow_ups.is_empty() {
+                    // 随附事件是可选诊断：失败时只回滚到保存点，准入照常提交。
+                    let mut savepoint = tx.begin().await?;
+                    match write_follow_ups_sqlite(&mut savepoint, &admission, &follow_up_sequences)
+                        .await
+                    {
+                        Ok(events) => {
+                            savepoint.commit().await?;
+                            follow_ups = events;
+                        }
+                        Err(error) => {
+                            savepoint.rollback().await?;
+                            follow_up_failure = Some(error);
+                        }
+                    }
+                }
                 tx.commit().await?;
                 connection.finish().await?;
-                Ok(event(
-                    sequence,
-                    admission.now,
-                    Some(admission.interaction_id),
-                    Some(&admission.start.id),
-                    None,
-                    "run_admitted",
-                    Value::Null,
-                ))
+                Ok(Admitted {
+                    event: event(
+                        sequence,
+                        admission.now,
+                        Some(admission.interaction_id),
+                        Some(&admission.start.id),
+                        None,
+                        "run_admitted",
+                        Value::Null,
+                    ),
+                    follow_ups,
+                    follow_up_failure,
+                })
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
@@ -511,10 +700,15 @@ impl ObservationStore {
                     )
                     .await?;
                 }
-                let sequence: i64 =
-                    sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
-                        .fetch_one(&mut *tx)
-                        .await?;
+                // 准入事件与随附事件一次取回实际序列值：并发写入下 nextval 跨批不连续。
+                let mut sequences: Vec<i64> = sqlx::query_scalar(
+                    "SELECT nextval('observation_event_sequence') FROM generate_series(1,$1)",
+                )
+                .bind(checked_event_count(1 + admission.follow_ups.len())?)
+                .fetch_all(&mut *tx)
+                .await?;
+                let sequence = sequences.remove(0);
+                let follow_up_sequences = sequences;
                 sqlx::query("INSERT INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12,$13) ON CONFLICT (id) DO NOTHING")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
                     .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
@@ -542,16 +736,38 @@ impl ObservationStore {
                     },
                 )
                 .await?;
+                let mut follow_ups = Vec::new();
+                let mut follow_up_failure = None;
+                if !admission.follow_ups.is_empty() {
+                    // 随附事件是可选诊断：失败时只回滚到保存点，准入照常提交。
+                    let mut savepoint = tx.begin().await?;
+                    match write_follow_ups_postgres(&mut savepoint, &admission, &follow_up_sequences)
+                        .await
+                    {
+                        Ok(events) => {
+                            savepoint.commit().await?;
+                            follow_ups = events;
+                        }
+                        Err(error) => {
+                            savepoint.rollback().await?;
+                            follow_up_failure = Some(error);
+                        }
+                    }
+                }
                 tx.commit().await?;
-                Ok(event(
-                    sequence,
-                    admission.now,
-                    Some(admission.interaction_id),
-                    Some(&admission.start.id),
-                    None,
-                    "run_admitted",
-                    Value::Null,
-                ))
+                Ok(Admitted {
+                    event: event(
+                        sequence,
+                        admission.now,
+                        Some(admission.interaction_id),
+                        Some(&admission.start.id),
+                        None,
+                        "run_admitted",
+                        Value::Null,
+                    ),
+                    follow_ups,
+                    follow_up_failure,
+                })
             }
         }
     }
@@ -605,6 +821,7 @@ impl ObservationStore {
 
     /// 首轮写入：Turn 开始行合并首个 attempt 开始，并携带用户输入与客户端工具结果。
     /// 四类事实来自同一源批次，必须一次事务落库；任何一步失败都不能留下半轮观测。
+    /// Run 行不存在（准入未能落库）时返回 `None`：没有父行就没有可挂靠的子事实。
     #[tracing::instrument(
         target = "stravia::perf",
         name = "observation.writer.persist_turn_start",
@@ -615,419 +832,73 @@ impl ObservationStore {
         interaction_id: &str,
         run_id: &str,
         start: TurnStart<'_>,
-    ) -> anyhow::Result<Vec<ObservationEvent>> {
-        let durable_count = 1
-            + start.leading.len()
-            + usize::from(start.input.is_some())
-            + usize::from(!start.tool_results.is_empty());
+    ) -> anyhow::Result<Option<Vec<ObservationEvent>>> {
+        let prepared = PreparedTurnStart::new(&start)?;
+        let count = prepared.durable_count;
         match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-                let mut writes = EventWrites::new(interaction_id, run_id);
-                let principal: Option<String> = sqlx::query_scalar(
-                    "SELECT i.principal FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=? AND i.id=?",
+                let owner: Option<(String, String)> = sqlx::query_as(
+                    "SELECT i.principal,i.root_run_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=? AND i.id=?",
                 )
                 .bind(run_id)
                 .bind(interaction_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some(principal) = principal else {
+                let Some((principal, root_run_id)) = owner else {
                     tx.rollback().await?;
                     connection.finish().await?;
-                    return Ok(Vec::new());
+                    return Ok(None);
                 };
-                let root_run_id: String = sqlx::query_scalar(
-                    "SELECT root_run_id FROM interaction_observations WHERE id=?",
-                )
-                .bind(interaction_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let mut sequence = next_sqlite_batch(&mut tx, durable_count).await?;
-                let turn_sequence = sequence;
-                let mut result = Vec::with_capacity(durable_count);
-                let mut latest_at = start.at;
-                apply_sqlite(
+                let first = next_sqlite_batch(&mut tx, count).await?;
+                let sequences: Vec<i64> = (first..first + i64::try_from(count)?).collect();
+                let result = write_turn_start_sqlite(
                     &mut tx,
                     interaction_id,
                     run_id,
-                    start.turn,
-                    turn_sequence,
-                    start.at,
-                    None,
+                    &principal,
+                    root_run_id == run_id,
+                    &start,
+                    prepared,
+                    &sequences,
                 )
                 .await?;
-                let mut turn_attrs = attrs_without_kind(start.turn)?;
-                if let Some(attempt) = start.attempt {
-                    apply_sqlite(
-                        &mut tx,
-                        interaction_id,
-                        run_id,
-                        attempt,
-                        turn_sequence + i64::try_from(start.leading.len())?,
-                        start.attempt_at,
-                        None,
-                    )
-                    .await?;
-                    turn_attrs.insert(
-                        "attempt".into(),
-                        Value::Object(attrs_without_kind(attempt)?),
-                    );
-                    turn_attrs.insert("attempt_at".into(), Value::from(start.attempt_at));
-                }
-                let turn_payload = Value::Object(turn_attrs);
-                writes.push_event(turn_sequence, start.at, "model_turn_started", &turn_payload)?;
-                result.push(event(
-                    turn_sequence,
-                    start.at,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "model_turn_started",
-                    turn_payload,
-                ));
-                for (leading, at) in start.leading {
-                    sequence += 1;
-                    let payload = serde_json::to_value(leading)?;
-                    let kind = payload["kind"]
-                        .as_str()
-                        .unwrap_or("observation_gap")
-                        .to_owned();
-                    apply_sqlite(
-                        &mut tx,
-                        interaction_id,
-                        run_id,
-                        leading,
-                        sequence,
-                        *at,
-                        None,
-                    )
-                    .await?;
-                    writes.push_event(sequence, *at, &kind, &payload)?;
-                    // 复用与事件同一事务登记（与 persist_ordered_run_events 一致）：侧栏只读登记表。
-                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = leading {
-                        upsert_credential_mapping_reuses_sqlite(
-                            &mut tx,
-                            interaction_id,
-                            Some(run_id),
-                            *at,
-                            discoveries,
-                        )
-                        .await?;
-                    }
-                    latest_at = latest_at.max(*at);
-                    result.push(event(
-                        sequence,
-                        *at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        payload,
-                    ));
-                }
-                let (input_slot, tool_slot) = extra_slots(&start);
-                let first_extra = sequence + 1;
-                let last_sequence = turn_sequence + i64::try_from(durable_count)? - 1;
-                let mut root_input_sequence = None;
-                if let Some(input) = start.input {
-                    let sequence = first_extra + i64::try_from(input_slot)?;
-                    let mut units = split_user_input(input);
-                    let content_ids =
-                        super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
-                    writes.push_event(
-                        sequence,
-                        start.input_at,
-                        "user_input_recorded",
-                        &Value::Null,
-                    )?;
-                    writes.push_refs(sequence, &content_ids)?;
-                    if root_run_id == run_id {
-                        root_input_sequence = Some(sequence);
-                    }
-                    latest_at = latest_at.max(start.input_at);
-                    result.push(event(
-                        sequence,
-                        start.input_at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        "user_input_recorded",
-                        Value::Null,
-                    ));
-                }
-                if !start.tool_results.is_empty() {
-                    let tool_sequence = first_extra + i64::try_from(tool_slot)?;
-                    let mut latest_tool_at = start.at;
-                    writes.push_event(
-                        tool_sequence,
-                        start.tool_results[0].1,
-                        "client_tool_result",
-                        &Value::Null,
-                    )?;
-                    let mut tools = Vec::with_capacity(start.tool_results.len());
-                    let mut units = Vec::with_capacity(start.tool_results.len());
-                    for (ordinal, (tool, at)) in start.tool_results.iter().enumerate() {
-                        let RunEvent::ClientToolResult {
-                            tool_id,
-                            content,
-                            is_error,
-                        } = tool
-                        else {
-                            continue;
-                        };
-                        tools.push((i64::try_from(ordinal)?, tool_id, *is_error));
-                        units.push(value_content(content));
-                        latest_tool_at = latest_tool_at.max(*at);
-                    }
-                    let content_ids =
-                        super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
-                    for ((ordinal, tool_id, is_error), content_id) in
-                        tools.into_iter().zip(content_ids)
-                    {
-                        writes.push_tool(ToolRow {
-                            sequence: tool_sequence,
-                            ordinal,
-                            tool_id: tool_id.clone(),
-                            is_error,
-                            content_id,
-                        });
-                    }
-                    latest_at = latest_at.max(latest_tool_at);
-                    result.push(event(
-                        tool_sequence,
-                        start.tool_results[0].1,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        "client_tool_result",
-                        Value::Null,
-                    ));
-                }
-                // Run 与 Interaction 的活动字段各只写一次：先写 Run，Interaction 的状态重算
-                // 读取到的就是已推进的 Run 活动时间。
-                writes.flush_sqlite(&mut tx).await?;
-                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last_sequence).bind(run_id).execute(&mut *tx).await?;
-                if status_event(start.turn) || !start.tool_results.is_empty() {
-                    refresh_interaction_sqlite(
-                        &mut tx,
-                        interaction_id,
-                        last_sequence,
-                        root_input_sequence,
-                    )
-                    .await?;
-                } else {
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,input_sequence=COALESCE(?,input_sequence) WHERE id=?").bind(latest_at).bind(last_sequence).bind(root_input_sequence).bind(interaction_id).execute(&mut *tx).await?;
-                }
                 tx.commit().await?;
                 connection.finish().await?;
-                result.sort_by_key(|event| event.sequence);
-                Ok(result)
+                Ok(Some(result))
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
-                let mut writes = EventWrites::new(interaction_id, run_id);
-                let principal: Option<String> = sqlx::query_scalar(
-                    "SELECT i.principal FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=$1 AND i.id=$2 FOR UPDATE OF r",
+                let owner: Option<(String, String)> = sqlx::query_as(
+                    "SELECT i.principal,i.root_run_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=$1 AND i.id=$2 FOR UPDATE OF r",
                 )
                 .bind(run_id)
                 .bind(interaction_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some(principal) = principal else {
-                    return Ok(Vec::new());
+                let Some((principal, root_run_id)) = owner else {
+                    return Ok(None);
                 };
-                let root_run_id: String = sqlx::query_scalar(
-                    "SELECT root_run_id FROM interaction_observations WHERE id=$1",
-                )
-                .bind(interaction_id)
-                .fetch_one(&mut *tx)
-                .await?;
                 let sequences: Vec<i64> = sqlx::query_scalar(
                     "SELECT nextval('observation_event_sequence') FROM generate_series(1,$1)",
                 )
-                .bind(checked_event_count(durable_count)?)
+                .bind(checked_event_count(count)?)
                 .fetch_all(&mut *tx)
                 .await?;
-                let mut sequences = sequences.into_iter();
-                let turn_sequence = sequences.next().expect("allocated turn sequence");
-                let mut result = Vec::with_capacity(durable_count);
-                let mut latest_at = start.at;
-                apply_postgres(
+                let result = write_turn_start_postgres(
                     &mut tx,
                     interaction_id,
                     run_id,
-                    start.turn,
-                    turn_sequence,
-                    start.at,
-                    None,
+                    &principal,
+                    root_run_id == run_id,
+                    &start,
+                    prepared,
+                    &sequences,
                 )
                 .await?;
-                let mut turn_attrs = attrs_without_kind(start.turn)?;
-                if let Some(attempt) = start.attempt {
-                    apply_postgres(
-                        &mut tx,
-                        interaction_id,
-                        run_id,
-                        attempt,
-                        turn_sequence + i64::try_from(start.leading.len())?,
-                        start.attempt_at,
-                        None,
-                    )
-                    .await?;
-                    turn_attrs.insert(
-                        "attempt".into(),
-                        Value::Object(attrs_without_kind(attempt)?),
-                    );
-                    turn_attrs.insert("attempt_at".into(), Value::from(start.attempt_at));
-                }
-                let turn_payload = Value::Object(turn_attrs);
-                writes.push_event(turn_sequence, start.at, "model_turn_started", &turn_payload)?;
-                result.push(event(
-                    turn_sequence,
-                    start.at,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "model_turn_started",
-                    turn_payload,
-                ));
-                for (leading, at) in start.leading {
-                    let leading_sequence = sequences.next().expect("allocated leading sequence");
-                    let payload = serde_json::to_value(leading)?;
-                    let kind = payload["kind"]
-                        .as_str()
-                        .unwrap_or("observation_gap")
-                        .to_owned();
-                    apply_postgres(
-                        &mut tx,
-                        interaction_id,
-                        run_id,
-                        leading,
-                        leading_sequence,
-                        *at,
-                        None,
-                    )
-                    .await?;
-                    writes.push_event(leading_sequence, *at, &kind, &payload)?;
-                    // 复用与事件同一事务登记（与 persist_ordered_run_events 一致）：侧栏只读登记表。
-                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = leading {
-                        upsert_credential_mapping_reuses_postgres(
-                            &mut tx,
-                            interaction_id,
-                            Some(run_id),
-                            *at,
-                            discoveries,
-                        )
-                        .await?;
-                    }
-                    latest_at = latest_at.max(*at);
-                    result.push(event(
-                        leading_sequence,
-                        *at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        payload,
-                    ));
-                }
-                let (input_slot, tool_slot) = extra_slots(&start);
-                let extras: Vec<i64> = sequences.collect();
-                let mut root_input_sequence = None;
-                if let Some(text) = start.input {
-                    let input_sequence = extras[input_slot];
-                    let mut units = split_user_input(text);
-                    let content_ids =
-                        super::content_refs::intern_postgres(&mut tx, &principal, &mut units)
-                            .await?;
-                    writes.push_event(
-                        input_sequence,
-                        start.input_at,
-                        "user_input_recorded",
-                        &Value::Null,
-                    )?;
-                    writes.push_refs(input_sequence, &content_ids)?;
-                    if root_run_id == run_id {
-                        root_input_sequence = Some(input_sequence);
-                    }
-                    latest_at = latest_at.max(start.input_at);
-                    result.push(event(
-                        input_sequence,
-                        start.input_at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        "user_input_recorded",
-                        Value::Null,
-                    ));
-                }
-                if !start.tool_results.is_empty() {
-                    let tool_sequence = extras[tool_slot];
-                    let mut latest_tool_at = start.at;
-                    writes.push_event(
-                        tool_sequence,
-                        start.tool_results[0].1,
-                        "client_tool_result",
-                        &Value::Null,
-                    )?;
-                    let mut tools = Vec::with_capacity(start.tool_results.len());
-                    let mut units = Vec::with_capacity(start.tool_results.len());
-                    for (ordinal, (tool, at)) in start.tool_results.iter().enumerate() {
-                        let RunEvent::ClientToolResult {
-                            tool_id,
-                            content,
-                            is_error,
-                        } = tool
-                        else {
-                            continue;
-                        };
-                        tools.push((i64::try_from(ordinal)?, tool_id, *is_error));
-                        units.push(value_content(content));
-                        latest_tool_at = latest_tool_at.max(*at);
-                    }
-                    let content_ids =
-                        super::content_refs::intern_postgres(&mut tx, &principal, &mut units)
-                            .await?;
-                    for ((ordinal, tool_id, is_error), content_id) in
-                        tools.into_iter().zip(content_ids)
-                    {
-                        writes.push_tool(ToolRow {
-                            sequence: tool_sequence,
-                            ordinal,
-                            tool_id: tool_id.clone(),
-                            is_error,
-                            content_id,
-                        });
-                    }
-                    latest_at = latest_at.max(latest_tool_at);
-                    result.push(event(
-                        tool_sequence,
-                        start.tool_results[0].1,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        "client_tool_result",
-                        Value::Null,
-                    ));
-                }
-                result.sort_by_key(|event| event.sequence);
-                let last_sequence = result.last().map_or(turn_sequence, |event| event.sequence);
-                writes.flush_postgres(&mut tx).await?;
-                sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last_sequence).bind(run_id).execute(&mut *tx).await?;
-                if status_event(start.turn) || !start.tool_results.is_empty() {
-                    refresh_interaction_postgres(
-                        &mut tx,
-                        interaction_id,
-                        last_sequence,
-                        root_input_sequence,
-                    )
-                    .await?;
-                } else {
-                    sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,input_sequence=COALESCE($3,input_sequence) WHERE id=$4").bind(latest_at).bind(last_sequence).bind(root_input_sequence).bind(interaction_id).execute(&mut *tx).await?;
-                }
                 tx.commit().await?;
-                Ok(result)
+                Ok(Some(result))
             }
         }
     }
@@ -1220,7 +1091,8 @@ impl ObservationStore {
         if events.is_empty() {
             return Ok(None);
         }
-        match self {
+        let mut tools = PreparedTools::new(events)?;
+        let sequence = match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -1231,51 +1103,18 @@ impl ObservationStore {
                         .fetch_one(&mut *tx)
                         .await?;
                 let sequence = next_sqlite(&mut tx).await?;
-                writes.push_event(sequence, events[0].1, "client_tool_result", &Value::Null)?;
-                let mut latest_at = events[0].1;
-                let mut tools = Vec::with_capacity(events.len());
-                let mut units = Vec::with_capacity(events.len());
-                for (event, at) in events {
-                    let RunEvent::ClientToolResult {
-                        tool_id,
-                        content,
-                        is_error,
-                    } = event
-                    else {
-                        anyhow::bail!("client tool result batch contains another event kind");
-                    };
-                    tools.push((tool_id, *is_error));
-                    units.push(value_content(content));
-                    latest_at = latest_at.max(*at);
-                }
                 // 同批工具结果一次解析所有正文，避免逐条往返。
                 let content_ids =
-                    super::content_refs::intern_sqlite(&mut tx, &principal, &mut units).await?;
-                for (ordinal, ((tool_id, is_error), content_id)) in
-                    tools.into_iter().zip(content_ids).enumerate()
-                {
-                    writes.push_tool(ToolRow {
-                        sequence,
-                        ordinal: i64::try_from(ordinal)?,
-                        tool_id: tool_id.clone(),
-                        is_error,
-                        content_id,
-                    });
-                }
+                    super::content_refs::intern_sqlite(&mut tx, &principal, &mut tools.units)
+                        .await?;
+                writes.push_event(sequence, tools.first_at, "client_tool_result", &Value::Null)?;
+                writes.push_tool_results(sequence, &tools.tools, &content_ids)?;
                 writes.flush_sqlite(&mut tx).await?;
-                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(tools.latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
                 recompute_status_sqlite(&mut tx, interaction_id, sequence).await?;
                 tx.commit().await?;
                 connection.finish().await?;
-                Ok(Some(event(
-                    sequence,
-                    events[0].1,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "client_tool_result",
-                    Value::Null,
-                )))
+                sequence
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
@@ -1290,52 +1129,27 @@ impl ObservationStore {
                     sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                         .fetch_one(&mut *tx)
                         .await?;
-                writes.push_event(sequence, events[0].1, "client_tool_result", &Value::Null)?;
-                let mut latest_at = events[0].1;
-                let mut tools = Vec::with_capacity(events.len());
-                let mut units = Vec::with_capacity(events.len());
-                for (event, at) in events {
-                    let RunEvent::ClientToolResult {
-                        tool_id,
-                        content,
-                        is_error,
-                    } = event
-                    else {
-                        anyhow::bail!("client tool result batch contains another event kind");
-                    };
-                    tools.push((tool_id, *is_error));
-                    units.push(value_content(content));
-                    latest_at = latest_at.max(*at);
-                }
-                // 同批工具结果一次解析所有正文，避免逐条往返。
                 let content_ids =
-                    super::content_refs::intern_postgres(&mut tx, &principal, &mut units).await?;
-                for (ordinal, ((tool_id, is_error), content_id)) in
-                    tools.into_iter().zip(content_ids).enumerate()
-                {
-                    writes.push_tool(ToolRow {
-                        sequence,
-                        ordinal: i64::try_from(ordinal)?,
-                        tool_id: tool_id.clone(),
-                        is_error,
-                        content_id,
-                    });
-                }
+                    super::content_refs::intern_postgres(&mut tx, &principal, &mut tools.units)
+                        .await?;
+                writes.push_event(sequence, tools.first_at, "client_tool_result", &Value::Null)?;
+                writes.push_tool_results(sequence, &tools.tools, &content_ids)?;
                 writes.flush_postgres(&mut tx).await?;
-                sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
+                sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(tools.latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
                 recompute_status_postgres(&mut tx, interaction_id, sequence).await?;
                 tx.commit().await?;
-                Ok(Some(event(
-                    sequence,
-                    events[0].1,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "client_tool_result",
-                    Value::Null,
-                )))
+                sequence
             }
-        }
+        };
+        Ok(Some(event(
+            sequence,
+            tools.first_at,
+            Some(interaction_id),
+            Some(run_id),
+            None,
+            "client_tool_result",
+            Value::Null,
+        )))
     }
 
     /// 轮次结算：最后一个 attempt 的结束与用量并入 Turn 结束行，同一事务只写一行事件。
@@ -1562,41 +1376,101 @@ impl ObservationStore {
                 crate::storage_test_faults::inject_postgres(pool, "observation").await?;
             }
         }
-        struct PreparedBlock {
-            channel: &'static str,
-            model_turn_id: Option<String>,
-            attempt_id: Option<String>,
-            item_ordinal: i64,
-            complete: bool,
-            envelope: Option<Value>,
-            units: Vec<Content>,
+        let batch = self.prepare_ordered_events(events, received).await?;
+        if batch.events.is_empty() {
+            return Ok(Vec::new());
         }
-        struct PreparedToolResult {
-            tool_id: String,
-            is_error: bool,
-            unit: Content,
+        let count = batch.durable_count;
+        match self {
+            Self::Sqlite(pool, _) => {
+                // 先取得写锁再读投影游标：延迟的 WAL 读事务无法在并发的准入/存储提交之后升级。
+                let mut connection = pool.acquire_write().await?;
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+                // 过滤后才按批预占：被跳过的 Wire/空 credential 不占号。
+                let current_sequence: i64 = sqlx::query_scalar(
+                    "SELECT last_event_sequence FROM inference_run_observations WHERE id=?",
+                )
+                .bind(run_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let sequences: Vec<i64> = if count > 0 {
+                    let first = next_sqlite_batch(&mut tx, count).await?;
+                    (first..first + i64::try_from(count)?).collect()
+                } else {
+                    Vec::new()
+                };
+                let principal: String =
+                    sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=?")
+                        .bind(interaction_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                let result = write_ordered_sqlite(
+                    &mut tx,
+                    interaction_id,
+                    run_id,
+                    &principal,
+                    batch,
+                    &sequences,
+                    current_sequence,
+                )
+                .await?;
+                tx.commit().await?;
+                connection.finish().await?;
+                Ok(result)
+            }
+            Self::Postgres(pool, _) => {
+                let mut tx = pool.begin().await?;
+                let current_sequence: i64 = sqlx::query_scalar(
+                    "SELECT last_event_sequence FROM inference_run_observations WHERE id=$1",
+                )
+                .bind(run_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                // 按批取回实际序列值再配对：并发写入下 nextval 跨批不连续，不能自行累加。
+                let sequences: Vec<i64> = if count > 0 {
+                    sqlx::query_scalar(
+                        "SELECT nextval('observation_event_sequence') FROM generate_series(1,$1)",
+                    )
+                    .bind(checked_event_count(count)?)
+                    .fetch_all(&mut *tx)
+                    .await?
+                } else {
+                    Vec::new()
+                };
+                let principal: String = sqlx::query_scalar(
+                    "SELECT principal FROM interaction_observations WHERE id=$1",
+                )
+                .bind(interaction_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let result = write_ordered_postgres(
+                    &mut tx,
+                    interaction_id,
+                    run_id,
+                    &principal,
+                    batch,
+                    &sequences,
+                    current_sequence,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(result)
+            }
         }
-        struct PreparedEvent<'a> {
-            source_index: usize,
-            event: &'a RunEvent,
-            at: i64,
-            kind: String,
-            payload: Value,
-            block: Option<PreparedBlock>,
-            tool_results: Option<Vec<PreparedToolResult>>,
-            /// Usage written by this event's single attempt UPDATE. A finish with
-            /// `None` here keeps the durable row's already recorded usage.
-            finish_usage: Option<Cow<'a, ConfirmedUsage>>,
-            /// A finish whose folded usage came from same-batch confirmations;
-            /// those confirmations must not write the attempt row a second time.
-            absorbs_batch_usage: bool,
-        }
+    }
+
+    /// 事务外的批准备：过滤、序列化、折叠用量、解析来源。两个后端共用同一份结果。
+    async fn prepare_ordered_events<'a>(
+        &self,
+        events: &'a [(RunEvent, Option<String>, i64)],
+        received: &[(i64, u64)],
+    ) -> anyhow::Result<PreparedBatch<'a>> {
         let mut prepared = Vec::with_capacity(events.len());
+        let mut tool_units = Vec::new();
         let mut absorbed_usage = std::collections::HashSet::new();
         for (index, (run_event, _block_id, now)) in events.iter().enumerate() {
             let now = *now;
-            if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries, .. } | RunEvent::CredentialMappingsReused { discoveries, .. } if discoveries.is_empty())
-            {
+            if is_empty_credential_mapping(run_event) {
                 continue;
             }
             if matches!(
@@ -1609,12 +1483,10 @@ impl ObservationStore {
                 continue;
             }
             let mut payload = serde_json::to_value(run_event)?;
-            let kind = payload["kind"]
-                .as_str()
-                .unwrap_or("observation_gap")
-                .to_owned();
+            let kind = event_kind(&payload)?;
             let mut block = None;
-            let mut tool_results = None;
+            let mut tool_result = None;
+            let mut tool_unit = None;
             match run_event {
                 RunEvent::ModelThinking {
                     model_turn_id,
@@ -1630,7 +1502,7 @@ impl ObservationStore {
                         channel: "thinking",
                         model_turn_id: Some(model_turn_id.clone()),
                         attempt_id: Some(attempt_id.clone()),
-                        item_ordinal: block_item_ordinal(block_id),
+                        item_ordinal: i64::try_from(parse_item_block_id(block_id)?)?,
                         complete: *complete,
                         envelope: split.envelope,
                         units: split.units,
@@ -1649,7 +1521,7 @@ impl ObservationStore {
                         channel: "visible",
                         model_turn_id: None,
                         attempt_id: None,
-                        item_ordinal: block_item_ordinal(block_id),
+                        item_ordinal: i64::try_from(parse_item_block_id(block_id)?)?,
                         complete: *complete,
                         envelope: split.envelope,
                         units: split.units,
@@ -1661,11 +1533,8 @@ impl ObservationStore {
                     content,
                     is_error,
                 } => {
-                    tool_results = Some(vec![PreparedToolResult {
-                        tool_id: tool_id.clone(),
-                        is_error: *is_error,
-                        unit: value_content(content),
-                    }]);
+                    tool_result = Some((tool_id.clone(), *is_error));
+                    tool_unit = Some(value_content(content));
                     payload = Value::Null;
                 }
                 _ => {}
@@ -1749,7 +1618,8 @@ impl ObservationStore {
                 }
             }
             // 首次接收时间与接收顺序随事件落盘：块与迟到的规范收尾可能晚于其后到达的事件写入，
-            // 读取方只能靠这两个值还原客户端实际看到的先后。
+            // 读取方只能靠这两个值还原客户端实际看到的先后。批落库独有：Turn 开始前的前置事件
+            // 与准入随附事件在到达时已按序落库，没有迟到问题，不带这两个值。
             if let Some((first_received_at, receive_order)) = received.get(index)
                 && !matches!(run_event, RunEvent::UsageConfirmed { .. })
             {
@@ -1769,7 +1639,7 @@ impl ObservationStore {
                         kind,
                         payload: Value::Null,
                         block,
-                        tool_results,
+                        tool_result,
                         finish_usage,
                         absorbs_batch_usage,
                     });
@@ -1780,6 +1650,8 @@ impl ObservationStore {
             if matches!(run_event, RunEvent::RequestFailed { .. }) {
                 payload = Value::Null;
             }
+            // 工具结果正文按事件顺序排列，写入时一次登记整批。
+            tool_units.extend(tool_unit);
             prepared.push(PreparedEvent {
                 source_index: index,
                 event: run_event,
@@ -1787,458 +1659,24 @@ impl ObservationStore {
                 kind,
                 payload,
                 block,
-                tool_results,
+                tool_result,
                 finish_usage,
                 absorbs_batch_usage,
             });
         }
-        if prepared.is_empty() {
-            return Ok(Vec::new());
-        }
-        let is_usage_absorbed =
-            |source_index: usize,
-             event: &RunEvent,
-             folded_attempts: &std::collections::HashSet<&str>| {
-                absorbed_usage.contains(&source_index)
-                    && matches!(event, RunEvent::UsageConfirmed { attempt_id, .. }
-                    if folded_attempts.contains(attempt_id.as_str()))
-            };
         let (durable_count, latest_at) = prepared
             .iter()
             .filter(|prepared| prepared.kind != "usage_confirmed")
             .fold((0, i64::MIN), |(count, latest), prepared| {
                 (count + 1, latest.max(prepared.at))
             });
-        let mut result = Vec::with_capacity(durable_count);
-        match self {
-            Self::Sqlite(pool, _) => {
-                // Acquire the writer lock before reading the projection cursor: a deferred
-                // WAL read cannot upgrade after a concurrent admission/storage commit.
-                let mut connection = pool.acquire_write().await?;
-                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-                // 过滤后才按批预占：被跳过的 Wire/空 credential 不占号。
-                let mut current_sequence: i64 = sqlx::query_scalar(
-                    "SELECT last_event_sequence FROM inference_run_observations WHERE id=?",
-                )
-                .bind(run_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let mut next_sequence = if durable_count > 0 {
-                    next_sqlite_batch(&mut tx, durable_count).await?
-                } else {
-                    current_sequence
-                };
-                let mut status_changed = false;
-                let mut folded_attempts = std::collections::HashSet::new();
-                let principal: String =
-                    sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=?")
-                        .bind(interaction_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
-                let mut writes = EventWrites::new(interaction_id, run_id);
-                for PreparedEvent {
-                    source_index,
-                    event: run_event,
-                    at,
-                    mut kind,
-                    mut payload,
-                    block,
-                    tool_results,
-                    finish_usage,
-                    absorbs_batch_usage,
-                } in prepared
-                {
-                    let attempt_id = match run_event {
-                        RunEvent::TargetAttemptFinished { attempt_id, .. }
-                        | RunEvent::UsageConfirmed { attempt_id, .. } => Some(attempt_id.as_str()),
-                        _ => None,
-                    };
-                    let absorbed = is_usage_absorbed(source_index, run_event, &folded_attempts);
-                    // 有界队列可能丢失父 Turn 开始；不能捏造父事实，也不能让子事件外键回滚整批。
-                    let gap;
-                    let run_event = if let RunEvent::TargetAttemptStarted {
-                        model_turn_id, ..
-                    } = run_event
-                    {
-                        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM model_turn_observations WHERE id=? AND run_id=?)")
-                            .bind(model_turn_id).bind(run_id).fetch_one(&mut *tx).await?;
-                        if exists {
-                            run_event
-                        } else {
-                            gap = RunEvent::ObservationGap {
-                                reason: "model_turn_start_unavailable".into(),
-                            };
-                            kind = "observation_gap".into();
-                            payload = serde_json::to_value(&gap)?;
-                            &gap
-                        }
-                    } else {
-                        run_event
-                    };
-                    if kind == "usage_confirmed" {
-                        if !absorbed {
-                            apply_sqlite(
-                                &mut tx,
-                                interaction_id,
-                                run_id,
-                                run_event,
-                                current_sequence,
-                                at,
-                                None,
-                            )
-                            .await?;
-                            if let RunEvent::UsageConfirmed {
-                                attempt_id, usage, ..
-                            } = run_event
-                            {
-                                writes.flush_sqlite(&mut tx).await?;
-                                refresh_finished_usage_sqlite(&mut tx, run_id, attempt_id, usage)
-                                    .await?;
-                            }
-                        }
-                        continue;
-                    }
-                    let sequence = next_sequence;
-                    next_sequence += 1;
-                    current_sequence = sequence;
-                    if let Some(mut block) = block {
-                        writes.push_event(sequence, at, &kind, &payload)?;
-                        let content_ids = super::content_refs::intern_sqlite(
-                            &mut tx,
-                            &principal,
-                            &mut block.units,
-                        )
-                        .await?;
-                        let envelope = block
-                            .envelope
-                            .map(|envelope| {
-                                Ok::<_, anyhow::Error>(crate::storage_codec::encode(
-                                    serde_json::to_vec(&envelope)?.into(),
-                                )?)
-                            })
-                            .transpose()?;
-                        writes.push_block(BlockRow {
-                            sequence,
-                            model_turn_id: block.model_turn_id.clone(),
-                            attempt_id: block.attempt_id.clone(),
-                            item_ordinal: block.item_ordinal,
-                            channel: block.channel,
-                            complete: block.complete,
-                            envelope,
-                        });
-                        writes.push_refs(sequence, &content_ids)?;
-
-                        result.push(event(
-                            sequence,
-                            at,
-                            Some(interaction_id),
-                            Some(run_id),
-                            None,
-                            &kind,
-                            Value::Null,
-                        ));
-                        continue;
-                    }
-                    if let Some(mut tool_results) = tool_results {
-                        writes.push_event(sequence, at, &kind, &payload)?;
-                        for (index, tool) in tool_results.iter_mut().enumerate() {
-                            let content_ids = super::content_refs::intern_sqlite(
-                                &mut tx,
-                                &principal,
-                                std::slice::from_mut(&mut tool.unit),
-                            )
-                            .await?;
-                            writes.push_tool(ToolRow {
-                                sequence,
-                                ordinal: i64::try_from(index)?,
-                                tool_id: tool.tool_id.clone(),
-                                is_error: tool.is_error,
-                                content_id: content_ids[0],
-                            });
-                        }
-                        status_changed = true;
-                        result.push(event(
-                            sequence,
-                            at,
-                            Some(interaction_id),
-                            Some(run_id),
-                            None,
-                            &kind,
-                            Value::Null,
-                        ));
-                        continue;
-                    }
-                    let wrote_usage = if absorbed {
-                        false
-                    } else {
-                        apply_sqlite(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            run_event,
-                            sequence,
-                            at,
-                            finish_usage.as_deref(),
-                        )
-                        .await?
-                    };
-                    if wrote_usage
-                        && absorbs_batch_usage
-                        && let Some(attempt_id) = attempt_id
-                    {
-                        folded_attempts.insert(attempt_id);
-                    }
-                    status_changed |= status_event(run_event);
-                    writes.push_event(sequence, at, &kind, &payload)?;
-                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
-                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
-                        upsert_credential_mapping_reuses_sqlite(
-                            &mut tx,
-                            interaction_id,
-                            Some(run_id),
-                            at,
-                            discoveries,
-                        )
-                        .await?;
-                    }
-                    result.push(event(
-                        sequence,
-                        at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        payload,
-                    ));
-                }
-                writes.flush_sqlite(&mut tx).await?;
-                if let Some(last) = result.last() {
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
-                    if status_changed {
-                        recompute_status_sqlite(&mut tx, interaction_id, last.sequence).await?;
-                    } else {
-                        sqlx::query("UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
-                    }
-                }
-                tx.commit().await?;
-                connection.finish().await?;
-            }
-            Self::Postgres(pool, _) => {
-                let mut tx = pool.begin().await?;
-                // 按批取回实际序列值再配对：并发写入下 nextval 跨批不连续，不能自行累加。
-                let mut current_sequence: i64 = sqlx::query_scalar(
-                    "SELECT last_event_sequence FROM inference_run_observations WHERE id=$1",
-                )
-                .bind(run_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let sequences: Vec<i64> = if durable_count > 0 {
-                    sqlx::query_scalar(
-                        "SELECT nextval('observation_event_sequence') FROM generate_series(1,$1)",
-                    )
-                    .bind(checked_event_count(durable_count)?)
-                    .fetch_all(&mut *tx)
-                    .await?
-                } else {
-                    Vec::new()
-                };
-                let mut sequences = sequences.into_iter();
-                let mut status_changed = false;
-                let mut folded_attempts = std::collections::HashSet::new();
-                let principal: String = sqlx::query_scalar(
-                    "SELECT principal FROM interaction_observations WHERE id=$1",
-                )
-                .bind(interaction_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let mut writes = EventWrites::new(interaction_id, run_id);
-                for PreparedEvent {
-                    source_index,
-                    event: run_event,
-                    at,
-                    mut kind,
-                    mut payload,
-                    block,
-                    tool_results,
-                    finish_usage,
-                    absorbs_batch_usage,
-                } in prepared
-                {
-                    let attempt_id = match run_event {
-                        RunEvent::TargetAttemptFinished { attempt_id, .. }
-                        | RunEvent::UsageConfirmed { attempt_id, .. } => Some(attempt_id.as_str()),
-                        _ => None,
-                    };
-                    let absorbed = is_usage_absorbed(source_index, run_event, &folded_attempts);
-                    // 与 SQLite 使用同一缺口语义，检查位于事务内以观察本批已写入的父 Turn。
-                    let gap;
-                    let run_event = if let RunEvent::TargetAttemptStarted {
-                        model_turn_id, ..
-                    } = run_event
-                    {
-                        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM model_turn_observations WHERE id=$1 AND run_id=$2)")
-                            .bind(model_turn_id).bind(run_id).fetch_one(&mut *tx).await?;
-                        if exists {
-                            run_event
-                        } else {
-                            gap = RunEvent::ObservationGap {
-                                reason: "model_turn_start_unavailable".into(),
-                            };
-                            kind = "observation_gap".into();
-                            payload = serde_json::to_value(&gap)?;
-                            &gap
-                        }
-                    } else {
-                        run_event
-                    };
-                    if kind == "usage_confirmed" {
-                        if !absorbed {
-                            apply_postgres(
-                                &mut tx,
-                                interaction_id,
-                                run_id,
-                                run_event,
-                                current_sequence,
-                                at,
-                                None,
-                            )
-                            .await?;
-                            if let RunEvent::UsageConfirmed {
-                                attempt_id, usage, ..
-                            } = run_event
-                            {
-                                writes.flush_postgres(&mut tx).await?;
-                                refresh_finished_usage_postgres(&mut tx, run_id, attempt_id, usage)
-                                    .await?;
-                            }
-                        }
-                        continue;
-                    }
-                    let sequence = sequences.next().expect("allocated durable event sequence");
-                    current_sequence = sequence;
-                    if let Some(mut block) = block {
-                        writes.push_event(sequence, at, &kind, &payload)?;
-                        let content_ids = super::content_refs::intern_postgres(
-                            &mut tx,
-                            &principal,
-                            &mut block.units,
-                        )
-                        .await?;
-                        let envelope = block
-                            .envelope
-                            .map(|envelope| {
-                                Ok::<_, anyhow::Error>(crate::storage_codec::encode(
-                                    serde_json::to_vec(&envelope)?.into(),
-                                )?)
-                            })
-                            .transpose()?;
-                        writes.push_block(BlockRow {
-                            sequence,
-                            model_turn_id: block.model_turn_id.clone(),
-                            attempt_id: block.attempt_id.clone(),
-                            item_ordinal: block.item_ordinal,
-                            channel: block.channel,
-                            complete: block.complete,
-                            envelope,
-                        });
-                        writes.push_refs(sequence, &content_ids)?;
-
-                        result.push(event(
-                            sequence,
-                            at,
-                            Some(interaction_id),
-                            Some(run_id),
-                            None,
-                            &kind,
-                            Value::Null,
-                        ));
-                        continue;
-                    }
-                    if let Some(mut tool_results) = tool_results {
-                        writes.push_event(sequence, at, &kind, &payload)?;
-                        for (index, tool) in tool_results.iter_mut().enumerate() {
-                            let content_ids = super::content_refs::intern_postgres(
-                                &mut tx,
-                                &principal,
-                                std::slice::from_mut(&mut tool.unit),
-                            )
-                            .await?;
-                            writes.push_tool(ToolRow {
-                                sequence,
-                                ordinal: i64::try_from(index)?,
-                                tool_id: tool.tool_id.clone(),
-                                is_error: tool.is_error,
-                                content_id: content_ids[0],
-                            });
-                        }
-                        status_changed = true;
-                        result.push(event(
-                            sequence,
-                            at,
-                            Some(interaction_id),
-                            Some(run_id),
-                            None,
-                            &kind,
-                            Value::Null,
-                        ));
-                        continue;
-                    }
-                    let wrote_usage = if absorbed {
-                        false
-                    } else {
-                        apply_postgres(
-                            &mut tx,
-                            interaction_id,
-                            run_id,
-                            run_event,
-                            sequence,
-                            at,
-                            finish_usage.as_deref(),
-                        )
-                        .await?
-                    };
-                    if wrote_usage
-                        && absorbs_batch_usage
-                        && let Some(attempt_id) = attempt_id
-                    {
-                        folded_attempts.insert(attempt_id);
-                    }
-                    status_changed |= status_event(run_event);
-                    writes.push_event(sequence, at, &kind, &payload)?;
-                    // 复用与事件同一事务落库：侧栏只读登记表，事件与登记行不能分叉。
-                    if let RunEvent::CredentialMappingsReused { discoveries, .. } = run_event {
-                        upsert_credential_mapping_reuses_postgres(
-                            &mut tx,
-                            interaction_id,
-                            Some(run_id),
-                            at,
-                            discoveries,
-                        )
-                        .await?;
-                    }
-                    result.push(event(
-                        sequence,
-                        at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        payload,
-                    ));
-                }
-                writes.flush_postgres(&mut tx).await?;
-                if let Some(last) = result.last() {
-                    sqlx::query("UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(run_id).execute(&mut *tx).await?;
-                    if status_changed {
-                        recompute_status_postgres(&mut tx, interaction_id, last.sequence).await?;
-                    } else {
-                        sqlx::query("UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3").bind(latest_at).bind(last.sequence).bind(interaction_id).execute(&mut *tx).await?;
-                    }
-                }
-                tx.commit().await?;
-            }
-        }
-        Ok(result)
+        Ok(PreparedBatch {
+            events: prepared,
+            tool_units,
+            absorbed_usage,
+            durable_count,
+            latest_at,
+        })
     }
 
     #[tracing::instrument(
@@ -3384,14 +2822,6 @@ pub(super) fn attrs_value(payload: &Value) -> Option<&Value> {
     }
 }
 
-/// 从 `{scope}:item:{n}` 取 item 序号；非法后缀按 0 处理（历史数据只有合法的两种形态）。
-fn block_item_ordinal(block_id: &str) -> i64 {
-    block_id
-        .rsplit_once(":item:")
-        .and_then(|(_, ordinal)| ordinal.parse().ok())
-        .unwrap_or(0)
-}
-
 /// 事件去掉 `kind` 后的独有属性；合并行（如 Turn 开始）用它拼装 attrs。
 fn attrs_without_kind(event: &RunEvent) -> anyhow::Result<serde_json::Map<String, Value>> {
     let Value::Object(mut object) = serde_json::to_value(event)? else {
@@ -4446,6 +3876,615 @@ fn status_event(event: &RunEvent) -> bool {
     )
 }
 
+/// 序列化后的事件载荷里的 `kind`。`RunEvent` 恒带 `kind` 标签；缺失说明序列化契约被破坏，
+/// 直接报错，不再落成 `observation_gap` 掩盖缺陷。
+fn event_kind(payload: &Value) -> anyhow::Result<String> {
+    payload["kind"]
+        .as_str()
+        .map(str::to_owned)
+        .context("serialized run event has no kind")
+}
+
+/// 不携带任何发现的凭据映射事件没有可展示的内容，所有写入路径一律不落库。
+/// 事件在到达写入路径之前（Turn 开始前置缓冲、批量落库）就按此谓词过滤，
+/// 保证各路径对同一事件的取舍一致。
+pub(super) fn is_empty_credential_mapping(event: &RunEvent) -> bool {
+    matches!(
+        event,
+        RunEvent::CredentialMappingsCreated { discoveries, .. }
+            | RunEvent::CredentialMappingsReused { discoveries, .. }
+            if discoveries.is_empty()
+    )
+}
+
+/// 事务内要落库的一个普通事件（不含正文块、工具结果与用量确认：它们各有专门的写入路径）。
+struct PlainEvent<'a> {
+    event: &'a RunEvent,
+    sequence: i64,
+    at: i64,
+    kind: &'a str,
+    payload: Value,
+    /// 随事件写入 attempt 行的用量（仅收尾事件）。
+    finish_usage: Option<&'a ConfirmedUsage>,
+    /// `false`：投影已由同批前序事件吸收（用量折叠），只写事件行。
+    apply: bool,
+}
+
+/// 各后端的“普通事件落库”与“准入随附事件落库”。
+///
+/// 普通事件的写入步骤——更新投影行、收集事件行、同事务登记凭据映射复用、产出给订阅方的
+/// 事件——在 Turn 开始前置事件、批量落库与准入随附事件之间共用同一份定义；
+/// 各路径的差异只体现在传入的 `PlainEvent` 上（是否应用投影、是否带收尾用量）。
+macro_rules! backend_event_writers {
+    (
+        $record:ident,
+        $follow_ups:ident,
+        $db:ty,
+        $apply:ident,
+        $upsert:ident,
+        $flush:ident,
+        $touch_run:literal,
+        $touch_interaction:literal
+    ) => {
+        /// 返回 `(本事件是否写入了用量, 订阅方事件)`。
+        async fn $record(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            writes: &mut EventWrites<'_>,
+            interaction_id: &str,
+            run_id: &str,
+            record: PlainEvent<'_>,
+        ) -> anyhow::Result<(bool, ObservationEvent)> {
+            let wrote_usage = if record.apply {
+                $apply(
+                    tx,
+                    interaction_id,
+                    run_id,
+                    record.event,
+                    record.sequence,
+                    record.at,
+                    record.finish_usage,
+                )
+                .await?
+            } else {
+                false
+            };
+            writes.push_event(record.sequence, record.at, record.kind, &record.payload)?;
+            // 复用与事件同一事务登记：侧栏只读登记表，事件与登记行不能分叉。
+            if let RunEvent::CredentialMappingsReused { discoveries, .. } = record.event {
+                $upsert(tx, interaction_id, Some(run_id), record.at, discoveries).await?;
+            }
+            let observed = event(
+                record.sequence,
+                record.at,
+                Some(interaction_id),
+                Some(run_id),
+                None,
+                record.kind,
+                record.payload,
+            );
+            Ok((wrote_usage, observed))
+        }
+
+        /// 准入事务内写随附事件，并把 Run 与 Interaction 的最新事件序号推进到最后一个。
+        async fn $follow_ups(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            admission: &Admission<'_>,
+            sequences: &[i64],
+        ) -> anyhow::Result<Vec<ObservationEvent>> {
+            let interaction_id = admission.interaction_id;
+            let run_id = admission.start.id.as_str();
+            let mut writes = EventWrites::new(interaction_id, run_id);
+            let mut events = Vec::with_capacity(sequences.len());
+            for (follow_up, sequence) in admission.follow_ups.iter().zip(sequences) {
+                let payload = serde_json::to_value(follow_up)?;
+                let kind = event_kind(&payload)?;
+                let (_, observed) = $record(
+                    tx,
+                    &mut writes,
+                    interaction_id,
+                    run_id,
+                    PlainEvent {
+                        event: follow_up,
+                        sequence: *sequence,
+                        at: admission.now,
+                        kind: &kind,
+                        payload,
+                        finish_usage: None,
+                        apply: true,
+                    },
+                )
+                .await?;
+                events.push(observed);
+            }
+            writes.$flush(tx).await?;
+            let last = *sequences
+                .last()
+                .context("admission follow-ups allocate no sequence")?;
+            sqlx::query($touch_run)
+                .bind(last)
+                .bind(run_id)
+                .execute(&mut **tx)
+                .await?;
+            sqlx::query($touch_interaction)
+                .bind(last)
+                .bind(interaction_id)
+                .execute(&mut **tx)
+                .await?;
+            Ok(events)
+        }
+    };
+}
+
+backend_event_writers!(
+    record_event_sqlite,
+    write_follow_ups_sqlite,
+    sqlx::Sqlite,
+    apply_sqlite,
+    upsert_credential_mapping_reuses_sqlite,
+    flush_sqlite,
+    "UPDATE inference_run_observations SET last_event_sequence=? WHERE id=?",
+    "UPDATE interaction_observations SET last_event_sequence=? WHERE id=?"
+);
+backend_event_writers!(
+    record_event_postgres,
+    write_follow_ups_postgres,
+    sqlx::Postgres,
+    apply_postgres,
+    upsert_credential_mapping_reuses_postgres,
+    flush_postgres,
+    "UPDATE inference_run_observations SET last_event_sequence=$1 WHERE id=$2",
+    "UPDATE interaction_observations SET last_event_sequence=$1 WHERE id=$2"
+);
+
+/// 首轮写入在事务内的全部写入：Turn 开始（含首个 attempt）、前置事件、输入与工具结果，
+/// 最后各推进一次 Run 与 Interaction 的活动字段。
+macro_rules! backend_turn_start_writer {
+    (
+        $write:ident,
+        $db:ty,
+        $record:ident,
+        $apply:ident,
+        $intern:path,
+        $flush:ident,
+        $refresh:ident,
+        $touch_run:literal,
+        $touch_interaction:literal
+    ) => {
+        #[allow(clippy::too_many_arguments)]
+        async fn $write(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            interaction_id: &str,
+            run_id: &str,
+            principal: &str,
+            is_root_run: bool,
+            start: &TurnStart<'_>,
+            prepared: PreparedTurnStart<'_>,
+            sequences: &[i64],
+        ) -> anyhow::Result<Vec<ObservationEvent>> {
+            let layout = TurnLayout::new(start, prepared.leading.len(), sequences)?;
+            let PreparedTurnStart {
+                turn_payload,
+                leading,
+                input_units,
+                tools,
+                latest_at,
+                ..
+            } = prepared;
+            let mut writes = EventWrites::new(interaction_id, run_id);
+            let mut result = Vec::with_capacity(sequences.len());
+            $apply(
+                tx,
+                interaction_id,
+                run_id,
+                start.turn,
+                layout.turn,
+                start.at,
+                None,
+            )
+            .await?;
+            if let Some(attempt) = start.attempt {
+                $apply(
+                    tx,
+                    interaction_id,
+                    run_id,
+                    attempt,
+                    layout.attempt,
+                    start.attempt_at,
+                    None,
+                )
+                .await?;
+            }
+            writes.push_event(layout.turn, start.at, "model_turn_started", &turn_payload)?;
+            result.push(event(
+                layout.turn,
+                start.at,
+                Some(interaction_id),
+                Some(run_id),
+                None,
+                "model_turn_started",
+                turn_payload,
+            ));
+            for (item, sequence) in leading.into_iter().zip(layout.leading) {
+                let (_, observed) = $record(
+                    tx,
+                    &mut writes,
+                    interaction_id,
+                    run_id,
+                    PlainEvent {
+                        event: item.event,
+                        sequence: *sequence,
+                        at: item.at,
+                        kind: &item.kind,
+                        payload: item.payload,
+                        finish_usage: None,
+                        apply: true,
+                    },
+                )
+                .await?;
+                result.push(observed);
+            }
+            let mut root_input_sequence = None;
+            if let (Some(mut units), Some(sequence)) = (input_units, layout.input) {
+                let content_ids = $intern(tx, principal, &mut units).await?;
+                writes.push_event(
+                    sequence,
+                    start.input_at,
+                    "user_input_recorded",
+                    &Value::Null,
+                )?;
+                writes.push_refs(sequence, &content_ids)?;
+                if is_root_run {
+                    root_input_sequence = Some(sequence);
+                }
+                result.push(event(
+                    sequence,
+                    start.input_at,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    "user_input_recorded",
+                    Value::Null,
+                ));
+            }
+            if let (Some(mut tools), Some(sequence)) = (tools, layout.tools) {
+                let content_ids = $intern(tx, principal, &mut tools.units).await?;
+                writes.push_event(sequence, tools.first_at, "client_tool_result", &Value::Null)?;
+                writes.push_tool_results(sequence, &tools.tools, &content_ids)?;
+                result.push(event(
+                    sequence,
+                    tools.first_at,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    "client_tool_result",
+                    Value::Null,
+                ));
+            }
+            // Run 与 Interaction 的活动字段各只写一次：先写 Run，Interaction 的状态重算
+            // 读取到的就是已推进的 Run 活动时间。
+            writes.$flush(tx).await?;
+            sqlx::query($touch_run)
+                .bind(latest_at)
+                .bind(layout.last)
+                .bind(run_id)
+                .execute(&mut **tx)
+                .await?;
+            if status_event(start.turn) || !start.tool_results.is_empty() {
+                $refresh(tx, interaction_id, layout.last, root_input_sequence).await?;
+            } else {
+                sqlx::query($touch_interaction)
+                    .bind(latest_at)
+                    .bind(layout.last)
+                    .bind(root_input_sequence)
+                    .bind(interaction_id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            result.sort_by_key(|event| event.sequence);
+            Ok(result)
+        }
+    };
+}
+
+backend_turn_start_writer!(
+    write_turn_start_sqlite,
+    sqlx::Sqlite,
+    record_event_sqlite,
+    apply_sqlite,
+    super::content_refs::intern_sqlite,
+    flush_sqlite,
+    refresh_interaction_sqlite,
+    "UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?",
+    "UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=?,input_sequence=COALESCE(?,input_sequence) WHERE id=?"
+);
+backend_turn_start_writer!(
+    write_turn_start_postgres,
+    sqlx::Postgres,
+    record_event_postgres,
+    apply_postgres,
+    super::content_refs::intern_postgres,
+    flush_postgres,
+    refresh_interaction_postgres,
+    "UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3",
+    "UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2,input_sequence=COALESCE($3,input_sequence) WHERE id=$4"
+);
+
+struct PreparedBlock {
+    channel: &'static str,
+    model_turn_id: Option<String>,
+    attempt_id: Option<String>,
+    item_ordinal: i64,
+    complete: bool,
+    envelope: Option<Value>,
+    units: Vec<Content>,
+}
+
+struct PreparedEvent<'a> {
+    source_index: usize,
+    event: &'a RunEvent,
+    at: i64,
+    kind: String,
+    payload: Value,
+    block: Option<PreparedBlock>,
+    /// `(tool_id, is_error)`；正文单元在 `PreparedBatch::tool_units` 里按事件顺序排列。
+    tool_result: Option<(String, bool)>,
+    /// Usage written by this event's single attempt UPDATE. A finish with
+    /// `None` here keeps the durable row's already recorded usage.
+    finish_usage: Option<Cow<'a, ConfirmedUsage>>,
+    /// A finish whose folded usage came from same-batch confirmations;
+    /// those confirmations must not write the attempt row a second time.
+    absorbs_batch_usage: bool,
+}
+
+/// 一批有序事件在进入事务前的准备结果。
+struct PreparedBatch<'a> {
+    events: Vec<PreparedEvent<'a>>,
+    /// 全批工具结果正文，写入时一次登记。
+    tool_units: Vec<Content>,
+    /// 其用量已折叠进同批收尾事件的确认事件下标。
+    absorbed_usage: std::collections::HashSet<usize>,
+    /// 产生事件行的条数（用量确认不占行）。
+    durable_count: usize,
+    latest_at: i64,
+}
+
+/// 有序事件批在事务内的写入。块、工具结果与用量确认各有专门步骤，其余事件走共用的
+/// `record_event_*`。
+macro_rules! backend_ordered_writer {
+    (
+        $write:ident,
+        $db:ty,
+        $record:ident,
+        $apply:ident,
+        $intern:path,
+        $flush:ident,
+        $refresh_usage:ident,
+        $recompute:ident,
+        $turn_exists:literal,
+        $touch_run:literal,
+        $touch_interaction:literal
+    ) => {
+        async fn $write(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            interaction_id: &str,
+            run_id: &str,
+            principal: &str,
+            batch: PreparedBatch<'_>,
+            sequences: &[i64],
+            mut current_sequence: i64,
+        ) -> anyhow::Result<Vec<ObservationEvent>> {
+            let PreparedBatch {
+                events,
+                mut tool_units,
+                absorbed_usage,
+                latest_at,
+                ..
+            } = batch;
+            let mut sequences = sequences.iter().copied();
+            // 全批工具结果一次登记，按事件顺序领取。
+            let mut tool_content_ids = $intern(tx, principal, &mut tool_units)
+                .await?
+                .into_iter();
+            let mut result = Vec::with_capacity(events.len());
+            let mut status_changed = false;
+            let mut folded_attempts = std::collections::HashSet::new();
+            let mut writes = EventWrites::new(interaction_id, run_id);
+            for PreparedEvent {
+                source_index,
+                event: run_event,
+                at,
+                mut kind,
+                mut payload,
+                block,
+                tool_result,
+                finish_usage,
+                absorbs_batch_usage,
+            } in events
+            {
+                let attempt_id = match run_event {
+                    RunEvent::TargetAttemptFinished { attempt_id, .. }
+                    | RunEvent::UsageConfirmed { attempt_id, .. } => Some(attempt_id.as_str()),
+                    _ => None,
+                };
+                let absorbed = absorbed_usage.contains(&source_index)
+                    && matches!(run_event, RunEvent::UsageConfirmed { attempt_id, .. }
+                        if folded_attempts.contains(attempt_id.as_str()));
+                // 有界队列可能丢失父 Turn 开始；不能捏造父事实，也不能让子事件外键回滚整批。
+                // 检查位于事务内，能观察到本批已写入的父 Turn。
+                let gap;
+                let run_event = if let RunEvent::TargetAttemptStarted { model_turn_id, .. } =
+                    run_event
+                {
+                    let exists: bool = sqlx::query_scalar($turn_exists)
+                        .bind(model_turn_id)
+                        .bind(run_id)
+                        .fetch_one(&mut **tx)
+                        .await?;
+                    if exists {
+                        run_event
+                    } else {
+                        gap = RunEvent::ObservationGap {
+                            reason: "model_turn_start_unavailable".into(),
+                        };
+                        kind = "observation_gap".into();
+                        payload = serde_json::to_value(&gap)?;
+                        &gap
+                    }
+                } else {
+                    run_event
+                };
+                if kind == "usage_confirmed" {
+                    if !absorbed {
+                        $apply(
+                            tx,
+                            interaction_id,
+                            run_id,
+                            run_event,
+                            current_sequence,
+                            at,
+                            None,
+                        )
+                        .await?;
+                        if let RunEvent::UsageConfirmed {
+                            attempt_id, usage, ..
+                        } = run_event
+                        {
+                            writes.$flush(tx).await?;
+                            $refresh_usage(tx, run_id, attempt_id, usage).await?;
+                        }
+                    }
+                    continue;
+                }
+                let sequence = sequences
+                    .next()
+                    .context("ordered batch ran out of allocated event sequences")?;
+                current_sequence = sequence;
+                if let Some(mut block) = block {
+                    writes.push_event(sequence, at, &kind, &payload)?;
+                    let content_ids = $intern(tx, principal, &mut block.units).await?;
+                    let envelope = block
+                        .envelope
+                        .map(|envelope| {
+                            Ok::<_, anyhow::Error>(crate::storage_codec::encode(
+                                serde_json::to_vec(&envelope)?.into(),
+                            )?)
+                        })
+                        .transpose()?;
+                    writes.push_block(BlockRow {
+                        sequence,
+                        model_turn_id: block.model_turn_id.clone(),
+                        attempt_id: block.attempt_id.clone(),
+                        item_ordinal: block.item_ordinal,
+                        channel: block.channel,
+                        complete: block.complete,
+                        envelope,
+                    });
+                    writes.push_refs(sequence, &content_ids)?;
+                    result.push(event(
+                        sequence,
+                        at,
+                        Some(interaction_id),
+                        Some(run_id),
+                        None,
+                        &kind,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+                if let Some(tool) = tool_result {
+                    let content_id = tool_content_ids
+                        .next()
+                        .context("ordered batch ran out of interned tool contents")?;
+                    writes.push_event(sequence, at, &kind, &payload)?;
+                    writes.push_tool_results(sequence, &[tool], &[content_id])?;
+                    status_changed = true;
+                    result.push(event(
+                        sequence,
+                        at,
+                        Some(interaction_id),
+                        Some(run_id),
+                        None,
+                        &kind,
+                        Value::Null,
+                    ));
+                    continue;
+                }
+                let (wrote_usage, observed) = $record(
+                    tx,
+                    &mut writes,
+                    interaction_id,
+                    run_id,
+                    PlainEvent {
+                        event: run_event,
+                        sequence,
+                        at,
+                        kind: &kind,
+                        payload,
+                        finish_usage: finish_usage.as_deref(),
+                        apply: !absorbed,
+                    },
+                )
+                .await?;
+                if wrote_usage
+                    && absorbs_batch_usage
+                    && let Some(attempt_id) = attempt_id
+                {
+                    folded_attempts.insert(attempt_id);
+                }
+                status_changed |= status_event(run_event);
+                result.push(observed);
+            }
+            writes.$flush(tx).await?;
+            if let Some(last) = result.last() {
+                sqlx::query($touch_run)
+                    .bind(latest_at)
+                    .bind(last.sequence)
+                    .bind(run_id)
+                    .execute(&mut **tx)
+                    .await?;
+                if status_changed {
+                    $recompute(tx, interaction_id, last.sequence).await?;
+                } else {
+                    sqlx::query($touch_interaction)
+                        .bind(latest_at)
+                        .bind(last.sequence)
+                        .bind(interaction_id)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+            }
+            Ok(result)
+        }
+    };
+}
+
+backend_ordered_writer!(
+    write_ordered_sqlite,
+    sqlx::Sqlite,
+    record_event_sqlite,
+    apply_sqlite,
+    super::content_refs::intern_sqlite,
+    flush_sqlite,
+    refresh_finished_usage_sqlite,
+    recompute_status_sqlite,
+    "SELECT EXISTS(SELECT 1 FROM model_turn_observations WHERE id=? AND run_id=?)",
+    "UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?",
+    "UPDATE interaction_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?"
+);
+backend_ordered_writer!(
+    write_ordered_postgres,
+    sqlx::Postgres,
+    record_event_postgres,
+    apply_postgres,
+    super::content_refs::intern_postgres,
+    flush_postgres,
+    refresh_finished_usage_postgres,
+    recompute_status_postgres,
+    "SELECT EXISTS(SELECT 1 FROM model_turn_observations WHERE id=$1 AND run_id=$2)",
+    "UPDATE inference_run_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3",
+    "UPDATE interaction_observations SET last_active_at=GREATEST(last_active_at,$1),last_event_sequence=$2 WHERE id=$3"
+);
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -4896,6 +4935,7 @@ mod tests {
                 grouping_reason: "new_root",
                 diagnostic_source_run_id: None,
                 interrupt_parent: false,
+                follow_ups: &[],
                 now: 1,
             })
             .await?;
@@ -5047,7 +5087,8 @@ mod tests {
                         leading: &[],
                     },
                 )
-                .await?;
+                .await?
+                .expect("run row exists");
             let kinds: Vec<_> = events.iter().map(|event| event.kind.as_str()).collect();
             let expected = if tools_first {
                 [
@@ -5231,6 +5272,7 @@ mod tests {
                 grouping_reason: "exact_parent",
                 diagnostic_source_run_id: None,
                 interrupt_parent: false,
+                follow_ups: &[],
                 now: 1,
             })
             .await?;
@@ -5517,6 +5559,7 @@ mod tests {
                 grouping_reason: "new_user",
                 diagnostic_source_run_id: None,
                 interrupt_parent: true,
+                follow_ups: &[],
                 now: at,
             })
             .await?;
@@ -6249,7 +6292,7 @@ mod tests {
                 RunEvent::ClientVisibleContent {
                     text: "你好".repeat(1024),
                     parts: Vec::new(),
-                    block_id: "test-block".into(),
+                    block_id: "test-block:item:0".into(),
                     item: Value::Null,
                     complete: true,
                 },
@@ -6260,7 +6303,7 @@ mod tests {
                 RunEvent::ClientVisibleContent {
                     text: "世界".into(),
                     parts: Vec::new(),
-                    block_id: "test-block".into(),
+                    block_id: "test-block:item:0".into(),
                     item: Value::Null,
                     complete: true,
                 },
@@ -6279,7 +6322,7 @@ mod tests {
                 RunEvent::ClientVisibleContent {
                     text: "must rollback".into(),
                     parts: Vec::new(),
-                    block_id: "test-block".into(),
+                    block_id: "test-block:item:0".into(),
                     item: Value::Null,
                     complete: true,
                 },
@@ -6331,7 +6374,7 @@ mod tests {
                     RunEvent::ClientVisibleContent {
                         text: "delayed block".into(),
                         parts: Vec::new(),
-                        block_id: "test-block".into(),
+                        block_id: "test-block:item:0".into(),
                         item: Value::Null,
                         complete: true,
                     },
@@ -6384,7 +6427,7 @@ mod tests {
                         RunEvent::ClientVisibleContent {
                             text: "a".into(),
                             parts: Vec::new(),
-                            block_id: "test-block".into(),
+                            block_id: "test-block:item:0".into(),
                             item: Value::Null,
                             complete: true,
                         },
@@ -6439,7 +6482,7 @@ mod tests {
                         RunEvent::ClientVisibleContent {
                             text: "b".into(),
                             parts: Vec::new(),
-                            block_id: "test-block".into(),
+                            block_id: "test-block:item:0".into(),
                             item: Value::Null,
                             complete: true,
                         },
@@ -6460,7 +6503,7 @@ mod tests {
                 RunEvent::ClientVisibleContent {
                     text: "x".into(),
                     parts: Vec::new(),
-                    block_id: "test-block".into(),
+                    block_id: "test-block:item:0".into(),
                     item: Value::Null,
                     complete: true,
                 },
@@ -6650,7 +6693,7 @@ mod tests {
         let text = |text: &str| RunEvent::ClientVisibleContent {
             text: text.into(),
             parts: Vec::new(),
-            block_id: "test-block".into(),
+            block_id: "test-block:item:0".into(),
             item: Value::Null,
             complete: true,
         };
@@ -6886,7 +6929,7 @@ mod tests {
                         RunEvent::ClientVisibleContent {
                             text: "preserved output".into(),
                             parts: Vec::new(),
-                            block_id: "race-block".into(),
+                            block_id: "race-block:item:0".into(),
                             item: Value::Null,
                             complete: true,
                         },
@@ -6957,6 +7000,7 @@ mod tests {
                 grouping_reason: "new_root",
                 diagnostic_source_run_id: None,
                 interrupt_parent: false,
+                follow_ups: &[],
                 now: 1,
             })
             .await?;
@@ -6984,6 +7028,7 @@ mod tests {
                     grouping_reason: "new_root",
                     diagnostic_source_run_id: None,
                     interrupt_parent: true,
+                    follow_ups: &[],
                     now: 2,
                 })
                 .await

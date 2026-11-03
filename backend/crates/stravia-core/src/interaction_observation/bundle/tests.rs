@@ -540,7 +540,10 @@ async fn bundle_exports_full_visible_output_and_expands_content_refs() -> anyhow
         run.record(RunEvent::ClientVisibleContent {
             text: answer.clone(),
             parts: vec![serde_json::json!({"type": "text", "text": answer})],
-            block_id: format!("{turn}-block"),
+            block_id: crate::interaction_observation::types::canonical_item_block_id(
+                &format!("{turn}-block"),
+                0,
+            ),
             item: serde_json::json!({"id": format!("{turn}-block"), "role": "assistant", "content": answer}),
             complete: true,
         });

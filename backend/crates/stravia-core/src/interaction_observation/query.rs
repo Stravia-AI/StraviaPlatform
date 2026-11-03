@@ -2675,35 +2675,16 @@ impl ObservationStore {
         &self,
         content_ids: &[i64],
     ) -> anyhow::Result<std::collections::HashMap<i64, i64>> {
-        let mut lengths = std::collections::HashMap::new();
-        for chunk in content_ids.chunks(IN_LIST_BATCH) {
-            let rows: Vec<(i64, i64)> = match self {
-                Self::Sqlite(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                        "SELECT id,raw_len FROM contents WHERE id IN (",
-                    );
-                    let mut separated = query.separated(",");
-                    for id in chunk {
-                        separated.push_bind(*id);
-                    }
-                    separated.push_unseparated(")");
-                    query.build_query_as().fetch_all(pool).await?
-                }
-                Self::Postgres(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT id,raw_len FROM contents WHERE id IN (",
-                    );
-                    let mut separated = query.separated(",");
-                    for id in chunk {
-                        separated.push_bind(*id);
-                    }
-                    separated.push_unseparated(")");
-                    query.build_query_as().fetch_all(pool).await?
-                }
-            };
-            lengths.extend(rows);
+        match self {
+            Self::Sqlite(pool, _) => {
+                let mut connection = pool.acquire().await?;
+                crate::content_store::sqlite::lengths(&mut connection, content_ids).await
+            }
+            Self::Postgres(pool, _) => {
+                let mut connection = pool.acquire().await?;
+                crate::content_store::postgres::lengths(&mut connection, content_ids).await
+            }
         }
-        Ok(lengths)
     }
 
     /// 按 Interaction 所属 Principal 的 scope 读取正文；Interaction 不存在时没有正文。
@@ -3265,6 +3246,7 @@ mod tests {
                     grouping_reason: "new_root",
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
+                    follow_ups: &[],
                     now: at,
                 })
                 .await?;
@@ -3408,6 +3390,7 @@ mod tests {
                     grouping_reason: "new_root",
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
+                    follow_ups: &[],
                     now: at,
                 })
                 .await?;
@@ -3547,6 +3530,7 @@ mod tests {
                 },
                 diagnostic_source_run_id: None,
                 interrupt_parent: parent.is_some(),
+                follow_ups: &[],
                 now,
             })
             .await?;

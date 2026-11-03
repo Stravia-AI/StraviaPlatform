@@ -1833,7 +1833,7 @@ mod snapshot_tests {
         RunEvent::ClientVisibleContent {
             text: text.into(),
             parts: vec![serde_json::json!({"type":"text","text":text})],
-            block_id: id.into(),
+            block_id: types::canonical_item_block_id(id, 0),
             item: serde_json::json!({"id":id,"role":"assistant","content":text}),
             complete: true,
         }
@@ -3756,10 +3756,10 @@ mod snapshot_tests {
         Ok(())
     }
 
-    /// Turn 开始与 attempt 开始之间到达的正文块仍走块与内容引用路径：
-    /// 不能作为开始事务里的普通前置行把全文写进 attrs。
+    /// Turn 开始与 attempt 开始之间到达的正文块仍作为一个完整的可见块事件回放，
+    /// 不会因为合并进开始事务而丢失或拆碎全文。
     #[tokio::test]
-    async fn visible_content_between_turn_start_and_attempt_keeps_the_block_layout()
+    async fn visible_content_between_turn_start_and_attempt_replays_whole_text()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
@@ -3779,21 +3779,6 @@ mod snapshot_tests {
             generation_root_id: None,
         });
         observation.flush().await?;
-        let blocks: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM observation_blocks WHERE run_id='leading-block' AND channel='visible'",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(blocks, 1, "the visible block keeps its block row");
-        let inline: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM observation_events WHERE run_id='leading-block' AND kind='client_visible_content' AND attrs IS NOT NULL AND length(attrs) > 1000",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(
-            inline, 0,
-            "the body lives in content refs, not in event attrs"
-        );
         let events = replayed(&observation).await?;
         let visible = events_of(&events, Some("leading-block"), "client_visible_content");
         assert_eq!(visible.len(), 1);
@@ -4023,7 +4008,7 @@ mod snapshot_tests {
             duration_ms: 1,
             content: None,
         });
-        parent.record(visible_item(&block_id, &"文".repeat(16384)));
+        parent.record(visible_item("burst-parent", &"文".repeat(16384)));
         parent.finish(RunOutcome {
             client_output_committed: false,
             delivery: None,
@@ -5047,6 +5032,7 @@ mod snapshot_tests {
                     grouping_reason: "exact_parent",
                     diagnostic_source_run_id: None,
                     interrupt_parent: false,
+                    follow_ups: &[],
                     now: at + offset,
                 })
                 .await?;
@@ -7935,7 +7921,7 @@ mod snapshot_tests {
             attempt_id: "attempt".into(),
             text: "private reasoning".into(),
             parts: vec![serde_json::json!({"type":"thinking","text":"private reasoning"})],
-            block_id: "private-reasoning".into(),
+            block_id: types::canonical_item_block_id("private-reasoning", 0),
             item: serde_json::json!({"id":"private-reasoning","content":"private reasoning"}),
             complete: true,
         });

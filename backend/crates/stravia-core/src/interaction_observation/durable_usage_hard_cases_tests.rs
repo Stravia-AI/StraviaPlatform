@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use super::{
     manifest_index::DebugTraceIndex,
-    store::ObservationStore,
-    types::{ConfirmedUsage, ForestQuery, RunEvent, UsageCoverage},
+    store::{Admission, Admitted, ObservationStore},
+    types::{ConfirmedUsage, ForestQuery, RunEvent, RunStart, UsageCoverage},
 };
 use crate::{
     db::models::StatsWindow,
@@ -741,6 +741,180 @@ async fn ordered_batch_usage_and_billing(
     Ok(())
 }
 
+async fn admit_with_follow_ups(
+    observation: &ObservationStore,
+    id: &str,
+    follow_ups: &[RunEvent],
+) -> anyhow::Result<Admitted> {
+    let start = RunStart {
+        id: id.into(),
+        principal: "owner".into(),
+        api_key_id: None,
+        api_key_name: None,
+        route_id: "route".into(),
+        model_display_name: None,
+        ingress_protocol: "responses".into(),
+    };
+    observation
+        .admit(Admission {
+            start: &start,
+            metadata: None,
+            interaction_id: id,
+            generation_root_id: None,
+            generation_parent_id: None,
+            has_new_user: true,
+            ingress_received_at: 0,
+            parent_run_id: None,
+            parent_interaction_id: None,
+            debug_enabled: false,
+            inferred_retry: false,
+            grouping_reason: "new_root",
+            diagnostic_source_run_id: None,
+            interrupt_parent: false,
+            follow_ups,
+            now: 1,
+        })
+        .await
+}
+
+async fn stored_events(
+    observation: &ObservationStore,
+    run: &str,
+) -> anyhow::Result<Vec<(i64, String)>> {
+    Ok(observation
+        .replay(0)
+        .await?
+        .into_iter()
+        .filter(|event| event.run_id.as_deref() == Some(run))
+        .map(|event| (event.sequence, event.kind))
+        .collect())
+}
+
+/// 准入随附的缺口与尾源诊断和 `run_admitted` 同一次提交、序号连续；
+/// 诊断写入故障只丢弃随附事件，准入与它的用量事实照常落库。
+async fn admission_follow_ups_commit_with_the_admission(
+    db: &Database,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    let gap = RunEvent::ObservationGap {
+        reason: "generation_parent_observation_unavailable".into(),
+    };
+    let tail = RunEvent::RetainedTailAssociated {
+        source_run_id: None,
+        source_interaction_id: None,
+        status: "no_match".into(),
+        matched_units: 0,
+        matched_bytes: 0,
+        input_start: None,
+        candidate_count: 0,
+    };
+    let admitted = admit_with_follow_ups(observation, "follow-ok", &[gap.clone(), tail.clone()])
+        .await?;
+    assert!(admitted.follow_up_failure.is_none());
+    let published: Vec<_> = std::iter::once(&admitted.event)
+        .chain(&admitted.follow_ups)
+        .map(|event| (event.sequence, event.kind.clone()))
+        .collect();
+    let kinds: Vec<_> = published.iter().map(|(_, kind)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["run_admitted", "observation_gap", "retained_tail_associated"]
+    );
+    assert!(published.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(
+        stored_events(observation, "follow-ok").await?,
+        published,
+        "published and replayed events agree"
+    );
+    let last = published.last().expect("published events").0;
+    for table in ["inference_run_observations", "interaction_observations"] {
+        assert_eq!(
+            db.scalar_with(format!(
+                "SELECT last_event_sequence FROM {table} WHERE id='follow-ok'"
+            ))
+            .await?,
+            last,
+            "{table} points at the newest event"
+        );
+    }
+    assert_eq!(
+        db.scalar(
+            "SELECT CAST(observation_gap AS BIGINT) FROM interaction_observations WHERE id='follow-ok'"
+        )
+        .await?,
+        1
+    );
+
+    match db {
+        Database::Sqlite(_) => db.execute("CREATE TRIGGER follow_up_fault BEFORE INSERT ON observation_events WHEN NEW.kind='retained_tail_associated' BEGIN SELECT RAISE(ABORT,'diagnostic unavailable'); END;").await?,
+        Database::Postgres(_) => db.execute("CREATE FUNCTION follow_up_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'diagnostic unavailable' USING ERRCODE='P0001'; END $$; CREATE TRIGGER follow_up_fault BEFORE INSERT ON observation_events FOR EACH ROW WHEN (NEW.kind='retained_tail_associated') EXECUTE FUNCTION follow_up_fault();").await?,
+    }
+    let faulted = admit_with_follow_ups(observation, "follow-fault", &[gap, tail]).await;
+    match db {
+        Database::Sqlite(_) => db.execute("DROP TRIGGER follow_up_fault").await?,
+        Database::Postgres(_) => {
+            db.execute(
+                "DROP TRIGGER follow_up_fault ON observation_events; DROP FUNCTION follow_up_fault();",
+            )
+            .await?
+        }
+    }
+    let faulted = faulted?;
+    assert!(
+        faulted.follow_up_failure.is_some(),
+        "the diagnostic fault is reported to the caller"
+    );
+    assert!(faulted.follow_ups.is_empty());
+    assert_eq!(
+        stored_events(observation, "follow-fault").await?,
+        [(faulted.event.sequence, "run_admitted".to_owned())],
+        "only the admission survives; its follow-ups roll back together"
+    );
+    assert_eq!(
+        db.scalar(
+            "SELECT COUNT(*) FROM inference_run_observations WHERE id='follow-fault' AND status='running'"
+        )
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+/// 块标识不是规范 item 标识时写入失败，而不是静默落成 item 0。
+async fn malformed_block_id_fails_the_write(
+    db: &Database,
+    observation: &ObservationStore,
+) -> anyhow::Result<()> {
+    db.seed("malformed-block", BATCH, BATCH, 1000, 20, 0).await?;
+    let batch = [(
+        RunEvent::ClientVisibleContent {
+            text: "hi".into(),
+            parts: Vec::new(),
+            block_id: "plain-block".into(),
+            item: serde_json::json!({"id": "x", "role": "assistant", "content": "hi"}),
+            complete: true,
+        },
+        None,
+        BATCH,
+    )];
+    let error = observation
+        .persist_ordered_run_events("malformed-block", "malformed-block", &batch, &[])
+        .await
+        .expect_err("a non-canonical block id must not be stored");
+    assert!(
+        format!("{error:#}").contains("canonical item block id"),
+        "{error:#}"
+    );
+    assert_eq!(
+        db.scalar(
+            "SELECT COUNT(*) FROM observation_blocks WHERE run_id='malformed-block'"
+        )
+        .await?,
+        0
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -754,7 +928,9 @@ async fn sqlite_durable_usage_hard_cases() -> anyhow::Result<()> {
         retention_across_batches(&db, storage.usage_stats(), &observation).await?;
         failed_parent_delete_restores_children_and_usage(&db, storage.usage_stats(), &observation)
             .await?;
-        ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
+        ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await?;
+        admission_follow_ups_commit_with_the_admission(&db, &observation).await?;
+        malformed_block_id_fails_the_write(&db, &observation).await
     }
     .await;
     pool.close().await;
@@ -812,7 +988,9 @@ async fn postgres_durable_usage_hard_cases() -> anyhow::Result<()> {
                 &observation,
             )
             .await?;
-            ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await
+            ordered_batch_usage_and_billing(&db, storage.usage_stats(), &observation).await?;
+            admission_follow_ups_commit_with_the_admission(&db, &observation).await?;
+            malformed_block_id_fails_the_write(&db, &observation).await
         }
         .await;
         pool.close().await;

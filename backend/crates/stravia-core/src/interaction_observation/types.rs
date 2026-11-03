@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use anyhow::Context;
 use bytes::Bytes;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -1194,9 +1195,34 @@ pub(crate) fn canonical_item_block_id(scope: &str, item_ordinal: usize) -> Strin
     format!("{scope}:item:{item_ordinal}")
 }
 
+/// [`canonical_item_block_id`] 的逆运算：取 `{scope}:item:{n}` 的 item 序号。
+/// 标识不是这个形态时报错，不静默落到 item 0——块行的序号是块身份的一部分。
+pub(crate) fn parse_item_block_id(block_id: &str) -> anyhow::Result<usize> {
+    let (_, ordinal) = block_id
+        .rsplit_once(":item:")
+        .with_context(|| format!("block id {block_id:?} is not a canonical item block id"))?;
+    ordinal
+        .parse()
+        .with_context(|| format!("block id {block_id:?} has a non-numeric item ordinal"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_block_ids_round_trip_and_malformed_ids_are_errors() {
+        for ordinal in [0, 1, 17] {
+            let id = canonical_item_block_id("run:turn", ordinal);
+            assert_eq!(parse_item_block_id(&id).unwrap(), ordinal);
+        }
+        for malformed in ["plain-block", "scope:item:", "scope:item:x", "scope:item:-1"] {
+            assert!(
+                parse_item_block_id(malformed).is_err(),
+                "{malformed:?} must not map to an item ordinal"
+            );
+        }
+    }
 
     #[test]
     fn management_usage_aggregates_each_known_field_independently() {

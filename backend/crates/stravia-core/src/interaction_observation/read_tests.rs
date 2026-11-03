@@ -96,7 +96,7 @@ fn visible(id: &str, text: &str) -> RunEvent {
     RunEvent::ClientVisibleContent {
         text: text.into(),
         parts: vec![json!({"type": "text", "text": text})],
-        block_id: id.into(),
+        block_id: super::types::canonical_item_block_id(id, 0),
         item: json!({"id": id, "role": "assistant", "content": text}),
         complete: true,
     }

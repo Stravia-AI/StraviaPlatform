@@ -106,8 +106,28 @@ impl<'a> EventWrites<'a> {
         Ok(())
     }
 
-    pub(super) fn push_tool(&mut self, tool: ToolRow) {
-        self.tools.push(tool);
+    /// 一个事件的逐项工具结果：`tools` 为 `(tool_id, is_error)`，与 `content_ids` 同序，下标即 ordinal。
+    pub(super) fn push_tool_results(
+        &mut self,
+        sequence: i64,
+        tools: &[(String, bool)],
+        content_ids: &[i64],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            tools.len() == content_ids.len(),
+            "tool results and interned contents differ in length"
+        );
+        for (ordinal, ((tool_id, is_error), content_id)) in tools.iter().zip(content_ids).enumerate()
+        {
+            self.tools.push(ToolRow {
+                sequence,
+                ordinal: i64::try_from(ordinal)?,
+                tool_id: tool_id.clone(),
+                is_error: *is_error,
+                content_id: *content_id,
+            });
+        }
+        Ok(())
     }
 }
 

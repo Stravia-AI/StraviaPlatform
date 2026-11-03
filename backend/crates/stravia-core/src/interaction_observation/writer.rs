@@ -755,7 +755,8 @@ async fn persist_turn_start_phase(
     interaction: &str,
     pending: PendingTurn,
 ) -> anyhow::Result<Vec<ObservationEvent>> {
-    let events = store
+    // Run 行缺失（准入未能落库）时没有可挂靠的子事实，存储层以 `None` 明示；此时不发布任何事件。
+    let Some(events) = store
         .persist_turn_start(
             interaction,
             &pending.run_id,
@@ -771,10 +772,17 @@ async fn persist_turn_start_phase(
                 leading: &pending.leading,
             },
         )
-        .await?;
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
     debug_assert_eq!(
         events.len(),
-        1 + pending.leading.len()
+        1 + pending
+            .leading
+            .iter()
+            .filter(|(event, _)| !super::store::is_empty_credential_mapping(event))
+            .count()
             + usize::from(pending.input.is_some())
             + usize::from(!pending.tool_results.is_empty())
     );
@@ -1474,6 +1482,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     if decision.replayed_client_tool_results {
                         replayed_tool_results.insert(start.id.clone());
                     }
+                    // 缺口与尾源诊断是准入的随附事件：与 `run_admitted` 同一事务提交，
+                    // 其写入失败不回滚准入（可选诊断不得拖垮用量事实）。
+                    let requests_parent_gap = decision.grouping_reason == "unmatched_parent"
+                        || decision.parent_evidence_error.is_some();
+                    let mut follow_ups = Vec::with_capacity(2);
+                    if requests_parent_gap {
+                        follow_ups.push(RunEvent::ObservationGap {
+                            reason: "generation_parent_observation_unavailable".into(),
+                        });
+                    }
+                    follow_ups.extend(decision.diagnostic_event.take());
                     match store
                         .admit(Admission {
                             start: &start,
@@ -1490,11 +1509,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             grouping_reason: decision.grouping_reason,
                             diagnostic_source_run_id: decision.diagnostic_source_run_id.as_deref(),
                             interrupt_parent: decision.interrupt_parent,
+                            follow_ups: &follow_ups,
                             now,
                         })
                         .await
                     {
-                        Ok(event) => {
+                        Ok(admitted) => {
                             if let Some(input) = decision.received_input.take() {
                                 attribution.cache_received_input(start.id.clone(), input, expires);
                             }
@@ -1520,52 +1540,16 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                     }
                                 }
                             }
-                            publish(&updates, &trace_sequence, event);
-                            if decision.grouping_reason == "unmatched_parent"
-                                || decision.parent_evidence_error.is_some()
-                            {
-                                let gap = RunEvent::ObservationGap {
-                                    reason: "generation_parent_observation_unavailable".into(),
-                                };
-                                match store
-                                    .persist_run_event(
-                                        &decision.interaction_id,
-                                        &start.id,
-                                        &gap,
-                                        now,
-                                    )
-                                    .await
-                                {
-                                    Ok(Some(event)) => publish(&updates, &trace_sequence, event),
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        failures.gaps.insert(decision.interaction_id.clone(), now);
-                                        tracing::warn!(run_id=%start.id, %error, "parent observation gap persistence failed");
-                                    }
-                                }
+                            publish(&updates, &trace_sequence, admitted.event);
+                            for event in admitted.follow_ups {
+                                publish(&updates, &trace_sequence, event);
                             }
-                            if let Some(diagnostic_event) = decision.diagnostic_event {
-                                match store
-                                    .persist_run_event(
-                                        &decision.interaction_id,
-                                        &start.id,
-                                        &diagnostic_event,
-                                        now,
-                                    )
-                                    .await
-                                {
-                                    Ok(Some(event)) => {
-                                        publish(&updates, &trace_sequence, event);
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            run_id=%start.id,
-                                            %error,
-                                            "tail observation persistence failed"
-                                        );
-                                    }
+                            if let Some(error) = admitted.follow_up_failure {
+                                // 父缺口未能随准入落库时交给缺口重试；尾源诊断只是附加信息，丢弃即可。
+                                if requests_parent_gap {
+                                    failures.gaps.insert(decision.interaction_id.clone(), now);
                                 }
+                                tracing::warn!(run_id=%start.id, %error, "admission follow-up observation persistence failed");
                             }
                         }
                         Err(error) => {

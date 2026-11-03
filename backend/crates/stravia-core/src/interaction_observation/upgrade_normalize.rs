@@ -114,31 +114,29 @@ fn decode_attrs(bytes: Option<Vec<u8>>) -> anyhow::Result<Value> {
     }
 }
 
-fn block_ordinal(block_id: Option<&str>) -> i64 {
-    block_id
-        .and_then(|id| id.rsplit_once(":item:"))
-        .and_then(|(_, ordinal)| ordinal.parse().ok())
-        .unwrap_or(0)
-}
-
 struct SplitRow {
     sequence: i64,
     interaction_id: Option<String>,
     run_id: Option<String>,
     payload: Value,
+    /// 块行的 item 序号；非块事件与无法解析的历史块标识为 0（后者已计数告警）。
+    item_ordinal: i64,
 }
 
-/// 无法解码而被按空对象迁移的历史载荷计数。
+/// 有损迁移的历史行计数。
 ///
 /// 已损坏的历史诊断不得阻断整库升级（既有升级测试要求无关升级不因历史诊断解码失败而失败），
-/// 因此事件行保留、载荷按空对象迁移；这是有损迁移，逐行与汇总都留下告警。
+/// 因此事件行保留：无法解码的载荷按空对象迁移，无法解析 item 序号的块标识按 0 迁移；
+/// 这是有损迁移，逐行与汇总都留下告警。写入路径对同样的块标识是硬错误，这里只放过存量。
 #[derive(Default)]
-struct UnreadablePayloads {
-    count: u64,
-    first_sequence: Option<i64>,
+struct LossyMigration {
+    unreadable: u64,
+    first_unreadable: Option<i64>,
+    malformed_block_ids: u64,
+    first_malformed_block_id: Option<i64>,
 }
 
-impl UnreadablePayloads {
+impl LossyMigration {
     /// 解码旧载荷；失败时按空对象迁移并计数。
     fn decode(&mut self, sequence: i64, bytes: &[u8]) -> Value {
         match crate::storage_codec::decode(bytes)
@@ -148,19 +146,66 @@ impl UnreadablePayloads {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::warn!(sequence, %error, "observation payload unreadable during normalization; migrated as empty");
-                self.count += 1;
-                self.first_sequence.get_or_insert(sequence);
+                self.unreadable += 1;
+                self.first_unreadable.get_or_insert(sequence);
                 Value::Object(serde_json::Map::new())
             }
         }
     }
 
+    /// 把一行旧事件读成拆分输入；块事件的 item 序号在这里解析并计数。
+    fn split_row(
+        &mut self,
+        kind: &str,
+        sequence: i64,
+        interaction_id: Option<String>,
+        run_id: Option<String>,
+        payload: &[u8],
+    ) -> SplitRow {
+        let payload = self.decode(sequence, payload);
+        let item_ordinal = if matches!(kind, "model_thinking" | "client_visible_content") {
+            self.item_ordinal(sequence, payload["block_id"].as_str())
+        } else {
+            0
+        };
+        SplitRow {
+            sequence,
+            interaction_id,
+            run_id,
+            payload,
+            item_ordinal,
+        }
+    }
+
+    fn item_ordinal(&mut self, sequence: i64, block_id: Option<&str>) -> i64 {
+        let parsed = block_id
+            .context("block id is missing")
+            .and_then(super::types::parse_item_block_id)
+            .and_then(|ordinal| Ok(i64::try_from(ordinal)?));
+        match parsed {
+            Ok(ordinal) => ordinal,
+            Err(error) => {
+                tracing::warn!(sequence, %error, "observation block id malformed during normalization; migrated as item 0");
+                self.malformed_block_ids += 1;
+                self.first_malformed_block_id.get_or_insert(sequence);
+                0
+            }
+        }
+    }
+
     fn report(&self) {
-        if let Some(first_sequence) = self.first_sequence {
+        if let Some(first_sequence) = self.first_unreadable {
             tracing::warn!(
-                unreadable = self.count,
+                unreadable = self.unreadable,
                 first_sequence,
                 "observation normalization migrated unreadable payloads as empty objects"
+            );
+        }
+        if let Some(first_sequence) = self.first_malformed_block_id {
+            tracing::warn!(
+                malformed = self.malformed_block_ids,
+                first_sequence,
+                "observation normalization migrated malformed block ids as item 0"
             );
         }
     }
@@ -174,7 +219,7 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
     .fetch_one(&mut *connection)
     .await?;
     let mut principals = HashMap::new();
-    let mut unreadable = UnreadablePayloads::default();
+    let mut unreadable = LossyMigration::default();
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>? ORDER BY sequence LIMIT ?")
@@ -190,15 +235,14 @@ async fn split_events_sqlite(connection: &mut sqlx::SqliteConnection<'_>) -> any
         for row in rows {
             let kind: String = row.try_get("kind")?;
             let payload: Vec<u8> = row.try_get("payload")?;
-            batch.push((
-                kind,
-                SplitRow {
-                    sequence: row.try_get("sequence")?,
-                    interaction_id: row.try_get("interaction_id")?,
-                    run_id: row.try_get("run_id")?,
-                    payload: unreadable.decode(row.try_get("sequence")?, &payload),
-                },
-            ));
+            let row = unreadable.split_row(
+                &kind,
+                row.try_get("sequence")?,
+                row.try_get("interaction_id")?,
+                row.try_get("run_id")?,
+                &payload,
+            );
+            batch.push((kind, row));
         }
         for (kind, row) in batch {
             last = row.sequence;
@@ -253,7 +297,7 @@ async fn split_event_sqlite(
                 .bind(&row.run_id)
                 .bind(&model_turn_id)
                 .bind(&attempt_id)
-                .bind(block_ordinal(row.payload["block_id"].as_str()))
+                .bind(row.item_ordinal)
                 .bind(if kind == "model_thinking" { "thinking" } else { "visible" })
                 .bind(row.payload["complete"].as_bool().unwrap_or(false))
                 .bind(envelope)
@@ -375,7 +419,7 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
     .fetch_one(&mut *connection)
     .await?;
     let mut principals = HashMap::new();
-    let mut unreadable = UnreadablePayloads::default();
+    let mut unreadable = LossyMigration::default();
     loop {
         let mut tx = connection.begin().await?;
         let rows = sqlx::query("SELECT sequence,interaction_id,run_id,kind,payload FROM observation_events WHERE sequence>$1 ORDER BY sequence LIMIT $2")
@@ -391,15 +435,14 @@ async fn split_events_postgres(connection: &mut sqlx::PgConnection<'_>) -> anyho
         for row in rows {
             let kind: String = row.try_get("kind")?;
             let payload: Vec<u8> = row.try_get("payload")?;
-            batch.push((
-                kind,
-                SplitRow {
-                    sequence: row.try_get("sequence")?,
-                    interaction_id: row.try_get("interaction_id")?,
-                    run_id: row.try_get("run_id")?,
-                    payload: unreadable.decode(row.try_get("sequence")?, &payload),
-                },
-            ));
+            let row = unreadable.split_row(
+                &kind,
+                row.try_get("sequence")?,
+                row.try_get("interaction_id")?,
+                row.try_get("run_id")?,
+                &payload,
+            );
+            batch.push((kind, row));
         }
         for (kind, row) in batch {
             last = row.sequence;
@@ -455,7 +498,7 @@ async fn split_event_postgres(
                 .bind(&row.run_id)
                 .bind(&model_turn_id)
                 .bind(&attempt_id)
-                .bind(block_ordinal(row.payload["block_id"].as_str()))
+                .bind(row.item_ordinal)
                 .bind(if kind == "model_thinking" { "thinking" } else { "visible" })
                 .bind(row.payload["complete"].as_bool().unwrap_or(false))
                 .bind(envelope)
@@ -834,4 +877,55 @@ async fn backfill_input_sequence_postgres(
         .execute(&mut *connection)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(payload: &Value) -> Vec<u8> {
+        crate::storage_codec::encode(serde_json::to_vec(payload).unwrap().into()).unwrap()
+    }
+
+    /// 存量块事件的 item 序号取自规范块标识；解析不了的存量行仍然迁移（按 item 0），
+    /// 但逐行告警并计数，写入路径对同样的标识是硬错误。
+    #[test]
+    fn malformed_stored_block_ids_migrate_as_item_zero_and_are_counted() {
+        let mut lossy = LossyMigration::default();
+        let canonical = lossy.split_row(
+            "client_visible_content",
+            10,
+            Some("i".into()),
+            Some("r".into()),
+            &stored(&serde_json::json!({"block_id": "r:item:7"})),
+        );
+        assert_eq!(canonical.item_ordinal, 7);
+        assert_eq!(lossy.malformed_block_ids, 0);
+
+        for (sequence, payload) in [
+            (11, serde_json::json!({"block_id": "plain-block"})),
+            (12, serde_json::json!({"text": "no block id"})),
+        ] {
+            let row = lossy.split_row(
+                "model_thinking",
+                sequence,
+                Some("i".into()),
+                Some("r".into()),
+                &stored(&payload),
+            );
+            assert_eq!(row.item_ordinal, 0);
+        }
+        assert_eq!(lossy.malformed_block_ids, 2);
+        assert_eq!(lossy.first_malformed_block_id, Some(11));
+
+        let other = lossy.split_row(
+            "run_admitted",
+            13,
+            Some("i".into()),
+            Some("r".into()),
+            &stored(&serde_json::json!({"block_id": "plain-block"})),
+        );
+        assert_eq!(other.item_ordinal, 0);
+        assert_eq!(lossy.malformed_block_ids, 2, "non-block events carry no item ordinal");
+    }
 }
