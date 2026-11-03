@@ -560,20 +560,22 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 
 ### 10.4 实施后实测
 
-实施后实测。下表由集成者在合成负载上测量后填写（计数与字节行已于 2026-11-03 填入，实施前 `aecfc21e`、实施后 `589c6c33`；命令、二进制 SHA256、Run 数与按 kind 明细见 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)）；未测量的格保持“待测”，不使用开发库估算值或 ADR 的推断代替，也不与第 5 节 0033 时期的测量混算。字节为 SQLite dbstat 页面（含索引，4 KiB 粒度）的 6 轮工具调用流（144 个 Run），PostgreSQL 与单轮队列见 ADR；小库上页面粒度占主导，不外推到开发库规模。
+下表由集成者在合成负载上测量后填写（2026-11-04，实施前 `aecfc21e`、实施后 `d68284d5`；命令、二进制 SHA256、机器状态、Run 数与按 kind 明细见 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)）；未能测量的格写明原因，不使用开发库估算值或 ADR 的推断代替，也不与第 5 节 0033 时期的测量混算。字节为 SQLite dbstat 页面（含索引，4 KiB 粒度）的 6 轮工具调用流（144 个 Run），PostgreSQL 与单轮队列见 ADR；小库上页面粒度占主导，不外推到开发库规模。升级与扫描用克隆录制夹具单元合成的存量（`observation_events` 489,997、`turn_contents` 177,833、`history_markers` 16,999），不是开发库的真实分布。
 
 | 指标 | 实施前 | 实施后 | 条件 |
 |---|---:|---:|---|
 | 事件行 / Inference Run | 13.33（工具流）/ 11.0（单轮） | 9.42 / 8.0 | SQLite；工具流 144 个 Run，单轮 32 个 Run |
-| 写事务 / Inference Run（Observation 归因） | 12.34 / 12.56 | 9.11 / 7.41 | 同上；PostgreSQL 工具流 11.48 → 8.22（96 个 Run） |
+| Observation 写事务 / Inference Run | 11.49 / 12.50 | 8.01 / 6.25 | 同上；PostgreSQL 工具流 11.57 → 8.03（96 个 Run）；外层提交，保存点释放不计 |
+| 非 Observation 写事务 / Inference Run | 3.57 / 11.1 | 3.97 / 10.1 | 同上；Observation 之外的写入没有同比下降 |
 | 各表字节：`contents` | 462,848（`turn_contents`） | 512,000 | 现含 Observation 引用的正文 |
-| 各表字节：`observation_events` / `observation_blocks` / `observation_event_contents` / `observation_tool_results` | 860,160（`observation_events`） | 602,112（491,520 + 73,728 + 8,192 + 28,672） | |
+| 各表字节：`observation_events` / `observation_blocks` / `observation_event_contents` / `observation_tool_results` | 847,872（`observation_events`） | 589,824（479,232 + 73,728 + 8,192 + 28,672） | |
 | 各表字节：`history_markers` / `history_marker_contents` | 131,072 | 159,744（122,880 + 36,864） | Marker 正文移入 `contents`，引用表为新增 |
-| 升级耗时（0037–0042） | 不适用 | 待测 | 记录库规模 |
-| 升级期间新旧结构并存的峰值空间 | 不适用 | 待测 | 记录库规模 |
-| 每轮扫描耗时：常态 | 不适用 | 待测 | |
-| 每轮扫描耗时：缩短天数后的首轮 | 不适用 | 待测 | |
-| SQLite 写租约持有时间 | 待测 | 待测 | |
-| PostgreSQL 并发写入与 GC 的争用 | 待测 | 待测 | |
-
-测量数据由集成者在实施后填入上表并注明日期、数据规模与方法。
+| 各表字节合计 / 编码载荷合计 | 1,441,792 / 923,667 | 1,261,568（−12.5%）/ 734,368（−20.5%） | PostgreSQL 页面合计反而 +8.3%（小库页面粒度），载荷 −20.4% |
+| 升级耗时（0037–0042，含 Rust 钩子） | 不适用 | SQLite 74.1 / 109.3 s；PostgreSQL 137.9 / 87.2 s | 各 2 次，波动大，原因未查明；CPU SQLite 75.2 / 85.3 s、PostgreSQL 38.0 / 39.7 s；峰值 RSS 562–758 MB |
+| 升级期间新旧结构并存的峰值空间 | 不适用 | SQLite 1.150 GB（库 788 MB + WAL；升级前 668 MB）；PostgreSQL 1.472 GB（升级前 1.006 GB） | 升级后占用不回收，VACUUM 后 587 MB / 852 MB，比同数据旧布局（646 MB / 880 MB）小 9.1% / 3.2% |
+| 空库迁移 | 964–1,036 ms（36 个迁移） | 1,715–1,719 ms（42 个迁移） | `_sqlx_migrations.execution_time`；`0038` 94–95 ms、`0040` 185–188 ms、`0042` 476–484 ms |
+| 每轮扫描耗时：常态 | Observation 扫描 109–199 ms，另有保留期更新 0.19 s（SQLite）/ 5.9–8.6 s（PostgreSQL） | `history.sweep` 118–134 ms，保留期更新 0 | 升级后的库；基线的保留期更新逐行重写四张表的 `expires_at` |
+| 每轮扫描耗时：缩短天数后的首轮 | 113 ms 加保留期更新 1.2–2.8 s（SQLite）/ 7.7–7.9 s（PostgreSQL） | 125–169 ms，保留期更新 0 | 夹具全部数据在 1 天之内（`log_retention_days` 最小 1），只删除 3 行；大批删除的成本未测（没有时间戳回溯的存量） |
+| SQLite 写租约（Observation，每 Run 持有 / 排队总时长） | 21.8–36.6 ms / 27.4–66.7 ms | 19.5–24.4 ms / 8.2–15.3 ms | 并发 8、每二进制 4 次重复；租约数减半，单次持有 1.6–2.9 → 3.2–4.1 ms；新二进制 2 个 case 出现提交停顿（136.3、148.5 ms / Run）原因未定 |
+| PostgreSQL 32 worker 固定并发尾延迟 | unary 准入 p95 483–485 ms | 386–438 ms | 各 2 次；stream 被 mock 的节奏门禁作废，未测 |
+| PostgreSQL 并发写入与 GC 的争用 | 死锁 18 / 10 次，服务端日志 16 / 9 次观察写入失败 | 死锁 0 / 0 | 32 worker、120 s、每 0.5 s 强制扫描，各 2 次；请求尾延迟两侧相当（e2e p99 1.85–1.87 s） |

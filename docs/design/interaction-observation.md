@@ -491,17 +491,19 @@ rejected_request_observations -- 删除 expires_at
 - **读取契约。** 列表、changes、详情与 Bundle 里的 `InteractionSummary.input/output` 只返回有序内容引用与 `raw_len`；正文由 `GET /api/v1/observations/contents` 批量取，详情增加 `input_text` / `output_text` 全文，Bundle 导出时把引用展开为正文。存储与响应均不截断（见 §9）。
 - **升级。** 0041 只做加法（新增 `attrs`、`observation_blocks`、新增列与 `interaction_observations_activity_idx`）；随后 Rust 阶段 `upgrade_normalize` 分批把旧 `payload` 转为 `attrs`、块与引用，把首个 attempt 并入 Model Turn 开始行、把先于结束行的最后一个 attempt 与用量并入 Model Turn 结束行并删除 `usage_confirmed`（failover 中被取代的 attempt 开始/结束保持各自独立的行），并回填 `input_sequence`；无法解码的历史载荷按 `{}` 迁移并告警（逐条与汇总数量），因为升级测试要求此类行不阻断升级；进度写入 `observation_normalization_upgrade`（`stage` 0–4，四个阶段），可中断重跑；最后 0042 删除旧列与旧索引。已被截断的旧输入预览保持截断，不从 Turn Chain 回填。
 
-实施后实测（2026-11-03，合成负载，SQLite，计数与负载无关；实施前 `aecfc21e`，实施后 `589c6c33`；命令、二进制 SHA256 与明细见 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)）：
+实施后实测（2026-11-04，合成负载；实施前 `aecfc21e`，实施后 `d68284d5`；命令、二进制 SHA256、机器状态与明细见 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)）：
 
 |每 Inference Run|实施前|实施后|
 |---|---:|---:|
 |事件行：单轮队列（32 个 Run）|11.0|8.0|
 |事件行：6 轮工具调用流（144 个 Run）|13.33|9.42|
-|Observation 写事务：单轮队列（unary / stream）|12.19 / 12.94|7.56 / 7.25|
-|Observation 写事务：工具调用流|12.34|9.11|
-|写租约内 Observation 语句：单轮队列 / 工具调用流|约 75 / 79.7|约 58 / 68.6|
+|Observation 写事务：单轮队列（unary / stream）|12.25 / 12.75|6.25 / 6.25|
+|Observation 写事务：工具调用流（SQLite / PostgreSQL）|11.49 / 11.57|8.01 / 8.03|
+|写租约内 Observation 语句：单轮队列 / 工具调用流|约 74.4–74.9 / 80.4|约 53.7–54.0 / 68.0|
+|SQLite 写租约：Observation 每 Run 持有总时长（并发 8，4 次重复）|21.8–36.6 ms|19.5–24.4 ms|
+|SQLite 写租约：Observation 每 Run 排队总时长|27.4–66.7 ms|8.2–15.3 ms|
 
-对 `observation.writer.*` perf span 的延迟影响（租约持有与排队）尚未测量，仍待测。ADR-0089 中按开发库估算的 7.7 事件行与 4.7 事务没有被这两个合成队列复现（单轮队列事务 7.41，工具流 9.11），原因与按 kind 的行数变化见 ADR 明细；ADR 的估算是推断，不是本设计的结论。
+事务数是外层提交，嵌套保存点的释放不计。写租约次数减半，但单次持有更长（均值 1.6–2.9 → 3.2–4.1 ms），所以持有总时长只降约 18–26%；新二进制 8 个 case 中有 2 个因 SQLite 提交（磁盘同步）停顿出现数十到数百毫秒的持有（每 Run 136.3 与 148.5 ms），基线 8 个 case 没有出现，原因未定，见 ADR。PostgreSQL 32 worker 并发写入加每 0.5 s 强制扫描 120 s，实施前 2 次运行有 18 与 10 次死锁（`pg_stat_database`），实施后 2 次均为 0。ADR-0089 中按开发库估算的 7.7 事件行与 4.7 事务没有被这两个合成队列复现（单轮队列事务 6.25，工具流 8.01），原因与按 kind 的行数变化见 ADR 明细；ADR 的估算是推断，不是本设计的结论。
 
 ### 6.2 Debug 分段文件
 

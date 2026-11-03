@@ -261,58 +261,146 @@ _Contradicts ADR-0076（`turn_contents` 由 Turn Chain 拥有，「此格式不�
 
 ## 实施后实测
 
-以下由集成者在真实或合成负载上测量后填写；未测量的格保持「待测」，不用本地开发库估算值或推断代替。
+以下由集成者在合成负载上测量，日期 2026-11-04。未能测量的格写明原因，不用本地开发库估算值或推断代替。工作负载是脚本化 mock 上游产生的合成负载，不是开发库的真实 Run 分布，不能与上文 ADR 的估算（6,919 个真实 Run：事件行 12.0 → 7.7、事务 10.0 → 4.7）直接比较。
 
 |指标|实施前|实施后|条件|
 |---|---:|---:|---|
-|事件行 / Inference Run|13.33（工具流）/ 11.0（单轮）|9.42 / 8.0|合成负载，SQLite，计数与负载无关；明细见下|
-|写事务 / Inference Run（Observation 归因）|12.34（工具流）/ 12.56（单轮）|9.11 / 7.41|同上；PostgreSQL 工具流 11.48 → 8.22|
-|SQLite 写租约持有时间|待测|待测||
-|各表字节（`contents`、`observation_*`、`history_markers`）|1,454,080 B 页面（工具流，SQLite）|1,273,856 B|合成小库，页面粒度；编码载荷 924,759 → 735,242 B（−20.5%）；明细见下|
-|升级耗时与新旧结构并存的峰值空间|不适用|待测|记录库规模|
-|每轮扫描耗时（常态 / 缩短天数后的首轮）|不适用|待测||
-|PostgreSQL 并发写入与 GC 的争用|待测|待测||
+|事件行 / Inference Run|13.33（工具流）/ 11.0（单轮）|9.42 / 8.0|SQLite，计数与负载无关；明细见下|
+|写事务 / Inference Run（Observation 归因）|11.49（工具流）/ 12.50（单轮）|8.01 / 6.25|同上；PostgreSQL 工具流 11.57 → 8.03|
+|写事务 / Inference Run（非 Observation 归因）|3.57（工具流）/ 11.1（单轮）|3.97 / 10.1|同上；Observation 之外的写入：单轮减少 1.0，工具流增加 0.4（见下）|
+|SQLite 写租约：Observation 每 Run 持有总时长|21.8–36.6 ms|19.5–24.4 ms（两个 case 因磁盘提交停顿为 136.3 与 148.5 ms）|空闲机，每二进制 4 次重复；单租约持有变长：均值 1.6–2.9 → 3.2–4.1 ms|
+|SQLite 写租约：Observation 每 Run 排队总时长|27.4–66.7 ms|8.2–15.3 ms（两个停顿 case 为 613.8 与 60.4 ms）|同上；非 Observation 写入的排队均值没有变差|
+|PostgreSQL 32 worker 固定并发，unary 准入阶段尾延迟（p95 / p99）|483–485 / 552–568 ms|386–438 / 413–542 ms|120 s × 2 次；stream 用例被 mock 的节奏门禁作废，未测（见下）|
+|PostgreSQL 并发写入 + 强制扫描的死锁|18 与 10 次（`pg_stat_database`）|0 与 0|32 worker、120 s、扫描每 0.5 s 交替 7/8 天，各 2 次|
+|各表字节（`contents`、`observation_*`、`history_markers`）|1,441,792 B 页面（工具流，SQLite）|1,261,568 B（−12.5%）|合成小库，页面粒度；编码载荷 923,667 → 734,368 B（−20.5%）；明细见下|
+|升级耗时（0037–0042，含 Rust 钩子）|不适用|SQLite 74.1 / 109.3 s，PostgreSQL 137.9 / 87.2 s|约 490k 事件 / 178k 内容 / 17k Marker，各 2 次；波动大，不给均值|
+|升级峰值空间（新旧结构并存）|不适用|SQLite 1.150 GB（库 788 MB + 未检查点 WAL；升级前 668 MB）；PostgreSQL 数据库 1.472 GB（升级前 1.006 GB）|升级后不回收：VACUUM 后 587 MB / 852 MB，比同数据旧布局的 646 MB / 880 MB 小 9.1% / 3.2%|
+|每轮扫描耗时（常态 / 缩短天数后的首轮）|Observation 扫描 109–199 ms + 保留期更新 0.19 s（SQLite）/ 5.9–8.6 s（PostgreSQL）|`history.sweep` 118–134 ms / 125–169 ms，保留期更新 0|同一升级库上的扫描；夹具内全部数据在 1 天之内，缩短天数没有触发大批删除（见下）|
 
-### 计数与字节实测明细（2026-11-03）
+### 二进制、命令与机器状态
 
-以下只含与机器负载无关的计数与字节；租约持有、PostgreSQL 并发、升级与扫描耗时仍待测。数字全部来自下列运行，工作负载是合成的（脚本化 mock 上游），不是开发库的真实 Run 分布，不能与上文 ADR 的估算（6,919 个真实 Run：事件行 12.0 → 7.7、事务 10.0 → 4.7）直接比较。
+实施前 = `aecfc21e` 的 `test-harness` release 构建，SHA256 `c8e9fda9974b69d451f982b82ce93abd7d73ea5066c02309ad8d3f390446ca6e`；实施后 = `d68284d5`，SHA256 `7c1bd726d659422d86dc976472b69c8a8800903194e2c37ba9e90edea8d27704`（升级库生成器所用 `stravia-storage-test-harness` 为 `ba3e1a81397a280b919cfe928493e3eb324cb3edd03b957eda83c2fd9b177e2f`）。`d68284d5` 之后的提交（`12ae3ab2`）只改测试与脚本，不改产品代码。构建：先 `cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors` 构建 Wasm，再 `CARGO_BUILD_JOBS=8 cargo build --locked --release -p stravia-server --no-default-features --features test-harness --bin stravia-server --bin stravia-storage-test-harness`，两侧各在独立 worktree 与 target 目录。
 
-**二进制与命令。** 实施前 = `aecfc21e` 的 `test-harness` release 构建，SHA256 `c8e9fda9974b69d451f982b82ce93abd7d73ea5066c02309ad8d3f390446ca6e`；实施后 = `589c6c33`，SHA256 `afc310ae3fb861608af5cb1ddc0b2aad90d352e8bb9e72bdf5ba7d0acca64cb8`（升级库生成器所用 `stravia-storage-test-harness` 为 `dec61163a1d0d1b67164c9f24465a242e1d9a3c0a38c458058dfe5af7f261d4d`）。构建：`CARGO_BUILD_JOBS=8 cargo build --locked --release -p stravia-server --no-default-features --features test-harness --bin stravia-server`（先 `cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors` 构建 Wasm）。运行：`tests/common/adr0089_measure.sh counts|toolflow BINARY LABEL`（`CONVERSATIONS=6 … toolflow`），随后 `analyze_observation_writes.py` 按 perf span 祖先链归因 `sql.transaction.commit`。每个 case 的 `dropped_*` 均为 0，两个后端的全链路审计均通过。
+命令都经 `tests/common/adr0089_measure.sh MODE BINARY LABEL`（说明见 [研究笔记](../research/protocol-http-benchmark.md) 的 ADR-0089 一节）：`counts`、`CONVERSATIONS=6 … toolflow`、`BACKEND=postgres CONVERSATIONS=4 … toolflow`、`lease`、`pg`、`contention`、`upgrade-gen`、`upgrade`（`KEEP_UPGRADED=1`）、`sweep`（`DATA_DIR=…` 复用升级库）。每个 PostgreSQL 运行前执行 `redis-cli -p 56379 -n 0 flushdb`（专用 Redis，只清 DB 0），数据库用后即删。写租约、固定并发、扫描、争用与升级的运行只在机器空闲时进行：每次运行前 `/proc/loadavg` 的 1 分钟值为 0.4–3.4（超过 2.4 的都紧接在前一次测量或副本准备之后，是测量自身的残留），20 核 / 62 GB，后台只有 qbittorrent、IDE 等常驻进程（各约 5–10% 单核）。第一批运行（租约、固定并发，04:10–04:56）期间后台采样每 5 秒记录非测量进程的 CPU，超过 30% 单核的只有：`podman` 31.6% 一次（04:11，基线 r1 租约运行内）、`gh`/`git` 31–83% 单核（04:36–04:38 约 2 分钟，基线 r2 固定并发运行内；04:41、04:46、04:49、04:51 为 33–50% 的零星一次，在新 r2 固定并发运行内）；采样同样覆盖升级、扫描与争用的运行（均无超过 30% 的外部进程）。后加的租约重复 r3、r4 没有采样，r3 紧接在 cargo 构建与单元测试之后（1 分钟 loadavg 1.5、5 分钟 4.7）。PostgreSQL 16.15 与 Redis 为本机独立实例（`fsync=off`、`max_connections=400`），数据目录在 `/srv/nas` 下的联合文件系统。
 
-**单轮队列（`counts`）。** 2 个入口 × 2 个上游（openai-chat、anthropic-messages）× unary/stream，每 case 4 个请求，并发 1，共 32 个 Run，SQLite，Debug 开启。
+### 单轮队列（`counts`）
+
+2 个入口 × 2 个上游（openai-chat、anthropic-messages）× unary/stream，每 case 4 个请求，并发 1，共 32 个 Run，SQLite，Debug 开启。每个 case 的 `dropped_*` 均为 0，全链路审计通过。
+
+|每 Run|实施前（unary / stream）|实施后（unary / stream）|
+|---|---:|---:|
+|事件行|11.0 / 11.0|8.0 / 8.0|
+|Observation 写租约|13.0 / 13.5|6.0 / 6.0|
+|Observation 写事务（外层提交）|12.25 / 12.75|6.25 / 6.25|
+|写租约内 Observation 语句|74.4 / 74.9|53.7 / 54.0|
+|非 Observation 写事务|10.75 / 11.44|9.75 / 10.44|
+
+事务计数只数外层 `sql.transaction.commit`：sqlx 嵌套 `begin()` 产生的保存点释放也是 `sql.transaction.commit` span，准入事务里随附诊断事件的那个保存点会被算成第二个事务，分析脚本沿同一父 span 的 begin/commit 深度把它排除（`savepoint_commits` 另记，实施后每 Run 1.0 个）。事务按 writer 动作拆分（unary）：实施前 `admit_persist` 1、`persist_events`（准入事件）1、`persist_input_preview` 1、`finish_run` 1、`persist_tail_source` 0.56、其余各自提交的单事件命令 7.69；实施后 `admit_persist` 1、`persist_turn_start` 1、`finish_run` 1、其余各自提交的单事件命令 3.25。实施前的 11 行事件为 `run_admitted`、`input_preview_recorded`、`credential_mappings_created`、`retained_tail_associated`、`model_turn_started`、`target_attempt_started`、`client_visible_content`、`target_attempt_finished`、`model_turn_finished`、`run_state_changed`、`run_finished` 各 1；实施后的 8 行为 `input_preview_recorded` 换成 `user_input_recorded`，去掉两个 `target_attempt_*` 与 `run_state_changed`。
+
+### 工具调用流（`toolflow`）
+
+6 轮对话 × {openai-compatible, google-gemini} × {unary, stream}，每个变体 6 个对话（PostgreSQL 4 个），共 144 个 Run（PostgreSQL 96 个），每个对话一个 Debug epoch 与独立 API Key。SQLite 24/24 个对话有效，PostgreSQL 16/16 个对话有效。
 
 |每 Run|实施前|实施后|
 |---|---:|---:|
-|事件行|11.0|8.0|
-|Observation 写租约（unary / stream）|12.81 / 13.69|7.00 / 7.00|
-|Observation 写事务（unary / stream）|12.19 / 12.94|7.56 / 7.25|
-|写租约内 Observation 语句（unary / stream）|74.4 / 75.4|57.7 / 58.0|
+|事件行|13.33|9.42|
+|Observation 写事务（SQLite / PostgreSQL）|11.49 / 11.57|8.01 / 8.03|
+|非 Observation 写事务（SQLite / PostgreSQL）|3.57 / 3.62|3.97 / 3.99|
+|两类合计（SQLite / PostgreSQL）|15.06 / 15.19|11.97 / 12.02|
+|Observation 写租约（SQLite）|11.46|7.00|
+|写租约内 Observation 语句（SQLite）|80.4|68.0|
 
-实施前的 11 行为 `run_admitted`、`input_preview_recorded`、`credential_mappings_created`、`retained_tail_associated`、`model_turn_started`、`target_attempt_started`、`client_visible_content`、`target_attempt_finished`、`model_turn_finished`、`run_state_changed`、`run_finished` 各 1；实施后的 8 行为 `input_preview_recorded` 换成 `user_input_recorded`，并去掉两个 `target_attempt_*` 与 `run_state_changed`。事务按 writer 动作拆分（实施后）：`admit_persist` 1、`persist_events`（准入阶段）1、`persist_turn_start` 1、`finish_run` 1，另有 3.0 个单事件命令各自提交（合计约 7.4，余下约 0.4 个未能归因到命令；实施前同类 6.59 个，另有 `persist_input_preview` 1、`persist_tail_source` 0.66 与独立的 ClientCompletion 1）。
+非 Observation 写事务（Turn Chain、统计等）单轮队列每 Run 少 1.0 个，工具流多约 0.4 个；perf span 不带 SQL 文本，没有逐项归因这些事务。事件行按 kind 的变化（每 Run）：`target_attempt_started`/`target_attempt_finished` 各 1.0 → 0（并入 Model Turn 行）；`run_state_changed` 1.83 → 0.83；`client_tool_result` 1.75 → 0.83（工具结果同时写入 `observation_tool_results`，共 252 行）；`input_preview_recorded` 0.17 → `user_input_recorded` 0.17；其余（`client_tool_handoff` 1.75、`model_thinking` 1.42、`run_admitted`/`model_turn_started`/`model_turn_finished`/`run_finished` 各 1、`client_visible_content` 0.25、`retained_tail_associated` 0.17）不变。
 
-**工具调用流（`toolflow`）。** 6 轮对话 × {openai-compatible, google-gemini} × {unary, stream}，每个变体 6 个对话（PostgreSQL 为 4 个），共 144 个 Run（PostgreSQL 96 个），每个对话一个 Debug epoch 与独立 API Key。
+**与 ADR 估算的差异。** 单轮队列的事件行（8.0）接近估算的 7.7，工具流（9.42）高于它，因为工具流每 Run 平均有 1.75 个 `client_tool_handoff` 与 1.42 个 `model_thinking` 事件，这些是 item 收口事件，不会被阶段合并消除。Observation 写事务没有达到估算的 4.7：单轮队列 6.25，工具流 8.01。实施后单轮 Run 的 6.25 个事务是 3 个阶段事务（准入、Turn 开始、收尾）加 3.25 个仍各自提交的单事件命令；perf span 不带 SQL 文本，无法从跟踪中直接指出这 3.25 个命令对应哪几种 kind。按代码路径推断，它们是流式阶段里 item 收口批、`UsageConfirmed` 只更新用量的事务与 `persist_turn_finish` 的用量事务，这是推断，未对每个 span 逐一验证。估算把“相邻事件间隔小于 50 ms”都算作同一阶段，实现按生产方可确定的阶段边界合并，并且写入线程遇到另一个 Run 的命令即结束批次（跨 Run 合批不在本 ADR 范围）；两者口径不同，估算未被实测复现。
 
-|每 Run|实施前|实施后|
-|---|---:|---:|
-|事件行（SQLite）|13.33|9.42|
-|Observation 写事务（SQLite / PostgreSQL）|12.34 / 11.48|9.11 / 8.22|
-|Observation 写租约（SQLite）|11.27|7.17|
-|写租约内 Observation 语句（SQLite）|79.7|68.6|
+### 共享内容（`verify_content_sharing.py`）
 
-事件行按 kind 的变化（每 Run）：`target_attempt_started`/`target_attempt_finished` 各 1.0 → 0（并入 Model Turn 行）；`run_state_changed` 1.83 → 0.83；`client_tool_result` 1.75 → 0.83（工具结果同时写入 `observation_tool_results`，共 252 行）；`input_preview_recorded` 0.17 → `user_input_recorded` 0.17；其余（`client_tool_handoff` 1.75、`model_thinking` 1.42、`run_admitted`/`model_turn_started`/`model_turn_finished`/`run_finished` 各 1、`client_visible_content` 0.25、`retained_tail_associated` 0.17）不变。
+每个 API Key 一个 `content_scopes` 行（形态 `api-key:<id>`），Turn、Marker 与 Observation 共用。单轮队列（SQLite）：1 个 scope，`contents` 112 行，其中 Turn 与 Observation 同时引用 64 行、仅 Turn 引用 48 行，没有仅被 Observation 引用的行，即 Observation 的输入/输出正文没有第二份存储。工具流（SQLite，24 个 API Key）：24 个 scope，`contents` 1,704 行，仅 Turn 1,308、Turn+Observation 384、Turn+Marker+Observation 12；PostgreSQL（16 个 API Key）：16 个 scope，`contents` 1,136 行，仅 Turn 872、Turn+Observation 256、Turn+Marker+Observation 8。三组的 `api_keys_with_more_than_one_scope` 与 `bodies_in_more_than_one_scope_of_the_same_api_key` 均为 0。查询为 `SELECT COUNT(*) FROM (SELECT <去掉 api-key: 前缀的 principal> AS k, c.digest FROM contents c JOIN content_scopes s ON s.id = c.scope_id GROUP BY k, c.digest HAVING COUNT(*) > 1) t`。工具流里跨 API Key 出现相同摘要（SQLite 与 PostgreSQL 各 36）是作用域隔离的预期结果，不算重复。
 
-**与 ADR 估算的差异。** 单轮队列的事件行（8.0）接近估算的 7.7，工具流（9.42）高于它，因为工具流每 Run 平均有 1.75 个 `client_tool_handoff` 与 1.42 个 `model_thinking` 事件，这些是 item 收口事件，不会被阶段合并消除。写事务没有达到估算的 4.7：单轮队列 7.41，工具流 9.11。实施后单轮 Run 的事务约为 7.4 个：4 个阶段事务（准入、准入事件、Turn 开始、收尾）、3.0 个仍各自提交的单事件命令，余下约 0.4 个未能归因到命令；perf span 不带 SQL 文本，无法从跟踪中直接指出这 3 个事件命令对应哪几种 kind；按代码路径归因，它们是：流式阶段里 item 收口批（visible item 的收口批，每批一次提交）、`UsageConfirmed` 的只更新用量的事务（发布终态前的独立同步点）、`persist_turn_finish` 的用量事务（合并后的 turn 结束行）。这是代码路径归因（推断），未对每个 span 逐一验证。“准入事件”事务是实施后实测当时的形态；随附的父链缺口与 Retained Tail 诊断事件现已并入准入事务，该实测未重做。估算把“相邻事件间隔小于 50 ms”都算作同一阶段，实现按生产方可确定的阶段边界合并，并且写入线程遇到另一个 Run 的命令即结束批次（跨 Run 合批不在本 ADR 范围）；两者口径不同，估算未被实测复现。
+### 各表字节
 
-**共享内容（`verify_content_sharing.py`）。** 每个 API Key 一个 `content_scopes` 行（形态 `api-key:<id>`），Turn、Marker 与 Observation 共用。单轮队列（SQLite）：1 个 scope，`contents` 112 行，其中 Turn 与 Observation 同时引用的 64 行、仅 Turn 引用的 48 行，没有仅被 Observation 引用的行，即 Observation 的输入/输出正文没有第二份存储；`api_keys_with_more_than_one_scope` 与 `bodies_in_more_than_one_scope_of_the_same_api_key` 均为 0。工具流（SQLite，24 个 API Key）：24 个 scope，`contents` 1,704 行，仅 Turn 1,308、Turn+Observation 384、Turn+Marker+Observation 12，两个计数均为 0；PostgreSQL（16 个 API Key）：`contents` 1,136 行，两个计数同样为 0。查询为 `SELECT COUNT(*) FROM (SELECT <去掉 api-key: 前缀的 principal> AS k, c.digest FROM contents c JOIN content_scopes s ON s.id = c.scope_id GROUP BY k, c.digest HAVING COUNT(*) > 1) t`。跨 API Key 出现相同摘要（SQLite 36、PostgreSQL 36）是作用域隔离的预期结果，不算重复。修复前的快照 `7cbc0714` 用同一查询得到 2 个 scope（裸 id 与 `api-key:` 前缀）与 4 个重复正文，已由 `589c6c33` 消除。
-
-**各表字节。** SQLite 用 dbstat（含索引，页面粒度 4 KiB）、PostgreSQL 用 `pg_table_size + pg_indexes_size`（8 KiB 页），两者在 100 多个 Run 的小库上都受页面粒度主导，不外推到开发库规模。
+SQLite 用 dbstat（含索引，页面粒度 4 KiB）、PostgreSQL 用 `pg_table_size + pg_indexes_size`（8 KiB 页），两者在 100 多个 Run 的小库上都受页面粒度主导，不外推到开发库规模。
 
 |工具流 SQLite|实施前|实施后|
 |---|---:|---:|
 |内容（`turn_contents` → `contents`）|462,848|512,000|
-|Observation（`observation_events` → 加 `observation_blocks`、`observation_event_contents`、`observation_tool_results`）|860,160|602,112（491,520 + 73,728 + 8,192 + 28,672）|
+|Observation（`observation_events` → 加 `observation_blocks`、`observation_event_contents`、`observation_tool_results`）|847,872|589,824（479,232 + 73,728 + 8,192 + 28,672）|
 |Marker（`history_markers` → 加 `history_marker_contents`）|131,072|159,744（122,880 + 36,864）|
-|三者合计|1,454,080|1,273,856（−12.4%）|
-|编码载荷合计（`turn_node_payloads`、内容、Marker 外壳、事件 `payload`/`attrs`、块 `envelope`）|924,759|735,242（−20.5%）|
+|三者合计|1,441,792|1,261,568（−12.5%）|
+|编码载荷合计（`turn_node_payloads`、内容、Marker 外壳、事件 `payload`/`attrs`、块 `envelope`）|923,667|734,368（−20.5%）|
 
-PostgreSQL 工具流（96 个 Run）：三者合计页面字节 1,736,704 → 1,851,392（+6.6%；Observation 单项 966,656 → 991,232），编码载荷合计 616,567 → 489,931（−20.5%）。小库上新增的表各带至少一个堆页与索引页，页面总量没有下降；载荷字节的下降才反映内容共享与规范化的效果，页面级收益需在开发库规模的升级运行后确认（待测）。单轮队列（输入输出正文占绝大部分字节）：`turn_contents` 7,917,568 → `contents` 7,876,608 B，Observation 事件表 327,680 → 122,880 B（加块 8,192、事件引用 8,192），编码载荷合计 8,061,593 → 7,867,524 B（−2.4%）。
+PostgreSQL 工具流（96 个 Run）：三者合计页面字节 1,679,360 → 1,818,624（+8.3%；内容 516,096 → 581,632，Observation 950,272 → 974,848，Marker 212,992 → 262,144），编码载荷合计 615,554 → 489,903（−20.4%）。小库上新增的表各带至少一个堆页与索引页，页面总量没有下降；载荷字节的下降才反映内容共享与规范化的效果。单轮队列（输入输出正文占绝大部分字节，SQLite）：内容 7,921,664 → 7,872,512 B，Observation 327,680 → 151,552 B，Marker 20,480 → 36,864 B，三者合计 8,269,824 → 8,060,928 B，编码载荷合计 8,061,642 → 7,867,524 B（−2.4%）。
+
+### SQLite 写租约（`lease`）
+
+openai-chat → openai-chat，unary 与 stream 各一个 case，并发 8，每 case 16 个 Run（2 轮续接 × 8 个并发链），`--mode fixed-workers`；二进制各重复 4 次（r1、r2 先基线后新，r3、r4 先新后基线）；每个 case 的 `dropped_*` 均为 0。数据目录与 perf 快照由 `--data-dir`、`--save-performance-snapshots` 保留。上游 mock 固定 10 s 输出，吞吐约 0.68 QPS，写租约队列远未饱和，下面的排队时间是该负载下的值，不代表高并发写入的上限。单租约统计（`sqlite.write_gate.hold` / `.wait`，微秒，按 span 的 `parent_id` 链归属到 Observation 与其余写入）：
+
+|case|二进制|Observation 租约/Run|持有均值 / p95|排队均值 / p50 / p95|持有总长 / Run|排队总长 / Run|
+|---|---|---:|---:|---:|---:|---:|
+|unary|实施前 r1–r4|12.4–12.8|2.0–2.9 ms / 4.1–6.9 ms|2.2–5.2 ms / 1.1–4.1 ms / 7.7–14.6 ms|25.6–36.6 ms|27.9–66.7 ms|
+|unary|实施后 r2–r4|6.0|3.2–4.1 ms / 9.6–12.7 ms|2.0–2.6 ms / 0.005–1.05 ms / 6.2–7.3 ms|19.5–24.4 ms|11.9–15.3 ms|
+|unary|实施后 r1（停顿）|6.0|22.7 ms / 128.2 ms|102.3 ms / 2.7 ms / 673.4 ms|136.3 ms|613.8 ms|
+|stream|实施前 r1–r4|13.0–13.3|1.6–2.1 ms / 3.2–5.3 ms|2.1–2.6 ms / 1.3–1.7 ms / 6.8–9.7 ms|21.8–28.0 ms|27.4–33.9 ms|
+|stream|实施后 r1、r2、r4|6.0–6.06|3.3–3.5 ms / 7.7–10.8 ms|1.4–1.7 ms / 0.006–0.35 ms / 4.6–8.7 ms|19.8–20.9 ms|8.2–10.6 ms|
+|stream|实施后 r3（停顿）|6.0|24.8 ms / 93.1 ms|10.1 ms / 0.003 ms / 8.9 ms|148.5 ms|60.4 ms|
+
+结论：同一负载下，Observation 的租约次数减半；每 Run 总排队时间下降约 70%（unary 40.4 → 13.4 ms，stream 30.8 → 9.4 ms，均为各自重复的均值，新二进制不含停顿 case），总持有时间下降约 18–26%（unary 29.5 → 21.7 ms，stream 24.9 → 20.4 ms），代价是单次持有更长（均值约 +1.1–1.5 ms，p95 约翻倍）。非 Observation 写入（Turn Chain、统计等）的排队均值没有变差（unary 实施前 2.8–7.5 ms，实施后 2.8–4.0 ms；stream 实施前 2.6–3.5 ms，实施后 2.2–3.0 ms）。**两次停顿**：新二进制的 unary r1 与 stream r3 各有一个 case 出现数十到数百毫秒的持有；停顿期间 `sqlite.write_gate.hold` 内耗时最长的是 `sql.transaction.commit`（例如 451 ms 的持有里 447 ms 是提交）与非 Observation 写入自己的 `sql.query`（最长 425 ms），Observation 与其余写入同时受影响；unary r1 的 e2e p95 因此升到 23.5 s（正常 11.7–11.9 s）。基线 8 个 case 没有出现，新二进制 8 个 case 中出现 2 个。停顿集中在 SQLite 提交（磁盘同步）上，且所有写入者同时受影响，更像数据目录所在联合文件系统的同步停顿（r3 还紧接在 cargo 构建之后，磁盘写回可能未结束），而不是 Observation 写入路径的行为；但没有额外探针（例如同时记录磁盘同步延迟）去证明，原因未定，如实保留两个 case 并单列。
+
+### PostgreSQL 32 worker 固定并发（`pg`）
+
+openai-chat → openai-chat，`--mode fixed-workers --concurrency 32 --warmup 5 --duration 120 --seed 1`，unary 与 stream 各一个 case；二进制各重复 2 次。**stream case 被 harness 的节奏门禁作废**（`synthetic upstream missed token pacing budget`，`--max-pacing-lag-ms 250`），四次运行都是如此，基线与新二进制相同；缩小输入、去掉图片、固定节奏、并发降到 16/24 的探测运行同样没有通过门禁（32 worker 时最大滞后 496–558 ms，门禁为 250 ms；探测结果未保留），说明单进程 Python mock 无法在 32 个并发 stream 下保持要求的节奏，是 harness 的限制，不是被测服务的问题，因此 PostgreSQL stream 的尾延迟记为未测，不放宽门禁。unary case 有效（已完成请求 110–112，凭据泄漏 0）：
+
+|unary|端到端 p50 / p95 / p99|准入阶段 p50 / p95 / p99|
+|---|---:|---:|
+|实施前 r1|42.9 / 62.5 / 67.7 s|66 / 485 / 552 ms|
+|实施前 r2|42.8 / 62.5 / 67.7 s|64 / 483 / 568 ms|
+|实施后 r1|42.8 / 62.7 / 67.6 s|68 / 438 / 542 ms|
+|实施后 r2|42.9 / 62.7 / 67.6 s|63 / 386 / 413 ms|
+
+端到端延迟由 mock 上游 10–60 s 的输出时长决定，看不出差别；准入阶段（写入与排队相关的部分）实施后 p95 为 386–438 ms，实施前 483–485 ms；每个二进制只有 2 次重复，且基线 r2 的运行内有约 2 分钟的外部单核占用，只作为“没有变差”的证据，不当作改善幅度。
+
+### PostgreSQL 并发写入与 GC 争用（`contention`）
+
+`measure_pg_contention`：32 个 worker 持续 120 s 的 unary 请求，同时以 0.5 s 间隔交替把 `log_retention_days` 设为 7 和 8 强制扫描（每次扫描内部串行，请求在上一次完成后才发下一次），各 2 次。所有请求 200，错误 0：
+
+|二进制|请求数 / QPS|e2e p50 / p95 / p99|准入 p95|扫描次数（PUT 墙钟 p50 / p95）|`pg_stat_database` 死锁 / 回滚|服务端日志中的死锁与观察写入失败|有 Lock 等待的采样（250 ms 间隔）|每请求提交数|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|实施前 c1|3,020 / 24.9|1,225 / 1,648 / 1,868 ms|15.5 ms|24（5.1 s / 10.3 s）|18 / 19|16（另有 3 条 `database_error`）|95 / 499|74.8|
+|实施前 c2|2,966 / 24.4|1,254 / 1,635 / 1,860 ms|30.1 ms|19（7.0 s / 8.7 s）|10 / 11|9（另有 2 条）|68 / 490|73.6|
+|实施后 c1|2,938 / 24.2|1,286 / 1,612 / 1,853 ms|19.8 ms|19（6.1 s / 11.8 s）|0 / 1|0|13 / 484|69.0|
+|实施后 c2|2,998 / 24.7|1,245 / 1,604 / 1,864 ms|19.2 ms|37（1.7 s / 9.4 s）|0 / 1|0|13 / 510|69.7|
+
+实施前两次运行都有死锁（服务端日志里是 `deadlock detected`，对应 Observation 的 tail、完成与事件写入失败；请求本身都返回 200）；实施后两次均为 0 死锁，`clean` 为真（FK、序列化、唯一约束等错误类别全为 0）。采样到的 `Lock:transactionid` 等待实施前合计 158 与 93 次，实施后为 0，剩下的只有 `Lock:advisory`（PostgreSQL 写协调，30–64 次对 32–41 次）。请求尾延迟两侧相当。强制扫描的 PUT 墙钟在两侧都很长（秒级），因为扫描与 32 个写入者争用；这是在持续写入压力下的值，不是空闲扫描耗时。实施前 `sweep_spans_valid` 为假是因为基线二进制没有 `history.sweep` span（扫描耗时只看 PUT 墙钟）。每次运行 1 个数据库、一次性，样本量小，不外推到更大并发。
+
+### 升级（`upgrade-gen` / `upgrade`）
+
+**升级前库。** `scale_upgrade_fixture` 用新二进制所在提交的 `stravia-storage-test-harness` 在空库里克隆已录制的夹具单元，写成与升级前（schema 36，`legacy-adr0076-turn-contents`）一致的存量；夹具 SHA256 `eb0a68ddf88e8cd0ef6d786434ba95eb7766ee463eb6325d416720ca87e354b8`。目标规模 490000 / 178000 / 17000，达成 `observation_events` 489,997、`turn_contents` 177,833、`history_markers` 16,999（另有 `turn_nodes` 35,846、`turn_node_contents` 294,639、`interaction_observations` 32,654、`inference_run_observations` 40,845）；SQLite 668,262,400 B，PostgreSQL 数据库 1,006,107,671 B。抽样的 500 个内容做了摘要校验，500 个事件做了解码校验，用旧（实施前）二进制经管理 API 读出 40 个抽样 Interaction 无失败。这是克隆的合成存量，不是开发库的真实分布。升级后：`observation_events` 408,461（合并 attempt 与去掉 `usage_confirmed`）、`contents` 179,410、`history_marker_contents` 16,999、`observation_blocks` 46,661、`observation_event_contents` 79,315、`observation_tool_results` 16,066、`content_scopes` 6。
+
+**升级成本**（新二进制启动并经 `setup/complete` 触发迁移；`getrusage` 的子进程资源，`/proc` 的峰值 RSS 与 5 秒采样的磁盘占用；每后端 2 次，副本不复用）：
+
+|后端|墙钟|服务端 CPU|峰值 RSS（VmHWM）|峰值磁盘|
+|---|---:|---:|---:|---:|
+|SQLite r1 / r2|74.1 / 109.3 s|75.2 / 85.3 s|590 / 758 MB|1,150,337,905 / 1,150,560,996 B（库文件 787,935,232 B，其余为 WAL；升级前 668,262,400 B）|
+|PostgreSQL r1 / r2|137.9 / 87.2 s|38.0 / 39.7 s|562 / 571 MB|数据库 1,472,315,919 / 1,471,978,519 B（升级前 1,006,107,671 B），WAL 目录峰值 1,073,741,824 B|
+
+两次重复的墙钟差距很大（SQLite +47%，PostgreSQL −37%），原因未查明，只报区间，不给均值。服务端日志中的阶段标签：`Converting shared content storage` 到下一个 `Applying database schema migrations` 之间 SQLite 约 68.7 / 104.6 s、PostgreSQL 约 134.9 / 84.3 s，其后到 `Verifying database integrity` / `Releasing database migration lock` 之间约 2.0–3.4 s，迁移总计 `elapsed_ms` 为 73,258 / 108,404 与 136,946 / 86,317；这些标签之间的区间包含 Rust 钩子的转换，但标签只在阶段开始处打印，转换各阶段（内容、保留期回填、Observation 规范化）的耗时没有单独记录。升级结束时 SQLite 库文件比升级前大 17.9%（`observation_events` 含索引 223 MB → 312 MB）、PostgreSQL 大 45.8%（死元组），推断是转换按行 UPDATE 重写，释放的空间留在页内或成为死元组（未单独验证）；回收需要 VACUUM：`VACUUM INTO` 后 SQLite 587,382,784 B，对照同一存量在旧布局上同样 `VACUUM INTO` 的 646,275,072 B（−9.1%）；PostgreSQL `VACUUM FULL` 后 851,672,087 B，对照旧布局 880,065,559 B（−3.2%）。升级本身不执行 VACUUM，升级后文件占用高于升级前、直到回收，是运维需要知道的成本。
+
+**空库迁移。** 全新空库上 36 → 42 个迁移的 `_sqlx_migrations.execution_time`（release 二进制，从空闲机上的租约运行的新建库读取，每侧 2 个库）：实施前总计 964–1,036 ms（`0033` 664–667 ms 为最大项，另有 `0030` 约 60 ms）；实施后 1,715–1,719 ms，新增 `0038` 94–95 ms、`0040` 185–188 ms、`0042` 476–484 ms，三者合计约 0.76 s，其余新迁移均低于 50 ms。对应的单元测试 `sqlite_baseline_applies_to_empty_database_and_is_idempotent`（debug 构建，内存 SQLite，含一次幂等重放）实施前 1.01 / 0.90 / 0.88 s，实施后 1.74 / 1.72 / 1.73 s，增量约 0.85 s，与上面迁移的增量同量级。
+
+### 扫描耗时（`sweep`）
+
+在上述升级库的副本上，基线二进制与新二进制各启动一次，`steady-repeats 3`、`lower-to 1`：先 3 次稳态（`log_retention_days=30`），再调低到 1 天的首轮，再 1 次稳态。基线副本是同一升级前存量经基线二进制启动（`setup/complete`）后的库，新副本是上面 `KEEP_UPGRADED=1` 的升级结果；每个二进制各 2 个副本。基线的扫描 span 是 `observation.maintenance.sweep`（`SWEEP_SPAN`），新二进制是 `history.sweep`；两者范围不同，基线只含 Observation，另外还有 `observation.maintenance.update_retention`：基线代码（`retention.rs`）在保存天数时对 `interaction_observations`、`inference_run_observations`、`observation_events`、`rejected_request_observations` 四张表逐行 `UPDATE … SET expires_at`，新二进制没有这一步（修改天数不重写任何行）。
+
+|后端|二进制|稳态扫描 span|缩短天数后首轮扫描 span|保留期更新 span（稳态 / 首轮）|PUT 墙钟（稳态 / 首轮）|SQL 查询数 / 次扫描|
+|---|---|---:|---:|---:|---:|---:|
+|SQLite|实施前 r1 / r2|112.6–156.7 / 109.4–157.8 ms|113.1 / 113.4 ms|188–193 ms / 2,754 / 1,238 ms|312–361 ms / 2,879 / 1,362 ms|1|
+|SQLite|实施后 r1 / r2|117.7–124.2 / 121.0–126.6 ms|124.9 / 138.3 ms|0|126–134 ms / 135 / 148 ms|28（首轮 61）|
+|PostgreSQL|实施前 r1 / r2|161.5–177.0 / 160.9–199.3 ms|180.7 / 188.3 ms|5,917–8,584 ms / 7,890 / 7,693 ms|6.1–8.8 s / 8.1 / 7.9 s|1|
+|PostgreSQL|实施后 r1 / r2|128.8–133.5 / 131.4–133.0 ms|142.4 / 169.0 ms|0|137–142 ms / 151 / 180 ms|34（首轮 75）|
+
+所有 case 的 `dropped_*` 为 0，凭据泄漏 0。**局限：** 夹具里所有行的时间都在 1 天之内，而 `log_retention_days` 的最小值是 1，所以缩短天数后的首轮只删除了 3 行（Marker、Marker 内容与可逆脱敏映射各 1），基线删除 0 行——这次测的是扫描本身的固定成本（span 内 active 部分约 55–80 ms），**不是**大批删除的成本。要测批量删除需要时间戳回溯的存量，本次没有，未测。基线的 PUT 墙钟里保留期更新占大头（SQLite 缩短天数后 1.2–2.8 s，PostgreSQL 6–8.6 s），新二进制没有这一步，这是设计上“修改天数不重写任何行”的实测体现。
+
+### 需要留意的两点
+
+没有发现需要停下的产品缺陷。一是升级后文件/数据库占用先升，需 VACUUM 才降（见上）；二是租约停顿 case 的原因未定，不能排除新二进制较长的单事务更容易撞上磁盘同步停顿（单租约持有变长这一点是确定的）。
