@@ -1462,7 +1462,7 @@ impl ObservationStore {
                 let mut connection = pool.acquire_write().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let mut writes = EventWrites::new(interaction_id, run_id);
-                let (principal, is_root): (String, bool) = sqlx::query_as("SELECT i.principal,EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=? AND r.interaction_id=i.id AND r.parent_run_id IS NULL) FROM interaction_observations i WHERE i.id=?")
+                let (principal, is_root): (String, bool) = sqlx::query_as("SELECT i.principal,i.root_run_id=? FROM interaction_observations i WHERE i.id=?")
                     .bind(run_id)
                     .bind(interaction_id)
                     .fetch_one(&mut *tx)
@@ -1493,7 +1493,7 @@ impl ObservationStore {
                 let mut tx = pool.begin().await?;
                 let mut writes = EventWrites::new(interaction_id, run_id);
                 let (principal, is_root): (String, bool) = sqlx::query_as(
-                    "SELECT i.principal,EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.id=$1 AND r.interaction_id=i.id AND r.parent_run_id IS NULL) FROM interaction_observations i WHERE i.id=$2",
+                    "SELECT i.principal,i.root_run_id=$1 FROM interaction_observations i WHERE i.id=$2",
                 )
                 .bind(run_id)
                 .bind(interaction_id)

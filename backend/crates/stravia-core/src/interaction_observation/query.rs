@@ -2747,7 +2747,8 @@ impl ObservationStore {
         Ok(refs)
     }
 
-    /// 完整登录文本：最新根 Run `user_input_recorded` 的引用按 `\n` 连接。
+    /// 完整登录文本：Interaction 根 Run（`root_run_id`）的最新 `user_input_recorded` 引用按 `\n` 连接。
+    /// 子 Interaction 的根 Run 仍带指向父 Interaction 的 `parent_run_id`，不能以其为空判定根。
     pub(super) async fn input_text(
         &self,
         interaction_id: &str,
@@ -2755,14 +2756,14 @@ impl ObservationStore {
     ) -> anyhow::Result<String> {
         let sequence: Option<i64> = match self {
             Self::Sqlite(pool, _) => sqlx::query_scalar(
-                "SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=? AND r.parent_run_id IS NULL AND e.kind='user_input_recorded' AND e.sequence<=?",
+                "SELECT MAX(e.sequence) FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id AND i.root_run_id=e.run_id WHERE e.interaction_id=? AND e.kind='user_input_recorded' AND e.sequence<=?",
             )
             .bind(interaction_id)
             .bind(through)
             .fetch_one(pool)
             .await?,
             Self::Postgres(pool, _) => sqlx::query_scalar(
-                "SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=$1 AND r.parent_run_id IS NULL AND e.kind='user_input_recorded' AND e.sequence<=$2",
+                "SELECT MAX(e.sequence) FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id AND i.root_run_id=e.run_id WHERE e.interaction_id=$1 AND e.kind='user_input_recorded' AND e.sequence<=$2",
             )
             .bind(interaction_id)
             .bind(through)

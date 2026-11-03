@@ -33,6 +33,26 @@ fn admit(
     items: Vec<AiItem>,
     parent_generation: Option<&str>,
 ) -> RunObserver {
+    admit_with(
+        observation,
+        id,
+        principal,
+        route,
+        items,
+        parent_generation,
+        parent_generation.is_none(),
+    )
+}
+
+fn admit_with(
+    observation: &InteractionObservation,
+    id: &str,
+    principal: &str,
+    route: &str,
+    items: Vec<AiItem>,
+    parent_generation: Option<&str>,
+    has_new_user: bool,
+) -> RunObserver {
     observation
         .observe_ingress(IngressStart {
             id: id.into(),
@@ -52,7 +72,7 @@ fn admit(
             },
             AdmissionFacts {
                 client_request: Arc::new(AiRequest::new("model", items)),
-                has_new_user: parent_generation.is_none(),
+                has_new_user,
                 has_matching_pending_tool_result: false,
                 generation_root_id: parent_generation.map(|_| "root-generation".into()),
                 generation_parent_id: parent_generation.map(str::to_owned),
@@ -655,6 +675,88 @@ async fn merged_turn_finish_usage_uses_management_net_input(
     Ok(())
 }
 
+/// 编辑历史用户消息后产生的子 Interaction：它的首个 Run 带着指向父 Interaction 的
+/// `parent_run_id`，但仍是该子 Interaction 自己的根 Run；详情的完整输入必须与摘要引用一致。
+async fn branch_child_detail_carries_its_own_input_text(
+    observation: &InteractionObservation,
+) -> anyhow::Result<()> {
+    use stravia_runtime_contract::protocol::ir::ToolCall;
+
+    let first = vec![user_item("branch original question")];
+    let parent = admit(
+        observation,
+        "branch-parent",
+        "branch-reader",
+        "route-branch-parent",
+        first.clone(),
+        None,
+    );
+    parent.capture_user_input(&first);
+    parent.publish_user_input();
+    parent.record(RunEvent::ClientToolHandoff {
+        tool_id: "branch-call".into(),
+        name: "probe".into(),
+        input: None,
+    });
+    // 父分支的交付早于子请求超过合并窗口，新的用户输入才会分叉为子 Interaction。
+    parent.finish(RunOutcome {
+        client_output_committed: true,
+        delivery: None,
+        delivery_completed_at: Some(writer::now() - 60_000),
+        status: "waiting_client".into(),
+        terminal_reason: None,
+        generation_node_id: Some("branch-node".into()),
+        generation_root_id: Some("root-generation".into()),
+    });
+    observation.flush().await?;
+
+    let edited = vec![
+        user_item("branch original question"),
+        AiItem::function_call(ToolCall {
+            id: "branch-call".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        }),
+        AiItem::function_call_output("branch-call", json!("ok")),
+        user_item("branch edited question"),
+    ];
+    let child = admit_with(
+        observation,
+        "branch-child",
+        "branch-reader",
+        "route-branch-child",
+        edited.clone(),
+        Some("branch-node"),
+        true,
+    );
+    child.capture_user_input(&edited);
+    child.capture_client_tool_results(&edited);
+    child.publish_user_input();
+    record_turn(&child, "branch-turn", "branch-attempt", "branch answer");
+    finish(&child, "completed", None);
+    observation.flush().await?;
+
+    let forest = observation.query_forest(ForestQuery::default()).await?;
+    let parent_summary = summary_by_route(&forest, "route-branch-parent");
+    let summary = summary_by_route(&forest, "route-branch-child");
+    assert_eq!(
+        summary.parent_interaction_id.as_deref(),
+        Some(parent_summary.id.as_str()),
+        "新的用户输入分叉为子 Interaction"
+    );
+    assert_eq!(summary.input.refs.len(), 1, "{summary:?}");
+    let detail = observation
+        .get_interaction(&summary.id, ForestQuery::default())
+        .await?
+        .expect("child detail");
+    assert_eq!(detail.input_text, "branch edited question");
+    let contents = observation
+        .observation_contents(&[summary.input.refs[0].content_id])
+        .await?;
+    assert_eq!(contents[0].content.body, json!(detail.input_text));
+    Ok(())
+}
+
 async fn run_read_contract(observation: &InteractionObservation) -> anyhow::Result<()> {
     let seeded = seed_text(observation).await?;
     summaries_carry_refs_and_raw_len(observation, &seeded).await?;
@@ -777,6 +879,14 @@ async fn sqlite_merged_turn_finish_usage_uses_management_net_input() -> anyhow::
 }
 
 #[tokio::test]
+async fn sqlite_branch_child_detail_carries_its_own_input_text() -> anyhow::Result<()> {
+    let fixture = Fixture::sqlite().await?;
+    let result = branch_child_detail_carries_its_own_input_text(&fixture.observation).await;
+    fixture.close().await?;
+    result
+}
+
+#[tokio::test]
 #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
 async fn postgres_read_contract() -> anyhow::Result<()> {
     let fixture = Fixture::postgres().await?;
@@ -790,6 +900,15 @@ async fn postgres_read_contract() -> anyhow::Result<()> {
 async fn postgres_merged_turn_finish_usage_uses_management_net_input() -> anyhow::Result<()> {
     let fixture = Fixture::postgres().await?;
     let result = merged_turn_finish_usage_uses_management_net_input(&fixture.observation).await;
+    fixture.close().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_branch_child_detail_carries_its_own_input_text() -> anyhow::Result<()> {
+    let fixture = Fixture::postgres().await?;
+    let result = branch_child_detail_carries_its_own_input_text(&fixture.observation).await;
     fixture.close().await?;
     result
 }

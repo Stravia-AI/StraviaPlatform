@@ -793,7 +793,7 @@ async fn merge_turn_finish_postgres(connection: &mut sqlx::PgConnection<'_>) -> 
 async fn backfill_input_sequence_sqlite(
     connection: &mut sqlx::SqliteConnection<'_>,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET input_sequence=(SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=interaction_observations.id AND r.parent_run_id IS NULL AND e.kind='user_input_recorded')")
+    sqlx::query("UPDATE interaction_observations SET input_sequence=(SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=interaction_observations.id AND r.id=interaction_observations.root_run_id AND e.kind='user_input_recorded')")
         .execute(&mut *connection)
         .await?;
     Ok(())
@@ -802,7 +802,7 @@ async fn backfill_input_sequence_sqlite(
 async fn backfill_input_sequence_postgres(
     connection: &mut sqlx::PgConnection<'_>,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET input_sequence=(SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=interaction_observations.id AND r.parent_run_id IS NULL AND e.kind='user_input_recorded')")
+    sqlx::query("UPDATE interaction_observations SET input_sequence=(SELECT MAX(e.sequence) FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE r.interaction_id=interaction_observations.id AND r.id=interaction_observations.root_run_id AND e.kind='user_input_recorded')")
         .execute(&mut *connection)
         .await?;
     Ok(())
