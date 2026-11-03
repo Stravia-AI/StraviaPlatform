@@ -219,8 +219,9 @@ def observe(session, route, generation, directory, exclude_runs=(), *, require_t
 def unknown_projection_fixture(args, directory, route, key, candidate_ids):
     """Clear only nullable derived proofs for this driver's own fresh Principal.
 
-    Table presence selects normalized v3 or the frozen legacy layout; this is a
-    measurement adapter for baseline binaries, not a product compatibility path.
+    Table presence selects the ADR-0089 shared-content layout or the frozen ADR-0076
+    baseline layout; this is a measurement adapter for baseline binaries, not a product
+    compatibility path.
     """
     fields = ("prefix_projection_version", "prefix_controls_fingerprint", "prefix_context_fingerprint")
     report = {"backend": args.backend, "operation": "set derived candidate projection to NULL outside inference timer",
@@ -229,16 +230,15 @@ def unknown_projection_fixture(args, directory, route, key, candidate_ids):
     assignments = ", ".join(field + " = NULL" for field in fields)
 
     def table_and_schema(tables):
-        schema = history_storage_schema(tables)
-        return ("turn_nodes" if schema == NORMALIZED_HISTORY else "turn_chain_nodes"), schema
+        # 两种受支持布局（ADR-0089 共享正文与冻结基线 ADR-0076）都把节点存在 turn_nodes。
+        return "turn_nodes", history_storage_schema(tables)
 
     def scope_guard(schema, key_sql, route_sql):
         effective = (f"(SELECT 'api-key:' || k.id FROM api_keys k "
                      "JOIN api_key_models km ON km.api_key_id = k.id "
                      f"WHERE k.token = {key_sql} AND km.model_id = {route_sql})")
-        if schema == NORMALIZED_HISTORY:
-            return f"scope_id = (SELECT s.id FROM turn_scopes s WHERE s.principal = {effective})"
-        return f"principal = {effective}"
+        scopes = "content_scopes" if schema == NORMALIZED_HISTORY else "turn_scopes"
+        return f"scope_id = (SELECT s.id FROM {scopes} s WHERE s.principal = {effective})"
 
     if args.backend == "sqlite":
         path = Path(directory) / "db" / "gateway.db"
