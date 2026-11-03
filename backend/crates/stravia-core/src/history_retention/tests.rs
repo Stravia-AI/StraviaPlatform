@@ -25,7 +25,7 @@ use stravia_runtime_contract::turn_chain::{
     TurnChainStore, TurnCommitError, TurnNodeId, TurnNodeKind,
 };
 
-use super::{ContentGc, HistoryMaintenance, HistoryRetention};
+use super::{ContentGc, HistoryMaintenance, HistoryRetention, PG_GC_LOCK, PG_GC_LOCK_SHARED};
 use crate::compaction::{Compaction, CompactionRecord, CompactionRegistration, CompactionTarget};
 use crate::generation_chain::{GenerationChain, GenerationSource, PersistError};
 use crate::history_marker::{
@@ -144,7 +144,7 @@ impl Fixture {
             retention.clone(),
         )
         .with_history_markers(Arc::clone(&markers))
-        .with_redaction_mappings(Arc::clone(&mappings))
+        .with_redaction_references()
         .with_compaction(compaction.clone());
         let observation_dir = tempfile::tempdir().expect("observation directory");
         let (sqlite, postgres) = match &db {
@@ -1418,6 +1418,32 @@ both_backends!(
     shared_content_lives_until_its_last_referrer_is_gone
 );
 
+/// 一次扫描排空多于一个批次（512 行）的正文：批次之间提交并释放写协调，
+/// 但调用方只需要一次 `sweep_history`。
+async fn one_sweep_drains_more_content_than_one_batch(fx: Fixture) {
+    let n = fx.window();
+    for index in 0..600 {
+        fx.commit(
+            None,
+            &Refs::answer(&format!("bulk body {index} ").repeat(8)),
+        )
+        .await;
+    }
+    let written = fx.tick().await;
+    assert!(fx.count("contents").await >= 600);
+    fx.sweep(written + n).await;
+    assert_eq!(fx.count("contents").await, 0, "every batch was drained");
+    for queue in fx.queue_tables().await {
+        assert_eq!(fx.count(&queue).await, 0, "{queue} drained");
+    }
+}
+both_backends!(
+    sqlite_one_sweep_drains_more_content_than_one_batch,
+    postgres_one_sweep_drains_more_content_than_one_batch,
+    1,
+    one_sweep_drains_more_content_than_one_batch
+);
+
 /// Observation 引用的正文与 Turn 共享：Turn 先过期时正文留给仍在期内的交互，
 /// 交互也被清理后正文随之回收；可见输出与工具结果正文随交互一并回收。
 async fn observation_content_lives_until_its_interaction_is_swept(fx: Fixture) {
@@ -1836,6 +1862,100 @@ impl Fixture {
             .expect("reclaim must not wait for a writer's row lock")
             .expect("reclaim must not fail on a writer's row lock")
     }
+}
+
+/// 等到有一个后端正阻塞在咨询锁上；返回阻塞数。轮询的是可观察状态，不是掩盖竞态的睡眠。
+async fn advisory_waiters(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_stat_activity \
+         WHERE wait_event_type = 'Lock' AND wait_event = 'advisory' AND datname = current_database()",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count advisory waiters")
+}
+
+async fn wait_for_advisory_waiter(pool: &PgPool, baseline: i64) {
+    for _ in 0..1000 {
+        if advisory_waiters(pool).await > baseline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no transaction blocked on the reclaim coordination lock");
+}
+
+/// 批量更新对象行的写入方（发布）与回收事务互斥：回收事务在途时发布等待，不与触发器
+/// 的取锁顺序交叉；回收释放后发布成功。
+async fn publication_waits_for_an_in_flight_reclaim(fx: Fixture) {
+    let marker = fx.thinking_marker("publication waits body", false).await;
+    let mapping = fx.mapping(false).await;
+    let pool = fx.pg().clone();
+    let baseline = advisory_waiters(&pool).await;
+
+    let mut reclaim = pool.begin().await.expect("reclaim transaction");
+    sqlx::query(PG_GC_LOCK)
+        .execute(&mut *reclaim)
+        .await
+        .expect("take the reclaim lock");
+    let publishing = async {
+        fx.markers
+            .publish(&fx.owner, std::slice::from_ref(&marker))
+            .await
+            .expect("publish marker");
+        fx.mappings
+            .publish(&fx.owner, std::slice::from_ref(&mapping))
+            .await
+            .expect("publish mapping");
+    };
+    let observing = async {
+        wait_for_advisory_waiter(&pool, baseline).await;
+        reclaim.commit().await.expect("finish reclaim");
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(publishing, observing)
+    })
+    .await
+    .expect("publication resumes once the reclaim transaction ends");
+    assert!(fx.marker_readable(&marker).await);
+    assert!(fx.mapping_readable(&mapping).await);
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_publication_waits_for_an_in_flight_reclaim() {
+    run_postgres(1, publication_waits_for_an_in_flight_reclaim).await;
+}
+
+/// 反方向：发布事务在途时回收等待，结束后照常完成。
+async fn reclaim_waits_for_an_in_flight_publication(fx: Fixture) {
+    let marker = fx.thinking_marker("reclaim waits body", true).await;
+    let t = fx.tick().await;
+    let n = fx.window();
+    let pool = fx.pg().clone();
+    let baseline = advisory_waiters(&pool).await;
+
+    let mut publishing = pool.begin().await.expect("publication transaction");
+    sqlx::query(PG_GC_LOCK_SHARED)
+        .execute(&mut *publishing)
+        .await
+        .expect("take the shared lock");
+    let reclaiming = fx.maintenance.sweep_history(t + 2 * n);
+    let observing = async {
+        wait_for_advisory_waiter(&pool, baseline).await;
+        publishing.commit().await.expect("finish publication");
+    };
+    let (swept, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(reclaiming, observing)
+    })
+    .await
+    .expect("reclaim resumes once the publication ends");
+    swept.expect("sweep_history");
+    assert!(fx.marker_text(&marker).await.is_none());
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_reclaim_waits_for_an_in_flight_publication() {
+    run_postgres(1, reclaim_waits_for_an_in_flight_publication).await;
 }
 
 /// 提交正在引用一个已过下限的依赖（持有它的 `FOR KEY SHARE`、尚未提交）时，

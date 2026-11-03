@@ -3067,3 +3067,76 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
         "upgraded index drives authoritative history discovery"
     );
 }
+
+impl SqlTurnChainStore {
+    /// 只供旧领域 payload fixture 使用；每次读写一个节点，不依赖内部 descriptor 布局。
+    pub(crate) async fn rewrite_payloads(
+        &self,
+        mut edit: impl FnMut(&mut serde_json::Value),
+    ) -> anyhow::Result<()> {
+        macro_rules! rewrite {
+            ($pool:expr, $put:ident, $restore:ident, $enqueue:path, $backend:ident, $lock:literal) => {{
+                let nodes: Vec<(i64,String,i64,String)> = sqlx::query_as(
+                    "SELECT node_pk,id,scope_id,kind FROM turn_nodes",
+                ).fetch_all($pool).await?;
+                for (node_pk,id,scope,kind) in nodes {
+                    let kind = match kind.as_str() {
+                        "response" => TurnNodeKind::Response,
+                        "agent" => TurnNodeKind::Agent,
+                        "web_search" => TurnNodeKind::WebSearch,
+                        _ => anyhow::bail!("invalid history kind"),
+                    };
+                    let (version,parent,payload,references): (i64,Option<String>,Vec<u8>,sqlx::types::Json<Vec<[i64; 3]>>) = sqlx::query_as(
+                        concat!("SELECT n.payload_version,parent.id,p.payload,",content::reference_projection!($backend),
+                        " FROM turn_nodes n \
+                         JOIN turn_node_payloads p ON p.node_pk=n.node_pk \
+                         LEFT JOIN turn_nodes parent ON parent.node_pk=n.parent_pk WHERE n.node_pk=$1"),
+                    ).bind(node_pk).fetch_one($pool).await?;
+                    let node = content::StoredNode { node_pk,scope_id:scope,references:references.0,id:TurnNodeId::new(id),kind,
+                        parent_id:parent.map(TurnNodeId::new),payload_version:u32::try_from(version)?,payload };
+                    let restored = {
+                        let mut connection = $pool.acquire().await?;
+                        content::$restore(&mut connection, vec![node]).await?
+                    };
+                    let mut payload = restored.into_iter().next().expect("restored node").payload;
+                    edit(&mut payload);
+                    let mut encoded = tokio::task::spawn_blocking(move || content::encode(payload)).await??;
+                    let mut connection = $pool.acquire_write().await?;
+                    let mut transaction = connection.begin().await?;
+                    if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
+                    let removed: Vec<i64> = sqlx::query_scalar(
+                        "DELETE FROM turn_node_contents WHERE node_pk=$1 RETURNING content_id",
+                    )
+                    .bind(node_pk)
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                    $enqueue(&mut transaction, &removed).await?;
+                    content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await?;
+                    sqlx::query("UPDATE turn_node_payloads SET payload=$1 WHERE node_pk=$2")
+                        .bind(encoded.payload).bind(node_pk).execute(&mut *transaction).await?;
+                    transaction.commit().await?;
+                    connection.finish().await?;
+                }
+                anyhow::Ok(())
+            }};
+        }
+        match &self.backend {
+            Backend::Sqlite(pool) => rewrite!(
+                pool,
+                put_sqlite,
+                restore_sqlite,
+                crate::content_store::sqlite::enqueue_unreferenced,
+                sqlite,
+                ""
+            ),
+            Backend::Postgres(pool) => rewrite!(
+                pool,
+                put_postgres,
+                restore_postgres,
+                crate::content_store::postgres::enqueue_unreferenced,
+                postgres,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
+            ),
+        }
+    }
+}

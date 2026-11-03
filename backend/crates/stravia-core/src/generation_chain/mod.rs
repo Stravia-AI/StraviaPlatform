@@ -201,7 +201,8 @@ pub(crate) struct GenerationChain {
     pending_commits: PendingGenerationCommits,
     artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
-    redaction_mappings: Option<Arc<dyn stravia_credential_protection::store::MappingStore>>,
+    /// 提交时是否登记节点引用的映射占位符；只在装配了可逆脱敏的网关里开启。
+    records_redaction_references: bool,
     compaction: Option<crate::compaction::Compaction>,
 }
 
@@ -329,7 +330,7 @@ impl GenerationChain {
             pending_commits: PendingGenerationCommits::default(),
             artifacts,
             history_markers: None,
-            redaction_mappings: None,
+            records_redaction_references: false,
             compaction: None,
         }
     }
@@ -348,11 +349,8 @@ impl GenerationChain {
         self
     }
 
-    pub(crate) fn with_redaction_mappings(
-        mut self,
-        mappings: Arc<dyn stravia_credential_protection::store::MappingStore>,
-    ) -> Self {
-        self.redaction_mappings = Some(mappings);
+    pub(crate) fn with_redaction_references(mut self) -> Self {
+        self.records_redaction_references = true;
         self
     }
 

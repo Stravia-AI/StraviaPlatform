@@ -241,14 +241,14 @@ impl GenerationChainWrite {
         let staged = self.staged.as_mut().ok_or(PersistError::NotStaged)?;
         let projection = staged.projection.take();
         let mut staged = staged.clone();
-        let redaction_references = match &self.chain.redaction_mappings {
-            Some(_) => self
-                .request
+        let redaction_references = if self.chain.records_redaction_references {
+            self.request
                 .meta
                 .redaction
                 .references()
-                .map_err(PersistError::Redaction)?,
-            None => Vec::new(),
+                .map_err(PersistError::Redaction)?
+        } else {
+            Vec::new()
         };
         // 客户端提交的 Marker reference 只按存在性解析，发布会话状态不再参与提交。
         let mut marker_references =

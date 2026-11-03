@@ -5,6 +5,14 @@ use async_trait::async_trait;
 use super::RedactionError;
 use stravia_runtime_contract::Principal;
 
+/// 历史回收的 PostgreSQL 协调锁（独占）。回收事务的释放触发器会按行删除顺序对被引用对象依次
+/// 加 `FOR NO KEY UPDATE`；两个事务以不同顺序取得同一批行的锁就会死锁。回收事务先取独占锁，
+/// 批量更新对象行的写入方（发布、确认）先取共享锁，二者互斥，取锁顺序因此不会成环。
+/// 只加 `FOR KEY SHARE` 的提交路径与单行更新不取此锁。
+pub const PG_GC_LOCK: &str = "SELECT pg_advisory_xact_lock(8900089)";
+/// 同一把锁的共享模式：写入方之间并行，只与回收事务互斥。
+pub const PG_GC_LOCK_SHARED: &str = "SELECT pg_advisory_xact_lock_shared(8900089)";
+
 const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 
 // Intentionally no Debug: mapping plaintext must never enter diagnostics.
@@ -65,7 +73,7 @@ pub struct InternedMappings {
 #[async_trait]
 pub trait MappingStore: Send + Sync {
     async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError>;
-    /// 实例内是否存在未过期映射。没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
+    /// 实例内是否存在映射（映射不再有过期时间，回收前都有效）。没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
     /// 默认返回 `true`，让未知实现保持保守行为。
     async fn any_active(&self) -> Result<bool, RedactionError> {
         Ok(true)
@@ -171,6 +179,12 @@ impl SqlMappingStore {
             }
             Self::Postgres(pool) => {
                 let mut transaction = pool.begin().await.map_err(|error| self.storage(error))?;
+                // 批量发布按调用方顺序锁映射行，与历史回收触发器的取锁顺序无关；
+                // 先取回收协调锁的共享模式，使两者互斥，取锁顺序不会成环。
+                sqlx::query(PG_GC_LOCK_SHARED)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| self.storage(error))?;
                 // The same principal lock as intern makes lifecycle decisions after any writer wait.
                 sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                     .bind(&principal)
