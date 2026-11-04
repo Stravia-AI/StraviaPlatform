@@ -17,6 +17,7 @@ mod user_rules;
 pub use user_rules::CompiledCustomRules;
 
 use super::RedactionError;
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use expression::{Context, Program};
 use pattern::Regex;
 use serde::{Deserialize, Serialize};
@@ -336,7 +337,8 @@ struct Rule {
     regex: Option<Regex>,
     path: Option<Regex>,
     secret_group: usize,
-    keywords: Vec<String>,
+    /// 小写关键词在 `Detector::keywords` 中的模式编号；任一出现于小写文本即需运行规则。
+    keywords: Vec<usize>,
     filter: Program,
     components: Vec<Component>,
     skip_report: bool,
@@ -347,6 +349,8 @@ pub(super) struct Detector {
     catalog: CredentialRuleCatalog,
     rules: Vec<Rule>,
     order: Vec<usize>,
+    /// 全部规则去重后的小写关键词；每段文本一次扫描，替代数百次逐关键词子串搜索。
+    keywords: AhoCorasick,
     prefilter: Program,
     filter: Program,
     tokenizer: tiktoken_rs::CoreBPE,
@@ -387,6 +391,8 @@ impl Detector {
             }
         }
         let mut rules = Vec::with_capacity(snapshot.rules.len());
+        let mut keyword_ids: HashMap<String, usize> = HashMap::new();
+        let mut keyword_patterns: Vec<String> = Vec::new();
         for source in &snapshot.rules {
             if source.description.is_empty()
                 || !matches!(source.confidence.as_str(), "low" | "medium" | "high")
@@ -433,7 +439,19 @@ impl Detector {
                 regex,
                 path,
                 secret_group: source.secret_group,
-                keywords: source.keywords.iter().map(|s| s.to_lowercase()).collect(),
+                keywords: source
+                    .keywords
+                    .iter()
+                    .map(|keyword| {
+                        let next = keyword_patterns.len();
+                        *keyword_ids
+                            .entry(keyword.to_lowercase())
+                            .or_insert_with_key(|keyword| {
+                                keyword_patterns.push(keyword.clone());
+                                next
+                            })
+                    })
+                    .collect(),
                 filter: Program::compile(&source.filter)?,
                 components,
                 skip_report: source.skip_report,
@@ -452,9 +470,16 @@ impl Detector {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
+        // 重叠匹配才能报告互为前缀或子串的全部关键词，与逐个子串搜索的语义一致。
+        let keywords = AhoCorasick::builder()
+            .match_kind(MatchKind::Standard)
+            .kind(Some(AhoCorasickKind::DFA))
+            .build(&keyword_patterns)
+            .map_err(|_| RedactionError::Detection)?;
         Ok(Self {
             rules,
             order,
+            keywords,
             prefilter: Program::compile(&snapshot.prefilter)?,
             filter: Program::compile(&snapshot.filter)?,
             tokenizer: tiktoken_rs::cl100k_base().map_err(|_| RedactionError::Detection)?,
@@ -513,6 +538,10 @@ impl Detector {
                 continue;
             }
             let lower = raw.to_lowercase();
+            let mut present = vec![false; self.keywords.patterns_len()];
+            for found in self.keywords.find_overlapping_iter(&lower) {
+                present[found.pattern().as_usize()] = true;
+            }
             let references = reference_ranges(raw);
             let mut candidates: Vec<Option<Vec<Finding<'_>>>> =
                 (0..self.rules.len()).map(|_| None).collect();
@@ -521,7 +550,7 @@ impl Detector {
                 let rule = &self.rules[index];
                 if rule.skip_report
                     || !rule.keywords.is_empty()
-                        && !rule.keywords.iter().any(|key| lower.contains(key))
+                        && !rule.keywords.iter().any(|&keyword| present[keyword])
                 {
                     continue;
                 }
@@ -857,6 +886,23 @@ mod tests {
         assert!(!has_secret(&[&secret]));
         assert!(!has_secret(&[&secret, client]));
         assert!(has_secret(&[&format!("{client}\n{secret}")]));
+    }
+
+    #[test]
+    fn keyword_prefilter_runs_rules_whose_keyword_extends_another_rules_keyword() {
+        // `apk_`（服务密钥）是 `apk_user_`（个人密钥）的前缀；只报告首个或最短关键词会跳过个人密钥规则。
+        let personal = format!("apk_user_{}", "Zx8Qp2Lm7Vt4Rk9Hs1Jd6Fg3Wc5Nb0Ty".repeat(5));
+        let service = format!("apk_{}", "Ub3Ye7Io1Ma5Sw9Xq2Ce6Rv0Gn4Hl8Pk".repeat(3));
+        let text = format!("devin personal {personal}\ndevin service {service}\n");
+        let detected = detector().unwrap().detect(&[&text]).unwrap();
+        let rule_of = |secret: &str| {
+            detected
+                .iter()
+                .find(|item| item.secret == secret)
+                .map(|item| item.findings[0].rule_id.as_str())
+        };
+        assert_eq!(rule_of(&personal), Some("devin-personal-api-key"));
+        assert_eq!(rule_of(&service), Some("devin-service-api-key"));
     }
 
     #[tokio::test]

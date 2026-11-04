@@ -102,6 +102,8 @@ tinyufo = { package = "TinyUFO", version = "=0.9.0" }
 redis = { version = "=1.7.1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "script"] }
 tempfile = "3"
 regex = "1.13.1"
+# 凭据检测关键词预筛选的多模式匹配；与 regex 已依赖的版本相同，不引入新的构建产物。
+aho-corasick = "1.1.5"
 tiktoken-rs = "=0.12.1"
 scraper = { version = "0.27.0", default-features = false, features = ["errors"] }
 tower = { version = "0.5", features = ["util"] }
