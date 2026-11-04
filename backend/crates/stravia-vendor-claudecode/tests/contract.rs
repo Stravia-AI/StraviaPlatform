@@ -92,11 +92,16 @@ struct MockServices {
     private_state: Mutex<Option<Vec<u8>>>,
     deltas: Mutex<Vec<AiStreamDelta>>,
     reject_assistant_prefill: bool,
+    /// 宿主拒绝授予续接恢复（例如额度、资格、截止时间或取消门禁不通过）。
+    deny_recovery: bool,
+    /// 宿主可见的有序事件：`start`、`request`、`replay`、`replay_denied`、`failed`。
+    wire_log: Mutex<Vec<&'static str>>,
 }
 
 #[async_trait]
 impl HostServices for MockServices {
     fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+        self.wire_log.lock().push("request");
         if self.reject_assistant_prefill {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             if body["messages"]
@@ -167,9 +172,25 @@ impl HostServices for MockServices {
         Ok(())
     }
 
+    async fn replay_continuation(&self) -> Result<Option<Arc<AiRequest>>, HostFailure> {
+        if self.deny_recovery {
+            self.wire_log.lock().push("replay_denied");
+            return Err(HostFailure::new(
+                ErrorKind::Unsupported,
+                "continuation recovery was not granted",
+            ));
+        }
+        // Claude Code 的插件始终持有完整历史，宿主没有裁剪过请求。
+        self.wire_log.lock().push("replay");
+        Ok(None)
+    }
+
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
-        if let RuntimeEvent::Delta(delta) = event {
-            self.deltas.lock().push(delta);
+        match event {
+            RuntimeEvent::UpstreamStarted => self.wire_log.lock().push("start"),
+            RuntimeEvent::Failed { .. } => self.wire_log.lock().push("failed"),
+            RuntimeEvent::Delta(delta) => self.deltas.lock().push(delta),
+            RuntimeEvent::Completed | RuntimeEvent::Compacted => {}
         }
         Ok(())
     }
@@ -1156,6 +1177,16 @@ async fn thread_rejection_replays_full_history_once_without_reusing_request_id()
             .unwrap_or_else(|error| panic!("{code}: {error}"));
             history.push(json!({"role":"assistant","content":reply}));
         }
+        // 恢复在单次操作内部完成：宿主先被要求重新装填发送门禁，再看到第二次
+        // 起始事件；明确失效的拒绝既不是失败事件，也不会在门禁外多发一次请求。
+        assert_eq!(
+            *services.wire_log.lock(),
+            [
+                "start", "request", "start", "request", "replay", "start", "request", "start",
+                "request"
+            ],
+            "{code}"
+        );
         let sent = services.requests.lock();
         assert_eq!(sent.len(), 4, "{code}");
         let failed: Value = serde_json::from_slice(&sent[1].body).unwrap();
@@ -1213,7 +1244,63 @@ async fn unrelated_upstream_failures_are_not_replayed() {
         assert!(result.is_err());
         assert_eq!(services.requests.lock().len(), 1);
         assert!(services.private_state.lock().is_none());
+        // 不明确的失败不请求恢复，也不重新开始。
+        assert_eq!(*services.wire_log.lock(), ["start", "request"]);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn ungranted_recovery_is_the_final_error_without_a_second_request() {
+    let (runtime, plugin) = load_plugin().await;
+    let reply = json!([{"type":"text","text":"READY"}]);
+    let services = Arc::new(MockServices {
+        deny_recovery: true,
+        script: Mutex::new(VecDeque::from([
+            (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
+            (404, "application/json",
+             json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
+                 "details":{"error_code":"thread_not_found"}}}).to_string(), Some("req_rejected".into())),
+        ])),
+        ..Default::default()
+    });
+    let mut provider = signed_in();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), json!("denied-session"));
+    let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request: threaded_request(&history),
+        },
+    )
+    .await
+    .expect("first turn");
+    history.push(json!({"role":"assistant","content":reply}));
+    history.push(json!({"role":"user","content":"Continue."}));
+    let state_before = services.private_state.lock().clone();
+    let result = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider,
+            request: threaded_request(&history),
+        },
+    )
+    .await;
+    assert!(result.is_err(), "a denied recovery must fail the operation");
+    // 被拒绝的恢复是终态：没有第二次起始/请求，且失败的轮次不改写线程状态。
+    assert_eq!(
+        *services.wire_log.lock(),
+        ["start", "request", "start", "request", "replay_denied"]
+    );
+    assert_eq!(services.requests.lock().len(), 2);
+    assert_eq!(*services.private_state.lock(), state_before);
 }
 
 #[tokio::test(flavor = "current_thread")]

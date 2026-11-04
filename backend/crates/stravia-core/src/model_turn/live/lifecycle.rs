@@ -255,6 +255,7 @@ impl Operation<'_, '_> {
             }),
         };
         context.send_admission = Some(send_admission.clone());
+        context.continuation_fallback = prepared.continuation_fallback.clone();
         context.root_request = prepared.root_request.clone();
         context.events = Some(event_tx);
         context.observer = prepared.observer.clone();

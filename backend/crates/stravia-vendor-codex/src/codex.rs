@@ -8,7 +8,8 @@ use stravia_runtime_contract::protocol::{
     ir::{AiResponse, ServerToolUsage, Usage},
 };
 use stravia_vendor_sdk::{
-    GuestHost, ProviderSnapshot, SearchRequest, SearchResponse, SearchSource, WsMessage, WsRequest,
+    ErrorKind, GuestHost, PluginError, ProviderSnapshot, SearchRequest, SearchResponse,
+    SearchSource, WsMessage, WsRequest,
 };
 
 use super::auth::account_id_from_jwt;
@@ -518,6 +519,27 @@ pub(super) fn websocket_available(provider: &ProviderSnapshot) -> bool {
         })
 }
 
+/// The native continuation the frame actually asks the upstream to resume.
+fn request_continuation_id(body: &Value) -> Option<&str> {
+    (body.get("store").and_then(Value::as_bool) == Some(false))
+        .then(|| body.get("previous_response_id").and_then(Value::as_str))
+        .flatten()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Only an attempt that carried a continuation can be recovered, and only from
+/// proof that the model never ran: a local socket miss before any frame was
+/// sent, or the exact unstarted upstream rejection classified by
+/// `classify_codex_websocket_error`. Everything else keeps its real error.
+pub(super) fn continuation_replayable(body: &Value, error: &PluginError) -> bool {
+    request_continuation_id(body).is_some()
+        && matches!(
+            error.kind,
+            ErrorKind::ContinuationUnavailable | ErrorKind::ContinuationNotFound
+        )
+}
+
 pub(super) fn infer_websocket(
     host: &GuestHost,
     provider: &ProviderSnapshot,
@@ -556,12 +578,7 @@ pub(super) fn infer_websocket(
             .map_err(|_| invalid("Codex WebSocket URL could not be constructed"))?;
         url.to_string()
     };
-    let continuation_id = (body.get("store").and_then(Value::as_bool) == Some(false))
-        .then(|| body.get("previous_response_id").and_then(Value::as_str))
-        .flatten()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned);
+    let continuation_id = request_continuation_id(body).map(str::to_owned);
     let continuation_requested = continuation_id.is_some();
     let connection = host.ws_connect_with_compression(
         WsRequest {

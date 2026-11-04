@@ -2046,7 +2046,6 @@ async fn drive_vendor_attempt(
         &output,
         ready,
     );
-    let mut continuation_fallback = prepared.continuation_fallback.take();
     let mut auth_recovered = false;
     // 最多剥离非本上游载荷后重放一次。
     let mut protected_reasoning_recovery = 0u8;
@@ -2215,7 +2214,7 @@ async fn drive_vendor_attempt(
             {
                 // 上游因载荷拒绝说明 Target 本身健康：不计入连续失败，也不受 Target
                 // 重试预算约束；只允许剥离非本上游载荷后重放一次。
-                if let Some(fallback) = continuation_fallback.take() {
+                if let Some(fallback) = prepared.continuation_fallback.take() {
                     prepared.request = fallback;
                 }
                 crate::router::clear_previous_response_id(Arc::make_mut(&mut prepared.request));
@@ -2316,7 +2315,7 @@ async fn drive_vendor_attempt(
             Err(failure)
                 if !lifecycle.committed()
                     && failure.error.code == "continuation_unavailable"
-                    && continuation_fallback.is_some() =>
+                    && prepared.continuation_fallback.is_some() =>
             {
                 // 宿主尚未发送请求；连接本地优化失效不是上游失败，
                 // 不消耗恢复预算，也不影响 Target 的连续失败计数。
@@ -2327,14 +2326,17 @@ async fn drive_vendor_attempt(
                     None,
                     Some(&failure.diagnostic),
                 );
-                prepared.request = continuation_fallback.take().expect("checked fallback");
+                prepared.request = prepared
+                    .continuation_fallback
+                    .take()
+                    .expect("checked fallback");
             }
             Err(failure)
                 if !lifecycle.committed()
                     && failure.error.code == "continuation_not_found"
                     && prepared.allow_recovery
                     && target.target_retry_budget > i32::from(auth_recovered)
-                    && continuation_fallback.is_some() =>
+                    && prepared.continuation_fallback.is_some() =>
             {
                 // 远端续接失败后的完整回放仍消耗既有恢复预算；本地连接 miss
                 // 才可免费回退。该请求级错误不能为获取预算而累计 Target 健康失败。
@@ -2346,7 +2348,10 @@ async fn drive_vendor_attempt(
                     None,
                     Some(&failure.diagnostic),
                 );
-                prepared.request = continuation_fallback.take().expect("checked fallback");
+                prepared.request = prepared
+                    .continuation_fallback
+                    .take()
+                    .expect("checked fallback");
             }
             Err(failure) => {
                 finish_vendor_failure(

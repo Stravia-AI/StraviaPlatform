@@ -305,6 +305,14 @@ impl VendorNetwork {
         self
     }
 
+    pub(crate) fn replay_continuation(&self) -> Result<(), HostFailure> {
+        self.ensure_current()?;
+        self.send_admission
+            .as_ref()
+            .ok_or_else(|| invalid("continuation replay requires inference send admission"))?
+            .replay_continuation()
+    }
+
     async fn admit_send(&self) -> Result<(), HostFailure> {
         self.ensure_current()?;
         if let Some(admission) = &self.send_admission {

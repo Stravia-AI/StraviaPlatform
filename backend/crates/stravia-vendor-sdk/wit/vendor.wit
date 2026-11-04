@@ -269,7 +269,7 @@ interface types {
 /// Controlled host services imported by the guest. Every call is scoped to the
 /// single operation; no handle survives it.
 interface host {
-    use types.{http-request, http-compression, ws-request, ws-compression, ws-message, canonical-event, plugin-error};
+    use types.{http-request, http-compression, ws-request, ws-compression, ws-message, canonical-event, canonical-payload, plugin-error};
 
     /// An in-flight HTTP exchange. `http-start` returns the handle as soon as
     /// the request is admitted, so a single operation can run several
@@ -327,6 +327,17 @@ interface host {
     /// discovery, registration, allowance, and assignment requests must not
     /// call this import. The host uses it to own retry and replay policy.
     emit-started: func() -> result<_, plugin-error>;
+
+    /// Recover an expired continuation before any model output. The guest must
+    /// have verified that the rejected request did not execute, or that its
+    /// exact local continuation socket was unavailable before dispatch.
+    /// Allowed once per inference operation, independently of retry budgets
+    /// and half-open probes. The next actual send still passes all admission
+    /// checks and consumes destination RPM. A successful recovery permits a
+    /// new emit-started; it does not emit a failure or reset the deadline.
+    /// Returns retained full canonical history when the host sent a delta;
+    /// none means the guest already received full history.
+    replay-continuation: func() -> result<option<canonical-payload>, plugin-error>;
 
     /// Emit one incremental canonical output event for the running
     /// operation. The host applies bounded backpressure; the call blocks

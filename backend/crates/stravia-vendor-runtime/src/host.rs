@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::{AiRequest, AiStreamDelta};
 use stravia_vendor_sdk::{ErrorKind, HttpCompression, WsCompression};
 
 #[derive(Clone)]
@@ -149,6 +149,16 @@ pub trait HostServices: Send + Sync {
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure>;
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure>;
+
+    /// Grant one verified pre-execution continuation recovery and return any
+    /// retained full history without copying the normal-path request.
+    /// Non-inference services do not provide continuation recovery.
+    async fn replay_continuation(&self) -> Result<Option<Arc<AiRequest>>, HostFailure> {
+        Err(HostFailure::new(
+            ErrorKind::Unsupported,
+            "continuation replay is unavailable for this operation",
+        ))
+    }
 
     /// Must apply bounded backpressure and return only after the event has been
     /// accepted or the operation was cancelled/fenced.

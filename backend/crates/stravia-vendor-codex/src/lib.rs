@@ -236,14 +236,8 @@ fn infer(
     operation: Operation,
 ) -> Result<OperationOutput, PluginError> {
     let model = required_model(&provider)?;
-    request.model = model.to_owned();
     require_codex_protocol(&provider)?;
-    for item in &mut request.items {
-        if item.role == stravia_runtime_contract::protocol::ir::Role::System {
-            item.role = stravia_runtime_contract::protocol::ir::Role::Developer;
-        }
-    }
-    request.parameters.store = Some(false);
+    normalize_request(model, &mut request);
     let mut session = codex::NativeSession::new(&provider);
     session.resolve_identity(host, &provider)?;
 
@@ -253,38 +247,69 @@ fn infer(
     let websocket = operation == Operation::Infer
         && provider.transport_preference() != TransportPreference::HttpOnly
         && codex::websocket_available(&provider);
-    if operation == Operation::Infer {
-        require_native_continuation_transport(&request, websocket)?;
+    if operation == Operation::Infer && !websocket && requests_previous_response(&request) {
+        // HTTP cannot carry a continuation delta. Nothing has been sent, so the
+        // plugin recovers full history itself before its only dispatch.
+        request = match host.replay_continuation()? {
+            Some(full) => restore_full_history(full, model),
+            None => {
+                request.parameters.continuation = None;
+                request
+            }
+        };
     }
-    let native_tools = codex::encode_tools(&request, codex::BodyOperation::Http);
-    // 原生工具只编码一次；通用 codec 仍负责历史与统一控制的协议投影。
-    request.tools = None;
-    request.parameters.native_tools.clear();
-    let encoded = common::encode_inference_request(&protocol.to_string(), request)?;
-    let mut body = encoded.body;
-    body["tools"] = native_tools.into();
-    let codec_headers = encoded.headers;
-    let egress_path = encoded.path;
-    prepare_responses_body(&provider, &mut body)?;
+    let mut attempt = prepare_attempt(
+        &provider,
+        &protocol.to_string(),
+        request,
+        operation,
+        websocket,
+        &session,
+    )?;
     if websocket {
-        codex::prepare_operation_body(&mut body, codex::BodyOperation::WebSocket)?;
-    } else {
-        codex::prepare_body(&mut body)?;
+        let mut replayed = false;
+        loop {
+            match codex::infer_websocket(
+                host,
+                &provider,
+                &attempt.body,
+                &session,
+                preserve_upstream_errors,
+            ) {
+                // A local socket miss (nothing sent) or the exact unstarted
+                // upstream rejection is consumed here: one full-history replay,
+                // never a failed event. The replay carries no continuation ID,
+                // so a second miss cannot loop.
+                Err(error)
+                    if !replayed && codex::continuation_replayable(&attempt.body, &error) =>
+                {
+                    replayed = true;
+                    attempt = match host.replay_continuation()? {
+                        Some(full) => prepare_attempt(
+                            &provider,
+                            &protocol.to_string(),
+                            restore_full_history(full, model),
+                            operation,
+                            websocket,
+                            &session,
+                        )?,
+                        None => attempt.without_continuation()?,
+                    };
+                }
+                result => {
+                    return result.map(Box::new).map(OperationOutput::Infer);
+                }
+            }
+        }
     }
-    // 独立压缩与官方客户端一致：普通流式 /responses + 末尾 compaction_trigger。
-    let retained = if operation == Operation::Compact {
-        compaction::arm(&mut body)?
-    } else {
-        Vec::new()
-    };
-    session.apply_body(&mut body);
-    if websocket {
-        return codex::infer_websocket(host, &provider, &body, &session, preserve_upstream_errors)
-            .map(Box::new)
-            .map(OperationOutput::Infer);
-    }
+    let Attempt {
+        body,
+        headers: codec_headers,
+        egress_path,
+        retained,
+    } = attempt;
     let path = strip_v1_prefix(&egress_path).to_owned();
-    let mut headers = common::header_pairs(&codec_headers)?;
+    let mut headers = codec_headers;
     headers.retain(|(name, _)| {
         !name.eq_ignore_ascii_case("content-type") && !name.eq_ignore_ascii_case("accept")
     });
@@ -348,27 +373,103 @@ fn infer(
     }
 }
 
-fn require_native_continuation_transport(
-    request: &AiRequest,
-    websocket: bool,
-) -> Result<(), PluginError> {
-    if !websocket
-        && request
-            .parameters
-            .continuation
-            .as_ref()
-            .and_then(|continuation| continuation.previous_response_id())
-            .is_some_and(|id| !id.trim().is_empty())
-    {
-        // The host may have replaced full history with a continuation delta.
-        // Reject before dispatch so its existing seam restores retained history.
-        return Err(PluginError {
-            kind: ErrorKind::ContinuationUnavailable,
-            message: "Codex HTTP requires the host's full-history request".into(),
-            upstream_status: None,
-        });
+/// One fully projected upstream request. A continuation replay rebuilds it from
+/// the same session, so identity and settings stay coherent across attempts.
+struct Attempt {
+    body: Value,
+    /// Codec headers for the HTTP wire; empty for WebSocket.
+    headers: Vec<(String, String)>,
+    egress_path: String,
+    retained: Vec<Value>,
+}
+
+impl Attempt {
+    /// Replay when the host dispatched the full history unchanged: the same
+    /// projection minus the stale reference. A body without input would be an
+    /// increment masquerading as history and must not be sent.
+    fn without_continuation(mut self) -> Result<Self, PluginError> {
+        let object = self
+            .body
+            .as_object_mut()
+            .ok_or_else(|| invalid("Codex Responses request body must be an object"))?;
+        object.remove("previous_response_id");
+        if object
+            .get("input")
+            .is_none_or(|input| input.is_null() || input.as_array().is_some_and(Vec::is_empty))
+        {
+            return Err(invalid(
+                "Codex continuation replay requires the full request history",
+            ));
+        }
+        Ok(self)
     }
-    Ok(())
+}
+
+fn normalize_request(model: &str, request: &mut AiRequest) {
+    request.model = model.to_owned();
+    for item in &mut request.items {
+        if item.role == stravia_runtime_contract::protocol::ir::Role::System {
+            item.role = stravia_runtime_contract::protocol::ir::Role::Developer;
+        }
+    }
+    request.parameters.store = Some(false);
+}
+
+/// The host's retained canonical request, with the stale reference removed.
+fn restore_full_history(mut full: AiRequest, model: &str) -> AiRequest {
+    full.parameters.continuation = None;
+    normalize_request(model, &mut full);
+    full
+}
+
+fn requests_previous_response(request: &AiRequest) -> bool {
+    request
+        .parameters
+        .continuation
+        .as_ref()
+        .and_then(|continuation| continuation.previous_response_id())
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
+fn prepare_attempt(
+    provider: &ProviderSnapshot,
+    protocol: &str,
+    mut request: AiRequest,
+    operation: Operation,
+    websocket: bool,
+    session: &codex::NativeSession,
+) -> Result<Attempt, PluginError> {
+    let native_tools = codex::encode_tools(&request, codex::BodyOperation::Http);
+    // 原生工具只编码一次；通用 codec 仍负责历史与统一控制的协议投影。
+    request.tools = None;
+    request.parameters.native_tools.clear();
+    let encoded = common::encode_inference_request(protocol, request)?;
+    let mut body = encoded.body;
+    body["tools"] = native_tools.into();
+    let headers = if websocket {
+        Vec::new()
+    } else {
+        common::header_pairs(&encoded.headers)?
+    };
+    prepare_responses_body(provider, &mut body)?;
+    if websocket {
+        codex::prepare_operation_body(&mut body, codex::BodyOperation::WebSocket)?;
+    } else {
+        codex::prepare_body(&mut body)?;
+    }
+    // 独立压缩与官方客户端一致：普通流式 /responses + 末尾 compaction_trigger。
+    let retained = if operation == Operation::Compact {
+        compaction::arm(&mut body)?
+    } else {
+        Vec::new()
+    };
+    session.apply_body(&mut body);
+    Ok(Attempt {
+        body,
+        headers,
+        egress_path: encoded.path,
+        retained,
+    })
 }
 
 fn prepare_responses_body(
@@ -797,6 +898,20 @@ pub(crate) fn classify_codex_websocket_error(
     if let Some(error) = classify_responses_stream_error(value, saw_response_event) {
         return Some(error);
     }
+    if continuation_requested
+        && !saw_response_event
+        && value.get("type").and_then(Value::as_str) == Some("error")
+        && common::previous_response_not_found(value)
+    {
+        return Some(PluginError {
+            kind: ErrorKind::ContinuationNotFound,
+            message: "upstream continuation is no longer available".into(),
+            upstream_status: value
+                .get("status")
+                .and_then(Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok()),
+        });
+    }
     (continuation_requested
         && !saw_response_event
         && value.get("type").and_then(Value::as_str) == Some("error")
@@ -889,21 +1004,6 @@ stravia_vendor_sdk::export_vendor!(CodexVendor);
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn http_continuation_requires_host_full_history_before_dispatch() {
-        let mut request = AiRequest::new("gpt-5.4", Vec::new());
-        request.parameters.continuation = Some(
-            stravia_runtime_contract::protocol::ir::Continuation::PreviousResponse(
-                "resp_previous".into(),
-            ),
-        );
-        let error = require_native_continuation_transport(&request, false).unwrap_err();
-        assert!(matches!(error.kind, ErrorKind::ContinuationUnavailable));
-        assert!(require_native_continuation_transport(&request, true).is_ok());
-        request.parameters.continuation = None;
-        assert!(require_native_continuation_transport(&request, false).is_ok());
-    }
 
     #[test]
     fn native_projection_keeps_supported_controls_and_canonical_history() {
@@ -1183,6 +1283,40 @@ mod tests {
     }
 
     #[test]
+    fn only_a_continuation_attempt_with_unstarted_proof_is_replayable() {
+        let error = |kind| PluginError {
+            kind,
+            message: String::new(),
+            upstream_status: None,
+        };
+        let with_reference = json!({"store": false, "previous_response_id": " resp_previous "});
+        for kind in [
+            ErrorKind::ContinuationUnavailable,
+            ErrorKind::ContinuationNotFound,
+        ] {
+            assert!(codex::continuation_replayable(
+                &with_reference,
+                &error(kind)
+            ));
+        }
+        assert!(!codex::continuation_replayable(
+            &with_reference,
+            &error(ErrorKind::Auth)
+        ));
+        // The full-history replay carries no reference, so it can never loop.
+        for body in [
+            json!({"store": false}),
+            json!({"store": false, "previous_response_id": " "}),
+            json!({"store": true, "previous_response_id": "resp_previous"}),
+        ] {
+            assert!(!codex::continuation_replayable(
+                &body,
+                &error(ErrorKind::ContinuationNotFound)
+            ));
+        }
+    }
+
+    #[test]
     fn websocket_continuation_error_requires_exact_unstarted_rejection() {
         let rejection = json!({
             "type": "error",
@@ -1198,6 +1332,17 @@ mod tests {
         ));
         assert!(classify_codex_websocket_error(&rejection, false, false).is_none());
         assert!(classify_codex_websocket_error(&rejection, true, true).is_none());
+        let coded_rejection = json!({
+            "type": "error",
+            "status": 400,
+            "error": {"code": "previous_response_not_found", "message": "Expired reference"}
+        });
+        assert!(matches!(
+            classify_codex_websocket_error(&coded_rejection, false, true).map(|error| error.kind),
+            Some(ErrorKind::ContinuationNotFound)
+        ));
+        assert!(classify_codex_websocket_error(&coded_rejection, false, false).is_none());
+        assert!(classify_codex_websocket_error(&coded_rejection, true, true).is_none());
         let ordinary_bad_request = json!({
             "type": "error",
             "error": {

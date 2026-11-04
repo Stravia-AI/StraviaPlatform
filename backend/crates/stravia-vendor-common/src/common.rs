@@ -599,8 +599,11 @@ fn decode_normalized_websocket(
                         .and_then(|status| u16::try_from(status).ok()),
                 });
             }
-            if !preserve_upstream_errors
-                && let Some(error) = classify_error(&value, saw_response_event)
+            if let Some(error) = classify_error(&value, saw_response_event)
+                && (!preserve_upstream_errors
+                    || (continuation_requested
+                        && !saw_response_event
+                        && matches!(error.kind, ErrorKind::ContinuationNotFound)))
             {
                 reusable = true;
                 return Err(error);
@@ -744,7 +747,9 @@ fn classify_stream_error_before_emit(
     Ok(())
 }
 
-fn previous_response_not_found(value: &serde_json::Value) -> bool {
+/// Match only the explicit missing-reference code. Callers must independently
+/// prove that a continuation was requested and no model execution has begun.
+pub fn previous_response_not_found(value: &serde_json::Value) -> bool {
     value
         .pointer("/error/code")
         .or_else(|| value.pointer("/response/error/code"))

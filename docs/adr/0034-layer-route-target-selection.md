@@ -20,17 +20,19 @@ Target Priority 是有符号 32 位分组整数，越大越优先，缺省 0；�
 
 Model Turn 中 Vendor 返回明确的 `Unsupported` 时，视为当前 Target 不具备所需操作或能力，直接尝试后续合格 Target；不在同 Target 重试，也不计共享健康失败。通用 `Invalid` 或 HTTP 400 不据此放宽。Native Compaction、不可安全跨 Target 回放的不透明 Conversation，以及首个 canonical 输出后的切换限制继续生效。
 
-本段明确替换本 ADR 此前的「重试预算用尽、QuotaExceeded 或请求放弃当前 Target 即立即冷却」规则：除上述显式长 Retry-After 外，普通 Target 只在共享连续失败数达到统一阈值时冷却，单次流式失败、QuotaExceeded 或已提交输出均不会仅凭自身触发冷却。Target Cooldown 到期后进入半开，而不是全量恢复；下一个实际符合选路条件的请求独占一次探测机会。探测关闭同 Target 预算重试和 ProviderCall 内部回退，完整成功清零并恢复正常；任何上游探测失败（含已经发出上游请求后的超时）立即重新冷却，显式长 Retry-After 仍取上述有界时长，否则等待完整配置冷却。用户取消、本地准备失败和消费者断开仅释放名额。半开失败后的请求是否切换 Target，仍遵守错误分类与 Client Output Commit。冷却为 0 时仅关闭冷却调度门禁；失败仍计数并在达到阈值后按错误分类更换或停止 Target，完整成功仍清零。恢复状态、共享计数与进行中占位统一由 `RoutePolicyState` 拥有，以世代隔离迟到结果，不再叠加独立的固定失败次数健康过滤。已经开始执行的请求不因其他请求触发冷却而被取消。
+本段明确替换本 ADR 此前的「重试预算用尽、QuotaExceeded 或请求放弃当前 Target 即立即冷却」规则：除上述显式长 Retry-After 外，普通 Target 只在共享连续失败数达到统一阈值时冷却，单次流式失败、QuotaExceeded 或已提交输出均不会仅凭自身触发冷却。Target Cooldown 到期后进入半开，而不是全量恢复；下一个实际符合选路条件的请求独占一次探测机会。探测关闭同 Target 预算重试和 ProviderCall 内部回退，下述已确认未执行的插件内部续接恢复除外；完整成功清零并恢复正常。健康相关的上游探测失败（含已经发出上游请求后的超时）立即重新冷却，显式长 Retry-After 仍取上述有界时长，否则等待完整配置冷却。用户取消、本地准备失败和消费者断开仅释放名额。半开失败后的请求是否切换 Target，仍遵守错误分类与 Client Output Commit。冷却为 0 时仅关闭冷却调度门禁；失败仍计数并在达到阈值后按错误分类更换或停止 Target，完整成功仍清零。恢复状态、共享计数与进行中占位统一由 `RoutePolicyState` 拥有，以世代隔离迟到结果，不再叠加独立的固定失败次数健康过滤。已经开始执行的请求不因其他请求触发冷却而被取消。
 
 Latency Preference 的输出 tok/s 为一小时内成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，包含首 Token 等待，不减 `first_token_ms`，也不平均单次 TPS。管理面 Provider TPS 使用同一完整 attempt 耗时；Run TPS 评价客户端完整请求，不把其他 Target、平台工具或客户端请求间隔的耗时归到该 Target。成功率权重、有效样本门槛、亲和与优先级顺序保持不变。
 
 ## Root-scoped cooldown attempts
 
-本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一次额外实际上游尝试。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，必须经过实际发送目的地 RPM、按上述规则计算的 Retry-After 等待／有界冷却、授权、能力、禁用、Credential Invalid、deadline 和取消门禁；不放宽 Continuation 的执行状态不确定性或 Client Output Commit。
+本次替代原有「请求级终态错误也计共享失败」与「Affinity 一律让位冷却」决定：冷却前已选中 Target，或具有合法 Target Continuation、Conversation Affinity、Cache Affinity 的请求，每个 RootRequest 对同一冷却 Target 最多领取一个额外 Target attempt。每个独立合格根各自有机会，不是每轮冷却全局仅一次；内部重试、隐藏轮次、后台执行与切回原 Target 不重置机会。不合格新请求仍走普通健康选路。额外尝试关闭同 Target 预算重试与 ProviderCall 内部回退，下述已确认未执行的插件内部续接恢复除外；每次实际发送仍必须经过目的地 RPM、按上述规则计算的 Retry-After 等待／有界冷却、授权、能力、禁用、Credential Invalid、deadline 和取消门禁，不放宽 Continuation 的执行状态不确定性或 Client Output Commit。
 
 额外尝试只有完整成功且冷却世代仍匹配才能清零并恢复；HTTP 200、首 token 或部分输出不算恢复，旧世代迟到成功不得覆盖新冷却。健康相关上游失败沿既有分类和冷却规则处理，请求级错误与取消不改变健康状态也不遗留探测占用。普通冷却到期的独占半开探测继续有效，已在执行的流不因别根触发冷却被取消。目的地 RPM 不改变健康身份；根累计等待及额度配置见[架构 §8.4](../design/architecture.md#84-上游目的地-rpm-发送门禁与配置)。
 
-远端 Continuation 不存在属于请求级错误，不为取得恢复预算而增加共享健康失败。完整历史回放仍受原 Target Retry Budget 限制；预算为 0 时不回放，已执行的认证恢复占用同一预算，完整回放最多一次。宿主尚未发送请求的本地连接 miss 仍可免费回退；半开探测与冷却额外尝试不获得内部回放许可。
+更新后的 Codex 与 Claude Code 插件在确认续接被上游拒绝且模型尚未执行，或本地 socket miss 尚未发送时，通过 `replay-continuation` 在同一次 Infer 内最多恢复一次。宿主按需交回已保留的完整历史，并重新开放一次发送机会；插件移除失效 ID 后完整重放，不产生中间失败 attempt 或健康失败。此恢复不占 Target Retry Budget，预算为 0、半开探测与冷却额外 attempt 同样允许；不创建新的探测名额、不重置总 deadline、不退回已用 RPM，下一次实际发送仍经过全部原有准入。普通上游错误、执行状态不明、已开始响应或已交付输出均不获得许可；重放本身失败仍正常记录。
+
+远端 Continuation 不存在仍属于请求级错误，不为取得恢复预算而增加共享健康失败。未使用该接口的旧插件保留原有宿主恢复路径：远端失效的完整历史回放受原 Target Retry Budget 限制，认证恢复占用同一预算，完整回放最多一次；本地连接 miss 可免费回退，但半开探测与冷却额外 attempt 不获得这条旧路径的内部回放许可。
 
 上述请求级隔离也适用于半开探测：此前「任何上游探测失败即重新冷却」现仅指健康相关失败；明确请求级错误只释放探测占用，不改变既有冷却世代或失败数。
 

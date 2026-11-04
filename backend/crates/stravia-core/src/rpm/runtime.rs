@@ -547,6 +547,27 @@ impl SendEligibility {
 }
 
 impl SendAdmission {
+    /// 已确认模型未执行的续接拒绝不占用唯一的恢复探测；重发仍重新扣目的地 RPM。
+    /// 调用次数与首个输出限制由操作级 VendorRuntime 持有。
+    pub(crate) fn replay_continuation(&self) -> Result<(), stravia_vendor_runtime::HostFailure> {
+        let _state = self.admission.inner.lock();
+        if self.cancellation.is_cancelled() || self.deadline.is_exceeded() {
+            return Err(stravia_vendor_runtime::HostFailure::new(
+                if self.cancellation.is_cancelled() {
+                    stravia_vendor_sdk::ErrorKind::Cancelled
+                } else {
+                    stravia_vendor_sdk::ErrorKind::DeadlineExceeded
+                },
+                "continuation replay operation is no longer active",
+            ));
+        }
+        self.sent.store(false, std::sync::atomic::Ordering::Release);
+        if let Some(state) = &self.upstream_state {
+            state.store(0, std::sync::atomic::Ordering::Release);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn acquire(&self) -> Result<(), stravia_vendor_runtime::HostFailure> {
         let result = self.acquire_inner().await;
         result.map_err(|error| {

@@ -302,9 +302,8 @@ fn infer(
             &plan.context,
             shaped.betas,
         );
-        if attempt == 0 {
-            host.emit_started()?;
-        }
+        // 每次实际模型请求之前都声明一次开始；恢复重放前宿主已经重置开始槽位。
+        host.emit_started()?;
         let response = host.http_start_with_compression(
             HttpRequest {
                 method: "POST".into(),
@@ -338,6 +337,10 @@ fn infer(
             {
                 // 这些拒绝发生在模型执行前。只做协议规定的一次全量重放；
                 // 网络/配额/认证错误及已经发出的流式输出不进入此路径。
+                // 该拒绝由本插件在内部消化：不发 Failed 事件。先向宿主声明
+                // “已确认未执行”以重新装填单次发送门禁；被拒绝则作为最终错误返回。
+                // 本插件已持有完整 canonical 历史，宿主返回的可选历史无需使用。
+                host.replay_continuation()?;
                 plan.context.mode = mode;
                 plan.context.message_offset = 0;
                 plan.context.previous_message_id = None;
@@ -423,7 +426,7 @@ fn infer(
         }
         return Ok(OperationOutput::Infer(Box::new(complete)));
     }
-    unreachable!("both attempts return or the first attempt explicitly replays")
+    unreachable!("the second attempt always returns; only the first may replay")
 }
 
 fn thread_scope(provider: &ProviderSnapshot, session_id: &str) -> String {

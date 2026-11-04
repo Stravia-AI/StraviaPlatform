@@ -657,6 +657,8 @@ impl VendorRuntime {
                 operation,
                 catalog_sync,
                 upstream_starts: 0,
+                continuation_replayed: false,
+                emitted_output: false,
                 received_check_response: false,
             },
         );
@@ -688,6 +690,8 @@ struct StoreState {
     /// connection-scoped import remains rejected.
     catalog_sync: bool,
     upstream_starts: usize,
+    continuation_replayed: bool,
+    emitted_output: bool,
     received_check_response: bool,
 }
 
@@ -902,6 +906,38 @@ impl wit_host::Host for StoreState {
         }
     }
 
+    async fn replay_continuation(
+        &mut self,
+    ) -> Result<Result<Option<wit_types::CanonicalPayload>, wit_types::PluginError>, wasmtime::Error>
+    {
+        let operation = match self.operation_active() {
+            Ok(operation) => operation,
+            Err(error) => return Ok(Err(to_wit_failure(error))),
+        };
+        if operation != Operation::Infer || self.continuation_replayed || self.emitted_output {
+            return Ok(Err(to_wit_failure(HostFailure::new(
+                ErrorKind::Invalid,
+                "continuation replay requires an uncommitted inference and is allowed only once",
+            ))));
+        }
+        let request = match self.services.replay_continuation().await {
+            Ok(request) => request,
+            Err(error) => return Ok(Err(to_wit_failure(error))),
+        };
+        let payload = request
+            .as_ref()
+            .map(|request| {
+                serde_json::to_vec(request.as_ref()).map(|body| wit_types::CanonicalPayload {
+                    format: CANONICAL_FORMAT_VERSION,
+                    body,
+                })
+            })
+            .transpose()?;
+        self.continuation_replayed = true;
+        self.upstream_starts = 0;
+        Ok(Ok(payload))
+    }
+
     async fn emit_event(
         &mut self,
         event: wit_types::CanonicalEvent,
@@ -923,7 +959,10 @@ impl wit_host::Host for StoreState {
             Err(error) => return Ok(Err(to_wit_failure(error))),
         };
         match self.services.emit_event(event).await {
-            Ok(()) => Ok(Ok(())),
+            Ok(()) => {
+                self.emitted_output = true;
+                Ok(Ok(()))
+            }
             Err(error) => Ok(Err(to_wit_failure(error))),
         }
     }
@@ -1548,6 +1587,8 @@ mod deadline_tests {
             generation: 0,
             operation: None,
             upstream_starts: 0,
+            continuation_replayed: false,
+            emitted_output: false,
             received_check_response: false,
             catalog_sync: false,
         }
