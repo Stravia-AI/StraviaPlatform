@@ -4443,6 +4443,13 @@ CREATE INDEX observation_events_run_idx ON public.observation_events USING btree
 
 
 --
+-- Name: observation_events_tool_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_events_tool_idx ON public.observation_events USING btree (tool_id, sequence) WHERE (tool_id IS NOT NULL);
+
+
+--
 -- Name: observation_pending_tools_expiry_idx; Type: INDEX; Schema: public; Owner: -
 --
 
