@@ -238,8 +238,6 @@ fn infer(
     let model = required_model(&provider)?;
     require_codex_protocol(&provider)?;
     normalize_request(model, &mut request);
-    let mut session = codex::NativeSession::new(&provider);
-    session.resolve_identity(host, &provider)?;
 
     let protocol = OPEN_RESPONSES_2026_04_24;
     let preserve_upstream_errors = operation == Operation::Infer
@@ -248,17 +246,18 @@ fn infer(
         && provider.transport_preference() != TransportPreference::HttpOnly
         && codex::websocket_available(&provider);
     if operation == Operation::Infer && !websocket && requests_previous_response(&request) {
-        // HTTP cannot carry a continuation delta. Nothing has been sent, so the
-        // plugin recovers full history itself before its only dispatch.
-        request = match host.replay_continuation()? {
-            Some(full) => restore_full_history(full, model),
-            None => {
-                request.parameters.continuation = None;
-                request
-            }
-        };
+        // HTTP cannot carry a continuation delta. Report the pre-execution fact
+        // before Started or any dispatch; Core owns the optional full-history
+        // replay and will remove the stale reference from its retained request.
+        return Err(PluginError {
+            kind: ErrorKind::ContinuationUnavailable,
+            message: "HTTP-only Codex transport cannot send a continuation delta".into(),
+            upstream_status: None,
+        });
     }
-    let mut attempt = prepare_attempt(
+    let mut session = codex::NativeSession::new(&provider);
+    session.resolve_identity(host, &provider)?;
+    let attempt = prepare_attempt(
         &provider,
         &protocol.to_string(),
         request,
@@ -267,40 +266,15 @@ fn infer(
         &session,
     )?;
     if websocket {
-        let mut replayed = false;
-        loop {
-            match codex::infer_websocket(
-                host,
-                &provider,
-                &attempt.body,
-                &session,
-                preserve_upstream_errors,
-            ) {
-                // A local socket miss (nothing sent) or the exact unstarted
-                // upstream rejection is consumed here: one full-history replay,
-                // never a failed event. The replay carries no continuation ID,
-                // so a second miss cannot loop.
-                Err(error)
-                    if !replayed && codex::continuation_replayable(&attempt.body, &error) =>
-                {
-                    replayed = true;
-                    attempt = match host.replay_continuation()? {
-                        Some(full) => prepare_attempt(
-                            &provider,
-                            &protocol.to_string(),
-                            restore_full_history(full, model),
-                            operation,
-                            websocket,
-                            &session,
-                        )?,
-                        None => attempt.without_continuation()?,
-                    };
-                }
-                result => {
-                    return result.map(Box::new).map(OperationOutput::Infer);
-                }
-            }
-        }
+        return codex::infer_websocket(
+            host,
+            &provider,
+            &attempt.body,
+            &session,
+            preserve_upstream_errors,
+        )
+        .map(Box::new)
+        .map(OperationOutput::Infer);
     }
     let Attempt {
         body,
@@ -373,36 +347,14 @@ fn infer(
     }
 }
 
-/// One fully projected upstream request. A continuation replay rebuilds it from
-/// the same session, so identity and settings stay coherent across attempts.
+/// One fully projected upstream request. Identity and settings are projected
+/// from the same native session for every dispatch.
 struct Attempt {
     body: Value,
     /// Codec headers for the HTTP wire; empty for WebSocket.
     headers: Vec<(String, String)>,
     egress_path: String,
     retained: Vec<Value>,
-}
-
-impl Attempt {
-    /// Replay when the host dispatched the full history unchanged: the same
-    /// projection minus the stale reference. A body without input would be an
-    /// increment masquerading as history and must not be sent.
-    fn without_continuation(mut self) -> Result<Self, PluginError> {
-        let object = self
-            .body
-            .as_object_mut()
-            .ok_or_else(|| invalid("Codex Responses request body must be an object"))?;
-        object.remove("previous_response_id");
-        if object
-            .get("input")
-            .is_none_or(|input| input.is_null() || input.as_array().is_some_and(Vec::is_empty))
-        {
-            return Err(invalid(
-                "Codex continuation replay requires the full request history",
-            ));
-        }
-        Ok(self)
-    }
 }
 
 fn normalize_request(model: &str, request: &mut AiRequest) {
@@ -413,13 +365,6 @@ fn normalize_request(model: &str, request: &mut AiRequest) {
         }
     }
     request.parameters.store = Some(false);
-}
-
-/// The host's retained canonical request, with the stale reference removed.
-fn restore_full_history(mut full: AiRequest, model: &str) -> AiRequest {
-    full.parameters.continuation = None;
-    normalize_request(model, &mut full);
-    full
 }
 
 fn requests_previous_response(request: &AiRequest) -> bool {
@@ -1280,40 +1225,6 @@ mod tests {
         .expect("listed model");
         assert_eq!(model.metadata["modalities"]["output"], json!([]));
         assert!(model.capabilities.is_empty());
-    }
-
-    #[test]
-    fn only_a_continuation_attempt_with_unstarted_proof_is_replayable() {
-        let error = |kind| PluginError {
-            kind,
-            message: String::new(),
-            upstream_status: None,
-        };
-        let with_reference = json!({"store": false, "previous_response_id": " resp_previous "});
-        for kind in [
-            ErrorKind::ContinuationUnavailable,
-            ErrorKind::ContinuationNotFound,
-        ] {
-            assert!(codex::continuation_replayable(
-                &with_reference,
-                &error(kind)
-            ));
-        }
-        assert!(!codex::continuation_replayable(
-            &with_reference,
-            &error(ErrorKind::Auth)
-        ));
-        // The full-history replay carries no reference, so it can never loop.
-        for body in [
-            json!({"store": false}),
-            json!({"store": false, "previous_response_id": " "}),
-            json!({"store": true, "previous_response_id": "resp_previous"}),
-        ] {
-            assert!(!codex::continuation_replayable(
-                &body,
-                &error(ErrorKind::ContinuationNotFound)
-            ));
-        }
     }
 
     #[test]

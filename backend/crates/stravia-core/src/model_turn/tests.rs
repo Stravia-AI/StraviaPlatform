@@ -1839,7 +1839,7 @@ mod rpm_admission {
         // Two legal destination slots do not grant a second single-attempt opportunity.
         assert!(admission.acquire().await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        admission.replay_continuation().unwrap();
+        admission.reset_unexecuted_send().unwrap();
         admission.acquire().await.unwrap();
         reqwest::Client::new().get(&url).send().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);

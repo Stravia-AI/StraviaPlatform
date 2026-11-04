@@ -684,7 +684,9 @@ Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatche
 
 OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace、affinity、URL、认证和握手参数隔离，记录最新成功完成的 upstream response ID，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须原子取得匹配 tip 的可用 socket；分支占用、tip 前移、断线或淘汰时，不先发送旧 ID，而是使用 Executor 已保留的完整历史，不消耗恢复预算。Codex 连接身份由 affinity 派生，轮次 ID 留在消息中。
 
-更新后的 Codex 与 Claude Code 插件通过 `replay-continuation` 在同一次 Infer 内恢复一次失效续接，不把已消化的拒绝记为失败。Codex 只接受本地未发送的连接 miss，或实际带续接 ID、尚无任何模型响应事件时的明确 `previous_response_not_found`／精确无 code 的 ``Invalid `previous_response_id`.``；Claude Code 只接受明确的 thread 拒绝。宿主只在插件请求恢复时序列化已保留的完整历史，正常路径继续共享 `Arc`；插件已有完整输入时不重复传回。此恢复不占 Target Retry Budget，半开与冷却额外 attempt 同样允许，仍逐次扣实际发送 RPM。普通 400、已开始响应、已交付输出与未知接受状态不获得许可，重放后的真实错误仍正常记录。OpenAI direct 与尚未使用该接口的旧插件继续走原有宿主恢复路径，远端 ID 失效仍受预算和探测限制。
+续接恢复统一由宿主处理，插件每次 Infer 最多发送一次模型请求，只报告明确的失效事实。Codex 只报告本地未发送的连接 miss，或实际带续接 ID、尚无任何模型响应事件时的明确 `previous_response_not_found`／精确无 code 的 ``Invalid `previous_response_id`.``；Claude Code 只报告明确的 thread 拒绝。宿主在 Client Output Commit 前最多恢复一次完整历史，正常路径继续共享 `Arc`；已有完整输入则复用该输入，尚未提交的失败 operation 控制元数据随其缓冲区丢弃。重放时通过 `operation_metadata.continuation_replay=true` 禁止该操作复用被拒的 native thread。拒绝与重放共用一个逻辑 attempt，成功不留下失败记录，失败只记录最终错误。此恢复不占 Target Retry Budget，半开与冷却额外 attempt 同样允许，仍逐次扣实际发送 RPM；OpenAI direct 也使用同一规则。普通 400、已提交输出与未知接受状态不获得许可，Compact 不恢复。
+
+完整历史重新派发前，宿主使用原 Principal 与目标协议，按正常派发规则将媒体的内部 Artifact 引用还原为可交付内容，包括嵌套工具结果和本轮新增输入。只物化回放副本，持久化历史保持 canonical 引用，正常增量路径不预读完整历史媒体；物化失败会终止回放，不把内部引用发给上游。
 
 宿主空闲连接池最多保留 64 条连接，满时淘汰最早归池的连接，并按原始建连时间执行 60 分钟 max-age；无 affinity 的 socket 在终态关闭。该空闲池容量不限制正在执行的连接，高并发分支仍会增加文件描述符、内存和上游连接占用。淘汰只影响续接优化，不影响 Generation Chain 提供完整历史。结构化日志只记录 transport、Target namespace、response/connection ID、连接年龄、fallback/replay 与 close reason，不记录 prompt、content、tool arguments、媒体或 credential。
 
@@ -1050,7 +1052,7 @@ MCP session、discovery、工具列表等非执行入口不计数。
 
 Host 在每次实际 HTTP 发送或 WebSocket 逻辑请求发送前原子准入，覆盖正常请求、同 Target 重试、failover、隐藏 Model Turn、能力调用、冷却额外尝试和 Provider Transport 内部重发。握手、连接复用、chunk 与心跳不是新的模型请求。本地准备、未发送取消及等待不预扣额度；已发起的连接／响应失败不退回记录。发送边界重新检查当前额度、授权、可用性、deadline 与取消，防止等待后迟到发送。
 
-Route 缓存发布与发送准入有原子先后顺序：资格读取期间发生的绑定、禁用或配置更新使旧快照失效，不能在更新成功后继续按旧目的地准入。同一冷却额外尝试或半开探测的并发 transport 调用也只能一个成功占用机会。插件确认续接尚未执行后，可在首次 canonical 输出前通过 `replay-continuation` 重新开放一次该机会；每次 Infer 只能获得一次许可，重放仍重新检查全部资格并扣目的地 RPM，不退回第一次发送的记录。兼容 Vendor 更新不改变已准入操作的固定 component 能力合同；当前授权、禁用、凭据状态和 Model 可用性仍是门禁。
+Route 缓存发布与发送准入有原子先后顺序：资格读取期间发生的绑定、禁用或配置更新使旧快照失效，不能在更新成功后继续按旧目的地准入。同一冷却额外尝试或半开探测的并发 transport 调用也只能一个成功占用机会。宿主收到明确未执行的续接拒绝后，可在 Client Output Commit 前重新开放一次完整历史恢复机会；同一逻辑 attempt 最多一次，重放仍重新检查全部资格并扣目的地 RPM，不退回第一次发送的记录。插件不能自行重置发送门禁。兼容 Vendor 更新不改变已准入操作的固定 component 能力合同；当前授权、禁用、凭据状态和 Model 可用性仍是门禁。
 
 有 Target Continuation、Conversation Affinity、合格 Cache Affinity 或本根已选中依据的原 Target 优先有限等待，即使备用有额度也保留默认 5 秒窗口；内部轮次与重试不重置。优先等待结束后重查候选当前额度，再按既有优先级与调度原子竞争，不沿旧快照扎堆备用。全部候选暂时无额度时等待下一可准入事件；所有目的地等待共享 RootRequest 的默认 30 秒累计预算且受剩余 deadline 限制。同根切换目的地不重复占队列，默认每实例最多 128 个等待根；取消、deadline、预算耗尽均清理占用，窗口恰在预算到期释放也不能让旧根迟到发送。**128 不是活跃流并发上限**；未设置 RPM 的目的地没有本地发送速率保护，长流仍可积累在途资源。
 

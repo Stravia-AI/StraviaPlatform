@@ -1035,6 +1035,7 @@ struct PreparedAttempt {
     observer: Option<crate::interaction_observation::RunObserver>,
     request: Arc<AiRequest>,
     continuation_fallback: Option<Arc<AiRequest>>,
+    continuation_send_reset: bool,
     dispatch_model: String,
     actual_model: String,
     namespace: String,
@@ -1612,6 +1613,7 @@ async fn prepare_attempt(
         observer: input.observer.clone(),
         request: provider_request,
         continuation_fallback,
+        continuation_send_reset: false,
         dispatch_model: route.model_id.to_string(),
         actual_model,
         namespace: target_namespace,
@@ -2060,32 +2062,36 @@ async fn drive_vendor_attempt(
     // 剥离掉的来源或未知载荷摘要，等待重放结果后才记忆拒绝。
     let mut stripped_protected_reasoning: Option<Vec<crate::history_marker::RejectedReasoning>> =
         None;
+    let mut continuation_replayed = false;
+    let mut pending_attempt = None;
 
     loop {
         if parent_cancellation.is_cancelled() || operation_cancellation.is_cancelled() {
             operation_cancellation.cancel();
             return;
         }
-        let attempt = AttemptObservation::new(
-            failure_observer.clone(),
-            prepared.model_turn_id.clone(),
-            prepared.route.target_id.clone(),
-            prepared.route.provider_id.clone(),
-            prepared.provider_name.clone(),
-            prepared.actual_model.clone(),
-            prepared.protocol_hint.clone(),
-            prepared.egress_base_url.clone(),
-            prepared.first_token_timed_out.clone(),
-            AttemptCostContext {
-                pricing: prepared.pricing.clone(),
-                cost_basis: prepared.cost_basis,
-                billing: prepared.billing.clone(),
-                api_key_id: Some(prepared.api_key_id.clone()),
-                currency: gateway.custom_currency_snapshot(),
-            },
-        )
-        .with_upstream_state(prepared.upstream_state.clone())
-        .with_usage_ledger(prepared.root_request.confirmed_usage.clone());
+        let attempt = pending_attempt.take().unwrap_or_else(|| {
+            AttemptObservation::new(
+                failure_observer.clone(),
+                prepared.model_turn_id.clone(),
+                prepared.route.target_id.clone(),
+                prepared.route.provider_id.clone(),
+                prepared.provider_name.clone(),
+                prepared.actual_model.clone(),
+                prepared.protocol_hint.clone(),
+                prepared.egress_base_url.clone(),
+                prepared.first_token_timed_out.clone(),
+                AttemptCostContext {
+                    pricing: prepared.pricing.clone(),
+                    cost_basis: prepared.cost_basis,
+                    billing: prepared.billing.clone(),
+                    api_key_id: Some(prepared.api_key_id.clone()),
+                    currency: gateway.custom_currency_snapshot(),
+                },
+            )
+            .with_upstream_state(prepared.upstream_state.clone())
+            .with_usage_ledger(prepared.root_request.confirmed_usage.clone())
+        });
         // 每次派发都从实际请求重建事实；恢复、续传回退与凭据恢复不能沿用旧声明。
         update_protected_reasoning_metadata(
             &mut prepared.metadata,
@@ -2322,44 +2328,28 @@ async fn drive_vendor_attempt(
             }
             Err(failure)
                 if !lifecycle.committed()
-                    && failure.error.code == "continuation_unavailable"
-                    && prepared.continuation_fallback.is_some() =>
+                    && !prepared.compact
+                    && !continuation_replayed
+                    && matches!(
+                        failure.error.code.as_str(),
+                        "continuation_unavailable" | "continuation_not_found"
+                    )
+                    && (prepared.continuation_fallback.is_some()
+                        || failure.error.code == "continuation_not_found") =>
             {
-                // 宿主尚未发送请求；连接本地优化失效不是上游失败，
-                // 不消耗恢复预算，也不影响 Target 的连续失败计数。
-                attempt.finish(
-                    "failed",
-                    None,
-                    Some("continuation_unavailable".into()),
-                    None,
-                    Some(&failure.diagnostic),
-                );
-                prepared.request = prepared
-                    .continuation_fallback
-                    .take()
-                    .expect("checked fallback");
-            }
-            Err(failure)
-                if !lifecycle.committed()
-                    && failure.error.code == "continuation_not_found"
-                    && prepared.allow_recovery
-                    && target.target_retry_budget > i32::from(auth_recovered)
-                    && prepared.continuation_fallback.is_some() =>
-            {
-                // 远端续接失败后的完整回放仍消耗既有恢复预算；本地连接 miss
-                // 才可免费回退。该请求级错误不能为获取预算而累计 Target 健康失败。
-                // fallback.take 限制回放一次，已执行的认证恢复也占用一次预算。
-                attempt.finish(
-                    "failed",
-                    failure.diagnostic.status_code,
-                    Some("continuation_not_found".into()),
-                    None,
-                    Some(&failure.diagnostic),
-                );
-                prepared.request = prepared
-                    .continuation_fallback
-                    .take()
-                    .expect("checked fallback");
+                // 明确未执行的续接拒绝只让优化失效，不提前结算 attempt 或健康。
+                // 恢复仍经完整媒体交付、固定组件租约和发送门禁，真实失败才结算。
+                if let Some(fallback) = prepared.continuation_fallback.take() {
+                    prepared.request = fallback;
+                }
+                crate::router::clear_previous_response_id(Arc::make_mut(&mut prepared.request));
+                prepared
+                    .metadata
+                    .insert("continuation_replay".into(), serde_json::Value::Bool(true));
+                prepared.continuation_send_reset = true;
+                continuation_replayed = true;
+                pending_attempt = Some(attempt);
+                first_token_window.notify_one();
             }
             Err(failure) => {
                 finish_vendor_failure(

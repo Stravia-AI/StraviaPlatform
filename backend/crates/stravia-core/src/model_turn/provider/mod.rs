@@ -149,7 +149,7 @@ impl Default for AttemptCostContext {
     }
 }
 
-/// Observation state for one Wasm Vendor operation.
+/// Observation state for one logical Vendor attempt, including safe continuation recovery.
 ///
 /// Wire capture belongs to the controlled host transport. Model Turn observes
 /// only canonical content, timing, terminal status, and confirmed usage.
