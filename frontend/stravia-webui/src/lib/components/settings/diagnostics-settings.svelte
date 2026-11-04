@@ -24,7 +24,7 @@ let debugConfirmOpen = $state(false)
 let debugClearOpen = $state(false)
 let changingDebug = $state(false)
 let clearingDebug = $state(false)
-let downloadingPerformance = $state<'metrics' | 'timeline' | null>(null)
+let downloadingPerformance = $state(false)
 let performanceDownloadHref: string | undefined
 let performanceDownloadDisposed = false
 let performanceDownloadUnlisten: (() => void) | undefined
@@ -74,11 +74,11 @@ async function clearDebugData(): Promise<void> {
   }
 }
 
-async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> {
+async function downloadPerformance(): Promise<void> {
   if (downloadingPerformance) return
-  downloadingPerformance = kind
+  downloadingPerformance = true
   try {
-    const blob = await admin.performance[kind]()
+    const blob = await admin.performance.export()
     if (performanceDownloadDisposed) return
     if (performanceDownloadHref) URL.revokeObjectURL(performanceDownloadHref)
     const href = URL.createObjectURL(blob)
@@ -98,7 +98,7 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
     }
     const link = document.createElement('a')
     link.href = href
-    link.download = kind === 'metrics' ? 'stravia-performance-metrics.prom' : 'stravia-performance-trace.json'
+    link.download = 'stravia-performance.zip'
     document.body.append(link)
     try {
       link.click()
@@ -135,7 +135,7 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
       URL.revokeObjectURL(performanceDownloadHref)
       performanceDownloadHref = undefined
     }
-    downloadingPerformance = null
+    downloadingPerformance = false
   }
 }
 </script>
@@ -165,28 +165,16 @@ async function downloadPerformance(kind: 'metrics' | 'timeline'): Promise<void> 
         aria-busy={changingDebug} />
     </SettingRow>
     <SettingRow title={m.settings_performance_data()}>
-      <div class="flex flex-wrap justify-end gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={downloadingPerformance !== null}
-          aria-busy={downloadingPerformance === 'metrics'}
-          onclick={() => void downloadPerformance('metrics')}>
-          {#if downloadingPerformance === 'metrics'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
-              data-icon="inline-start" />{/if}
-          {m.settings_diagnostics_download_metrics()}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={downloadingPerformance !== null}
-          aria-busy={downloadingPerformance === 'timeline'}
-          onclick={() => void downloadPerformance('timeline')}>
-          {#if downloadingPerformance === 'timeline'}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
-              data-icon="inline-start" />{/if}
-          {m.settings_diagnostics_download_timeline()}
-        </Button>
-      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={downloadingPerformance}
+        aria-busy={downloadingPerformance}
+        onclick={() => void downloadPerformance()}>
+        {#if downloadingPerformance}<Spinner data-icon="inline-start" />{:else}<DownloadIcon
+            data-icon="inline-start" />{/if}
+        {m.settings_diagnostics_download_performance()}
+      </Button>
     </SettingRow>
     {#if debugQuery.data.enabled || debugQuery.data.retained_bytes > 0}
       <SettingRow title={m.settings_debug_data()}>

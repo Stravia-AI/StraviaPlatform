@@ -77,3 +77,4 @@ objc2 = { workspace = true, features = ["disable-encoding-assertions", "exceptio
 reqwest = { workspace = true }
 tower = { workspace = true }
 stravia-core = { workspace = true, features = ["test-support"] }
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
