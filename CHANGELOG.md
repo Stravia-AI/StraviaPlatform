@@ -12,6 +12,7 @@
 ### Fixed
 
 - Startup dependency-retention conversion now batches shared-content reads and reference writes instead of restoring and committing each node separately. Decode, integrity verification and reconstruction use bounded multi-core workers; SQLite still has a single migration writer, with unchanged durability and idempotent restart behavior. The startup page shows committed node counts and percentages, and all known conversion phases have English and Chinese labels.
+- Generation Chain history restoration keeps client-history instructions separate from effective execution instructions, preventing a leading plain-text `developer` message from being duplicated on later turns. The shared fix covers Chat Completions, Open Responses, Anthropic Messages and Gemini, including tool-result continuations; it is not client- or tool-specific. Compatible Claude Code turns can continue from the second request instead of unnecessarily creating a new thread. Explicit Responses continuations follow the same rule; independently supplied instructions with identical text remain intact. Update the host; no plugin rebuild is required for this fix. Previously saved conversations with duplicate effective instructions are not rewritten; start a fresh conversation without replaying the affected history.
 
 ## [0.6.2] - 2026-11-04
 
