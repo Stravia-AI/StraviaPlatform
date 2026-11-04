@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Non-streaming inference and standalone remote compaction now use the existing shared request idle deadline (300 seconds by default), rather than the Target First Token Timeout. Activity still renews that deadline, cancellation remains effective, and ordinary streaming inference keeps its configured First Token Timeout. Returning a standalone compaction result as SSE does not re-enable the first-token timer.
 - Startup dependency-retention conversion now batches shared-content reads and reference writes instead of restoring and committing each node separately. Decode, integrity verification and reconstruction use bounded multi-core workers; SQLite still has a single migration writer, with unchanged durability and idempotent restart behavior. The startup page shows committed node counts and percentages, and all known conversion phases have English and Chinese labels.
 
 ## [0.6.2] - 2026-11-04

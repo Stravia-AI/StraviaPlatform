@@ -1353,6 +1353,7 @@ def test_client_errors_classify_failed_requests(admin_env: dict[str, Any]) -> No
         timeout_key,
         timeout_model,
         [{"role": "user", "content": "observation-delay"}],
+        body_extra={"stream": True},
     )
     assert status >= 500
 

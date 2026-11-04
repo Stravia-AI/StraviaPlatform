@@ -1065,7 +1065,10 @@ def test_timeout_connection_refused_and_stream_error_are_upstream_errors(usage_e
         env, timeout_model, retry_budget=0, first_token_timeout_ms=1_000,
     )
     try:
-        status, body = _proxy(env, timeout_key, timeout_model, [{"role": "user", "content": "blocked"}])
+        status, body = _proxy(
+            env, timeout_key, timeout_model, [{"role": "user", "content": "blocked"}],
+            body_extra={"stream": True},
+        )
     finally:
         env["release"].set()
     assert status >= 500, body

@@ -1533,6 +1533,8 @@ tests/stream/
 
 ### 12.8 Router 故障策略
 
+首 Token 等待计时只用于普通流式推理（`ModelTurnPurpose::Generation` 且 canonical `stream.enabled=true`）。非流式推理与独立远程压缩统一沿用请求的共享空闲 deadline，默认 300 秒；上游边界活动继续续期，取消与客户端断开继续生效，不新增压缩专用超时。独立压缩即使向客户端返回 SSE，或 Vendor 内部使用流式请求，也不套用 Target First Token Timeout。以下使用该配置判断 `Retry-After` 的重试与冷却规则不变。
+
 显式 `Retry-After` 不大于 Target First Token Timeout 时，推理和独立能力执行在 Stravia 内部完整等待后重发同 Target，不提前向客户端返回该次限流；等待不按 `target_cooldown_ms` 截短。First Token Timeout 为 0 时关闭此时长上限。同 Target 重试仍受共享失败预算、半开／冷却额外尝试的单次限制、Client Output Commit、取消和总 deadline 约束。等待大于或等于当前请求剩余 deadline 时，跳过该 Target 并尝试其余合格目标；没有备用时立即返回原上游错误，不以等待耗尽后的 `deadline_exceeded` 覆盖它，也不截短等待后提前重发。
 
 显式 `Retry-After` 大于已启用的 Target First Token Timeout 时，立即进入 `min(target_cooldown_ms, Retry-After)` 的共享冷却并切换其他合格 Target，不在当前请求里等待，也不要求先耗尽 Target Retry Budget。共享 Retry-After 门禁采用同一个有效冷却截止时间，不能在冷却到期后继续阻塞到原始 Retry-After。冷却为 0 时不建立共享等待，但本次请求仍跳过该 Target。每次上游失败只累计一次，不重复扣除预算。
