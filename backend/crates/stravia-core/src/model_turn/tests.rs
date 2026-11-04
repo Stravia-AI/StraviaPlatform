@@ -745,21 +745,18 @@ async fn execute_distinguishes_cancellation_from_deadline() {
     assert_eq!(deadline.code, "deadline_exceeded");
 }
 
-#[tokio::test]
-async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage() {
+async fn first_token_timeout_fixture() -> (
+    tempfile::TempDir,
+    Gateway,
+    Principal,
+    AiRequest,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let upstream = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        while !request.ends_with(b"\r\n\r\n") {
-            let read = socket.read(&mut chunk).await.unwrap();
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&chunk[..read]);
-        }
+        drain_test_http_request(&mut socket).await;
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
@@ -782,7 +779,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
             source: ProviderSourceInput::Custom {
                 vendor: "custom".into(),
                 channel: "default".into(),
-                protocol: Some("openai-compatible".into()),
+                protocol: Some("open-responses".into()),
                 base_url,
                 models_source: None,
                 static_models: None,
@@ -834,8 +831,44 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
         .await
         .unwrap();
     let principal = Principal::new(key.id);
+    let request = stravia_protocol_codec::transform::ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap()
+        .decode_request(serde_json::json!({"model": "timeout-model", "input": "wait for output"}))
+        .unwrap();
+    (directory, gateway, principal, request, upstream)
+}
+
+#[tokio::test]
+async fn unary_and_standalone_compaction_use_the_shared_deadline() {
+    for (purpose, stream) in [
+        (ModelTurnPurpose::Generation, false),
+        (ModelTurnPurpose::Compact, false),
+        (ModelTurnPurpose::Compact, true),
+    ] {
+        let (_directory, gateway, principal, mut request, upstream) =
+            first_token_timeout_fixture().await;
+        request.stream.enabled = stream;
+        let mut input = TurnInput::new(principal, request).with_execution(
+            CancellationToken::new(),
+            Deadline::from_now(Duration::from_millis(1500)),
+        );
+        input.purpose = purpose;
+        let error = match gateway.model_turn.execute(input).await {
+            Ok(_) => panic!("silent upstream must reach the shared deadline"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "deadline_exceeded", "{}", error.message);
+        upstream.abort();
+        let _ = upstream.await;
+    }
+}
+
+#[tokio::test]
+async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage() {
+    let (_directory, gateway, principal, mut request, upstream) =
+        first_token_timeout_fixture().await;
     let observer = credential_observer(&gateway, &principal);
-    let mut request = AiRequest::new("timeout-model", Vec::new());
     request.stream.enabled = true;
     let result = gateway
         .model_turn

@@ -665,7 +665,7 @@ _避免使用_：首个可见 Text、Client Output Commit
 
 ## First Token Timeout
 
-First Token Timeout 是 Target 在发出上游请求后等待 First Token 的最长时限；缺省 60 秒，0 表示关闭。超时按瞬时失败处置。
+First Token Timeout 是 Target 在流式推理尝试发出上游请求后等待 First Token 的最长时限；缺省 60 秒，0 表示关闭。非流式推理与独立远程压缩不受该等待时限约束，统一受请求的空闲 deadline 约束。超时按瞬时失败处置。
 _避免使用_：总超时、Connect Timeout
 
 ## Target Cooldown

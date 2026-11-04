@@ -712,7 +712,7 @@ fn execute_inner(
                         return Err(interruption_error(&input.deadline));
                     }
                     Ok(_) if !attempts.retry_current() => break,
-                    Ok(mut prepared) => {
+                    Ok(prepared) => {
                         if !gateway
                             .route_target_output_matches(
                                 &route.model_id,
@@ -730,9 +730,6 @@ fn execute_inner(
                             break;
                         }
                         sent = Some(prepared.sent.clone());
-                        prepared.first_token_timed_out = (target.first_token_timeout_ms != 0
-                            && input.observer.is_some())
-                        .then(|| Arc::new(AtomicBool::new(false)));
                         // If the outer deadline/cancellation select drops this
                         // attempt before first token, count a real deadline only
                         // after Vendor transport has started. Local preparation
@@ -1866,11 +1863,18 @@ async fn begin_attempt(
     route: &crate::db::models::RouteConfig,
     target: &SelectedTarget,
     input: &TurnInput,
-    prepared: PreparedAttempt,
+    mut prepared: PreparedAttempt,
     policy: AttemptRoutePolicy,
     mut deadline_guard: AttemptDeadlineGuard,
 ) -> Result<ModelTurn, AttemptFailure> {
-    let first_token_timeout_ms = target.first_token_timeout_ms;
+    // 非流式推理与独立压缩一次性返回结果，只受共享空闲 deadline 约束。
+    let first_token_timeout_ms = if prepared.compact || !input.request.stream.enabled {
+        0
+    } else {
+        target.first_token_timeout_ms
+    };
+    prepared.first_token_timed_out = (first_token_timeout_ms != 0 && input.observer.is_some())
+        .then(|| Arc::new(AtomicBool::new(false)));
     let model_turn_id = prepared.model_turn_id.clone();
     let route_context = prepared.route.clone();
     let publication = VendorPublication::default();

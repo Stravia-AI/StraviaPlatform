@@ -464,7 +464,10 @@ def test_failed_request_records_upstream_timeout(admin_env: dict[str, Any]) -> N
     route_id, key = _create_route(
         admin_env, model, retry_budget=0, first_token_timeout_ms=timeout_ms,
     )
-    status, _ = _proxy(admin_env, key, model, [{"role": "user", "content": model}])
+    status, _ = _proxy(
+        admin_env, key, model, [{"role": "user", "content": model}],
+        body_extra={"stream": True},
+    )
     assert status >= 500
     assert any(
         request.get("messages") == [{"role": "user", "content": model}]
