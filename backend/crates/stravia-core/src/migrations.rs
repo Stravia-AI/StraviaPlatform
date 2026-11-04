@@ -1254,6 +1254,33 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    // 命中详情按 tool_id 回溯同一主体更早的工具事件；0042 误删索引后该查询沿主键扫描整张事件表。
+    #[tokio::test]
+    async fn sqlite_principal_tool_event_lookup_is_served_by_an_index() {
+        let pool = sqlite_pool().await;
+        migrate_sqlite(&pool, None).await.unwrap();
+
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT e.sequence,e.attrs FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id WHERE e.kind IN ('platform_tool_finished') AND e.tool_id=? AND i.principal=? AND e.sequence<=? ORDER BY e.sequence DESC LIMIT 1",
+        )
+        .bind("call-1")
+        .bind("principal")
+        .bind(100_i64)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let events_step = plan
+            .iter()
+            .map(|(_, _, _, detail)| detail.as_str())
+            .find(|detail| detail.starts_with("SEARCH e ") || detail.starts_with("SCAN e"))
+            .unwrap();
+        assert!(
+            events_step.contains("USING INDEX"),
+            "tool_id lookup must not scan observation_events: {plan:?}"
+        );
+    }
+
     #[tokio::test]
     async fn sqlite_baseline_applies_to_empty_database_and_is_idempotent() {
         let pool = sqlite_pool().await;
