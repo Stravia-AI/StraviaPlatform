@@ -428,13 +428,8 @@ export const admin = {
       ),
   },
   performance: {
-    metrics: async (): Promise<Blob> => {
-      const response = await authenticatedFetch('/performance/snapshot')
-      if (!response.ok) await decodeAdmin(response)
-      return response.blob()
-    },
-    timeline: async (): Promise<Blob> => {
-      const response = await authenticatedFetch('/performance/timeline')
+    export: async (): Promise<Blob> => {
+      const response = await authenticatedFetch('/performance/export')
       if (!response.ok) await decodeAdmin(response)
       return response.blob()
     },

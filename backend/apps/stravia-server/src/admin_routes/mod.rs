@@ -329,6 +329,7 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/stats/api-keys", get(stats_by_api_key))
         .route("/performance/snapshot", get(performance::metrics))
         .route("/performance/timeline", get(performance::timeline))
+        .route("/performance/export", get(performance::export))
         .route("/provider-allowances", get(list_provider_allowances))
         .route(
             "/provider-allowances/{provider_id}",

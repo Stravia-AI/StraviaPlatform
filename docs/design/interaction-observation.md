@@ -585,7 +585,7 @@ writer 每次 Purge 命令只处理一个批次，提交后立即失效对应的
 
 - 唯一 Debug 开关位于设置页「诊断」，同时控制性能指标采集与原始 Wire 捕获；请求记录页不再提供启停或清除 Debug 数据入口，仍保留已有 Trace 查看及 Bundle 导出。
 - 关闭立即停止新的性能样本，并清空本次性能会话的内存缓冲与临时文件；需要时间线时须先导出再关闭。Wire 捕获继续遵循下述准入快照契约，不中断在途 Run，不删除已有 Trace。普通 Observation 不受影响。
-- 设置页可下载 Prometheus 文本性能快照（`GET /api/v1/performance/snapshot`）及 Chrome Trace JSON 时间线（`GET /api/v1/performance/timeline`）。两者均要求管理员鉴权，以禁止缓存的附件返回，不另开监听端口。关闭 Debug 后仍可下载本进程累计指标，但时间线为空；重启后不会恢复上次性能会话。清除 Debug 数据仍仅清除 Wire Trace，不重置性能指标或当前性能会话。
+- 设置页「下载性能数据」一次保存 `stravia-performance.zip`（`GET /api/v1/performance/export`）：Deflate 压缩，内含同一时刻生成的 Prometheus 文本性能快照 `stravia-performance-metrics.prom` 与 Chrome Trace JSON 时间线 `stravia-performance-trace.json`。时间线可达数十 MiB，序列化与压缩在阻塞线程完成；性能记录器未安装时返回 503，压缩失败返回 500，均不产出残缺归档。脚本仍可分别读取 `GET /api/v1/performance/snapshot` 与 `GET /api/v1/performance/timeline`。三者均要求管理员鉴权，以禁止缓存的附件返回，不另开监听端口。关闭 Debug 后仍可下载本进程累计指标，但时间线为空；重启后不会恢复上次性能会话。清除 Debug 数据仍仅清除 Wire Trace，不重置性能指标或当前性能会话。
 - Desktop 下载沿用宿主默认保存位置；设置页等待原生下载完成后提示实际文件路径，取消或失败不报告成功。Web 下载仍交由浏览器处理，管理员鉴权与附件格式不变。
 - 性能指标包含静态命名操作与关键等待耗时、按操作和池角色归因的 SQL driver 查询／连接获取结果，以及每五秒采样的宿主 RSS／CPU、活动推理、观察队列、派生缓存和 Wire 逻辑占用。CPU 在开启后的首个采样点不输出缺少差分基线的读数，多核 CPU 百分比可以超过 100%。不计入浏览器子进程或远端数据库内存；托管资源记账不等于实际堆占用。
 - SQL 采集位于统一池／连接／事务执行边界，不要求业务查询逐处增加包装。性能导出不包含 SQL 正文、绑定参数、数据库错误 Display、请求正文或动态业务身份标签；查询模板用 SHA-256 标识，结果限定为 driver 边界，失败和取消不冒充成功。关闭再开启期间尚未完成的旧 span 及旧队列命令的后代不进入新周期。

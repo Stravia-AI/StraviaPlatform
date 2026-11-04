@@ -907,6 +907,8 @@ CREATE INDEX native_compactions_pending_until_idx ON native_compactions(pending_
 CREATE INDEX observation_blocks_channel_idx
     ON observation_blocks(interaction_id, channel, sequence DESC);
 
+CREATE INDEX observation_blocks_run_idx ON observation_blocks(run_id);
+
 CREATE INDEX observation_event_contents_content_idx ON observation_event_contents(content_id);
 
 CREATE INDEX observation_events_context_kinds_idx

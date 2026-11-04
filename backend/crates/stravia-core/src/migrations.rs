@@ -110,7 +110,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=42
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=44
     ) {
         return false;
     }
@@ -1446,6 +1446,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(orphans, 0);
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_index_only_upgrades_skip_full_foreign_key_audit() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let prefix = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 42)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        // 全库外键审计会拒绝这条既有孤儿行；在生产规模 HDD 库上它要扫描约半小时。
+        sqlx::raw_sql(
+            "PRAGMA foreign_keys=OFF;
+             INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+             VALUES ('missing-provider','orphan','manual','present','{}');
+             PRAGMA foreign_keys=ON;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("adding indexes must not audit every foreign key in the database");
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('observation_events_tool_idx','observation_blocks_run_idx')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, 2);
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
             .fetch_one(&pool)
             .await

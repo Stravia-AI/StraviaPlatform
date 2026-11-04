@@ -277,6 +277,11 @@ async fn performance_export_requires_admin_and_clears_session_after_debug_is_dis
         .oneshot(Request::get("/api/v1/performance/timeline").body(Body::empty())?)
         .await?;
     assert_eq!(denied_timeline.status(), StatusCode::UNAUTHORIZED);
+    let denied_archive = app
+        .clone()
+        .oneshot(Request::get("/api/v1/performance/export").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied_archive.status(), StatusCode::UNAUTHORIZED);
 
     gateway.admin().set_observation_debug(true);
     let subscriber =
@@ -350,6 +355,55 @@ async fn performance_export_requires_admin_and_clears_session_after_debug_is_dis
     assert!(event["ts"].is_number());
     assert!(event["dur"].is_number());
     assert!(!String::from_utf8(timeline_body.to_vec())?.contains("must not leak"));
+
+    let archive = app
+        .clone()
+        .oneshot(request("/api/v1/performance/export")?)
+        .await?;
+    assert_eq!(archive.status(), StatusCode::OK);
+    assert_eq!(archive.headers()["content-type"], "application/zip");
+    assert_eq!(archive.headers()["cache-control"], "no-store");
+    assert_eq!(archive.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        archive.headers()["content-disposition"],
+        "attachment; filename=\"stravia-performance.zip\""
+    );
+    let archive_body = to_bytes(archive.into_body(), usize::MAX).await?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive_body.to_vec()))?;
+    let mut names = archive
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "stravia-performance-metrics.prom",
+            "stravia-performance-trace.json"
+        ]
+    );
+    let mut archived_metrics = String::new();
+    let mut entry = archive.by_name("stravia-performance-metrics.prom")?;
+    assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
+    std::io::Read::read_to_string(&mut entry, &mut archived_metrics)?;
+    drop(entry);
+    assert!(archived_metrics.contains("operation=\"test.admin_export\""));
+    let mut archived_timeline = String::new();
+    let mut entry = archive.by_name("stravia-performance-trace.json")?;
+    assert_eq!(entry.compression(), zip::CompressionMethod::Deflated);
+    std::io::Read::read_to_string(&mut entry, &mut archived_timeline)?;
+    drop(entry);
+    assert!(!archived_timeline.contains("must not leak"));
+    let archived_timeline: serde_json::Value = serde_json::from_str(&archived_timeline)?;
+    assert_eq!(archived_timeline["displayTimeUnit"], "ms");
+    assert!(
+        archived_timeline["traceEvents"]
+            .as_array()
+            .is_some_and(|events| events
+                .iter()
+                .any(|event| event["name"] == "test.admin_export" && event["ph"] == "X"))
+    );
+
     let disabled = app
         .clone()
         .oneshot(

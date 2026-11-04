@@ -11,6 +11,9 @@ use crate::pricing::{
 
 use super::*;
 
+const PERFORMANCE_ARCHIVE_METRICS_ENTRY: &str = "stravia-performance-metrics.prom";
+const PERFORMANCE_ARCHIVE_TIMELINE_ENTRY: &str = "stravia-performance-trace.json";
+
 impl AdminService {
     // ── Interaction Observation ──
 
@@ -236,6 +239,30 @@ impl AdminService {
 
     pub fn performance_timeline(&self) -> serde_json::Value {
         crate::performance::timeline_snapshot()
+    }
+
+    /// 同一时刻的性能指标与时间线打包为 Deflate 压缩的 zip，管理员一次下载即可完整诊断。
+    ///
+    /// 条目为 `stravia-performance-metrics.prom`（Prometheus 文本）与
+    /// `stravia-performance-trace.json`（Chrome Trace JSON）。时间线可达数十 MiB，
+    /// 序列化与压缩是 CPU 密集的同步工作，调用方须在阻塞线程执行。性能记录器未安装时返回
+    /// `None`；压缩或序列化失败返回错误，不产出残缺归档。
+    pub fn performance_archive(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let Some(metrics) = self.performance_metrics() else {
+            return Ok(None);
+        };
+        let timeline = self.performance_timeline();
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive.start_file(PERFORMANCE_ARCHIVE_METRICS_ENTRY, options)?;
+        archive.write_all(metrics.as_bytes())?;
+        archive.start_file(PERFORMANCE_ARCHIVE_TIMELINE_ENTRY, options)?;
+        serde_json::to_writer(&mut archive, &timeline)?;
+        Ok(Some(archive.finish()?.into_inner()))
     }
 
     pub fn set_observation_debug(&self, enabled: bool) -> DebugState {

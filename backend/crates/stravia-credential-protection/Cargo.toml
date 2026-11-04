@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 stravia-runtime-contract = { workspace = true }
+aho-corasick = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["clock", "std"] }
 futures = { workspace = true }
