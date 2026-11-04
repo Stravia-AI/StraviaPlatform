@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.2] - 2026-11-04
+
+### Verification
+
+- Manual signed-update smoke checks were not run on Windows x86_64/ARM64 or Linux x86_64/ARM64 because this release environment has no four-platform device matrix. Automated release checks do not replace verification of native installation and relaunch behavior.
+
 ### Added
 
 - Claude Code accounts now use message threads: compatible turns send only new user messages or tool results, preserving native response IDs and rebuilding from full history once when the upstream rejects a stale thread. Clients must still keep complete history; this reduces request transfer, not token usage or pricing. Rebuild and re-import the standalone Claude Code plugin.
