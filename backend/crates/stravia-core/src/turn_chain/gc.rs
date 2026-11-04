@@ -1,189 +1,141 @@
 use super::SqlTurnChainStore;
+use super::sql::Backend;
 
-use anyhow::{Context, ensure};
-use std::collections::{HashMap, VecDeque};
+use anyhow::ensure;
 
-const SEED_BATCH: usize = 512;
-const NODE_BATCH: usize = 128;
-const REFERENCE_BATCH: usize = 2048;
-const CONTENT_BATCH: usize = 512;
-const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
+const NODE_BATCH: i64 = 128;
+const REFERENCE_BATCH: i64 = 2048;
+const WATERMARK: &str = "turn_nodes.created_at";
 
 #[derive(sqlx::FromRow)]
 struct Candidate {
     node_pk: i64,
-    parent_pk: Option<i64>,
+    created_at: i64,
     scope_id: i64,
-    expires_at: Option<i64>,
     deleting: Option<bool>,
-    outside_child: bool,
-    has_refs: bool,
+    has_child: bool,
+    has_source_ref: bool,
+    has_contents: bool,
 }
 
-// 被保留的 child 会阻止其所有祖先删除；批外 child 已由索引 EXISTS 标记。
-// 限定在当前小批图上求闭包，不扫描整个 live 历史或依赖插入 ID 的先后。
-fn close_deletable(nodes: &[Candidate], allowed: &mut [bool]) {
-    let positions: HashMap<_, _> = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (node.node_pk, index))
-        .collect();
-    let mut blocked: VecDeque<_> = allowed
-        .iter()
-        .enumerate()
-        .filter_map(|(index, allowed)| (!allowed).then_some(index))
-        .collect();
-    while let Some(index) = blocked.pop_front() {
-        if let Some(parent) = nodes[index]
-            .parent_pk
-            .and_then(|parent| positions.get(&parent).copied())
-            && allowed[parent]
-        {
-            allowed[parent] = false;
-            blocked.push_back(parent);
-        }
+impl Candidate {
+    /// `deleting` 表示引用清理已开始；此后只需继续删正文引用，不再重算下限。
+    fn eligible(&self, threshold: i64) -> bool {
+        let floor = self.deleting == Some(true) || self.created_at <= threshold;
+        floor && !self.has_child && !self.has_source_ref
     }
 }
 
 macro_rules! backend {
-    ($seed:ident, $collect:ident, $prune:ident, $pool:ty, $conn:ty, $db:ty, $begin:literal, $lock:literal) => {
+    ($scan:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $begin:literal, $locks:expr, $skip_locked:literal) => {
         async fn $prune(connection: &mut $conn, scopes: &mut Vec<i64>) -> anyhow::Result<()> {
-            scopes.sort_unstable();
-            scopes.dedup();
-            if scopes.is_empty() { return Ok(()); }
-            let mut query = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_scopes WHERE id IN (");
-            let mut list = query.separated(",");
-            for scope in scopes.iter() { list.push_bind(*scope); }
-            list.push_unseparated(")");
-            query.push(" AND NOT EXISTS(SELECT 1 FROM turn_nodes n WHERE n.scope_id=turn_scopes.id) \
-                        AND NOT EXISTS(SELECT 1 FROM turn_contents c WHERE c.scope_id=turn_scopes.id)");
-            query.build().execute(&mut *connection).await?;
+            let scopes = std::mem::take(scopes);
+            $prune_scopes(connection, &scopes).await
+        }
+
+        /// 期限跨越扫描：只扫 `(W, T]`，没有子节点且不是原生登记来源的节点入队，同一事务推进水位。
+        async fn $scan(pool: &$pool, now: i64, window: i64) -> anyhow::Result<()> {
+            let threshold = now.saturating_sub(window);
+            let mut connection = pool.acquire_write().await?;
+            let mut transaction = connection.begin_with($begin).await?;
+            let watermark: i64 = sqlx::query_scalar(
+                "SELECT position FROM history_retention_watermarks WHERE name = $1",
+            ).bind(WATERMARK).fetch_one(&mut *transaction).await?;
+            if threshold < watermark {
+                sqlx::query("UPDATE history_retention_watermarks SET position = $2 WHERE name = $1")
+                    .bind(WATERMARK).bind(threshold).execute(&mut *transaction).await?;
+                transaction.commit().await?;
+                connection.finish().await?;
+                return Ok(());
+            }
+            let mut query = sqlx::QueryBuilder::<$db>::new(
+                "INSERT INTO turn_node_gc(node_pk) \
+                 SELECT n.node_pk FROM turn_nodes n \
+                 WHERE n.created_at > ",
+            );
+            query.push_bind(watermark).push(" AND n.created_at <= ").push_bind(threshold);
+            query.push(" AND NOT EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=n.node_pk) \
+                 AND NOT EXISTS(SELECT 1 FROM native_compactions c WHERE c.source_generation_id=n.id) \
+                 ON CONFLICT(node_pk) DO NOTHING");
+            query.build().execute(&mut *transaction).await?;
+            sqlx::query("UPDATE history_retention_watermarks SET position = $2 WHERE name = $1")
+                .bind(WATERMARK).bind(threshold).execute(&mut *transaction).await?;
+            transaction.commit().await?;
+            connection.finish().await?;
             Ok(())
         }
 
-        async fn $seed(pool: &$pool, now: i64, after: Option<(i64,i64)>) -> anyhow::Result<Option<(i64,i64)>> {
+        /// 从队列领取候选，加锁重检后删除；返回 `(访问数, 删除节点数, 进展数)`。
+        async fn $collect(pool: &$pool, now: i64, window: i64) -> anyhow::Result<(usize,u64,u64)> {
+            let threshold = now.saturating_sub(window);
             let mut connection = pool.acquire_write().await?;
             let mut transaction = connection.begin_with($begin).await?;
-            if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
-            let mut query = sqlx::QueryBuilder::<$db>::new("SELECT expires_at,node_pk FROM turn_node_retention WHERE expires_at<=");
-            query.push_bind(now);
-            query.push(" AND NOT EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=turn_node_retention.node_pk)");
-            if let Some((expires,node_pk)) = after {
-                query.push(" AND (expires_at,node_pk)>(").push_bind(expires).push(",").push_bind(node_pk).push(")");
-            }
-            query.push(" ORDER BY expires_at,node_pk LIMIT ").push(SEED_BATCH);
-            let rows: Vec<(i64,i64)> = query.build_query_as().fetch_all(&mut *transaction).await?;
-            if !rows.is_empty() {
-                let mut insert = sqlx::QueryBuilder::<$db>::new("INSERT INTO turn_node_gc(node_pk) ");
-                insert.push_values(rows.iter(), |mut values, row| { values.push_bind(row.1); });
-                insert.push(" ON CONFLICT(node_pk) DO NOTHING");
-                insert.build().execute(&mut *transaction).await?;
-            }
-            let next = rows.last().copied();
-            transaction.commit().await?;
-            connection.finish().await?;
-            Ok(next)
-        }
-
-        async fn $collect(pool: &$pool, now: i64) -> anyhow::Result<(usize,u64)> {
-            let mut connection = pool.acquire_write().await?;
-            let mut transaction = connection.begin_with($begin).await?;
-            // 普通提交和 native compaction 续期先持有 nodes ROW EXCLUSIVE。
-            // 顺序固定为 nodes -> contents，资格重检到删除之间不允许写入穿插。
-            if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
+            // 与提交共享的锁序：turn_nodes -> content_scopes；SHARE ROW EXCLUSIVE 阻止写入穿插。
+            // 表锁在前、咨询锁在后：等待在途提交结束期间不持有咨询锁，Marker/映射发布与原生压缩
+            // 确认（取咨询锁共享模式）不会排在这次等待之后；取得表锁后再取咨询锁，使并发回收事务的
+            // 释放触发器取锁顺序串行（见 `PG_GC_LOCK`）。持咨询锁的事务从不申请 turn_nodes 的
+            // ROW EXCLUSIVE 及以上表锁，所以这个顺序不会成环。
+            for lock in $locks { sqlx::query(lock).execute(&mut *transaction).await?; }
             let mut query = sqlx::QueryBuilder::<$db>::new(
-                "WITH RECURSIVE seeds AS (SELECT node_pk FROM turn_node_gc ORDER BY node_pk DESC LIMIT ",
+                "SELECT n.node_pk,n.created_at,n.scope_id,r.deleting,\
+                 EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=n.node_pk) AS has_child,\
+                 EXISTS(SELECT 1 FROM native_compactions c WHERE c.source_generation_id=n.id) AS has_source_ref,\
+                 EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.node_pk=n.node_pk) AS has_contents \
+                 FROM turn_node_gc g JOIN turn_nodes n ON n.node_pk=g.node_pk \
+                 LEFT JOIN turn_node_retention r ON r.node_pk=n.node_pk \
+                 ORDER BY n.node_pk LIMIT ",
             );
-            // 只共享有限的 selected；SQLite 不应因多次引用递归结果而先遍历全部祖先。
-            query.push(NODE_BATCH).push("), candidates(node_pk) AS NOT MATERIALIZED (\
-                SELECT node_pk FROM seeds UNION \
-                SELECT n.parent_pk FROM candidates c JOIN turn_nodes n ON n.node_pk=c.node_pk WHERE n.parent_pk IS NOT NULL\
-                ), selected AS MATERIALIZED (SELECT node_pk FROM candidates LIMIT ").push(NODE_BATCH).push(") \
-                SELECT n.node_pk,n.parent_pk,n.scope_id,r.expires_at,r.deleting,\
-                (EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=n.node_pk \
-                        AND child.node_pk NOT IN (SELECT node_pk FROM selected)) \
-                 OR EXISTS(SELECT 1 FROM native_compactions c WHERE c.source_generation_id=n.id)) AS outside_child,\
-                EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.node_pk=n.node_pk) AS has_refs \
-                FROM selected g JOIN turn_nodes n ON n.node_pk=g.node_pk \
-                LEFT JOIN turn_node_retention r ON r.node_pk=n.node_pk");
+            query.push(NODE_BATCH).push($skip_locked);
             let nodes: Vec<Candidate> = query.build_query_as().fetch_all(&mut *transaction).await?;
             let visited = nodes.len();
-            let mut eligible = nodes.iter().map(|node| {
-                let expiry = node.expires_at.context("missing history retention during collection")?;
-                let deleting = node.deleting.context("missing history retention during collection")?;
-                Ok((deleting || expiry <= now) && !node.outside_child)
-            }).collect::<anyhow::Result<Vec<bool>>>()?;
-            close_deletable(&nodes, &mut eligible);
-            let targets: Vec<_> = nodes.iter().zip(&eligible).filter_map(|(node,allowed)| allowed.then_some(node.node_pk)).collect();
-            let mut removed_refs = 0;
-            if nodes.iter().zip(&eligible).any(|(node,allowed)| *allowed && node.has_refs) {
-                // 与第一次引用删除原子提交；延期写入或时钟回拨不能复活半清理节点。
-                let mut mark = sqlx::QueryBuilder::<$db>::new("UPDATE turn_node_retention SET deleting=TRUE WHERE NOT deleting AND node_pk IN (");
-                let mut list = mark.separated(",");
-                for node_pk in &targets { list.push_bind(*node_pk); }
-                list.push_unseparated(")");
-                mark.build().execute(&mut *transaction).await?;
-                // 写锁保证两条语句使用相同的引用窗口；只为窗口外已无引用的内容入队，
-                // 避免逐行跨 driver 回传 content_id，再在 Rust 去重并送回数据库。
-                // SQLite 的复合 NOT IN 未命中仍会扫描窗口检查 NULL；等值反连接允许使用窗口索引。
-                let mut queue = sqlx::QueryBuilder::<$db>::new(
-                    "WITH doomed AS MATERIALIZED (SELECT node_pk,ordinal,content_id FROM turn_node_contents WHERE node_pk IN (",
+            let mut targets = Vec::new();
+            let mut blocked = Vec::new();
+            for node in &nodes {
+                if node.eligible(threshold) { targets.push(node.node_pk); } else { blocked.push(node.node_pk); }
+            }
+            let mut removed_refs = 0u64;
+            let mut marked = 0u64;
+            // 本轮释放的正文 ID。入队放在节点删除之后：先对象行（节点删除触发器锁的 Marker/映射/
+            // 登记行）、后正文行，与 Marker 回收和 Marker 单行写入的锁序一致。
+            let mut released: Vec<i64> = Vec::new();
+            let with_contents: Vec<_> = nodes.iter()
+                .filter(|node| node.eligible(threshold) && node.has_contents)
+                .map(|node| node.node_pk)
+                .collect();
+            if !with_contents.is_empty() {
+                let mut mark = sqlx::QueryBuilder::<$db>::new(
+                    "UPDATE turn_node_retention SET deleting=TRUE WHERE NOT deleting AND node_pk IN (",
                 );
-                let mut list = queue.separated(",");
-                for node_pk in &targets { list.push_bind(*node_pk); }
+                let mut list = mark.separated(",");
+                for node_pk in &with_contents { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
-                queue.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push("), \
-                    candidates AS MATERIALIZED (SELECT DISTINCT content_id FROM doomed) \
-                    INSERT INTO turn_content_gc(content_id) SELECT candidate.content_id FROM candidates candidate \
-                    WHERE NOT EXISTS(SELECT 1 FROM turn_node_contents live WHERE live.content_id=candidate.content_id \
-                        AND NOT EXISTS(SELECT 1 FROM doomed victim WHERE victim.node_pk=live.node_pk AND victim.ordinal=live.ordinal)) \
-                    ON CONFLICT(content_id) DO NOTHING");
-                queue.build().execute(&mut *transaction).await?;
-                // 引用行本身也有上限，不能让一个巨大节点的 ON DELETE CASCADE 霸占写锁。
+                marked = mark.build().execute(&mut *transaction).await?.rows_affected();
+                // 删除引用并取回失去引用的正文 ID（稍后在同一事务内重检入队）；
+                // 一个巨大节点的级联删除会长时间占用写锁，所以按批移除。
                 let mut remove = sqlx::QueryBuilder::<$db>::new(
                     "DELETE FROM turn_node_contents WHERE (node_pk,ordinal) IN \
                      (SELECT node_pk,ordinal FROM turn_node_contents WHERE node_pk IN (",
                 );
                 let mut list = remove.separated(",");
-                for node_pk in &targets { list.push_bind(*node_pk); }
+                for node_pk in &with_contents { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
-                remove.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push(")");
-                removed_refs = remove.build().execute(&mut *transaction).await?.rows_affected();
+                remove.push(" ORDER BY node_pk,ordinal LIMIT ").push(REFERENCE_BATCH).push(") RETURNING content_id");
+                released = remove.build_query_scalar().fetch_all(&mut *transaction).await?;
+                removed_refs = released.len() as u64;
+                // 本轮不删除带正文的节点；它们留在队列里由后续轮次继续。
+                targets.retain(|node_pk| !with_contents.contains(node_pk));
             }
-            let mut deletable = eligible.clone();
+            let mut removed = 0u64;
             if !targets.is_empty() {
-                // 每个候选仅做一次索引 EXISTS，避免 DISTINCT 扫描大节点的全部剩余引用。
-                let mut pending = sqlx::QueryBuilder::<$db>::new("SELECT n.node_pk FROM turn_nodes n WHERE n.node_pk IN (");
-                let mut list = pending.separated(",");
+                let mut remove = sqlx::QueryBuilder::<$db>::new(
+                    "DELETE FROM turn_nodes WHERE node_pk IN (",
+                );
+                let mut list = remove.separated(",");
                 for node_pk in &targets { list.push_bind(*node_pk); }
                 list.push_unseparated(")");
-                pending.push(" AND EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.node_pk=n.node_pk)");
-                let pending: Vec<i64> = pending.build_query_scalar().fetch_all(&mut *transaction).await?;
-                for (node, allowed) in nodes.iter().zip(&mut deletable) {
-                    *allowed &= !pending.contains(&node.node_pk);
-                }
-                close_deletable(&nodes, &mut deletable);
-            }
-            let deleted: Vec<_> = nodes.iter().zip(&deletable).filter_map(|(node,allowed)| allowed.then_some(node.node_pk)).collect();
-            let mut removed = 0;
-            if !deleted.is_empty() {
-                // 父 FK 在提交时验证，允许一个已证明封闭的小批子图集合删除。
-                // 批外父节点重新成为候选；仍有 live child 时下一次会重检并退出。
-                let mut parents = sqlx::QueryBuilder::<$db>::new(
-                    "INSERT INTO turn_node_gc(node_pk) SELECT DISTINCT parent_pk FROM turn_nodes WHERE parent_pk IS NOT NULL AND node_pk IN (",
-                );
-                let mut list = parents.separated(",");
-                for node_pk in &deleted { list.push_bind(*node_pk); }
-                list.push_unseparated(")");
-                parents.push(" ON CONFLICT(node_pk) DO NOTHING");
-                parents.build().execute(&mut *transaction).await?;
-                let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_nodes WHERE node_pk IN (");
-                let mut list = remove.separated(",");
-                for node_pk in &deleted { list.push_bind(*node_pk); }
-                list.push_unseparated(")");
+                remove.push(" AND NOT EXISTS(SELECT 1 FROM turn_nodes child WHERE child.parent_pk=turn_nodes.node_pk)");
                 removed = remove.build().execute(&mut *transaction).await?.rows_affected();
             }
-            let blocked: Vec<_> = nodes.iter().zip(&eligible).filter_map(|(node,allowed)| (!allowed).then_some(node.node_pk)).collect();
             if !blocked.is_empty() {
                 let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_node_gc WHERE node_pk IN (");
                 let mut list = remove.separated(",");
@@ -191,89 +143,76 @@ macro_rules! backend {
                 list.push_unseparated(")");
                 remove.build().execute(&mut *transaction).await?;
             }
-            let mut scopes: Vec<i64> = nodes.iter().zip(&deletable).filter_map(|(node,allowed)| allowed.then_some(node.scope_id)).collect();
-            ensure!(visited == 0 || removed > 0 || removed_refs > 0 || !blocked.is_empty(), "history collection made no progress");
-            // 节点、引用和内容各自的上限不变，在同一小事务内完成，避免重复提交和取写租约。
-            // 先固定小批队列，再按主键读正文；否则 SQLite 可为满足排序反向扫描全部内容。
-            let mut query = sqlx::QueryBuilder::<$db>::new(
-                "WITH candidates AS MATERIALIZED (SELECT content_id FROM turn_content_gc ORDER BY content_id LIMIT ",
-            );
-            query.push(CONTENT_BATCH).push(") \
-                 SELECT c.id,c.scope_id,CASE WHEN EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.content_id=c.id) \
-                 THEN CAST(0 AS BIGINT) ELSE CAST(length(c.content) AS BIGINT) END \
-                 FROM candidates g JOIN turn_contents c ON c.id=g.content_id ORDER BY c.id");
-            let rows: Vec<(i64,i64,i64)> = query.build_query_as().fetch_all(&mut *transaction).await?;
-            let mut selected = Vec::with_capacity(rows.len());
-            let mut bytes = 0i64;
-            for row in rows {
-                if !selected.is_empty() && bytes.saturating_add(row.2) > CONTENT_BYTES { break; }
-                bytes = bytes.saturating_add(row.2);
-                selected.push(row);
-            }
-            if !selected.is_empty() {
-                let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_contents WHERE id IN (");
-                let mut list = remove.separated(",");
-                for row in &selected { list.push_bind(row.0); }
-                list.push_unseparated(")");
-                remove.push(" AND NOT EXISTS(SELECT 1 FROM turn_node_contents refs WHERE refs.content_id=turn_contents.id)");
-                remove.build().execute(&mut *transaction).await?;
-                let mut remove = sqlx::QueryBuilder::<$db>::new("DELETE FROM turn_content_gc WHERE content_id IN (");
-                let mut list = remove.separated(",");
-                for row in &selected { list.push_bind(row.0); }
-                list.push_unseparated(")");
-                remove.build().execute(&mut *transaction).await?;
-                scopes.extend(selected.iter().map(|row| row.1));
-            }
+            let mut scopes: Vec<i64> = nodes.iter()
+                .filter(|node| targets.contains(&node.node_pk))
+                .map(|node| node.scope_id)
+                .collect();
+            ensure!(visited == 0 || removed > 0 || removed_refs > 0 || marked > 0 || !blocked.is_empty(), "history collection made no progress");
+            // 正文回收在节点收集结束后由共享内容存储单独进行；这里只登记失去引用的正文。
+            $enqueue(&mut *transaction, &released).await?;
             $prune(&mut transaction, &mut scopes).await?;
             transaction.commit().await?;
             connection.finish().await?;
-            Ok((visited + selected.len(),removed))
+            Ok((visited, removed, removed + removed_refs + marked + blocked.len() as u64))
         }
     };
 }
 
 backend!(
-    seed_sqlite,
+    scan_sqlite,
     collect_sqlite,
     prune_sqlite,
+    crate::content_store::sqlite::prune_scopes,
+    crate::content_store::sqlite::enqueue_unreferenced,
     sqlx::SqlitePool,
     sqlx::SqliteConnection<'_>,
     sqlx::Sqlite,
     "BEGIN IMMEDIATE",
+    [] as [&str; 0],
     ""
 );
 backend!(
-    seed_postgres,
+    scan_postgres,
     collect_postgres,
     prune_postgres,
+    crate::content_store::postgres::prune_scopes,
+    crate::content_store::postgres::enqueue_unreferenced,
     sqlx::PgPool,
     sqlx::PgConnection<'_>,
     sqlx::Postgres,
     "BEGIN",
-    "LOCK TABLE turn_nodes,turn_contents IN SHARE ROW EXCLUSIVE MODE"
+    [
+        "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE",
+        crate::history_retention::PG_GC_LOCK
+    ],
+    " FOR UPDATE OF n SKIP LOCKED"
 );
 
-pub(super) async fn sweep(store: &SqlTurnChainStore) -> anyhow::Result<u64> {
-    let now = chrono::Utc::now().timestamp_millis();
-    let mut cursor = None;
-    loop {
-        let next = match store {
-            SqlTurnChainStore::Sqlite(pool) => seed_sqlite(pool, now, cursor).await?,
-            SqlTurnChainStore::Postgres(pool) => seed_postgres(pool, now, cursor).await?,
-        };
-        let Some(next) = next else { break };
-        cursor = Some(next);
+pub(super) async fn sweep(store: &SqlTurnChainStore, now: i64) -> anyhow::Result<u64> {
+    let window = store.retention.window_millis();
+    match &store.backend {
+        Backend::Sqlite(pool) => scan_sqlite(pool, now, window).await?,
+        Backend::Postgres(pool) => scan_postgres(pool, now, window).await?,
     }
     let mut removed = 0u64;
     loop {
-        let (visited, count) = match store {
-            SqlTurnChainStore::Sqlite(pool) => collect_sqlite(pool, now).await?,
-            SqlTurnChainStore::Postgres(pool) => collect_postgres(pool, now).await?,
+        let (visited, count, progress) = match &store.backend {
+            Backend::Sqlite(pool) => collect_sqlite(pool, now, window).await?,
+            Backend::Postgres(pool) => collect_postgres(pool, now, window).await?,
         };
         removed = removed.saturating_add(count);
-        if visited == 0 {
-            break;
+        if progress == 0 {
+            if visited == 0 {
+                break;
+            }
+            anyhow::bail!("history collection claimed candidates without progress");
         }
     }
+    // 节点回收只负责登记；正文在节点引用全部移除后重检并删除。
+    // 依赖（Marker）释放的正文由 `HistoryMaintenance` 在最后再回收一次。
+    match &store.backend {
+        Backend::Sqlite(pool) => crate::content_store::sweep_sqlite(pool).await?,
+        Backend::Postgres(pool) => crate::content_store::sweep_postgres(pool).await?,
+    };
     Ok(removed)
 }

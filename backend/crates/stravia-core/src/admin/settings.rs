@@ -136,14 +136,23 @@ impl AdminService {
         let retention_days =
             if key == "log_retention_days" {
                 Some(value.parse::<u32>().map_err(|_| {
-                    anyhow::anyhow!("log_retention_days must be a nonnegative integer")
+                    anyhow::anyhow!("log_retention_days must be a positive integer")
                 })?)
             } else {
                 None
             };
+        if let Some(days) = retention_days {
+            anyhow::ensure!(
+                days >= crate::history_retention::MIN_RETENTION_DAYS,
+                "log_retention_days must be at least {}",
+                crate::history_retention::MIN_RETENTION_DAYS
+            );
+        }
         self.gw.storage.settings().set(key, value).await?;
         if let Some(days) = retention_days {
-            self.gw.observation.set_retention_days(days).await?;
+            self.gw.retention().set_days(days);
+            self.gw.observation.apply_retention_change().await?;
+            self.gw.sweep_history().await?;
         }
         Ok(())
     }

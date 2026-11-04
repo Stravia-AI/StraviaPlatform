@@ -14,6 +14,6 @@ Stravia 将所有完整交付的生成请求与最终响应写入 Principal-scop
 
 ## Consequences
 
-- 这是刻意改变既有 `store=false` 本地零留存契约；部署者必须按 Generation Chain TTL 管理所有生成请求的保留。
+- 这是刻意改变既有 `store=false` 本地零留存契约；部署者必须按「历史保留」天数（`log_retention_days`，最小 1，见 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md)）管理所有生成请求的保留。
 - Provider continuation 仍是可选优化。上游状态不可用时，Stravia 从 Generation Chain 展开完整历史，不把 upstream response ID 作为公共身份。
 - 只有完整交付的 `completed` 与 `incomplete` 终态写入节点；`failed`、取消、客户端断线与 delivery failure 不写入。

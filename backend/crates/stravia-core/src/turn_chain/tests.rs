@@ -1,5 +1,7 @@
+use super::sql::Backend;
 use super::*;
 use std::sync::Arc;
+use stravia_runtime_contract::protocol::ir::content::ContentFormat;
 
 fn principal(id: &str) -> Principal {
     Principal::new(id)
@@ -7,7 +9,7 @@ fn principal(id: &str) -> Principal {
 
 async fn content_counts(pool: &sqlx::SqlitePool, principal: &str) -> (i64, i64) {
     let contents: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+        "SELECT COUNT(*) FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = ?",
     )
     .bind(principal)
@@ -15,7 +17,7 @@ async fn content_counts(pool: &sqlx::SqlitePool, principal: &str) -> (i64, i64) 
     .await
     .expect("content count");
     let references: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM turn_node_contents r JOIN turn_scopes s ON s.id = r.scope_id \
+        "SELECT COUNT(*) FROM turn_node_contents r JOIN content_scopes s ON s.id = r.scope_id \
          WHERE s.principal = ?",
     )
     .bind(principal)
@@ -30,9 +32,12 @@ async fn scoped_content_id(
     principal: &str,
     raw: &serde_json::Value,
 ) -> i64 {
-    let digest = content::content_key(&serde_json::to_vec(raw).expect("serialize content"));
+    let digest = crate::content_store::content_digest(
+        ContentFormat::Json,
+        &serde_json::to_vec(raw).expect("serialize content"),
+    );
     sqlx::query_scalar(
-        "SELECT c.id FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+        "SELECT c.id FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = ? AND c.digest = ?",
     )
     .bind(principal)
@@ -50,26 +55,51 @@ async fn scoped_node_pk(pool: &sqlx::SqlitePool, id: &TurnNodeId) -> i64 {
         .expect("node primary key")
 }
 
-async fn expire_node(pool: &sqlx::SqlitePool, id: &TurnNodeId) {
-    sqlx::query(
-        "UPDATE turn_node_retention SET expires_at = 0 \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)",
-    )
-    .bind(id.as_str())
-    .execute(pool)
-    .await
-    .expect("expire node");
+/// 等墙钟推进到下一毫秒并返回边界：此前提交的节点 `created_at <= 边界`，此后提交的 `> 边界`。
+/// 回收的 `now` 只通过它推进，不改写任何时间戳。
+async fn tick() -> i64 {
+    let boundary = now_millis();
+    while now_millis() <= boundary {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    boundary
+}
+
+/// 回收时钟放在 `边界 + N`：只有边界之前提交的节点越过统一保留期。
+/// 同一个存储上较早的阶段可能把水位推到了未来；先让时钟回到边界（水位随之回退，
+/// 此时没有节点越过保留期），再前进到 `边界 + N`。返回第二轮的 `now`。
+async fn retreat_then_advance(store: &SqlTurnChainStore, boundary: i64) -> i64 {
+    store.sweep_history(boundary).await.unwrap();
+    boundary + store.retention.window_millis()
+}
+
+/// 比默认保留期（7 天）长得多的偏移；回收的 `now` 只通过它推进。
+const BEYOND_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn beyond_retention() -> i64 {
+    now_millis() + BEYOND_RETENTION_MS
+}
+
+/// 先以当前时刻回收一轮（时钟回拨会把水位拉回当前窗口），再跳到保留期之后回收，
+/// 使同一个存储上的多个阶段都能把新写入的节点推到保留期之外。
+async fn sweep_beyond_retention(store: &SqlTurnChainStore) {
+    store.sweep_history(now_millis()).await.unwrap();
+    store.sweep_history(beyond_retention()).await.unwrap();
 }
 
 async fn scoped_node_count(store: &SqlTurnChainStore, id: &TurnNodeId) -> i64 {
     let query = "SELECT COUNT(*) FROM turn_nodes WHERE id = $1";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => sqlx::query_scalar(query)
+    match &store.backend {
+        Backend::Sqlite(pool) => sqlx::query_scalar(query)
             .bind(id.as_str())
             .fetch_one(pool)
             .await
             .unwrap(),
-        SqlTurnChainStore::Postgres(pool) => sqlx::query_scalar(query)
+        Backend::Postgres(pool) => sqlx::query_scalar(query)
             .bind(id.as_str())
             .fetch_one(pool)
             .await
@@ -80,8 +110,8 @@ async fn scoped_node_count(store: &SqlTurnChainStore, id: &TurnNodeId) -> i64 {
 /// 模拟 GC 已进入不可恢复删除阶段：保留期仍未到期，引用只清理了一部分。
 async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
     let queue = "INSERT INTO turn_node_gc(node_pk) SELECT node_pk FROM turn_nodes WHERE id=$1 ON CONFLICT(node_pk) DO NOTHING";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
+    match &store.backend {
+        Backend::Sqlite(pool) => {
             sqlx::query(queue)
                 .bind(id.as_str())
                 .execute(pool)
@@ -96,7 +126,7 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
             .await
             .unwrap();
         }
-        SqlTurnChainStore::Postgres(pool) => {
+        Backend::Postgres(pool) => {
             sqlx::query(queue)
                 .bind(id.as_str())
                 .execute(pool)
@@ -115,36 +145,27 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
 }
 
 async fn begin_collecting_first_reference(store: &SqlTurnChainStore, id: &TurnNodeId) {
-    let queue = "INSERT INTO turn_content_gc(content_id) \
-         SELECT content_id FROM turn_node_contents \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0 \
-         ON CONFLICT(content_id) DO NOTHING";
-    let delete = "DELETE FROM turn_node_contents \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
-            sqlx::query(queue)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-            sqlx::query(delete)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
+    macro_rules! begin {
+        ($pool:expr, $enqueue:path) => {{
+            let mut connection = $pool.acquire().await.unwrap();
+            let removed: Vec<i64> = sqlx::query_scalar(
+                "DELETE FROM turn_node_contents \
+                 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0 \
+                 RETURNING content_id",
+            )
+            .bind(id.as_str())
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+            $enqueue(&mut connection, &removed).await.unwrap();
+        }};
+    }
+    match &store.backend {
+        Backend::Sqlite(pool) => {
+            begin!(pool, crate::content_store::sqlite::enqueue_unreferenced)
         }
-        SqlTurnChainStore::Postgres(pool) => {
-            sqlx::query(queue)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-            sqlx::query(delete)
-                .bind(id.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
+        Backend::Postgres(pool) => {
+            begin!(pool, crate::content_store::postgres::enqueue_unreferenced)
         }
     }
 }
@@ -154,7 +175,10 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("retention-owner");
     let live = TurnNodeId::response();
     let payload = serde_json::json!({"effective_system": "shared instructions ".repeat(100)});
@@ -166,13 +190,15 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
             principal: owner.clone(),
             payload_version: 6,
             payload: payload.clone(),
-            idle_ttl: Duration::from_secs(3600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .expect("live history");
     // 复制真实 descriptor、保留期和引用，构造同一 Principal 下大量独立的到期节点。
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -184,16 +210,14 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
             .fetch_one(&pool)
             .await
             .expect("live descriptor");
-    let now = chrono::Utc::now().timestamp_millis();
     sqlx::query(
         "WITH RECURSIVE expired(n) AS (
              SELECT 1 UNION ALL SELECT n+1 FROM expired WHERE n<8000
          )
          INSERT INTO turn_nodes (id, scope_id, kind, payload_version, created_at)
-         SELECT 'expired-' || n, ?, 'response', 6, ? FROM expired",
+         SELECT 'expired-' || n, ?, 'response', 6, 0 FROM expired",
     )
     .bind(scope)
-    .bind(now)
     .execute(&pool)
     .await
     .expect("expired history metadata");
@@ -206,7 +230,7 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
     .await
     .expect("expired history payloads");
     sqlx::query(
-        "INSERT INTO turn_node_retention (node_pk, expires_at)
+        "INSERT INTO turn_node_retention (node_pk, deleting)
          SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'expired-%'",
     )
     .execute(&pool)
@@ -249,7 +273,7 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
             });
     }
     let collecting = store.clone();
-    let mut sweep = tokio::spawn(async move { collecting.sweep_expired().await });
+    let mut sweep = tokio::spawn(async move { collecting.sweep_history(now_millis()).await });
     tokio::select! {
         started = deletion_started => started.expect("physical deletion started"),
         result = &mut sweep => panic!("collection ended before its first deletion: {result:?}"),
@@ -308,7 +332,10 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("gc-queue-owner");
     let live = TurnNodeId::response();
     let payload = serde_json::json!({"system": "live content"});
@@ -320,7 +347,9 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
             principal: owner.clone(),
             payload_version: 6,
             payload: payload.clone(),
-            idle_ttl: Duration::from_secs(600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -329,7 +358,7 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
         content_counts(&pool, &owner.continuation_key()).await,
         (1, 1)
     );
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -341,34 +370,31 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
     )
     .await;
 
-    // 模拟中断或重建后仍在表里的持久候选：600 个孤儿内容以及一个仍被节点引用的内容。
-    sqlx::query(
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<600) \
-         INSERT INTO turn_contents(scope_id, digest, content) \
-         SELECT ?, CAST(printf('%032d', i) AS BLOB), zeroblob(64) FROM n",
-    )
-    .bind(scope)
-    .execute(&pool)
-    .await
-    .expect("orphan contents");
-    sqlx::query(
-        "INSERT INTO turn_content_gc(content_id) \
-         SELECT id FROM turn_contents WHERE scope_id = ? AND id >= ?",
-    )
-    .bind(scope)
-    .bind(shared_id)
-    .execute(&pool)
-    .await
-    .expect("persisted content candidates");
+    // 模拟中断或重建后仍在表里的持久候选：600 个孤儿内容以及一个仍被节点引用的内容，
+    // 全部经由共享正文存储的公开入口写入与登记；仍被引用的内容不会进入队列。
+    {
+        let mut connection = pool.acquire().await.expect("connection");
+        let mut orphans: Vec<crate::content_store::Content> = (0..600)
+            .map(|index| crate::content_store::Content::text(format!("orphan content {index}")))
+            .collect();
+        let mut ids = crate::content_store::sqlite::intern(&mut connection, scope, &mut orphans)
+            .await
+            .expect("orphan contents");
+        ids.push(shared_id);
+        let enqueued = crate::content_store::sqlite::enqueue_unreferenced(&mut connection, &ids)
+            .await
+            .expect("persisted content candidates");
+        assert_eq!(enqueued, 600, "referenced content must not be queued");
+    }
 
-    assert_eq!(store.sweep_expired().await.expect("sweep"), 0);
+    assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 0);
     assert_eq!(
         content_counts(&pool, &owner.continuation_key()).await,
         (1, 1),
         "queued orphans are collected while live references protect their content"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_content_gc")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM content_gc")
             .fetch_one(&pool)
             .await
             .expect("remaining content candidates"),
@@ -387,26 +413,16 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite database");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
+    let store = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let owner = principal("gc-reference-batch-owner");
     let key = owner.continuation_key();
     let live = TurnNodeId::response();
     let expired = TurnNodeId::response();
     let shared = serde_json::json!({"text": "shared history ".repeat(100)});
     let live_payload = serde_json::json!({"items": [shared.clone()]});
-    store
-        .commit(TurnCommit {
-            id: live.clone(),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: owner.clone(),
-            payload_version: 6,
-            payload: live_payload.clone(),
-            idle_ttl: Duration::from_secs(3600),
-            reusable_prefix: None,
-        })
-        .await
-        .expect("live history");
     let expired_items: Vec<_> = std::iter::once(shared.clone())
         .chain((0..2500).map(|index| serde_json::json!({"text": format!("expired item {index}")})))
         .collect();
@@ -418,11 +434,30 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
             principal: owner.clone(),
             payload_version: 6,
             payload: serde_json::json!({"items": expired_items}),
-            idle_ttl: Duration::ZERO,
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .expect("expired history");
+    // 只有先提交的 expired 越过回收时钟；live 在边界之后提交。
+    let boundary = tick().await;
+    store
+        .commit(TurnCommit {
+            id: live.clone(),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 6,
+            payload: live_payload.clone(),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("live history");
     let expired_pk = scoped_node_pk(&pool, &expired).await;
     let before_refs: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM turn_node_contents WHERE node_pk = ?")
@@ -431,33 +466,19 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
             .await
             .expect("expired reference count");
     assert!(
-        before_refs > 1_000,
-        "fixture must require bounded reference cleanup"
+        before_refs > 2_048,
+        "fixture must exceed one reference cleanup batch"
     );
 
-    store.sweep_expired().await.expect("first sweep");
-    let after_refs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM turn_node_contents WHERE node_pk = ?")
-            .bind(expired_pk)
-            .fetch_one(&pool)
+    // 一次 sweep 必须把超过单批上限的引用全部清空并删除节点。
+    assert_eq!(
+        store
+            .sweep_history(retreat_then_advance(&store, boundary).await)
             .await
-            .expect("remaining reference count");
-    assert!(
-        after_refs < before_refs,
-        "a single maintenance pass removes a bounded reference batch"
+            .expect("sweep"),
+        1
     );
-    let mut passes = 0;
-    while sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_nodes WHERE id = ?")
-        .bind(expired.as_str())
-        .fetch_one(&pool)
-        .await
-        .expect("expired node count")
-        != 0
-    {
-        assert!(passes < 8, "persisted candidates must keep making progress");
-        store.sweep_expired().await.expect("follow-up sweep");
-        passes += 1;
-    }
+    assert_eq!(scoped_node_count(&store, &expired).await, 0);
     assert_eq!(content_counts(&pool, &key).await, (1, 1));
     let restored = store
         .materialize(&owner, TurnNodeKind::Response, &live)
@@ -501,7 +522,9 @@ async fn committed_root_materializes_through_the_public_store_interface() {
             principal: principal("owner"),
             payload_version: 1,
             payload: serde_json::json!({"message": "root"}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -528,21 +551,29 @@ async fn sqlite_turn_chain_survives_store_reconstruction() {
         .expect("SQLite migrations");
     let id = TurnNodeId::response();
     // 同一池上的多个 store 自动共享写协调。
-    SqlTurnChainStore::sqlite(pool.clone())
-        .commit(TurnCommit {
-            id: id.clone(),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: principal("owner"),
-            payload_version: 1,
-            payload: serde_json::json!({"response": "persisted"}),
-            idle_ttl: Duration::from_secs(60),
-            reusable_prefix: None,
-        })
-        .await
-        .expect("persist response Turn");
+    SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .commit(TurnCommit {
+        id: id.clone(),
+        kind: TurnNodeKind::Response,
+        parent_id: None,
+        principal: principal("owner"),
+        payload_version: 1,
+        payload: serde_json::json!({"response": "persisted"}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: None,
+    })
+    .await
+    .expect("persist response Turn");
 
-    let reconstructed = SqlTurnChainStore::sqlite(pool);
+    let reconstructed = SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let chain = reconstructed
         .materialize(&principal("owner"), TurnNodeKind::Response, &id)
         .await
@@ -551,66 +582,6 @@ async fn sqlite_turn_chain_survives_store_reconstruction() {
     assert_eq!(
         chain[0].payload,
         serde_json::json!({"response": "persisted"})
-    );
-}
-
-#[tokio::test]
-async fn sqlite_rejects_and_renews_expired_ancestor_chains() {
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let pool = crate::db::init_pool(data_dir.path())
-        .await
-        .expect("SQLite pool");
-    crate::migrations::migrate_sqlite(&pool, None)
-        .await
-        .expect("SQLite migrations");
-    let store = SqlTurnChainStore::sqlite(pool.clone());
-    let owner = principal("owner");
-    let root = TurnNodeId::agent();
-    let child = TurnNodeId::agent();
-    for (id, parent, message) in [(&root, None, "root"), (&child, Some(root.clone()), "child")] {
-        store
-            .commit(TurnCommit {
-                id: id.clone(),
-                kind: TurnNodeKind::Agent,
-                parent_id: parent,
-                principal: owner.clone(),
-                payload_version: 1,
-                payload: serde_json::json!({"message": message}),
-                idle_ttl: Duration::from_secs(60),
-                reusable_prefix: None,
-            })
-            .await
-            .expect("commit live ancestor chain");
-    }
-    expire_node(&pool, &root).await;
-
-    assert!(matches!(
-        store.materialize(&owner, TurnNodeKind::Agent, &child).await,
-        Err(TurnUnavailable::Unavailable)
-    ));
-
-    let grandchild = TurnNodeId::agent();
-    store
-        .commit(TurnCommit {
-            id: grandchild.clone(),
-            kind: TurnNodeKind::Agent,
-            parent_id: Some(child.clone()),
-            principal: owner.clone(),
-            payload_version: 1,
-            payload: serde_json::json!({"message": "grandchild"}),
-            idle_ttl: Duration::from_secs(60),
-            reusable_prefix: None,
-        })
-        .await
-        .expect("renew expired ancestor while extending live child");
-
-    let chain = store
-        .materialize(&owner, TurnNodeKind::Agent, &grandchild)
-        .await
-        .expect("materialize renewed chain");
-    assert_eq!(
-        chain.iter().map(|node| &node.id).collect::<Vec<_>>(),
-        [&root, &child, &grandchild]
     );
 }
 
@@ -626,7 +597,9 @@ async fn sibling_branches_are_isolated_and_principal_scoped() {
             principal: principal("owner"),
             payload_version: 1,
             payload: serde_json::json!({"message": "root"}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -642,7 +615,9 @@ async fn sibling_branches_are_isolated_and_principal_scoped() {
                 principal: principal("owner"),
                 payload_version: 1,
                 payload: serde_json::json!({"message": message}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
@@ -683,7 +658,9 @@ async fn sibling_branches_are_isolated_and_principal_scoped() {
                 principal: principal("owner"),
                 payload_version: 1,
                 payload: serde_json::json!({"message": "wrong kind"}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await,
@@ -694,9 +671,9 @@ async fn sibling_branches_are_isolated_and_principal_scoped() {
 #[tokio::test]
 async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_content() {
     let store = crate::turn_chain::test_store().await;
-    let pool = match &store {
-        SqlTurnChainStore::Sqlite(pool) => pool.clone(),
-        SqlTurnChainStore::Postgres(_) => unreachable!("SQLite test store"),
+    let pool = match &store.backend {
+        Backend::Sqlite(pool) => pool.clone(),
+        Backend::Postgres(_) => unreachable!("SQLite test store"),
     };
     let owner = principal("owner");
     let shared = serde_json::json!({"text": "shared branch content ".repeat(100)});
@@ -709,7 +686,9 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"items": [shared.clone()]}),
-            idle_ttl: Duration::from_secs(10),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -723,11 +702,15 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"items": [shared.clone()]}),
-            idle_ttl: Duration::ZERO,
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .expect("commit stale branch");
+    // stale 在边界之前提交，live 在边界之后；根节点有 live 子节点，不会被回收。
+    let boundary = tick().await;
     let live = TurnNodeId::agent();
     store
         .commit(TurnCommit {
@@ -737,13 +720,21 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"items": [shared.clone()]}),
-            idle_ttl: Duration::from_secs(10),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .expect("commit live branch");
 
-    assert_eq!(store.sweep_expired().await.expect("sweep"), 1);
+    assert_eq!(
+        store
+            .sweep_history(retreat_then_advance(&store, boundary).await)
+            .await
+            .expect("sweep"),
+        1
+    );
     assert_eq!(
         store.materialize(&owner, TurnNodeKind::Agent, &stale).await,
         Err(TurnUnavailable::Unavailable)
@@ -758,7 +749,7 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
         serde_json::json!({"items": [shared.clone()]})
     );
     assert!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_contents WHERE id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM contents WHERE id = ?")
             .bind(scoped_content_id(&pool, &owner.continuation_key(), &shared).await)
             .fetch_one(&pool)
             .await
@@ -769,13 +760,13 @@ async fn expired_sibling_is_collected_without_breaking_live_prefix_or_shared_con
 }
 
 #[tokio::test]
-async fn expired_ancestor_is_retained_while_a_live_descendant_can_renew_it() {
+async fn old_ancestor_is_retained_while_a_descendant_exists_and_collected_with_it() {
     let store = crate::turn_chain::test_store().await;
-    let pool = match &store {
-        SqlTurnChainStore::Sqlite(pool) => pool.clone(),
-        SqlTurnChainStore::Postgres(_) => unreachable!("SQLite test store"),
+    let pool = match &store.backend {
+        Backend::Sqlite(pool) => pool.clone(),
+        Backend::Postgres(_) => unreachable!("SQLite test store"),
     };
-    let owner = principal("gc-renewal-owner");
+    let owner = principal("gc-ancestor-owner");
     let root = TurnNodeId::agent();
     let child = TurnNodeId::agent();
     let grandchild = TurnNodeId::agent();
@@ -791,27 +782,20 @@ async fn expired_ancestor_is_retained_while_a_live_descendant_can_renew_it() {
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"system": message}),
-                idle_ttl: Duration::from_secs(3600),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
-            .expect("commit live ancestor");
+            .expect("commit ancestor");
     }
-    expire_node(&pool, &root).await;
-    assert_eq!(store.sweep_expired().await.expect("sweep"), 0);
+    assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 0);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turn_nodes WHERE id = ?")
-            .bind(root.as_str())
-            .fetch_one(&pool)
-            .await
-            .expect("root count"),
+        scoped_node_count(&store, &root).await,
         1,
-        "a live descendant keeps its ancestor recoverable for renewal"
+        "a descendant inside the retention window protects its ancestor"
     );
-    assert!(matches!(
-        store.materialize(&owner, TurnNodeKind::Agent, &child).await,
-        Err(TurnUnavailable::Unavailable)
-    ));
     store
         .commit(TurnCommit {
             id: grandchild.clone(),
@@ -820,23 +804,29 @@ async fn expired_ancestor_is_retained_while_a_live_descendant_can_renew_it() {
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"system": "grandchild"}),
-            idle_ttl: Duration::from_secs(3600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
-        .expect("append renews the expired ancestor");
-    let renewed = store
+        .expect("append below the old ancestor");
+    let chain = store
         .materialize(&owner, TurnNodeKind::Agent, &grandchild)
         .await
-        .expect("renewed chain");
+        .expect("chain through the old ancestor");
     assert_eq!(
-        renewed.iter().map(|node| &node.id).collect::<Vec<_>>(),
+        chain.iter().map(|node| &node.id).collect::<Vec<_>>(),
         [&root, &child, &grandchild]
     );
-    for id in [&root, &child, &grandchild] {
-        expire_node(&pool, id).await;
-    }
-    assert_eq!(store.sweep_expired().await.expect("final sweep"), 3);
+    // 叶子超出保留期后整条链在同一次 sweep 内子节点优先地被回收。
+    assert_eq!(
+        store
+            .sweep_history(beyond_retention())
+            .await
+            .expect("final sweep"),
+        3
+    );
     assert_eq!(
         content_counts(&pool, &owner.continuation_key()).await,
         (0, 0)
@@ -847,13 +837,12 @@ async fn expired_ancestor_is_retained_while_a_live_descendant_can_renew_it() {
 async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
     const DEPTH: usize = 150;
     let store = crate::turn_chain::test_store().await;
-    let pool = match &store {
-        SqlTurnChainStore::Sqlite(pool) => pool.clone(),
-        SqlTurnChainStore::Postgres(_) => unreachable!("SQLite test store"),
+    let pool = match &store.backend {
+        Backend::Sqlite(pool) => pool.clone(),
+        Backend::Postgres(_) => unreachable!("SQLite test store"),
     };
     let owner = principal("gc-chain-owner");
     let mut head = None;
-    let mut ids = Vec::with_capacity(DEPTH);
     for depth in 0..DEPTH {
         let id = TurnNodeId::agent();
         store
@@ -864,25 +853,26 @@ async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"system": format!("chain content {depth}")}),
-                idle_ttl: Duration::from_secs(3600),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
             .expect("commit chain node");
         head = Some(id.clone());
-        ids.push(id);
     }
     let leaf = head.expect("chain leaf");
-    for id in &ids {
-        expire_node(&pool, id).await;
-    }
     assert_eq!(
-        store.sweep_expired().await.expect("chain sweep"),
+        store
+            .sweep_history(beyond_retention())
+            .await
+            .expect("chain sweep"),
         DEPTH as u64
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM turn_nodes n JOIN turn_scopes s ON s.id = n.scope_id \
+            "SELECT COUNT(*) FROM turn_nodes n JOIN content_scopes s ON s.id = n.scope_id \
              WHERE s.principal = ?",
         )
         .bind(owner.continuation_key())
@@ -904,9 +894,9 @@ async fn sqlite_sweep_collects_an_expired_chain_longer_than_one_node_batch() {
 #[tokio::test]
 async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
     let store = crate::turn_chain::test_store().await;
-    let pool = match &store {
-        SqlTurnChainStore::Sqlite(pool) => pool.clone(),
-        SqlTurnChainStore::Postgres(_) => unreachable!("SQLite test store"),
+    let pool = match &store.backend {
+        Backend::Sqlite(pool) => pool.clone(),
+        Backend::Postgres(_) => unreachable!("SQLite test store"),
     };
     let owner = principal("corruption-owner");
     let id = TurnNodeId::response();
@@ -919,7 +909,9 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
             principal: owner.clone(),
             payload_version: 1,
             payload: payload.clone(),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -937,7 +929,7 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
         &serde_json::json!("authoritative content"),
     )
     .await;
-    let content: Vec<u8> = sqlx::query_scalar("SELECT content FROM turn_contents WHERE id = ?")
+    let content: Vec<u8> = sqlx::query_scalar("SELECT body FROM contents WHERE id = ?")
         .bind(content_id)
         .fetch_one(&pool)
         .await
@@ -982,31 +974,6 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
         .await
         .expect("restore payload");
 
-    let expires_at: i64 =
-        sqlx::query_scalar("SELECT expires_at FROM turn_node_retention WHERE node_pk = ?")
-            .bind(node_pk)
-            .fetch_one(&pool)
-            .await
-            .expect("retention");
-    sqlx::query("DELETE FROM turn_node_retention WHERE node_pk = ?")
-        .bind(node_pk)
-        .execute(&pool)
-        .await
-        .expect("remove retention");
-    assert!(
-        matches!(
-            store.materialize(&owner, TurnNodeKind::Response, &id).await,
-            Err(TurnUnavailable::Storage(_))
-        ),
-        "missing retention is corruption, not expiry"
-    );
-    sqlx::query("INSERT INTO turn_node_retention(node_pk, expires_at) VALUES(?, ?)")
-        .bind(node_pk)
-        .bind(expires_at)
-        .execute(&pool)
-        .await
-        .expect("restore retention");
-
     sqlx::query("UPDATE turn_node_payloads SET payload = X'00' WHERE node_pk = ?")
         .bind(node_pk)
         .execute(&pool)
@@ -1048,7 +1015,6 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
             90,
             true,
         ),
-        ("contract-expired", "owner", "target-a", "long", 4, 90, true),
         (
             "contract-long-old",
             "owner",
@@ -1103,11 +1069,9 @@ async fn assert_reusable_prefix_store_contract(store: Arc<dyn TurnChainStore>) {
                 principal: principal(owner),
                 payload_version: 1,
                 payload: serde_json::json!({"response": id}),
-                idle_ttl: if id == "contract-expired" {
-                    Duration::ZERO
-                } else {
-                    Duration::from_secs(60)
-                },
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: reusable.then(|| ReusablePrefixMetadata {
                     projection: None,
                     namespace: namespace.into(),
@@ -1203,7 +1167,11 @@ async fn sqlite_reusable_prefix_store_contract() {
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .expect("SQLite migrations");
-    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(pool))).await;
+    assert_reusable_prefix_store_contract(Arc::new(SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )))
+    .await;
 }
 
 async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
@@ -1217,7 +1185,9 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"system": "concurrent root"}),
-            idle_ttl: Duration::from_secs(3600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -1231,11 +1201,31 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"system": "expired branch"}),
-            idle_ttl: Duration::ZERO,
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .expect("expired branch");
+    let boundary = tick().await;
+    // 边界之后提交的锚点子节点始终保护根节点，回收时钟只让 expired 越过保留期。
+    store
+        .commit(TurnCommit {
+            id: TurnNodeId::response(),
+            kind: TurnNodeKind::Response,
+            parent_id: Some(root.clone()),
+            principal: owner.clone(),
+            payload_version: 1,
+            payload: serde_json::json!({"system": "anchor"}),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("anchor branch");
+    let sweep_now = retreat_then_advance(store, boundary).await;
 
     let writers: Vec<_> = (0..12)
         .map(|index| {
@@ -1252,7 +1242,9 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
                         principal: owner,
                         payload_version: 1,
                         payload: serde_json::json!({"system": format!("writer {index}")}),
-                        idle_ttl: Duration::from_secs(3600),
+                        marker_references: Vec::new(),
+                        redaction_references: Vec::new(),
+                        compaction_record_ids: Vec::new(),
                         reusable_prefix: None,
                     })
                     .await
@@ -1264,7 +1256,7 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
         let store = SqlTurnChainStore::clone(store);
         async move {
             for _ in 0..3 {
-                store.sweep_expired().await?;
+                store.sweep_history(sweep_now).await?;
                 tokio::task::yield_now().await;
             }
             Ok::<(), TurnUnavailable>(())
@@ -1283,7 +1275,7 @@ async fn assert_postgres_concurrent_commits_and_gc(store: &SqlTurnChainStore) {
         .await
         .expect("sweeper task")
         .expect("concurrent sweep");
-    store.sweep_expired().await.expect("final sweep");
+    store.sweep_history(sweep_now).await.expect("final sweep");
     let root_chain = store
         .materialize(&owner, TurnNodeKind::Response, &root)
         .await
@@ -1316,7 +1308,9 @@ async fn assert_deleting_retention_contract(store: &SqlTurnChainStore) {
             principal: owner.clone(),
             payload_version: 1,
             payload: serde_json::json!({"items": ["deleting-a", "deleting-b"]}),
-            idle_ttl: Duration::from_secs(3600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: Some(ReusablePrefixMetadata {
                 projection: None,
                 namespace: "deleting-target".into(),
@@ -1376,7 +1370,9 @@ async fn assert_deleting_retention_contract(store: &SqlTurnChainStore) {
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"system": "child"}),
-                idle_ttl: Duration::from_secs(3600),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await,
@@ -1385,7 +1381,7 @@ async fn assert_deleting_retention_contract(store: &SqlTurnChainStore) {
     );
 
     store
-        .sweep_expired()
+        .sweep_history(now_millis())
         .await
         .expect("sweep deleting retention");
     assert_eq!(
@@ -1435,10 +1431,14 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
     crate::migrations::migrate_postgres(&pool, None)
         .await
         .expect("PostgreSQL migrations");
-    let store = SqlTurnChainStore::postgres(pool.clone());
+    let store = SqlTurnChainStore::postgres(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     assert_prefix_rebuild_decodes_shared_ancestors_once(&store).await;
     assert_reusable_prefix_store_contract(Arc::new(store.clone())).await;
     assert_request_context_contract(&store).await;
+    assert_cached_prefix_keeps_the_head_expiry(&store).await;
     assert_expired_query_cutoff_proof_falls_back_to_current_facts(&store).await;
     assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_indexes(&store).await;
     assert_postgres_concurrent_commits_and_gc(&store).await;
@@ -1466,7 +1466,9 @@ async fn reusable_prefix_lookup_is_principal_scoped_and_longest_first() {
                 principal: principal("owner"),
                 payload_version: 1,
                 payload: serde_json::json!({"response": id}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: Some(ReusablePrefixMetadata {
                     projection: None,
                     namespace: "target-a".into(),
@@ -1515,38 +1517,46 @@ async fn sqlite_reusable_prefix_metadata_survives_store_reconstruction() {
         .await
         .expect("SQLite migrations");
     // 同一池上的多个 store 自动共享写协调。
-    SqlTurnChainStore::sqlite(pool.clone())
-        .commit(TurnCommit {
-            id: TurnNodeId::new("resp_indexed"),
-            kind: TurnNodeKind::Response,
-            parent_id: None,
-            principal: principal("owner"),
-            payload_version: 1,
-            payload: serde_json::json!({"response": "persisted"}),
-            idle_ttl: Duration::from_secs(60),
-            reusable_prefix: Some(ReusablePrefixMetadata {
-                projection: None,
-                namespace: "target-a".into(),
-                fingerprint: "hash-indexed".into(),
-                item_count: 6,
-                completed_at: 40,
-            }),
-        })
-        .await
-        .expect("commit indexed response");
+    SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .commit(TurnCommit {
+        id: TurnNodeId::new("resp_indexed"),
+        kind: TurnNodeKind::Response,
+        parent_id: None,
+        principal: principal("owner"),
+        payload_version: 1,
+        payload: serde_json::json!({"response": "persisted"}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: Some(ReusablePrefixMetadata {
+            projection: None,
+            namespace: "target-a".into(),
+            fingerprint: "hash-indexed".into(),
+            item_count: 6,
+            completed_at: 40,
+        }),
+    })
+    .await
+    .expect("commit indexed response");
 
-    let candidates = SqlTurnChainStore::sqlite(pool)
-        .find_reusable_prefixes(
-            &principal("owner"),
-            TurnNodeKind::Response,
-            &ReusablePrefixQuery {
-                projection: None,
-                namespace: "target-a".into(),
-                fingerprints: vec![("hash-indexed".into(), 6)],
-            },
-        )
-        .await
-        .expect("query indexed response");
+    let candidates = SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .find_reusable_prefixes(
+        &principal("owner"),
+        TurnNodeKind::Response,
+        &ReusablePrefixQuery {
+            projection: None,
+            namespace: "target-a".into(),
+            fingerprints: vec![("hash-indexed".into(), 6)],
+        },
+    )
+    .await
+    .expect("query indexed response");
 
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].node_id.as_str(), "resp_indexed");
@@ -1571,7 +1581,10 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .await
         .expect("SQLite migrations");
     let owner = principal("owner");
-    let setup = SqlTurnChainStore::sqlite(pool.clone());
+    let setup = SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
     let mut head: Option<TurnNodeId> = None;
     for depth in 0..DEPTH {
         let id = TurnNodeId::agent();
@@ -1583,7 +1596,9 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"depth": depth}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
@@ -1592,7 +1607,7 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     }
     let head = head.expect("chain head");
     let now = chrono::Utc::now().timestamp_millis();
-    let scope: i64 = sqlx::query_scalar("SELECT id FROM turn_scopes WHERE principal = ?")
+    let scope: i64 = sqlx::query_scalar("SELECT id FROM content_scopes WHERE principal = ?")
         .bind(owner.continuation_key())
         .fetch_one(&pool)
         .await
@@ -1621,10 +1636,9 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     .await
     .expect("insert unrelated payloads");
     sqlx::query(
-        "INSERT INTO turn_node_retention (node_pk, expires_at) \
-         SELECT node_pk, ? FROM turn_nodes WHERE id LIKE 'unrelated-%'",
+        "INSERT INTO turn_node_retention (node_pk, deleting) \
+         SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'unrelated-%'",
     )
-    .bind(now + 60_000)
     .execute(&pool)
     .await
     .expect("insert unrelated retention");
@@ -1648,7 +1662,10 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let store = SqlTurnChainStore::sqlite(budgeted);
+    let store = SqlTurnChainStore::sqlite(
+        budgeted,
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
 
     let chain = store
         .materialize(&owner, TurnNodeKind::Agent, &head)
@@ -1668,11 +1685,13 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
             principal: owner,
             payload_version: 1,
             payload: serde_json::json!({"depth": DEPTH}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
-        .expect("renew ancestors within VM budget");
+        .expect("append within VM budget");
     eprintln!(
         "TICKS commit={}",
         ticks.load(std::sync::atomic::Ordering::Relaxed)
@@ -1697,7 +1716,7 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
     let owner = principal("owner");
     let now = chrono::Utc::now().timestamp_millis();
     let scope: i64 =
-        sqlx::query_scalar("INSERT INTO turn_scopes(principal) VALUES(?) RETURNING id")
+        sqlx::query_scalar("INSERT INTO content_scopes(principal) VALUES(?) RETURNING id")
             .bind(owner.continuation_key())
             .fetch_one(&pool)
             .await
@@ -1728,10 +1747,9 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
     .await
     .expect("insert prefix payloads");
     sqlx::query(
-        "INSERT INTO turn_node_retention (node_pk, expires_at) \
-         SELECT node_pk, ? FROM turn_nodes WHERE id LIKE 'prefix-budget-%'",
+        "INSERT INTO turn_node_retention (node_pk, deleting) \
+         SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'prefix-budget-%'",
     )
-    .bind(now + 60_000)
     .execute(&pool)
     .await
     .expect("insert prefix retention");
@@ -1755,20 +1773,23 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
         .connect_with((*pool.connect_options()).clone())
         .await
         .expect("budgeted SQLite pool");
-    let candidates = SqlTurnChainStore::sqlite(budgeted)
-        .find_reusable_prefixes(
-            &owner,
-            TurnNodeKind::Response,
-            &ReusablePrefixQuery {
-                projection: None,
-                namespace: "budget".into(),
-                fingerprints: (1..=PAIRS)
-                    .map(|i| (format!("fingerprint-{i}"), i))
-                    .collect(),
-            },
-        )
-        .await
-        .expect("prefix lookup within VM-step budget");
+    let candidates = SqlTurnChainStore::sqlite(
+        budgeted,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .find_reusable_prefixes(
+        &owner,
+        TurnNodeKind::Response,
+        &ReusablePrefixQuery {
+            projection: None,
+            namespace: "budget".into(),
+            fingerprints: (1..=PAIRS)
+                .map(|i| (format!("fingerprint-{i}"), i))
+                .collect(),
+        },
+    )
+    .await
+    .expect("prefix lookup within VM-step budget");
     assert_eq!(
         candidates
             .into_iter()
@@ -1803,7 +1824,9 @@ async fn request_context_reuses_validated_ancestors_before_payload_fetch() {
                 kind: TurnNodeKind::Response,
                 payload_version: 1,
                 payload: serde_json::json!({"items": ["large history ".repeat(100)]}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
@@ -1822,7 +1845,7 @@ async fn request_context_reuses_validated_ancestors_before_payload_fetch() {
     context.admit(&chain, vec![(decoded.clone(), 256)]);
     // A validated ancestor must be reused without fetching or decoding its now
     // damaged persisted payload. Newly read descendants still restore normally.
-    let SqlTurnChainStore::Sqlite(pool) = &store else {
+    let super::sql::Backend::Sqlite(pool) = &store.backend else {
         unreachable!()
     };
     sqlx::query(
@@ -1965,32 +1988,70 @@ async fn ancestor_suffix_rows(
         ($backend:ident) => {
             concat!(
                 "SELECT n.node_pk, n.scope_id, n.parent_pk, n.id, parent.id AS parent_id, \
-         n.payload_version, p.payload, r.expires_at,",
+         n.payload_version, p.payload, n.created_at,",
                 super::content::reference_projection!($backend),
                 " FROM turn_nodes n \
-         JOIN turn_scopes s ON s.id = n.scope_id \
+         JOIN content_scopes s ON s.id = n.scope_id \
          LEFT JOIN turn_nodes parent ON parent.node_pk = n.parent_pk \
          LEFT JOIN turn_node_payloads p ON p.node_pk = n.node_pk \
-         LEFT JOIN turn_node_retention r ON r.node_pk = n.node_pk \
          WHERE n.id = $1 AND s.principal = $2"
             )
         };
     }
     let principal = principal.continuation_key();
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => sqlx::query_as(query!(sqlite))
+    match &store.backend {
+        Backend::Sqlite(pool) => sqlx::query_as(query!(sqlite))
             .bind(id.as_str())
             .bind(&principal)
             .fetch_all(pool)
             .await
             .unwrap(),
-        SqlTurnChainStore::Postgres(pool) => sqlx::query_as(query!(postgres))
+        Backend::Postgres(pool) => sqlx::query_as(query!(postgres))
             .bind(id.as_str())
             .bind(&principal)
             .fetch_all(pool)
             .await
             .unwrap(),
     }
+}
+
+/// 整条链共用头节点（最新节点）的计时：命中缓存的祖先前缀不能把链的有效期拉回祖先自己的期限。
+async fn assert_cached_prefix_keeps_the_head_expiry(store: &SqlTurnChainStore) {
+    let owner = principal("head-expiry");
+    let root = TurnNodeId::response();
+    let child = TurnNodeId::response();
+    let commit = |id: &TurnNodeId, parent: Option<&TurnNodeId>| TurnCommit {
+        id: id.clone(),
+        parent_id: parent.cloned(),
+        principal: owner.clone(),
+        kind: TurnNodeKind::Response,
+        payload_version: 1,
+        payload: serde_json::json!({"node": id.as_str()}),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+        compaction_record_ids: Vec::new(),
+        reusable_prefix: None,
+    };
+    store.commit(commit(&root, None)).await.unwrap();
+    let mut context = TurnReadContext::new(&owner, TurnNodeKind::Response);
+    let root_chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &root, &mut context)
+        .await
+        .unwrap();
+    let decoded: Arc<dyn std::any::Any + Send + Sync> = Arc::new("validated root");
+    context.admit(&root_chain, vec![(decoded, 128)]);
+    // 子节点创建得更晚，因此头节点的期限晚于祖先的期限。
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    store.commit(commit(&child, Some(&root))).await.unwrap();
+    let chain = store
+        .materialize_in_context(&owner, TurnNodeKind::Response, &child, &mut context)
+        .await
+        .unwrap();
+    assert_eq!(chain.nodes.len(), 2);
+    assert!(
+        chain.expires_at > root_chain.expires_at,
+        "the chain expires with its head, not with the cached ancestor"
+    );
 }
 
 async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &SqlTurnChainStore) {
@@ -2005,7 +2066,9 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
             kind: TurnNodeKind::Response,
             payload_version: 1,
             payload: serde_json::json!({"root": true}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -2021,7 +2084,7 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
     let decoded: Arc<dyn std::any::Any + Send + Sync> = Arc::new("validated root");
     context.admit(&root_chain, vec![(decoded, 128)]);
     assert!(context.validated_ids().contains(&root.as_str().to_owned()));
-    // A normal append renews the durable ancestor, not the old request proof.
+    // 追加子节点不改变祖先的创建时间，也不会让旧的请求证明失效。
     store
         .commit(TurnCommit {
             id: child.clone(),
@@ -2030,7 +2093,9 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
             kind: TurnNodeKind::Response,
             payload_version: 1,
             payload: serde_json::json!({"child": true}),
-            idle_ttl: Duration::from_secs(3600),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -2067,24 +2132,8 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
         serde_json::json!({"root": true})
     );
     assert!(chain.expires_at > cutoff_deadline);
-    let expire_root = "UPDATE turn_node_retention SET expires_at = 0 \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1)";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
-            sqlx::query(expire_root)
-                .bind(root.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-        SqlTurnChainStore::Postgres(pool) => {
-            sqlx::query(expire_root)
-                .bind(root.as_str())
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-    }
+    // 保留期过后整条链被回收；旧证明不能让已被删除的持久祖先复活。
+    sweep_beyond_retention(store).await;
     assert!(
         matches!(
             store
@@ -2100,6 +2149,11 @@ async fn assert_expired_query_cutoff_proof_falls_back_to_current_facts(store: &S
         ),
         "a truly expired durable ancestor cannot be revived by the old proof"
     );
+}
+
+#[tokio::test]
+async fn cached_prefix_keeps_the_head_expiry() {
+    assert_cached_prefix_keeps_the_head_expiry(&test_store().await).await;
 }
 
 #[tokio::test]
@@ -2203,7 +2257,9 @@ async fn assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"items": ["root"]}),
-                idle_ttl: Duration::from_secs(60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: Some(ReusablePrefixMetadata {
                     namespace: "old".into(),
                     fingerprint: "hash".into(),
@@ -2289,16 +2345,16 @@ async fn assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_
         );
     }
     let partial = "UPDATE turn_nodes SET prefix_context_fingerprint = NULL WHERE id = 'known' \
-         AND scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
+         AND scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
+    match &store.backend {
+        Backend::Sqlite(pool) => {
             sqlx::query(partial)
                 .bind(owner.continuation_key())
                 .execute(pool)
                 .await
                 .unwrap();
         }
-        SqlTurnChainStore::Postgres(pool) => {
+        Backend::Postgres(pool) => {
             sqlx::query(partial)
                 .bind(owner.continuation_key())
                 .execute(pool)
@@ -2384,7 +2440,9 @@ async fn assert_prefix_rebuild_decodes_shared_ancestors_once(store: &SqlTurnChai
                 principal: owner.clone(),
                 payload_version: 1,
                 payload: serde_json::json!({"items": ["retained content ".repeat(100)]}),
-                idle_ttl: Duration::from_secs(3600),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: Some(ReusablePrefixMetadata {
                     namespace: "previous".into(),
                     fingerprint: id.into(),
@@ -2470,17 +2528,20 @@ async fn store_content_id(
     principal: &Principal,
     raw: &serde_json::Value,
 ) -> i64 {
-    let digest = content::content_key(&serde_json::to_vec(raw).unwrap());
-    let query = "SELECT c.id FROM turn_contents c JOIN turn_scopes s ON s.id = c.scope_id \
+    let digest = crate::content_store::content_digest(
+        ContentFormat::Json,
+        &serde_json::to_vec(raw).unwrap(),
+    );
+    let query = "SELECT c.id FROM contents c JOIN content_scopes s ON s.id = c.scope_id \
          WHERE s.principal = $1 AND c.digest = $2";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => sqlx::query_scalar(query)
+    match &store.backend {
+        Backend::Sqlite(pool) => sqlx::query_scalar(query)
             .bind(principal.continuation_key())
             .bind(digest.to_vec())
             .fetch_one(pool)
             .await
             .unwrap(),
-        SqlTurnChainStore::Postgres(pool) => sqlx::query_scalar(query)
+        Backend::Postgres(pool) => sqlx::query_scalar(query)
             .bind(principal.continuation_key())
             .bind(digest.to_vec())
             .fetch_one(pool)
@@ -2495,10 +2556,10 @@ async fn overwrite_context_content(
     content_id: i64,
     bytes: Vec<u8>,
 ) {
-    let query = "UPDATE turn_contents SET content = $1 WHERE id = $2 \
-         AND scope_id = (SELECT id FROM turn_scopes WHERE principal = $3)";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
+    let query = "UPDATE contents SET body = $1 WHERE id = $2 \
+         AND scope_id = (SELECT id FROM content_scopes WHERE principal = $3)";
+    match &store.backend {
+        Backend::Sqlite(pool) => {
             sqlx::query(query)
                 .bind(bytes)
                 .bind(content_id)
@@ -2507,7 +2568,7 @@ async fn overwrite_context_content(
                 .await
                 .unwrap();
         }
-        SqlTurnChainStore::Postgres(pool) => {
+        Backend::Postgres(pool) => {
             sqlx::query(query)
                 .bind(bytes)
                 .bind(content_id)
@@ -2526,27 +2587,30 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
     let second = TurnNodeId::response();
     let expired = TurnNodeId::response();
     let item = serde_json::json!({"text": "shared external history ".repeat(100)});
-    for (id, parent_id, payload, ttl) in [
-        (root.clone(), None, serde_json::json!({"root": true}), 60),
+    // expired 先于 first / second 提交；回收时钟放在两者之间的边界之后加 N，
+    // 只有 expired 越过保留期，根节点仍有 first / second 两个子节点。
+    let mut boundary = 0;
+    for (index, (id, parent_id, payload)) in [
+        (root.clone(), None, serde_json::json!({"root": true})),
+        (
+            expired.clone(),
+            Some(root.clone()),
+            serde_json::json!({"items": [item.clone()]}),
+        ),
         (
             first.clone(),
             Some(root.clone()),
             serde_json::json!({"items": [item.clone()]}),
-            10,
         ),
         (
             second.clone(),
             Some(root.clone()),
             serde_json::json!({"items": [item.clone()]}),
-            60,
         ),
-        (
-            expired.clone(),
-            Some(root.clone()),
-            serde_json::json!({"items": [item.clone()]}),
-            0,
-        ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         store
             .commit(TurnCommit {
                 id,
@@ -2555,11 +2619,19 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
                 principal: owner.clone(),
                 kind: TurnNodeKind::Response,
                 payload_version: 1,
-                idle_ttl: Duration::from_secs(ttl),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await
             .unwrap();
+        if index == 1 {
+            boundary = tick().await;
+        } else if index == 2 {
+            // 让 second 的创建时间严格晚于 first，下面的期限比较不依赖同一毫秒内的取整。
+            tick().await;
+        }
     }
     let key = store_content_id(store, &owner, &item).await;
     let mut context = TurnReadContext::new(&owner, TurnNodeKind::Response);
@@ -2580,7 +2652,11 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
     let content = context
         .cached_content(key)
         .expect("successful fold admits external decode");
-    assert!(context.get(&root).unwrap().expires_at > context.get(&first).unwrap().expires_at);
+    assert_eq!(
+        context.get(&root).unwrap().expires_at,
+        context.get(&first).unwrap().expires_at,
+        "一条链共用头节点的保留期限"
+    );
     overwrite_context_content(store, &owner, key, vec![0]).await;
     let sibling = store
         .materialize_in_context(&owner, TurnNodeKind::Response, &second, &mut context)
@@ -2599,8 +2675,18 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
         "new suffix reuses external decode"
     );
     assert!(
-        sibling.expires_at > chain.expires_at,
-        "short sibling does not shorten independent head TTL"
+        sibling.expires_at >= chain.expires_at,
+        "每个头节点的期限来自自己的创建时间，较晚的兄弟不会更早到期"
+    );
+    // 超出保留期的叶子被回收后，上下文读取同样不可用。
+    // 共用的 PostgreSQL 存储里可能还有更早的断言留下的节点，它们同样越过了回收时钟，
+    // 所以只要求 expired 被回收（随后的读取断言它已不可用）。
+    assert!(
+        store
+            .sweep_history(retreat_then_advance(store, boundary).await)
+            .await
+            .unwrap()
+            >= 1
     );
     assert!(matches!(
         store
@@ -2670,15 +2756,17 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
             kind: TurnNodeKind::Response,
             payload_version: 1,
             payload: serde_json::json!({"inline": true}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
         .unwrap();
     let query = "UPDATE turn_node_payloads SET payload = $1 \
          WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $2)";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
+    match &store.backend {
+        Backend::Sqlite(pool) => {
             sqlx::query(query)
                 .bind(vec![0u8])
                 .bind(corrupt.as_str())
@@ -2686,7 +2774,7 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
                 .await
                 .unwrap();
         }
-        SqlTurnChainStore::Postgres(pool) => {
+        Backend::Postgres(pool) => {
             sqlx::query(query)
                 .bind(vec![0u8])
                 .bind(corrupt.as_str())
@@ -2767,11 +2855,11 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
     );
     // A missing owner-scoped row must not be replaced by a foreign row.
     let delete_references = "DELETE FROM turn_node_contents \
-         WHERE scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
-    let delete_contents = "DELETE FROM turn_contents \
-         WHERE scope_id = (SELECT id FROM turn_scopes WHERE principal = $1)";
-    match store {
-        SqlTurnChainStore::Sqlite(pool) => {
+         WHERE scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
+    let delete_contents = "DELETE FROM contents \
+         WHERE scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
+    match &store.backend {
+        Backend::Sqlite(pool) => {
             sqlx::query(delete_references)
                 .bind(owner.continuation_key())
                 .execute(pool)
@@ -2783,7 +2871,7 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
                 .await
                 .unwrap();
         }
-        SqlTurnChainStore::Postgres(pool) => {
+        Backend::Postgres(pool) => {
             sqlx::query(delete_references)
                 .bind(owner.continuation_key())
                 .execute(pool)
@@ -2804,7 +2892,9 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
             kind: TurnNodeKind::Response,
             payload_version: 1,
             payload: serde_json::json!({"items": [item]}),
-            idle_ttl: Duration::from_secs(60),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
             reusable_prefix: None,
         })
         .await
@@ -2849,9 +2939,9 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     let seed_store = Arc::new(test_store().await);
     let seed_chain = GenerationChain::from_turn_chain(
         seed_store.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let mut write = seed_chain
         .begin(owner.clone(), request(vec![question.clone()]))
@@ -2919,7 +3009,10 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .unwrap();
-    let store = Arc::new(SqlTurnChainStore::sqlite(pool.clone()));
+    let store = Arc::new(SqlTurnChainStore::sqlite(
+        pool.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    ));
     let proof = expected.projection.clone().unwrap();
     let query = ReusablePrefixQuery {
         namespace: expected.namespace.clone(),
@@ -2939,9 +3032,9 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     );
     let upgraded_chain = GenerationChain::from_turn_chain(
         store.clone(),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     upgraded_chain.rebuild_prefixes().await.unwrap();
     let candidates = store
@@ -2973,4 +3066,77 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
         Some(id.as_str()),
         "upgraded index drives authoritative history discovery"
     );
+}
+
+impl SqlTurnChainStore {
+    /// 只供旧领域 payload fixture 使用；每次读写一个节点，不依赖内部 descriptor 布局。
+    pub(crate) async fn rewrite_payloads(
+        &self,
+        mut edit: impl FnMut(&mut serde_json::Value),
+    ) -> anyhow::Result<()> {
+        macro_rules! rewrite {
+            ($pool:expr, $put:ident, $restore:ident, $enqueue:path, $backend:ident, $lock:literal) => {{
+                let nodes: Vec<(i64,String,i64,String)> = sqlx::query_as(
+                    "SELECT node_pk,id,scope_id,kind FROM turn_nodes",
+                ).fetch_all($pool).await?;
+                for (node_pk,id,scope,kind) in nodes {
+                    let kind = match kind.as_str() {
+                        "response" => TurnNodeKind::Response,
+                        "agent" => TurnNodeKind::Agent,
+                        "web_search" => TurnNodeKind::WebSearch,
+                        _ => anyhow::bail!("invalid history kind"),
+                    };
+                    let (version,parent,payload,references): (i64,Option<String>,Vec<u8>,sqlx::types::Json<Vec<[i64; 3]>>) = sqlx::query_as(
+                        concat!("SELECT n.payload_version,parent.id,p.payload,",content::reference_projection!($backend),
+                        " FROM turn_nodes n \
+                         JOIN turn_node_payloads p ON p.node_pk=n.node_pk \
+                         LEFT JOIN turn_nodes parent ON parent.node_pk=n.parent_pk WHERE n.node_pk=$1"),
+                    ).bind(node_pk).fetch_one($pool).await?;
+                    let node = content::StoredNode { node_pk,scope_id:scope,references:references.0,id:TurnNodeId::new(id),kind,
+                        parent_id:parent.map(TurnNodeId::new),payload_version:u32::try_from(version)?,payload };
+                    let restored = {
+                        let mut connection = $pool.acquire().await?;
+                        content::$restore(&mut connection, vec![node]).await?
+                    };
+                    let mut payload = restored.into_iter().next().expect("restored node").payload;
+                    edit(&mut payload);
+                    let mut encoded = tokio::task::spawn_blocking(move || content::encode(payload)).await??;
+                    let mut connection = $pool.acquire_write().await?;
+                    let mut transaction = connection.begin().await?;
+                    if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
+                    let removed: Vec<i64> = sqlx::query_scalar(
+                        "DELETE FROM turn_node_contents WHERE node_pk=$1 RETURNING content_id",
+                    )
+                    .bind(node_pk)
+                    .fetch_all(&mut *transaction)
+                    .await?;
+                    $enqueue(&mut transaction, &removed).await?;
+                    content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await?;
+                    sqlx::query("UPDATE turn_node_payloads SET payload=$1 WHERE node_pk=$2")
+                        .bind(encoded.payload).bind(node_pk).execute(&mut *transaction).await?;
+                    transaction.commit().await?;
+                    connection.finish().await?;
+                }
+                anyhow::Ok(())
+            }};
+        }
+        match &self.backend {
+            Backend::Sqlite(pool) => rewrite!(
+                pool,
+                put_sqlite,
+                restore_sqlite,
+                crate::content_store::sqlite::enqueue_unreferenced,
+                sqlite,
+                ""
+            ),
+            Backend::Postgres(pool) => rewrite!(
+                pool,
+                put_postgres,
+                restore_postgres,
+                crate::content_store::postgres::enqueue_unreferenced,
+                postgres,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
+            ),
+        }
+    }
 }

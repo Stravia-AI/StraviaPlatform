@@ -109,8 +109,7 @@ pub(super) struct TextOrigin {
 }
 
 pub(super) fn active(mapping: &Mapping) -> bool {
-    mapping.expires_at > chrono::Utc::now().timestamp_millis()
-        && marker::valid_reference(&mapping.reference)
+    marker::valid_reference(&mapping.reference)
 }
 
 /// Single pass over original bytes: inserted secrets/references are never scanned again.
@@ -1165,13 +1164,11 @@ mod tests {
         let first = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "密钥-long".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let second = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "密钥".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let mappings = [second, first];
@@ -1203,7 +1200,6 @@ mod tests {
         let mappings = [Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "not-present".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         }];
         for original in [
@@ -1226,7 +1222,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: identifier.into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let mut used = BTreeSet::new();
@@ -1245,7 +1240,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let mut payload = serde_json::json!([
@@ -1286,7 +1280,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let payload = serde_json::json!([
@@ -1334,7 +1327,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let payload = serde_json::json!([{"type": "image", "value": mapping.secret}]).to_string();
@@ -1357,46 +1349,10 @@ mod tests {
     }
 
     #[test]
-    fn expired_outbound_snapshot_fails_closed_but_restore_stays_literal() {
-        // A loaded mapping can expire after detection/intern and before replacement.
-        // Pin that boundary instead of racing a wall-clock sleep.
-        let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
-            secret: "synthetic snapshot secret".into(),
-            expires_at: 0,
-            rule_ids: Default::default(),
-        };
-        let mut request = AiRequest::new("model", Vec::new());
-        request.instructions = Some(mapping.secret.clone());
-        assert!(matches!(
-            redact_request(&mut request, std::slice::from_ref(&mapping)),
-            Err(RedactionError::InvalidText)
-        ));
-        let mut used = BTreeSet::new();
-        assert_eq!(
-            replace(
-                &mapping.reference,
-                std::slice::from_ref(&mapping),
-                true,
-                &mut used
-            ),
-            mapping.reference
-        );
-        assert!(used.is_empty());
-        request.instructions = Some("ordinary text".into());
-        assert_eq!(
-            redact_request(&mut request, &[mapping]).unwrap().references,
-            Vec::<String>::new()
-        );
-        assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
-    }
-
-    #[test]
     fn malformed_tool_arguments_still_sweep_credentials_and_pass_through() {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let malformed = format!("{{\"key\":\"{}\"", mapping.secret);
@@ -1441,7 +1397,6 @@ mod tests {
         let escaped = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"sk\\u002dlive\\u002d7f3a9c\",\"t\":".to_string();
@@ -1480,7 +1435,6 @@ mod tests {
         let quoting = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "a\"b".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let malformed = "{\"k\":\"a\\\"b\",\"t\":".to_string();
@@ -1503,7 +1457,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "sk-native-prompt-secret".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         let mut request = AiRequest::new("model", Vec::new());
@@ -1571,7 +1524,6 @@ mod tests {
         let mapping = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
-            expires_at: i64::MAX,
             rule_ids: Default::default(),
         };
         for malformed in ["{\"k\":\"sk\\live", "{\"k\":\"a\\qb\",\"t\":"] {
@@ -1620,7 +1572,6 @@ mod tests {
         Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", letter.repeat(IDENTIFIER_LEN)),
             secret: "sk-known-9f2c41".into(),
-            expires_at: i64::MAX,
             rule_ids: rule_ids
                 .iter()
                 .map(|rule| (*rule).to_owned())
@@ -1704,5 +1655,40 @@ mod tests {
         );
         let calls = response.items[1].tool_calls.as_ref().unwrap();
         assert!(calls[0].arguments.contains(&mapping.secret));
+    }
+
+    /// 映射不再有过期时间，快照条目失效的唯一形态是占位符不再合法（例如被篡改或截断）。
+    /// 外发替换命中这样的条目必须整体失败，而不是把明文放行；还原则保持字面。
+    /// 映射被回收之后的提交保护由历史保留期场景覆盖：引用已回收映射的提交按依赖不可用失败。
+    #[test]
+    fn inactive_outbound_snapshot_entry_fails_closed_but_restore_stays_literal() {
+        let mapping = Mapping {
+            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN - 1)),
+            secret: "synthetic snapshot secret".into(),
+            rule_ids: Default::default(),
+        };
+        let mut request = AiRequest::new("model", Vec::new());
+        request.instructions = Some(mapping.secret.clone());
+        assert!(matches!(
+            redact_request(&mut request, std::slice::from_ref(&mapping)),
+            Err(RedactionError::InvalidText)
+        ));
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            replace(
+                &mapping.reference,
+                std::slice::from_ref(&mapping),
+                true,
+                &mut used
+            ),
+            mapping.reference
+        );
+        assert!(used.is_empty());
+        request.instructions = Some("ordinary text".into());
+        assert_eq!(
+            redact_request(&mut request, &[mapping]).unwrap().references,
+            Vec::<String>::new()
+        );
+        assert_eq!(request.instructions.as_deref(), Some("ordinary text"));
     }
 }

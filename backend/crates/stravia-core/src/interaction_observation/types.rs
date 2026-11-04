@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use anyhow::Context;
 use bytes::Bytes;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -483,8 +484,8 @@ pub enum CredentialVisibility {
 pub enum CredentialDiscoveryHitDetail {
     Available {
         field: CredentialDiscoveryField,
+        /// 全文，不截断。
         text: String,
-        truncated: bool,
         /// `secret`：按映射明文命中；`rule`：退化为按所选规则命中。
         hit_basis: String,
         /// `true`：文本与匹配位置已按遮蔽后的文本重算；`false`：明文与原始偏移。
@@ -799,8 +800,8 @@ pub struct ObservationChange {
     pub rejection_id: Option<String>,
     pub kind: String,
     pub boundary: bool,
-    /// 仅 `target_attempt_finished` 且尝试带错误时取事件载荷中的 `error.source`；
-    /// 上游错误列表据此判断是否需要静默刷新，读取载荷不额外查询存储。
+    /// 失败尝试取 `error.source`：独立失败行在 `error`，合并的 Turn 结束行在
+    /// `attempt.error`。上游错误列表据此判断是否需要静默刷新。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_source: Option<String>,
 }
@@ -812,20 +813,23 @@ impl ObservationChange {
             "run_admitted"
                 | "run_finished"
                 | "run_state_changed"
-                | "client_visible_content"
-                | "model_thinking"
                 | "request_rejected"
+                | "model_thinking"
+                | "client_visible_content"
+                | "user_input_recorded"
+                | "client_tool_result"
         );
-        let error_source = (event.kind == "target_attempt_finished")
-            .then(|| {
-                event
-                    .payload
-                    .get("error")
-                    .and_then(|error| error.get("source"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .flatten();
+        let error_source = match event.kind.as_str() {
+            "target_attempt_finished" => event.payload.get("error"),
+            "model_turn_finished" => event
+                .payload
+                .get("attempt")
+                .and_then(|attempt| attempt.get("error")),
+            _ => None,
+        }
+        .and_then(|error| error.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
         Self {
             sequence: event.sequence,
             occurred_at: event.occurred_at,
@@ -866,6 +870,8 @@ pub enum ObservationQueryError {
     InvalidEventPage,
     #[error("invalid observation filter")]
     InvalidFilter,
+    #[error("observation content ids must be 1 to 256 positive integers")]
+    InvalidContentIds,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -887,6 +893,72 @@ pub struct ForestQuery {
     pub min_tokens: Option<i64>,
 }
 
+/// 一个有序正文引用：内容 id 与原始字节数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentRef {
+    pub content_id: i64,
+    pub raw_len: i64,
+}
+
+/// 列表与变更接口的输入/输出摘要：只有有序引用与字节数，不含正文。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentSummary {
+    pub refs: Vec<ContentRef>,
+    /// 各引用原始字节数之和；不含拼接分隔符。
+    pub raw_len: i64,
+}
+
+impl ContentSummary {
+    pub(crate) fn new(refs: Vec<ContentRef>) -> Self {
+        let raw_len = refs.iter().map(|reference| reference.raw_len).sum();
+        Self { refs, raw_len }
+    }
+}
+
+/// 内容端点一次请求允许的最大 id 数。
+pub const MAX_OBSERVATION_CONTENT_IDS: usize = 256;
+
+/// 内容端点的结果：遮蔽后的正文与供条件请求使用的 ETag（不含引号）。
+pub struct ObservationContentBatch {
+    pub contents: Vec<ObservationContent>,
+    pub etag: String,
+}
+
+/// 内容的 JSON 形态：`text` 的 `body` 是字符串，`json` 的 `body` 是原样解析的 JSON。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObservationContentFormat {
+    Text,
+    Json,
+}
+
+impl From<stravia_runtime_contract::protocol::ir::content::ContentFormat>
+    for ObservationContentFormat
+{
+    fn from(format: stravia_runtime_contract::protocol::ir::content::ContentFormat) -> Self {
+        use stravia_runtime_contract::protocol::ir::content::ContentFormat;
+        match format {
+            ContentFormat::Text => Self::Text,
+            ContentFormat::Json => Self::Json,
+        }
+    }
+}
+
+/// 内容端点返回的一项正文。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationContent {
+    pub content_id: i64,
+    pub format: ObservationContentFormat,
+    pub raw_len: i64,
+    pub body: Value,
+}
+
+/// 读取侧的内部结果：对外正文加上只用于 ETag 的内容摘要，摘要不进入响应。
+pub(crate) struct VisibleContent {
+    pub(crate) content: ObservationContent,
+    pub(crate) digest: crate::content_store::ContentDigest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionSummary {
     /// Durable diagnostic/native metadata, never an execution parent override.
@@ -901,9 +973,10 @@ pub struct InteractionSummary {
     pub status: String,
     pub started_at: i64,
     pub last_active_at: i64,
-    /// Opening text of the normalized initiating user message; absent for uncaptured input.
-    pub input_preview: Option<String>,
-    pub visible_tail: String,
+    /// 根 Run 最新用户输入的引用；正文经内容端点读取。
+    pub input: ContentSummary,
+    /// 最新可见块的引用；正文经内容端点读取。
+    pub output: ContentSummary,
     /// The interaction contains at least one terminal-error run that the client-errors view
     /// lists as a run record (failed request, or request rejected before Target selection).
     pub failed_request: bool,
@@ -1019,6 +1092,10 @@ pub struct InteractionDetail {
     pub interaction: InteractionSummary,
     pub root: ForestRoot,
     pub runs: Vec<RunDetail>,
+    /// 完整用户输入；有序文本单元以 `\n` 连接，不截断。
+    pub input_text: String,
+    /// 完整可见输出；块内单元以 `\n\n` 连接，模型轮次之间以 `\n\n` 分隔。
+    pub output_text: String,
     pub snapshot_sequence: i64,
     pub older_events_cursor: Option<i64>,
 }
@@ -1120,9 +1197,39 @@ pub(crate) fn canonical_item_block_id(scope: &str, item_ordinal: usize) -> Strin
     format!("{scope}:item:{item_ordinal}")
 }
 
+/// [`canonical_item_block_id`] 的逆运算：取 `{scope}:item:{n}` 的 item 序号。
+/// 标识不是这个形态时报错，不静默落到 item 0——块行的序号是块身份的一部分。
+pub(crate) fn parse_item_block_id(block_id: &str) -> anyhow::Result<usize> {
+    let (_, ordinal) = block_id
+        .rsplit_once(":item:")
+        .with_context(|| format!("block id {block_id:?} is not a canonical item block id"))?;
+    ordinal
+        .parse()
+        .with_context(|| format!("block id {block_id:?} has a non-numeric item ordinal"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_block_ids_round_trip_and_malformed_ids_are_errors() {
+        for ordinal in [0, 1, 17] {
+            let id = canonical_item_block_id("run:turn", ordinal);
+            assert_eq!(parse_item_block_id(&id).unwrap(), ordinal);
+        }
+        for malformed in [
+            "plain-block",
+            "scope:item:",
+            "scope:item:x",
+            "scope:item:-1",
+        ] {
+            assert!(
+                parse_item_block_id(malformed).is_err(),
+                "{malformed:?} must not map to an item ordinal"
+            );
+        }
+    }
 
     #[test]
     fn management_usage_aggregates_each_known_field_independently() {

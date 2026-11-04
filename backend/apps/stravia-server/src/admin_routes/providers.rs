@@ -201,11 +201,7 @@ pub(super) fn catalog_json_response<T: serde::Serialize>(
     body: &T,
 ) -> axum::response::Response {
     let etag = format!("\"{revision}\"");
-    if request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag))
-    {
+    if super::request_matches_etag(request_headers, &etag) {
         return StatusCode::NOT_MODIFIED.into_response();
     }
     let mut response = Json(body).into_response();

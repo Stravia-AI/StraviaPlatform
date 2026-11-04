@@ -122,7 +122,6 @@ function availableDetail(
     state: 'available',
     field: { source_type: 'tool_result', tool_id: 'tool-1', tool_name: 'Lookup' },
     text: entryText,
-    truncated: false,
     hit_basis: 'secret',
     masked: false,
     matches: [
@@ -885,7 +884,7 @@ test.describe('hit records', () => {
     await expect(dialog.getByRole('alert')).toHaveCount(0)
   })
 
-  test('warns when the hit is located by rule, the entry is truncated, or no hit match remains', async ({ page }) => {
+  test('warns when the hit is located by rule or no hit match remains', async ({ page }) => {
     await mockRedaction(page, {
       discoveries: [
         discovery(0, {
@@ -897,14 +896,13 @@ test.describe('hit records', () => {
       ],
       detail: (_id, index) =>
         index === 0
-          ? availableDetail({ truncated: true, hit_basis: 'rule', matches: [availableDetail().matches[1]] })
+          ? availableDetail({ hit_basis: 'rule', matches: [availableDetail().matches[1]] })
           : availableDetail({ matches: [] }),
     })
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/reversible-redaction')
     const dialog = await openRow(page)
     await expect(dialog.getByRole('alert')).toContainText('located by rule')
-    await expect(dialog.getByText('Only the beginning of this entry is available.')).toBeVisible()
     await expect(
       dialog.getByText('The detected credential is not in the available text.', { exact: false }),
     ).toBeVisible()

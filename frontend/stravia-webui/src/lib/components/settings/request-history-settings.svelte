@@ -33,7 +33,7 @@ async function save(next: string): Promise<string> {
 }
 </script>
 
-<SettingsSection id="logs" title={m.common_request_history()}>
+<SettingsSection id="logs" title={m.settings_history_retention()}>
   {#if retentionQuery.error}
     <RequestFailure
       title={m.settings_some_settings_not_loaded()}
@@ -44,7 +44,7 @@ async function save(next: string): Promise<string> {
     <SettingRow
       title={m.settings_retention_period_days()}
       labelFor="log-retention"
-      description={m.settings_automatically_deletes_older_request_history()}
+      description={m.settings_history_retention_description()}
       controlSize="number">
       {#snippet children({ titleId, descriptionId })}
         <InlineSettingInput

@@ -14,10 +14,10 @@ struct StoredAncestorRow {
     parent_id: Option<String>,
     payload_version: i64,
     payload: Option<Vec<u8>>,
-    expires_at: Option<i64>,
+    created_at: i64,
 }
 
-mod content;
+pub(crate) mod content;
 mod gc;
 mod sql;
 pub(crate) mod upgrade;
@@ -29,10 +29,11 @@ pub(crate) async fn test_store() -> SqlTurnChainStore {
     let pool = crate::test_support::migrated_sqlite_pool()
         .await
         .expect("SQLite Turn Chain test database");
-    SqlTurnChainStore::sqlite(pool)
+    SqlTurnChainStore::sqlite(
+        pool,
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
 }
 
-#[cfg(test)]
-mod content_tests;
 #[cfg(test)]
 mod tests;

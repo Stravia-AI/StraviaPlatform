@@ -461,26 +461,17 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         // payloads are rewritten through the store so the format-2 envelope and
         // externalized contents stay consistent.
         let pool = gateway._sqlite_pool.as_ref().unwrap();
-        crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .rewrite_payloads(remove_payload_kinds)
-            .await
-            .unwrap();
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT reference, segment_payload FROM history_markers WHERE segment_payload IS NOT NULL",
+        crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
         )
-        .fetch_all(pool)
+        .rewrite_payloads(remove_payload_kinds)
         .await
         .unwrap();
-        for (id, payload) in rows {
-            let mut payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            remove_payload_kinds(&mut payload);
-            sqlx::query("UPDATE history_markers SET segment_payload=? WHERE reference=?")
-                .bind(payload.to_string())
-                .bind(id)
-                .execute(pool)
-                .await
-                .unwrap();
-        }
+        crate::history_marker::SqlHistoryMarkerStore::sqlite(pool.clone())
+            .rewrite_segments(remove_payload_kinds)
+            .await
+            .unwrap();
         let requests_before = requests.lock().len();
         let rejected = client
             .post(format!("{gateway_url}/v1/responses"))

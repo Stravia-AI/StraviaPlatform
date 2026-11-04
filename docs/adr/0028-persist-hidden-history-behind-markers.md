@@ -8,6 +8,7 @@ status: accepted
 > - 「Streaming」一节中“普通可见 delta 立即发送”以及 Marker 载体的相关约定，曾被 [ADR-0030](0030-project-history-markers-through-reasoning.md) 取代；ADR-0030 又被 [ADR-0033](0033-stream-text-and-project-post-text-thinking.md) 整体取代，当前以 ADR-0033 为准。
 > - 「Target and storage boundaries」一节中“证明属于其它作用域时剥离”的判定，由 [ADR-0075](0075-replay-protected-reasoning-within-protocol-and-learn-rejections.md) 取代：同一出口协议下仅部署或凭据不同的受保护载荷改为保留，只有出口协议不同、协议绑定的模型不同，或已被当前签发作用域拒绝过时才剥离。
 > - 「Durable execution and rendezvous」中“Marker 发布后 execution 独立于原请求”的取消分界，对 `generate` 与外部 `StraviaRead` 由 [ADR-0082](0082-expose-queryable-tool-executions-after-bounded-wait.md) 局部取代：后台交接持久化提交前原请求仍可取消，已发布 Marker 恢复系统确定的取消结果；提交后执行独立继续。Marker 的本次交付结果与后台最终结果分别保留，不相互覆盖。
+> - 「Target and storage boundaries」中 Marker 的保留约定——“交付后按 Generation Chain 保留期发布，分支延长祖先时同步延长引用的 Marker”——由 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 取代：Marker 不再有到期时间；被任一 Turn 节点引用（`turn_node_markers`）时不回收，失去引用后未发布按一小时 `pending_until`，已发布按首次发布时刻加统一的历史保留天数 N 回收，提交不再延长祖先或 Marker；扫描是唯一的删除方，到期但尚未被扫描的记录仍可读、可被新节点引用。`segment_payload` 同时改为 `storage_codec` 编码的外壳，hidden 正文经 `history_marker_contents` 引用共享内容存储，Marker 仍是 hidden payload 的唯一事实源。
 >
 > 其余约定继续有效，包括 Principal 隔离、一对一 Hidden History Segment、durable execution，以及来源记录、可读推理的 codec 表示和两级剥离顺序。
 
@@ -24,7 +25,7 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 
 ## Durable execution and rendezvous
 
-- History Marker Store 是 hidden payload 和 Platform Tool Execution 状态的唯一事实源；Generation Chain 只持久化 Marker reference，不复制 hidden payload。Marker 在交付前持久化，交付后按 Generation Chain 保留期发布，分支延长祖先时同步延长引用的 Marker；未发布记录按 pending 保留策略清理。
+- History Marker Store 是 hidden payload 和 Platform Tool Execution 状态的唯一事实源；Generation Chain 只持久化 Marker reference，不复制 hidden payload。Marker 在交付前持久化，交付后发布；保留期按 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 由引用决定（被 Turn 节点引用时不回收，失去引用后按统一历史保留天数回收，提交不再延长引用的 Marker）；未发布记录按 pending 保留策略清理。
 - 混合 Platform/client tool 轮次并行执行：每个完整 Platform call 建立一个 Marker 和后台 execution，同时把公开 client call 返回客户端。Platform 先完成时 durable 保存并等待客户端；客户端先返回时请求等待 Platform terminal，随后用 call/result 替换 Marker并正常进入上游流程。
 - Platform Tool Execution 使用数据库条件更新原子 claim和持久 owner lease；其他实例只等待。进程崩溃或 owner lease 失联时，`running` 转为失败 tool result，向模型说明执行中断并允许模型重新请求；Stravia 不自动接管或重放可能已产生副作用的调用。
 - 每个 Platform Tool 在注册元数据声明既有执行上限，未声明时使用全局默认；execution record持久化绝对 deadline。Marker 发布后 execution 独立于原请求和后续 waiter cancellation。后台执行沿用创建时授权，不新增运行中权限复查。

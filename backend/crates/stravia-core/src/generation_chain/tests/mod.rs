@@ -27,17 +27,17 @@ fn generation_source() -> GenerationSource {
 async fn generation_store() -> GenerationChainStore {
     GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        DEFAULT_GENERATION_CHAIN_TTL,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 
 async fn generation_chain() -> GenerationChain {
     GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        DEFAULT_GENERATION_CHAIN_TTL,
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 
@@ -116,10 +116,11 @@ impl TurnChainStore for ImmediatelyExpiredTurnChainStore {
         self.inner.commit(commit).await
     }
 
-    async fn sweep_expired(
+    async fn sweep_history(
         &self,
+        now: i64,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
-        self.inner.sweep_expired().await
+        self.inner.sweep_history(now).await
     }
 }
 
@@ -268,10 +269,11 @@ impl TurnChainStore for CommitBarrierTurnChainStore {
         self.inner.rebuild_prefixes(namespace_prefix, decode).await
     }
 
-    async fn sweep_expired(
+    async fn sweep_history(
         &self,
+        now: i64,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
-        self.inner.sweep_expired().await
+        self.inner.sweep_history(now).await
     }
 }
 

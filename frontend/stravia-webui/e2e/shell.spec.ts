@@ -146,10 +146,10 @@ test('settings groups use one in-page navigation instead of nesting another side
   await nav.getByRole('link', { name: 'Network' }).click()
   await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(1)
   await nav.getByRole('link', { name: 'Data' }).click()
-  await expect(page.getByRole('region', { name: 'Request history' })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'History retention' })).toHaveCount(1)
 
   await page.setViewportSize({ width: 1500, height: 800 })
-  await expect(page.getByRole('region', { name: 'Request history' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'History retention' })).toBeVisible()
 })
 
 test('desktop port controls stay hidden outside the Tauri shell', async ({ page }) => {

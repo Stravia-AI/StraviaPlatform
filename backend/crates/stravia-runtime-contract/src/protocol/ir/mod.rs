@@ -13,6 +13,7 @@
 
 pub mod cache;
 pub mod canonical;
+pub mod content;
 pub mod envelope;
 pub mod error;
 mod ext;

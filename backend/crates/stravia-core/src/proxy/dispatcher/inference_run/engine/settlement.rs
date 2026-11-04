@@ -447,7 +447,7 @@ mod tests {
             Some(pool.clone()),
             None,
             directory.path().to_path_buf(),
-            7,
+            crate::history_retention::HistoryRetention::new(7),
             true,
             gateway.generation_chains.clone(),
         )
@@ -557,7 +557,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: std::time::Duration::from_secs(60),
-                    pending_retention: std::time::Duration::from_secs(3600),
                 },
             )
             .await
@@ -952,7 +951,6 @@ mod tests {
                     },
                     activity: "Searching".into(),
                     execution_limit: std::time::Duration::from_secs(60),
-                    pending_retention: std::time::Duration::from_secs(3600),
                 },
             )
             .await

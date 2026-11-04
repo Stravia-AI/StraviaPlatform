@@ -38,6 +38,215 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 内容端点测试夹具：带管理员令牌的路由与同一个 Gateway。
+async fn contents_fixture(directory: &Path) -> anyhow::Result<(Gateway, axum::Router, String)> {
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway.clone(),
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+    let tokens = auth.login_native().await?;
+    Ok((gateway, app, tokens.access_token))
+}
+
+async fn get_contents(
+    app: &axum::Router,
+    token: &str,
+    ids: &[i64],
+    if_none_match: Option<&str>,
+) -> anyhow::Result<(StatusCode, Option<String>, serde_json::Value)> {
+    let joined = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let mut request = Request::get(format!("/api/v1/observations/contents?ids={joined}"))
+        .header("authorization", format!("Bearer {token}"));
+    if let Some(value) = if_none_match {
+        request = request.header("if-none-match", value);
+    }
+    let response = app.clone().oneshot(request.body(Body::empty())?).await?;
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get("etag")
+        .map(|value| value.to_str().map(str::to_owned))
+        .transpose()?;
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes)?
+    };
+    Ok((status, etag, body))
+}
+
+const CONTENT_SECRET: &str = "sk-live-abcdefghijklmnopqrstuvwxyz";
+const CONTENT_SECRET_ROTATED: &str = "sk-live-0123456789abcdefghijklmnop";
+
+#[tokio::test]
+async fn observation_contents_scope_visibility_and_mask_per_owner() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, app, token) = contents_fixture(directory.path()).await?;
+    let admin = gateway.admin();
+    let text = format!("use {CONTENT_SECRET} for the call");
+    let owner = admin.seed_observation_input("owner-a", &text).await?;
+    let other = admin.seed_observation_input("owner-b", &text).await?;
+    admin
+        .seed_credential_mapping("owner-a", CONTENT_SECRET)
+        .await?;
+    let owner_id = owner.input_content_ids[0];
+    let other_id = other.input_content_ids[0];
+    assert_ne!(owner_id, other_id, "不同主体的相同正文不共享内容行");
+
+    // 未知 id 被静默省略，顺序遵循请求，且不泄露存在性。
+    let (status, _, body) =
+        get_contents(&app, &token, &[other_id, 9_000_000_000, owner_id], None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let contents = body["data"]["contents"].as_array().expect("contents");
+    let ids: Vec<i64> = contents
+        .iter()
+        .map(|content| content["content_id"].as_i64().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![other_id, owner_id]);
+    assert_eq!(contents[0]["body"], text, "没有映射的主体不遮蔽");
+    assert_eq!(contents[0]["format"], "text");
+    assert_eq!(contents[0]["raw_len"], text.len());
+    let masked = contents[1]["body"].as_str().expect("masked text");
+    assert!(!masked.contains(CONTENT_SECRET), "{masked}");
+    assert!(masked.contains("***"), "{masked}");
+    assert!(
+        contents[1].get("digest").is_none(),
+        "digest 只用于 ETag，不进入响应"
+    );
+
+    // 全部不可见时返回空集合而不是 404。
+    let (status, _, body) = get_contents(&app, &token, &[9_000_000_001], None).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["contents"], serde_json::json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn observation_contents_etag_tracks_bodies_and_mapping_version() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, app, token) = contents_fixture(directory.path()).await?;
+    let admin = gateway.admin();
+    let seeded = admin
+        .seed_observation_input("owner-a", &format!("use {CONTENT_SECRET}"))
+        .await?;
+    admin
+        .seed_credential_mapping("owner-a", CONTENT_SECRET)
+        .await?;
+    let ids = seeded.input_content_ids;
+
+    let (status, etag, first) = get_contents(&app, &token, &ids, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    let etag = etag.expect("etag header");
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+
+    // 同样的正文与映射：重复请求得到同一 ETag，带 If-None-Match 时 304 且无正文。
+    let (status, again, repeated) = get_contents(&app, &token, &ids, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again.as_deref(), Some(etag.as_str()));
+    assert_eq!(repeated, first);
+    let (status, _, empty) = get_contents(&app, &token, &ids, Some(&etag)).await?;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(empty.is_null());
+    let (status, _, _) = get_contents(&app, &token, &ids, Some("\"stale\"")).await?;
+    assert_eq!(status, StatusCode::OK, "不匹配的 ETag 必须返回完整响应");
+    let listed = format!("\"other\", {etag}");
+    let (status, _, _) = get_contents(&app, &token, &ids, Some(&listed)).await?;
+    assert_eq!(
+        status,
+        StatusCode::NOT_MODIFIED,
+        "If-None-Match 列表中任一命中即 304"
+    );
+
+    // 映射版本变化后，旧 ETag 失效，客户端必须重新拉取遮蔽后的正文。
+    admin
+        .seed_credential_mapping("owner-a", CONTENT_SECRET_ROTATED)
+        .await?;
+    let (status, changed, _) = get_contents(&app, &token, &ids, Some(&etag)).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(changed.as_deref(), Some(etag.as_str()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn observation_contents_responses_require_revalidation_before_reuse() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, app, token) = contents_fixture(directory.path()).await?;
+    let seeded = gateway
+        .admin()
+        .seed_observation_input("owner-a", "cacheable body")
+        .await?;
+    let uri = format!(
+        "/api/v1/observations/contents?ids={}",
+        seeded.input_content_ids[0]
+    );
+    let request = |if_none_match: Option<&str>| -> anyhow::Result<Request<Body>> {
+        let mut request = Request::get(&uri).header("authorization", format!("Bearer {token}"));
+        if let Some(etag) = if_none_match {
+            request = request.header("if-none-match", etag);
+        }
+        Ok(request.body(Body::empty())?)
+    };
+
+    let full = app.clone().oneshot(request(None)?).await?;
+    assert_eq!(full.status(), StatusCode::OK);
+    let etag = full
+        .headers()
+        .get("etag")
+        .expect("etag header")
+        .to_str()?
+        .to_owned();
+    assert_eq!(
+        full.headers().get("cache-control").expect("cache-control"),
+        "private, no-cache",
+        "正文随凭据映射变化，必须每次重新验证"
+    );
+
+    let not_modified = app.clone().oneshot(request(Some(&etag))?).await?;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified
+            .headers()
+            .get("etag")
+            .expect("304 必须回带 ETag"),
+        etag.as_str()
+    );
+    assert_eq!(
+        not_modified
+            .headers()
+            .get("cache-control")
+            .expect("cache-control"),
+        "private, no-cache"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn observation_contents_accepts_the_id_cap_and_requires_admin() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (_gateway, app, token) = contents_fixture(directory.path()).await?;
+    let at_cap: Vec<i64> = (1..=256).collect();
+    let (status, _, body) = get_contents(&app, &token, &at_cap, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["contents"], serde_json::json!([]));
+
+    let denied = app
+        .oneshot(Request::get("/api/v1/observations/contents?ids=1").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
 #[tokio::test]
 async fn performance_export_requires_admin_and_clears_session_after_debug_is_disabled()
 -> anyhow::Result<()> {
@@ -2279,5 +2488,48 @@ async fn catalog_parity_drives_dynamic_profiles_through_management_http() -> any
         "the saved provider survives removal from the advertised catalog"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn observation_contents_rejects_invalid_ids_with_stable_code() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let app = create_router(
+        gateway,
+        AdminHttpState {
+            auth: auth.clone(),
+            mode: AdminMode::Desktop,
+        },
+    );
+    let tokens = auth.login_native().await?;
+    let too_many = (1..=257)
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for query in ["", "?ids=", "?ids=1,,2", "?ids=0", "?ids=-3", "?ids=abc"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(std::iter::once(format!("?ids={too_many}")))
+    {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/observations/contents{query}"))
+                    .header("authorization", format!("Bearer {}", tokens.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["code"], "invalid_observation_ids", "{query}");
+    }
     Ok(())
 }

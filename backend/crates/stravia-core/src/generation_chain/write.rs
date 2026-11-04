@@ -241,56 +241,30 @@ impl GenerationChainWrite {
         let staged = self.staged.as_mut().ok_or(PersistError::NotStaged)?;
         let projection = staged.projection.take();
         let mut staged = staged.clone();
-        if let Some(compaction) = &self.chain.compaction {
-            compaction
-                .extend_retention(&self.principal, &self.parent.compaction_record_ids)
-                .await
-                .map_err(PersistError::Compaction)?;
-        }
-        if let Some(store) = &self.chain.redaction_mappings {
-            let references = self
-                .request
+        let redaction_references = if self.chain.records_redaction_references {
+            self.request
                 .meta
                 .redaction
                 .references()
-                .map_err(PersistError::Redaction)?;
-            if !references.is_empty() {
-                store
-                    .extend_retention(&self.principal, &references, self.chain.ttl)
-                    .await
-                    .map_err(PersistError::Redaction)?;
-            }
-        }
+                .map_err(PersistError::Redaction)?
+        } else {
+            Vec::new()
+        };
+        // 客户端提交的 Marker reference 只按存在性解析，发布会话状态不再参与提交。
+        let mut marker_references =
+            crate::history_marker::history_marker_commit_references(&self.request_delta.items);
+        marker_references.extend(crate::history_marker::history_marker_commit_references(
+            &staged.response.items,
+        ));
+        marker_references.sort_unstable();
+        marker_references.dedup();
         if let Some(store) = &self.chain.history_markers {
-            let mut parent_references = crate::history_marker::history_marker_references_iter(
-                self.parent.parent_client_items.iter().map(AsRef::as_ref),
-            );
-            parent_references.sort();
-            parent_references.dedup();
-            let parent_resolved = store
-                .resolve_many(&self.principal, &parent_references)
+            let resolved = store
+                .resolve_many(&self.principal, &marker_references)
                 .await
                 .map_err(PersistError::HistoryMarker)?;
-            let mut references = Vec::with_capacity(parent_references.len());
-            for (reference, resolved) in parent_references.into_iter().zip(parent_resolved) {
-                if resolved.as_ref().is_some_and(|marker| marker.published) {
-                    references.push(reference);
-                }
-            }
-            let mut untrusted =
-                crate::history_marker::history_marker_references(&self.request_delta.items);
-            untrusted.extend(crate::history_marker::history_marker_references(
-                &staged.response.items,
-            ));
-            let untrusted_resolved = store
-                .resolve_many(&self.principal, &untrusted)
-                .await
-                .map_err(PersistError::HistoryMarker)?;
-            for (reference, resolved) in untrusted.into_iter().zip(untrusted_resolved) {
-                if resolved.as_ref().is_some_and(|marker| marker.published) {
-                    references.push(reference);
-                }
-                if let Some(turn_id) = resolved
+            for (_, marker) in marker_references.iter().zip(resolved) {
+                if let Some(turn_id) = marker
                     .as_ref()
                     .and_then(|marker| marker.segment.as_ref())
                     .and_then(media_turn_id)
@@ -306,12 +280,6 @@ impl GenerationChainWrite {
                         .push(turn_id.to_owned());
                 }
             }
-            references.sort();
-            references.dedup();
-            store
-                .extend_retention(&self.principal, &references, self.chain.ttl)
-                .await
-                .map_err(PersistError::HistoryMarker)?;
         }
         let projected = match projection {
             Some(projected) => projected,
@@ -330,6 +298,8 @@ impl GenerationChainWrite {
                     response: staged.response,
                     upstream_response_id: staged.upstream_response_id,
                     effective_state: staged.effective_state,
+                    marker_references,
+                    redaction_references,
                 },
                 projected,
             )

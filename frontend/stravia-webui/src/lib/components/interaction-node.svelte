@@ -6,6 +6,7 @@ import InteractionPreview from './interaction-preview.svelte'
 import { formatCompactCount, formatLogTime } from '#lib/format.js'
 import { hasHistoricalFailure, interactionDisplayStatus } from '#lib/observation-chain-visibility.js'
 import { observationStatusLabel } from '#lib/observation-labels.js'
+import { INPUT_SEPARATOR, OUTPUT_SEPARATOR } from '#lib/observation-separators.js'
 import type { InteractionNodeData } from '#lib/types.js'
 
 type InteractionNode = import('@xyflow/svelte').Node<InteractionNodeData, 'interaction'>
@@ -66,8 +67,9 @@ const usage = $derived([
   </header>
 
   <InteractionPreview
-    text={interaction.input_preview}
-    label={m.observation_input_preview()}
+    summary={interaction.input}
+    separator={INPUT_SEPARATOR}
+    label={m.observation_card_input()}
     emptyLabel={m.observation_input_not_recorded()} />
 
   <div class="usage-grid" aria-label={m.observation_confirmed_usage()}>
@@ -81,10 +83,12 @@ const usage = $derived([
   </div>
 
   <InteractionPreview
-    text={selected ? (data.outputPreview?.text ?? interaction.visible_tail) : interaction.visible_tail}
-    label={m.observation_output_preview()}
+    summary={interaction.output}
+    separator={OUTPUT_SEPARATOR}
+    liveText={selected ? data.outputPreview?.text : undefined}
+    label={m.observation_card_output()}
     emptyLabel={interaction.client_output_delivered
-      ? m.observation_output_delivered_no_preview()
+      ? m.observation_output_delivered_no_text()
       : m.observation_no_visible_output()}
     {contextLabel}
     active={selected && data.outputActive}

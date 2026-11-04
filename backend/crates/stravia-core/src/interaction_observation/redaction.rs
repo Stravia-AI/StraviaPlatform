@@ -2,78 +2,27 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use stravia_credential_protection::marker;
 
 pub(crate) const REDACTED: &str = "***";
 
-/// Maximum number of Unicode scalar values retained for an input preview.
-pub(crate) const INPUT_PREVIEW_CHARS: usize = 4096;
-
-/// Bounded preview of the latest user text in the received canonical window.
-///
-/// Runs when the preview is captured so the waiting state does not pin the
-/// request tree. Multiple text blocks are joined with `\n` while copying at
-/// most [`INPUT_PREVIEW_CHARS`] scalar values; the full joined body is never
-/// materialized.
-pub(crate) fn user_input_preview(
+/// 最新用户 item 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
+pub(crate) fn user_input_units(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
-) -> Option<String> {
-    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
+) -> Option<Vec<String>> {
+    use stravia_runtime_contract::protocol::ir::Role;
+    use stravia_runtime_contract::protocol::ir::content::{ContentUnitBody, item_content_units};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
-    match &item.content {
-        MessageContent::Text(text) => {
-            (!text.is_empty()).then(|| preview_prefix(text, INPUT_PREVIEW_CHARS).0.to_owned())
-        }
-        MessageContent::Blocks(blocks) => {
-            let texts = blocks.iter().filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            });
-            let mut remaining = INPUT_PREVIEW_CHARS;
-            let mut text_count = 0;
-            let mut bytes = 0;
-            let mut last_end = 0;
-            for text in texts.clone() {
-                if text_count > 0 {
-                    bytes += 1;
-                    remaining -= 1;
-                }
-                let (prefix, chars) = preview_prefix(text, remaining);
-                last_end = prefix.len();
-                bytes += last_end;
-                remaining -= chars;
-                text_count += 1;
-                if remaining == 0 {
-                    break;
-                }
-            }
-            if bytes == 0 {
-                return None;
-            }
-            let mut preview = String::with_capacity(bytes);
-            for (index, text) in texts.take(text_count).enumerate() {
-                if index > 0 {
-                    preview.push('\n');
-                }
-                if index + 1 == text_count {
-                    preview.push_str(&text[..last_end]);
-                } else {
-                    preview.push_str(text);
-                }
-            }
-            Some(preview)
-        }
-    }
-}
-
-fn preview_prefix(text: &str, limit: usize) -> (&str, usize) {
-    let mut end = 0;
-    let mut chars = 0;
-    for (offset, character) in text.char_indices().take(limit) {
-        end = offset + character.len_utf8();
-        chars += 1;
-    }
-    (&text[..end], chars)
+    let units = item_content_units(item);
+    let texts: Vec<String> = units
+        .iter()
+        .filter_map(|unit| match &unit.body {
+            ContentUnitBody::Text(text) => Some((*text).to_owned()),
+            ContentUnitBody::Json(_) => None,
+        })
+        .collect();
+    (!texts.is_empty()).then_some(texts)
 }
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
@@ -105,6 +54,23 @@ impl ProtectedSecrets {
             }
         }
         values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+    }
+
+    /// 已注册明文的稳定指纹；用于内容端点 ETag，映射新增或消失都会改变结果。
+    pub(crate) fn version(&self) -> [u8; 32] {
+        let mut raws: Vec<String> = self
+            .0
+            .read()
+            .iter()
+            .map(|secret| secret.raw.clone())
+            .collect();
+        raws.sort_unstable();
+        let mut hasher = Sha256::new();
+        for raw in raws {
+            hasher.update(raw.as_bytes());
+            hasher.update([0]);
+        }
+        hasher.finalize().into()
     }
 
     pub(crate) fn text(&self, text: &mut String) {
@@ -1054,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn input_preview_selects_latest_user_text_without_history_or_tool_payloads() {
+    fn input_units_select_latest_user_text_without_history_or_tool_payloads() {
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"system","content":"system-secret"},
@@ -1062,15 +1028,14 @@ mod tests {
                 {"role":"assistant","content":"assistant-secret"},
                 {"role":"user","content":[
                     {"type":"text","text":"first"},
-                    {"type":"thinking","thinking":"ignored"},
                     {"type":"text","text":"second"}
                 ]},
                 {"role":"tool","content":"tool-secret","tool_call_id":"call"}
             ]))
             .unwrap();
         assert_eq!(
-            super::user_input_preview(&items),
-            Some("first\nsecond".into())
+            super::user_input_units(&items),
+            Some(vec!["first".to_owned(), "second".to_owned()])
         );
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
@@ -1078,13 +1043,13 @@ mod tests {
                 {"role":"user","content":[]}
             ]))
             .unwrap();
-        assert_eq!(super::user_input_preview(&items), None);
+        assert_eq!(super::user_input_units(&items), None);
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":[{"type":"text","text":""}]}
             ]))
             .unwrap();
-        assert_eq!(super::user_input_preview(&items), None);
+        assert_eq!(super::user_input_units(&items), Some(vec![String::new()]));
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":[
@@ -1093,57 +1058,33 @@ mod tests {
                 ]}
             ]))
             .unwrap();
-        assert_eq!(super::user_input_preview(&items), Some("\n".into()));
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec![String::new(), String::new()])
+        );
     }
 
     #[test]
-    fn input_preview_stops_at_the_limit_without_an_extra_separator() {
-        let full = "a".repeat(4096);
+    fn input_units_keep_the_complete_text_without_truncation() {
+        let long = "a".repeat(8192);
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":[
-                    {"type":"text","text":full},
-                    {"type":"text","text":"b"}
-                ]}
-            ]))
-            .unwrap();
-        assert_eq!(super::user_input_preview(&items).unwrap(), full);
-
-        let almost = "a".repeat(4095);
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
-            serde_json::from_value(serde_json::json!([
-                {"role":"user","content":[
-                    {"type":"text","text":almost},
+                    {"type":"text","text":long},
                     {"type":"text","text":"b"}
                 ]}
             ]))
             .unwrap();
         assert_eq!(
-            super::user_input_preview(&items).unwrap(),
-            format!("{almost}\n")
+            super::user_input_units(&items),
+            Some(vec![long, "b".to_owned()])
         );
-    }
-
-    #[test]
-    fn input_preview_preserves_literals_before_unicode_truncation() {
-        let secret = format!("{}private-ending", "密".repeat(4100));
-        let text = format!(
-            "start {secret}\napi_key=credential-sentinel\n{}",
-            "文".repeat(4200)
-        );
-        let items = user_text_items(&text);
-        let preview = super::user_input_preview(&items).unwrap();
-        assert!(preview.starts_with("start 密"));
-        assert!(preview.contains("密"));
-        assert!(!preview.contains("credential-sentinel"));
-        assert_eq!(preview.chars().count(), 4096);
-        assert!(preview.ends_with('密'));
     }
 
     use super::*;
 
     #[test]
-    fn input_preview_preserves_unicode_urls_and_credentials() {
+    fn input_units_preserve_unicode_urls_and_credentials() {
         let text = concat!(
             "接口https://example.test/cb?api_key=never-persist&safe=yes ",
             "🔗https://example.test/public ",
@@ -1151,27 +1092,17 @@ mod tests {
             "地址：https://example.test/path?token=never-persist"
         );
 
-        let preview = user_input_preview(&user_text_items(text)).unwrap();
+        let units = user_input_units(&user_text_items(text)).unwrap();
 
-        assert_eq!(preview, text);
+        assert_eq!(units, vec![text.to_owned()]);
     }
 
     #[test]
-    fn input_preview_preserves_header_schemes_in_semantic_text() {
+    fn input_units_preserve_header_schemes_in_semantic_text() {
         let text = "safe prose bEaReR bearer-sentinel BaSiC basic-sentinel";
-        let preview = user_input_preview(&user_text_items(text)).unwrap();
+        let units = user_input_units(&user_text_items(text)).unwrap();
 
-        assert_eq!(preview, text);
-    }
-
-    #[test]
-    fn input_preview_limits_unprotected_unicode_text_to_whole_characters() {
-        let opening = "𠮷".repeat(4096);
-        let text = format!("{opening}last");
-
-        let preview = user_input_preview(&user_text_items(&text)).unwrap();
-
-        assert_eq!(preview, opening);
+        assert_eq!(units, vec![text.to_owned()]);
     }
 
     #[test]

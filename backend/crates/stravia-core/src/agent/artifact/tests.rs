@@ -76,7 +76,6 @@ async fn artifact_ingest_reuse_and_thinking_wait_for_same_pool_write_lease() {
                             data: "coordinated-thinking".into(),
                         },
                         activity: "Preserving reasoning".into(),
-                        pending_retention: Duration::from_secs(60),
                     },
                 )
                 .await

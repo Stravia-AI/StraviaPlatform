@@ -167,7 +167,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
-                        observer.publish_input_preview();
+                        observer.publish_user_input();
                     }
                     // Redaction can change item bytes; otherwise reuse the serialized estimate
                     // from Model Turn start instead of serializing a large prompt twice.
@@ -957,6 +957,10 @@ async fn select_with_rpm(
         drop(routes);
         let wait = admission.filter_candidates(&mut policy, &input.root_request, excluded);
         if let Some((next, preferred)) = wait {
+            // 排队等待可能持续很久：此前缓冲的 Turn 开始先落盘，等待期间 Turn 即可读。
+            if let Some(observer) = input.observer.as_ref() {
+                observer.commit_turn_start();
+            }
             admission
                 .wait(
                     &input.root_request,

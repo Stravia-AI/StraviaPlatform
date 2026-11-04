@@ -374,14 +374,24 @@ test('real gateway accepts original images and persisted reasoning replay under 
         // sent within the rapid-continuation window may instead share one.
         // Verify both delivered answers and their accounting independently of
         // the browser reload's incidental timing relative to that boundary.
-        const completed = interactions.filter(
-          (item) =>
-            item.status === 'completed' &&
-            typeof item.visible_tail === 'string' &&
-            (item.visible_tail.includes('First real gateway answer') ||
-              item.visible_tail.includes('Second real gateway answer')),
+        // 摘要只引用最新一个可见块；两轮共用一个 Interaction 时，完整可见输出只在详情的 output_text 里。
+        const outputText = async (item: Record<string, unknown>): Promise<string> => {
+          if (typeof item.id !== 'string') throw new Error('Observation interaction omitted id')
+          const detail = record(await api(`/observations/interactions/${item.id}`))
+          if (typeof detail.output_text !== 'string') throw new Error('Observation detail omitted output_text')
+          return detail.output_text
+        }
+        const answered = await Promise.all(
+          interactions
+            .filter((item) => item.status === 'completed')
+            .map(async (item) => ({ item, tail: await outputText(item) })),
         )
-        const tails = completed.map((item) => item.visible_tail as string)
+        const completed = answered
+          .filter(
+            ({ tail }) => tail.includes('First real gateway answer') || tail.includes('Second real gateway answer'),
+          )
+          .map(({ item }) => item)
+        const tails = answered.map(({ tail }) => tail)
         if (
           !tails.some((tail) => tail.includes('First real gateway answer')) ||
           !tails.some((tail) => tail.includes('Second real gateway answer'))

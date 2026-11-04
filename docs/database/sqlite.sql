@@ -104,6 +104,26 @@ CREATE TABLE artifacts (
     created_at   INTEGER NOT NULL
 , storage_backend TEXT NOT NULL DEFAULT 'internal', storage_endpoint TEXT, storage_bucket TEXT);
 
+CREATE TABLE content_gc (
+    content_id INTEGER PRIMARY KEY REFERENCES contents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE "content_scopes" (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    principal TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE contents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_id BIGINT NOT NULL REFERENCES content_scopes(id) ON DELETE RESTRICT,
+    digest BLOB NOT NULL CHECK(length(digest) = 32),
+    format INTEGER NOT NULL CHECK(format IN (0, 1)),
+    raw_len BIGINT NOT NULL CHECK(raw_len >= 0),
+    body BLOB NOT NULL,
+    UNIQUE(scope_id, digest),
+    UNIQUE(scope_id, id)
+);
+
 CREATE TABLE credential_custom_rules (
     id          TEXT PRIMARY KEY NOT NULL,
     name        TEXT NOT NULL,
@@ -125,14 +145,26 @@ last_reused_at INTEGER NOT NULL,
 PRIMARY KEY (marker, interaction_id, source_type, tool_id, latest_input)
 );
 
-CREATE TABLE history_markers (
+CREATE TABLE history_marker_contents (
+    reference TEXT NOT NULL REFERENCES history_markers(reference) ON DELETE CASCADE,
+    ordinal BIGINT NOT NULL CHECK(ordinal >= 0),
+    content_id BIGINT NOT NULL REFERENCES contents(id) ON DELETE RESTRICT,
+    PRIMARY KEY(reference, ordinal),
+    UNIQUE(reference, content_id)
+) WITHOUT ROWID;
+
+CREATE TABLE history_marker_gc (
+    reference TEXT PRIMARY KEY REFERENCES history_markers(reference) ON DELETE CASCADE
+);
+
+CREATE TABLE "history_markers" (
     reference TEXT PRIMARY KEY,
     principal TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('platform', 'thinking')),
     activity TEXT NOT NULL,
     tool_id TEXT,
     call_payload TEXT,
-    segment_payload TEXT,
+    segment_payload BLOB,
     execution_state TEXT CHECK (
         execution_state IS NULL OR
         execution_state IN ('pending', 'running', 'completed', 'failed', 'interrupted')
@@ -141,9 +173,10 @@ CREATE TABLE history_markers (
     lease_expires_at INTEGER,
     execution_deadline INTEGER,
     published_at INTEGER,
+    pending_until INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
+    CHECK (published_at IS NULL OR pending_until IS NULL),
     CHECK (
         (kind = 'thinking' AND tool_id IS NULL AND call_payload IS NULL
          AND execution_state IS NULL AND segment_payload IS NOT NULL)
@@ -151,6 +184,11 @@ CREATE TABLE history_markers (
         (kind = 'platform' AND tool_id IS NOT NULL AND call_payload IS NOT NULL
          AND execution_state IS NOT NULL AND execution_deadline IS NOT NULL)
     )
+);
+
+CREATE TABLE history_retention_watermarks (
+    name TEXT PRIMARY KEY,
+    position BIGINT NOT NULL
 );
 
 CREATE TABLE inference_run_observations (
@@ -172,8 +210,7 @@ CREATE TABLE inference_run_observations (
     last_active_at INTEGER NOT NULL,
     finished_at INTEGER,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
-    expires_at INTEGER NOT NULL
-, failure_json TEXT, request_model TEXT, delivery_completed_at INTEGER, rejected_before_target INTEGER NOT NULL DEFAULT 0);
+    failure_json TEXT, request_model TEXT, delivery_completed_at INTEGER, rejected_before_target INTEGER NOT NULL DEFAULT 0, inferred_retry INTEGER NOT NULL DEFAULT 0, grouping_reason TEXT, diagnostic_source_run_id TEXT, has_new_user INTEGER NOT NULL DEFAULT 0, superseded_by TEXT);
 
 CREATE TABLE interaction_observations (
     id TEXT PRIMARY KEY,
@@ -189,11 +226,9 @@ CREATE TABLE interaction_observations (
     status TEXT NOT NULL,
     started_at INTEGER NOT NULL,
     last_active_at INTEGER NOT NULL,
-    visible_tail TEXT NOT NULL DEFAULT '',
     observation_gap INTEGER NOT NULL DEFAULT 0,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
-    expires_at INTEGER NOT NULL
-, input_preview TEXT);
+    input_sequence BIGINT);
 
 CREATE TABLE media_derivatives (
     principal              TEXT NOT NULL,
@@ -263,6 +298,10 @@ CREATE TABLE models (
         OR CASE WHEN json_valid(billing_json) THEN json_type(billing_json) = 'object' ELSE 0 END
     ));
 
+CREATE TABLE native_compaction_gc (
+    record_id TEXT PRIMARY KEY REFERENCES native_compactions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE native_compaction_sources (
     record_id TEXT NOT NULL REFERENCES native_compactions(id) ON DELETE CASCADE,
     source_id TEXT NOT NULL REFERENCES native_compactions(id) ON DELETE RESTRICT,
@@ -286,10 +325,29 @@ CREATE TABLE "native_compactions" (
     operation_id TEXT NOT NULL,
     payload TEXT NOT NULL CHECK (json_valid(payload)),
     created_at INTEGER NOT NULL,
-    delivered_at INTEGER,
-    referenced_at INTEGER,
-    expires_at INTEGER NOT NULL
+    confirmed_at INTEGER,
+    pending_until INTEGER,
+    CHECK (confirmed_at IS NULL OR pending_until IS NULL)
 );
+
+CREATE TABLE observation_blocks (
+    sequence INTEGER PRIMARY KEY REFERENCES observation_events(sequence) ON DELETE CASCADE,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    model_turn_id TEXT,
+    attempt_id TEXT,
+    item_ordinal BIGINT NOT NULL CHECK(item_ordinal >= 0),
+    channel TEXT NOT NULL CHECK(channel IN ('thinking', 'visible')),
+    complete INTEGER NOT NULL CHECK(complete IN (0, 1)),
+    envelope BLOB
+);
+
+CREATE TABLE observation_event_contents (
+    sequence BIGINT NOT NULL REFERENCES observation_events(sequence) ON DELETE CASCADE,
+    ordinal BIGINT NOT NULL CHECK(ordinal >= 0),
+    content_id BIGINT NOT NULL REFERENCES contents(id) ON DELETE RESTRICT,
+    PRIMARY KEY(sequence, ordinal)
+) WITHOUT ROWID;
 
 CREATE TABLE observation_events (
 sequence INTEGER PRIMARY KEY,
@@ -297,9 +355,8 @@ occurred_at INTEGER NOT NULL,
 interaction_id TEXT REFERENCES interaction_observations(id) ON DELETE CASCADE,
 run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
 rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
-kind TEXT NOT NULL, payload BLOB NOT NULL, expires_at INTEGER NOT NULL,
-tool_id TEXT, operation_id TEXT
-);
+kind TEXT NOT NULL, tool_id TEXT, operation_id TEXT
+, attrs BLOB);
 
 CREATE TABLE observation_pending_tools (
     principal TEXT NOT NULL,
@@ -323,6 +380,15 @@ CREATE TABLE observation_tail_sources (
     generation_node_id TEXT,
     expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE observation_tool_results (
+    sequence BIGINT NOT NULL REFERENCES observation_events(sequence) ON DELETE CASCADE,
+    ordinal BIGINT NOT NULL CHECK(ordinal >= 0),
+    tool_id TEXT NOT NULL,
+    is_error INTEGER NOT NULL CHECK(is_error IN (0, 1)),
+    content_id BIGINT NOT NULL REFERENCES contents(id) ON DELETE RESTRICT,
+    PRIMARY KEY(sequence, ordinal)
+) WITHOUT ROWID;
 
 CREATE TABLE provider_allowance_guards (
     provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
@@ -504,23 +570,28 @@ CREATE TABLE public_tool_executions (
     CHECK ((source_kind = 'mcp' AND source_run_id IS NULL) OR (source_kind = 'inference_run' AND source_run_id IS NOT NULL))
 );
 
+CREATE TABLE redaction_mapping_gc (
+    reference TEXT PRIMARY KEY REFERENCES reversible_redaction_mappings(reference) ON DELETE CASCADE
+);
+
 CREATE TABLE rejected_request_observations (
     id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,
     ingress_protocol TEXT NOT NULL, stage TEXT NOT NULL, code TEXT NOT NULL, status_code INTEGER NOT NULL,
     debug_enabled INTEGER NOT NULL, last_event_sequence INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-, failure_json TEXT, request_model TEXT, api_key_id TEXT, api_key_name TEXT, started_at INTEGER, duration_ms INTEGER);
+    failure_json TEXT, request_model TEXT, api_key_id TEXT, api_key_name TEXT, started_at INTEGER, duration_ms INTEGER);
 
-CREATE TABLE reversible_redaction_mappings (
+CREATE TABLE "reversible_redaction_mappings" (
     reference TEXT PRIMARY KEY NOT NULL,
     principal TEXT NOT NULL,
     secret TEXT NOT NULL,
     published_at INTEGER,
+    pending_until INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-, rule_ids TEXT NOT NULL DEFAULT '[]'
-    CHECK (json_valid(rule_ids) AND json_type(rule_ids) = 'array'));
+    rule_ids TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(rule_ids) AND json_type(rule_ids) = 'array'),
+    CHECK (published_at IS NULL OR pending_until IS NULL)
+);
 
 CREATE TABLE settings (
     name       TEXT PRIMARY KEY,
@@ -605,20 +676,13 @@ CREATE TABLE target_attempt_observations (
     last_event_sequence INTEGER NOT NULL
 , error_source TEXT, error_message TEXT, upstream_error_code TEXT, cost_basis TEXT, cost_usd_nanos INTEGER, cost_custom_nanos INTEGER, billing_state TEXT, billing_usd_nanos INTEGER, billing_custom_nanos INTEGER);
 
-CREATE TABLE turn_content_gc (
-    content_id INTEGER PRIMARY KEY REFERENCES turn_contents(id) ON DELETE CASCADE
-);
+CREATE TABLE turn_node_compactions (
+    node_pk BIGINT NOT NULL REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
+    record_id TEXT NOT NULL REFERENCES native_compactions(id) ON DELETE RESTRICT,
+    PRIMARY KEY(node_pk, record_id)
+) WITHOUT ROWID;
 
-CREATE TABLE turn_contents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scope_id BIGINT NOT NULL REFERENCES turn_scopes(id) ON DELETE RESTRICT,
-    digest BLOB NOT NULL CHECK(length(digest) = 32),
-    content BLOB NOT NULL,
-    UNIQUE(scope_id, digest),
-    UNIQUE(scope_id, id)
-);
-
-CREATE TABLE turn_node_contents (
+CREATE TABLE "turn_node_contents" (
     node_pk BIGINT NOT NULL,
     scope_id BIGINT NOT NULL,
     ordinal BIGINT NOT NULL CHECK(ordinal >= 0),
@@ -628,28 +692,39 @@ CREATE TABLE turn_node_contents (
     FOREIGN KEY(node_pk, scope_id)
         REFERENCES turn_nodes(node_pk, scope_id) ON DELETE CASCADE,
     FOREIGN KEY(scope_id, content_id)
-        REFERENCES turn_contents(scope_id, id) ON DELETE RESTRICT
+        REFERENCES contents(scope_id, id) ON DELETE RESTRICT
 ) WITHOUT ROWID;
 
 CREATE TABLE turn_node_gc (
     node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE
 );
 
+CREATE TABLE turn_node_markers (
+    node_pk BIGINT NOT NULL REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
+    reference TEXT NOT NULL REFERENCES history_markers(reference) ON DELETE RESTRICT,
+    PRIMARY KEY(node_pk, reference)
+) WITHOUT ROWID;
+
 CREATE TABLE turn_node_payloads (
     node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
     payload BLOB NOT NULL
 );
 
-CREATE TABLE turn_node_retention (
+CREATE TABLE turn_node_redaction_mappings (
+    node_pk BIGINT NOT NULL REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
+    reference TEXT NOT NULL REFERENCES reversible_redaction_mappings(reference) ON DELETE RESTRICT,
+    PRIMARY KEY(node_pk, reference)
+) WITHOUT ROWID;
+
+CREATE TABLE "turn_node_retention" (
     node_pk INTEGER PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
-    expires_at BIGINT NOT NULL,
     deleting INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0, 1))
 );
 
 CREATE TABLE turn_nodes (
     node_pk INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
-    scope_id BIGINT NOT NULL REFERENCES turn_scopes(id) ON DELETE RESTRICT,
+    scope_id BIGINT NOT NULL REFERENCES "content_scopes"(id) ON DELETE RESTRICT,
     kind TEXT NOT NULL CHECK(kind IN ('response', 'agent', 'web_search')),
     parent_pk BIGINT,
     payload_version BIGINT NOT NULL CHECK(payload_version > 0),
@@ -666,11 +741,6 @@ CREATE TABLE turn_nodes (
     FOREIGN KEY(parent_pk, scope_id, kind)
         REFERENCES turn_nodes(node_pk, scope_id, kind)
         ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE TABLE turn_scopes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    principal TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE vendor_data_recovery (
@@ -728,6 +798,12 @@ CREATE TABLE web_providers (
 CREATE INDEX credential_mapping_reuses_interaction_idx
     ON credential_mapping_reuses(interaction_id);
 
+CREATE INDEX history_marker_contents_content_idx ON history_marker_contents(content_id);
+
+CREATE INDEX history_markers_pending_until_idx ON history_markers(pending_until);
+
+CREATE INDEX history_markers_published_at_idx ON history_markers(published_at);
+
 CREATE INDEX idx_admin_sessions_expiry ON admin_sessions(expires_at);
 
 CREATE INDEX idx_agent_definition_revisions_slug
@@ -746,9 +822,6 @@ CREATE INDEX idx_artifacts_expiry ON artifacts(expires_at);
 CREATE INDEX idx_history_markers_execution
 ON history_markers(execution_state, lease_expires_at, execution_deadline);
 
-CREATE INDEX idx_history_markers_expiry
-ON history_markers(expires_at);
-
 CREATE INDEX idx_history_markers_principal_reference
 ON history_markers(principal, reference);
 
@@ -763,8 +836,6 @@ CREATE INDEX idx_native_compaction_source ON native_compaction_sources(source_id
 CREATE INDEX idx_native_compaction_state_fingerprint ON native_compaction_states(principal, fingerprint);
 
 CREATE INDEX idx_native_compaction_state_identity ON native_compaction_states(principal, native_identity);
-
-CREATE INDEX idx_native_compactions_expiry ON native_compactions(expires_at);
 
 CREATE UNIQUE INDEX idx_oauth_creds_connection_id ON provider_oauth_credentials(connection_id);
 
@@ -787,11 +858,8 @@ CREATE INDEX idx_provider_models_provider_name
 CREATE INDEX idx_provider_models_provider_state
     ON provider_models(provider_id, presence, lifecycle_status, selection_policy);
 
-CREATE INDEX idx_reversible_redaction_mappings_expiry
-ON reversible_redaction_mappings(expires_at);
-
-CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
-ON reversible_redaction_mappings(principal, expires_at);
+CREATE INDEX idx_reversible_redaction_mappings_principal_pending
+ON reversible_redaction_mappings(principal, pending_until);
 
 CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
 
@@ -810,7 +878,8 @@ CREATE INDEX inference_runs_parent_idx ON inference_run_observations(parent_run_
 
 CREATE INDEX inference_runs_status_idx ON inference_run_observations(status, last_active_at);
 
-CREATE INDEX interaction_observations_expiry_idx ON interaction_observations(expires_at, id);
+CREATE INDEX interaction_observations_activity_idx
+    ON interaction_observations(last_active_at, id);
 
 CREATE INDEX interaction_observations_filter_idx ON interaction_observations(status, api_key_name, last_active_at DESC);
 
@@ -828,8 +897,17 @@ CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_
 
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
 
+CREATE INDEX native_compactions_confirmed_at_idx ON native_compactions(confirmed_at);
+
 CREATE INDEX native_compactions_generation_idx ON native_compactions(source_generation_id)
     WHERE source_generation_id IS NOT NULL;
+
+CREATE INDEX native_compactions_pending_until_idx ON native_compactions(pending_until);
+
+CREATE INDEX observation_blocks_channel_idx
+    ON observation_blocks(interaction_id, channel, sequence DESC);
+
+CREATE INDEX observation_event_contents_content_idx ON observation_event_contents(content_id);
 
 CREATE INDEX observation_events_context_kinds_idx
     ON observation_events(interaction_id, sequence)
@@ -846,8 +924,6 @@ CREATE INDEX observation_events_operation_idx ON observation_events(operation_id
 CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id,sequence) WHERE rejection_id IS NOT NULL;
 
 CREATE INDEX observation_events_run_idx ON observation_events(run_id,sequence);
-
-CREATE INDEX observation_events_tool_idx ON observation_events(tool_id,sequence) WHERE tool_id IS NOT NULL;
 
 CREATE INDEX observation_pending_tools_expiry_idx
     ON observation_pending_tools(expires_at);
@@ -867,6 +943,10 @@ CREATE INDEX observation_tail_sources_hash_idx
 
 CREATE INDEX observation_tail_sources_interaction_idx ON observation_tail_sources(interaction_id);
 
+CREATE INDEX observation_tool_results_content_idx ON observation_tool_results(content_id);
+
+CREATE INDEX observation_tool_results_tool_idx ON observation_tool_results(tool_id, sequence);
+
 CREATE INDEX provider_cost_plans_effective
     ON provider_cost_plans (provider_id, effective_from);
 
@@ -878,9 +958,13 @@ CREATE INDEX rejected_requests_client_error_window_idx
     ON rejected_request_observations(COALESCE(started_at, occurred_at) DESC, id)
     WHERE status_code <> 499 AND code NOT IN ('request_aborted', 'cancelled', 'client_disconnected');
 
-CREATE INDEX rejected_requests_expiry_idx ON rejected_request_observations(expires_at, id);
-
 CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occurred_at DESC, id);
+
+CREATE INDEX reversible_redaction_mappings_pending_until_idx
+    ON reversible_redaction_mappings(pending_until);
+
+CREATE INDEX reversible_redaction_mappings_published_at_idx
+    ON reversible_redaction_mappings(published_at);
 
 CREATE INDEX stats_usage_window_idx ON stats_usage_buckets (scope, bucket_start);
 
@@ -896,9 +980,16 @@ CREATE INDEX target_attempts_upstream_error_window_idx
     ON target_attempt_observations (started_at DESC, id)
     WHERE status='failed' AND error_source='upstream';
 
+CREATE INDEX turn_node_compactions_record_idx ON turn_node_compactions(record_id);
+
 CREATE INDEX turn_node_contents_content_idx ON turn_node_contents(content_id);
 
-CREATE INDEX turn_node_retention_expiry_idx ON turn_node_retention(expires_at, node_pk);
+CREATE INDEX turn_node_markers_reference_idx ON turn_node_markers(reference);
+
+CREATE INDEX turn_node_redaction_mappings_reference_idx
+    ON turn_node_redaction_mappings(reference);
+
+CREATE INDEX turn_nodes_created_at_idx ON turn_nodes(created_at, node_pk);
 
 CREATE INDEX turn_nodes_parent_idx ON turn_nodes(parent_pk, scope_id, kind);
 
@@ -1550,6 +1641,28 @@ WHEN NEW.balance NOT IN ('traffic_equalization', 'latency_preference')
     OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
 BEGIN SELECT RAISE(ABORT, 'invalid Route configuration'); END;
 
+CREATE TRIGGER native_compaction_sources_release AFTER DELETE ON native_compaction_sources
+BEGIN
+    INSERT OR IGNORE INTO native_compaction_gc(record_id)
+    SELECT OLD.source_id
+    WHERE OLD.source_id <> OLD.record_id
+      AND EXISTS (SELECT 1 FROM native_compactions WHERE id = OLD.source_id)
+      AND NOT EXISTS (SELECT 1 FROM native_compaction_sources WHERE source_id = OLD.source_id);
+END;
+
+CREATE TRIGGER native_compactions_release_source_node AFTER DELETE ON native_compactions
+BEGIN
+    INSERT OR IGNORE INTO turn_node_gc(node_pk)
+    SELECT n.node_pk
+    FROM turn_nodes n
+    WHERE OLD.source_generation_id IS NOT NULL
+      AND n.id = OLD.source_generation_id
+      AND NOT EXISTS (
+          SELECT 1 FROM native_compactions c
+          WHERE c.source_generation_id = OLD.source_generation_id
+      );
+END;
+
 CREATE TRIGGER providers_boolean_insert BEFORE INSERT ON providers
 WHEN (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
@@ -1571,6 +1684,13 @@ WHEN CASE WHEN json_valid(NEW.adapter_credentials) THEN json_type(NEW.adapter_cr
     OR typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)
     OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
 BEGIN SELECT RAISE(ABORT, 'invalid Provider configuration'); END;
+
+CREATE TRIGGER public_tool_executions_release_marker AFTER DELETE ON public_tool_executions
+BEGIN
+    INSERT OR IGNORE INTO history_marker_gc(reference)
+    SELECT OLD.marker_reference
+    WHERE EXISTS (SELECT 1 FROM history_markers WHERE reference = OLD.marker_reference);
+END;
 
 CREATE TRIGGER rejected_request_observations_boolean_insert BEFORE INSERT ON rejected_request_observations
 WHEN (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1))
@@ -3144,6 +3264,39 @@ BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 CREATE TRIGGER target_attempt_observations_boolean_update BEFORE UPDATE ON target_attempt_observations
 WHEN (typeof(NEW.usage_recorded) <> 'integer' OR NEW.usage_recorded NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER turn_node_compactions_release AFTER DELETE ON turn_node_compactions
+BEGIN
+    INSERT OR IGNORE INTO native_compaction_gc(record_id)
+    SELECT OLD.record_id
+    WHERE EXISTS (SELECT 1 FROM native_compactions WHERE id = OLD.record_id)
+      AND NOT EXISTS (SELECT 1 FROM turn_node_compactions WHERE record_id = OLD.record_id);
+END;
+
+CREATE TRIGGER turn_node_markers_release AFTER DELETE ON turn_node_markers
+BEGIN
+    INSERT OR IGNORE INTO history_marker_gc(reference)
+    SELECT OLD.reference
+    WHERE EXISTS (SELECT 1 FROM history_markers WHERE reference = OLD.reference)
+      AND NOT EXISTS (SELECT 1 FROM turn_node_markers WHERE reference = OLD.reference);
+END;
+
+CREATE TRIGGER turn_node_redaction_mappings_release AFTER DELETE ON turn_node_redaction_mappings
+BEGIN
+    INSERT OR IGNORE INTO redaction_mapping_gc(reference)
+    SELECT OLD.reference
+    WHERE EXISTS (SELECT 1 FROM reversible_redaction_mappings WHERE reference = OLD.reference)
+      AND NOT EXISTS (SELECT 1 FROM turn_node_redaction_mappings WHERE reference = OLD.reference);
+END;
+
+CREATE TRIGGER turn_nodes_release_parent AFTER DELETE ON turn_nodes
+BEGIN
+    INSERT OR IGNORE INTO turn_node_gc(node_pk)
+    SELECT OLD.parent_pk
+    WHERE OLD.parent_pk IS NOT NULL
+      AND EXISTS (SELECT 1 FROM turn_nodes WHERE node_pk = OLD.parent_pk)
+      AND NOT EXISTS (SELECT 1 FROM turn_nodes WHERE parent_pk = OLD.parent_pk);
+END;
 
 CREATE TRIGGER web_providers_boolean_insert BEFORE INSERT ON web_providers
 WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)) OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))

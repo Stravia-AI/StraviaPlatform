@@ -51,6 +51,8 @@ import type {
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
+  ObservationContentsPage,
+  ObservationContentsResponse,
   DebugState,
   ClearHistoryResult,
   DownloadTicket,
@@ -397,6 +399,23 @@ export const admin = {
         'GET',
         `/observations/interactions/${encodeURIComponent(id)}/events${queryString(query) || '?'}`,
       ),
+    /**
+     * 批量读取 Observation 引用的正文；调用方保证 ids 不超过 256 个。
+     * 显式带 `If-None-Match` 并绕过浏览器 HTTP 缓存：验证与 304 复用由 `ObservationContents` 自己负责，
+     * 行为不依赖浏览器的缓存启发式。
+     */
+    contents: async (ids: number[], etag: string | null): Promise<ObservationContentsResponse> => {
+      const headers = new Headers()
+      if (etag !== null) headers.set('If-None-Match', etag)
+      const response = await authenticatedFetch(`/observations/contents${queryString({ ids: ids.join(',') })}`, {
+        method: 'GET',
+        headers,
+        cache: 'no-store',
+      })
+      if (response.status === 304) return { status: 'not-modified' }
+      const page = await decodeAdmin<ObservationContentsPage>(response)
+      return { status: 'modified', etag: response.headers.get('ETag'), contents: page.contents }
+    },
     debug: () => request<DebugState>('GET', '/observations/debug'),
     setDebug: (enabled: boolean) => request<DebugState>('PUT', '/observations/debug', { enabled, confirmed: enabled }),
     clearDebug: () => request<DebugState>('DELETE', '/observations/debug'),

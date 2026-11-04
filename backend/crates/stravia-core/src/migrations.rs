@@ -110,7 +110,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=42
     ) {
         return false;
     }
@@ -307,6 +307,68 @@ pub async fn run_sqlite_migrator(
             .await?;
         }
     }
+    if runner.version_exists(37) {
+        runner
+            .run_direct(Some(37), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "content_store",
+                "Converting shared content storage",
+                0,
+                None,
+            );
+            crate::content_upgrade::run_sqlite(&mut pinned.connection).await?;
+        }
+    }
+    if runner.version_exists(39) {
+        // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
+        runner
+            .run_direct(Some(39), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=40 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report("retention_data", "Converting dependency retention", 0, None);
+            crate::turn_chain::upgrade::retention_sqlite(&mut pinned.connection).await?;
+        }
+    }
+    if runner.version_exists(41) {
+        report(
+            "observation_schema",
+            "Preparing normalized observation schema",
+            0,
+            None,
+        );
+        runner
+            .run_direct(Some(41), &mut *pinned.connection, false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=42 AND success)",
+        )
+        .fetch_one(&mut *pinned.connection)
+        .await?;
+        if !finalized {
+            report(
+                "observation_data",
+                "Normalizing observation history",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade_normalize::normalize_sqlite(
+                &mut pinned.connection,
+            )
+            .await?;
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -486,6 +548,60 @@ pub async fn run_postgres_migrator(
                 &mut connection,
             )
             .await?;
+        }
+    }
+    if runner.version_exists(37) {
+        runner.run_direct(Some(37), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "content_store",
+                "Converting shared content storage",
+                0,
+                None,
+            );
+            crate::content_upgrade::run_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(39) {
+        // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
+        runner.run_direct(Some(39), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=40 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report("retention_data", "Converting dependency retention", 0, None);
+            crate::turn_chain::upgrade::retention_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(41) {
+        report(
+            "observation_schema",
+            "Preparing normalized observation schema",
+            0,
+            None,
+        );
+        runner.run_direct(Some(41), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=42 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            report(
+                "observation_data",
+                "Normalizing observation history",
+                0,
+                None,
+            );
+            crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut connection)
+                .await?;
         }
     }
     report(
@@ -919,12 +1035,22 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(actual_version, expected_version);
-            let retained: Vec<u8> =
-                sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(retained, [0xff]);
+            if version == 26 {
+                let retained: Vec<u8> =
+                    sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(retained, [0xff]);
+            } else {
+                // 无法解码的历史诊断不阻断升级：事件行保留，载荷按空对象迁移。
+                let kept: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE sequence=1")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(kept, 1);
+            }
             let source: Option<String> = sqlx::query_scalar(
                 "SELECT error_source FROM target_attempt_observations WHERE id='a'",
             )
@@ -1116,13 +1242,14 @@ mod tests {
             ("credential hit records".into(), true)
         );
         let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT payload FROM observation_events WHERE sequence=1")
+            sqlx::query_scalar("SELECT attrs FROM observation_events WHERE sequence=1")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         let actual: serde_json::Value =
             serde_json::from_slice(&crate::storage_codec::decode(&stored).unwrap()).unwrap();
         let mut expected = payload;
+        expected.as_object_mut().unwrap().remove("kind");
         expected["discoveries"][0]["rule_ids"] = serde_json::json!(["custom.kept"]);
         assert_eq!(actual, expected);
     }
@@ -1457,14 +1584,17 @@ mod tests {
         assert!(sqlx::query("UPDATE provider_models SET snapshot_state='not json' WHERE provider_id='p' AND model_id='upstream'")
             .execute(&pool).await.is_err());
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
-        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .materialize(
-                &stravia_runtime_contract::Principal::new("alice"),
-                TurnNodeKind::Response,
-                &TurnNodeId::new("child"),
-            )
-            .await
-            .unwrap();
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .materialize(
+            &stravia_runtime_contract::Principal::new("alice"),
+            TurnNodeKind::Response,
+            &TurnNodeId::new("child"),
+        )
+        .await
+        .unwrap();
         assert_eq!(nodes[0].payload, serde_json::json!({"items":[1]}));
         assert_eq!(nodes[1].payload, serde_json::json!({"items":[historical]}));
         use crate::history_marker::{
@@ -1502,13 +1632,6 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         assert_eq!(native_source, "child");
         assert_eq!(native_payload, "{}");
-        let stored_segment: String =
-            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=?")
-                .bind(marker_reference)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored_segment, segment_bytes);
         assert!(
             sqlx::query("DELETE FROM turn_nodes WHERE id='child'")
                 .execute(&pool)
@@ -1558,13 +1681,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        sqlx::query("INSERT INTO turn_scopes(principal) VALUES('api-key:bob') ON CONFLICT(principal) DO NOTHING")
+        sqlx::query("INSERT INTO content_scopes(principal) VALUES('api-key:bob') ON CONFLICT(principal) DO NOTHING")
             .execute(&pool).await.unwrap();
         for (id, kind, principal) in [
             ("foreign", "response", "api-key:bob"),
             ("wrong-kind", "agent", "api-key:alice"),
         ] {
-            let error = sqlx::query("INSERT INTO turn_nodes(id,kind,parent_pk,scope_id,payload_version,created_at) SELECT $1,$2,p.node_pk,s.id,1,1 FROM turn_nodes p CROSS JOIN turn_scopes s WHERE p.id='parent' AND s.principal=$3")
+            let error = sqlx::query("INSERT INTO turn_nodes(id,kind,parent_pk,scope_id,payload_version,created_at) SELECT $1,$2,p.node_pk,s.id,1,1 FROM turn_nodes p CROSS JOIN content_scopes s WHERE p.id='parent' AND s.principal=$3")
                 .bind(id).bind(kind).bind(principal).execute(&pool).await.unwrap_err();
             assert!(
                 error
@@ -1608,14 +1731,17 @@ mod tests {
             .unwrap();
         assert_eq!(version, SQLITE_MIGRATOR.iter().last().unwrap().version);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
-        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(pool.clone())
-            .materialize(
-                &stravia_runtime_contract::Principal::new("alice"),
-                TurnNodeKind::Response,
-                &TurnNodeId::new("legacy-node"),
-            )
-            .await
-            .unwrap();
+        let nodes = crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool.clone(),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .materialize(
+            &stravia_runtime_contract::Principal::new("alice"),
+            TurnNodeKind::Response,
+            &TurnNodeId::new("legacy-node"),
+        )
+        .await
+        .unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].payload, serde_json::json!({"slot": true}));
         let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
@@ -1663,6 +1789,184 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(foreign_keys, 1);
+    }
+
+    /// 升级用的 failover Turn 夹具：首个 attempt 失败、第二个成功。
+    fn failover_turn_events() -> [(i64, i64, &'static str, serde_json::Value); 6] {
+        [
+            (
+                1,
+                101,
+                "model_turn_started",
+                serde_json::json!({"kind": "model_turn_started", "model_turn_id": "turn", "route_id": "route", "retention_detached": false}),
+            ),
+            (
+                2,
+                102,
+                "target_attempt_started",
+                serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "first", "target_id": "t1"}),
+            ),
+            (
+                3,
+                103,
+                "target_attempt_finished",
+                serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "first", "status": "failed", "duration_ms": 1}),
+            ),
+            (
+                4,
+                104,
+                "target_attempt_started",
+                serde_json::json!({"kind": "target_attempt_started", "model_turn_id": "turn", "attempt_id": "second", "target_id": "t2"}),
+            ),
+            (
+                5,
+                105,
+                "target_attempt_finished",
+                serde_json::json!({"kind": "target_attempt_finished", "model_turn_id": "turn", "attempt_id": "second", "status": "completed", "duration_ms": 2}),
+            ),
+            (
+                6,
+                106,
+                "model_turn_finished",
+                serde_json::json!({"kind": "model_turn_finished", "model_turn_id": "turn", "status": "completed", "retention_detached": false}),
+            ),
+        ]
+    }
+
+    const FAILOVER_PARENTS: &str = "INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('failover','owner','failover','failover-run','route','completed',100,200,9999999999999);\nINSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,expires_at) VALUES ('failover-run','failover','responses','route','completed',FALSE,100,200,200,9999999999999);";
+
+    /// 首个 attempt 开始并入 Turn 开始行；最后一个 attempt 的结束并入 Turn 结束行；
+    /// 被取代的 attempt 保留自己的结束行与后续 attempt 的开始行，不丢信息。
+    fn assert_failover_turn_upgraded(rows: &[(i64, String, Option<Vec<u8>>)]) {
+        let attrs = |bytes: &Option<Vec<u8>>| -> serde_json::Value {
+            serde_json::from_slice(&crate::storage_codec::decode(bytes.as_ref().unwrap()).unwrap())
+                .unwrap()
+        };
+        let kinds: Vec<(i64, &str)> = rows.iter().map(|(s, k, _)| (*s, k.as_str())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (1, "model_turn_started"),
+                (3, "target_attempt_finished"),
+                (4, "target_attempt_started"),
+                (6, "model_turn_finished"),
+            ],
+            "only the first start and the last finish are merged"
+        );
+        let start = attrs(&rows[0].2);
+        assert_eq!(start["attempt"]["attempt_id"], "first");
+        assert_eq!(start["attempt_at"], 102);
+        let superseded = attrs(&rows[1].2);
+        assert_eq!(superseded["attempt_id"], "first");
+        assert_eq!(superseded["status"], "failed");
+        let second_start = attrs(&rows[2].2);
+        assert_eq!(second_start["attempt_id"], "second");
+        let finish = attrs(&rows[3].2);
+        assert_eq!(finish["attempt"]["attempt_id"], "second");
+        assert_eq!(finish["attempt"]["status"], "completed");
+        assert_eq!(finish["attempt_at"], 105);
+    }
+
+    #[tokio::test]
+    async fn sqlite_failover_turn_upgrade_merges_the_last_attempt_and_keeps_superseded_rows() {
+        let pool = sqlite_pool().await;
+        SQLITE_MIGRATOR
+            .run_to(36, pool.migration_pool())
+            .await
+            .unwrap();
+        sqlx::raw_sql(FAILOVER_PARENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (sequence, at, kind, payload) in failover_turn_events() {
+            let encoded =
+                crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();
+            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,'failover','failover-run',?,?,9999999999999)")
+                .bind(sequence)
+                .bind(at)
+                .bind(kind)
+                .bind(encoded)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        migrate_sqlite(&pool, None).await.unwrap();
+
+        let rows: Vec<(i64, String, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT sequence,kind,attrs FROM observation_events WHERE interaction_id='failover' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_failover_turn_upgraded(&rows);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_failover_turn_upgrade_merges_the_last_attempt_and_keeps_superseded_rows_when_configured()
+     {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("failover_upgrade_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        // 以 ADR-0089 之前的目录建库；数据转换钩子随 `run_postgres_migrator` 一起执行。
+        let prefix = Migrator::with_migrations(
+            super::POSTGRES_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 36)
+                .cloned()
+                .collect(),
+        );
+        super::run_postgres_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(FAILOVER_PARENTS)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (sequence, at, kind, payload) in failover_turn_events() {
+            let encoded =
+                crate::storage_codec::encode(serde_json::to_vec(&payload).unwrap().into()).unwrap();
+            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES ($1,$2,'failover','failover-run',$3,$4,9999999999999)")
+                .bind(sequence)
+                .bind(at)
+                .bind(kind)
+                .bind(encoded)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        migrate_postgres(&pool, None).await.unwrap();
+
+        let rows: Vec<(i64, String, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT sequence,kind,attrs FROM observation_events WHERE interaction_id='failover' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_failover_turn_upgraded(&rows);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
     }
 
     #[tokio::test]
@@ -2085,7 +2389,7 @@ mod tests {
         assert_eq!(parent_projection, None);
         use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnNodeId, TurnNodeKind};
         let principal = stravia_runtime_contract::Principal::new("alice");
-        let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone())
+        let restored = crate::turn_chain::SqlTurnChainStore::postgres(pool.clone(), crate::history_retention::HistoryRetention::for_tests())
             .materialize(
                 &principal,
                 TurnNodeKind::Response,
@@ -2095,11 +2399,6 @@ mod tests {
             .unwrap();
         assert_eq!(restored[0].payload, parent_payload);
         assert_eq!(restored[1].payload, serde_json::json!({"items": [item]}));
-        let distinct: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_contents")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(distinct, 1);
         use crate::history_marker::{
             HiddenHistorySegment, HistoryMarkerStore, SqlHistoryMarkerStore,
         };
@@ -2113,13 +2412,6 @@ mod tests {
             serde_json::to_value(marker.segment.unwrap()).unwrap(),
             serde_json::to_value(expected_segment).unwrap()
         );
-        let raw_segment: String =
-            sqlx::query_scalar("SELECT segment_payload FROM history_markers WHERE reference=$1")
-                .bind(marker_reference)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(raw_segment, segment_bytes);
         let source: String = sqlx::query_scalar(
             "SELECT source_generation_id FROM native_compactions WHERE id='pg-compaction'",
         )
@@ -2127,9 +2419,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(source, "pg-child");
-        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at, expires_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1, 100)")
+        sqlx::query("INSERT INTO interaction_observations (id, principal, root_id, root_run_id, first_route_id, status, started_at, last_active_at) VALUES ('interaction', 'api-key:alice', 'interaction', 'run', 'r', 'active', 1, 1)")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at, expires_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, false, 1, 1, 100)")
+        sqlx::query("INSERT INTO inference_run_observations (id, interaction_id, ingress_protocol, route_id, status, background_active, debug_enabled, started_at, last_active_at) VALUES ('run', 'interaction', 'openai', 'r', 'active', 2, false, 1, 1)")
             .execute(&pool).await.unwrap();
         sqlx::query("UPDATE inference_run_observations SET background_active=3 WHERE id='run'")
             .execute(&pool)

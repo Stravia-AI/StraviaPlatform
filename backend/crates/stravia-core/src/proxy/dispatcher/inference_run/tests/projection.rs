@@ -459,7 +459,7 @@ async fn responses_delivered_protected_thinking_replay_preserves_parent() {
                     .runs
                     .iter()
                     .flat_map(|run| &run.events)
-                    .filter(|event| event.kind == "input_preview_recorded")
+                    .filter(|event| event.kind == "user_input_recorded")
                     .count();
                 if let Some(run) = detail
                     .runs

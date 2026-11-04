@@ -28,6 +28,10 @@ mod oauth;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
 mod observation_masking;
+#[cfg(feature = "test-support")]
+mod observation_test_support;
+#[cfg(feature = "test-support")]
+pub use observation_test_support::SeededInteraction;
 pub mod provider_allowance;
 mod provider_connection;
 pub(crate) mod routes;
@@ -45,11 +49,12 @@ pub use crate::interaction_observation::{
     CredentialDiscoveryQuery, CredentialDiscoveryReuse, CredentialDiscoveryReuseQuery,
     CredentialDiscoveryReuses, DebugState, DownloadTicket, ForestPage, ForestQuery, ForestRoot,
     InteractionDetail, InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot,
-    InteractionSummary, KnownInteraction, ObservationChange, ObservationEvent,
-    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline, RootChangesPage,
-    RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming, UpstreamErrorDetail,
-    UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary, UsageCoverage,
+    InteractionSummary, KnownInteraction, ObservationChange, ObservationContentBatch,
+    ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
+    RejectionPage, RejectionQuery, RejectionSummary, RootChange, RootChangesBaseline,
+    RootChangesPage, RootChangesQuery, RunDetail, TraceManifest, UpstreamAttemptTiming,
+    UpstreamErrorDetail, UpstreamErrorPage, UpstreamErrorQuery, UpstreamErrorSummary,
+    UsageCoverage,
 };
 pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 pub use money::{ProviderCostPlanInput, provider_cost_plan_value};

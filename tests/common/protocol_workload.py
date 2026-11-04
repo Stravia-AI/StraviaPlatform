@@ -83,6 +83,11 @@ class Plan:
 
     def metadata(self) -> dict:
         output_sha256 = hashlib.sha256(self.output_text.encode()).hexdigest()
+        # ADR-0088: admin Observation reads replace mapped credentials with `***`, longest first.
+        masked = self.output_text
+        for secret in sorted(self.credential_secrets, key=len, reverse=True):
+            masked = masked.replace(secret, "***")
+        masked_output_sha256 = hashlib.sha256(masked.encode()).hexdigest()
         return {"nonce": self.nonce, "input_tokens": self.input_tokens,
                 "image_count": self.image_count, "image_tokens": None,
                 "images": [{"sha256": i.sha256, "width": i.width, "height": i.height,
@@ -90,7 +95,7 @@ class Plan:
                 "first_token_delay": self.first_token_delay,
                 "tokens_per_second": self.tokens_per_second, "duration": self.duration,
                 "output_tokens": self.output_tokens, "reserve_tokens": self.reserve_tokens,
-                "output_sha256": output_sha256,
+                "output_sha256": output_sha256, "masked_output_sha256": masked_output_sha256,
                 "credential_protection_enabled": bool(self.new_credential_secrets),
                 "expected_new_mappings": len(self.new_credential_secrets)}
 

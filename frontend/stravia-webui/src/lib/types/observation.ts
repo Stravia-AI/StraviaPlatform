@@ -163,6 +163,38 @@ export interface InteractionNodeData extends Record<string, unknown> {
   outputSnapshotKey?: number
 }
 
+/** Observation 引用的一份正文；`raw_len` 是原始字节数，不是字符数。 */
+export interface ObservationContentRef {
+  content_id: number
+  raw_len: number
+}
+
+/** 有序正文引用；拼接顺序即 `refs` 顺序。列表与变更接口只返回引用，正文经内容端点按需读取。 */
+export interface ObservationContentSummary {
+  refs: ObservationContentRef[]
+  /** 各引用原始字节数之和，不含拼接分隔符。 */
+  raw_len: number
+}
+
+export interface ObservationContent {
+  content_id: number
+  format: 'text' | 'json'
+  raw_len: number
+  /** 文本为字符串；JSON 单元为解析后的值。文本已按当前有效映射遮蔽。 */
+  body: unknown
+}
+
+export interface ObservationContentsPage {
+  contents: ObservationContent[]
+}
+
+/**
+ * 内容端点的条件请求结果。正文按当前凭据映射遮蔽，ETag 随映射版本变化，
+ * 因此客户端只缓存「ETag + 正文」，每次读取都带 `If-None-Match` 重新验证。
+ */
+export type ObservationContentsResponse =
+  { status: 'not-modified' } | { status: 'modified'; etag: string | null; contents: ObservationContent[] }
+
 export interface InteractionSummary {
   context_events: ObservationEvent[]
   id: string
@@ -174,8 +206,8 @@ export interface InteractionSummary {
   status: string
   started_at: number
   last_active_at: number
-  input_preview: string | null
-  visible_tail: string
+  input: ObservationContentSummary
+  output: ObservationContentSummary
   failed_request: boolean
   client_output_delivered: boolean
   usage: ConfirmedUsage
@@ -233,7 +265,7 @@ export interface ObservationChange {
   rejection_id: string | null
   kind: string
   boundary: boolean
-  /** 仅 `target_attempt_finished` 携带；上游错误列表据此判断是否需要静默刷新。 */
+  /** 仅有错误的上游尝试结束时携带（`target_attempt_finished` 或合并了最后一次尝试的 `model_turn_finished`）；上游错误列表据此判断是否需要静默刷新。 */
   error_source?: FailureDiagnostic['source']
 }
 
@@ -296,6 +328,10 @@ export interface InteractionEventsPage {
 export interface InteractionDetail {
   older_events_cursor: number | null
   interaction: InteractionSummary
+  /** 根 Run 最新的完整用户输入（多个文本单元以换行连接）。 */
+  input_text: string
+  /** 完整可见输出（块内以空行连接，模型轮次之间以空行分隔）。 */
+  output_text: string
   root: ForestRoot
   runs: RunDetail[]
   snapshot_sequence: number

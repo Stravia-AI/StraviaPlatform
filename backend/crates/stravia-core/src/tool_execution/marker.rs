@@ -192,7 +192,6 @@ impl Gateway {
                     call: execution.call().call.clone(),
                     activity: execution.activity().to_owned(),
                     execution_limit: remaining,
-                    pending_retention: std::time::Duration::from_secs(60 * 60),
                 },
             )
             .await?;

@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from tests.common.observation_contents import attempt_finishes, attempt_starts
 from tests.common.helpers import (
     WebSession, find_free_port, http_bytes, http_request, initialize_server,
     start_stravia_server, stop_stravia_server, wait_for_setup_token, wait_until_ready,
@@ -387,10 +388,9 @@ def test_none_cost_basis_records_no_cost_until_basis_returns(usage_env):
             return None
         detail = _detail(env, interactions[0]["id"])
         finished = [
-            event for run in detail["runs"] for event in run["events"]
-            if event["kind"] == "target_attempt_finished"
+            attempt for run in detail["runs"] for attempt in attempt_finishes(run["events"])
         ]
-        return finished[0]["payload"] if finished else None
+        return finished[0] if finished else None
 
     payload = _wait_for("untracked attempt amounts", finished_attempt)
     assert payload["cost_basis"] is None, payload
@@ -640,9 +640,7 @@ def test_crash_during_priced_attempt_records_unknown_cost_without_charge(
                 return None
             run = detail["runs"][0]
             started = any(
-                event["kind"] == "target_attempt_started"
-                and event["payload"].get("cost_basis") == "usage"
-                for event in run["events"]
+                attempt.get("cost_basis") == "usage" for attempt in attempt_starts(run["events"])
             )
             return detail if run["status"] == "running" and started else None
 

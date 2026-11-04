@@ -846,7 +846,10 @@ def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
                 if (
                     run["status"] == "completed"
                     and any(event["kind"] == "run_finished" for event in run["events"])
-                    and any(event["payload"]["tool_id"] == call_id for event in results)
+                    and any(
+                        result["tool_id"] == call_id
+                        for event in results for result in event["payload"]["results"]
+                    )
                 ):
                     return detail
         return None
@@ -877,10 +880,10 @@ def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
     ]:
         _, branch = conversation.send(messages, tools=True)
         newest = _newest_run(branch)
-        events = [event["payload"] for event in newest["events"] if event["kind"] == "client_tool_result"]
-        assert len(events) == 1
-        assert events[0]["tool_id"] == call_id
-        assert events[0]["content"] == result
+        batches = [event["payload"] for event in newest["events"] if event["kind"] == "client_tool_result"]
+        assert len(batches) == 1
+        assert [item["tool_id"] for item in batches[0]["results"]] == [call_id]
+        assert [item["content"] for item in batches[0]["results"]] == [result]
 
     details = [
         _detail(conversation.env, item["id"])
@@ -889,8 +892,9 @@ def test_thinking_only_input_replay_keeps_one_receipt_and_independent_branches(
     runs = [run for detail in details for run in detail["runs"]]
     assert len(runs) == 5
     results = [
-        event["payload"] for run in runs for event in run["events"]
+        item for run in runs for event in run["events"]
         if event["kind"] == "client_tool_result"
+        for item in event["payload"]["results"]
     ]
     assert sorted(event["content"] for event in results) == [
         "branch result", "first result", "first result",
@@ -936,6 +940,8 @@ def test_editing_user_after_received_tool_result_creates_child_interaction(
     run = _newest_run(branch)
     assert run["parent_run_id"] == source_run["id"]
     assert run["generation_parent_id"] == (None if new_generation_root else source_run["generation_node_id"])
-    assert branch["interaction"]["input_preview"] == "Use CloakBrowser for OMP and preserve UA-CH."
+    assert branch["input_text"] == "Use CloakBrowser for OMP and preserve UA-CH.", (
+        branch["interaction"]["input"], [(r["id"], [e["kind"] for e in r["events"]]) for r in branch["runs"]],
+    )
     assert run["status"] == "completed"
     assert not any(event["kind"] == "client_tool_result" for event in run["events"])

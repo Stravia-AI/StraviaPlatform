@@ -43,8 +43,8 @@ function detail(runs: RunDetail[]): InteractionDetail {
     status: 'running',
     started_at: 0,
     last_active_at: 10,
-    input_preview: 'Question',
-    visible_tail: '',
+    input: { refs: [], raw_len: 0 },
+    output: { refs: [], raw_len: 0 },
     failed_request: false,
     client_output_delivered: false,
     usage,
@@ -56,6 +56,8 @@ function detail(runs: RunDetail[]): InteractionDetail {
   }
   return {
     interaction,
+    input_text: '',
+    output_text: '',
     root: { id: 'root', last_active_at: 10, interactions: [interaction] },
     runs,
     snapshot_sequence: 10,
@@ -94,7 +96,7 @@ describe('observation activities', () => {
       { live: true, status: 'waiting' },
     ])
     const child = run('child', 'root')
-    event(child, 4, 'client_tool_result', { tool_id: 'a', content: 'failure', is_error: true })
+    event(child, 4, 'client_tool_result', { results: [{ tool_id: 'a', content: 'failure', is_error: true }] })
     value.runs.push(child)
     expect(tools(value, 'root')).toMatchObject([
       { live: false, status: 'error', results: [{ content: 'failure', isError: true }] },
@@ -103,12 +105,30 @@ describe('observation activities', () => {
     root.status = 'superseded'
     root.terminal_reason = 'superseded'
     expect(tools(value, 'root')[1]).toMatchObject({ live: false, status: 'missing-result', reason: 'superseded' })
-    event(child, 5, 'client_tool_result', { tool_id: 'b', content: 'late return' })
+    event(child, 5, 'client_tool_result', { results: [{ tool_id: 'b', content: 'late return' }] })
     expect(tools(value, 'root')[1]).toMatchObject({
       live: false,
       status: 'returned',
       results: [{ content: 'late return' }],
     })
+  })
+
+  test('attaches every result of one batched client_tool_result row to its own call', () => {
+    const root = run('root')
+    root.status = 'waiting_client'
+    event(root, 1, 'client_tool_handoff', { tool_id: 'a', name: 'Read' })
+    event(root, 2, 'client_tool_handoff', { tool_id: 'b', name: 'Bash' })
+    const child = run('child', 'root')
+    event(child, 3, 'client_tool_result', {
+      results: [
+        { tool_id: 'a', content: 'file text', is_error: false },
+        { tool_id: 'b', content: { code: 1 }, is_error: true },
+      ],
+    })
+    expect(tools(detail([root, child]), 'root')).toMatchObject([
+      { status: 'returned', results: [{ content: 'file text', isError: false }] },
+      { status: 'error', results: [{ content: { code: 1 }, isError: true }] },
+    ])
   })
 
   test('shows authoritative waiting closure reasons without claiming a client execution failure', () => {
@@ -124,7 +144,7 @@ describe('observation activities', () => {
         results: [],
       })
       const child = run('late', 'root')
-      event(child, 2, 'client_tool_result', { tool_id: 'call', content: 'late result', is_error: true })
+      event(child, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: 'late result', is_error: true }] })
       expect(tools(detail([root, child]), 'root')[0]).toMatchObject({
         live: false,
         status: 'error',
@@ -140,7 +160,7 @@ describe('observation activities', () => {
     event(root, 1, 'client_tool_handoff', { model_turn_id: 'first', tool_id: 'same', name: 'Read' })
     event(root, 2, 'client_tool_handoff', { model_turn_id: 'second', tool_id: 'same', name: 'Read' })
     const child = run('child', 'root')
-    event(child, 3, 'client_tool_result', { tool_id: 'same', content: 'cannot prove owner' })
+    event(child, 3, 'client_tool_result', { results: [{ tool_id: 'same', content: 'cannot prove owner' }] })
     const activities = tools(detail([root, child]), 'root')
     expect(activities[0].id).not.toBe(activities[1].id)
     expect(activities).toMatchObject([
@@ -162,7 +182,8 @@ describe('observation activities', () => {
     event(root, 3, 'observation_gap', { reason: 'unfinished_observation_activity' })
     expect(tools(value, 'root')[0]).toMatchObject({ live: false, status: 'missing-result', results: [] })
     root.events.pop()
-    event(root, 3, 'run_state_changed', { status: 'completed', reason: 'process_restarted' })
+    root.terminal_reason = 'process_restarted'
+    event(root, 3, 'run_state_changed', { status: 'interrupted', superseded_by: null })
     expect(tools(value, 'root')[0]).toMatchObject({
       live: false,
       status: 'missing-result',
@@ -259,16 +280,16 @@ describe('observation activities', () => {
     const unrelated = run('unrelated')
     event(root, 1, 'client_tool_handoff', { tool_id: 'call', name: 'Bash', input: null })
     for (const child of [left, replay, right, unrelated]) {
-      event(child, 2, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
+      event(child, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
     }
-    event(left, 3, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
+    event(left, 3, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
     const value = detail([replay, unrelated, right, left, root])
     expect(tools(value, 'root')[0].results.map(({ content, isError }) => ({ content, isError }))).toEqual([
       { content: null, isError: true },
       { content: null, isError: true },
     ])
     event(left, 4, 'client_tool_handoff', { tool_id: 'call', name: 'Bash' })
-    event(replay, 5, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
+    event(replay, 5, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
     expect(tools(value, 'left')[0].results.map((entry) => entry.content)).toEqual([null])
     expect(tools(value, 'root')[0].results).toHaveLength(2)
   })
@@ -284,11 +305,13 @@ describe('observation activities', () => {
       event(value, 1, 'client_tool_handoff', { tool_id: 'call', name: 'Bash', input: { command: 'pwd' } })
     }
     for (const value of [left, replay, right]) {
-      event(value, 2, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
+      event(value, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
     }
-    event(left, 3, 'client_tool_result', { tool_id: 'call', content: null, is_error: true })
-    event(unrelated, 2, 'client_tool_result', { tool_id: 'call', content: 'must not attach to self or sibling' })
-    event(reusedChild, 2, 'client_tool_result', { tool_id: 'call', content: 'nearest call' })
+    event(left, 3, 'client_tool_result', { results: [{ tool_id: 'call', content: null, is_error: true }] })
+    event(unrelated, 2, 'client_tool_result', {
+      results: [{ tool_id: 'call', content: 'must not attach to self or sibling' }],
+    })
+    event(reusedChild, 2, 'client_tool_result', { results: [{ tool_id: 'call', content: 'nearest call' }] })
     const value = detail([replay, reusedChild, unrelated, right, reused, left, root])
     const rootTool = tools(value, 'root')[0]
     expect(rootTool.results.map(({ content, isError }) => ({ content, isError }))).toEqual([

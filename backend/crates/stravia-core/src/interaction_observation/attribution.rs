@@ -215,10 +215,10 @@ impl AttributionEvidence for ObservationEvidence {
         &self,
         principal: &str,
         tool_ids: &[String],
-        now: i64,
+        _now: i64,
     ) -> anyhow::Result<Vec<(String, Option<String>)>> {
         self.store
-            .client_tool_result_sources(principal, tool_ids, now)
+            .client_tool_result_sources(principal, tool_ids)
             .await
     }
 
@@ -484,7 +484,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
             diagnostic.as_ref(),
         );
         // Placement remains governed by ADR-0053. The stricter input-origin
-        // decision only controls observation metadata and preview publication.
+        // decision only controls observation metadata and user input publication.
         let has_new_user = has_new_user && !assignment.inferred_retry;
         self.grouping.set_has_new_user(&start.id, has_new_user);
         Attribution {
@@ -1343,16 +1343,16 @@ mod tests {
     #[tokio::test]
     async fn received_prefix_reconstructs_real_generation_input_without_output_or_graph_metadata() {
         use crate::generation_chain::{GenerationChain, GenerationSource};
-        use std::{sync::Arc, time::Duration};
+        use std::sync::Arc;
         use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
         use stravia_runtime_contract::protocol::ir::AiResponse;
 
         let backend = Arc::new(crate::turn_chain::test_store().await);
         let chain = GenerationChain::from_turn_chain(
             backend.clone(),
-            Duration::from_secs(60),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let principal = Principal::new("owner");
         let request = |items| {
@@ -1388,9 +1388,9 @@ mod tests {
 
         let restarted = GenerationChain::from_turn_chain(
             backend,
-            Duration::from_secs(60),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let mut replay = incoming.clone();
         replay.push(user("reminder"));

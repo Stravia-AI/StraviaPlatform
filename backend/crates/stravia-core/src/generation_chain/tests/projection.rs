@@ -424,9 +424,9 @@ async fn hook_completion_does_not_reuse_an_earlier_target_or_upstream_response()
 async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let mut root = chain
@@ -549,9 +549,9 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
 async fn native_responses_replay_uses_whitelisted_provider_context_for_continuation() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -707,9 +707,9 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
 async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let mut initial = responses_request(vec![user_message("question")]);
@@ -779,9 +779,9 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
 async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -978,9 +978,9 @@ async fn gemini_wire_thought_and_marker_replay_preserves_parent_prefix() {
 async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");
@@ -1155,9 +1155,9 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
 async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
-        Duration::from_secs(60),
         None,
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let owner = principal("owner");
     let question = user_message("question");

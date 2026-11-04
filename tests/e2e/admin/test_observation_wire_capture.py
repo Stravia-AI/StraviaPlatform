@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
+from tests.common.observation_contents import output_text
 from tests.e2e.admin.test_compaction_diagnostics import _semantic, diagnostic_provider
 from tests.e2e.admin.test_observations import (
     _create_route,
@@ -286,7 +287,8 @@ def test_client_visible_content_is_preserved_in_observation_artifacts(
         "finalized visible-content trace",
         lambda: _finalized_route_detail(admin_env, route_id),
     )
-    assert detail["interaction"]["visible_tail"] == expected_content
+    assert detail["output_text"] == expected_content
+    assert output_text(admin_env, detail["interaction"]) == expected_content
 
     visible_event = next(
         event

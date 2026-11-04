@@ -1,5 +1,6 @@
 import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, ObservationOutputPreview, RunDetail } from './types/observation'
+import { boundedTail } from './bounded-text'
 import { observationConversationActivities, type ObservationActivity } from './observation-activities'
 
 export type ObservationConversationBlock =
@@ -127,32 +128,15 @@ function runText(run: RunDetail): string {
 }
 
 function runInputText(run: RunDetail): string | undefined {
-  const payload = run.events.find(
-    (event) => event.kind === 'input_preview_recorded' && event.run_id === run.id,
-  )?.payload
+  const payload = run.events.find((event) => event.kind === 'user_input_recorded' && event.run_id === run.id)?.payload
   return payloadString(payloadRecord(payload).text)
-}
-
-const previewSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-
-function previewSuffix(text: string, limit: number): string {
-  let start = text.length
-  for (let count = 0; count < limit && start > 0; count += 1) {
-    start -= 1
-    const unit = text.charCodeAt(start)
-    if (unit >= 0xdc00 && unit <= 0xdfff && start > 0) start -= 1
-  }
-  if (start === 0) return text
-  const boundary = previewSegmenter.segment(text).containing(start)
-  if (boundary && boundary.index < start) start = boundary.index + boundary.segment.length
-  return text.slice(start)
 }
 
 /** 画布只取得选中输出的有界尾部，不复制累计详情全文，也不包含 Thinking。 */
 export function observationOutputPreview(
   detail: InteractionDetail,
   blocks: LiveContentBlock[],
-): ObservationOutputPreview {
+): ObservationOutputPreview | undefined {
   const runs = detail.runs.toSorted((a, b) => a.started_at - b.started_at)
   const committed = new Set(
     runs.flatMap((run) =>
@@ -172,7 +156,7 @@ export function observationOutputPreview(
   let length = 0
   const append = (text: string) => {
     length += text.length
-    tail = previewSuffix(tail + previewSuffix(text, 4096), 4096)
+    tail = boundedTail(tail + boundedTail(text, 4096), 4096)
   }
   for (const run of runs) {
     const text = runText(run)
@@ -185,7 +169,7 @@ export function observationOutputPreview(
   for (const block of visible.filter((block) => !runs.some((run) => run.id === block.run_id))) {
     append(block.text)
   }
-  return length ? { text: tail, start: length - tail.length } : { text: detail.interaction.visible_tail, start: 0 }
+  return length ? { text: tail, start: length - tail.length } : undefined
 }
 
 export function observationConversationMessages(
@@ -202,7 +186,7 @@ export function observationConversationMessages(
       id: `user:${interaction.id}`,
       role: 'user',
       runId: runs[0]?.id,
-      text: interaction.input_preview ?? firstInput ?? '',
+      text: detail.input_text || firstInput || '',
       at: interaction.started_at,
       model: '',
       live: false,

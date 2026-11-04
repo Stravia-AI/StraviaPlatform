@@ -241,7 +241,7 @@ heaptrack 通过只对 Server 子进程注入 preload 采集，不包裹 PID。�
 ### 后续降低内存的优先级
 
 1. **优先收敛检测器搜索缓存。** 当前全局 `OnceLock<Detector>` 已避免重复初始化；`expression.rs` / `kingfisher.rs` 的 `size_limit` 是编译结果上限，不是搜索缓存总预算。锁定的 regex 1.13.1 另有 `dfa_size_limit`；regex-automata 0.4.18 的搜索 scratch 池按同时使用峰值扩张、不主动收缩，不应误报成“每个历史线程永久一份”。应分别评估缓存容量、受控扫描并发、等价预过滤，以及相同模式/flags 的编译结果能否共享。减缓存可能增加重建与 fallback CPU；不得删规则、关闭 Unicode 语义或跳过凭据检测。
-2. **缩短整请求的额外持有。** `RunObserver::capture_input_preview` 的 `pending_input` 目前持有完整 `Arc<AiRequest>`；凭据保护可能因其他所有者而触发 `Arc::make_mut`。可研究只保留预览所需文本，避免观察者额外 pin 整请求；仍须先完整脱敏再截取，并保持映射注册后的发布时序。其他所有者仍可能要求 COW，尚未量化节省量。
+2. **整请求的额外持有已消除。** `RunObserver::capture_user_input` 在准入时只从收到的 canonical 窗口抽取最新用户输入的文本单元（ADR-0089 起不再截断为预览），观察者不再持有 `Arc<AiRequest>`；发布仍在映射登记完成之后（`publish_user_input`）。节省量未单独测量。
 3. **用在途字节预算约束并发峰值。** 代理入口的 140MiB 是单请求 JSON 上限，RPM admission 不是活跃请求字节上限。Trace writer 的 1024 槽、普通 writer 的 2048 槽也不等于总字节预算。预算应覆盖形成大缓冲之前、queued 与 writing 的生命周期；保留 Admission/Finish/清理控制容量，不以丢历史、更多 partial 或降低成功请求负载美化成绩。代价是排队延迟或明确拒绝，必须同时报告。
 4. **实时订阅按共享正文与聚合预算治理。** Live mailbox 各有 8MiB 上限，当前为每个订阅者 clone 内容；多慢订阅者会放大内存。这是实际 UI/订阅负载的机会，不是没有实时订阅者的本次 HTTP 矩阵 RSS 的归因。
 5. **Wasm 与分配器分别测量。** 内置 Engine/编译结果已共享，owned host calls 已提前释放 lowered payload；不要重复列为待做。每操作仍独立 Store，不能为省内存复用权限状态。可测量实例化等待期间的载荷生命周期；Store 内存限额是防失控措施，不保证降低当前有效请求的 RSS，过低会导致 OOM。分配器驻留仍需同负载 `/proc/PID/smaps` 与 allocator 统计后再决定是否换分配器，不能把 malloc 存活量与 RSS 的差额全部归因于 glibc。
@@ -758,3 +758,73 @@ BLAKE3 默认同为 256-bit 输出，不代表摘要等于 SHA256。按 [ADR-007
 .venv/bin/python /tmp/stravia-memory-ejfi0vja/run-pairs.py \
   --label repeat-c8 --concurrency 8 --rounds 8 --pairs 2
 ```
+
+## 2026-11-04 ADR-0089：Observation 写入、写租约、升级与扫描实测
+
+ADR-0089 实施后的计数、字节、写租约、PostgreSQL 并发、升级与扫描实测。数字与结论全部在 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)，本节只记录对比对象、命令、驱动脚本与已知限制。合成负载（脚本化 mock 上游），不能与 ADR 按 6,919 个真实 Run 的估算（事件行 12.0 → 7.7、事务 10.0 → 4.7）直接比较。2026-11-03 在 `589c6c33` 上做过一轮计数/字节运行，已被本节在 `d68284d5` 上的运行取代，不再引用。
+
+### 对比对象
+
+|角色|提交|二进制 SHA256|
+|---|---|---|
+|实施前|`aecfc21e`|`c8e9fda9974b69d451f982b82ce93abd7d73ea5066c02309ad8d3f390446ca6e`|
+|实施后|`d68284d5`|`7c1bd726d659422d86dc976472b69c8a8800903194e2c37ba9e90edea8d27704`|
+
+升级库生成器使用的 `stravia-storage-test-harness`（`d68284d5`）SHA256 为 `ba3e1a81397a280b919cfe928493e3eb324cb3edd03b957eda83c2fd9b177e2f`。`12ae3ab2` 只改测试与脚本，不影响二进制。两侧各在独立 worktree 与 target 目录构建：实施后一侧先 `cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors` 重建 Wasm，再 `CARGO_BUILD_JOBS=8 cargo build --locked --release -p stravia-server --no-default-features --features test-harness --bin stravia-server --bin stravia-storage-test-harness`；实施前一侧只构建 `stravia-server`。二进制冻结后再测，测量期间不重新构建。
+
+### 命令
+
+所有运行经 `tests/common/adr0089_measure.sh MODE BINARY LABEL`，结果落在 `target/benchmarks/adr0089/`（`MEASURE_OUT` 可改）。PostgreSQL 为本机独立实例（`postgresql://postgres@127.0.0.1:55432`，`fsync=off`、`max_connections=400`），Redis 为专用实例（`redis://127.0.0.1:56379/0`，基线与新二进制在 PostgreSQL 上都要求 Redis）；每个 PostgreSQL 运行前 `redis-cli -p 56379 -n 0 flushdb`，数据库由脚本新建、运行后删除（`upgrade` 的 `--keep` 与 `upgrade-gen` 例外）。
+
+```bash
+# 与负载无关的计数（任何时候可跑）
+tests/common/adr0089_measure.sh counts BINARY LABEL                       # 单轮队列：2 入口 × 2 上游 × unary/stream，每 case 4 请求，并发 1
+CONVERSATIONS=6 tests/common/adr0089_measure.sh toolflow BINARY LABEL     # 6 轮工具调用流：{openai-compatible, google-gemini} × {unary, stream}
+BACKEND=postgres CONVERSATIONS=4 tests/common/adr0089_measure.sh toolflow BINARY LABEL
+python -m tests.common.verify_content_sharing --data-dir DIR | --database-url URL --output FILE   # 共享内容校验（只读）
+
+# 以下只在机器空闲时跑（前后记录 /proc/loadavg，并旁路采样非测量进程的 CPU）
+tests/common/adr0089_measure.sh lease BINARY LABEL                        # SQLite 写租约排队：并发 8、每 case 16 Run，unary + stream
+tests/common/adr0089_measure.sh pg BINARY LABEL                           # PostgreSQL fixed-workers 32，warmup 5 s + 120 s
+tests/common/adr0089_measure.sh contention BINARY LABEL                   # PostgreSQL 32 worker 写入 + 每 0.5 s 强制扫描（交替 7/8 天）120 s
+BACKEND=postgres tests/common/adr0089_measure.sh upgrade-gen HARNESS LABEL    # 升级前库：490000 事件 / 178000 内容 / 17000 Marker
+tests/common/adr0089_measure.sh upgrade-gen HARNESS LABEL                 # 同上，SQLite
+tests/common/adr0089_measure.sh verify-fixture BASELINE_BINARY LABEL      # 旧二进制经管理 API 读出抽样 Interaction，证明放大库可被旧服务端读取
+KEEP_UPGRADED=1 tests/common/adr0089_measure.sh upgrade BINARY LABEL      # 新二进制在副本上升级：墙钟 / CPU / 峰值 RSS / 峰值磁盘（BACKEND=postgres 同）
+DATA_DIR=DIR SWEEP_SPAN=observation.maintenance.sweep tests/common/adr0089_measure.sh sweep BASELINE LABEL   # 基线：没有 history.sweep
+DATA_DIR=DIR tests/common/adr0089_measure.sh sweep BINARY LABEL           # 新二进制；PostgreSQL 用 BACKEND=postgres PG_DATABASE=库名
+```
+
+基线二进制不能读取升级后的结构，所以 `sweep` 的基线副本是“同一升级前存量经基线二进制启动一次”的库（`KEEP_UPGRADED=1 … upgrade BASELINE` 即可得到，基线不做迁移，只执行 `setup/complete`）；新二进制的副本是上面 `upgrade` 保留的升级结果。升级后空间的回收用 `sqlite3 DB "pragma wal_checkpoint(truncate); vacuum into 'OUT.db'"` 与 `psql -c "vacuum full"`（先用 `CREATE DATABASE … TEMPLATE …` 复制一份），新旧布局各做一次对照。空库迁移成本读 `sqlite3 DB "select version, execution_time/1e6 from _sqlx_migrations"`（租约运行保留的新建库），单元测试用 `cargo test --locked -p stravia-core --lib -- --exact migrations::tests::sqlite_baseline_applies_to_empty_database_and_is_idempotent`（debug 构建，各侧 3 次）。
+
+### 驱动脚本
+
+|脚本|作用|
+|---|---|
+|`adr0089_measure.sh`|上面全部模式的入口，命令即记录|
+|`analyze_observation_writes.py`|沿 perf span 的 `parent_id` 链，把 `sql.transaction.commit`、`sqlite.write_gate.hold/wait` 与租约内 `sql.query` 归属到最近的 `observation.writer.*` 动作；分开外层事务提交与保存点释放（同一父 span 下按 begin/commit 深度）；任何 `dropped_*` 非零即作废该 case|
+|`measure_tool_flow.py`|6 轮工具调用流的计数队列（按 kind 的事件行、事务、租约、语句）|
+|`measure_history_sweep.py`|`history.sweep`（基线为 `observation.maintenance.sweep`）稳态与缩短天数后首轮的耗时，PUT 墙钟，SQL 查询数；`--reuse-data-dir` 复用升级库|
+|`measure_pg_contention.py`|PostgreSQL 并发写入 + 强制扫描：尾延迟、`pg_stat_database` 差、`pg_stat_activity` 采样、服务端日志的 SQLSTATE 分类（`40P01`、`23503`、`40001`、`23505`，边界匹配以免时间戳小数误报）|
+|`scale_upgrade_fixture.py`|克隆录制的夹具单元，放大到目标规模并写出升级前存量（用 `stravia-storage-test-harness`），记录达成规模|
+|`measure_upgrade.py`|在副本上启动新二进制并触发迁移：墙钟、`getrusage(RUSAGE_CHILDREN)` 的 CPU 与峰值 RSS、`/proc` 的 VmHWM、5 秒采样的磁盘占用（PostgreSQL 另含 WAL 目录），前后存量清单|
+|`verify_scaled_fixture.py`|`verify-fixture`：旧二进制读出放大库的抽样 Interaction|
+|`verify_content_sharing.py`|只读校验同一 API Key 下没有重复正文、每个 Principal 只有一个 scope|
+|`protocol_storage_inventory.py`|新旧两种布局的行数、编码载荷字节与每表字节（SQLite dbstat，PostgreSQL `pg_table_size + pg_indexes_size`）|
+
+### 审计的适配
+
+`protocol_history_audit.py` 读取新的存储布局：`contents`/`content_scopes`，摘要域 `stravia.content.v1\0` 加 format 字节，文本 slot 与拼接 slot，Observation 的 `observation_blocks` 与 `observation_event_contents`。旧布局（`turn_contents`，摘要域 `.turn-content.v1\0`）只通过显式的 `allow_legacy` 适配器读取，仅用于实施前二进制，与 format-2 的处理约定相同。API 摘要与存储摘要的口径分开：管理端 API 把凭据值遮成 `***`（ADR-0088），因此 API 输出摘要对照 `masked_output_sha256`，存储证明对照未遮蔽的 `output_sha256`。
+
+### 已知限制
+
+- 合成 mock 上游：工具流每 Run 有 1.75 个 `client_tool_handoff` 与 1.42 个 `model_thinking`，真实流量的分布不同；升级库是克隆夹具单元合成的存量，不是开发库。
+- 小库：每表字节受页面粒度主导，PostgreSQL 页面总量在小库上反而增加 8.3%（见 ADR），不外推。
+- perf span 不带 SQL 文本，实施后单轮 Run 中 3.25 个仍各自提交的单事件命令无法从跟踪中确定 kind；非 Observation 写事务的增减也无法逐项归因。
+- `lease` 并发 8、吞吐约 0.68 QPS（mock 上游固定 10 s 输出），写租约队列远未饱和；每个 Debug epoch 的环形缓冲只容纳 10,000 个 span / 2,048 个 SQL span，所以每 case 只有 4 或 16 个 Run。
+- `pg` 的 stream case 在 32 个并发 stream 下被节奏门禁（`--max-pacing-lag-ms 250`）作废：单进程 Python mock 保持不了节奏，是 harness 的限制；门禁没有放宽，PostgreSQL stream 的尾延迟未测。
+- 新二进制的 `lease` 有 2 个 case 出现提交停顿（原因未定，疑为数据目录所在文件系统的同步停顿），按原样单列；后加的重复 r3、r4 没有 CPU 采样。
+- `sweep` 的夹具数据都在 1 天之内，`log_retention_days` 最小 1，缩短天数只删除 3 行；大批删除的成本需要时间戳回溯的存量，未测。
+- 升级墙钟在两次重复间波动很大（SQLite 74–109 s，PostgreSQL 87–138 s），原因未查明，各阶段（内容、保留期回填、Observation 规范化）没有单独计时。
+- 工具流没有复制 e2e 的 bundle 下载检查、`omitted-tool-whitespace` 与 alternating 流模式。
+- 早期在 `7cbc0714`（Observation 使用裸 id 作用域）上的 smoke 只用于验证脚本，其数字不进入任何表。

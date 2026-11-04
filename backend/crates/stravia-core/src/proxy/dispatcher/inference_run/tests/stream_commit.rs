@@ -591,29 +591,21 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
         &self,
         principal: &stravia_runtime_contract::Principal,
         references: &[String],
-        retention: std::time::Duration,
     ) -> Result<(), crate::history_marker::HistoryMarkerError> {
         if matches!(self.failure, ThinkingMarkerFailure::Publish) {
             return Err(crate::history_marker::HistoryMarkerError::Storage(
                 "injected Thinking publish failure".into(),
             ));
         }
-        self.inner.publish(principal, references, retention).await
+        self.inner.publish(principal, references).await
     }
 
-    async fn extend_retention(
+    async fn sweep(
         &self,
-        principal: &stravia_runtime_contract::Principal,
-        references: &[String],
+        now: i64,
         retention: std::time::Duration,
-    ) -> Result<(), crate::history_marker::HistoryMarkerError> {
-        self.inner
-            .extend_retention(principal, references, retention)
-            .await
-    }
-
-    async fn cleanup_expired(&self) -> Result<u64, crate::history_marker::HistoryMarkerError> {
-        self.inner.cleanup_expired().await
+    ) -> Result<u64, crate::history_marker::HistoryMarkerError> {
+        self.inner.sweep(now, retention).await
     }
 }
 

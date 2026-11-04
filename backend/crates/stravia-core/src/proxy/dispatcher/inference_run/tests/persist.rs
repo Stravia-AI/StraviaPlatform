@@ -122,9 +122,9 @@ async fn automatic_parent_discovery_failure_falls_back_to_a_chat_root() {
     .expect("Gateway");
     gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
         Arc::new(failing_parent_discovery_store().await),
-        std::time::Duration::from_secs(60),
         None,
         gateway.runtime_cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let model = "parent-discovery-fallback";
     configure_route(&gateway, model, &[base_url]).await;
@@ -174,9 +174,9 @@ async fn embeddings_skip_generation_chain_begin() {
     let discovery_attempts = Arc::clone(&history.discovery_attempts);
     gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
         history,
-        std::time::Duration::from_secs(60),
         None,
         gateway.runtime_cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     let model = "embedding-without-generation-chain";
     configure_route(&gateway, model, &[base_url]).await;
@@ -307,9 +307,9 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
     let barrier = Arc::new(CommitBarrierStore::new(Arc::clone(&gateway.turn_chains)));
     gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
         barrier.clone(),
-        std::time::Duration::from_secs(60),
         None,
         gateway.runtime_cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     configure_route(&gateway, "commit-window-parent", &[provider_url]).await;
     let headers = authorized_headers(&gateway).await;
@@ -488,9 +488,9 @@ async fn delivered_tool_resumes_before_source_generation_commit(websocket: bool)
     let barrier = Arc::new(CommitBarrierStore::new(Arc::clone(&gateway.turn_chains)));
     gateway.generation_chains = crate::generation_chain::GenerationChain::from_turn_chain(
         barrier.clone(),
-        std::time::Duration::from_secs(60),
         None,
         gateway.runtime_cache.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
     );
     configure_route(&gateway, "tool-commit-window", &[provider_url]).await;
     let headers = authorized_headers(&gateway).await;

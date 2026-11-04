@@ -1301,16 +1301,16 @@ mod tests {
                 self.0.commit(commit).await
             }
 
-            async fn sweep_expired(&self) -> Result<u64, TurnUnavailable> {
-                self.0.sweep_expired().await
+            async fn sweep_history(&self, now: i64) -> Result<u64, TurnUnavailable> {
+                self.0.sweep_history(now).await
             }
         }
 
         let chain = crate::generation_chain::GenerationChain::from_turn_chain(
             Arc::new(UnknownExpiryStore(crate::turn_chain::test_store().await)),
-            std::time::Duration::from_secs(7 * 24 * 60 * 60),
             None,
             crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
         );
         let owner = principal();
         let mut root = chain

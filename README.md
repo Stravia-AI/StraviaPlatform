@@ -76,7 +76,7 @@ Alternatively, download a platform archive from Releases (verify against `SHA256
 
 **Nix / NixOS (Linux Server only):** Build this checkout with `nix build .#stravia-server`, or import `nixosModules.default` and enable `services.stravia`. See [Nix deployment](docs/design/architecture.md#nix-server-与-nixos-服务).
 
-**Upgrading an existing instance:** Stop and back up the complete data directory and any external database first. The Route output-purpose migration makes **all historical Routes nonexecutable until individually reconfigured**, on both SQLite and PostgreSQL. See [upgrade and recovery](docs/design/media-generation.md#4-route-与-codex-接入); rollback requires restoring the backup.
+**Upgrading an existing instance:** Stop and back up the complete data directory and any external database first. The Route output-purpose migration makes **all historical Routes nonexecutable until individually reconfigured**, on both SQLite and PostgreSQL. See [upgrade and recovery](docs/design/media-generation.md#4-route-与-codex-接入); rollback requires restoring the backup. The history-storage upgrade rewrites existing conversation and request history once at startup; it takes longer and needs more temporary space the larger the history is, and older binaries cannot read the upgraded database.
 
 **First run (both):**
 

@@ -23,578 +23,8 @@ async fn sqlite_store() -> Arc<dyn HistoryMarkerStore> {
     Arc::new(SqlHistoryMarkerStore::sqlite(sqlite_pool().await))
 }
 
-#[tokio::test]
-async fn sqlite_diagnostic_deletion_does_not_own_public_execution() {
-    let store = SqlHistoryMarkerStore::sqlite(sqlite_pool().await);
-    let owner = principal("diagnostic-independent");
-    let marker = store
-        .create_platform(
-            &owner,
-            PlatformMarkerInput {
-                tool_id: "web-search".into(),
-                call: call("independent-call"),
-                activity: "Searching".into(),
-                execution_limit: Duration::from_secs(900),
-                pending_retention: Duration::from_secs(3600),
-            },
-        )
-        .await
-        .unwrap();
-    let id = store
-        .create_public_execution(
-            &owner,
-            &marker.reference,
-            PublicExecutionInput {
-                source_run_id: Some("independent-source".into()),
-                retention: Duration::from_secs(3600),
-                deadline_unix_ms: chrono::Utc::now().timestamp_millis() + 900_000,
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .claim_execution(
-            &owner,
-            &marker.reference,
-            "worker",
-            Duration::from_secs(900),
-        )
-        .await
-        .unwrap();
-    store
-        .handoff_public_execution(&owner, &id, &|| true)
-        .await
-        .unwrap();
-    public_test_sql(&store, "INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('independent-source','diagnostic-independent','independent-source','independent-source','route','completed',0,0,0);
-        INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('independent-source','independent-source','responses','route','completed',false,0,0,0);
-        DELETE FROM interaction_observations WHERE id='independent-source'").await;
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        PlatformExecutionState::Running
-    );
-}
-
 fn principal(id: &str) -> Principal {
     Principal::new(id)
-}
-
-async fn public_test_sql(store: &SqlHistoryMarkerStore, sql: &'static str) {
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => {
-            sqlx::raw_sql(sql).execute(pool).await.unwrap();
-        }
-        SqlHistoryMarkerStore::Postgres(pool) => {
-            sqlx::raw_sql(sql).execute(pool).await.unwrap();
-        }
-    };
-}
-
-async fn assert_public_cleanup_contract(store: &SqlHistoryMarkerStore) {
-    let owner = principal("public-owner");
-    // Deleting diagnostics before admission is no cancellation evidence either.
-    public_test_sql(store, "INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('public-source','public-owner','public-source','public-source','route','completed',0,0,0); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('public-source','public-source','responses','route','completed',false,0,0,0); DELETE FROM interaction_observations WHERE id='public-source'").await;
-    let marker = store
-        .create_platform(
-            &owner,
-            PlatformMarkerInput {
-                tool_id: "web-search".into(),
-                call: call("public-call"),
-                activity: "Searching".into(),
-                execution_limit: Duration::from_secs(900),
-                pending_retention: Duration::from_secs(3600),
-            },
-        )
-        .await
-        .unwrap();
-    let deadline = chrono::Utc::now().timestamp_millis() + 600_000;
-    let id = store
-        .create_public_execution(
-            &owner,
-            &marker.reference,
-            PublicExecutionInput {
-                source_run_id: Some("public-source".into()),
-                retention: Duration::from_secs(3600),
-                deadline_unix_ms: deadline,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap()
-            .deadline_unix_ms,
-        deadline
-    );
-    assert!(
-        store
-            .resolve_public_execution(&principal("stranger"), &id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .resolve_public_execution(&owner, "unknown")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .claim_execution(
-                &owner,
-                &marker.reference,
-                "worker",
-                Duration::from_secs(900)
-            )
-            .await
-            .unwrap(),
-        ClaimOutcome::Claimed
-    );
-    assert!(matches!(
-        store.handoff_public_execution(&owner, &id, &|| false).await,
-        Err(HistoryMarkerError::TerminalConflict)
-    ));
-    assert_eq!(public_handoff_count(store).await, 0);
-    store
-        .handoff_public_execution(&owner, &id, &|| true)
-        .await
-        .unwrap();
-    assert_eq!(public_handoff_count(store).await, 1);
-    // Expiry and cleanup of the diagnostic do not affect the running execution.
-    public_test_sql(store, "INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('public-source','public-owner','public-source','public-source','route','completed',0,0,0); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('public-source','public-source','responses','route','completed',false,0,0,0); UPDATE history_markers SET expires_at=0 WHERE principal='api-key:public-owner'").await;
-    store.cleanup_expired().await.unwrap();
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        PlatformExecutionState::Running
-    );
-    public_test_sql(store, "DELETE FROM interaction_observations WHERE id='public-source'; INSERT INTO settings(name,value) VALUES ('log_retention_days','9') ON CONFLICT(name) DO UPDATE SET value=excluded.value").await;
-    let segment = HiddenHistorySegment::Platform {
-        call: call("public-call"),
-        result: ContentBlock::ToolResult {
-            content_kind: Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
-            tool_use_id: "public-call".into(),
-            content: serde_json::json!({"report":"independent result"}),
-            is_error: Some(false),
-            cache_control: None,
-        },
-    };
-    let before = chrono::Utc::now().timestamp_millis();
-    store
-        .finish_execution(
-            &owner,
-            &marker.reference,
-            "worker",
-            PlatformExecutionState::Completed,
-            segment.clone(),
-        )
-        .await
-        .unwrap();
-    let facts = public_retention_snapshot(store, &id).await;
-    let determined = facts.0.unwrap();
-    assert!(determined >= before && determined <= chrono::Utc::now().timestamp_millis());
-    assert_eq!(facts.1, Some(determined));
-    assert_eq!(facts.2, Some(determined + 9 * 86_400_000));
-    assert_eq!(
-        facts.3,
-        9 * 86_400_000,
-        "use history retention at terminal determination, not admission"
-    );
-    // Query, handoff readback, publication, and retention changes cannot renew a result.
-    for _ in 0..2 {
-        let result = store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.state, PlatformExecutionState::Completed);
-        assert_eq!(
-            serde_json::to_value(result.segment).unwrap(),
-            serde_json::to_value(Some(segment.clone())).unwrap()
-        );
-    }
-    public_test_sql(store, "UPDATE history_markers SET expires_at=4000000000000 WHERE principal='api-key:public-owner'").await;
-    store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(30 * 86400),
-        )
-        .await
-        .unwrap();
-    public_test_sql(store, "UPDATE settings SET value='2' WHERE name='log_retention_days'; UPDATE history_markers SET execution_deadline=0 WHERE principal='api-key:public-owner'").await;
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        PlatformExecutionState::Completed
-    );
-    assert_eq!(public_retention_snapshot(store, &id).await, facts);
-    public_test_sql(
-        store,
-        "UPDATE public_tool_executions SET expires_at=0 WHERE principal='api-key:public-owner'",
-    )
-    .await;
-    assert!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    store.cleanup_expired().await.unwrap();
-    assert!(
-        store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let timed_out = store
-        .create_platform(
-            &owner,
-            PlatformMarkerInput {
-                tool_id: "web-search".into(),
-                call: call("deadline-call"),
-                activity: "Searching".into(),
-                execution_limit: Duration::from_secs(900),
-                pending_retention: Duration::from_secs(3600),
-            },
-        )
-        .await
-        .unwrap();
-    let timed_out_id = store
-        .create_public_execution(
-            &owner,
-            &timed_out.reference,
-            PublicExecutionInput {
-                source_run_id: None,
-                retention: Duration::from_secs(3600),
-                deadline_unix_ms: chrono::Utc::now().timestamp_millis() + 900_000,
-            },
-        )
-        .await
-        .unwrap();
-    public_test_sql(store, "UPDATE history_markers SET execution_deadline=0 WHERE execution_state='pending' AND principal='api-key:public-owner'").await;
-    let determined_after = chrono::Utc::now().timestamp_millis();
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, &timed_out_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        PlatformExecutionState::Failed
-    );
-    let timeout_facts = public_retention_snapshot(store, &timed_out_id).await;
-    assert!(timeout_facts.0.unwrap() >= determined_after);
-    assert_eq!(timeout_facts.1, timeout_facts.0);
-    assert_eq!(
-        timeout_facts.2,
-        Some(timeout_facts.0.unwrap() + 2 * 86_400_000)
-    );
-
-    // Restart determines interruption now, never replays or leaves a result TTL
-    // anchored to admission. Both pending and running executions are covered.
-    for running in [false, true] {
-        let marker = store
-            .create_platform(
-                &owner,
-                PlatformMarkerInput {
-                    tool_id: "web-search".into(),
-                    call: call("restart-call"),
-                    activity: "Searching".into(),
-                    execution_limit: Duration::from_secs(900),
-                    pending_retention: Duration::from_secs(3600),
-                },
-            )
-            .await
-            .unwrap();
-        let id = store
-            .create_public_execution(
-                &owner,
-                &marker.reference,
-                PublicExecutionInput {
-                    source_run_id: None,
-                    retention: Duration::from_secs(3600),
-                    deadline_unix_ms: chrono::Utc::now().timestamp_millis() + 900_000,
-                },
-            )
-            .await
-            .unwrap();
-        if running {
-            assert_eq!(
-                store
-                    .claim_execution(
-                        &owner,
-                        &marker.reference,
-                        "old-worker",
-                        Duration::from_secs(900)
-                    )
-                    .await
-                    .unwrap(),
-                ClaimOutcome::Claimed
-            );
-        }
-        public_test_sql(store, "UPDATE public_tool_executions SET process_id='previous-process' WHERE retention_started_at IS NULL; UPDATE history_markers SET expires_at=0 WHERE execution_state IN ('pending','running') AND principal='api-key:public-owner'").await;
-        let before = chrono::Utc::now().timestamp_millis();
-        store.recover_public_executions().await.unwrap();
-        let interrupted = public_retention_snapshot(store, &id).await;
-        assert!(interrupted.0.unwrap() >= before);
-        assert_eq!(interrupted.1, interrupted.0);
-        assert_eq!(interrupted.2, Some(interrupted.0.unwrap() + 2 * 86_400_000));
-        let result = store
-            .resolve_public_execution(&owner, &id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.state, PlatformExecutionState::Interrupted);
-        let HiddenHistorySegment::Platform {
-            result: ContentBlock::ToolResult {
-                is_error, content, ..
-            },
-            ..
-        } = result.segment.unwrap()
-        else {
-            panic!("interruption result")
-        };
-        assert_eq!(is_error, Some(true));
-        assert!(content.as_str().unwrap().contains("interrupted"));
-        assert_eq!(
-            store
-                .claim_execution(
-                    &owner,
-                    &marker.reference,
-                    "new-worker",
-                    Duration::from_secs(900)
-                )
-                .await
-                .unwrap(),
-            ClaimOutcome::Terminal
-        );
-        assert!(matches!(
-            store
-                .finish_execution(
-                    &owner,
-                    &marker.reference,
-                    "old-worker",
-                    PlatformExecutionState::Completed,
-                    HiddenHistorySegment::Platform {
-                        call: call("restart-call"),
-                        result: ContentBlock::ToolResult {
-                            content_kind: Some(
-                                stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json
-                            ),
-                            tool_use_id: "restart-call".into(),
-                            content: serde_json::json!("late"),
-                            is_error: Some(false),
-                            cache_control: None,
-                        },
-                    }
-                )
-                .await,
-            Err(HistoryMarkerError::TerminalConflict)
-        ));
-        store.recover_public_executions().await.unwrap();
-        assert_eq!(public_retention_snapshot(store, &id).await, interrupted);
-    }
-}
-
-async fn public_handoff_count(store: &SqlHistoryMarkerStore) -> i64 {
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => sqlx::query_scalar(
-            "SELECT COUNT(*) FROM public_tool_executions WHERE handed_off_at IS NOT NULL",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap(),
-        SqlHistoryMarkerStore::Postgres(pool) => sqlx::query_scalar(
-            "SELECT COUNT(*) FROM public_tool_executions WHERE handed_off_at IS NOT NULL",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap(),
-    }
-}
-
-// Retention facts are intentionally not exposed by the consumer response.
-async fn public_retention_snapshot(
-    store: &SqlHistoryMarkerStore,
-    id: &str,
-) -> (Option<i64>, Option<i64>, Option<i64>, i64) {
-    let query = "SELECT terminal_at, retention_started_at, expires_at, retention_ms FROM public_tool_executions WHERE id=$1";
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => sqlx::query_as(query)
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        SqlHistoryMarkerStore::Postgres(pool) => sqlx::query_as(query)
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-    }
-}
-
-fn legacy_public_migrator(sqlite: bool) -> sqlx::migrate::Migrator {
-    let all = if sqlite {
-        sqlx::migrate!("./migrations/sqlite")
-    } else {
-        sqlx::migrate!("./migrations/postgres")
-    };
-    sqlx::migrate::Migrator::with_migrations(
-        all.iter()
-            .filter(|migration| migration.version <= 23)
-            .cloned()
-            .collect(),
-    )
-}
-
-async fn assert_public_upgrade_contract(store: &SqlHistoryMarkerStore) {
-    // Seed the legacy storage seam, including records no longer queryable before
-    // upgrade. No current runtime API may accidentally manufacture legacy facts.
-    public_test_sql(store, "INSERT INTO settings(name,value) VALUES ('log_retention_days','7');
-        INSERT INTO tool_execution_sources(source_run_id,removed,expires_at) VALUES ('legacy-live',0,4000000000000),('legacy-expired',0,0);
-        INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('legacy-retained','legacy-owner','legacy-retained','legacy-retained','route','completed',0,0,0);
-        INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('legacy-retained','legacy-retained','responses','route','completed',false,0,0,0);
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        VALUES ('legacy-template','api-key:legacy-owner','platform','Searching','web-search','{\"id\":\"legacy-call\",\"name\":\"web_search\",\"arguments\":\"{}\"}','{\"kind\":\"platform\",\"call\":{\"id\":\"legacy-call\",\"name\":\"web_search\",\"arguments\":\"{}\"},\"result\":{\"type\":\"tool_result\",\"tool_use_id\":\"legacy-call\",\"content\":{\"artifact\":\"stravia://artifacts/independent\"},\"is_error\":false}}','completed',1,10,42,90,4000000000000);
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        SELECT 'legacy-mcp-expired-marker',principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,0 FROM history_markers WHERE reference='legacy-template';
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        SELECT 'legacy-source-expired-marker',principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,0 FROM history_markers WHERE reference='legacy-template';
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        SELECT 'legacy-expired-source',principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at FROM history_markers WHERE reference='legacy-template';
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        SELECT 'legacy-expired-mcp',principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at FROM history_markers WHERE reference='legacy-template';
-        INSERT INTO history_markers(reference,principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,expires_at)
-        SELECT 'legacy-real-source',principal,kind,activity,tool_id,call_payload,segment_payload,execution_state,execution_deadline,created_at,updated_at,published_at,0 FROM history_markers WHERE reference='legacy-template';
-        INSERT INTO public_tool_executions(id,marker_reference,principal,source_kind,source_run_id,process_id,expires_at) VALUES
-        ('kept-mcp','legacy-template','api-key:legacy-owner','mcp',NULL,'old',4000000000000),
-        ('expired-marker','legacy-mcp-expired-marker','api-key:legacy-owner','mcp',NULL,'old',4000000000000),
-        ('kept-source','legacy-source-expired-marker','api-key:legacy-owner','inference_run','legacy-live','old',0),
-        ('expired-source','legacy-expired-source','api-key:legacy-owner','inference_run','legacy-expired','old',4000000000000),
-        ('expired-mcp','legacy-expired-mcp','api-key:legacy-owner','mcp',NULL,'old',0),
-        ('deleted-marker','legacy-deleted-marker','api-key:legacy-owner','mcp',NULL,'old',4000000000000),
-        ('deleted-execution','legacy-deleted-execution','api-key:legacy-owner','mcp',NULL,'old',4000000000000),
-        ('kept-real-source','legacy-real-source','api-key:legacy-owner','inference_run','legacy-retained','old',0);
-        DELETE FROM public_tool_executions WHERE id='deleted-execution'").await;
-    let before = chrono::Utc::now().timestamp_millis();
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => {
-            crate::migrations::migrate_sqlite(pool, None).await.unwrap()
-        }
-        SqlHistoryMarkerStore::Postgres(pool) => crate::migrations::migrate_postgres(pool, None)
-            .await
-            .unwrap(),
-    }
-    let after = chrono::Utc::now().timestamp_millis();
-    let owner = principal("legacy-owner");
-    for (id, reference) in [
-        ("kept-mcp", "legacy-template"),
-        ("kept-source", "legacy-source-expired-marker"),
-        ("kept-real-source", "legacy-real-source"),
-    ] {
-        let execution = store
-            .resolve_public_execution(&owner, id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(execution.id, id);
-        assert_eq!(execution.marker_reference, reference);
-        assert_eq!(execution.state, PlatformExecutionState::Completed);
-        let HiddenHistorySegment::Platform {
-            call,
-            result: ContentBlock::ToolResult { content, .. },
-        } = execution.segment.unwrap()
-        else {
-            panic!("retained legacy result")
-        };
-        assert_eq!(call.id, "legacy-call");
-        assert_eq!(
-            content,
-            serde_json::json!({"artifact":"stravia://artifacts/independent"})
-        );
-        let facts = public_retention_snapshot(store, id).await;
-        assert_eq!(
-            facts.0, None,
-            "unknown actual completion is not migration time or updated_at"
-        );
-        let migration_start = facts.1.unwrap();
-        assert!(migration_start >= before - 999 && migration_start <= after);
-        assert_eq!(facts.2, Some(migration_start + 7 * 86_400_000));
-        assert_eq!(facts.3, 7 * 86_400_000);
-        store
-            .resolve_public_execution(&owner, id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(public_retention_snapshot(store, id).await, facts);
-    }
-    for id in [
-        "expired-marker",
-        "expired-source",
-        "expired-mcp",
-        "deleted-marker",
-        "deleted-execution",
-    ] {
-        assert!(
-            store
-                .resolve_public_execution(&owner, id)
-                .await
-                .unwrap()
-                .is_none(),
-            "{id} must not revive"
-        );
-    }
-    store.recover_public_executions().await.unwrap();
-    assert_eq!(
-        store
-            .resolve_public_execution(&owner, "kept-source")
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        PlatformExecutionState::Completed
-    );
-    // Avoid leaking upgrade fixtures into the remaining shared contract tests.
-    public_test_sql(store, "DELETE FROM public_tool_executions WHERE principal='api-key:legacy-owner'; DELETE FROM history_markers WHERE principal='api-key:legacy-owner'; DELETE FROM interaction_observations WHERE id='legacy-retained'; DELETE FROM settings WHERE name='log_retention_days'").await;
-}
-
-#[tokio::test]
-async fn sqlite_public_execution_upgrade_preserves_only_queryable_legacy_results() {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    crate::migrations::run_sqlite_migrator(&pool, &legacy_public_migrator(true), None)
-        .await
-        .unwrap();
-    assert_public_upgrade_contract(&SqlHistoryMarkerStore::sqlite(pool)).await;
-}
-
-#[tokio::test]
-async fn sqlite_public_execution_retention_is_independent_and_restart_does_not_replay() {
-    assert_public_cleanup_contract(&SqlHistoryMarkerStore::sqlite(sqlite_pool().await)).await;
 }
 
 #[tokio::test]
@@ -676,7 +106,6 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
                 call: call("call-1"),
                 activity: "Searching the web".into(),
                 execution_limit: Duration::from_secs(30),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -794,7 +223,6 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
                     call: call("semantic-call"),
                     activity: "Reading data".into(),
                     execution_limit: Duration::from_secs(30),
-                    pending_retention: Duration::from_secs(60),
                 },
             )
             .await
@@ -817,11 +245,7 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
             .await
             .unwrap();
         store
-            .publish(
-                &owner,
-                std::slice::from_ref(&marker.reference),
-                Duration::from_secs(60),
-            )
+            .publish(&owner, std::slice::from_ref(&marker.reference))
             .await
             .unwrap();
         let mut request = AiRequest::new(
@@ -840,161 +264,6 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
 
 // The public resolved marker intentionally omits TTL metadata. These snapshots
 // observe retention/rollback only; marker creation and accessibility use the store API.
-async fn retention_snapshot(
-    store: &SqlHistoryMarkerStore,
-    owner: &Principal,
-) -> Vec<(String, i64, i64, Option<i64>)> {
-    let principal = owner.continuation_key();
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => sqlx::query_as(
-            "SELECT reference, expires_at, updated_at, published_at FROM history_markers \
-             WHERE principal = ? ORDER BY reference",
-        )
-        .bind(&principal)
-        .fetch_all(pool)
-        .await
-        .unwrap(),
-        SqlHistoryMarkerStore::Postgres(pool) => sqlx::query_as(
-            "SELECT reference, expires_at, updated_at, published_at FROM history_markers \
-             WHERE principal = $1 ORDER BY reference",
-        )
-        .bind(&principal)
-        .fetch_all(pool)
-        .await
-        .unwrap(),
-    }
-}
-
-async fn assert_batch_retention_contract(store: &SqlHistoryMarkerStore) {
-    let owner = principal("marker-batch-owner");
-    let foreign_owner = principal("marker-batch-foreign");
-    // Reserve and sort first so every unavailable reference sorts after more
-    // than one chunk of valid owner references, independent of random IDs.
-    let mut markers: Vec<_> = (0..407).map(|_| reserve_thinking_marker()).collect();
-    markers.sort_unstable_by(|left, right| left.reference.cmp(&right.reference));
-    for (index, marker) in markers.iter().enumerate() {
-        store
-            .create_reserved_thinking(
-                if index == 406 { &foreign_owner } else { &owner },
-                marker,
-                ThinkingMarkerInput {
-                    block: ContentBlock::RedactedThinking {
-                        data: "opaque-retention".into(),
-                    },
-                    source: None,
-                    activity: marker.activity.clone(),
-                    pending_retention: Duration::from_secs(3600),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    let references: Vec<_> = markers[..405]
-        .iter()
-        .map(|marker| marker.reference.clone())
-        .collect();
-    store
-        .publish(&owner, &references[..1], Duration::from_secs(3600))
-        .await
-        .unwrap();
-    let expired = &markers[405].reference;
-    match store {
-        SqlHistoryMarkerStore::Sqlite(pool) => {
-            sqlx::query("UPDATE history_markers SET expires_at = 0 WHERE reference = ?")
-                .bind(expired)
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-        SqlHistoryMarkerStore::Postgres(pool) => {
-            sqlx::query("UPDATE history_markers SET expires_at = 0 WHERE reference = $1")
-                .bind(expired)
-                .execute(pool)
-                .await
-                .unwrap();
-        }
-    }
-    let initial = retention_snapshot(store, &owner).await;
-    let foreign_initial = retention_snapshot(store, &foreign_owner).await;
-    let long = Duration::from_secs(30 * 24 * 60 * 60);
-    let missing = format!("{}-missing", markers[406].reference);
-    for unavailable in [
-        missing.as_str(),
-        expired.as_str(),
-        markers[406].reference.as_str(),
-    ] {
-        let mut requested = references.clone();
-        requested.extend_from_within(..);
-        requested.push(unavailable.into());
-        let error = store
-            .extend_retention(&owner, &requested, long)
-            .await
-            .unwrap_err();
-        assert!(matches!(&error, HistoryMarkerError::Storage(message)
-            if message == "trusted Generation Chain references an unavailable history marker"));
-        assert_eq!(
-            retention_snapshot(store, &owner).await,
-            initial,
-            "a later unavailable reference must roll back earlier chunks"
-        );
-        assert_eq!(
-            retention_snapshot(store, &foreign_owner).await,
-            foreign_initial
-        );
-        assert!(store.resolve(&owner, unavailable).await.unwrap().is_none());
-    }
-    let mut repeated = references.clone();
-    repeated.extend_from_within(..);
-    let before = chrono::Utc::now().timestamp_millis();
-    store
-        .extend_retention(&owner, &repeated, long)
-        .await
-        .unwrap();
-    let retained = retention_snapshot(store, &owner).await;
-    for row in retained.iter().filter(|row| row.0 != *expired) {
-        assert!(row.1 >= before + 30 * 24 * 60 * 60 * 1000);
-    }
-    for (index, reference) in references.iter().enumerate() {
-        let resolved = store.resolve(&owner, reference).await.unwrap().unwrap();
-        assert_eq!(
-            resolved.published,
-            index == 0,
-            "renewal does not publish pending markers"
-        );
-    }
-    store
-        .extend_retention(&owner, &repeated, Duration::ZERO)
-        .await
-        .unwrap();
-    let shorter = retention_snapshot(store, &owner).await;
-    assert_eq!(
-        shorter
-            .iter()
-            .map(|row| (&row.0, row.1, row.3))
-            .collect::<Vec<_>>(),
-        retained
-            .iter()
-            .map(|row| (&row.0, row.1, row.3))
-            .collect::<Vec<_>>(),
-        "renewal cannot shorten TTL or change publication"
-    );
-    assert!(store.resolve(&owner, expired).await.unwrap().is_none());
-    store.extend_retention(&owner, &[], long).await.unwrap();
-}
-
-#[tokio::test]
-async fn sqlite_history_marker_batch_retention_is_atomic_and_monotonic() {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    crate::migrations::migrate_sqlite(&pool, None)
-        .await
-        .unwrap();
-    assert_batch_retention_contract(&SqlHistoryMarkerStore::sqlite(pool)).await;
-}
-
 #[tokio::test]
 async fn sqlite_history_marker_store_contract() {
     assert_store_contract(sqlite_store().await).await;
@@ -1026,13 +295,10 @@ async fn postgres_history_marker_store_contract_when_configured() {
         .connect_with(options)
         .await
         .expect("isolated PostgreSQL pool");
-    crate::migrations::run_postgres_migrator(&pool, &legacy_public_migrator(false), None)
+    crate::migrations::migrate_postgres(&pool, None)
         .await
-        .expect("legacy PostgreSQL migrations");
-    assert_public_upgrade_contract(&SqlHistoryMarkerStore::postgres(pool.clone())).await;
+        .expect("PostgreSQL migrations");
     assert_store_contract(Arc::new(SqlHistoryMarkerStore::postgres(pool.clone()))).await;
-    assert_batch_retention_contract(&SqlHistoryMarkerStore::postgres(pool.clone())).await;
-    assert_public_cleanup_contract(&SqlHistoryMarkerStore::postgres(pool.clone())).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
@@ -1060,7 +326,6 @@ async fn sqlite_claim_is_atomic_across_store_instances() {
                 call: call("call-atomic"),
                 activity: "Searching the web".into(),
                 execution_limit: Duration::from_secs(30),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1109,7 +374,6 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
                 call: call("deadline"),
                 activity: "Searching the web".into(),
                 execution_limit: Duration::from_millis(1),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1142,7 +406,6 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
                 call: call("interrupted"),
                 activity: "Searching the web".into(),
                 execution_limit: Duration::from_secs(10),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1207,162 +470,6 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
 }
 
 #[tokio::test]
-async fn sqlite_completed_marker_remains_immutable_after_its_execution_deadline() {
-    let pool = sqlite_pool().await;
-    let store = SqlHistoryMarkerStore::sqlite(pool.clone());
-    let owner = principal("owner");
-    let marker = store
-        .create_platform(
-            &owner,
-            PlatformMarkerInput {
-                tool_id: "web-search".into(),
-                call: call("completed"),
-                activity: "Searching the web".into(),
-                execution_limit: Duration::from_millis(50),
-                pending_retention: Duration::from_secs(60),
-            },
-        )
-        .await
-        .unwrap();
-    // Control persisted time boundaries, not scheduler latency: completion must
-    // happen before the deadline even when the full suite stalls this task.
-    assert_eq!(
-        sqlx::query("UPDATE history_markers SET execution_deadline = ? WHERE reference = ?")
-            .bind(i64::MAX)
-            .bind(&marker.reference)
-            .execute(&pool)
-            .await
-            .unwrap()
-            .rows_affected(),
-        1
-    );
-    assert_eq!(
-        store
-            .claim_execution(&owner, &marker.reference, "worker", Duration::from_secs(1))
-            .await
-            .unwrap(),
-        ClaimOutcome::Claimed
-    );
-    assert_eq!(
-        sqlx::query("UPDATE history_markers SET lease_expires_at = ? WHERE reference = ?")
-            .bind(i64::MAX)
-            .bind(&marker.reference)
-            .execute(&pool)
-            .await
-            .unwrap()
-            .rows_affected(),
-        1
-    );
-    let segment = HiddenHistorySegment::Platform {
-        call: call("completed"),
-        result: ContentBlock::ToolResult {
-            content_kind: Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
-            tool_use_id: "completed".into(),
-            content: serde_json::json!("done"),
-            is_error: Some(false),
-            cache_control: None,
-        },
-    };
-    store
-        .finish_execution(
-            &owner,
-            &marker.reference,
-            "worker",
-            PlatformExecutionState::Completed,
-            segment.clone(),
-        )
-        .await
-        .unwrap();
-    let completed = store
-        .resolve(&owner, &marker.reference)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        completed.execution_state,
-        Some(PlatformExecutionState::Completed)
-    );
-    assert_eq!(completed.execution_deadline_unix_ms, Some(i64::MAX));
-    assert_eq!(
-        serde_json::to_value(completed.segment).unwrap(),
-        serde_json::to_value(Some(segment.clone())).unwrap()
-    );
-    // Only move the deadline into the past after observing a durable Completed
-    // result through the consumer API. Keep retention separate from execution.
-    assert_eq!(
-        sqlx::query("UPDATE history_markers SET execution_deadline = 0 WHERE reference = ?")
-            .bind(&marker.reference)
-            .execute(&pool)
-            .await
-            .unwrap()
-            .rows_affected(),
-        1
-    );
-    let resolved = store
-        .resolve(&owner, &marker.reference)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(resolved.execution_deadline_unix_ms, Some(0));
-    assert_eq!(
-        resolved.execution_state,
-        Some(PlatformExecutionState::Completed)
-    );
-    assert_eq!(
-        serde_json::to_value(resolved.segment).unwrap(),
-        serde_json::to_value(Some(segment)).unwrap()
-    );
-}
-
-#[tokio::test]
-async fn sqlite_thinking_markers_are_immutable_and_publish_extends_retention() {
-    let store = sqlite_store().await;
-    let owner = principal("owner");
-    let block = ContentBlock::RedactedThinking {
-        data: "opaque".into(),
-    };
-    let marker = store
-        .create_thinking(
-            &owner,
-            ThinkingMarkerInput {
-                source: None,
-                block: block.clone(),
-                activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_millis(50),
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store.cleanup_expired().await.unwrap();
-    let resolved = store
-        .resolve(&owner, &marker.reference)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(resolved.published);
-    let Some(HiddenHistorySegment::Thinking {
-        block: restored_block,
-        ..
-    }) = resolved.segment
-    else {
-        panic!("Thinking marker should restore one Thinking segment");
-    };
-    assert_eq!(
-        serde_json::to_value(restored_block).unwrap(),
-        serde_json::to_value(block).unwrap()
-    );
-}
-
-#[tokio::test]
 async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_edits() {
     let store = sqlite_store().await;
     let owner = principal("owner");
@@ -1376,17 +483,12 @@ async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_e
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let rendered = render_history_marker(&marker);
@@ -1439,17 +541,12 @@ async fn resolver_collapses_legacy_marker_item_duplicate_without_losing_public_c
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let mut marked = AiItem::output_text(format!("{}public", render_history_marker(&marker)));
@@ -1502,17 +599,12 @@ async fn resolver_removes_unknown_and_unauthorized_private_markers() {
                     data: "private".into(),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let unknown = HistoryMarker {
@@ -1550,7 +642,6 @@ async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_p
                 call: call("call-ordered"),
                 activity: "Searching the web".into(),
                 execution_limit: Duration::from_secs(30),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1581,11 +672,7 @@ async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_p
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
 
@@ -1641,17 +728,12 @@ async fn resolver_replaces_protected_preview_with_authoritative_thinking() {
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let projected = format!(
@@ -1687,17 +769,12 @@ async fn resolver_treats_content_preview_as_display_only_while_marker_remains() 
                     signature: None,
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let edited_preview =
@@ -1743,17 +820,12 @@ async fn published_signed_thinking(
                 source: None,
                 block,
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     marker
@@ -1916,7 +988,6 @@ async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
                     signature: None,
                 },
                 activity: reserved.activity.clone(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1982,7 +1053,6 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
                     encrypted_content: Some("opaque-encrypted-content".into()),
                 },
                 activity: "Preserving encrypted reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -1996,7 +1066,6 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
                     data: "opaque-redacted-content".into(),
                 },
                 activity: "Preserving redacted reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -2005,7 +1074,6 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
         .publish(
             &owner,
             &[encrypted.reference.clone(), redacted.reference.clone()],
-            Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -2081,17 +1149,12 @@ async fn resolver_keeps_tool_use_mirrors_with_their_fragments() {
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let mirrored_call = ToolCall {
@@ -2193,17 +1256,12 @@ async fn resolver_strips_mismatched_delimiters_without_retyping_visible_bytes() 
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let projected = format!(
@@ -2243,17 +1301,12 @@ async fn resolver_treats_marker_removal_as_an_explicit_projection_edit() {
                     signature: Some("opaque-signature".into()),
                 },
                 activity: "Preserving protected reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            std::slice::from_ref(&marker.reference),
-            Duration::from_secs(60),
-        )
+        .publish(&owner, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
     let mut request = AiRequest::new(
@@ -2290,7 +1343,6 @@ async fn resolver_restores_multiple_markers_at_block_boundaries_once_in_order() 
                     signature: Some("first-signature".into()),
                 },
                 activity: "Preserving first reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -2305,17 +1357,12 @@ async fn resolver_restores_multiple_markers_at_block_boundaries_once_in_order() 
                     signature: Some("second-signature".into()),
                 },
                 activity: "Preserving second reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
         .unwrap();
     store
-        .publish(
-            &owner,
-            &[first.reference.clone(), second.reference.clone()],
-            Duration::from_secs(60),
-        )
+        .publish(&owner, &[first.reference.clone(), second.reference.clone()])
         .await
         .unwrap();
     let projected = format!(
@@ -2360,7 +1407,6 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
                     signature: Some("opaque".into()),
                 },
                 activity: "Unpublished reasoning".into(),
-                pending_retention: Duration::from_secs(60),
             },
         )
         .await
@@ -2375,7 +1421,6 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
                     signature: Some("opaque".into()),
                 },
                 activity: "Expired reasoning".into(),
-                pending_retention: Duration::ZERO,
             },
         )
         .await
@@ -2453,4 +1498,181 @@ async fn resolver_leaves_private_syntax_inside_tool_output_unchanged() {
         &request.items[0].content,
         MessageContent::Text(text) if text.as_str() == fixture
     ));
+}
+
+async fn assert_marker_retention_floor(store: Arc<dyn HistoryMarkerStore>) {
+    let owner = principal("marker-retention-owner");
+    let marker = store
+        .create_platform(
+            &owner,
+            PlatformMarkerInput {
+                tool_id: "web_search".into(),
+                call: call("retention-call"),
+                activity: "Searching".into(),
+                execution_limit: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("create marker");
+    let started_at = chrono::Utc::now().timestamp_millis();
+
+    store
+        .sweep(started_at + 1_000, Duration::from_secs(3600))
+        .await
+        .expect("early sweep");
+    assert!(
+        store
+            .resolve(&owner, &marker.reference)
+            .await
+            .unwrap()
+            .is_some(),
+        "未发布标记在 pending 窗口内不得回收"
+    );
+
+    store
+        .sweep(started_at + 2 * 3600 * 1_000, Duration::from_secs(3600))
+        .await
+        .expect("pending sweep");
+    assert!(
+        store
+            .resolve(&owner, &marker.reference)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let published = store
+        .create_platform(
+            &owner,
+            PlatformMarkerInput {
+                tool_id: "web_search".into(),
+                call: call("published-retention-call"),
+                activity: "Searching".into(),
+                execution_limit: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("create published marker");
+    store
+        .publish(&owner, std::slice::from_ref(&published.reference))
+        .await
+        .expect("publish marker");
+    let published_at = chrono::Utc::now().timestamp_millis();
+    store
+        .sweep(
+            published_at + 6 * 24 * 3600 * 1_000,
+            Duration::from_secs(7 * 24 * 3600),
+        )
+        .await
+        .expect("retained sweep");
+    assert!(
+        store
+            .resolve(&owner, &published.reference)
+            .await
+            .unwrap()
+            .is_some(),
+        "已发布标记在 N 内必须保留"
+    );
+    store
+        .sweep(
+            published_at + 8 * 24 * 3600 * 1_000,
+            Duration::from_secs(7 * 24 * 3600),
+        )
+        .await
+        .expect("expired sweep");
+    assert!(
+        store
+            .resolve(&owner, &published.reference)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn sqlite_marker_reclaims_only_after_pending_or_published_floor() {
+    assert_marker_retention_floor(sqlite_store().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at PostgreSQL"]
+async fn postgres_marker_reclaims_only_after_pending_or_published_floor() {
+    let url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("DB_URL"))
+        .expect("DATABASE_URL");
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("admin pool");
+    let schema = format!("stravia_marker_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("options");
+    let options = options.options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .expect("isolated pool");
+    crate::migrations::migrate_postgres(&pool, None)
+        .await
+        .unwrap();
+    assert_marker_retention_floor(Arc::new(SqlHistoryMarkerStore::postgres(pool.clone()))).await;
+    pool.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+    admin.close().await;
+}
+
+#[cfg(test)]
+impl SqlHistoryMarkerStore {
+    /// 只供旧领域 payload fixture 使用：逐个 Marker 经领域编码重写段载荷，不依赖内部 descriptor 布局。
+    pub(crate) async fn rewrite_segments(
+        &self,
+        mut edit: impl FnMut(&mut serde_json::Value),
+    ) -> anyhow::Result<()> {
+        let Self::Sqlite(pool) = self else {
+            anyhow::bail!("rewrite_segments is only available for SQLite fixtures");
+        };
+        let rows: Vec<(String, String, Vec<u8>)> = sqlx::query_as(
+            "SELECT reference, principal, segment_payload FROM history_markers \
+             WHERE segment_payload IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        for (reference, principal, envelope) in rows {
+            let segment = super::payload::sqlite::read_segments(
+                pool,
+                &principal,
+                &[(reference.clone(), Some(envelope))],
+            )
+            .await?
+            .pop()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("history marker segment is missing"))?;
+            let mut value = serde_json::to_value(&segment)?;
+            edit(&mut value);
+            let segment: HiddenHistorySegment = serde_json::from_value(value)?;
+            let payload = super::content::encode_segment(&segment)?;
+            let mut connection = pool.acquire_write().await?;
+            let mut transaction = connection.begin().await?;
+            let (envelope, ids) =
+                super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
+                    .await?;
+            super::payload::sqlite::replace_refs(&mut transaction, &reference, &ids).await?;
+            sqlx::query("UPDATE history_markers SET segment_payload = ? WHERE reference = ?")
+                .bind(envelope)
+                .bind(&reference)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            connection.finish().await?;
+        }
+        Ok(())
+    }
 }

@@ -204,8 +204,9 @@ impl DiscoveryWorkspace {
         principal: &Principal,
         nodes: &[Arc<DecodedDiscoveryNode>],
         chain: &stravia_runtime_contract::turn_chain::SharedMaterializedTurnChain,
+        retention_days: u32,
     ) -> Result<MaterializedGeneration, String> {
-        match materialize_discovery_nodes(nodes, chain.expires_at) {
+        match materialize_discovery_nodes(nodes, chain.expires_at, retention_days) {
             Ok(materialized) => {
                 self.retain(principal, nodes, chain);
                 Ok(materialized)
@@ -261,7 +262,8 @@ impl DiscoveryWorkspace {
 #[derive(Clone)]
 pub(super) struct GenerationChainStore {
     pub(super) turn_chain: Arc<dyn TurnChainStore>,
-    ttl: Duration,
+    /// 与 Turn Chain 共享的内存保留天数；缓存命中时按当前值重算有效期。
+    pub(super) retention: crate::history_retention::HistoryRetention,
     runtime_cache: RuntimeCache,
 }
 
@@ -283,6 +285,8 @@ pub(super) struct MaterializedGeneration {
     pub(super) payload_version: u32,
     #[serde(with = "cache_deadline")]
     pub(super) expires_at: std::time::Instant,
+    /// 物化时的保留天数；命中时按当前天数平移有效期。
+    pub(super) retention_days: u32,
 }
 
 impl MaterializedGeneration {
@@ -305,6 +309,7 @@ impl MaterializedGeneration {
             client_item_units: _,
             payload_version: _,
             expires_at: _,
+            retention_days: _,
         } = self;
         let mut bytes = std::mem::size_of::<Self>()
             .saturating_add(shared_window_bytes(&[
@@ -386,6 +391,8 @@ pub(super) struct GenerationChainCommit<'a> {
     pub(crate) response: AiResponse,
     pub(crate) upstream_response_id: Option<String>,
     pub(crate) effective_state: GenerationChainState,
+    pub(crate) marker_references: Vec<String>,
+    pub(crate) redaction_references: Vec<String>,
 }
 
 pub(super) fn generation_cache_key(
@@ -498,12 +505,12 @@ struct PrefixVerifyContext<'a> {
 impl GenerationChainStore {
     pub fn from_turn_chain(
         turn_chain: Arc<dyn TurnChainStore>,
-        ttl: Duration,
         runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
     ) -> Self {
         Self {
             turn_chain,
-            ttl,
+            retention,
             runtime_cache,
         }
     }
@@ -847,7 +854,7 @@ impl GenerationChainStore {
             let materialized = if let Some((nodes, expires_at)) =
                 workspace.chain(principal, &node_id, std::time::Instant::now())
             {
-                materialize_discovery_nodes(&nodes, expires_at)
+                materialize_discovery_nodes(&nodes, expires_at, self.retention.days())
                     .map_err(|_| BeginError::CompactionUnavailable)?
             } else {
                 if workspace.is_enabled_for(principal) {
@@ -865,7 +872,7 @@ impl GenerationChainStore {
                         }
                     };
                     workspace
-                        .fold(principal, &nodes, &chain)
+                        .fold(principal, &nodes, &chain, self.retention.days())
                         .map_err(|_| BeginError::CompactionUnavailable)?
                 } else {
                     let chain = match self
@@ -882,8 +889,12 @@ impl GenerationChainStore {
                             return Err(BeginError::CompactionUnavailable);
                         }
                     };
-                    materialize_generation_nodes(chain.nodes, chain.expires_at)
-                        .map_err(|_| BeginError::CompactionUnavailable)?
+                    materialize_generation_nodes(
+                        chain.nodes,
+                        chain.expires_at,
+                        self.retention.days(),
+                    )
+                    .map_err(|_| BeginError::CompactionUnavailable)?
                 }
             };
             let count = materialized.client_items.len();
@@ -935,7 +946,7 @@ impl GenerationChainStore {
                     .as_ref()
                     .is_some_and(|context| context.admission_open())
                 {
-                    workspace.fold(principal, &nodes, &chain)?;
+                    workspace.fold(principal, &nodes, &chain, self.retention.days())?;
                 }
                 (nodes, chain.expires_at)
             }
@@ -1128,9 +1139,13 @@ impl GenerationChainStore {
             .load_generation_chain(principal, id)
             .await
             .map_err(|_| not_found.to_string())?;
-        let (materialized, catalog) =
-            materialize_generation_nodes_with_catalog(chain.nodes, chain.expires_at, ingress)
-                .map_err(|_| not_found.to_string())?;
+        let (materialized, catalog) = materialize_generation_nodes_with_catalog(
+            chain.nodes,
+            chain.expires_at,
+            self.retention.days(),
+            ingress,
+        )
+        .map_err(|_| not_found.to_string())?;
         let materialized = Arc::new(materialized);
         self.materialization_cache_insert(
             principal_key.clone(),
@@ -1161,7 +1176,8 @@ impl GenerationChainStore {
         }
         if let Some((nodes, expires_at)) = workspace.chain(principal, id, std::time::Instant::now())
         {
-            return materialize_discovery_nodes(&nodes, expires_at).map(Arc::new);
+            return materialize_discovery_nodes(&nodes, expires_at, self.retention.days())
+                .map(Arc::new);
         }
         let principal_key = principal.continuation_key();
         if let Some(materialized) = self.materialization_cache_get(&principal_key, id).await {
@@ -1173,7 +1189,8 @@ impl GenerationChainStore {
             .read(self.turn_chain.as_ref(), principal, id)
             .await
             .map_err(|error| error.to_string())?;
-        let materialized = Arc::new(workspace.fold(principal, &nodes, &chain)?);
+        let materialized =
+            Arc::new(workspace.fold(principal, &nodes, &chain, self.retention.days())?);
         self.materialization_cache_insert(principal_key, id.clone(), Arc::clone(&materialized))
             .await;
         Ok(materialized)
@@ -1191,10 +1208,30 @@ impl GenerationChainStore {
         }
         crate::performance::record_generation_cache_access(false);
         let chain = self.load_generation_chain(principal, id).await?;
-        let materialized = Arc::new(materialize_generation_nodes(chain.nodes, chain.expires_at)?);
+        let materialized = Arc::new(materialize_generation_nodes(
+            chain.nodes,
+            chain.expires_at,
+            self.retention.days(),
+        )?);
         self.materialization_cache_insert(principal_key, id.clone(), Arc::clone(&materialized))
             .await;
         Ok(materialized)
+    }
+
+    /// 物化时按当时 N 记下有效期；命中时按当前 N 平移。N 调小会缩短缓存寿命，
+    /// 但读取本身没有时间条件，未命中只是重新读取数据库。
+    fn generation_deadline(&self, materialized: &MaterializedGeneration) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        let remaining = materialized.expires_at.saturating_duration_since(now);
+        let delta_days = i64::from(self.retention.days()) - i64::from(materialized.retention_days);
+        let remaining = i64::try_from(remaining.as_millis())
+            .unwrap_or(i64::MAX)
+            .saturating_add(delta_days.saturating_mul(crate::history_retention::DAY_MILLIS));
+        if remaining <= 0 {
+            now
+        } else {
+            now + std::time::Duration::from_millis(u64::try_from(remaining).unwrap_or(u64::MAX))
+        }
     }
 
     async fn materialization_cache_get(
@@ -1207,7 +1244,7 @@ impl GenerationChainStore {
             .runtime_cache
             .get::<MaterializedGeneration>("generation.materialized", &key)
             .await?;
-        if materialized.expires_at <= std::time::Instant::now()
+        if self.generation_deadline(&materialized) <= std::time::Instant::now()
             || materialized.payload_version != RESPONSE_PAYLOAD_VERSION
         {
             self.runtime_cache
@@ -1224,8 +1261,8 @@ impl GenerationChainStore {
         id: TurnNodeId,
         materialized: Arc<MaterializedGeneration>,
     ) {
-        let ttl = materialized
-            .expires_at
+        let ttl = self
+            .generation_deadline(&materialized)
             .saturating_duration_since(std::time::Instant::now());
         if ttl.is_zero() || materialized.payload_version != RESPONSE_PAYLOAD_VERSION {
             return;
@@ -1324,6 +1361,8 @@ impl GenerationChainStore {
             response,
             upstream_response_id,
             mut effective_state,
+            marker_references,
+            redaction_references,
         } = commit;
         let mut response = response;
         let mut effective_request = Cow::Borrowed(effective_request.unwrap_or(request_delta));
@@ -1448,7 +1487,9 @@ impl GenerationChainStore {
                 principal: principal.clone(),
                 payload_version: RESPONSE_PAYLOAD_VERSION,
                 payload,
-                idle_ttl: self.ttl,
+                marker_references,
+                redaction_references,
+                compaction_record_ids: parent.compaction_record_ids.clone(),
                 reusable_prefix,
             })
             .await?;

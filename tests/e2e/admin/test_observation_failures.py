@@ -8,7 +8,6 @@ import sqlite3
 import tempfile
 import threading
 import time
-import uuid
 import zipfile
 from contextlib import closing
 from pathlib import Path
@@ -23,7 +22,6 @@ import pytest
 from tests.common.helpers import (
     WebSession,
     download_observation_bundle,
-    encode_storage_json,
     find_free_port,
     http_bytes,
     http_request,
@@ -606,7 +604,7 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
                 assert interrupted["runs"][0]["status"] == "interrupted"
                 assert interrupted["runs"][0]["terminal_reason"] == "process_restarted"
                 assert any(
-                    event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted"
+                    event["kind"] == "run_state_changed" and event["payload"].get("status") == "interrupted"
                     for event in interrupted["runs"][0]["events"]
                 )
 
@@ -622,66 +620,32 @@ def test_restart_interrupts_running_activity_and_pending_client_tools(
         mock_server.server_close()
 
 
-def _seed_resolved_waiting_siblings(data_dir: Path, interaction_id: str) -> str:
-    """Seed resolved tool siblings in the current schema of a stopped isolated instance."""
-    database = data_dir / "db" / "gateway.db"
-    assert data_dir.is_absolute() and database.is_file()
-    with closing(sqlite3.connect(database)) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        root = dict(connection.execute(
-            "SELECT * FROM inference_run_observations WHERE interaction_id = ?",
-            (interaction_id,),
-        ).fetchone())
-        assert root["status"] == "completed"
-        waiting_id = f"req-{uuid.uuid4()}"
-        result_id = f"req-{uuid.uuid4()}"
-        sequence = connection.execute(
-            "SELECT next_sequence FROM observation_sequence WHERE singleton_id = 1"
-        ).fetchone()[0]
-        for run_id, run_status, records in (
-            (waiting_id, "waiting_client", [
-                ("run_admitted", {"parent_run_id": root["id"]}),
-                ("client_tool_handoff", {"tool_id": "restart-a", "name": "local_probe", "input": {}}),
-                ("client_tool_handoff", {"tool_id": "restart-b", "name": "local_probe", "input": {}}),
-                ("run_finished", {"status": "waiting_client", "delivery": {"status": "delivered", "reason": None}}),
-            ]),
-            (result_id, "completed", [
-                ("run_admitted", {"parent_run_id": root["id"]}),
-                ("client_tool_result", {"tool_id": "restart-a", "content": "ok", "is_error": False}),
-                ("client_tool_result", {"tool_id": "restart-b", "content": "tool failed", "is_error": True}),
-                ("run_finished", {"status": "completed", "delivery": {"status": "delivered", "reason": None}}),
-            ]),
-        ):
-            run = {**root, "id": run_id, "parent_run_id": root["id"],
-                   "generation_node_id": None, "generation_parent_id": root["generation_node_id"],
-                   "status": run_status, "last_event_sequence": sequence + len(records) - 1}
-            columns = ", ".join(run)
-            placeholders = ", ".join("?" for _ in run)
-            connection.execute(
-                f"INSERT INTO inference_run_observations ({columns}) VALUES ({placeholders})",
-                tuple(run.values()),
-            )
-            for kind, payload in records:
-                connection.execute(
-                    "INSERT INTO observation_events "
-                    "(sequence, occurred_at, interaction_id, run_id, kind, payload, expires_at, tool_id, operation_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sequence, root["last_active_at"], interaction_id, run_id,
-                     kind, encode_storage_json(payload), root["expires_at"],
-                     payload.get("tool_id"), payload.get("operation_id")),
-                )
-                sequence += 1
-        connection.execute(
-            "UPDATE observation_sequence SET next_sequence = ? WHERE singleton_id = 1",
-            (sequence,),
-        )
-        connection.execute(
-            "UPDATE interaction_observations SET status = 'waiting_client', last_event_sequence = ? WHERE id = ?",
-            (sequence - 1, interaction_id),
-        )
-        connection.commit()
-    return waiting_id
+def _create_resolved_waiting_interaction(env: dict[str, Any], route_id: str, api_key: str, model: str) -> tuple[dict[str, Any], str, str]:
+    """经真实 HTTP 流程制造“已被工具结果续接”的历史 waiting_client Run，返回 (Interaction 摘要, 父 Run id, 父 Run 状态)。"""
+    tools = [{"type": "function", "function": {"name": "local_probe", "parameters": {"type": "object"}}}]
+    history = [{"role": "user", "content": "observation-branch final response before restart"}]
+    status, first = _proxy(env, api_key, model, history, body_extra={"tools": tools})
+    assert status == 200, first
+    assistant = first["choices"][0]["message"]
+    assert assistant["tool_calls"], first
+    status, final = _proxy(env, api_key, model, [
+        *history, assistant,
+        {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": "ok"},
+    ], body_extra={"tools": tools})
+    assert status == 200, final
+
+    def settled() -> tuple[dict[str, Any], str, str] | None:
+        item = next((i for i in _route_interactions(env, route_id) if i["status"] == "completed"), None)
+        if item is None:
+            return None
+        detail = _detail(env, item["id"])
+        if len(detail["runs"]) != 2:
+            return None
+        # 续接后的父 Run 保持它自己的终态（不会被重启对账改写）；返回它的 id 供重启后比对。
+        first = min(detail["runs"], key=lambda run: run["started_at"])
+        return item, first["id"], first["status"]
+
+    return _wait_for("completed Interaction with resolved waiting Run", settled)
 
 
 @pytest.mark.e2e
@@ -696,15 +660,10 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                 stravia_binary, data_dir, f"http://127.0.0.1:{mock_port}"
             )
             try:
-                route_id, api_key = _create_route(env, "observation-recovery-completed")
-                status, response = _proxy(env, api_key, "observation-recovery-completed", [
-                    {"role": "user", "content": "final response before restart"},
-                ])
-                assert status == 200, response
-                completed = _wait_for("completed seed", lambda: next((
-                    item for item in _route_interactions(env, route_id)
-                    if item["status"] == "completed"
-                ), None))
+                route_id, api_key = _create_route(env, "observation-branch-recovery-completed")
+                completed, resolved_run, resolved_status = _create_resolved_waiting_interaction(
+                    env, route_id, api_key, "observation-branch-recovery-completed",
+                )
                 pending_route, pending_key = _create_route(env, "observation-branch-recovery")
 
                 def create_waiting(current_env: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -741,7 +700,6 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
             finally:
                 stop_stravia_server(process, logs)
 
-            resolved_run = _seed_resolved_waiting_siblings(data_dir, completed["id"])
             recovery_events: list[dict[str, Any]] | None = None
             for restart_index in range(2):
                 port = find_free_port()
@@ -769,8 +727,8 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                         assert exported["status"] == expected
                     resolved = _detail(current, completed["id"])
                     historical = next(run for run in resolved["runs"] if run["id"] == resolved_run)
-                    assert historical["status"] == "waiting_client"
-                    assert not any(event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted" for event in historical["events"])
+                    assert historical["status"] == resolved_status
+                    assert not any(event["kind"] == "run_state_changed" and event["payload"].get("status") == "interrupted" for event in historical["events"])
                     recovered_detail = _detail(current, pending["id"])
                     assert recovered_detail["interaction"]["last_active_at"] == before_active_at
                     recovered = recovered_detail["runs"][0]
@@ -781,9 +739,15 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                     assert [event for event in recovered["events"] if event["kind"] == "run_finished"] == [
                         event for event in before["events"] if event["kind"] == "run_finished"
                     ]
-                    events = [event for event in recovered["events"] if event["kind"] == "run_state_changed" and event["payload"].get("reason") == "process_restarted"]
-                    assert len(events) == 1
-                    assert events[0]["payload"] == {"status": "interrupted", "reason": "process_restarted"}
+                    # 状态变更事件不带 payload：status 在读取时取自 Run 列，重启原因只在 terminal_reason 列。
+                    # 因此重启前已存在的转换（交付结算）读出来也是 interrupted；一次重启恰好多一条。
+                    before_transitions = [event for event in before["events"] if event["kind"] == "run_state_changed"]
+                    events = [event for event in recovered["events"] if event["kind"] == "run_state_changed"]
+                    assert len(events) == len(before_transitions) + 1, events
+                    assert [event["sequence"] for event in events[:-1]] == [event["sequence"] for event in before_transitions]
+                    assert events[-1]["sequence"] > max(event["sequence"] for event in before["events"])
+                    assert all(event["payload"]["status"] == "interrupted" for event in events), events
+                    assert all("reason" not in event["payload"] for event in events), events
                     if recovery_events is not None:
                         assert events == recovery_events
                     recovery_events = events
@@ -872,13 +836,29 @@ def test_expired_waiting_client_is_removed_with_events_and_trace(
                 assert cleared["data"]["skipped_active"] == 1
                 assert _detail(env, waiting["id"])["interaction"]["status"] == "waiting_client"
 
+                # 保留期下限为 1 天：把等待中的 Interaction 回拨到 N 天之外，保存保留天数即清扫。
+                # 先借 bundle 导出通道排空 writer 队列，避免迟到事件把 last_active_at 刷回当前时间。
+                download_observation_bundle(env, _detail(env, waiting["id"]))
+                aged_at = int(time.time() * 1000) - 40 * 24 * 60 * 60 * 1000
+                with closing(
+                    sqlite3.connect(data_dir / "db" / "gateway.db", timeout=10)
+                ) as connection:
+                    connection.execute(
+                        "UPDATE inference_run_observations SET last_active_at = ? WHERE interaction_id = ?",
+                        (aged_at, waiting["id"]),
+                    )
+                    connection.execute(
+                        "UPDATE interaction_observations SET last_active_at = ? WHERE id = ?",
+                        (aged_at, waiting["id"]),
+                    )
+                    connection.commit()
                 status, setting = http_request(
                     "PUT",
                     f"{env['admin']}/api/v1/settings/log_retention_days",
-                    payload={"value": "0"},
+                    payload={"value": "7"},
                     headers=env["auth"],
                 )
-                assert status == 200, setting
+                assert status == 200 and "error" not in setting, setting
 
                 _wait_for(
                     "expired waiting-client removal",
@@ -1008,10 +988,9 @@ def test_idle_waiting_client_expires_to_disconnected_on_retention_sweep(
                 transitions = [
                     event for event in run["events"] if event["kind"] == "run_state_changed"
                 ]
-                assert transitions[-1]["payload"] == {
-                    "status": "disconnected",
-                    "reason": "client_wait_expired",
-                }
+                # 状态变更事件只带 Run 列的 status / superseded_by；原因在 terminal_reason 列。
+                assert transitions[-1]["payload"]["status"] == "disconnected"
+                assert "reason" not in transitions[-1]["payload"]
             finally:
                 stop_stravia_server(process, logs)
     finally:
@@ -1715,14 +1694,22 @@ def test_upstream_errors_list_detail_filters_and_retention(
     )
     assert status == 404
 
-    # 明细随所属运行过期；统计桶不受影响（本测试只验证列表口径）。
+    # 明细随所属 Interaction 的保留期清理；统计桶不受影响（本测试只验证列表口径）。
+    # 保留期没有到期列：把所属 Interaction 回拨到 N 天之外，再保存保留天数触发即时清扫。
     database = Path(admin_env["data_dir"]) / "db" / "gateway.db"
+    aged_at = int(time.time() * 1000) - 40 * 24 * 60 * 60 * 1000
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
-            "UPDATE inference_run_observations SET expires_at=? WHERE id=?",
-            (int(time.time() * 1000) - 1, recovered_run),
+            "UPDATE interaction_observations SET last_active_at=? WHERE id=("
+            "SELECT interaction_id FROM inference_run_observations WHERE id=?)",
+            (aged_at, recovered_run),
         )
         connection.commit()
+    status, saved = http_request(
+        "PUT", f"{admin_env['admin']}/api/v1/settings/log_retention_days",
+        payload={"value": "7"}, headers=admin_env["auth"],
+    )
+    assert status == 200 and "error" not in saved, saved
     assert recovered_id not in {
         item["id"] for item in _upstream_errors(admin_env, **window, limit=100)["items"]
     }
@@ -1941,10 +1928,16 @@ def test_upstream_errors_mark_client_tool_handoff_as_recovered(
     assistant = _tool_call_message(response)
     assert assistant["tool_calls"][0]["function"]["name"] == "local_probe"
     window = _window(started_at)
+    # 失败的 attempt 先于 Run 收尾落库（分阶段写入）：行出现时 outcome 仍可能是 in_progress，
+    # 等待写入器提交收尾事务后再断言最终结果。
     row = _wait_for(
-        "upstream error for tool handoff",
+        "upstream error for tool handoff with the run settled",
         lambda: next(
-            iter(_upstream_errors(admin_env, **window, model=route_id)["items"]),
+            (
+                item
+                for item in _upstream_errors(admin_env, **window, model=route_id)["items"]
+                if item["outcome"] != "in_progress"
+            ),
             None,
         ),
     )
@@ -2178,7 +2171,7 @@ def test_observation_sse_change_carries_error_source(admin_env: dict[str, Any]) 
         before,
         lambda observed: (
             observed["event"] == "observation"
-            and observed["data"]["kind"] == "target_attempt_finished"
+            and observed["data"]["kind"] == "model_turn_finished"
             and "error_source" not in observed["data"]
         ),
     )

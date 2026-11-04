@@ -381,8 +381,8 @@ fn definition() -> AgentDefinitionSpec {
             version: 1,
         }],
         budgets: AgentBudgets {
-            total_wall_time: Duration::from_secs(60),
-            working_wall_time: Duration::from_secs(50),
+            total_wall_time: std::time::Duration::from_secs(60),
+            working_wall_time: std::time::Duration::from_secs(50),
             model_turns: 4,
             tool_calls: Some(4),
             tool_parallelism: Some(2),
@@ -476,7 +476,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
         Some(pool.clone()),
         None,
         directory.path().to_path_buf(),
-        1,
+        crate::history_retention::HistoryRetention::new(1),
         true,
         crate::generation_chain::test_chain().await,
     )
@@ -586,7 +586,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
         .map(|events| tokio::spawn(async move { events.collect::<Vec<_>>().await }))
         .collect::<Vec<_>>();
     for driver in drivers {
-        let events = tokio::time::timeout(Duration::from_secs(10), driver).await??;
+        let events = tokio::time::timeout(std::time::Duration::from_secs(10), driver).await??;
         assert!(
             matches!(events.last(), Some(AgentEvent::Completed(_))),
             "{events:?}"

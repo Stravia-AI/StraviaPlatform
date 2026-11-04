@@ -315,7 +315,7 @@ Codex 的连接级 session/thread/window ID 由 `transport_affinity` 派生；We
 
 客户端只看到 Stravia response ID。`previous_response_id` 永远引用 Stravia Response Chain 节点；upstream response ID 是 Target continuation state，不能成为公共身份。
 
-Response Chain 是协议无关 Generation Chain 的 Responses 投影。Stravia 对每个完整交付的生成请求保存 canonical graph，并沿用 Principal isolation、分支语义和现有可配置 TurnChain TTL；默认 7 天。图片等二进制内容以 ArtifactRef 和 metadata 保存，不把 Base64 写入 TurnChain JSON。
+Response Chain 是协议无关 Generation Chain 的 Responses 投影。Stravia 对每个完整交付的生成请求保存 canonical graph，并沿用 Principal isolation、分支语义和统一的历史保留天数 N（`log_retention_days`，默认 7 天，最小 1 天）；节点只按 `created_at` 计时，后代存在时祖先随之保留，到期记录由后台扫描回收（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。图片等二进制内容以 ArtifactRef 和 metadata 保存，不把 Base64 写入 TurnChain JSON。
 
 ### 8.2 `store`
 

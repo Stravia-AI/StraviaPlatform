@@ -102,11 +102,7 @@ const ws = new ObservationWorkspace(
 )
 
 const selectedOutputPreview = $derived(
-  ws.interactionDetail
-    ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks)
-    : ws.selectedInteraction
-      ? { text: ws.selectedInteraction.visible_tail, start: 0 }
-      : undefined,
+  ws.interactionDetail ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks) : undefined,
 )
 const selectedFilterModel = $derived(modelsQuery.data?.find((item) => item.id === ws.modelFilter))
 const draftStartMs = $derived(new Date(draftStart).getTime())

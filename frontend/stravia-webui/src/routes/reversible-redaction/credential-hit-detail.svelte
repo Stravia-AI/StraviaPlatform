@@ -128,9 +128,6 @@ function selectMatch(index: number): void {
           : m.credential_protection_hit_records_no_hit_match()}
       </p>
     {/if}
-    {#if detail.truncated}
-      <p class="text-xs text-muted-foreground">{m.credential_protection_hit_records_truncated()}</p>
-    {/if}
     {#if canReveal}
       <div class="flex flex-wrap items-center gap-2">
         <Button

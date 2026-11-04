@@ -7,7 +7,6 @@ struct HeldPublicationStore {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
     fail: bool,
-    expire_intern: bool,
     held_intern: Option<Arc<HeldInternAcknowledgement>>,
     starts: AtomicUsize,
     cancel_on_release: Mutex<Option<CancellationToken>>,
@@ -40,16 +39,11 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         stravia_credential_protection::store::InternedMappings,
         stravia_runtime_contract::redaction::RedactionError,
     > {
-        let mut result = self.inner.intern(principal, secrets).await?;
+        let result = self.inner.intern(principal, secrets).await?;
         if let Some(held) = &self.held_intern {
             held.committed.notify_one();
             held.release.notified().await;
             held.acknowledged.notify_one();
-        }
-        if self.expire_intern {
-            for mapping in &mut result.mappings {
-                mapping.expires_at = 0;
-            }
         }
         Ok(result)
     }
@@ -58,11 +52,10 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         &self,
         principal: &Principal,
         references: &[String],
-        retention: Duration,
     ) -> Result<(), stravia_runtime_contract::redaction::RedactionError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         if !self.fail {
-            self.inner.publish(principal, references, retention).await?;
+            self.inner.publish(principal, references).await?;
         }
         self.entered.notify_one();
         self.release.notified().await;
@@ -76,21 +69,12 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         }
     }
 
-    async fn extend_retention(
+    async fn sweep(
         &self,
-        principal: &Principal,
-        references: &[String],
-        retention: Duration,
-    ) -> Result<(), stravia_runtime_contract::redaction::RedactionError> {
-        self.inner
-            .extend_retention(principal, references, retention)
-            .await
-    }
-
-    async fn cleanup_expired(
-        &self,
+        now: i64,
+        retention: std::time::Duration,
     ) -> Result<u64, stravia_runtime_contract::redaction::RedactionError> {
-        self.inner.cleanup_expired().await
+        self.inner.sweep(now, retention).await
     }
 
     async fn plaintext(
@@ -130,7 +114,6 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
         fail: false,
-        expire_intern: false,
         held_intern: Some(held.clone()),
         starts: AtomicUsize::new(0),
         cancel_on_release: Mutex::new(None),
@@ -424,7 +407,6 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
         fail: false,
-        expire_intern: true,
         held_intern: None,
         starts: AtomicUsize::new(0),
         cancel_on_release: Mutex::new(None),
@@ -438,13 +420,11 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
     let mut request = Arc::new(request);
-    assert!(matches!(
-        gateway
-            .redaction
-            .protect(&principal, &mut request, Some(&observer))
-            .await,
-        Err(stravia_runtime_contract::redaction::RedactionError::InvalidText)
-    ));
+    gateway
+        .redaction
+        .protect(&principal, &mut request, Some(&observer))
+        .await
+        .expect("protect records the committed discovery");
     observer.finish(crate::interaction_observation::RunOutcome {
         delivery: None,
         client_output_committed: false,
@@ -570,7 +550,6 @@ async fn held_publication_turn(
     Arc<HeldPublicationStore>,
     Principal,
     (CancellationToken, Deadline),
-    i64,
 ) {
     let (directory, mut gateway, _, key) =
         gateway_with_captured_thinking("publication-model", true, "answer <!--sr:", None).await;
@@ -580,7 +559,6 @@ async fn held_publication_turn(
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
         fail,
-        expire_intern: false,
         held_intern: None,
         starts: AtomicUsize::new(0),
         cancel_on_release: Mutex::new(None),
@@ -591,7 +569,6 @@ async fn held_publication_turn(
         gateway.redaction.custom_rules.clone(),
     );
     let mut request = AiRequest::new("publication-model", Vec::new());
-    let mut pending_expiry = 0;
     if !late_reference {
         let mapping = store
             .inner
@@ -610,7 +587,6 @@ async fn held_publication_turn(
             "{}\napi_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"",
             mapping.reference
         ));
-        pending_expiry = mapping.expires_at;
     }
     let mut related = request.clone();
     let cancellation = CancellationToken::new();
@@ -631,7 +607,7 @@ async fn held_publication_turn(
         .admit(
             crate::interaction_observation::RunStart {
                 id: run_id,
-                principal: principal.continuation_key(),
+                principal: principal.api_key_id().into(),
                 api_key_id: None,
                 api_key_name: None,
                 route_id: "publication-model".into(),
@@ -668,7 +644,6 @@ async fn held_publication_turn(
             .unwrap()
             .mappings
             .remove(0);
-        pending_expiry = mapping.expires_at;
         related.instructions = Some(mapping.reference);
         let mut related = Arc::new(related);
         gateway
@@ -684,7 +659,6 @@ async fn held_publication_turn(
         store,
         principal,
         (cancellation, deadline),
-        pending_expiry,
     )
 }
 
@@ -706,7 +680,7 @@ async fn consume_until_publication(turn: &mut ModelTurn, store: &HeldPublication
 
 #[tokio::test]
 async fn canonical_completion_publishes_after_trailing_output_and_is_permanently_terminal() {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
@@ -714,7 +688,6 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
     );
     // The select above dropped a pending next() future. Publication must survive
     // that pause and resume rather than issuing a second write.
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     store.release.notify_one();
     match turn.output.next().await.unwrap().unwrap() {
         CanonicalEvent::Completed(response) => {
@@ -735,13 +708,12 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
 
 #[tokio::test]
 async fn canonical_completion_publishes_current_shared_trace_with_empty_local_mappings() {
-    let (_directory, _gateway, mut turn, store, principal, _, pending_expiry) =
+    let (_directory, _gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, true).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
         "answer <!--sr:"
     );
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     store.release.notify_one();
     assert!(matches!(
         turn.output.next().await,
@@ -752,7 +724,7 @@ async fn canonical_completion_publishes_current_shared_trace_with_empty_local_ma
 
 #[tokio::test]
 async fn canonical_completion_reports_publication_failure_without_success_or_upstream_replay() {
-    let (_directory, gateway, mut turn, store, _, _, _) = held_publication_turn(true, false).await;
+    let (_directory, gateway, mut turn, store, _, _) = held_publication_turn(true, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
         "answer <!--sr:"
@@ -772,7 +744,7 @@ async fn canonical_completion_reports_publication_failure_without_success_or_ups
 #[tokio::test]
 async fn canonical_completion_cancellation_interrupts_publication_without_revoking_committed_mappings()
  {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     cancellation.cancel();
@@ -782,7 +754,6 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
         "cancelled"
     );
     assert!(turn.output.next().await.is_none());
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     drop(turn);
     assert_publication_observation(&gateway, "cancelled").await;
     let discoveries = gateway
@@ -800,7 +771,7 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
 
 #[tokio::test]
 async fn canonical_completion_deadline_interrupts_publication() {
-    let (_directory, gateway, mut turn, store, _, (_, deadline), _) =
+    let (_directory, gateway, mut turn, store, _, (_, deadline)) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     // Deadline 使用 std::time::Instant；虚拟推进 Tokio 会空转至真实五分钟。
@@ -844,34 +815,30 @@ async fn assert_publication_observation(gateway: &Gateway, status: &str) {
         "one owner records the Model Turn result"
     );
     assert_eq!(terminals[0].payload["status"], status);
-    let attempts = run
-        .events
-        .iter()
-        .filter(|event| event.kind == "target_attempt_finished")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        attempts.len(),
-        1,
-        "local publication never retries an upstream attempt"
+    // 上游尝试的结束事实随 Turn 结束行一起落盘；本地发布失败不会产生第二次上游尝试。
+    assert!(
+        run.events
+            .iter()
+            .all(|event| event.kind != "target_attempt_finished"),
+        "attempt terminal is folded into the Model Turn terminal"
     );
-    assert_eq!(attempts[0].payload["status"], "completed");
+    assert_eq!(terminals[0].payload["attempt"]["status"], "completed");
     assert_eq!(run.usage.input_tokens, Some(1));
     assert_eq!(run.usage.output_tokens, Some(1));
 }
 
 #[tokio::test]
 async fn dropping_pending_canonical_publication_records_cancelled_once() {
-    let (_directory, gateway, mut turn, store, principal, _, pending_expiry) =
+    let (_directory, gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     drop(turn);
     assert_publication_observation(&gateway, "cancelled").await;
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
 }
 
 #[tokio::test]
 async fn cancellation_in_publications_final_poll_preempts_completed() {
-    let (_directory, gateway, mut turn, store, principal, (cancellation, _), pending_expiry) =
+    let (_directory, gateway, mut turn, store, _principal, (cancellation, _)) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     *store.cancel_on_release.lock() = Some(cancellation);
@@ -883,12 +850,11 @@ async fn cancellation_in_publications_final_poll_preempts_completed() {
     assert!(turn.output.next().await.is_none());
     drop(turn);
     assert_publication_observation(&gateway, "cancelled").await;
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
 }
 
 #[tokio::test]
 async fn observation_writer_failure_does_not_change_canonical_publication_success() {
-    let (_directory, gateway, mut turn, store, principal, _, pending_expiry) =
+    let (_directory, gateway, mut turn, store, _principal, _) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
     gateway.observation.shutdown().await;
@@ -898,7 +864,6 @@ async fn observation_writer_failure_does_not_change_canonical_publication_succes
         Some(Ok(CanonicalEvent::Completed(_)))
     ));
     assert!(turn.output.next().await.is_none());
-    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
 }
 
 #[tokio::test]
@@ -915,71 +880,71 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
     .await
     .unwrap();
     let now = chrono::Utc::now().timestamp_millis();
-    let expires = now + 86_400_000;
-    let encode = |value: serde_json::Value| {
-        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
-    };
     let pool = gateway._sqlite_pool.as_ref().unwrap();
-    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0,?)")
+    sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0)")
         .bind(now - 100)
         .bind(now - 50)
-        .bind(expires)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?,?)")
+    sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ('hit-run','hit-interaction','openai','route','completed',0,?,?)")
         .bind(now - 100)
         .bind(now - 50)
-        .bind(expires)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,updated_at,expires_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,?,?,?,'[\"github-pat\"]')")
+    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,updated_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,NULL,?,?,'[\"github-pat\"]')")
         .bind(secret)
         .bind(now)
         .bind(now)
         .bind(now)
-        .bind(expires)
         .execute(pool)
         .await
         .unwrap();
-    for (sequence, kind, payload) in [
-        (
-            1,
-            "input_preview_recorded",
-            encode(serde_json::json!({
-                "kind": "input_preview_recorded",
-                "text": format!("please use {secret} now")
-            })),
-        ),
-        (
-            2,
-            "credential_mappings_created",
-            encode(serde_json::json!({
-                "kind": "credential_mappings_created",
-                "discoveries": [{
-                    "rule_ids": ["github-pat"],
-                    "source_types": ["user_message"],
-                    "locators": [{
-                        "rule_id": "github-pat",
-                        "source_type": "user_message",
-                        "latest_input": true
-                    }],
-                    "marker": "m-secret"
-                }]
-            })),
-        ),
-    ] {
-        sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES (?,?,'hit-interaction','hit-run',?,?,?)")
-            .bind(sequence)
-            .bind(now - 10 + sequence)
-            .bind(kind)
-            .bind(payload)
-            .bind(expires)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
+    let attrs = |value: serde_json::Value| {
+        crate::storage_codec::encode(serde_json::to_vec(&value).unwrap().into()).unwrap()
+    };
+    let mut connection = pool.acquire().await.unwrap();
+    let scope = crate::content_store::sqlite::resolve_scope(&mut connection, "api-key:hit")
+        .await
+        .unwrap();
+    let mut contents = [crate::content_store::Content::text(format!(
+        "please use {secret} now"
+    ))];
+    let content_ids = crate::content_store::sqlite::intern(&mut connection, scope, &mut contents)
+        .await
+        .unwrap();
+    drop(connection);
+    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (1,?,'hit-interaction','hit-run','user_input_recorded',?)")
+        .bind(now - 9)
+        .bind(attrs(serde_json::json!({})))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO observation_event_contents(sequence,ordinal,content_id) VALUES (1,0,?)",
+    )
+    .bind(content_ids[0])
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (2,?,'hit-interaction','hit-run','credential_mappings_created',?)")
+        .bind(now - 8)
+        .bind(attrs(serde_json::json!({
+            "discoveries": [{
+                "rule_ids": ["github-pat"],
+                "source_types": ["user_message"],
+                "locators": [{
+                    "rule_id": "github-pat",
+                    "source_type": "user_message",
+                    "latest_input": true
+                }],
+                "marker": "m-secret"
+            }]
+        })))
+        .execute(pool)
+        .await
+        .unwrap();
 
     let detail = gateway
         .admin()
@@ -990,7 +955,6 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         CredentialDiscoveryHitDetail::Available {
             field,
             text,
-            truncated,
             hit_basis,
             masked,
             matches,
@@ -998,7 +962,6 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
             assert_eq!(field.source_type, "user_message");
             assert_eq!(field.tool_id, None);
             assert_eq!(field.tool_name, None);
-            assert!(!truncated);
             assert!(!masked);
             assert!(text.contains(secret));
             assert_eq!(hit_basis, "secret");

@@ -101,31 +101,35 @@ fn fold_client_history_view(
 pub(super) fn materialize_generation_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
+    retention_days: u32,
 ) -> Result<MaterializedGeneration, String> {
-    materialize_generation_nodes_inner(nodes, expires_at, |_| {})
+    materialize_generation_nodes_inner(nodes, expires_at, retention_days, |_| {})
 }
 
 pub(super) fn materialize_generation_nodes_with_catalog(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
+    retention_days: u32,
     ingress: Option<ProtocolId>,
 ) -> Result<(MaterializedGeneration, Result<Vec<FrozenItem>, String>), String> {
     let mut catalog = Ok(Vec::new());
     // 保留原有错误优先级：完整验证历史后再报告引用目录的协议投影错误。
     // 目录按 (materialized, ingress) 缓存；此处仅负责本次构建，缓存归调用方。
-    let materialized = materialize_generation_nodes_inner(nodes, expires_at, |node| {
-        if let Ok(items) = catalog.as_mut()
-            && let Err(error) = append_history_catalog_node(items, node, ingress)
-        {
-            catalog = Err(error);
-        }
-    })?;
+    let materialized =
+        materialize_generation_nodes_inner(nodes, expires_at, retention_days, |node| {
+            if let Ok(items) = catalog.as_mut()
+                && let Err(error) = append_history_catalog_node(items, node, ingress)
+            {
+                catalog = Err(error);
+            }
+        })?;
     Ok((materialized, catalog))
 }
 
 fn materialize_generation_nodes_inner(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
+    retention_days: u32,
     visit_node: impl FnMut(&PersistedResponseNode<'static>),
 ) -> Result<MaterializedGeneration, String> {
     materialize_generation_replay(
@@ -133,6 +137,7 @@ fn materialize_generation_nodes_inner(
             decode_response_node(node).map(|(id, node)| (Cow::Owned(id), Cow::Owned(node)))
         }),
         expires_at,
+        retention_days,
         visit_node,
     )
 }
@@ -142,6 +147,7 @@ fn materialize_generation_replay<'a>(
         Item = Result<(Cow<'a, TurnNodeId>, Cow<'a, PersistedResponseNode<'static>>), String>,
     >,
     expires_at: std::time::Instant,
+    retention_days: u32,
     mut visit_node: impl FnMut(&PersistedResponseNode<'static>),
 ) -> Result<MaterializedGeneration, String> {
     let mut root_id = None;
@@ -259,18 +265,21 @@ fn materialize_generation_replay<'a>(
         client_history,
         payload_version: RESPONSE_PAYLOAD_VERSION,
         expires_at,
+        retention_days,
     })
 }
 
 pub(super) fn materialize_discovery_nodes(
     nodes: &[Arc<DecodedDiscoveryNode>],
     expires_at: std::time::Instant,
+    retention_days: u32,
 ) -> Result<MaterializedGeneration, String> {
     materialize_generation_replay(
         nodes
             .iter()
             .map(|node| Ok((Cow::Borrowed(&node.id), Cow::Borrowed(&node.persisted)))),
         expires_at,
+        retention_days,
         |_| {},
     )
 }

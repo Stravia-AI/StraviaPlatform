@@ -26,16 +26,17 @@ import { observationEventSummary, observationStatusTone } from '#lib/observation
 import {
   deriveEventItems,
   deriveTimeline,
+  eventKey,
   itemEvents,
   itemKey,
   processGroup,
   type StreamItem,
+  type TimelineEvent,
 } from '#lib/observation-timeline.js'
 import type {
   ClientErrorDetail,
   InteractionDetail,
   LiveContentBlock,
-  ObservationEvent,
   RunDetail,
   UpstreamErrorDetail,
 } from '#lib/types.js'
@@ -117,11 +118,17 @@ async function showRunInDiagnostics(runId: string) {
 }
 </script>
 
-{#snippet eventRow(event: ObservationEvent)}
+{#snippet eventRow(event: TimelineEvent)}
   {@const summary = observationEventSummary(event)}
+  <!-- 原始详情展示存储的事件：合并事件拆出的尝试行与轮次行都指向同一条存储记录。 -->
+  {@const stored = event.stored ?? event}
   <li class="stream-item">
     <Collapsible.Root>
-      <Collapsible.Trigger class="stream-row" data-tone={summary.tone} data-sequence={event.sequence}>
+      <Collapsible.Trigger
+        class="stream-row"
+        data-tone={summary.tone}
+        data-sequence={event.attempt ? undefined : event.sequence}
+        data-attempt-of={event.attempt ? event.sequence : undefined}>
         <span class="stream-text">
           <strong>{summary.title}</strong>
           {#each summary.facts as fact (fact.label)}
@@ -142,18 +149,18 @@ async function showRunInDiagnostics(runId: string) {
                 <dl class="detail-grid">
                   <div>
                     <dt>{m.observation_event_type()}</dt>
-                    <dd class="event-kind"><code>{event.kind}</code></dd>
+                    <dd class="event-kind"><code>{stored.kind}</code></dd>
                   </div>
                   <div>
                     <dt>{m.observation_event_sequence()}</dt>
-                    <dd class="font-technical">{event.sequence}</dd>
+                    <dd class="font-technical">{stored.sequence}</dd>
                   </div>
                   <div>
                     <dt>{m.failed_request_time()}</dt>
-                    <dd>{formatLogTime(event.occurred_at)}</dd>
+                    <dd>{formatLogTime(stored.occurred_at)}</dd>
                   </div>
                 </dl>
-                <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+                <pre>{JSON.stringify(stored.payload, null, 2)}</pre>
               </div>
             {/if}
           </div>
@@ -192,7 +199,7 @@ async function showRunInDiagnostics(runId: string) {
             <div {...props}>
               {#if open}
                 <ol class="branch sub">
-                  {#each events as event (event.sequence)}
+                  {#each events as event (eventKey(event))}
                     {@render eventRow(event)}
                   {/each}
                 </ol>

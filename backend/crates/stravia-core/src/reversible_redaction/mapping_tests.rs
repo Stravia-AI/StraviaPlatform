@@ -1,135 +1,101 @@
 use std::time::Duration;
+
 use stravia_credential_protection::store::{DetectedSecret, MappingStore, SqlMappingStore};
 use stravia_runtime_contract::Principal;
 
-const PUBLISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
-fn after(now: i64, retention: Duration) -> i64 {
-    now.saturating_add(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX))
-}
 
-async fn expire(store: &SqlMappingStore, reference: &str) {
-    match store {
-        SqlMappingStore::Sqlite(pool) => {
-            sqlx::query(
-                "UPDATE reversible_redaction_mappings SET expires_at = 0 WHERE reference = ?",
-            )
-            .bind(reference)
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-        SqlMappingStore::Postgres(pool) => {
-            sqlx::query(
-                "UPDATE reversible_redaction_mappings SET expires_at = 0 WHERE reference = $1",
-            )
-            .bind(reference)
-            .execute(pool)
-            .await
-            .unwrap();
-        }
+fn detect(value: &str) -> DetectedSecret {
+    DetectedSecret {
+        secret: value.into(),
+        rule_ids: vec!["test-rule".into()],
     }
 }
 
-async fn assert_batch_retention_contract(store: &SqlMappingStore) {
-    let owner = Principal::new("mapping-batch-owner");
-    let other = Principal::new("mapping-batch-other");
-    let secrets: Vec<_> = (0..407)
-        .map(|index| DetectedSecret::from(format!("batch-secret-{index}").as_str()))
-        .collect();
-    let mappings = store.intern(&owner, &secrets).await.unwrap().mappings;
-    let references: Vec<_> = mappings
-        .iter()
-        .map(|mapping| mapping.reference.clone())
-        .collect();
-    let foreign = store
-        .intern(&other, &["foreign-batch-secret".into()])
+async fn assert_unpublished_mapping_waits_for_pending_window(store: &SqlMappingStore) {
+    let owner = Principal::new("mapping-owner");
+    let mapping = store
+        .intern(&owner, &[detect("Q8n4Vk7sT2p9X5a3Lc6D0h1R")])
         .await
         .unwrap()
         .mappings
         .remove(0);
-    let long = Duration::from_secs(30 * 24 * 60 * 60);
-    let mut published = references[..405].to_vec();
-    published.extend_from_within(..);
-    published.push("missing-mapping".into());
-    published.push(foreign.reference.clone());
-    store
-        .publish(&owner, &published, Duration::ZERO)
-        .await
-        .unwrap();
-    expire(store, &references[405]).await;
-    let pending_expiry = mappings[406].expires_at;
-    let mut requested = references.clone();
-    requested.extend_from_within(..);
-    requested.push("missing-mapping".into());
-    requested.push(foreign.reference.clone());
-    let before = now();
-    store
-        .extend_retention(&owner, &requested, long)
-        .await
-        .unwrap();
-    let retained = store.active(&owner).await.unwrap();
-    assert_eq!(retained.len(), 406);
-    for mapping in &retained {
-        if mapping.reference == references[406] {
-            assert_eq!(
-                mapping.expires_at, pending_expiry,
-                "unpublished mappings are not renewed"
-            );
-        } else {
-            assert!(mapping.expires_at >= after(before, long));
-        }
-    }
+    let reference = mapping.reference.clone();
+    let interned_at = now();
     assert_eq!(
-        store.active(&other).await.unwrap()[0].expires_at,
-        foreign.expires_at
-    );
-    let expiry: std::collections::BTreeMap<_, _> = retained
-        .into_iter()
-        .map(|mapping| (mapping.reference, mapping.expires_at))
-        .collect();
-    store
-        .extend_retention(&owner, &requested, Duration::ZERO)
-        .await
-        .unwrap();
-    store
-        .publish(&owner, &published, Duration::ZERO)
-        .await
-        .unwrap();
-    let shortened: std::collections::BTreeMap<_, _> = store
-        .active(&owner)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|mapping| (mapping.reference, mapping.expires_at))
-        .collect();
-    assert_eq!(
-        shortened, expiry,
-        "shorter retention cannot shorten an existing TTL"
-    );
-    store
-        .publish(&owner, std::slice::from_ref(&references[405]), long)
-        .await
-        .unwrap();
-    assert!(
-        !store
+        store
             .active(&owner)
             .await
             .unwrap()
-            .iter()
-            .any(|mapping| mapping.reference == references[405]),
-        "publication cannot revive expired mappings"
+            .first()
+            .map(|mapping| mapping.reference.as_str()),
+        Some(reference.as_str())
     );
-    store.extend_retention(&owner, &[], long).await.unwrap();
-    store.publish(&owner, &[], long).await.unwrap();
+    assert_eq!(
+        store.plaintext(&reference).await.unwrap().as_deref(),
+        Some("Q8n4Vk7sT2p9X5a3Lc6D0h1R")
+    );
+
+    store
+        .sweep(interned_at + 1_000, Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.plaintext(&reference).await.unwrap().as_deref(),
+        Some("Q8n4Vk7sT2p9X5a3Lc6D0h1R"),
+        "未发布的映射在 pending 窗口内仍可供同一轮提交引用"
+    );
+
+    store
+        .sweep(interned_at + 2 * 3600 * 1_000, DAY)
+        .await
+        .unwrap();
+    assert_eq!(store.plaintext(&reference).await.unwrap(), None);
+    assert!(store.active(&owner).await.unwrap().is_empty());
 }
 
-async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, String) {
-    let owner = Principal::new("mapping-owner");
-    let other = Principal::new("mapping-other");
-    // Large, incompressible-enough plaintext also exercises PostgreSQL's index-size boundary.
+async fn assert_published_mapping_is_kept_for_retention(store: &SqlMappingStore) {
+    let owner = Principal::new("published-owner");
+    let mapping = store
+        .intern(&owner, &[detect("published-secret")])
+        .await
+        .unwrap()
+        .mappings
+        .remove(0);
+    let reference = mapping.reference.clone();
+    store
+        .publish(&owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    let published_at = now();
+
+    store
+        .sweep(published_at + 6 * 24 * 3600 * 1_000, DAY * 7)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.plaintext(&reference).await.unwrap().as_deref(),
+        Some("published-secret")
+    );
+
+    store
+        .sweep(published_at + 8 * 24 * 3600 * 1_000, DAY * 7)
+        .await
+        .unwrap();
+    assert_eq!(store.plaintext(&reference).await.unwrap(), None);
+    assert!(store.active(&owner).await.unwrap().is_empty());
+}
+
+/// 并发 intern 只有一个事务可声明新建；规则随映射创建持久化，再次命中不改写归因；
+/// 不同 Principal 的映射互相隔离。
+async fn assert_concurrent_intern_keeps_rules_and_isolates_principals(store: &SqlMappingStore) {
+    let owner = Principal::new("contract-owner");
+    let other = Principal::new("contract-other");
+    // 长明文同时覆盖 PostgreSQL 的索引大小边界。
     let secrets = vec![DetectedSecret {
         secret: (0..200)
             .map(|_| uuid::Uuid::new_v4().to_string())
@@ -150,23 +116,14 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
     );
     let first = left.mappings.remove(0);
     let concurrent = right.mappings.remove(0);
-    assert!(
-        store
-            .intern(&owner, &secrets)
-            .await
-            .unwrap()
-            .created
-            .is_empty()
-    );
     assert_eq!(first.reference, concurrent.reference);
     assert!(stravia_credential_protection::marker::valid_reference(
         &first.reference
     ));
     assert_eq!(first.secret, secrets[0].secret);
-    assert_eq!(first.expires_at, concurrent.expires_at);
-    // 规则随映射创建写入并持久化；之后被别的规则再次检测到也不改写归因。
     assert_eq!(first.rule_ids.as_slice(), secrets[0].rule_ids);
     assert_eq!(concurrent.rule_ids.as_slice(), secrets[0].rule_ids);
+
     let redetected = [DetectedSecret {
         secret: secrets[0].secret.clone(),
         rule_ids: vec!["another-rule".into()],
@@ -178,161 +135,193 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
         store.active(&owner).await.unwrap()[0].rule_ids.as_slice(),
         secrets[0].rule_ids
     );
+
     assert!(store.active(&other).await.unwrap().is_empty());
     let mut foreign = store.intern(&other, &secrets).await.unwrap();
-    assert_eq!(foreign.created.len(), 1);
+    assert_eq!(
+        foreign.created.len(),
+        1,
+        "the same plaintext is a new mapping for another principal"
+    );
     let foreign = foreign.mappings.remove(0);
     assert_ne!(first.reference, foreign.reference);
+    assert_eq!(store.active(&owner).await.unwrap().len(), 1);
+    assert_eq!(store.active(&other).await.unwrap().len(), 1);
+}
 
-    let references = vec![first.reference.clone()];
-    let long = Duration::from_secs(30 * 24 * 60 * 60);
-    store
-        .extend_retention(&owner, &references, long)
+/// 批量发布去重，忽略不存在的占位符，且只作用于调用方自己的映射。
+async fn assert_batch_publish_is_scoped_to_the_principal(store: &SqlMappingStore) {
+    let owner = Principal::new("batch-owner");
+    let other = Principal::new("batch-other");
+    let secrets: Vec<_> = (0..407)
+        .map(|index| detect(&format!("batch-secret-{index}")))
+        .collect();
+    let references: Vec<_> = store
+        .intern(&owner, &secrets)
         .await
-        .unwrap();
-    assert_eq!(
-        store.active(&owner).await.unwrap()[0].expires_at,
-        first.expires_at
-    );
-    store.publish(&other, &references, long).await.unwrap();
-    assert_eq!(
-        store.active(&owner).await.unwrap()[0].expires_at,
-        first.expires_at
-    );
+        .unwrap()
+        .mappings
+        .into_iter()
+        .map(|mapping| mapping.reference)
+        .collect();
+    let foreign = store
+        .intern(&other, &[detect("foreign-batch-secret")])
+        .await
+        .unwrap()
+        .mappings
+        .remove(0)
+        .reference;
 
-    let before_publish = now();
+    let mut requested = references[..405].to_vec();
+    requested.extend_from_within(..);
+    requested.push("missing-mapping".into());
+    requested.push(foreign.clone());
+    store.publish(&owner, &requested).await.unwrap();
+    // 他人发布不影响本主体的映射。
     store
-        .publish(&owner, &references, Duration::ZERO)
+        .publish(&other, std::slice::from_ref(&references[405]))
         .await
         .unwrap();
-    let published = store.active(&owner).await.unwrap().remove(0);
-    assert!(published.expires_at >= after(before_publish, PUBLISHED_RETENTION));
-    let before_extend = now();
-    store
-        .extend_retention(&owner, &references, long)
-        .await
-        .unwrap();
-    let extended = store.active(&owner).await.unwrap().remove(0);
-    assert!(extended.expires_at >= after(before_extend, long));
-    store
-        .extend_retention(&owner, &references, Duration::ZERO)
-        .await
-        .unwrap();
-    store
-        .publish(&owner, &references, Duration::ZERO)
-        .await
-        .unwrap();
-    assert_eq!(
-        store.active(&owner).await.unwrap()[0].expires_at,
-        extended.expires_at
-    );
+    store.publish(&owner, &[]).await.unwrap();
 
-    expire(store, &first.reference).await;
+    let published_at = now();
+    // 先把水位线拉回到本场景之前，再越过未发布下限窗口扫描。
+    store
+        .sweep(published_at + 1_000, Duration::from_secs(3600))
+        .await
+        .unwrap();
+    store
+        .sweep(published_at + 2 * 3600 * 1_000, DAY * 7)
+        .await
+        .unwrap();
+    for reference in &references[..405] {
+        assert!(
+            store.plaintext(reference).await.unwrap().is_some(),
+            "published mappings outlive the pending window"
+        );
+    }
+    for reference in [&references[405], &references[406], &foreign] {
+        assert_eq!(
+            store.plaintext(reference).await.unwrap(),
+            None,
+            "mappings the caller did not publish are reclaimed after the pending window"
+        );
+    }
+    assert_eq!(store.active(&owner).await.unwrap().len(), 405);
+    assert!(store.active(&other).await.unwrap().is_empty());
+
+    store
+        .sweep(published_at + 8 * 24 * 3600 * 1_000, DAY * 7)
+        .await
+        .unwrap();
     assert!(store.active(&owner).await.unwrap().is_empty());
-    store.publish(&owner, &references, long).await.unwrap();
-    store
-        .extend_retention(&owner, &references, long)
-        .await
-        .unwrap();
-    assert!(store.active(&owner).await.unwrap().is_empty());
-    let mut replacement = store.intern(&owner, &secrets).await.unwrap();
-    assert_eq!(
-        replacement.created.len(),
-        1,
-        "expired mappings permit a new discovery"
-    );
-    let replacement = replacement.mappings.remove(0);
-    assert_ne!(replacement.reference, first.reference);
-    assert_eq!(replacement.secret, secrets[0].secret);
-    assert_eq!(store.cleanup_expired().await.unwrap(), 1);
-    assert_eq!(
-        store.active(&owner).await.unwrap()[0].reference,
-        replacement.reference
-    );
-    assert_eq!(
-        store.active(&other).await.unwrap()[0].reference,
-        foreign.reference
-    );
-    (owner, replacement.reference, replacement.secret)
 }
 
 #[tokio::test]
-async fn sqlite_mapping_concurrency_lifecycle_isolation_and_restart() {
+async fn sqlite_mapping_contract_concurrency_isolation_and_batch_publish() {
+    let pool = crate::test_support::migrated_sqlite_pool()
+        .await
+        .expect("migrated sqlite");
+    let store = SqlMappingStore::sqlite(pool.clone());
+    assert_concurrent_intern_keeps_rules_and_isolates_principals(&store).await;
+    assert_batch_publish_is_scoped_to_the_principal(&store).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_mapping_survives_a_restart() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .unwrap();
-    let store = SqlMappingStore::sqlite(pool.clone());
-    let (owner, reference, secret) = assert_store_contract(&store).await;
-    assert_batch_retention_contract(&store).await;
-    drop(store);
+    let owner = Principal::new("restart-owner");
+    let mapping = SqlMappingStore::sqlite(pool.clone())
+        .intern(&owner, &[detect("restart-secret")])
+        .await
+        .unwrap()
+        .mappings
+        .remove(0);
     pool.close().await;
+
     let reopened = crate::db::init_pool(directory.path()).await.unwrap();
     crate::migrations::migrate_sqlite(&reopened, None)
         .await
         .unwrap();
-    let restored = SqlMappingStore::sqlite(reopened.clone())
-        .active(&owner)
-        .await
-        .unwrap();
-    assert_eq!(restored[0].reference, reference);
-    assert_eq!(restored[0].secret, secret);
+    let store = SqlMappingStore::sqlite(reopened.clone());
+    let restored = store.active(&owner).await.unwrap();
+    assert_eq!(restored[0].reference, mapping.reference);
+    assert_eq!(restored[0].secret, "restart-secret");
+    assert_eq!(restored[0].rule_ids.as_slice(), ["test-rule"]);
     reopened.close().await;
 }
 
 #[tokio::test]
-async fn postgres_mapping_contract_when_configured() {
-    let Some(url) = std::env::var("DB_URL")
-        .ok()
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-    else {
-        return;
-    };
+async fn sqlite_mapping_reclaims_only_after_pending_or_published_floor() {
+    let pool = crate::test_support::migrated_sqlite_pool()
+        .await
+        .expect("migrated sqlite");
+    let store = SqlMappingStore::sqlite(pool.clone());
+    assert_unpublished_mapping_waits_for_pending_window(&store).await;
+    assert_published_mapping_is_kept_for_retention(&store).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL pointing at PostgreSQL"]
+async fn postgres_mapping_reclaims_only_after_pending_or_published_floor() {
+    let url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("DB_URL"))
+        .expect("DATABASE_URL");
     let admin = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&url)
         .await
-        .expect("PostgreSQL admin pool");
-    let schema = format!("stravia_redaction_test_{}", uuid::Uuid::new_v4().simple());
+        .expect("admin pool");
+    let schema = format!("stravia_mapping_{}", uuid::Uuid::new_v4().simple());
     sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&admin)
         .await
-        .expect("create isolated PostgreSQL schema");
-    let options: sqlx::postgres::PgConnectOptions =
-        url.parse().expect("PostgreSQL connection options");
+        .expect("create schema");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("options");
     let options = options.options([("search_path", schema.as_str())]);
+    let options_for_restart = options.clone();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
-        .connect_with(options.clone())
+        .connect_with(options)
         .await
-        .expect("isolated PostgreSQL pool");
+        .expect("isolated pool");
     crate::migrations::migrate_postgres(&pool, None)
         .await
         .unwrap();
     let store = SqlMappingStore::postgres(pool.clone());
-    let (owner, reference, secret) = assert_store_contract(&store).await;
-    assert_batch_retention_contract(&store).await;
-    drop(store);
+    assert_unpublished_mapping_waits_for_pending_window(&store).await;
+    assert_published_mapping_is_kept_for_retention(&store).await;
+    assert_concurrent_intern_keeps_rules_and_isolates_principals(&store).await;
+    assert_batch_publish_is_scoped_to_the_principal(&store).await;
+    let restart_owner = Principal::new("restart-owner");
+    let restart_mapping = store
+        .intern(&restart_owner, &[detect("restart-secret")])
+        .await
+        .unwrap()
+        .mappings
+        .remove(0);
     pool.close().await;
+    // 重启后仍可读：同一 schema 重新连接。
     let reopened = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(options)
+        .connect_with(options_for_restart)
         .await
-        .unwrap();
-    crate::migrations::migrate_postgres(&reopened, None)
-        .await
-        .unwrap();
+        .expect("reopened pool");
     let restored = SqlMappingStore::postgres(reopened.clone())
-        .active(&owner)
+        .active(&restart_owner)
         .await
         .unwrap();
-    assert_eq!(restored[0].reference, reference);
-    assert_eq!(restored[0].secret, secret);
+    assert_eq!(restored[0].reference, restart_mapping.reference);
     reopened.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
         .await
-        .expect("drop isolated PostgreSQL schema");
+        .expect("drop schema");
     admin.close().await;
 }

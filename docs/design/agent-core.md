@@ -17,7 +17,7 @@ Stravia 不应直接嵌入 Rig、Swiftide 或非 Rust sidecar。目标方案是�
 
 会话复用不引入 `AgentSession`。每次成功或预算收束成功只返回一个 `AgentTurnId`；后续调用显式传入该 ID，沿不可变父链恢复精确前缀。无 ID 创建新根，同一父节点允许多个分支，不提供合并或隐式 latest。
 
-现有 `Response Chain` 与 Agent Turn 父链共享同一 `TurnChain` deep module。Responses 状态从进程内 TTL store 迁入 SQL，默认保留期从 1 小时调整为可配置的 7 天。`ToolContinuation` 仍保持现有进程内语义；本设计不引入客户端工具穿透。
+现有 `Response Chain` 与 Agent Turn 父链共享同一 `TurnChain` deep module。Responses 状态从进程内 TTL store 迁入 SQL，保留期由统一的历史保留天数 N（`log_retention_days`，默认 7，最小 1）决定，不再是固定的 1 小时或 7 天（见 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。`ToolContinuation` 仍保持现有进程内语义；本设计不引入客户端工具穿透。
 
 图片、视频和未来联网研究不是 AgentRunner 的分支逻辑：
 
@@ -196,9 +196,9 @@ Release 可停止注册某个 Definition：
 
 - 不再允许新根，也不再进入 discovery；
 - 当前已启动 Run 使用启动快照完成；
-- 未过期 Turn 仍按已持久化 Revision 和根 Model ID 续接；
+- 尚未被回收的 Turn 仍按已持久化 Revision 和根 Model ID 续接；
 - 活跃 Revision 引用的 ToolVersion 必须继续随 binary 注册，否则实例不 ready；
-- Revision 在最后引用过期并经过 grace 后可回收。
+- Revision 在最后引用的 Turn 被回收并经过 grace 后可回收。
 
 不引入显式 `Retired` 状态；registry absence 只决定能否创建新根，不删除持久化 Revision。
 
@@ -225,8 +225,8 @@ Run 可包含多个 Model Turns 和 AgentTool calls。失败、取消、stream d
 - append immutable node；
 - 按 parent chain materialize 精确 canonical prefix；
 - 从任意旧节点自然分支；
-- 授权、TTL、ancestor refresh 与 GC；
-- 对外隐藏 not-found/expired/forbidden/mismatch 的存在性差异。
+- 授权、统一保留期（只由 `created_at + N` 计时，祖先因有子节点而保留，提交不刷新祖先）与扫描回收；
+- 对外隐藏 not-found/已回收/forbidden/mismatch 的存在性差异。
 
 它不拥有 model call、Hook、tool loop 或 delivery。
 
@@ -292,7 +292,7 @@ flowchart TB
 |---|---|---|---|
 | `ModelTurnExecutor` | canonical request→event/final response | auth refresh、route、target retry、provider codec、usage | tool loop、history、delivery |
 | `AgentRunner` | AgentInput→AgentEvent stream | bounded loop、tool calls、schema repair、finalization、Turn commit | transport、Definition CRUD、background task |
-| `TurnChain` | append/materialize/branch/expire | DAG、principal scope、TTL、GC | model/tool execution |
+| `TurnChain` | append/materialize/branch/sweep | DAG、principal scope、统一保留期、引用保留、GC | model/tool execution |
 | `ArtifactStore` | stage/open/attach/release | LocalFS/S3、hash、multipart、refcount | model encoding、media analysis |
 | `PlatformToolRegistry` | versioned descriptor/execute | executor lookup、parallel policy | client tool continuation、agent nesting |
 | adapters | wire↔AgentInput/ToolResult | protocol-specific declaration与错误映射 | Agent loop |
@@ -459,9 +459,9 @@ pub trait TurnChainStore: Send + Sync {
 }
 ```
 
-`commit` 必须在一个数据库事务中校验 parent 仍可用、principal 与 kind 匹配，插入 immutable node，并刷新新节点及 ancestor path 的 expiry。AgentRunner 必须在发送 Completed/Partial terminal 前完成 commit。
+`commit` 必须在一个数据库事务中校验 parent 仍可用、principal 与 kind 匹配，插入 immutable node 及其 Marker、可逆脱敏映射、原生压缩登记的引用行；不更新祖先，保留只由新节点的 `created_at` 与子节点关系决定。AgentRunner 必须在发送 Completed/Partial terminal 前完成 commit。
 
-Adapter delivery 失败不回滚已提交 Turn；当前没有独立 Run/delivery record，调用方仍可在 TTL 内用已返回或已产生的 TurnId 重试读取。
+Adapter delivery 失败不回滚已提交 Turn；当前没有独立 Run/delivery record，调用方仍可在保留期内（节点被扫描回收之前）用已返回或已产生的 TurnId 重试读取。
 
 ### 7.6 ArtifactStore
 
@@ -589,7 +589,7 @@ Run 期间管理员修改 Definition config 不改变当前执行。Definition d
 
 - 已启动 Run 继续；
 - 新根与后续基于旧 Turn 的新 Run 均拒绝；
-- 重新启用后，未过期 Turn 可继续。
+- 重新启用后，尚未被回收的 Turn 可继续。
 
 ### 9.2 动态 Principal 检查
 
@@ -620,7 +620,7 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 |---|---|---|
 | Agent Definition Revision | definition_id、slug、version、spec_hash、spec_json、created_at | 程序注册的 immutable spec |
 | Agent Definition Config | definition_id、enabled、model_id、thinking_level、updated_at | Admin 唯一可改字段 |
-| Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、expires_at | kind 至少 response/agent |
+| Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、created_at | kind 至少 response/agent |
 | Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；LocalFS/S3；物理 key 独立于最终 ID |
 | Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | authenticated multipart staging；artifact_id 仅为内部暂存身份，不公开 |
 
@@ -647,9 +647,9 @@ Failed/Cancelled Run 不持久化；其 typed error 只通过当前 Event Stream
 
 ### 10.2 TTL 与 GC
 
-- Agent Turn 与 Response Chain 默认 TTL 均为 7 天；成功续接刷新新 Turn 及其 ancestor path，未使用 sibling branch 独立过期。
+- Agent Turn 与 Response Chain 共用历史保留天数 N（`log_retention_days`，默认 7，最小 1）：节点按 `created_at + N` 计时，提交与续接都不刷新祖先；只要子树中还有未到期的后代，祖先就因有子节点而保留，未使用的 sibling branch 各自到期。到期不等于立即不可读：读取没有时间条件，由每小时的扫描回收没有子节点、也不是原生压缩来源的到期节点，扫描前仍可读、可续接（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。
 - Artifact 默认保留 7 天；multipart upload 使用 idle TTL，每次成功 part 上传都会刷新。
-- Gateway lifecycle 每小时驱动 Turn 与 Artifact sweep；失败记录 warning 并在下一周期重试。
+- Gateway lifecycle 每小时驱动历史（Observation、Turn 节点、依赖与共享正文）与 Artifact sweep；失败记录 warning 并在下一周期重试。
 - 当前 Artifact 没有引用计数或显式删除；到期后由 sweeper 清理 metadata、object 与未完成 staging。
 - Revision 当前不自动回收，以保证已存活 Turn 可按固定 Revision 续接。
 - 不提供显式 Turn/Artifact 删除 API。
@@ -882,8 +882,8 @@ MCP execution failure使用 tool `isError`/structured error；JSON-RPC error 仅
 ### 阶段 B：持久化 TurnChain
 
 1. 增加 SQLite/PostgreSQL TurnChain store。
-2. 迁移 Responses nodes，默认 TTL 改为 7 天。
-3. 增加 principal scope、branch、ancestor refresh、GC 与事务测试。
+2. 迁移 Responses nodes，保留期改为统一的 N 天（默认 7；原先的固定 7 天 TTL 已由 ADR-0089 取消）。
+3. 增加 principal scope、branch、GC 与事务测试（原设计的 ancestor refresh 已由 ADR-0089 的“祖先因有子节点而保留”取代）。
 4. 删除旧 `ResponseChainStore` implementation。
 
 验收：`previous_response_id` 跨进程重启可恢复；旧节点可分支；越权不可探测。
@@ -928,7 +928,7 @@ Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-on
 6. **预算收束**：working budget 到达后只使用 reserve；成功提交 partial，失败不提交；总硬上限不突破。
 7. **Context 拒绝**：无法保留完整 prefix+reserve 时在 model call 前失败，不截断/摘要。
 8. **Definition snapshot**：新根使用新 Revision/Model；旧 Turn 继续固定旧 Revision/Model。
-9. **Definition 删除**：新根 discovery 消失；旧 Turn 在 TTL 内仍可按持久化 Revision 续接。
+9. **Definition 删除**：新根 discovery 消失；旧 Turn 在被扫描回收前仍可按持久化 Revision 续接。
 10. **动态撤权**：Run 中途禁用 key/撤销 Model binding，下一隐藏 step 终止；Definition config 更新不改变已启动 Run。
 11. **Hook policy**：内层 Hook ExposeTool typed reject；其他受支持 Hook actions 每个 ModelTurn 生效。
 12. **ToolVersion**：缺活跃 Revision 所需实现时 readiness 失败；agent nesting 在启动校验拒绝。
@@ -936,7 +936,7 @@ Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-on
 14. **Artifact**：opaque ID、principal scope、inline/HTTPS/upload snapshot、SSRF、quota、staging TTL、refcount/grace。
 15. **Media negotiation**：native video target 成功编码；不支持 target typed reject，不静默抽帧。
 16. **Adapter visibility**：父模型在所有 PlatformTool flow 看见 TurnId；MCP 直调客户端看见；Responses/Chat/Anthropic/Gemini 隐藏客户端看不见。
-17. **Delivery failure**：Turn commit 后 adapter delivery 失败，Turn 不回滚，Run 记录 delivery_failed 并按 TTL 回收。
+17. **Delivery failure**：Turn commit 后 adapter delivery 失败，Turn 不回滚，Run 记录 delivery_failed，Turn 按统一保留期由扫描回收。
 18. **无幂等保证**：相同调用重试产生新 Run/分支，文档与测试不得暗示去重。
 
 ---
@@ -946,10 +946,10 @@ Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-on
 | 风险 | 已确认决策 | 影响 |
 |---|---|---|
 | Agent 活跃并发无上限 | API Key 与上游仅限制请求频率；RPM 等待队列默认 128 个根请求，不限制活跃流 | 长流仍可累积内存、连接池、provider/tool 资源；未设置池 RPM 时没有本地发送速率保护 |
-| 无显式删除 | Turn/Artifact 只能等待 TTL/GC | 敏感媒体误上传后无法立即清除；默认暴露窗口 7 天 |
+| 无显式删除 | Turn/Artifact 只能等待保留期与 sweep | 敏感媒体误上传后无法立即清除；默认暴露窗口 7 天（Turn 为 N 天加一个扫描周期） |
 | 无 idempotency | tool/HTTP/MCP 重试不去重 | 重复 provider 成本与重复分支 |
-| Response TTL 从 1h 变 7d | 所有 Responses chain 默认 7 天 | SQL 存储、隐私与 GC 压力扩大 |
-| 无 context compaction | 超窗直接拒绝 | 长会话最终不可继续，即使 Artifact/Turn 尚未过期 |
+| Response 保留期从 1h 变为 N 天 | 所有 Responses chain 默认保留 7 天（`log_retention_days`） | SQL 存储、隐私与 GC 压力扩大 |
+| 无 context compaction | 超窗直接拒绝 | 长会话最终不可继续，即使 Artifact/Turn 尚未到期或回收 |
 | 无 deterministic loop detector | 只靠硬预算 | 重复昂贵 tool call 可耗尽全部工作预算 |
 | Generic Agent 无 per-key capability ACL | 全局 enabled + Model binding | 能使用模型的认证 key 可使用该 generic Definition；Media/Web Search 等产品 capability 使用各自的平台 Gate |
 | request-bound 首期 | disconnect 即取消 | 大视频/深度研究仍受客户端/proxy deadline；需后续 Tasks/background adapter |

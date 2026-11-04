@@ -767,7 +767,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         // pass by finding the preceding unary request's saved Artifact.
         let rows = gateway._sqlite_pool.as_ref().unwrap();
         let nodes: Vec<(String, String)> = sqlx::query_as(
-            "SELECT n.id, n.kind FROM turn_nodes n JOIN turn_scopes s ON s.id = n.scope_id WHERE s.principal = ?",
+            "SELECT n.id, n.kind FROM turn_nodes n JOIN content_scopes s ON s.id = n.scope_id WHERE s.principal = ?",
         )
         .bind(Principal::new(key.id.clone()).continuation_key())
         .fetch_all(rows)

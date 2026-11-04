@@ -20,6 +20,7 @@ import time
 import pytest
 
 from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
+from tests.common.observation_contents import attempt_starts
 from tests.e2e.proxy.conftest import (
     PROTOCOLS,
     _scan_replay_models,
@@ -327,8 +328,9 @@ def test_protocol_matrix(
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))
     kinds = [event["kind"] for event in run["events"]]
-    assert kinds.index("target_attempt_started") < kinds.index("target_attempt_finished")
-    assert kinds.index("target_attempt_finished") < kinds.index("run_finished")
+    # 首个 attempt 并入 Model Turn 行，所以顺序由 Turn 开始/结束行体现。
+    assert kinds.index("model_turn_started") < kinds.index("model_turn_finished")
+    assert kinds.index("model_turn_finished") < kinds.index("run_finished")
     finished = max(
         (event for event in run["events"] if event["kind"] == "run_finished"),
         key=lambda event: event["sequence"],
@@ -355,9 +357,7 @@ def test_protocol_matrix(
         if event.get("layer") == "wire" and event.get("attempt_id")
     }
     started_attempts = {
-        event["payload"].get("attempt_id")
-        for event in run["events"]
-        if event["kind"] == "target_attempt_started" and event["payload"].get("attempt_id")
+        attempt["attempt_id"] for attempt in attempt_starts(run["events"]) if attempt.get("attempt_id")
     }
     assert wire_attempts
     assert started_attempts

@@ -532,7 +532,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert initial[0]["linkable"] is True
             preview = _wait_for(
                 "masked input preview before restart",
-                lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
+                lambda: _detail(env, initial[0]["interaction_id"])["input_text"],
             )
             assert preview == "***"
             stop_stravia_server(process, logs)
@@ -553,7 +553,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert restored[0]["hits"] == initial[0]["hits"]
             assert SECRET not in json.dumps(restored)
             assert reference not in json.dumps(restored)
-            assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == "***"
+            assert _detail(env, initial[0]["interaction_id"])["input_text"] == "***"
             status, body = _proxy(env, key, model, [
                 {"role": "user", "content": SECRET},
                 first["choices"][0]["message"],
@@ -578,7 +578,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
                 lambda: _route_interactions(env, route_id),
             )
             assert key_discoveries(env, f"{model}-key") == []
-            assert _detail(env, new_interactions[0]["id"])["interaction"]["input_preview"] == "***"
+            assert _detail(env, new_interactions[0]["id"])["input_text"] == "***"
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])
             assert status == 200, body
@@ -684,7 +684,10 @@ def test_observation_tool_replay_and_trace_survive_restart(
              else None)(_detail(env, interactions[0]["id"]))
         ))
         events = [event for run in detail["runs"] for event in run["events"]]
-        results = [event["payload"]["content"] for event in events if event["kind"] == "client_tool_result"]
+        results = [
+            item["content"] for event in events if event["kind"] == "client_tool_result"
+            for item in event["payload"]["results"]
+        ]
         assert sorted(results) == ["result-0", "result-1", "result-2"]
         assert not any(event["kind"] in {"wire", "content", "target_selected"} for event in events)
         assert [run["debug_enabled"] for run in detail["runs"]] == [True, False, True, True]

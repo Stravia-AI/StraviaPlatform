@@ -15,7 +15,7 @@ import pytest
 from tests.common.helpers import encode_storage_json
 from tests.common.measure_wasm_snapshot_http import Replay
 from tests.common.prepare_wasm_evaluation import prepare
-from tests.common.protocol_history_audit import content_digest
+from tests.common.protocol_history_audit import JSON_FORMAT, content_digest
 
 
 @pytest.mark.proxy
@@ -76,13 +76,14 @@ def _prepare_snapshot(tmp_path: Path) -> SimpleNamespace:
             resource_url TEXT, subject_id TEXT);
         CREATE TABLE provider_models(provider_id TEXT, model_id TEXT, metadata_json TEXT);
         CREATE TABLE vendor_plugins(vendor_id TEXT PRIMARY KEY, digest TEXT, descriptor TEXT);
-        CREATE TABLE turn_scopes(id INTEGER PRIMARY KEY, principal TEXT UNIQUE);
+        CREATE TABLE content_scopes(id INTEGER PRIMARY KEY, principal TEXT UNIQUE);
         CREATE TABLE turn_nodes(
             node_pk INTEGER PRIMARY KEY, id TEXT UNIQUE, scope_id INTEGER, kind TEXT,
             parent_pk INTEGER, payload_version INTEGER);
         CREATE TABLE turn_node_payloads(node_pk INTEGER PRIMARY KEY, payload BLOB NOT NULL);
-        CREATE TABLE turn_contents(
-            id INTEGER PRIMARY KEY, scope_id INTEGER, digest BLOB, content BLOB);
+        CREATE TABLE contents(
+            id INTEGER PRIMARY KEY, scope_id INTEGER, digest BLOB, format INTEGER,
+            raw_len INTEGER, body BLOB);
         CREATE TABLE turn_node_contents(
             node_pk INTEGER, scope_id INTEGER, ordinal INTEGER, content_id INTEGER,
             PRIMARY KEY(node_pk, ordinal));
@@ -100,15 +101,16 @@ def _prepare_snapshot(tmp_path: Path) -> SimpleNamespace:
     reply = {"type": "message", "role": "assistant",
              "content": [{"type": "output_text", "text": "recorded reply"}]}
     reply_raw = json.dumps(reply, ensure_ascii=False, separators=(",", ":")).encode()
-    connection.execute("INSERT INTO turn_scopes VALUES(?,?)", (1, "fixture-owner"))
+    connection.execute("INSERT INTO content_scopes VALUES(?,?)", (1, "fixture-owner"))
     connection.execute("INSERT INTO turn_nodes VALUES(?,?,?,?,?,?)",
                        (1, "generation-1", 1, "response", None, 6))
     connection.execute(
         "INSERT INTO turn_node_payloads VALUES(?,?)",
         (1, encode_storage_json({"data": payload, "slots": [["/effective_output/items/0", 0]]})),
     )
-    connection.execute("INSERT INTO turn_contents VALUES(?,?,?,?)",
-                       (1, 1, content_digest(reply_raw), encode_storage_json(reply)))
+    connection.execute("INSERT INTO contents VALUES(?,?,?,?,?,?)",
+                       (1, 1, content_digest(JSON_FORMAT, reply_raw), JSON_FORMAT, len(reply_raw),
+                        encode_storage_json(reply)))
     connection.execute("INSERT INTO turn_node_contents VALUES(?,?,?,?)", (1, 1, 0, 1))
     connection.execute("INSERT INTO inference_run_observations VALUES(?,?,?,?)",
                        ("run-1", "generation-1", "openai-chat", "interaction-1"))

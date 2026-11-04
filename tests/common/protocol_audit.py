@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 _DIRECTIONS = {"client_to_platform", "platform_to_upstream", "upstream_to_platform", "platform_to_client"}
-_SAFE = ("generation_id", "expected_parent", "expected_parent_nonce", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "input_tokens", "upstream_input_tokens", "output_tokens", "client_output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream", "nonce", "session_id", "run_id")
+_SAFE = ("generation_id", "expected_parent", "expected_parent_nonce", "route_id", "expected_provider_id", "expected_target_id", "expected_model", "output_sha256", "masked_output_sha256", "input_tokens", "upstream_input_tokens", "output_tokens", "client_output_tokens", "credential_protection_enabled", "expected_new_mappings", "upstream", "nonce", "session_id", "run_id")
 
 
 class AuditAPIError(RuntimeError):
@@ -292,10 +292,15 @@ def _check(row: dict, detail: dict, run: dict) -> dict:
     for event in events:
         payload = event["payload"]
         kind = event["kind"]
+        # 首个 attempt 的开始并入 Model Turn 开始行，最后一个 attempt 的结束并入 Turn 结束行。
         if kind == "model_turn_started":
             turns[payload["model_turn_id"]] = payload
+            if payload.get("attempt"):
+                attempts[payload["attempt"]["attempt_id"]] = payload["attempt"]
         elif kind == "model_turn_finished":
             turn_terminals[payload["model_turn_id"]] = payload
+            if payload.get("attempt"):
+                terminals[payload["attempt"]["attempt_id"]] = payload["attempt"]
         elif kind == "target_attempt_started":
             attempts[payload["attempt_id"]] = payload
         elif kind == "target_attempt_finished":
@@ -340,7 +345,9 @@ def _check(row: dict, detail: dict, run: dict) -> dict:
     evidence["persisted_output_items"] = len(contents)
     if not contents or any(content.get("complete") is not True for content in contents):
         failures.append("persisted_visible_output_incomplete")
-    if digest.hexdigest() != row["output_sha256"]:
+    # ADR-0088 masks mapped credentials as `***` in every admin Observation read, so this API view is compared
+    # with the client body masked the same way; the stored bytes are checked unmasked via storage proofs.
+    if digest.hexdigest() != row.get("masked_output_sha256", row["output_sha256"]):
         failures.append("persisted_output_digest_mismatch")
     evidence["failures"] = failures
     return evidence
@@ -427,6 +434,22 @@ def _history_proof(generation_id: str, expected_parent: str | None, proofs: dict
             "principal_sha256": principal}
 
 
+def _observation_proof(run_id: str, row: dict, proofs: dict) -> dict:
+    """Consume the Observation storage proof; its text is unmasked, so it equals the client body digest."""
+    proof = proofs.get(run_id) or {}
+    failures = list(proof.get("failures") or [])
+    if proof.get("read_verified") is not True or proof.get("backend") not in {"sqlite", "postgres"}:
+        failures.append("observation_storage_read_unverified")
+    if not proof.get("visible_blocks"):
+        failures.append("observation_storage_visible_missing")
+    if proof.get("output_sha256") != row["output_sha256"]:
+        failures.append("observation_storage_output_digest_mismatch")
+    return {"failures": sorted(set(failures)), "backend": proof.get("backend"), "layout": proof.get("layout"),
+            "output_sha256": proof.get("output_sha256"), "visible_blocks": proof.get("visible_blocks"),
+            "content_refs": proof.get("content_refs"), "content_scope_sha256": proof.get("content_scope_sha256"),
+            "interaction_principal_sha256": proof.get("interaction_principal_sha256")}
+
+
 def _performance_index(snapshot: dict) -> dict:
     """Partition the causal forest once rather than scanning all roots per row."""
     events = [event for event in snapshot.get("traceEvents", []) if event.get("ph") in {"X", "B"}]
@@ -463,7 +486,7 @@ def _audit_ready(run: dict, require_debug: bool) -> bool:
 def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: float = 30,
                    *, require_debug: bool = False, performance_snapshot: Any = None,
                    history_evidence: Any = None, credential_expectations: dict | None = None,
-                   credential_evidence: Any = None) -> dict:
+                   credential_evidence: Any = None, observation_evidence: Any = None) -> dict:
     """Return safe evidence and explicit failures, including incomplete coverage.
 
     routes is accepted as fixture context; expected selection is mandatory per row.
@@ -558,6 +581,14 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
         except Exception:
             history_evidence = {identity: {"failures": ["history_storage_reader_failed"]}
                                 for identity in generation_ids}
+    if callable(observation_evidence):
+        run_ids = sorted({run["id"] for row in resolved
+                          for _, run in (by_run_id.get(row.get("run_id"), []) or
+                                         by_generation_id.get(row.get("generation_id"), []))})
+        try:
+            observation_evidence = observation_evidence(run_ids)
+        except Exception:
+            observation_evidence = {identity: {"failures": ["observation_storage_reader_failed"]} for identity in run_ids}
     if callable(performance_snapshot):
         try:
             performance_snapshot = performance_snapshot()
@@ -618,6 +649,9 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
             item["performance"] = _performance_request(performance_by_request.get(run["id"], {}),
                                                        {run["id"]}, row.get("expected_parent"))
             item["failures"].extend(item["performance"]["failures"])
+        if observation_evidence is not None:
+            item["observation_storage"] = _observation_proof(run["id"], row, observation_evidence)
+            item["failures"].extend(item["observation_storage"]["failures"])
         item["history_storage"] = _history_proof(run.get("generation_node_id"), row.get("expected_parent"), history_evidence or {})
         item["failures"].extend(item["history_storage"]["failures"])
         if item["history_storage"]["output_sha256"] != row["output_sha256"]:
@@ -659,4 +693,6 @@ def audit_requests(session: Any, requests: list[dict], routes: Any, timeout: flo
                          "performance_request_correlation": bool(evidence) and all(
                              "performance" in row and not row["performance"]["failures"] for row in evidence),
                          "history_storage_read": bool(evidence) and all(
-                             "history_storage" in row and not row["history_storage"]["failures"] for row in evidence)}}
+                             "history_storage" in row and not row["history_storage"]["failures"] for row in evidence),
+                         "observation_storage_read": observation_evidence is not None and bool(evidence) and all(
+                             "observation_storage" in row and not row["observation_storage"]["failures"] for row in evidence)}}

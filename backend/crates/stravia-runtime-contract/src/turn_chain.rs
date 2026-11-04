@@ -1,9 +1,4 @@
-use std::{
-    any::Any,
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{any::Any, collections::HashMap, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -150,7 +145,7 @@ pub struct TurnReadContext {
     budget: usize,
     admission_open: bool,
     validated_until: HashMap<TurnNodeId, Instant>,
-    /// Internal `turn_contents.id` values; each id is owned by exactly one
+    /// Internal `contents.id` values; each id is owned by exactly one
     /// principal scope, so a numeric key never crosses principals.
     contents: HashMap<i64, (Arc<Value>, usize)>,
     pending_contents: HashMap<i64, (Arc<Value>, usize)>,
@@ -378,7 +373,12 @@ pub struct TurnCommit {
     pub principal: Principal,
     pub payload_version: u32,
     pub payload: Value,
-    pub idle_ttl: Duration,
+    /// 客户端提交的 Marker reference；不存在的引用在提交时跳过。
+    pub marker_references: Vec<String>,
+    /// 本次请求登记、复用或还原的映射；缺失即视为依赖不可用。
+    pub redaction_references: Vec<String>,
+    /// 节点保存的原生压缩登记 ID；缺失即视为依赖不可用。
+    pub compaction_record_ids: Vec<String>,
     pub reusable_prefix: Option<ReusablePrefixMetadata>,
 }
 /// Version of the optional controls/client-context exclusion proof. Unknown
@@ -442,6 +442,8 @@ pub enum TurnCommitError {
     ParentUnavailable,
     #[error("turn already exists")]
     AlreadyExists,
+    #[error("turn dependency unavailable")]
+    DependencyUnavailable,
     #[error("turn storage failed: {0}")]
     Storage(String),
 }
@@ -528,7 +530,8 @@ pub trait TurnChainStore: Send + Sync {
         Ok(())
     }
 
-    async fn sweep_expired(&self) -> Result<u64, TurnUnavailable>;
+    /// 统一历史维护的一部分：期限扫描入队，再由队列回收节点与正文。
+    async fn sweep_history(&self, now: i64) -> Result<u64, TurnUnavailable>;
 }
 
 #[cfg(test)]

@@ -4,6 +4,8 @@ status: accepted
 
 # 命中记录按新增映射逐条列出，并从保留正文还原命中位置
 
+> [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 修订本文两处：最新用户输入不再「最多 4,096 字符」，事件改名为 `user_input_recorded` 并保存完整的有序文本单元引用；命中详情不再按字节上限截断，`CredentialDiscoveryHitDetail::Available.truncated` 与 `MAX_DISCOVERY_TEXT_BYTES`（1 MiB）一并删除，详情在服务端按引用取回全文。
+
 ## 决定
 
 [ADR-0083](0083-record-credential-hits-with-reuse-and-block-locators.md) 把命中记录做成 Interaction 级摘要：新增与复用合并为一行、不保存片段、占位符只在 Debug Run 记录。这回答不了管理员真正要问的问题：「这个映射是被哪条规则、在哪个字段、什么内容里创建的，之后又在哪里用到」。现决定：
@@ -12,7 +14,7 @@ status: accepted
 - **占位符对所有 Run 记录。** 事件载荷的 `marker`（= 映射 `reference`）不再只限 Debug Run；`created` 与 `reused` 事件都记录。同一占位符即同一映射，用它把复用事件关联回创建行。升级前的事件没有占位符（Debug Run 除外），侧栏提示无法关联复用，不回填。
 - **命中位置按需从保留正文还原，不新增明文存储。** 侧栏选中一条命中时，服务端按 `(source_type, tool_id, latest_input)` 找回 Observation 已保留的条目正文，对它运行与「密钥匹配测试」同一检测器，返回完整条目文本与匹配（含起止行列）。能取到映射明文时，只把秘密字面值等于该映射的匹配标为命中；取不到（映射已清理、无占位符）则退化为按所选规则标记，并如实标示。
   - 工具参数、工具结果：事件里的工具输入 / 返回。
-  - 最新用户输入：`input_preview_recorded`，最多 4,096 字符。
+  - 最新用户输入：`user_input_recorded`（升级前称 `input_preview_recorded`，当时最多 4,096 字符；升级时已截断的旧预览保持截断），现为完整的有序文本单元，读取时以 `\n` 连接。
   - system、历史用户消息、其他文本：Observation 不保留，显示「正文不可用」。
 - **复用在写入时登记，读取时只做索引查找。** 写 `credential_mappings_reused` 事件的同一事务里，按 `(占位符, Interaction, 来源, 工具调用或最新输入)` 向 `credential_mapping_reuses` upsert 一行，保留最大 `last_reused_at` 与对应 Run；侧栏按占位符读取，不显示次数。事件载荷是 `storage_codec` 编码，SQL 无法按占位符过滤，早先「读时解码事件」的方案要线性扫描该主体的全部复用事件，且设了 50,000 事件的硬上限——按序号升序扫描，触顶丢掉的恰是最新的复用。登记后没有扫描上限，唯一的上限是展示的 200 个位置，超出时 `truncated=true`。
 - **列表索引替换。** `observation_events_credential_discovery_idx`（`kind, interaction_id, occurred_at`）服务于旧的 Interaction 聚合，换成只覆盖创建事件的部分索引 `observation_events_credential_hit_idx`（`kind, sequence DESC`），支持按 `sequence` 倒序翻页；复用事件不再被任何查询读取，不进索引。

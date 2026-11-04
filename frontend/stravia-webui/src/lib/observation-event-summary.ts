@@ -12,7 +12,8 @@ type EventSummary = {
   tone: 'neutral' | 'success' | 'warning' | 'error'
 }
 
-// 思考与可见正文按 Canonical Item 各落一行；确认用量由 target_attempt_finished 携带。
+// 思考与可见正文按 Canonical Item 各落一行；确认用量随尝试结束携带（首个尝试并入 model_turn_started，
+// 最后一个并入 model_turn_finished，由 observation-timeline 拆回尝试行后再汇总）。
 const TITLES: Record<string, () => string> = {
   run_admitted: m.observation_event_run_admitted,
   retained_tail_associated: m.observation_event_retained_tail_associated,
@@ -33,7 +34,7 @@ const TITLES: Record<string, () => string> = {
   request_failed: m.observation_request_failed,
   observation_gap: m.observation_event_observation_gap,
   client_visible_content: m.observation_event_client_visible_content,
-  input_preview_recorded: m.observation_event_input_preview_recorded,
+  user_input_recorded: m.observation_event_user_input_recorded,
   credential_mappings_created: m.observation_event_credential_mappings_created,
   credential_mappings_reused: m.observation_event_credential_mappings_reused,
   checkpoint: m.observation_event_checkpoint,
@@ -139,7 +140,6 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
     summary.tone = observationStatusTone(payload.status)
   }
   switch (event.kind) {
-    case 'run_admitted':
     case 'model_turn_started':
       add(m.observation_chat_model(), text(payload.model_display_name) ?? payload.route_id)
       break
@@ -152,10 +152,13 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
     case 'client_tool_handoff':
       add(m.observation_event_tool(), payload.name)
       break
-    case 'client_tool_result':
-      add(m.observation_event_result(), observationStatusLabel(payload.is_error === true ? 'failed' : 'completed'))
-      summary.tone = payload.is_error === true ? 'error' : 'success'
+    case 'client_tool_result': {
+      // 一批结果一行：任一项出错即整行按失败展示。
+      const failed = Array.isArray(payload.results) && payload.results.some((item) => record(item).is_error === true)
+      add(m.observation_event_result(), observationStatusLabel(failed ? 'failed' : 'completed'))
+      summary.tone = failed ? 'error' : 'success'
       break
+    }
     case 'model_turn_finished':
     case 'platform_tool_finished':
     case 'target_attempt_finished':
@@ -218,17 +221,6 @@ export function observationEventSummary(event: ObservationEvent): EventSummary {
           add(m.observation_event_delivery_reason(), delivery.reason)
           if (deliveryStatus === 'delivery_failed' && summary.tone === 'neutral') summary.tone = 'warning'
         }
-      }
-      if (event.kind === 'run_state_changed') {
-        const reason =
-          payload.reason === 'user_interrupted'
-            ? m.observation_user_interrupted()
-            : payload.reason === 'superseded'
-              ? m.observation_status_superseded()
-              : payload.reason === 'process_restarted'
-                ? m.observation_event_reason_process_restarted()
-                : payload.reason
-        add(m.observation_event_reason(), reason)
       }
       break
     case 'retained_tail_associated':

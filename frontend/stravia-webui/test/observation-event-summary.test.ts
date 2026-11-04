@@ -124,14 +124,35 @@ describe('observation merged lifecycle payloads', () => {
     expect(summary.facts).toContainEqual({ label: m.observation_event_delivery_reason(), value: 'user_cancelled' })
   })
 
-  test('run_state_changed explains a restart recovery instead of the raw reason', () => {
-    const summary = observationEventSummary(
-      event(9, 'run_state_changed', { status: 'interrupted', reason: 'process_restarted' }),
+  test('run_state_changed reports the new status without a payload reason', () => {
+    const summary = observationEventSummary(event(9, 'run_state_changed', { status: 'interrupted' }))
+    expect(summary.facts).toEqual([{ label: m.observation_event_result(), value: m.observation_status_interrupted() }])
+    expect(summary.tone).toBe('warning')
+  })
+
+  test('a batched client_tool_result row fails when any result failed', () => {
+    const ok = observationEventSummary(
+      event(9, 'client_tool_result', { results: [{ tool_id: 'a', content: 'x', is_error: false }] }),
     )
-    expect(summary.facts).toContainEqual({
-      label: m.observation_event_reason(),
-      value: m.observation_event_reason_process_restarted(),
-    })
+    expect(ok.tone).toBe('success')
+    const failed = observationEventSummary(
+      event(10, 'client_tool_result', {
+        results: [
+          { tool_id: 'a', content: 'x', is_error: false },
+          { tool_id: 'b', content: 'y', is_error: true },
+        ],
+      }),
+    )
+    expect(failed.tone).toBe('error')
+  })
+
+  test('payload-less run_admitted and the renamed user_input_recorded are known events', () => {
+    expect(observationEventSummary(event(1, 'run_admitted', { has_new_user: true })).title).toBe(
+      m.observation_event_run_admitted(),
+    )
+    expect(observationEventSummary(event(2, 'user_input_recorded', { text: 'hello' })).title).toBe(
+      m.observation_event_user_input_recorded(),
+    )
   })
 })
 

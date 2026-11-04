@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::runtime_cache::RuntimeCache;
 use async_trait::async_trait;
@@ -183,9 +182,6 @@ pub(super) fn shared_inline_compaction_boundary(
         .rposition(|item| boundary(std::slice::from_ref(item.as_ref()), fresh_states).is_some())
 }
 
-#[cfg(test)]
-const DEFAULT_GENERATION_CHAIN_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
 /// Test-only chain on a fresh migrated SQLite store; used by tests outside this
 /// module that need to construct a `GenerationChain` (e.g. Interaction
 /// Observation).
@@ -193,9 +189,9 @@ const DEFAULT_GENERATION_CHAIN_TTL: Duration = Duration::from_secs(7 * 24 * 60 *
 pub(crate) async fn test_chain() -> GenerationChain {
     GenerationChain::from_turn_chain(
         std::sync::Arc::new(crate::turn_chain::test_store().await),
-        DEFAULT_GENERATION_CHAIN_TTL,
         None,
         RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
     )
 }
 
@@ -205,9 +201,9 @@ pub(crate) struct GenerationChain {
     pending_commits: PendingGenerationCommits,
     artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
-    redaction_mappings: Option<Arc<dyn stravia_credential_protection::store::MappingStore>>,
+    /// 提交时是否登记节点引用的映射占位符；只在装配了可逆脱敏的网关里开启。
+    records_redaction_references: bool,
     compaction: Option<crate::compaction::Compaction>,
-    ttl: Duration,
 }
 
 pub(crate) struct GenerationChainWrite {
@@ -297,7 +293,6 @@ pub(crate) enum PersistError {
     Store(TurnCommitError),
     HistoryMarker(crate::history_marker::HistoryMarkerError),
     Redaction(stravia_runtime_contract::redaction::RedactionError),
-    Compaction(crate::compaction::CompactionError),
 }
 
 impl std::fmt::Display for PersistError {
@@ -307,7 +302,6 @@ impl std::fmt::Display for PersistError {
             Self::Store(error) => write!(formatter, "{error}"),
             Self::HistoryMarker(error) => write!(formatter, "{error}"),
             Self::Redaction(error) => write!(formatter, "{error}"),
-            Self::Compaction(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -327,18 +321,17 @@ pub(crate) struct PreparedCompactionInput {
 impl GenerationChain {
     pub(crate) fn from_turn_chain(
         turn_chain: Arc<dyn TurnChainStore>,
-        ttl: Duration,
         artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
         runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
     ) -> Self {
         Self {
-            store: GenerationChainStore::from_turn_chain(turn_chain, ttl, runtime_cache),
+            store: GenerationChainStore::from_turn_chain(turn_chain, runtime_cache, retention),
             pending_commits: PendingGenerationCommits::default(),
             artifacts,
             history_markers: None,
-            redaction_mappings: None,
+            records_redaction_references: false,
             compaction: None,
-            ttl,
         }
     }
 
@@ -356,11 +349,8 @@ impl GenerationChain {
         self
     }
 
-    pub(crate) fn with_redaction_mappings(
-        mut self,
-        mappings: Arc<dyn stravia_credential_protection::store::MappingStore>,
-    ) -> Self {
-        self.redaction_mappings = Some(mappings);
+    pub(crate) fn with_redaction_references(mut self) -> Self {
+        self.records_redaction_references = true;
         self
     }
 

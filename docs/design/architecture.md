@@ -537,7 +537,6 @@ Gateway::builder(config)
     .hook(Arc<dyn Hook>)                 // 按调用顺序重复添加
     .platform_tool(Arc<dyn PlatformTool>)
     .continuation_ttl(Duration::from_secs(...))
-    .generation_chain_ttl(Duration::from_secs(...))
     .build()
 ```
 
@@ -655,25 +654,29 @@ Responses 的跨协议 Thinking Preview 与其 History Marker 属于同一个合
 
 `stage` 在进程内登记待提交屏障，按 Principal、精确客户端历史前缀、显式父 ID 或 item reference 匹配后续请求。父发现与物化先等待相关写入结束，再读取 durable history，避免客户端已收到终止事件而 SQL 尚未提交时错连旧父。屏障不是历史事实源，不提前发布节点；失败和取消释放等待但不形成可续接历史。无关分支与其他 Principal 不等待，dispatcher 的既有取消和 deadline 覆盖真实的 begin/compaction 等待。该机制不提供跨进程的提交协调。
 
-Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG，默认 TTL 为 7 天。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Generation Materialization Cache 通过统一派生缓存加速精确物化，物化对象与引用目录共享 §10.1 的预算。Memory / SQLite 的 TinyUFO 命中只复制不可变对象的 `Arc`，不序列化或复制整段历史；PostgreSQL 的 Redis 值需要编码与解码。构造可变请求时再复制所需字段。计量采用逻辑字节估计，不为计量分配完整 JSON 缓冲；条目受预算与历史有效期限制，超大条目不缓存但仍正常返回 SQL 结果。缓存不是历史事实源，重启、未命中或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、过期或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
+Generation Chain 使用 `TurnChainStore` 保存所有 ingress 的完整交付生成历史；它是 Principal 隔离、不可变、可分支的 canonical DAG；节点按创建时间至少保留统一的历史保留天数 N（`log_retention_days`，默认 7 天，最小 1 天），保留语义见本节“历史保留”一段。完整交付的 `completed` 与 `incomplete` 终态形成节点；`failed`、取消、客户端断线与 delivery failure 不形成节点。每个节点只保存 canonical 输入 delta、最终输出和 resolved profile delta。Generation Materialization Cache 通过统一派生缓存加速精确物化，物化对象与引用目录共享 §10.1 的预算。Memory / SQLite 的 TinyUFO 命中只复制不可变对象的 `Arc`，不序列化或复制整段历史；PostgreSQL 的 Redis 值需要编码与解码。构造可变请求时再复制所需字段。计量采用逻辑字节估计，不为计量分配完整 JSON 缓冲；条目受预算与上述进程内截止时刻限制，超大条目不缓存但仍正常返回 SQL 结果。缓存不是历史事实源，重启、未命中或淘汰后必须按父节点顺序重放 immutable delta，不能重跑 Hook。Response Chain 是它的 Responses 投影，使用 Gateway 自有 response ID。显式 `previous_response_id` 始终优先：命中后按 parent input/output + delta materialize 完整 canonical 历史，再交给 Hook；未提供父节点的协议只在同 Principal 内以严格 canonical 历史前缀自动选择最长且留下新 input item 的父链，任何语义差异或无候选都创建新根。未知、已被清理或跨 Principal ID 返回 `previous_response_not_found`。`store=false` 仅作为 Upstream Store Hint 发送给 Provider；它不禁用 Stravia 的 Generation Chain 持久化。connection-local state 仍可优化同 socket upstream continuation，但不是历史唯一来源。
 
-父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。自动父发现胜出后，未过期且无引用的 delta 直接复用核验得到的不可变物化对象，不再二次查缓存；对象已过期时沿用原恢复与错误处理路径。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，若已有对应 ingress 的引用目录则不再读链，否则读取一次祖先历史构造目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录按 ingress 惰性缓存，并计入同一字节预算。
+父节点恢复在首次物化时一并收集根节点与压缩记录 ID，并将这些元数据计入缓存字节预算。无 Item Reference 的普通父节点恢复在冷缓存下只读取一次完整历史，热缓存下不再读取数据库。自动父发现胜出后，仍在截止时刻内且无引用的 delta 直接复用核验得到的不可变物化对象，不再二次查缓存；对象已越过截止时刻时沿用原恢复与错误处理路径。含 Item Reference 时，冷缓存路径在同一次读链和解码中折叠执行上下文并构造祖先引用目录；热缓存路径复用执行上下文，若已有对应 ingress 的引用目录则不再读链，否则读取一次祖先历史构造目录。目录包含全部祖先的客户端可见输入与输出，不能用最终执行窗口替代，否则会丢失 `Replace` 前仍可引用的条目或漏掉跨祖先的歧义。引用目录按 ingress 惰性缓存，并计入同一字节预算。
 
-Generation 准备阶段将已经核验的 Principal、父 ID、最终 Target、上游 response ID、续接状态与完整祖先链的最早到期时间，作为不可由客户端 IR 构造的小型证明传给路由和 Target Continuation 准备。两者复用同一证明，不再各自为同一父节点重复物化，也不持有完整历史或发现工作区。证明只在 Principal、父 ID 一致且未过期时有效；续接仍校验 Target namespace、Provider model、protocol、controls 与完整历史前缀，并在改写请求前再次检查期限。它不绕过 Target 资格、健康、cooldown、脱敏证明或完整历史回退。已解析但没有 Target、已过期或身份不匹配的证明不触发第二次查询；独立 Model Turn / Agent 入口，以及不能提供可复用有效期的自定义存储适配器，仍使用即时查询。原生压缩的 source-only 父链只有路由元数据，没有执行状态，不能恢复已被压缩的执行历史。
+Generation 准备阶段将已经核验的 Principal、父 ID、最终 Target、上游 response ID、续接状态与该链的进程内截止时刻，作为不可由客户端 IR 构造的小型证明传给路由和 Target Continuation 准备。截止时刻由物化时头节点（最新节点）的 `created_at + N` 换算为单调时钟 `Instant`，整条链共用头节点计时（祖先因有子节点引用而继续保留，不单独计时）；它只是证明与缓存条目的复用上限，不是持久读取条件。两者复用同一证明，不再各自为同一父节点重复物化，也不持有完整历史或发现工作区。证明只在 Principal、父 ID 一致且未到该截止时刻时有效；续接仍校验 Target namespace、Provider model、protocol、controls 与完整历史前缀，并在改写请求前再次检查截止时刻。它不绕过 Target 资格、健康、cooldown、脱敏证明或完整历史回退。已解析但没有 Target、已越过截止时刻或身份不匹配的证明不触发第二次查询；独立 Model Turn / Agent 入口，以及不能提供可复用截止时刻的自定义存储适配器，仍使用即时查询。原生压缩的 source-only 父链只有路由元数据，没有执行状态，不能恢复已被压缩的执行历史。
 
-同一请求的多轮发现共享一个按 Principal 和节点 kind 隔离的准备阶段读取上下文，固定逻辑预算为 16 MiB。上下文下移到 SQL 祖先读取与外置内容恢复之前：递归查询在仍有效、已经完整核验的共同祖先处停止，只读取新后缀；跨后缀复用已经校验和解码的外置内容。唯一解码 delta、父边、期限证明和外置内容共用这份预算，可选内容暂存也即时计费；预算不足时释放未接纳暂存、停止接纳新材料，保留已有有效命中，其余正常读取。只有完整 domain 解码与重放成功后才接纳节点和内容，不缓存缺失、错误、半链、累计历史或匹配结论。各节点独立保留期限，任一 head 仍受完整祖先链的最早期限约束；若用于截断查询的缓存证明在 SQL 等待期间失效，则重新读取完整事实链，不能把证明失效当作数据库历史不存在，也不能复活真正过期的历史。每轮保留候选顺序、controls、精确 canonical 前缀与完整窗口核验，owned 与共享节点使用同一重放逻辑。普通自动发现仅在首次实际核验失败后启用上下文，不追溯缓存首个拒绝候选；原生压缩的多个发现阶段预先共享。上下文在准备结束、进入模型执行前释放，不复制到隐藏 Model Leg，也不随流式响应保留。这是独立于跨请求统一派生缓存的请求临时逻辑预算，不是整个请求或进程 RSS 上限；并发请求各自占用预算。
+同一请求的多轮发现共享一个按 Principal 和节点 kind 隔离的准备阶段读取上下文，固定逻辑预算为 16 MiB。上下文下移到 SQL 祖先读取与外置内容恢复之前：递归查询在仍有效、已经完整核验的共同祖先处停止，只读取新后缀；跨后缀复用已经校验和解码的外置内容。唯一解码 delta、父边、期限证明和外置内容共用这份预算，可选内容暂存也即时计费；预算不足时释放未接纳暂存、停止接纳新材料，保留已有有效命中，其余正常读取。只有完整 domain 解码与重放成功后才接纳节点和内容，不缓存缺失、错误、半链、累计历史或匹配结论。上下文中每个节点携带读取它时所属头节点的进程内截止时刻，任一 head 的复用上限取其祖先链上这些截止时刻的最小值；若用于截断查询的缓存证明在 SQL 等待期间越过截止时刻，则重新读取完整事实链，不能把证明失效当作数据库历史不存在。截止时刻只限制缓存复用，不删除也不恢复任何持久节点。每轮保留候选顺序、controls、精确 canonical 前缀与完整窗口核验，owned 与共享节点使用同一重放逻辑。普通自动发现仅在首次实际核验失败后启用上下文，不追溯缓存首个拒绝候选；原生压缩的多个发现阶段预先共享。上下文在准备结束、进入模型执行前释放，不复制到隐藏 Model Leg，也不随流式响应保留。这是独立于跨请求统一派生缓存的请求临时逻辑预算，不是整个请求或进程 RSS 上限；并发请求各自占用预算。
 
-凭据映射的发布与续期在既有事务和 Principal 锁内，对借用引用去重后按最多 400 个引用批量更新，保留 published、过期和缺失过滤，不缩短 TTL 或复活过期记录。History Marker 的一次续期调用也去重分块，但所有分块共用一个事务：任一引用缺失、过期或不属于当前 Principal，整批续期回滚并返回原有 unavailable-marker 错误。此原子性只覆盖该次 Marker 续期，不表示 Generation 提交、Marker 和凭据映射跨存储共用一个事务。
+**历史保留（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md) 取代原固定 7 天 TTL 与祖先续期）：** Generation Chain、Observation（含 Rejected Request）与 Debug manifest 共用同一个内存天数 N，即管理端设置 `log_retention_days`（`HistoryRetention`，默认 7，最小 1；启动时缺失按默认，无法解析时记录告警后按默认，低于 1 按 1）。`GatewayBuilder::generation_chain_ttl`、`Gateway::new` 中固定的 7 天与原生压缩登记的固定 `RETENTION` 均已删除。Turn 节点只有一个计时 `turn_nodes.created_at`，`turn_node_retention` 只保存 `deleting`；提交与读取都不再为祖先续期，也不依赖整条祖先链的最早到期时间。读取（物化、父发现、可复用前缀候选、提交时的祖先检查）只排除 `deleting`，没有时间条件：已满 N 天但尚未被扫描的节点仍可读取、续接并被新节点引用。
 
-SQLite 与 PostgreSQL 的候选查询仍将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，保留 Principal、kind、namespace、期限过滤及按 canonical 单元数、完成时间、节点 ID 的原排序。迁移 `0017_history_candidate_projection` 在节点表增加可空的投影版本、controls 指纹与客户端 context 指纹；提交从实际客户端投影 `client_items` 计算，旧索引升级到 Generation history v3 namespace 时从 retained client items 重放重建，不借用 Provider 脱敏视图的证明。查询在 SQL 中用版本匹配的 controls 与 `(context fingerprint, canonical unit count)` 配对否决确定不匹配的候选；缺失字段、未知版本或没有查询证明时保守保留。指纹只能否决，不能证明匹配：其余候选仍按顺序读取并执行完整 canonical 历史核验，session hint 不能替代语义一致性。确定不匹配的分支不读取，因此该分支的 payload 或祖先损坏不会影响当前请求；可能匹配的分支保持原有错误与 TTL 语义。自动父发现先查询并严格核验 session 层，只有该层没有可用父链时才查询 controls 层；`candidate_count` 只统计实际 SQL 返回的候选，不能再用于推断被投影排除的分支也经过了读链。
+删除只由 `HistoryMaintenance::sweep_history(now)` 执行，顺序为 Observation → Turn 节点 → History Marker → 可逆脱敏映射 → 原生压缩登记 → 共享正文回收（`content_gc`）；其中 Turn 节点、Marker、映射与原生登记四步作为一轮重复执行，直到某一轮没有删除任何行，所以被释放的来源节点、Marker 与映射在同一次扫描内收完；正文回收每批至多 512 行或 8 MiB，逐批提交并释放写协调，直到队列排空；每一步都会被尝试，某一步失败只记录告警，其余步骤照常执行，最后合并各步错误返回。Gateway 后台每小时一次，保存 `log_retention_days` 后也同步执行一次。Turn 节点在 `created_at + N` 已过、且没有子节点、没有 native compaction source 引用时才被回收，因此祖先随最新后代存活，续接不需要续期写。Marker、可逆脱敏映射与原生压缩登记不再保存 `expires_at`：被 `turn_node_markers`、`turn_node_redaction_mappings`、`turn_node_compactions` 引用时不回收；失去最后一条引用后，尚未发布或确认的行按 1 小时的 `pending_until` 回收，已发布或确认的行按首次 `published_at` / `confirmed_at` 加 N 为下限回收，之后均经回收队列删除（最后一条引用消失时由 `AFTER DELETE` 触发器入队，从未被引用的行由扫描按水位入队）。因此保证是“至少保留 N 天；不再使用的记录到期后在一个扫描周期（≤ 1 小时加扫描耗时）内删除”，而不是到期立即不可读；修改 N 不重写任何行。迁移 0037–0042 的结构见 §10.2 的“0037–0042”段，设计取舍与性能分析见 [数据布局与性能](data-layout-performance.md#10-adr-0089-的共享内容存储引用保留与-observation-写入合并)。
+
+发布只记录首次发布时刻并清空 `pending_until`，不延长任何保留期。凭据映射发布在既有事务内对借用引用排序去重，按最多 400 个引用分块更新；History Marker 发布在单个事务内逐引用更新，任一引用缺失或不属于当前 Principal，整批回滚并返回存储错误。Generation 提交在同一事务和 Principal 锁内按最多 400 个引用分块登记引用行：缺失的 Marker 只跳过，缺失的映射或原生压缩登记使提交以依赖不可用失败。发布与 Generation 提交仍是各自的事务，不表示 Generation 提交、Marker 和凭据映射共用一个事务。
+
+SQLite 与 PostgreSQL 的候选查询仍将 `(prefix_fingerprint, prefix_item_count)` 表达为配对集合，保留 Principal、kind、namespace 与 `deleting` 过滤（没有时间条件）及按 canonical 单元数、完成时间、节点 ID 的原排序。迁移 `0017_history_candidate_projection` 在节点表增加可空的投影版本、controls 指纹与客户端 context 指纹；提交从实际客户端投影 `client_items` 计算，旧索引升级到 Generation history v3 namespace 时从 retained client items 重放重建，不借用 Provider 脱敏视图的证明。查询在 SQL 中用版本匹配的 controls 与 `(context fingerprint, canonical unit count)` 配对否决确定不匹配的候选；缺失字段、未知版本或没有查询证明时保守保留。指纹只能否决，不能证明匹配：其余候选仍按顺序读取并执行完整 canonical 历史核验，session hint 不能替代语义一致性。确定不匹配的分支不读取，因此该分支的 payload 或祖先损坏不会影响当前请求；可能匹配的分支保持原有错误语义。自动父发现先查询并严格核验 session 层，只有该层没有可用父链时才查询 controls 层；`candidate_count` 只统计实际 SQL 返回的候选，不能再用于推断被投影排除的分支也经过了读链。
 
 外置内容恢复从 immutable descriptor 提取 JSON Pointer 与 ordinal，以 `turn_node_contents` 的数值映射作为唯一内容引用权威；descriptor 不再保存摘要或内容 ID 副本。经过 Principal/kind 过滤的节点查询同时投影 scope 与整数引用映射，不另查一次关联，也不重复携带正文；恢复器按 ordinal 排序并检查连续、完整和同 scope，不依赖聚合输出顺序。先在当前节点批次内去重，再查询请求上下文中的已校验内容，只对缺失的数值 content_id 按最多 256 项分批读取。内容解码后验证带域 SHA-256 再恢复 slot；缺失正文、损坏归属/摘要或非法 slot 明确失败，不能以部分成功污染上下文。内容接纳与节点完整重放共用前述预算和成功边界；不同 Principal 不共享内容。跨候选复用避免重复数据库读取、解压与解析，不承诺消除 JSON slot 恢复所需的全部复制。
 
-历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或过期历史撤销不可用索引，不重写原始节点或父边。
+历史指纹与精确前缀核验复用完整消息语义投影：忽略应用 `metadata`、`internal_chat_message_metadata_passthrough` 和交付身份字段，不忽略角色顺序、内容块、工具关联、推理密文、原生压缩状态或未分类协议扩展。原始 wire 字段继续保留。Gateway 初始化时按版本重建旧 Generation 前缀索引，只更新派生列；缺失祖先或已回收历史撤销不可用索引，不重写原始节点或父边。
 
 同一不可变客户端投影的 context fingerprint 与 canonical 单元数一起计算，提交索引复用该计数，不再为计数重新投影正文。计算边界在输出改写、inline compaction 与 Replace 之后；不能缓存可变请求，也不能把 Provider/脱敏投影的摘要当作客户端历史摘要。发现、重放与前缀重建借用同一套语义单元，普通文本不先复制成 owned JSON。既有 JSON 键序、单元顺序、哈希域及长度前缀保持不变；长度前缀仍要求先计 JSON 字节数，再对相同字节散列，不通过保留完整序列化正文来省掉这一契约。
 
-SQLite 与 PostgreSQL 的启动重建在同一事务内先去重旧索引 head 的祖先元数据，校验完整、同 Principal、未过期的 Response 祖先链，再按父节点优先顺序逐节点读取、恢复和解码一次。`TurnChainStore::rebuild_prefixes` 的可变回调接收单个 `TurnNode` 与可选的原完成时间；无索引祖先仍参与折叠，但不新增索引，已有当前版本的祖先索引保持不变。Generation 折叠只保留每节点的客户端 context 哈希与 canonical 单元数，Append 延续父摘要，Replace 从空摘要重新计算，分支互不污染；不为每个 head 重新物化完整祖先历史，也不保留完整正文缓存。只有旧索引更新派生列，成功重建保留原完成时间；解码或存储失败回滚整个索引事务。
+SQLite 与 PostgreSQL 的启动重建在同一事务内先去重旧索引 head 的祖先元数据，校验完整、同 Principal、未被标记 `deleting` 的 Response 祖先链，再按父节点优先顺序逐节点读取、恢复和解码一次。`TurnChainStore::rebuild_prefixes` 的可变回调接收单个 `TurnNode` 与可选的原完成时间；无索引祖先仍参与折叠，但不新增索引，已有当前版本的祖先索引保持不变。Generation 折叠只保留每节点的客户端 context 哈希与 canonical 单元数，Append 延续父摘要，Replace 从空摘要重新计算，分支互不污染；不为每个 head 重新物化完整祖先历史，也不保留完整正文缓存。只有旧索引更新派生列，成功重建保留原完成时间；解码或存储失败回滚整个索引事务。
 
 Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。
 
@@ -689,7 +692,7 @@ Codex HTTP 推理实际发送 `stream=true` 时，Vendor 显式选择既有 SSE 
 
 - Hook 运行在受信 in-process Rust 环境，不获得可变 `Gateway`、任意存储、原始 `Authorization`、API key、provider credential 或 raw request/response。
 - Runtime 仅提供 canonical IR、稳定主体/路由标识、受限 ContextSnapshot 和受控 PlatformTool；凭据由宿主持久化并只授予当前 Provider 的 Vendor Plugin operation。
-- 普通 Interaction Observation 持久化拓扑、生命周期、时间、路由/Target、错误分类、凭据脱敏后的用户输入预览、Client Projection 可见内容、模型可读思考、客户端及平台工具输入/返回和 Confirmed Upstream Usage。思考按 Model Turn / Target attempt 隔离增量脱敏和合并，不采集其签名、密文或保护元数据，也不混入可见输出预览。输入预览及收到的客户端工具返回在既有凭据保护成功后发布；输入预览最多保留前 4,096 Unicode 字符，工具续跑不覆盖原始输入。普通内容沿用请求记录保留期，仍可能包含业务敏感数据。原始应用协议 Wire 仅由进程级 Debug 控制，canonical payload 不进入 Debug Trace；开关默认关闭，启用必须确认，只影响后续准入 Run。
+- 普通 Interaction Observation 持久化拓扑、生命周期、时间、路由/Target、错误分类、凭据脱敏后的用户输入、Client Projection 可见内容、模型可读思考、客户端及平台工具输入/返回和 Confirmed Upstream Usage。思考按 Model Turn / Target attempt 隔离增量脱敏和合并，不采集其签名、密文或保护元数据，也不混入可见输出。用户输入及收到的客户端工具返回在既有凭据保护成功后发布；用户输入以完整文本单元保存，不再有前 4,096 字符的截断（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md) 取代原 `input_preview`），工具续跑不覆盖原始输入。正文经共享内容存储以引用保存（见 [Interaction Observation](interaction-observation.md)），按同一历史保留天数 N 清理，仍可能包含业务敏感数据。原始应用协议 Wire 仅由进程级 Debug 控制，canonical payload 不进入 Debug Trace；开关默认关闭，启用必须确认，只影响后续准入 Run。
 - 管理面、非推理路由和 Vendor Plugin 不通过 HookRuntime 的事件面；供应商行为只经统一 Wasm execution seam，不是 hook 的凭据出口。
 
 ### 4.10 Interaction Observation
@@ -737,7 +740,7 @@ Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG
 
 Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度与保留期。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 只保存 client↔platform↔upstream 四方向观察到的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层原始 Wire 顺序及必要关联元数据，不保存 canonical、Hook 或 Client Projection 中间阶段，也不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。只有 HTTP `Authorization` header 值在进入队列前永久替换；其他 header、URL、query、body、prompt、工具参数、工具结果与媒体可能原样保留。
 
-Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug` 目录；落盘不设 Run 级或全局容量上限，`retained_bytes` 只统计实际落盘字节，原始分块捕获与单条 Wire message 的既有缓冲仍有内存上限，但 Debug 不为 JSON、SSE、NDJSON 或媒体重组正文。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；Debug 开启时 Clear Debug Data 可删除全部已保留 Trace 而不动请求记录与开关，活动 Run 的 Trace 标记 `debug_data_cleared` partial。manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
+Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug` 目录；落盘不设 Run 级或全局容量上限，`retained_bytes` 只统计实际落盘字节，原始分块捕获与单条 Wire message 的既有缓冲仍有内存上限，但 Debug 不为 JSON、SSE、NDJSON 或媒体重组正文。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天，最小 1 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；Debug 开启时 Clear Debug Data 可删除全部已保留 Trace 而不动请求记录与开关，活动 Run 的 Trace 标记 `debug_data_cleared` partial。manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
 
 已认证 POST 可为 Interaction 或 Rejected Request 固定 through-sequence 的 snapshot，并签发 60 秒、单次使用、高熵 opaque ticket；普通 GET 消费 ticket 并流式生成 versioned ZIP，URL 不携带 Admin credential。manifest 记录 export time、through-sequence、resource status、每 Run capture state/bytes/reason 及整体 `complete|partial|none`；运行中导出只能是 point-in-time partial。过期、重放、跨资源或进程重启后的 ticket 统一失效。当前 realtime、Debug switch、Trace storage 与 ticket 都仅保证单 Gateway instance，不提供 cluster fanout、共享 Trace 或跨实例 ticket。
 
@@ -747,7 +750,7 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 管理面显示名称为「凭据保护」，既有页面路由和配置键不变。`AdminService` 提供规则目录、按新增映射逐条列出的命中记录查询（含条目详情与后续复用两个只读端点）及主动文本测试，Server 与 Desktop 复用同一个管理 HTTP 边界。目录与结构化检测结果来自同一运行时快照；检测器由 `OnceLock` 初始化，目录加载和文本检测沿用 `spawn_blocking`，不在异步请求线程编译或扫描规则。最终匹配保留规则身份、原文本来源与字节范围，测试返回 UTF-16 起止偏移和从 1 开始的 Unicode 字符行列，右端不包含在区间内；正式保护仍按秘密值去重，不为管理展示重复检测请求。
 
-映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时，`protect` 在替换完成后发送 `CredentialMappingsReused`：位置取自出站替换实际发生之处（含检测器认不出上下文的已知凭据），只限本次请求新提交的文本（最后一条 Assistant 之后的条目），客户端重放的历史不重复记录；模型响应里工具调用参数的引用被还原时，`restore_stream` 在完整响应处同样发送一次，来源为 `tool_arguments`，块标识是该调用 ID。新建事件记录该秘密出现过的全部位置，由检测器逐处标注规则；复用事件的规则取自映射的 `rule_ids`（创建时写入、不再改写，迁移前创建的映射为空，只受保护、不产生复用命中）。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；所有 Run 另带不透明占位符 `marker`（= 映射 `reference`），用于把复用事件关联回创建它的命中记录，不进入列表接口；写入 `CredentialMappingsReused` 事件的同一事务同时按占位符与位置 upsert `credential_mapping_reuses`，命中记录侧栏的「后续复用」据此做索引查找而不扫描事件。复用不产生命中记录行，只作为创建行的后续使用列出；续期、还原和 Target 重试不产生新增；过期重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
+映射事务返回实际提交的新建下标，SQLite 与 PostgreSQL 均在同 Key 创建互斥边界内裁决，不能以调用前读取推断首次发现。`protect` 在新建返回后、任何可失败的替换之前，通过既有可选 `RunObserver` 发送 `CredentialMappingsCreated` 普通事件；命中已有有效映射时，`protect` 在替换完成后发送 `CredentialMappingsReused`：位置取自出站替换实际发生之处（含检测器认不出上下文的已知凭据），只限本次请求新提交的文本（最后一条 Assistant 之后的条目），客户端重放的历史不重复记录；模型响应里工具调用参数的引用被还原时，`restore_stream` 在完整响应处同样发送一次，来源为 `tool_arguments`，块标识是该调用 ID。新建事件记录该秘密出现过的全部位置，由检测器逐处标注规则；复用事件的规则取自映射的 `rule_ids`（创建时写入、不再改写，迁移前创建的映射为空，只受保护、不产生复用命中）。每个映射携带规则 ID 集合、最小来源类型和块级 `locators`（工具调用 ID 或「最后一条用户输入」标记，有数量上限，见[凭据命中记录](interaction-observation.md#35-凭据命中记录)）；所有 Run 另带不透明占位符 `marker`（= 映射 `reference`），用于把复用事件关联回创建它的命中记录，不进入列表接口；写入 `CredentialMappingsReused` 事件的同一事务同时按占位符与位置 upsert `credential_mapping_reuses`，命中记录侧栏的「后续复用」据此做索引查找而不扫描事件。复用不产生命中记录行，只作为创建行的后续使用列出；发布、还原和 Target 重试不产生新增；映射被回收后重建与其他 API Key 独立计入。写者解析 Connect Client Interaction 归属，失败或取消不撤销发现；没有客户端观察归属的内部执行不伪造成客户端交互。观察写入不参与映射事务，也不改变保护错误与成功发布裁决。
 
 映射预留与发现投递共用一个独立任务，覆盖数据库提交与调用方收到确认之间的取消窗口。调用方取消后不等待该任务；任务只能完成已启动的预留及诊断投递，不调用 Provider、不执行替换或发布，预留仍按既有 pending 保留期过期。
 
@@ -759,7 +762,7 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 内置检测只使用 Betterleaks；不再内置 Kingfisher 补充规则。迁移 `0035_credential_hit_records` 与其启动升级从映射归因和命中事件中移除存量 `kingfisher.*` 规则 ID，界面没有「已移除规则集」的特殊分支。管理规则目录、匹配测试与正式保护使用同一个检测器。
 
-SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
+SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布（记录首次发布时刻，不再延长固定期限），然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 提交在同一事务内登记 `turn_node_redaction_mappings` 引用，被节点引用的映射不会被回收；失去引用后至少保留到首次发布时刻加 N，之后由统一扫描删除（见 §4.8“历史保留”）。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 
 当前请求含本 Principal 的有效引用时，`protect` 在替换后追加一次系统说明：`Preserve Stravia redaction markers verbatim when used; Stravia restores their values.` 关闭新增保护但仍有可恢复引用时也适用；无引用、仅未知或跨 Principal 引用的请求不追加。说明仅属于当前模型请求，不写回客户端历史。本次为面向新部署和全新数据库的干净切换；迁移 0046 仍是从 `~stravia-secret:…~` 转到旧长 HTML 注释格式的历史迁移，本次不修改。两种旧格式均不再读取或还原，也不重写 Stravia 的不可变历史或外部客户端、上游历史；不应直接复用依赖旧引用的数据库；旧数据库与用户数据应另行保留而不是删除，并在全新数据库上新开会话。
 
@@ -767,11 +770,11 @@ SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 H
 
 Anthropic 工具结果的 content blocks 保留可读文本、工具关联和媒体语义，目标编码器可以使用原生数组；编码成 Tool Text 的数组通过内部标记与普通文本区分，不保证所有数组维持字符串载体。新 Generation Chain 写入 payload version 5；旧版本恢复时剥除该保留键，防止旧客户端 vendor meta 被提升为可信证明。内部语义不参与 canonical identity，也不发往 Provider。旧无语义的复合数组及编码数组在保护开启时拒绝出站；关闭保护或还原时原样保留，不猜测、不改写媒体。
 
-流式与完整响应使用同一份有效映射和单次替换语义。流式状态只暂存未完成的引用及 JSON 转义，按输出项、文本字段和工具调用分开；普通文本不等待 Model Turn 结束。Provider 视图中的引用及上下文指纹在还原前记录，用于续期和上游续接判断；客户端明文历史不被改写成占位符历史。开关切换造成 Provider 可见历史不等价时发送完整历史，不错误复用原前缀。
+流式与完整响应使用同一份有效映射和单次替换语义。流式状态只暂存未完成的引用及 JSON 转义，按输出项、文本字段和工具调用分开；普通文本不等待 Model Turn 结束。Provider 视图中的引用及上下文指纹在还原前记录，用于登记 Turn 节点的映射引用和上游续接判断；客户端明文历史不被改写成占位符历史。开关切换造成 Provider 可见历史不等价时发送完整历史，不错误复用原前缀。
 
 恢复前将有效映射注册到 Run 级诊断保护集合，由 RunObserver 与其 TraceHandle 共享，不跨 Run 或 Principal 共享。恢复后的响应与工具参数进入持久化诊断队列前，按已知秘密精确替换为 `***`；流式可见文本使用增量匹配，仅保留未决前缀，不等待整轮结束。原始客户端入站载荷仍沿用既有永久脱敏策略，不能据此将诊断导出视为不含敏感信息。
 
-关闭开关停止检测和出站替换，但已有有效引用仍在回答、客户端工具参数及平台工具执行参数中还原。未知、过期与跨 Key 引用均原样保留，不暴露归属差异。检测、替换、映射访问或发布错误按既有 typed error / 流式失败流程终止，不发送绕过保护的明文，不提交失败的 Generation Chain。映射不提供数据库静态加密，也不阻止工具把还原后的秘密发给外部地址；既有认证、工具出站约束和诊断永久脱敏仍然适用。
+关闭开关停止检测和出站替换，但已有有效引用仍在回答、客户端工具参数及平台工具执行参数中还原。未知、已回收与跨 Key 引用均原样保留，不暴露归属差异。检测、替换、映射访问或发布错误按既有 typed error / 流式失败流程终止，不发送绕过保护的明文，不提交失败的 Generation Chain。映射不提供数据库静态加密，也不阻止工具把还原后的秘密发给外部地址；既有认证、工具出站约束和诊断永久脱敏仍然适用。
 
 自定义凭据规则保存在 `credential_custom_rules` 表（SQLite 与 PostgreSQL 各有 `0005` 迁移），`spec` 是带 `mode` 标签的 JSON：`simple` 只保存要精确匹配的文本（区分大小写、按原样保存、不可全为空白）；`pattern` 保存正则、提取分组、关键词与最小熵，语义与内置规则一致（正则经同一 RE2 翻译器，关键词不区分大小写做预检，最小熵按提取内容的 Shannon 熵计算）。规则 ID 固定为 `custom.<uuid>`，与内置规则目录分开：`GET /reversible-redaction/rules` 仍只返回内置目录，自定义规则通过 `/reversible-redaction/custom-rules`（GET/POST）与 `/custom-rules/{id}`（PUT/DELETE）管理。保存前用与运行时相同的编译器校验，字段级错误以 `custom_credential_rule_invalid` 的 `params{field,reason}` 返回，因此已保存的规则必能被检测路径加载；检测时读取失败按 `RedactionError` 终止请求，不放行明文。已启用的自定义规则与内置规则产出同一种命中，之后共用 `intern` → 替换 → 还原管线，`POST /reversible-redaction/test` 也包含它们；简易模式的匹配文本可能就是凭据，管理接口按明文返回给已认证管理员，界面表格与搜索索引不展示它。删除规则不清除既有映射，保留期内仍可还原。
 
@@ -1216,7 +1219,7 @@ Core 的共享 SQLite 连接池在每条新连接初始化时读取实际 `page_
 
 Core 的 `build.rs` 显式跟踪整个 `migrations/` 目录，使新增迁移也能触发增量构建重新嵌入；仅依赖 `sqlx::migrate!` 对已有文件的跟踪不能发现新增文件。`0015_history_retention_indexes` 在两后端将父边索引扩展为 `(parent_id, principal, kind)`，并增加内容引用的 `(node_id, principal)` 索引，使外键删除检查按完整关系定位，避免清理每个节点时反复扫描同一 Principal 的全部历史并长时间占用 SQLite 写锁。迁移只调整索引，不改变历史、保留期、身份或会话契约。
 
-`0020_observation_retention_indexes` 在两后端补齐 Interaction/Run 自引用父边、待完成工具、尾部来源与 Target attempt 的清理外键索引，并将两类观测到期索引扩展为 `(expires_at, id)`。周期清理每批独立提交最多 100 条 Rejected Request 与 100 条非运行中过期 Interaction，SQLite 写协调器随批次释放；writer 逐批失效已删除的归属与实时状态。后批失败保留已提交进度并显式报错，不增加锁超时或自动重试；手动清除及用量持久化屏障保持原有边界。详见 [保留与清理](interaction-observation.md#64-保留与清理)。
+`0020_observation_retention_indexes` 在两后端补齐 Interaction/Run 自引用父边、待完成工具、尾部来源与 Target attempt 的清理外键索引，并将两类观测到期索引扩展为 `(expires_at, id)`。周期清理每批独立提交最多 100 条 Rejected Request 与 100 条非运行中过期 Interaction，SQLite 写协调器随批次释放；writer 逐批失效已删除的归属与实时状态。后批失败保留已提交进度并显式报错，不增加锁超时或自动重试；手动清除及用量持久化屏障保持原有边界。详见 [保留与清理](interaction-observation.md#64-保留与清理)。上述 `(expires_at, id)` 到期索引与按 `expires_at` 判定到期的清理是 0020 时的历史状态，已由 0041/0042 取代：Observation 不再保存 `expires_at`，Interaction 按 `last_active_at + N`、Rejected Request 按 `occurred_at + N` 判定，索引为 `interaction_observations_activity_idx(last_active_at, id)` 与既有 `rejected_requests_window_idx`（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。
 
 `0024_independent_tool_execution_retention` 在两个后端解除公开执行对来源 Observation 的生命周期依赖，删除来源清理触发器、fence、移除队列及 lifetime view。`terminal_at` 记录实际判定终态的时刻，`retention_started_at` 记录结果保留起点，`expires_at` 只约束终态结果；运行中仍由原 deadline 与 owner／lease 保护。升级仅保留旧规则下仍可查询的引用及结果，从迁移时刻给予完整历史保留窗口；旧终态的 `terminal_at` 保持 NULL，不把迁移起点或后来 publish 的时间伪造成完成时间。已失效或已删除的结果不复活。
 
@@ -1243,17 +1246,19 @@ SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需�
 
 详情见[成本与计费](cost-and-billing.md)，最终结构见生成的 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql) 参考 schema。
 
-`0032_normalized_turn_storage` / `0033_finalize_normalized_history` 将 Turn Chain 切换为规范化存储 v3。`turn_scopes` 字典化 Principal，`turn_nodes` 保留公开 ID、kind、数值父边与前缀，正文与可变期限分别进入 `turn_node_payloads` / `turn_node_retention`。所有非 null 语义内容单元统一以 `SHA256(b"stravia.turn-content.v1\0" + raw_compact_json)` 的完整 32 字节寻址，不再有 256B 分流；空值类型仍精确保留，opaque Item 不拆成标量 EAV。`turn_contents` 仅在 scope 内共享，`turn_node_contents` 以 ordinal 映射数值 ID，复合外键保证 scope/kind 隔离。descriptor 只有 data/slots，关联表是唯一内容引用权威。
+`0032_normalized_turn_storage` / `0033_finalize_normalized_history` 将 Turn Chain 切换为规范化存储 v3。**以下关于表名、内容哈希域与期限列的记述是 0032/0033 当时的状态，已由 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md) 与迁移 0037–0042 取代**（当前状态见后文“0037–0042”段）：Principal 字典表 `turn_scopes` 现为 `content_scopes`；`turn_contents` / `turn_content_gc` 现为 `contents` / `content_gc`，由 Turn、Marker 与 Observation 共享；哈希域 `turn-content.v1` 现为 `content.v1`；`turn_node_retention` 当时保存 `expires_at` 与 `deleting`，现仅保存 `deleting`。0032/0033 引入且仍有效的部分：`turn_nodes` 保留公开 ID、kind、数值父边与前缀，descriptor 与可变状态分别进入 `turn_node_payloads` / `turn_node_retention`；所有非 null 语义内容单元统一内容寻址，不再有 256B 分流，空值类型仍精确保留，opaque Item 不拆成标量 EAV；`turn_node_contents` 以 ordinal 映射数值内容 ID，复合外键保证 scope/kind 隔离。descriptor 只有 data/slots，关联表是唯一内容引用权威。
 
-迁移先建立新结构，再按阶段/游标验证旧正文、引用集合并转换，全部完成后才切换 native compaction 外键、删除旧表与工作表；0001–0031 checksum 保持不变，已完成库重启不访问旧表。升级需备份完整数据根和外部数据库，预留新旧结构并存空间；回退必须恢复配套备份。节点 descriptor、内容及普通 Observation payload 继续共用二进制 codec，128B 压缩门槛与内容寻址规则无关。14 字节 trailer、锁序、候选 GC、deleting 恢复与验收边界见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)。Debug 仍由 `diagnostics/observation-debug/<trace_id>/manifest.json` 与本实例 `DebugTraceIndex` 提供，不进入共享数据库；事件契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+迁移先建立新结构，再按阶段/游标验证旧正文、引用集合并转换，全部完成后才切换 native compaction 外键、删除旧表与工作表；0001–0031 checksum 保持不变，已完成库重启不访问旧表。升级需备份完整数据根和外部数据库，预留新旧结构并存空间；回退必须恢复配套备份。节点 descriptor、内容及 Observation 的小属性（0042 之后为 `attrs` / `envelope`）继续共用二进制 codec，128B 压缩门槛与内容寻址规则无关。14 字节 trailer、候选 GC 与 deleting 恢复的原始设计见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)；其中的内容锁序与 GC 协议已由 ADR-0089 的共享内容存储取代。Debug 仍由 `diagnostics/observation-debug/<trace_id>/manifest.json` 与本实例 `DebugTraceIndex` 提供，不进入共享数据库；事件契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
 
-普通历史写入先在 blocking worker 中外置 JSON、计算摘要并编码 descriptor，再查询内容存在性提示；释放查询连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内重新查询全部内容，PostgreSQL 按 nodes→contents 取得 `ROW EXCLUSIVE` 表锁并按稳定摘要顺序锁定已有内容；SQLite 在共享 gate 与 BEGIN IMMEDIATE 内裁决。若 GC 删除了提示中的内容，则以保留的 raw JSON 补做压缩，保持写/GC 互斥，不释放锁后重试。缺失内容批量插入，冲突后定向取号；节点、payload、retention、ordinal 关联和前缀同事务提交。祖先续期仍为 O(depth)，只更新确实增长的窄 retention 行，不改变保留期语义。
+普通历史写入先在 blocking worker 中外置内容单元、计算摘要并编码 descriptor，再查询内容存在性提示；释放查询连接后，仅压缩提示中缺失的内容。上述常态 CPU 准备发生在 SQLite 共享写 gate 与 PostgreSQL 写事务之前。提示不是事实源：事务内按摘要重新取得全部内容。PostgreSQL 仍对 `turn_nodes` 取 `ROW EXCLUSIVE` 表锁，但内容表不再有表锁：先复用已有行（`FOR KEY SHARE`），缺失内容 `INSERT … ON CONFLICT DO NOTHING RETURNING id`，冲突未返回的行以加锁查询重读，GC 已删除则重新插入；GC 以 `FOR UPDATE OF c SKIP LOCKED` 领取并重检四类反向引用；scope 读取同样 `FOR KEY SHARE`，清理 scope 以 `FOR UPDATE SKIP LOCKED` 领取后重检。依赖（Marker、映射、原生登记）的提交路径只加 `FOR KEY SHARE`；回收以 `FOR UPDATE OF g, m SKIP LOCKED` 同时锁住队列行与对象行并重检引用；释放触发器与 `enqueue_unreferenced` 取 `FOR NO KEY UPDATE`。节点、Marker 与原生登记的回收事务取独占的事务级咨询锁 `PG_GC_LOCK`，Marker 发布、映射发布、原生登记确认与启动恢复先取同一把锁的共享模式，使释放触发器按行删除顺序取锁、与发布按调用方顺序取锁不会成环（正确性不依赖捕获外键错误后重试）。节点回收先取 `turn_nodes` 的 `SHARE ROW EXCLUSIVE` 表锁、再取咨询锁，等待在途提交期间不持有咨询锁，因此发布与确认只等待一个正在执行的回收批次；Marker 回收整批只做一次按 ID 升序的正文入队，各事务的排他正文锁（`FOR NO KEY UPDATE`）一律在对象行锁之后，与 Observation 清理的一次有序入队不交叉。各事务的完整取锁顺序见 ADR-0089 §PostgreSQL 锁协议。SQLite 在共享 gate 与 BEGIN IMMEDIATE 内裁决。若 GC 删除了提示中的内容，则以保留的原始字节补做压缩。节点、payload、retention、引用行和前缀同事务提交。0032/0033 时的“祖先续期为 O(depth)”与“nodes→contents 表锁序”已被取代：提交不再续期祖先（见 §4.8“历史保留”）。
 
 锁内确认内容存在后，立即释放已不再需要的恢复正文。缺失内容的压缩缓冲按所有权交给 SQLx 参数：SQLite 复用原 `Vec<u8>`，避免借用 slice 的绑定副本；PostgreSQL 仍需将 BYTEA 编码进协议参数区，但源缓冲在编码后释放，不再跨数据库等待重复驻留。启动迁移保留共享 prepared map 的借用路径，不改变其数据复用与原子提交。
 
 内容抽取复用 compact JSON 序列化 scratch 和摘要去重，内容身份仍取确切 JSON bytes 而不是语义指纹；逐 occurrence 的 slot、未知字段、精确数字及完整恢复不变。解码后的 `FrozenItem(Arc<AiItem>)` 在 client/effective/mutation/catalog 窗口间共享，真正改写才 COW；已有 owned canonical 结果直接接管，准备好的客户端投影在提交时消费而非复制。缓存按唯一 Item allocation、深层 metadata 与完整 effective_request 控制估重；请求工作区还计入解码节点保留的响应扩展与容器，不再为准入序列化整节点。JSON 估重与 precommit 共用 `memory` 的借用遍历，计入任意精度数字词法及保守容器开销，内容条目另计 Arc 头和槽位；不为计量构造第二棵 DOM。PostgreSQL 的 payload/content BYTEA 列保持 `STORAGE EXTERNAL`，避免对 storage codec 帧重复尝试 TOAST 压缩。
 
-0033 同时移除 interaction/model-turn 各五个无生产读者的 Token 副本，以 attempt 为查询权威，保留 estimated_input_tokens 和全部金额事实。Observation 批内复用 usage、按需读取 durable attempt，并把 finish 的状态/金额/usage 合并更新；不重写事件顺序、迟到修订、stats 触发器或长期 spend。Client Errors 的拒绝分支用匹配 `COALESCE(started_at,occurred_at)` 与排除取消条件的部分表达式索引，普通列表和 expiry 索引仍各司其职。
+0033 同时移除 interaction/model-turn 各五个无生产读者的 Token 副本，以 attempt 为查询权威，保留 estimated_input_tokens 和全部金额事实。Observation 批内复用 usage、按需读取 durable attempt，并把 finish 的状态/金额/usage 合并更新；不重写事件顺序、迟到修订、stats 触发器或长期 spend。Client Errors 的拒绝分支用匹配 `COALESCE(started_at,occurred_at)` 与排除取消条件的部分表达式索引，普通列表和当时的 expiry 索引仍各司其职（该 expiry 索引已由 0042 取代）。
+
+`0037`–`0042` 落实 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)，分三组；设计取舍与性能分析见[数据布局与性能 §10](data-layout-performance.md#10-adr-0089-的共享内容存储引用保留与-observation-写入合并)，两个后端行为一致。`0037` / `0038` 建立共享内容存储：`turn_scopes` 改名 `content_scopes`，新增 `contents(id, scope_id, digest, format, raw_len, body)` 与 `content_gc`，身份为 `SHA256("stravia.content.v1\0" + format 字节 + 原文)`，文本单元存 UTF-8 原文、JSON 单元存紧凑 JSON；`turn_node_contents`、`history_marker_contents`、`observation_event_contents`、`observation_tool_results` 以 `content_id`（RESTRICT 外键加反向索引）引用同一份正文，`history_markers.segment_payload` 改为 `storage_codec` 外壳。0037 之后由顶层模块 `content_upgrade`（不在语义无关的 `content_store` 内）的 Rust 钩子在进度表 `content_upgrade` 的记录下分阶段转换节点与 Marker（可中断重跑），0038 再切换并删除 `turn_contents` / `turn_content_gc`。`0039` / `0040` 落实引用保留：Marker、可逆脱敏映射与原生压缩登记的 `expires_at` 由 `pending_until`（仅未发布/未确认）加 `published_at` / `confirmed_at` 取代，新增 `turn_node_markers` / `turn_node_redaction_mappings` / `turn_node_compactions` 引用表、三个新增回收队列（`history_marker_gc`、`redaction_mapping_gc`、`native_compaction_gc`，与既有 `turn_node_gc` 并列）与 `AFTER DELETE` 触发器，`history_retention_watermarks` 记录七个期限列的扫描水位，映射表的 Principal 索引改为 `idx_reversible_redaction_mappings_principal_pending (principal, pending_until)`，`turn_node_retention` 删除 `expires_at` 并新增 `turn_nodes_created_at_idx(created_at, node_pk)`；回填由 `turn_chain/upgrade/retention.rs` 完成，已发布/确认行的下限取 `max(原值, expires_at − 升级前生效天数)`，不缩短任何现有保留期。`0041` / `0042` 规范化 Observation：删除 `observation_events.payload` 与全部 Observation 表的 `expires_at`，`interaction_observations` 删除 `input_preview` / `visible_tail`，新增 `observation_blocks` 与 `input_sequence`，由 Rust 钩子在 `observation_normalization_upgrade` 记录下分阶段转换旧事件（0041 加法；0042 删除旧列与索引：`interaction_observations_expiry_idx`、`rejected_requests_expiry_idx`、`observation_events_tool_idx`，按 `tool_id` 的子表索引为 `observation_tool_results_tool_idx`）。已被截断的旧输入预览保持截断，不从 Turn Chain 回填。
 
 本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`DataPaths::plugins()` 下的 `plugins/artifacts/<sha256>.wasm`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。内嵌 `base` Component 从程序内存加载，不写入插件产物目录；本地导入的专属插件或 `base` 替代包才是不可变、按内容寻址的实例文件。SQL 只保存 digest、来源、revision、epoch 等安装元数据以及业务与插件私有状态，绝不保存 Component 字节或任意持久化文件路径。本地导入的校验文件必须先写入并同步，再提交元数据，准备失败不能替换旧安装；内嵌 `base` 直接使用程序内字节完成校验与加载准备。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）位于 `state/desktop-port.json`。已有可写的 Windows/Linux `state/desktop-webview/` 配置继续复用；不存在或不可写时，恢复壳使用业务根之外、按所选根隔离的应用本地数据或配置目录，最后才回退临时目录，使数据目录故障也能显示恢复界面。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
@@ -1341,12 +1346,11 @@ CREATE TABLE interaction_observations (
     root_run_id TEXT NOT NULL,
     status TEXT NOT NULL,
     last_active_at INTEGER NOT NULL,
-    visible_tail TEXT NOT NULL,
+    input_sequence INTEGER,            -- 根 Run 最新 user_input_recorded 事件；输入正文经 observation_event_contents 引用
     input_tokens INTEGER, output_tokens INTEGER,
     cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
     observation_gap INTEGER NOT NULL,
-    last_event_sequence INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
+    last_event_sequence INTEGER NOT NULL
 );
 
 CREATE TABLE inference_run_observations (
@@ -1358,8 +1362,7 @@ CREATE TABLE inference_run_observations (
     debug_enabled INTEGER NOT NULL,
     client_output_committed INTEGER NOT NULL,
     delivery_completed_at INTEGER,
-    last_event_sequence INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
+    last_event_sequence INTEGER NOT NULL
 );
 
 CREATE TABLE model_turn_observations (
@@ -1393,8 +1396,7 @@ CREATE TABLE rejected_request_observations (
     stage TEXT NOT NULL,
     code TEXT NOT NULL,
     status_code INTEGER NOT NULL,
-    debug_enabled INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
+    debug_enabled INTEGER NOT NULL
 );
 
 CREATE TABLE observation_events (
@@ -1404,10 +1406,22 @@ CREATE TABLE observation_events (
     run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
     rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
-    payload BLOB NOT NULL, -- PostgreSQL: BYTEA
     tool_id TEXT,
     operation_id TEXT,
-    expires_at INTEGER NOT NULL
+    attrs BLOB                           -- 仅 kind 独有的小属性（storage_codec）；PostgreSQL: BYTEA
+);
+
+-- 思考/可见内容块元数据；正文经 observation_event_contents 引用共享内容存储
+CREATE TABLE observation_blocks (
+    sequence INTEGER PRIMARY KEY REFERENCES observation_events(sequence) ON DELETE CASCADE,
+    interaction_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    model_turn_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    item_ordinal INTEGER NOT NULL,
+    channel TEXT NOT NULL,               -- thinking | visible
+    complete INTEGER NOT NULL,
+    envelope BLOB
 );
 
 -- 全局配置 KV
@@ -1434,7 +1448,7 @@ CREATE TABLE provider_oauth_credentials (
 
 基线 schema 不再包含旧 `request_logs`，Observation schema 与 sequence/index 自初始创建即存在，不做 Generation Chain backfill。没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的模型用量从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。总览、时间分桶和 Provider 汇总的请求数与错误率分母按客户端请求去重；错误数复用「失败的请求」查询，合并准入前拒绝与最终失败的 Run，排除恢复成功、取消、断线、中断、进行中及已过保留期的记录。窗口和错误分桶按请求开始时间判定，拒绝记录不要求存在 Model Turn；Provider 归属沿用失败列表的「涉及该服务」筛选，每个服务内对同一请求去重，服务间计数不保证可相加。
 
-Observation metadata、文件 manifest 与 Trace segment 共用 `log_retention_days`（默认 7 天）；Debug 原始 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；文件删除先 rename 为 `.deleting-*` 再幂等完成，启动 reconciliation 继续中断删除并回收无 manifest 的孤儿目录。owner rows 清理后删除已无 owner 的目录。
+`log_retention_days`（`settings` 表；默认 7 天，**最小 1 天**，管理端设置小于 1 返回错误 `log_retention_days must be at least 1`）是 Turn Chain、Observation、Marker/映射/原生压缩登记及 Debug manifest 与 Trace segment 共用的唯一保留天数 N，保存后立即触发一次历史清理，不重写任何行；Debug 原始 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。保留期清理与 Clear History 都跳过 active Interaction；文件删除先 rename 为 `.deleting-*` 再幂等完成，启动 reconciliation 继续中断删除并回收无 manifest 的孤儿目录。owner rows 清理后删除已无 owner 的目录。上述 Observation 表不再有 `expires_at` 列，到期判定见 §4.8“历史保留”与 [保留与清理](interaction-observation.md#64-保留与清理)。
 
 > Target 的共享连续失败计数、冷却、半开探测与进行中输入占位由 `RoutePolicyState`（`router/selector.rs`）在当前 Gateway 进程内管理，**不持久化到数据库，也不跨进程同步**；成功率调度证据仍从持久化的 Target attempt observations 派生。
 

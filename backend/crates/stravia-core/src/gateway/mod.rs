@@ -83,6 +83,9 @@ pub struct Gateway {
     pub(crate) custom_currency:
         Arc<parking_lot::RwLock<Option<Arc<crate::pricing::CustomCurrency>>>>,
     pub(crate) observation: interaction_observation::InteractionObservation,
+    /// 全域共享的内存保留期；修改后下一轮扫描生效，无需逐表改写。
+    pub(crate) retention: crate::history_retention::HistoryRetention,
+    pub(crate) history_content: crate::history_retention::ContentGc,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
     pub(crate) artifact_store: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
@@ -144,6 +147,8 @@ impl Gateway {
             route_policy_state: self.route_policy_state.clone(),
             custom_currency: Arc::clone(&self.custom_currency),
             observation: self.observation.clone(),
+            retention: self.retention.clone(),
+            history_content: self.history_content.clone(),
             auth_sessions: Arc::clone(&self.auth_sessions),
             agent_definitions: self.agent_definitions.clone(),
             artifact_store: self.artifact_store.clone(),

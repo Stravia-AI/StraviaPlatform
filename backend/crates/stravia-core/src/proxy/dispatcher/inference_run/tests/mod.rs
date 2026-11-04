@@ -179,10 +179,11 @@ impl stravia_runtime_contract::turn_chain::TurnChainStore for CommitBarrierStore
         self.inner.rebuild_prefixes(namespace_prefix, decode).await
     }
 
-    async fn sweep_expired(
+    async fn sweep_history(
         &self,
+        now: i64,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
-        self.inner.sweep_expired().await
+        self.inner.sweep_history(now).await
     }
 }
 
@@ -239,10 +240,11 @@ impl stravia_runtime_contract::turn_chain::TurnChainStore for FailingParentDisco
         )
     }
 
-    async fn sweep_expired(
+    async fn sweep_history(
         &self,
+        now: i64,
     ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
-        self.inner.sweep_expired().await
+        self.inner.sweep_history(now).await
     }
 }
 

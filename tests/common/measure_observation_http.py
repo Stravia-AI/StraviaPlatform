@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, unquote
 from urllib.request import Request, urlopen
 
 from tests.common.helpers import initialize_server, start_stravia_server, wait_for_setup_token
+from tests.common.observation_contents import input_text
 from tests.e2e.admin.test_observations import _create_route
 
 
@@ -188,6 +189,16 @@ class Meter:
 def members(page: dict) -> list[dict]:
     return [item for root in page["roots"] for item in root["interactions"]]
 
+
+# 冻结基线二进制的摘要内联 input_preview；ADR-0089 摘要只带输入引用，正文经 /contents 读取。
+def has_input(item: dict) -> bool:
+    return bool(item["input"]["refs"]) if "input" in item else bool(item.get("input_preview"))
+
+
+def input_marker(env: dict, item: dict) -> str:
+    text = input_text(env, item) if "input" in item else item.get("input_preview") or ""
+    return "B" if "synthetic-B" in text else "A"
+
 def max_depth(page: dict) -> int:
     parents = {item["id"]: item["parent_interaction_id"] for item in members(page)}
     deepest = 0
@@ -327,14 +338,14 @@ def main() -> None:
                     while scenario != "failure-page" and len(selected) < 2 and time.monotonic() < deadline:
                         forest = meter.request(forest_path)["data"]
                         selected = [item for item in members(forest)
-                                    if item["last_event_sequence"] > initial["snapshot_sequence"] and item.get("input_preview")]
+                                    if item["last_event_sequence"] > initial["snapshot_sequence"] and has_input(item)]
                         if len(selected) < 2:
                             time.sleep(0.01)  # Same explicit discovery cadence for both binaries.
                     if len(selected) < 2 and scenario != "failure-page":
                         raise RuntimeError("two admitted interactions with current input identity were not discovered")
                     if browser_process:
                         browser_process.stdin.write(json.dumps({"interactions": [item["id"] for item in selected],
-                            "markers": ["B" if "synthetic-B" in (item.get("input_preview") or "") else "A" for item in selected]}) + "\n")
+                            "markers": [input_marker(env, item) for item in selected]}) + "\n")
                         browser_process.stdin.flush()
                     scoped = []
                     if args.optimized and scenario not in ("no-detail", "failure-page"):

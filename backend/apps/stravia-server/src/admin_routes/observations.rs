@@ -21,6 +21,11 @@ pub(super) struct EventQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ContentQuery {
+    ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct DebugUpdate {
     enabled: bool,
     #[serde(default)]
@@ -30,6 +35,58 @@ pub(super) struct DebugUpdate {
 #[derive(Debug, Deserialize)]
 pub(super) struct BundleTicketInput {
     through_sequence: Option<i64>,
+}
+
+/// 传输层解析：`ids` 缺失按空列表处理，任何无法解析成整数的片段都判为非法 id；
+/// 数量上限与正数约束由 Core 校验。
+fn parse_content_ids(raw: Option<&str>) -> Result<Vec<i64>, ObservationQueryError> {
+    let Some(raw) = raw.filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(|part| {
+            part.trim()
+                .parse()
+                .map_err(|_| ObservationQueryError::InvalidContentIds)
+        })
+        .collect()
+}
+
+/// 正文按当前凭据映射遮蔽，同一 id 的响应会随映射变化：浏览器可以缓存，
+/// 但每次使用前必须带 `If-None-Match` 重新验证（`no-cache`），不得直接复用。
+fn revalidated_headers(response: &mut Response, etag: &str) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+}
+
+pub(super) async fn observation_contents(
+    State(gateway): State<Gateway>,
+    request_headers: HeaderMap,
+    Query(query): Query<ContentQuery>,
+) -> Response {
+    let ids = match parse_content_ids(query.ids.as_deref()) {
+        Ok(ids) => ids,
+        Err(error) => return observation_query_error(error.into()),
+    };
+    match gateway.admin().observation_contents(&ids).await {
+        Ok(batch) => {
+            let etag = format!("\"{}\"", batch.etag);
+            let mut response = if super::request_matches_etag(&request_headers, &etag) {
+                StatusCode::NOT_MODIFIED.into_response()
+            } else {
+                Json(serde_json::json!({ "data": { "contents": batch.contents } })).into_response()
+            };
+            revalidated_headers(&mut response, &etag);
+            response
+        }
+        Err(error) => observation_query_error(error),
+    }
 }
 
 pub(super) async fn interaction_forest(
@@ -367,6 +424,7 @@ fn observation_query_error(error: anyhow::Error) -> Response {
                 "code": match error {
                     ObservationQueryError::InvalidEventPage => "invalid_observation_event_page",
                     ObservationQueryError::InvalidFilter => "invalid_observation_filter",
+                    ObservationQueryError::InvalidContentIds => "invalid_observation_ids",
                     ObservationQueryError::IncompleteWindow | ObservationQueryError::InvalidWindow => {
                         "invalid_observation_window"
                     }

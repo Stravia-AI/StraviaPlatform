@@ -1,22 +1,60 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 
-import {
-  observation_no_visible_output,
-  observation_output_delivered_no_preview,
-} from '../src/lib/paraglide/messages.js'
+import { observation_no_visible_output, observation_output_delivered_no_text } from '../src/lib/paraglide/messages.js'
 import type {
   ClientErrorSummary,
   ConfirmedUsage,
   ForestRoot,
   InteractionDetail,
   InteractionSummary,
+  ObservationContent,
+  ObservationContentSummary,
   ObservationEvent,
   RunDetail,
   TraceManifest,
 } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
+
+// 模拟共享内容库：同一文本复用同一 content_id，/observations/contents 按 id 回读正文。
+const contentTexts = new Map<number, string>()
+const contentIds = new Map<string, number>()
+
+function contentOf(text: string): ObservationContentSummary {
+  if (text === '') return { refs: [], raw_len: 0 }
+  let id = contentIds.get(text)
+  if (id === undefined) {
+    id = contentIds.size + 1
+    contentIds.set(text, id)
+    contentTexts.set(id, text)
+  }
+  const raw_len = new TextEncoder().encode(text).length
+  return { refs: [{ content_id: id, raw_len }], raw_len }
+}
+
+function contentBody(summary: ObservationContentSummary, separator: string): string {
+  return summary.refs.map((ref) => contentTexts.get(ref.content_id)!).join(separator)
+}
+
+const inputText = (item: InteractionSummary) => contentBody(item.input, '\n')
+const outputText = (item: InteractionSummary) => contentBody(item.output, '\n\n')
+
+function contentsPage(
+  ids: number[],
+  rewrites: ReadonlyMap<string, string> = new Map(),
+): { contents: ObservationContent[] } {
+  return {
+    contents: ids.flatMap((id) => {
+      let body = contentTexts.get(id)
+      for (const [from, to] of rewrites) body = body?.replaceAll(from, to)
+      return body === undefined
+        ? []
+        : [{ content_id: id, format: 'text' as const, raw_len: new TextEncoder().encode(body).length, body }]
+    }),
+  }
+}
 
 const DAY = 86_400_000
 const startedAt = Date.UTC(2026, 8, 6, 8, 0, 0)
@@ -62,11 +100,12 @@ function interaction(
     status,
     started_at: startedAt + offset,
     last_active_at: startedAt + offset + 10_000,
-    input_preview:
+    input: contentOf(
       model === 'Boreal'
-        ? null
+        ? ''
         : `**${model} user question**\n\nPlease explain the result using \`Markdown\`.\n\n${Array.from({ length: 20 }, (_, index) => `Input context ${index}`).join('\n\n')}\n\nInput preview ending`,
-    visible_tail: `${model} client-visible answer`,
+    ),
+    output: contentOf(`${model} client-visible answer`),
     failed_request: false,
     client_output_delivered: true,
     usage,
@@ -114,8 +153,8 @@ function runFor(item: InteractionSummary): RunDetail {
         sequence: item.last_event_sequence - 1,
         kind: 'client_visible_content',
         payload: {
-          text: item.visible_tail,
-          parts: [{ type: 'text', text: item.visible_tail }],
+          text: outputText(item),
+          parts: [{ type: 'text', text: outputText(item) }],
           item: 'text:0',
           block_id: 'block:0',
           complete: true,
@@ -174,10 +213,17 @@ interface ObservationFixture {
   addFailure(request: ClientErrorSummary, detail?: { events?: ObservationEvent[]; trace?: TraceManifest | null }): void
   holdNextFailureRead(): () => void
   reset(): void
+  updateRun(interactionId: string, patch: Partial<Pick<RunDetail, 'status' | 'terminal_reason'>>): void
   forestRequests: URL[]
   summaryRequests: URL[]
   detailRequests: URL[]
   eventRequests: URL[]
+  /** 每次内容请求的 id、客户端带来的验证器、服务端签发的 ETag 与答复状态码。 */
+  contentRequests: Array<{ ids: number[]; ifNoneMatch: string | null; etag: string | null; status: number }>
+  /** 之后的内容请求答复 500，用于验证读取失败与重试。 */
+  failContents(failing: boolean): void
+  /** 改写某段正文（模拟凭据映射变化后重新遮蔽）；ETag 随之变化。 */
+  rewriteContent(from: string, to: string): void
   failureRequests: URL[]
   failureDetailRequests: URL[]
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
@@ -295,7 +341,7 @@ async function installObservationFixture(
     60_000,
   )
   const cinder = interaction('interaction-cinder', 'root-a', atlas.id, 'Cinder', routeIds.cinder, 'running', 120_000)
-  if (emptyRunningOutput) cinder.visible_tail = ''
+  if (emptyRunningOutput) cinder.output = contentOf('')
   const contextSiblings = ['Context One', 'Context Two', 'Context Three', 'Context Four', 'Context Five'].map(
     (model, index) =>
       interaction(
@@ -320,6 +366,10 @@ async function installObservationFixture(
   const summaryRequests: URL[] = []
   const detailRequests: URL[] = []
   const eventRequests: URL[] = []
+  const contentRequests: ObservationFixture['contentRequests'] = []
+  let contentsFailing = false
+  // 凭据映射变化后的重新遮蔽：只作用于本夹具，不污染其他用例共享的正文表。
+  const contentRewrites = new Map<string, string>()
   const heldDetails = new Map<string, Promise<void>>()
   let resetRequired = false
   const debugWrites: Array<{ enabled: boolean; confirmed: boolean }> = []
@@ -375,6 +425,23 @@ async function installObservationFixture(
       }
       const body = event ? `id: ${event.sequence}\nevent: observation\ndata: ${JSON.stringify(change)}\n\n` : ''
       await route.fulfill({ contentType: 'text/event-stream', body })
+      return
+    }
+
+    if (path === '/observations/contents') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').map(Number)
+      const ifNoneMatch = request.headers()['if-none-match'] ?? null
+      if (contentsFailing) {
+        contentRequests.push({ ids, ifNoneMatch, etag: null, status: 500 })
+        await route.fulfill({ status: 500, json: { error: 'content store offline', code: 'internal' } })
+        return
+      }
+      const body = contentsPage(ids, contentRewrites)
+      const etag = `"${createHash('sha256').update(JSON.stringify(body)).digest('hex')}"`
+      const status = ifNoneMatch === etag ? 304 : 200
+      contentRequests.push({ ids, ifNoneMatch, etag, status })
+      if (status === 304) await route.fulfill({ status, headers: { etag } })
+      else await route.fulfill({ headers: { etag }, json: { data: body } })
       return
     }
 
@@ -524,6 +591,8 @@ async function installObservationFixture(
       const selected = root.interactions.find((item) => item.id === id)!
       const detail: InteractionDetail = {
         interaction: selected,
+        input_text: inputText(selected),
+        output_text: outputText(selected),
         root,
         runs: [{ ...recordedRuns.get(selected.id)!, debug_enabled: captureDebug }],
         snapshot_sequence: snapshotSequence,
@@ -637,6 +706,13 @@ async function installObservationFixture(
     reset() {
       resetRequired = true
     },
+    // run_state_changed 不再带载荷：Run 的状态与终止原因是 Run 列，由夹具直接改写。
+    updateRun(interactionId, patch) {
+      const run = recordedRuns.get(interactionId)!
+      Object.assign(run, patch)
+      const known = roots.flatMap((root) => root.interactions).find((item) => item.id === interactionId)!
+      if (patch.status) known.status = patch.status
+    },
     emit(event, visibleTail) {
       snapshotSequence = Math.max(snapshotSequence, event.sequence)
       const known = roots.flatMap((root) => root.interactions).find((item) => item.id === event.interaction_id)
@@ -651,16 +727,15 @@ async function installObservationFixture(
           const payload = event.payload as { text: string; item: string; block_id: string }
           payload.item = payload.item === 'text:0' ? `text:${event.sequence}` : payload.item
           payload.block_id = payload.block_id === 'block:0' ? `block:${event.sequence}` : payload.block_id
-          known.visible_tail = (known.visible_tail + payload.text).slice(-4096)
+          known.output = contentOf(outputText(known) + payload.text)
         } else {
-          known.visible_tail = visibleTail ?? `Updated at sequence ${event.sequence}`
+          known.output = contentOf(visibleTail ?? `Updated at sequence ${event.sequence}`)
         }
-        if (event.kind === 'run_finished' || event.kind === 'run_state_changed') {
-          const payload = event.payload as { status?: string; reason?: string }
+        if (event.kind === 'run_finished') {
+          const payload = event.payload as { status?: string }
           known.status = payload.status ?? 'completed'
           run.status = payload.status ?? 'completed'
-          run.terminal_reason = payload.reason ?? null
-          if (event.kind === 'run_finished') run.finished_at = event.occurred_at
+          run.finished_at = event.occurred_at
         }
       }
       streamEvents.push(event)
@@ -669,6 +744,13 @@ async function installObservationFixture(
     summaryRequests,
     detailRequests,
     eventRequests,
+    contentRequests,
+    failContents: (failing) => {
+      contentsFailing = failing
+    },
+    rewriteContent: (from, to) => {
+      contentRewrites.set(from, to)
+    },
     failureRequests,
     failureDetailRequests,
     debugWrites,
@@ -986,7 +1068,8 @@ test.describe('Interaction Observation canvas', () => {
     )
     await installObservationFixture(page, false, false, false, (detail) => {
       if (detail.interaction.id !== 'interaction-cinder') return
-      detail.interaction.input_preview = 'Short question'
+      detail.interaction.input = contentOf('Short question')
+      detail.input_text = 'Short question'
       const visible = detail.runs[0].events.find((event) => event.kind === 'client_visible_content')
       if (!visible) throw new Error('missing visible-content fixture')
       visible.payload = { text: paragraphs.join('\n\n'), block_id: 'long-readable-body', complete: true }
@@ -1943,7 +2026,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     flint.failed_request = true
     flint.client_output_delivered = false
-    flint.visible_tail = ''
+    flint.output = contentOf('')
     fixture.addInteraction(flint)
     fixture.addFailure(
       failedRequest('run-flint', 'run', startedAt + 280_000, {
@@ -2001,7 +2084,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByRole('definition').filter({ hasText: 'Failed' })).toBeVisible()
   })
 
-  test('separates completed state from failed history and distinguishes delivered output without a text preview', async ({
+  test('separates completed state from failed history and distinguishes delivered output without text', async ({
     page,
   }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -2017,7 +2100,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     opal.failed_request = true
     opal.client_output_delivered = true
-    opal.visible_tail = '\n'
+    opal.output = contentOf('\n')
     fixture.addInteraction(opal)
     const quartz = interaction(
       'interaction-quartz',
@@ -2029,7 +2112,7 @@ test.describe('Interaction Observation canvas', () => {
       275_000,
     )
     quartz.client_output_delivered = false
-    quartz.visible_tail = ' \t\r\n'
+    quartz.output = contentOf(' \t\r\n')
     fixture.addInteraction(quartz)
 
     await page.goto('/logs')
@@ -2037,15 +2120,15 @@ test.describe('Interaction Observation canvas', () => {
     await expect(opalNode).toBeVisible()
     await expect(opalNode.getByText('Completed', { exact: true })).toBeVisible()
     await expect(opalNode.getByText('Earlier request failed', { exact: true })).toBeVisible()
-    const deliveredPreview = opalNode.getByRole('button', { name: 'Model output preview', exact: true })
-    const deliveredEmpty = observation_output_delivered_no_preview({}, { locale: 'en-US' })
+    const deliveredPreview = opalNode.getByRole('button', { name: 'Model output', exact: true })
+    const deliveredEmpty = observation_output_delivered_no_text({}, { locale: 'en-US' })
     await expect(deliveredPreview).toContainText(deliveredEmpty)
     await deliveredPreview.click()
     await expect(page.getByRole('tooltip')).toContainText(deliveredEmpty)
     await page.keyboard.press('Escape')
 
     const undeliveredPreview = node(page, 'Quartz', 'running').getByRole('button', {
-      name: 'Model output preview',
+      name: 'Model output',
       exact: true,
     })
     await expect(undeliveredPreview).toContainText(observation_no_visible_output({}, { locale: 'en-US' }))
@@ -2076,7 +2159,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     flint.failed_request = true
     flint.client_output_delivered = false
-    flint.visible_tail = ''
+    flint.output = contentOf('')
     fixture.addInteraction(flint)
     await page.goto('/logs')
     await expect(node(page, 'Cinder', 'running')).toBeVisible()
@@ -2109,7 +2192,7 @@ test.describe('Interaction Observation canvas', () => {
     )
     flint.failed_request = true
     flint.client_output_delivered = false
-    flint.visible_tail = ''
+    flint.output = contentOf('')
     fixture.addInteraction(flint)
     await page.goto('/logs?interaction=interaction-flint')
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
@@ -2446,7 +2529,7 @@ test.describe('Interaction Observation canvas', () => {
             interaction_id: detail.interaction.id,
             run_id: 'run-interjection',
             rejection_id: null,
-            kind: 'input_preview_recorded',
+            kind: 'user_input_recorded',
             payload: {
               text: input,
               parts: [{ type: 'text', text: input }],
@@ -2549,18 +2632,7 @@ test.describe('Interaction Observation canvas', () => {
         run_id: 'run-interaction-cinder',
         rejection_id: null,
         kind: 'run_admitted',
-        payload: {
-          route_id: routeIds.cinder,
-          model_display_name: 'Cinder',
-          debug_enabled: true,
-          inferred_retry: false,
-          parent_run_id: null,
-          generation_parent_id: 'generation-parent-atlas',
-          generation_root_id: 'generation-root-cinder',
-          has_new_user: true,
-          parent_interaction_id: 'interaction-atlas',
-          root_id: 'root-a',
-        },
+        payload: {},
       },
       {
         sequence: 12,
@@ -2623,13 +2695,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(processGroup).toHaveAccessibleName(/^2 process events/)
     await expect(diagnostics.locator('pre:visible')).toHaveCount(0)
     await expect(diagnostics.getByText('interaction-cinder', { exact: true })).toBeVisible()
-    for (const value of [
-      'generation-root-cinder',
-      'generation-parent-atlas',
-      'run-interaction-atlas',
-      'interaction-atlas',
-      'uninterpreted payload',
-    ]) {
+    for (const value of ['run-interaction-atlas', 'interaction-atlas', 'uninterpreted payload']) {
       await expect(diagnostics.getByText(value, { exact: true })).toBeHidden()
     }
     for (const event of events) await expect(diagnostics.getByText(event.kind, { exact: true })).toBeHidden()
@@ -2782,7 +2848,7 @@ test.describe('Interaction Observation canvas', () => {
     const rows: Array<[string, number, Record<string, unknown>]> = [
       ['model_turn_started', 0, { model_turn_id: 'ordered-turn', model_display_name: 'Cinder' }],
       ['target_attempt_started', 0, { model_turn_id: 'ordered-turn', attempt_id: 'ordered-attempt' }],
-      ['input_preview_recorded', 5000, {}],
+      ['user_input_recorded', 5000, {}],
       ['client_visible_content', 6000, { text: 'first streamed output' }],
       [
         'model_thinking',
@@ -3029,8 +3095,7 @@ test.describe('Interaction Observation canvas', () => {
             content: 'platform failure evidence',
           }),
         )
-      if (phase >= 2)
-        owner.events.push(ordinary(457, 'run_state_changed', { status: 'superseded', reason: 'superseded' }))
+      if (phase >= 2) owner.events.push(ordinary(457, 'run_state_changed', {}))
       const child = {
         ...owner,
         id: 'run-results',
@@ -3043,7 +3108,7 @@ test.describe('Interaction Observation canvas', () => {
           ordinary(
             456,
             'client_tool_result',
-            { tool_id: 'a', content: 'client error evidence', is_error: true },
+            { results: [{ tool_id: 'a', content: 'client error evidence', is_error: true }] },
             child.id,
           ),
         )
@@ -3052,7 +3117,7 @@ test.describe('Interaction Observation canvas', () => {
           ordinary(
             458,
             'client_tool_result',
-            { tool_id: 'b', content: 'legitimate late evidence', is_error: false },
+            { results: [{ tool_id: 'b', content: 'legitimate late evidence', is_error: false }] },
             child.id,
           ),
         )
@@ -3101,12 +3166,16 @@ test.describe('Interaction Observation canvas', () => {
       const notification: ObservationEvent = {
         sequence,
         kind: 'run_state_changed',
-        payload: { status: next < 2 ? 'waiting_client' : 'superseded' },
+        payload: {},
         run_id: 'run-interaction-cinder',
         interaction_id: 'interaction-cinder',
         rejection_id: null,
         occurred_at: startedAt + sequence,
       }
+      fixture.updateRun('interaction-cinder', {
+        status: next < 2 ? 'waiting_client' : 'superseded',
+        terminal_reason: next < 2 ? null : 'superseded',
+      })
       fixture.emit(notification)
       await sendObservation(page, 'observation', notification, sequence)
     }
@@ -3164,12 +3233,13 @@ test.describe('Interaction Observation canvas', () => {
       const event: ObservationEvent = {
         sequence: 12,
         kind: 'run_state_changed',
-        payload: { status: 'interrupted', reason },
+        payload: {},
         run_id: 'run-interaction-cinder',
         interaction_id: 'interaction-cinder',
         rejection_id: null,
         occurred_at: startedAt + 12,
       }
+      fixture.updateRun('interaction-cinder', { status: 'interrupted', terminal_reason: reason })
       fixture.emit(event)
       await sendObservation(page, 'observation', event, 12)
       await expect(activity).toHaveAttribute('aria-busy', 'false')
@@ -3250,7 +3320,7 @@ test.describe('Interaction Observation canvas', () => {
             ordinary(
               16,
               'client_tool_result',
-              { tool_id: 'call-bash', content: 'tool-output-sentinel\n', is_error: false },
+              { results: [{ tool_id: 'call-bash', content: 'tool-output-sentinel\n', is_error: false }] },
               childId,
             ),
           ],
@@ -3770,7 +3840,7 @@ test.describe('Interaction Observation canvas', () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.getByRole('button', { name: 'Close', exact: true }).click()
-    const preview = node(page, 'Cinder', 'running').getByRole('button', { name: 'Model output preview', exact: true })
+    const preview = node(page, 'Cinder', 'running').getByRole('button', { name: 'Model output', exact: true })
     await preview.focus()
     const tooltip = page.getByRole('tooltip')
     await expect(tooltip.getByRole('columnheader')).toHaveText(['项目', '详情'])
@@ -3979,6 +4049,84 @@ test.describe('Interaction Observation canvas', () => {
     }
   })
 
+  test('revalidates content with If-None-Match and shows re-masked text after the credential mapping changes', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    const input = node(page, 'Atlas', 'completed').getByRole('button', { name: 'User input', exact: true })
+    const tooltip = page.getByRole('tooltip')
+    await expect(input.locator('strong')).toHaveText('Atlas user question')
+    // 指针仍在卡片上时再次 hover 不会产生新的指针事件，每次读取前先移开。
+    const openTooltip = async (text: string) => {
+      await page.mouse.move(0, 0)
+      await input.hover()
+      await expect(tooltip.locator('strong')).toHaveText(text)
+      const request = fixture.contentRequests.at(-1)!
+      await page.keyboard.press('Escape')
+      await page.mouse.move(0, 0)
+      await expect(tooltip).toBeHidden()
+      return request
+    }
+
+    const first = await openTooltip('Atlas user question')
+    expect(first.status).toBe(200)
+    // 同一请求键再次读取：带上服务端签发的验证器，正文未变时答复 304。
+    const second = await openTooltip('Atlas user question')
+    expect(second).toMatchObject({ ids: first.ids, ifNoneMatch: first.etag, status: 304 })
+
+    // 凭据映射变化后服务端重新遮蔽：ETag 改变，客户端展示新文本而不是缓存的旧文本。
+    fixture.rewriteContent('Atlas user question', 'Atlas masked question')
+    const third = await openTooltip('Atlas masked question')
+    expect(third).toMatchObject({ ids: first.ids, ifNoneMatch: first.etag, status: 200 })
+    expect(third.etag).not.toBe(first.etag)
+  })
+
+  test('a failed content read is styled as an error with its reason and Retry recovers it', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    fixture.failContents(true)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
+    const input = node(page, 'Atlas', 'completed').getByRole('button', { name: 'User input', exact: true })
+    await expect(input).toContainText('Could not load this text. Request failed: content store offline')
+    // 失败不用弱化色承载：文字色是 destructive 语义色，而不是 muted-foreground。
+    const colors = await input.evaluate((button) => {
+      const resolve = (token: string) => {
+        const probe = document.createElement('span')
+        probe.style.color = `var(${token})`
+        button.append(probe)
+        const color = getComputedStyle(probe).color
+        probe.remove()
+        return color
+      }
+      const text = Array.from(button.querySelectorAll('span')).find((element) =>
+        element.textContent?.startsWith('Could not load'),
+      )
+      return {
+        shown: text ? getComputedStyle(text).color : null,
+        destructive: resolve('--destructive'),
+        muted: resolve('--muted-foreground'),
+      }
+    })
+    expect(colors.shown).toBe(colors.destructive)
+    expect(colors.shown).not.toBe(colors.muted)
+
+    await input.hover()
+    const tooltip = page.getByRole('tooltip')
+    await expect(tooltip).toContainText('Could not load this text. Request failed: content store offline')
+    fixture.failContents(false)
+    await tooltip.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(input.locator('strong')).toHaveText('Atlas user question')
+    // 成功后重新打开：全文可读，不再出现 Retry。
+    await page.keyboard.press('Escape')
+    await page.mouse.move(0, 0)
+    await expect(tooltip).toBeHidden()
+    await input.hover()
+    await expect(tooltip.locator('strong')).toHaveText('Atlas user question')
+    await expect(tooltip.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+  })
+
   test('input and recent output previews expand without opening details and remain readable outside the scaled canvas', async ({
     page,
   }) => {
@@ -3986,14 +4134,14 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await page.getByRole('button', { name: 'Load and show all chains', exact: true }).click()
     const card = node(page, 'Atlas', 'completed')
-    const input = card.getByRole('button', { name: 'User input preview', exact: true })
-    const output = card.getByRole('button', { name: 'Model output preview', exact: true })
+    const input = card.getByRole('button', { name: 'User input', exact: true })
+    const output = card.getByRole('button', { name: 'Model output', exact: true })
     await expect(input.locator('strong')).toHaveText('Atlas user question')
     await expect(output).toContainText('Atlas client-visible answer')
     await expect(input).not.toContainText('Atlas client-visible answer')
     await expect(
-      node(page, 'Boreal', 'waiting_client').getByRole('button', { name: 'User input preview' }),
-    ).toContainText('No text input preview recorded.')
+      node(page, 'Boreal', 'waiting_client').getByRole('button', { name: 'User input', exact: true }),
+    ).toContainText('No text input recorded.')
     await input.hover()
     const tooltip = page.getByRole('tooltip')
     await expect(tooltip).toBeVisible()
@@ -4724,8 +4872,8 @@ test.describe('Interaction Observation canvas', () => {
       const card = node(page, 'Atlas', 'completed')
       const tooltip = page.getByRole('tooltip')
       for (const [label, text] of [
-        ['User input preview', 'Atlas user question'],
-        ['Model output preview', 'Atlas client-visible answer'],
+        ['User input', 'Atlas user question'],
+        ['Model output', 'Atlas client-visible answer'],
       ]) {
         await card.getByRole('button', { name: label, exact: true }).tap()
         await expect(tooltip).toContainText(text)
@@ -4739,7 +4887,7 @@ test.describe('Interaction Observation canvas', () => {
         await page.touchscreen.tap(4, 4)
         await expect(tooltip).toBeHidden()
       }
-      await card.getByRole('button', { name: 'User input preview', exact: true }).tap()
+      await card.getByRole('button', { name: 'User input', exact: true }).tap()
       await page.keyboard.press('Escape')
       await expect(tooltip).toBeHidden()
       await expect(page.getByRole('dialog', { name: 'Observation details' })).toBeHidden()

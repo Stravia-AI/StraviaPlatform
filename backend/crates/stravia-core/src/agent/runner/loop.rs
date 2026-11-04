@@ -888,7 +888,9 @@ impl AgentRunner {
                     "output": commit.result.output,
                     "usage": commit.result.usage,
                 }),
-                idle_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
                 reusable_prefix: None,
             })
             .await

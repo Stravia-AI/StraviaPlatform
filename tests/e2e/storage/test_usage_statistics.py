@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from tests.common.observation_contents import input_text
 from tests.common.helpers import (
     find_free_port, http_request, initialize_server, minimal_mock_provider,
     start_stravia_server, stop_stravia_server, wait_for_setup_token, wait_until_ready,
@@ -247,7 +248,7 @@ def test_stats_write_failure_rejects_public_purge_and_preserves_history(usage_en
     assert status == 200 and body["choices"][0]["message"]["content"] == "ok", body
     baseline = _wait_for("baseline usage history", lambda: next((
         item for item in _route_interactions(env, route_id)
-        if item["input_preview"] == "baseline" and item["status"] == "completed"
+        if input_text(env, item) == "baseline" and item["status"] == "completed"
     ), None))
     before = _wait_for("baseline terminal usage", lambda: _finished_detail(env, baseline["id"]))
     assert before["interaction"]["usage"]["output_tokens"] == 7
@@ -258,7 +259,7 @@ def test_stats_write_failure_rejects_public_purge_and_preserves_history(usage_en
         # the targeted stats-bearing transaction failed before invoking purge.
         failed = _wait_for("stats transaction persistence gap", lambda: next((
             item for item in _route_interactions(env, route_id)
-            if item["input_preview"] == "stats-failure" and item["observation_gap"]
+            if input_text(env, item) == "stats-failure" and item["observation_gap"]
         ), None))
         status, error = http_request("DELETE", f"{env['admin']}/api/v1/observations/history", headers=env["auth"])
         assert status == 503, f"unsafe history purge returned HTTP {status}"
@@ -272,7 +273,7 @@ def test_stats_write_failure_rejects_public_purge_and_preserves_history(usage_en
     assert status == 200 and body["choices"][0]["message"]["content"] == "ok", body
     following = _wait_for("following successful inference", lambda: next((
         item for item in _route_interactions(env, route_id)
-        if item["input_preview"] == "following" and item["status"] == "completed"
+        if input_text(env, item) == "following" and item["status"] == "completed"
     ), None))
     detail = _wait_for("following terminal usage", lambda: _finished_detail(env, following["id"]))
     assert detail["interaction"]["usage"]["output_tokens"] == 7

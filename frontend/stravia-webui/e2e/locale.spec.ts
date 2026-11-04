@@ -132,8 +132,8 @@ test('localized Request Records keep one local timestamp across canvas and detai
     status: 'completed',
     started_at: startedAt,
     last_active_at: startedAt + 42,
-    input_preview: '用户输入问题',
-    visible_tail: '',
+    input: { refs: [{ content_id: 1, raw_len: 18 }], raw_len: 18 },
+    output: { refs: [], raw_len: 0 },
     failed_request: true,
     client_output_delivered: true,
     usage: {
@@ -172,8 +172,13 @@ test('localized Request Records keep one local timestamp across canvas and detai
       ? { runs: [], snapshot_sequence: 4, next_cursor: null }
       : path.endsWith('/summary')
         ? summary
-        : { ...summary, runs: [], older_events_cursor: null }
+        : { ...summary, input_text: '用户输入问题', output_text: '', runs: [], older_events_cursor: null }
     await route.fulfill({ json: { data } })
+  })
+  await page.route('**/api/v1/observations/contents?**', async (route) => {
+    await route.fulfill({
+      json: { data: { contents: [{ content_id: 1, format: 'text', raw_len: 18, body: '用户输入问题' }] } },
+    })
   })
   await page.goto('/logs')
 
@@ -181,8 +186,8 @@ test('localized Request Records keep one local timestamp across canvas and detai
   await expect(page.getByText(localTimestamp, { exact: true })).toBeVisible()
   const interactionNode = page.getByRole('button', { name: 'GPT 5.6，已完成，先前请求失败', exact: true })
   await expect(interactionNode.getByText('先前请求失败', { exact: true })).toBeVisible()
-  await expect(interactionNode.getByRole('button', { name: '模型输出预览', exact: true })).toContainText(
-    '已交付输出，暂无文本预览。',
+  await expect(interactionNode.getByRole('button', { name: '模型输出', exact: true })).toContainText(
+    '已交付输出，没有可显示的文本。',
   )
   await interactionNode.click()
   const inspector = page.getByRole('complementary', { name: '观测详情' })
