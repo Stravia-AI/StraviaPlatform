@@ -42,12 +42,9 @@ pub(super) async fn timeline(State(gateway): State<Gateway>) -> Response {
 
 /// 管理员一次下载指标与时间线的 zip；读取磁盘历史、序列化与压缩均在阻塞线程完成。
 pub(super) async fn export(State(gateway): State<Gateway>) -> Response {
-    let archive =
-        tokio::task::spawn_blocking(move || gateway.admin().performance_archive()).await;
+    let archive = tokio::task::spawn_blocking(move || gateway.admin().performance_archive()).await;
     let response = match archive {
-        Ok(Ok(Some(bytes))) => {
-            ([(header::CONTENT_TYPE, "application/zip")], bytes).into_response()
-        }
+        Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/zip")], bytes).into_response(),
         Ok(Ok(None)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "performance recorder unavailable",
