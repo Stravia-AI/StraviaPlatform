@@ -1590,6 +1590,9 @@ test('Model editor keeps lanes, disabled area and footer on the form column at e
 test('Dragging a destination toward the page edge scrolls the page so it can reach the disabled area', async ({
   page,
 }) => {
+  // 慢设备上连续移动可能只产生 dragenter；仍须及时停止边缘滚动并允许落下。
+  const session = await page.context().newCDPSession(page)
+  await session.send('Emulation.setCPUThrottlingRate', { rate: 6 })
   const target = (id: string, priority: number, enabled: boolean) => ({
     id,
     model_id: 'scroll-route',
@@ -1655,19 +1658,22 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(initialScroll)
 
   // 指针回到停用区后滚动停止，松手即可停用目标。
-  // mouse.move 返回时 dragover 未必已被页面处理；等指针位置更新后再取停止滚动的基线。
-  const dragOver = await page.evaluateHandle(() => {
+  // mouse.move 返回时原生拖拽事件未必已被页面处理；等指针位置更新后再取基线。
+  const dragPointer = await page.evaluateHandle(() => {
     const latest = { clientY: Number.NaN }
-    document.addEventListener('dragover', (event) => (latest.clientY = event.clientY), { capture: true })
+    const track = (event: DragEvent) => (latest.clientY = event.clientY)
+    document.addEventListener('dragenter', track, { capture: true })
+    document.addEventListener('dragover', track, { capture: true })
     return latest
   })
   const dockBox = (await dock.boundingBox())!
   const dockCenterY = dockBox.y + dockBox.height / 2
   await page.mouse.move(dockBox.x + dockBox.width / 2, dockCenterY, { steps: 5 })
   await page.mouse.move(dockBox.x + dockBox.width / 2, dockCenterY)
-  await expect
-    .poll(() => dragOver.evaluate((latest, expectedY) => Math.abs(latest.clientY - expectedY) < 1, dockCenterY))
-    .toBe(true)
+  await page.waitForFunction(({ pointer, y }) => Math.abs(pointer.clientY - y) < 1, {
+    pointer: dragPointer,
+    y: dockCenterY,
+  })
   const settledScroll = await main.evaluate((element) => element.scrollTop)
   await page.waitForTimeout(200)
   expect(await main.evaluate((element) => element.scrollTop)).toBe(settledScroll)

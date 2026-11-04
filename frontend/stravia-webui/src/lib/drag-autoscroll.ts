@@ -77,9 +77,12 @@ export function startDragAutoscroll(): () => void {
     frame = requestAnimationFrame(step)
   }
 
+  // 移入新元素时可能先只有 dragenter；不能沿用边缘位置等到 dragover 才停滚。
+  document.addEventListener('dragenter', track, { capture: true, passive: true })
   document.addEventListener('dragover', track, { capture: true, passive: true })
   frame = requestAnimationFrame(step)
   return () => {
+    document.removeEventListener('dragenter', track, { capture: true })
     document.removeEventListener('dragover', track, { capture: true })
     cancelAnimationFrame(frame)
   }
