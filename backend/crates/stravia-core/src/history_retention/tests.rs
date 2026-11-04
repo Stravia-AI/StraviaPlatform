@@ -31,7 +31,7 @@ use crate::generation_chain::{GenerationChain, GenerationSource, PersistError};
 use crate::history_marker::{
     ClaimOutcome, HiddenHistorySegment, HistoryMarkerStore, PlatformExecutionState,
     PlatformMarkerInput, PublicExecutionInput, SqlHistoryMarkerStore, ThinkingMarkerInput,
-    render_history_marker_reference, render_text_projection_span,
+    render_history_marker_reference, render_history_marker_token, render_text_projection_span,
 };
 use crate::turn_chain::SqlTurnChainStore;
 
@@ -52,11 +52,13 @@ enum Db {
     Postgres(PgPool),
 }
 
-/// 一个事务里要引用的依赖。Marker 同时覆盖普通 Marker 语法与跨协议投影语法。
+/// 一个事务里要引用的依赖。Marker 同时覆盖普通 Marker 语法、跨协议投影语法与
+/// Responses reasoning `encrypted_content` 中的 Marker 令牌（无状态客户端回传的形态）。
 #[derive(Default)]
 struct Refs {
     plain_markers: Vec<String>,
     projected_markers: Vec<String>,
+    token_markers: Vec<String>,
     mappings: Vec<String>,
     compaction: Option<AiItem>,
     /// 响应正文；缺省时每次生成唯一文本。
@@ -264,19 +266,37 @@ impl Fixture {
         }
         answer.push_str(&refs.answer.clone().unwrap_or_else(|| self.unique("answer")));
         let mut response = AiResponse::new("retention-response", "model");
-        response.items = vec![AiItem::output_text(answer)];
-        response.items[0].set_graph_metadata(
-            Some(
-                stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
-                    "msg",
-                    write.id(),
-                    0,
+        response.items = refs
+            .token_markers
+            .iter()
+            .map(|reference| {
+                AiItem::reasoning(
+                    Vec::new(),
+                    Vec::new(),
+                    Some(render_history_marker_token(reference)),
+                )
+            })
+            .collect();
+        response.items.push(AiItem::output_text(answer));
+        for (index, item) in response.items.iter_mut().enumerate() {
+            let prefix = if item.output_text_ref().is_some() {
+                "msg"
+            } else {
+                "rs"
+            };
+            item.set_graph_metadata(
+                Some(
+                    stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
+                        prefix,
+                        write.id(),
+                        index,
+                    ),
                 ),
-            ),
-            Some(AiItemStatus::Completed),
-            AiItemProvenance::Provider,
-            AiItemAudience::Client,
-        );
+                Some(AiItemStatus::Completed),
+                AiItemProvenance::Provider,
+                AiItemAudience::Client,
+            );
+        }
         let source = GenerationSource::Target(crate::history_marker::ThinkingSource {
             namespace: "provider:model".into(),
             protocol: Some(OPEN_RESPONSES_2026_04_24.into()),
@@ -962,6 +982,7 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
     // 早依赖：先于节点发布，下限比节点期限更早。
     let early_marker = fx.thinking_marker("early dependency body", true).await;
     let early_projected = fx.thinking_marker("early projected body", true).await;
+    let early_token = fx.thinking_marker("early token body", true).await;
     let early_mapping = fx.mapping(true).await;
     let early_compaction = fx.native_compaction(None, &[], true).await;
     let t_dep = fx.tick().await;
@@ -971,6 +992,7 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
             &Refs {
                 plain_markers: vec![early_marker.clone()],
                 projected_markers: vec![early_projected.clone()],
+                token_markers: vec![early_token.clone()],
                 mappings: vec![early_mapping.clone()],
                 compaction: Some(early_compaction.state.clone()),
                 ..Refs::default()
@@ -1003,7 +1025,7 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
     fx.sweep(t_dep + n).await;
     assert!(fx.turn_readable(&early_node).await);
     assert!(fx.turn_readable(&late_node).await);
-    for marker in [&early_marker, &early_projected, &late_marker] {
+    for marker in [&early_marker, &early_projected, &early_token, &late_marker] {
         assert!(fx.marker_readable(marker).await);
     }
     for mapping in [&early_mapping, &late_mapping] {
@@ -1015,7 +1037,7 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
     // 早节点到期：它和下限已过的早依赖同一轮删除；晚依赖尚未到下限，保留。
     fx.sweep(t_early + n).await;
     assert!(!fx.turn_readable(&early_node).await);
-    for marker in [&early_marker, &early_projected] {
+    for marker in [&early_marker, &early_projected, &early_token] {
         assert!(
             !fx.marker_readable(marker).await,
             "{marker} is reclaimed with its node"

@@ -454,6 +454,17 @@ pub(crate) fn history_marker_commit_references(items: &[AiItem]) -> Vec<String> 
                                 collect(text);
                             }
                         }
+                        // 无状态客户端只原样回传 `encrypted_content`，Marker 令牌是该 item 唯一的依赖。
+                        ContentBlock::Reasoning {
+                            summary,
+                            content,
+                            encrypted_content: Some(token),
+                        } if is_history_marker_token(token) => {
+                            for text in summary.iter().chain(content) {
+                                collect(text);
+                            }
+                            collect(token);
+                        }
                         _ => {}
                     }
                 }

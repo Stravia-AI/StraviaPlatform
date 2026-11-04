@@ -55,7 +55,7 @@ Turn 节点写入后不再更新时间。节点 X 的子树中只要还有一个
 
 |表|引用来源|
 |---|---|
-|`turn_node_markers(node_pk, reference)`|节点请求增量与响应 item 中的 Marker reference，含跨协议投影文本中的 Marker 语法。祖先窗口中的 Marker 已由祖先节点引用，提交不再解析整个父窗口|
+|`turn_node_markers(node_pk, reference)`|节点请求增量与响应 item 中的 Marker reference，含跨协议投影文本中的 Marker 语法与 Responses reasoning `encrypted_content` 中的 Marker 令牌（ADR-0088）。祖先窗口中的 Marker 已由祖先节点引用，提交不再解析整个父窗口|
 |`turn_node_redaction_mappings(node_pk, reference)`|本次请求登记、复用或还原的映射，即现在 `persist_inner` 续期的集合。ADR-0043 说明 Generation Chain 可能保存原文而不是占位符，所以只能在提交时取自请求，不能从载荷反推|
 |`turn_node_compactions(node_pk, record_id)`|节点保存的 `compaction_record_ids`；登记之间的来源边沿用 `native_compaction_sources` 的 `RESTRICT`|
 
