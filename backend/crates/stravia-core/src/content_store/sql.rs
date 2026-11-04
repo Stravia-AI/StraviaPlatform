@@ -326,39 +326,45 @@ macro_rules! backend {
                 unique.dedup();
                 let mut bodies = Vec::with_capacity(unique.len());
                 for chunk in unique.chunks(READ_BATCH) {
-                    let mut query = sqlx::QueryBuilder::<$db>::new(
-                        "SELECT id, digest, CAST(format AS BIGINT), raw_len, body FROM contents WHERE id IN (",
-                    );
-                    let mut list = query.separated(",");
-                    for id in chunk {
-                        list.push_bind(*id);
-                    }
-                    list.push_unseparated(")");
-                    if let Some(scope_id) = scope_id {
-                        query.push(" AND scope_id = ").push_bind(scope_id);
-                    }
-                    query.push(" ORDER BY id");
-                    let rows: Vec<(i64, Vec<u8>, i64, i64, Vec<u8>)> =
-                        query.build_query_as().fetch_all(&mut *connection).await?;
-                    for (id, digest, format, raw_len, encoded) in rows {
-                        let format = format_from_code(format)
-                            .context("invalid stored content format")?;
-                        let raw = crate::storage_codec::decode(&encoded)?;
-                        ensure!(
-                            i64::try_from(raw.len()).unwrap_or(i64::MAX) == raw_len,
-                            "stored content length mismatch"
-                        );
-                        let computed = content_digest(format, &raw);
-                        ensure!(computed == digest.as_slice(), "damaged content");
-                        bodies.push(Body {
-                            id,
-                            format,
-                            digest: computed,
-                            bytes: raw.into_owned(),
-                        });
+                    for row in read_encoded_filtered(connection, scope_id, chunk).await? {
+                        bodies.push(super::super::decode_body(row)?);
                     }
                 }
                 Ok(bodies)
+            }
+
+            /// 仅供启动迁移：单连接读取有界的一批编码行，CPU 校验由调用方在
+            /// blocking worker 上使用 `decode_body` 完成，不能直接暴露为正文。
+            pub(crate) async fn read_upgrade_encoded(
+                connection: &mut $conn,
+                scope_id: i64,
+                ids: &[i64],
+            ) -> anyhow::Result<Vec<super::super::EncodedBody>> {
+                ensure!(ids.len() <= READ_BATCH, "upgrade content batch too large");
+                if ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                read_encoded_filtered(connection, Some(scope_id), ids).await
+            }
+
+            async fn read_encoded_filtered(
+                connection: &mut $conn,
+                scope_id: Option<i64>,
+                ids: &[i64],
+            ) -> anyhow::Result<Vec<super::super::EncodedBody>> {
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "SELECT id, digest, CAST(format AS BIGINT), raw_len, body FROM contents WHERE id IN (",
+                );
+                let mut list = query.separated(",");
+                for id in ids {
+                    list.push_bind(*id);
+                }
+                list.push_unseparated(")");
+                if let Some(scope_id) = scope_id {
+                    query.push(" AND scope_id = ").push_bind(scope_id);
+                }
+                query.push(" ORDER BY id");
+                Ok(query.build_query_as().fetch_all(&mut *connection).await?)
             }
 
             /// 引用方删除引用后，在同一事务内登记失去最后引用的内容。

@@ -1,4 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { once } from 'node:events'
+import { createServer, type ServerResponse } from 'node:http'
 
 import { prepareApp } from './prepare-app'
 
@@ -494,6 +496,97 @@ test.describe('Server startup', () => {
     await expect(page.getByText(/\d+ \/ \d+/)).toHaveCount(0)
     await expect(page).not.toHaveURL(/\/login/)
   })
+
+  for (const locale of ['zh-CN', 'en-US'] as const) {
+    test(`localizes conversion phases and keeps live retention progress on the startup page in ${locale}`, async ({
+      page,
+    }) => {
+      const chinese = locale === 'zh-CN'
+      const retentionLabel = chinese ? '正在转换依赖保留数据' : 'Converting dependency retention'
+      const progress = {
+        phase: 'retention_data',
+        label: 'Converting dependency retention',
+        completed: 0,
+        total: null as number | null,
+      }
+      const snapshot = () => ({ status: 'starting', progress })
+      let connect!: (response: ServerResponse) => void
+      const connected = new Promise<ServerResponse>((resolve) => {
+        connect = resolve
+      })
+      // Serve a real, open SSE connection so each assertion observes a separate backend update.
+      const stream = createServer((_request, response) => {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'access-control-allow-origin': '*',
+          'cache-control': 'no-cache',
+        })
+        response.write(': connected\n\n')
+        connect(response)
+      })
+      stream.listen(0, '127.0.0.1')
+      await once(stream, 'listening')
+      try {
+        const address = stream.address()
+        if (!address || typeof address === 'string') throw new Error('Startup stream has no TCP address')
+        await page.addInitScript((locale) => localStorage.setItem('stravia-locale', locale), locale)
+        await page.route('**/api/v1/startup', (route) => route.fulfill({ json: snapshot() }))
+        await page.route('**/api/v1/startup/events', (route) =>
+          route.continue({ url: `http://127.0.0.1:${address.port}/events` }),
+        )
+        await page.route('**/api/v1/auth/state', (route) => route.fulfill({ json: signedOut }))
+        await page.setViewportSize({ width: 320, height: 640 })
+        await page.goto('/')
+        const heading = page.getByRole('heading', { level: 1, name: chinese ? '正在启动 Stravia' : 'Starting Stravia' })
+        const bar = page.getByRole('progressbar')
+        await expect(heading).toBeVisible()
+        await expect(page.getByText(retentionLabel, { exact: true })).toBeVisible()
+        await expect(bar).not.toHaveAttribute('aria-valuenow', /.+/)
+        await expect(page.getByText(/\d+ \/ \d+|\d+%/)).toHaveCount(0)
+
+        const response = await connected
+        const update = () => response.write(`event: startup\ndata: ${JSON.stringify(snapshot())}\n\n`)
+        for (const [completed, percentage] of [
+          [17, 40],
+          [31, 73],
+          [42, 100],
+        ]) {
+          progress.completed = completed
+          progress.total = 42
+          update()
+          await expect(page.getByText(`${completed} / 42`, { exact: true })).toBeVisible()
+          await expect(page.getByText(`${percentage}%`, { exact: true })).toBeVisible()
+          await expect(bar).toHaveAttribute('aria-valuenow', new RegExp(`^${percentage}(\\.\\d+)?$`))
+          await expect(heading).toBeVisible()
+          await expect(page).not.toHaveURL(/\/login/)
+          await expectContainedHorizontally(page)
+        }
+
+        for (const [phase, label] of [
+          ['content_store', chinese ? '正在转换共享内容存储' : 'Converting shared content storage'],
+          ['credential_cleanup', chinese ? '正在移除已停用的凭据规则' : 'Removing retired credential rules'],
+          ['model_pinning', chinese ? '正在转换已编辑的供应商模型快照' : 'Converting edited provider model snapshots'],
+          ['usage_backfill', chinese ? '正在更新用量记录' : 'Updating usage records'],
+        ]) {
+          progress.phase = phase
+          progress.label = 'Backend fallback must not be displayed for a known phase'
+          progress.completed = 0
+          progress.total = null
+          update()
+          await expect(page.getByText(label, { exact: true })).toBeVisible()
+          await expect(page.getByText(progress.label, { exact: true })).toHaveCount(0)
+          await expect(bar).not.toHaveAttribute('aria-valuenow', /.+/)
+          await expect(page.getByText(/\d+ \/ \d+|\d+%/)).toHaveCount(0)
+          await expect(heading).toBeVisible()
+          await expect(page).not.toHaveURL(/\/login/)
+        }
+        await expectNoApplicationNavigation(page)
+      } finally {
+        await page.goto('about:blank')
+        await new Promise<void>((resolve, reject) => stream.close((error) => (error ? reject(error) : resolve())))
+      }
+    })
+  }
 
   test('keeps a startup failure and a connection failure distinct, each with its own recovery', async ({ page }) => {
     await mockStartup(page, { status: 200, json: { status: 'failed', progress: null } })

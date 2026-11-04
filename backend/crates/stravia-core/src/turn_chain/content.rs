@@ -659,3 +659,294 @@ restore_backend!(
     restore_postgres_context,
     sqlx::PgConnection<'_>
 );
+
+/// 迁移只保留当前节点批次；不能让调用方意外把整库送入 blocking 队列。
+const UPGRADE_NODE_BATCH: usize = 128;
+/// 沿用共享正文 GC 的 8 MiB 工作批次；超大单元独占一批，不拒绝合法大正文。
+const UPGRADE_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// 同时在途的 blocking 工作至多为可用 CPU 数且不超过 8；输入所有权只移动，
+/// 不为每个 worker 克隆整个节点批次。序号在完成时恢复，不依赖任务调度顺序。
+async fn upgrade_cpu<T: Send + 'static, U: Send + 'static>(
+    jobs: Vec<T>,
+    work: fn(T) -> anyhow::Result<U>,
+) -> anyhow::Result<Vec<U>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8);
+    let mut pending = jobs.into_iter().enumerate();
+    let mut running = tokio::task::JoinSet::new();
+    let mut completed = Vec::new();
+    loop {
+        while running.len() < workers {
+            let Some((index, job)) = pending.next() else {
+                break;
+            };
+            running.spawn_blocking(move || work(job).map(|value| (index, value)));
+        }
+        let Some(result) = running.join_next().await else {
+            break;
+        };
+        completed.push(result.context("joining retention restore worker")??);
+    }
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    Ok(completed.into_iter().map(|(_, value)| value).collect())
+}
+
+type UpgradeNode = (usize, Vec<StoredNode>, RestorePlan);
+
+fn plan_upgrade_node((index, node): (usize, StoredNode)) -> anyhow::Result<UpgradeNode> {
+    let mut nodes = vec![node];
+    let plan = plan_restore(&mut nodes)?;
+    Ok((index, nodes, plan))
+}
+
+fn decode_upgrade_body(row: content_store::EncodedBody) -> anyhow::Result<(i64, RestoredContent)> {
+    let body = content_store::decode_body(row)?;
+    let value = match body.format {
+        ContentFormat::Text => {
+            Value::String(String::from_utf8(body.bytes).context("invalid stored text content")?)
+        }
+        ContentFormat::Json => body.json()?,
+    };
+    Ok((body.id, RestoredContent::Shared(std::sync::Arc::new(value))))
+}
+
+fn apply_upgrade_node(
+    (index, nodes, plan, mut loaded): (
+        usize,
+        Vec<StoredNode>,
+        RestorePlan,
+        HashMap<i64, RestoredContent>,
+    ),
+) -> anyhow::Result<(usize, TurnNode)> {
+    let node = apply_plan(nodes, plan, &mut loaded)?
+        .pop()
+        .context("missing restored history node")?;
+    Ok((index, node))
+}
+
+macro_rules! restore_upgrade_backend {
+    ($restore:ident, $backend:ident, $conn:ty) => {
+        /// 启动迁移专用：单连接读取、按 scope 共享去重、CPU 有界多核恢复。
+        /// 调用方持迁移锁；不使用运行期 TurnReadContext，不创建连接或 writer。
+        pub(super) async fn $restore(
+            connection: &mut $conn,
+            nodes: Vec<StoredNode>,
+        ) -> anyhow::Result<Vec<TurnNode>> {
+            ensure!(
+                nodes.len() <= UPGRADE_NODE_BATCH,
+                "upgrade node batch too large"
+            );
+            let mut identities = HashSet::with_capacity(nodes.len());
+            for node in &nodes {
+                ensure!(
+                    identities.insert(node.node_pk),
+                    "duplicate history node identity"
+                );
+            }
+            let planned =
+                upgrade_cpu(nodes.into_iter().enumerate().collect(), plan_upgrade_node).await?;
+            let mut scopes: HashMap<i64, Vec<UpgradeNode>> = HashMap::new();
+            for node in planned {
+                scopes.entry(node.2.scope_id).or_default().push(node);
+            }
+            let mut jobs = Vec::new();
+            for (scope_id, nodes) in scopes {
+                let mut needed: Vec<i64> = nodes
+                    .iter()
+                    .flat_map(|(_, _, plan)| plan.needed.iter().copied())
+                    .collect();
+                needed.sort_unstable();
+                needed.dedup();
+                let lengths = content_store::$backend::lengths(connection, &needed).await?;
+                let mut ids = needed.into_iter().peekable();
+                let mut loaded = HashMap::new();
+                while ids.peek().is_some() {
+                    let mut chunk = Vec::new();
+                    let mut bytes = 0usize;
+                    while let Some(&id) = ids.peek() {
+                        let length = *lengths.get(&id).context("missing history content")?;
+                        let length =
+                            usize::try_from(length).context("invalid stored content length")?;
+                        if !chunk.is_empty()
+                            && (chunk.len() == 256
+                                || bytes.saturating_add(length) > UPGRADE_CONTENT_BYTES)
+                        {
+                            break;
+                        }
+                        chunk.push(id);
+                        ids.next();
+                        bytes = bytes.saturating_add(length);
+                    }
+                    let encoded =
+                        content_store::$backend::read_upgrade_encoded(connection, scope_id, &chunk)
+                            .await?;
+                    loaded.extend(upgrade_cpu(encoded, decode_upgrade_body).await?);
+                }
+                for (index, nodes, plan) in nodes {
+                    let mut contents = HashMap::with_capacity(plan.needed.len());
+                    for id in &plan.needed {
+                        let value = loaded.get(id).context("missing history content")?;
+                        let RestoredContent::Shared(value) = value else {
+                            anyhow::bail!("unshared upgrade content");
+                        };
+                        contents.insert(*id, RestoredContent::Shared(value.clone()));
+                    }
+                    jobs.push((index, nodes, plan, contents));
+                }
+                // 只保留各消费节点的 Arc；最后使用者可直接移动正文。
+                drop(loaded);
+            }
+            let mut restored = upgrade_cpu(jobs, apply_upgrade_node).await?;
+            restored.sort_unstable_by_key(|(index, _)| *index);
+            Ok(restored.into_iter().map(|(_, node)| node).collect())
+        }
+    };
+}
+
+restore_upgrade_backend!(restore_upgrade_sqlite, sqlite, sqlx::SqliteConnection<'_>);
+restore_upgrade_backend!(restore_upgrade_postgres, postgres, sqlx::PgConnection<'_>);
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    async fn database() -> anyhow::Result<sqlx::SqliteConnection<'static>> {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await?;
+        sqlx::query(
+            "CREATE TABLE contents (id INTEGER PRIMARY KEY, scope_id INTEGER NOT NULL, \
+             digest BLOB NOT NULL, format INTEGER NOT NULL, raw_len INTEGER NOT NULL, body BLOB NOT NULL)",
+        )
+        .execute(&mut connection)
+        .await?;
+        Ok(connection)
+    }
+
+    async fn body(
+        connection: &mut sqlx::SqliteConnection<'_>,
+        id: i64,
+        scope_id: i64,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let digest = content_store::content_digest(ContentFormat::Text, text.as_bytes());
+        let encoded = crate::storage_codec::encode(text.as_bytes().into())?;
+        sqlx::query(
+            "INSERT INTO contents (id,scope_id,digest,format,raw_len,body) VALUES (?,?,?,0,?,?)",
+        )
+        .bind(id)
+        .bind(scope_id)
+        .bind(digest.to_vec())
+        .bind(text.len() as i64)
+        .bind(encoded)
+        .execute(&mut *connection)
+        .await?;
+        Ok(())
+    }
+
+    fn node(node_pk: i64, scope_id: i64, content_id: i64) -> anyhow::Result<StoredNode> {
+        Ok(StoredNode {
+            node_pk,
+            scope_id,
+            references: vec![[scope_id, 0, content_id]],
+            id: TurnNodeId::new(format!("upgrade-{node_pk}")),
+            kind: TurnNodeKind::Response,
+            parent_id: None,
+            payload_version: 1,
+            payload: content_store::encode_descriptor(
+                &serde_json::json!({"first": null, "second": null}),
+                &[
+                    Slot::text("/first".to_owned(), 0),
+                    Slot::text("/second".to_owned(), 0),
+                ],
+            )?,
+        })
+    }
+
+    #[tokio::test]
+    async fn upgrade_preserves_order_scopes_shared_content_and_large_units() -> anyhow::Result<()> {
+        let mut connection = database().await?;
+        let large = "中".repeat(UPGRADE_CONTENT_BYTES / 3 + 1);
+        body(&mut connection, 1, 10, "shared\n😀").await?;
+        body(&mut connection, 2, 20, &large).await?;
+        let restored = restore_upgrade_sqlite(
+            &mut connection,
+            vec![node(3, 10, 1)?, node(1, 20, 2)?, node(2, 10, 1)?],
+        )
+        .await?;
+        for ((restored, id), text) in restored
+            .iter()
+            .zip(["upgrade-3", "upgrade-1", "upgrade-2"])
+            .zip(["shared\n😀", large.as_str(), "shared\n😀"])
+        {
+            assert_eq!(restored.id.as_str(), id);
+            assert_eq!(
+                restored.payload,
+                serde_json::json!({"first": text, "second": text})
+            );
+        }
+        assert!(
+            restore_upgrade_sqlite(&mut connection, Vec::new())
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upgrade_rejects_corrupt_references_and_bodies() -> anyhow::Result<()> {
+        let mut connection = database().await?;
+        body(&mut connection, 1, 10, "verified").await?;
+        let mut wrong_scope = node(1, 10, 1)?;
+        wrong_scope.references[0][0] = 20;
+        assert!(
+            restore_upgrade_sqlite(&mut connection, vec![wrong_scope])
+                .await
+                .is_err()
+        );
+        let mut wrong_ordinal = node(1, 10, 1)?;
+        wrong_ordinal.references[0][1] = 1;
+        assert!(
+            restore_upgrade_sqlite(&mut connection, vec![wrong_ordinal])
+                .await
+                .is_err()
+        );
+        // A self-consistent reference row still cannot read another scope's body.
+        assert!(
+            restore_upgrade_sqlite(&mut connection, vec![node(1, 20, 1)?])
+                .await
+                .is_err()
+        );
+        assert!(
+            restore_upgrade_sqlite(&mut connection, vec![node(1, 10, 1)?, node(1, 10, 1)?],)
+                .await
+                .is_err()
+        );
+        for corruption in [
+            "UPDATE contents SET format = 99 WHERE id = 1",
+            "UPDATE contents SET raw_len = raw_len + 1 WHERE id = 1",
+            "UPDATE contents SET body = x'00' WHERE id = 1",
+        ] {
+            sqlx::query(corruption).execute(&mut connection).await?;
+            assert!(
+                restore_upgrade_sqlite(&mut connection, vec![node(1, 10, 1)?])
+                    .await
+                    .is_err(),
+                "{corruption}"
+            );
+            sqlx::query("DELETE FROM contents")
+                .execute(&mut connection)
+                .await?;
+            body(&mut connection, 1, 10, "verified").await?;
+        }
+        sqlx::query("UPDATE contents SET digest = zeroblob(32) WHERE id = 1")
+            .execute(&mut connection)
+            .await?;
+        let error = restore_upgrade_sqlite(&mut connection, vec![node(1, 10, 1)?])
+            .await
+            .err()
+            .context("damaged body accepted")?;
+        assert!(error.to_string().contains("damaged content"), "{error:#}");
+        Ok(())
+    }
+}

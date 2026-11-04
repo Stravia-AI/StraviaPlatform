@@ -33,6 +33,16 @@ export function startupPhaseLabel(progress: StartupProgress): string {
       return m.startup_phase_observation_schema()
     case 'observation_data':
       return m.startup_phase_observation_data()
+    case 'usage_backfill':
+      return m.startup_phase_usage_backfill()
+    case 'model_pinning':
+      return m.startup_phase_model_pinning()
+    case 'credential_cleanup':
+      return m.startup_phase_credential_cleanup()
+    case 'content_store':
+      return m.startup_phase_content_store()
+    case 'retention_data':
+      return m.startup_phase_retention_data()
     case 'schema_migrations':
       return m.startup_phase_schema_migrations()
     case 'migration_verify':

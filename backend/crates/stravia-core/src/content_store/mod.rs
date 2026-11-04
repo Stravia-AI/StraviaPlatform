@@ -157,6 +157,29 @@ pub(crate) struct Body {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// 尚未解码的数据库行。迁移读取把所有权交给有界 blocking worker；
+/// 普通读取仍在原路径调用同一校验，不改变缓存与读取契约。
+pub(crate) type EncodedBody = (i64, Vec<u8>, i64, i64, Vec<u8>);
+
+pub(crate) fn decode_body(
+    (id, digest, format, raw_len, encoded): EncodedBody,
+) -> anyhow::Result<Body> {
+    let format = format_from_code(format).context("invalid stored content format")?;
+    let raw = crate::storage_codec::decode(&encoded)?;
+    ensure!(
+        i64::try_from(raw.len()).unwrap_or(i64::MAX) == raw_len,
+        "stored content length mismatch"
+    );
+    let computed = content_digest(format, &raw);
+    ensure!(computed == digest.as_slice(), "damaged content");
+    Ok(Body {
+        id,
+        format,
+        digest: computed,
+        bytes: raw.into_owned(),
+    })
+}
+
 impl Body {
     pub(crate) fn text(&self) -> anyhow::Result<&str> {
         ensure!(
