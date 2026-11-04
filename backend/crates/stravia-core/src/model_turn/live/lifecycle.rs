@@ -254,8 +254,12 @@ impl Operation<'_, '_> {
                     .is_some_and(|plan| plan.mode == MediaRoutingMode::Native),
             }),
         };
+        if std::mem::take(&mut prepared.continuation_send_reset) {
+            send_admission.reset_unexecuted_send().map_err(|error| {
+                classify_vendor_kind(error.kind, error.upstream_status, Some(error.message))
+            })?;
+        }
         context.send_admission = Some(send_admission.clone());
-        context.continuation_fallback = prepared.continuation_fallback.clone();
         context.root_request = prepared.root_request.clone();
         context.events = Some(event_tx);
         context.observer = prepared.observer.clone();

@@ -286,9 +286,15 @@ fn infer(
     let mut plan = store
         .plan(&scope, session_id, &body, now_ms()?)
         .map_err(invalid)?;
+    let continuation_replay = provider
+        .operation_metadata
+        .get("continuation_replay")
+        .and_then(Value::as_bool)
+        == Some(true);
     // 原生压缩块只能作为完整窗口回放：独立压缩和携带压缩块的历史都必须发送全量
-    // 历史，不能续接线程或按 offset 切片。无压缩历史的会话保持原有线程行为。
-    if compact || body.as_object().is_some_and(request::carries_compaction) {
+    // 历史，不能续接线程或按 offset 切片。宿主授权的续接恢复同样只发送全量历史，
+    // 不复用已被拒绝的 native thread；普通会话保持原有线程行为。
+    if compact || continuation_replay || body.as_object().is_some_and(request::carries_compaction) {
         plan.context.mode = ThreadMode::Disabled;
         plan.context.message_offset = 0;
         plan.context.previous_message_id = None;
@@ -297,140 +303,133 @@ fn infer(
         "{}?beta=true",
         common::endpoint_url(&provider.base_url, &encoded.path)?
     );
-    for attempt in 0..2 {
-        let shaped = request::encode(&body, client_version, &identity, &plan.context, compact)
-            .map_err(invalid)?;
-        let headers = request::inference_headers(
-            access_token(provider)?,
-            client_version,
-            &plan.context,
-            shaped.betas,
-        );
-        // 每次实际模型请求之前都声明一次开始；恢复重放前宿主已经重置开始槽位。
-        host.emit_started()?;
-        let response = host.http_start_with_compression(
-            HttpRequest {
-                method: "POST".into(),
-                url: url.clone(),
-                headers,
-                body: shaped.body,
-            },
-            stravia_vendor_sdk::HttpCompression {
-                request: None,
-                response: vec![
-                    stravia_vendor_sdk::HttpContentCoding::Gzip,
-                    stravia_vendor_sdk::HttpContentCoding::Deflate,
-                    stravia_vendor_sdk::HttpContentCoding::Br,
-                    stravia_vendor_sdk::HttpContentCoding::Zstd,
-                ],
-            },
-        )?;
-        if compact {
-            return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
-                .map(OperationOutput::Compact);
-        }
-        let status = response.status()?;
-        let response_headers = response.headers()?;
-        if !(200..300).contains(&status) {
-            let error_body = read_http_body(&response, 256 * 1024)?;
-            let error_value = serde_json::from_slice::<Value>(&error_body).ok();
-            if attempt == 0
-                && let Some(mode) = error_value
-                    .as_ref()
-                    .and_then(|value| thread_recovery(status, value, plan.context.mode))
-            {
-                // 这些拒绝发生在模型执行前。只做协议规定的一次全量重放；
-                // 网络/配额/认证错误及已经发出的流式输出不进入此路径。
-                // 该拒绝由本插件在内部消化：不发 Failed 事件。先向宿主声明
-                // “已确认未执行”以重新装填单次发送门禁；被拒绝则作为最终错误返回。
-                // 本插件已持有完整 canonical 历史，宿主返回的可选历史无需使用。
-                host.replay_continuation()?;
-                plan.context.mode = mode;
-                plan.context.message_offset = 0;
-                plan.context.previous_message_id = None;
-                continue;
-            }
-            let mut error = error_value
-                .as_ref()
-                .and_then(|value| common::classify_anthropic_error(value, false))
-                .unwrap_or_else(|| common::upstream_error(status, &response_headers, &error_body));
-            error.upstream_status.get_or_insert(status);
+    let shaped = request::encode(&body, client_version, &identity, &plan.context, compact)
+        .map_err(invalid)?;
+    let headers = request::inference_headers(
+        access_token(provider)?,
+        client_version,
+        &plan.context,
+        shaped.betas,
+    );
+    // 每次实际模型请求之前都声明一次开始；宿主恢复重放时已经重置开始槽位。
+    host.emit_started()?;
+    let response = host.http_start_with_compression(
+        HttpRequest {
+            method: "POST".into(),
+            url,
+            headers,
+            body: shaped.body,
+        },
+        stravia_vendor_sdk::HttpCompression {
+            request: None,
+            response: vec![
+                stravia_vendor_sdk::HttpContentCoding::Gzip,
+                stravia_vendor_sdk::HttpContentCoding::Deflate,
+                stravia_vendor_sdk::HttpContentCoding::Br,
+                stravia_vendor_sdk::HttpContentCoding::Zstd,
+            ],
+        },
+    )?;
+    if compact {
+        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
+            .map(OperationOutput::Compact);
+    }
+    let status = response.status()?;
+    let response_headers = response.headers()?;
+    if !(200..300).contains(&status) {
+        let error_body = read_http_body(&response, 256 * 1024)?;
+        let error_value = serde_json::from_slice::<Value>(&error_body).ok();
+        if let Some(error) = error_value
+            .as_ref()
+            .and_then(|value| thread_rejection(status, value, plan.context.mode))
+        {
+            // 明确发生在上游执行前的线程拒绝：只把事实与原始状态交还宿主，
+            // 不在插件内重新编码或重发。恢复、准入与最终结果均由宿主决定。
             return Err(error);
         }
-        let complete = common::decode_ai_response_renaming_tools(
-            host,
-            &protocol,
-            response,
-            common::classify_anthropic_error,
-            request::strip_tool_prefix,
-        )?;
-        if provider
-            .operation_metadata
-            .get("transport_affinity")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-        {
-            // 只投影本轮输出，不复制完整历史；和下轮请求复用同一个 Anthropic
-            // 编码器，避免签名、工具调用或内容块的另一套哈希表示。
-            let save = (|| {
-                let reusable = complete.error.is_none()
-                    && matches!(
-                        complete.stop_reason.as_deref(),
-                        Some("stop" | "tool_calls" | "pause_turn")
-                    );
-                let mut response_history = reusable
-                    .then(|| {
-                        common::encode_inference_request(
-                            &protocol,
-                            AiRequest::new(&complete.model, complete.items.clone()),
-                        )
-                    })
-                    .transpose()?;
-                let response_messages = match &mut response_history {
-                    Some(history) => {
-                        let messages = history
-                            .body
-                            .get_mut("messages")
-                            .and_then(Value::as_array_mut)
-                            .ok_or_else(|| {
-                                invalid("Claude Code response history is not an array")
-                            })?;
-                        request::prefix_message_tool_names(messages);
-                        messages.as_slice()
-                    }
-                    None => &[],
-                };
-                // 网络调用期间其它会话可能更新连接私有状态；提交前重新读取，
-                // 保留它们以及 OAuth 流程写入的非线程字段。
-                let latest = host.read_private_state()?;
-                let mut latest = SessionStore::from_bytes(latest.as_deref()).map_err(invalid)?;
-                let request_id = response_headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("request-id"))
-                    .map(|(_, value)| value.as_str());
-                latest
-                    .commit(
-                        plan,
-                        response_messages,
-                        &complete.id,
-                        request_id,
-                        now_ms()?,
-                        reusable,
-                    )
-                    .map_err(invalid)?;
-                host.write_private_state(&latest.to_bytes().map_err(invalid)?)
-            })();
-            if let Err(error) = save {
-                // 已完成的模型响应不因可丢弃的续接优化失效而变成生成失败。
-                host.log(
-                    stravia_vendor_sdk::LogLevel::Warn,
-                    &format!("Claude Code thread state was not saved: {error}"),
-                );
-            }
-        }
-        return Ok(OperationOutput::Infer(Box::new(complete)));
+        let mut error = error_value
+            .as_ref()
+            .and_then(|value| common::classify_anthropic_error(value, false))
+            .unwrap_or_else(|| common::upstream_error(status, &response_headers, &error_body));
+        error.upstream_status.get_or_insert(status);
+        return Err(error);
     }
-    unreachable!("the second attempt always returns; only the first may replay")
+    let complete = common::decode_ai_response_renaming_tools(
+        host,
+        &protocol,
+        response,
+        common::classify_anthropic_error,
+        request::strip_tool_prefix,
+    )?;
+    if provider
+        .operation_metadata
+        .get("transport_affinity")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+    {
+        // 只投影本轮输出，不复制完整历史；和下轮请求复用同一个 Anthropic
+        // 编码器，避免签名、工具调用或内容块的另一套哈希表示。
+        let save = (|| {
+            let reusable = !continuation_replay
+                && complete.error.is_none()
+                && matches!(
+                    complete.stop_reason.as_deref(),
+                    Some("stop" | "tool_calls" | "pause_turn")
+                );
+            let mut response_history = reusable
+                .then(|| {
+                    common::encode_inference_request(
+                        &protocol,
+                        AiRequest::new(&complete.model, complete.items.clone()),
+                    )
+                })
+                .transpose()?;
+            let response_messages = match &mut response_history {
+                Some(history) => {
+                    let messages = history
+                        .body
+                        .get_mut("messages")
+                        .and_then(Value::as_array_mut)
+                        .ok_or_else(|| invalid("Claude Code response history is not an array"))?;
+                    request::prefix_message_tool_names(messages);
+                    messages.as_slice()
+                }
+                None => &[],
+            };
+            // 网络调用期间其它会话可能更新连接私有状态；提交前重新读取，
+            // 保留它们以及 OAuth 流程写入的非线程字段。
+            let latest = host.read_private_state()?;
+            let mut latest = SessionStore::from_bytes(latest.as_deref()).map_err(invalid)?;
+            let request_id = response_headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("request-id"))
+                .map(|(_, value)| value.as_str());
+            if continuation_replay {
+                // 本轮未使用 thread，不能保存为续接 tip，也不能永久关闭后续优化。
+                // reusable=false 清除失效 tip，下一轮正常请求重新创建线程。
+                plan.context.mode = ThreadMode::Create;
+            }
+            latest
+                .commit(
+                    plan,
+                    response_messages,
+                    &complete.id,
+                    request_id,
+                    now_ms()?,
+                    reusable,
+                )
+                .map_err(invalid)?;
+            host.write_private_state(&latest.to_bytes().map_err(invalid)?)
+        })();
+        if let Err(error) = save {
+            // 已完成的模型响应不因可丢弃的续接优化失效而变成生成失败。
+            host.log(
+                stravia_vendor_sdk::LogLevel::Warn,
+                &format!("Claude Code thread state was not saved: {error}"),
+            );
+        }
+    }
+    Ok(OperationOutput::Infer(Box::new(complete)))
 }
 
 fn thread_scope(provider: &ProviderSnapshot, session_id: &str) -> String {
@@ -456,11 +455,14 @@ fn now_ms() -> Result<i64, PluginError> {
         .map_err(|error| common::plugin_error(ErrorKind::Trapped, error.to_string()))
 }
 
-fn thread_recovery(status: u16, error: &Value, mode: ThreadMode) -> Option<ThreadMode> {
+/// Exact pre-execution evidence that Anthropic rejected the native thread.
+/// The plugin reports the fact and the original upstream status; Core owns the
+/// single full-history replay and all admission/outcome decisions.
+fn thread_rejection(status: u16, error: &Value, mode: ThreadMode) -> Option<PluginError> {
     if mode == ThreadMode::Disabled || !matches!(status, 400 | 404) {
         return None;
     }
-    match error
+    let rejected = match error
         .pointer("/error/details/error_code")
         .and_then(Value::as_str)
     {
@@ -469,16 +471,28 @@ fn thread_recovery(status: u16, error: &Value, mode: ThreadMode) -> Option<Threa
             | "thread_already_continued"
             | "thread_continue_in_flight"
             | "thread_fingerprint_mismatch",
-        ) if mode == ThreadMode::Continue => Some(ThreadMode::Create),
-        Some("thread_unsupported_request") => Some(ThreadMode::Disabled),
-        _ => {
-            let message = error.pointer("/error/message").and_then(Value::as_str)?;
-            (status == 400
-                && message.contains("message-threads-2026-08-12")
-                && (message.contains("Unsupported") || message.contains("invalid beta")))
-            .then_some(ThreadMode::Disabled)
+        ) if mode == ThreadMode::Continue => true,
+        Some("thread_unsupported_request") => true,
+        _ => error
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                status == 400
+                    && message.contains("message-threads-2026-08-12")
+                    && (message.contains("Unsupported") || message.contains("invalid beta"))
+            }),
+    };
+    rejected.then(|| {
+        let detail = error
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("thread rejected");
+        PluginError {
+            kind: ErrorKind::ContinuationNotFound,
+            message: format!("Anthropic rejected the native continuation: {detail}"),
+            upstream_status: Some(status),
         }
-    }
+    })
 }
 
 /// 仅从宿主 principal/target scoped 传输亲和键派生稳定的 UUID 形态会话 ID，

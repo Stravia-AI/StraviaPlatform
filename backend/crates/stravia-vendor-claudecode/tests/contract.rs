@@ -92,9 +92,7 @@ struct MockServices {
     private_state: Mutex<Option<Vec<u8>>>,
     deltas: Mutex<Vec<AiStreamDelta>>,
     reject_assistant_prefill: bool,
-    /// 宿主拒绝授予续接恢复（例如额度、资格、截止时间或取消门禁不通过）。
-    deny_recovery: bool,
-    /// 宿主可见的有序事件：`start`、`request`、`replay`、`replay_denied`、`failed`。
+    /// 宿主可见的有序事件：`start`、`request`、`failed`。
     wire_log: Mutex<Vec<&'static str>>,
 }
 
@@ -170,19 +168,6 @@ impl HostServices for MockServices {
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure> {
         *self.private_state.lock() = Some(bytes);
         Ok(())
-    }
-
-    async fn replay_continuation(&self) -> Result<Option<Arc<AiRequest>>, HostFailure> {
-        if self.deny_recovery {
-            self.wire_log.lock().push("replay_denied");
-            return Err(HostFailure::new(
-                ErrorKind::Unsupported,
-                "continuation recovery was not granted",
-            ));
-        }
-        // Claude Code 的插件始终持有完整历史，宿主没有裁剪过请求。
-        self.wire_log.lock().push("replay");
-        Ok(None)
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
@@ -1487,96 +1472,191 @@ async fn thread_delta_and_native_ids_survive_tool_loop_and_guest_reload() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn thread_rejection_replays_full_history_once_without_reusing_request_id() {
+async fn thread_rejections_are_reported_with_the_original_upstream_status() {
     let (runtime, plugin) = load_plugin().await;
-    for code in [
-        "thread_not_found",
-        "thread_already_continued",
-        "thread_continue_in_flight",
-        "thread_fingerprint_mismatch",
-        "thread_unsupported_request",
+    for (code, expected_status) in [
+        ("thread_not_found", 404),
+        ("thread_already_continued", 400),
+        ("thread_continue_in_flight", 400),
+        ("thread_fingerprint_mismatch", 400),
+        ("thread_unsupported_request", 400),
     ] {
         let reply = json!([{"type":"text","text":"READY"}]);
         let services = Arc::new(MockServices {
             script: Mutex::new(VecDeque::from([
                 (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
-                (if code == "thread_not_found" {404} else {400}, "application/json",
+                (expected_status, "application/json",
                  json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
                      "details":{"error_code":code}}}).to_string(), Some("req_rejected".into())),
-                (200, "application/json", message_reply("msg_2", reply.clone(), "end_turn"), Some("req_2".into())),
-                (200, "application/json", message_reply("msg_3", reply.clone(), "end_turn"), Some("req_3".into())),
             ])),
             ..Default::default()
         });
         let mut provider = signed_in();
         provider
             .operation_metadata
-            .insert("transport_affinity".into(), json!("replay-session"));
+            .insert("transport_affinity".into(), json!("rejected-session"));
         let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
-        for prompt in [None, Some("Continue."), Some("Again.")] {
-            if let Some(prompt) = prompt {
-                history.push(json!({"role":"user","content":prompt}));
-            }
-            run(
-                &runtime,
-                &plugin,
-                &services,
-                OperationInput::Infer {
-                    provider: provider.clone(),
-                    request: threaded_request(&history),
-                },
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{code}: {error}"));
-            history.push(json!({"role":"assistant","content":reply}));
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request: threaded_request(&history),
+            },
+        )
+        .await
+        .expect("first turn establishes the native thread");
+        let state_after_first = services.private_state.lock().clone();
+        history.push(json!({"role":"assistant","content":reply}));
+        history.push(json!({"role":"user","content":"Continue."}));
+        let error = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider,
+                request: threaded_request(&history),
+            },
+        )
+        .await
+        .expect_err("a rejected native thread must fail this operation");
+        match error {
+            RuntimeError::Plugin {
+                kind: ErrorKind::ContinuationNotFound,
+                upstream_status,
+                ..
+            } => assert_eq!(upstream_status, Some(expected_status), "{code}"),
+            other => panic!("{code}: expected continuation-not-found, got {other:?}"),
         }
-        // 恢复在单次操作内部完成：宿主先被要求重新装填发送门禁，再看到第二次
-        // 起始事件；明确失效的拒绝既不是失败事件，也不会在门禁外多发一次请求。
+        // 插件不自行重发，也不把已确认未执行的拒绝记成失败事件；失败的轮次
+        // 不改写线程状态，宿主可据此授权一次完整历史重放。
         assert_eq!(
             *services.wire_log.lock(),
-            [
-                "start", "request", "start", "request", "replay", "start", "request", "start",
-                "request"
-            ],
+            ["start", "request", "start", "request"],
             "{code}"
         );
         let sent = services.requests.lock();
-        assert_eq!(sent.len(), 4, "{code}");
-        let failed: Value = serde_json::from_slice(&sent[1].body).unwrap();
-        let replay: Value = serde_json::from_slice(&sent[2].body).unwrap();
-        let after: Value = serde_json::from_slice(&sent[3].body).unwrap();
-        assert_eq!(failed["thread"]["type"], "continue", "{code}");
-        assert_eq!(failed["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(replay["messages"].as_array().unwrap().len(), 3);
-        assert_eq!(replay["messages"][1]["content"], reply);
-        assert!(replay.get("tools").is_some());
-        assert_eq!(
-            wire_header(&sent[1], "x-claude-code-prompt-id"),
-            wire_header(&sent[2], "x-claude-code-prompt-id")
-        );
-        assert_ne!(
-            wire_header(&sent[1], "x-client-request-id"),
-            wire_header(&sent[2], "x-client-request-id")
-        );
-        if code == "thread_unsupported_request" {
-            for (body, request) in [(&replay, &sent[2]), (&after, &sent[3])] {
-                assert!(body.get("thread").is_none());
-                assert!(!wire_header(request, "anthropic-beta").contains("message-threads"));
-            }
-            assert_eq!(after["messages"].as_array().unwrap().len(), 5);
-        } else {
-            assert_eq!(replay["thread"], json!({"type":"create"}));
-            assert_eq!(
-                after["thread"],
-                json!({"type":"continue","previous_message_id":"msg_2"})
-            );
-        }
+        assert_eq!(sent.len(), 2, "{code}");
+        let rejected: Value = serde_json::from_slice(&sent[1].body).unwrap();
+        assert_eq!(rejected["thread"]["type"], "continue", "{code}");
+        assert_eq!(rejected["messages"].as_array().unwrap().len(), 1, "{code}");
+        assert_eq!(*services.private_state.lock(), state_after_first, "{code}");
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn unrelated_upstream_failures_are_not_replayed() {
+async fn host_authorized_continuation_replay_sends_full_history_without_a_thread() {
+    let (runtime, plugin) = load_plugin().await;
+    let reply = json!([{"type":"text","text":"READY"}]);
+    let services = Arc::new(MockServices {
+        script: Mutex::new(VecDeque::from([
+            (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
+            (404, "application/json",
+             json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
+                 "details":{"error_code":"thread_not_found"}}}).to_string(), Some("req_rejected".into())),
+            (200, "application/json", message_reply("msg_2", reply.clone(), "end_turn"), Some("req_2".into())),
+            (200, "application/json", message_reply("msg_3", reply.clone(), "end_turn"), Some("req_3".into())),
+        ])),
+        ..Default::default()
+    });
+    let mut provider = signed_in();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), json!("host-replay-session"));
+    let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request: threaded_request(&history),
+        },
+    )
+    .await
+    .expect("first turn establishes the native thread");
+    history.push(json!({"role":"assistant","content":reply}));
+    history.push(json!({"role":"user","content":"Continue."}));
+    let rejected = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request: threaded_request(&history),
+        },
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        Err(RuntimeError::Plugin {
+            kind: ErrorKind::ContinuationNotFound,
+            ..
+        })
+    ));
+
+    // 宿主授权一次完整历史重放：本轮必须发送 canonical 全量历史，且不再携带
+    // 被拒绝的 native thread。普通会话（没有该标记）仍按 session 计划续接。
+    provider
+        .operation_metadata
+        .insert("continuation_replay".into(), json!(true));
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request: threaded_request(&history),
+        },
+    )
+    .await
+    .expect("the host-authorized full replay succeeds");
+
+    let sent = services.requests.lock();
+    assert_eq!(sent.len(), 3);
+    let replay: Value = serde_json::from_slice(&sent[2].body).unwrap();
+    assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
+    assert!(!wire_header(&sent[2], "anthropic-beta").contains("message-threads"));
+    assert_eq!(replay["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(replay["messages"][1]["content"], reply);
+    assert!(replay.get("tools").is_some());
+    // 重放是独立的新插件操作：重试的 HTTP 请求使用新的 request id，但仍不复用
+    // 被拒绝的线程状态。
+    assert_ne!(
+        wire_header(&sent[1], "x-client-request-id"),
+        wire_header(&sent[2], "x-client-request-id")
+    );
+    assert_eq!(
+        *services.wire_log.lock(),
+        ["start", "request", "start", "request", "start", "request"]
+    );
+    drop(sent);
+
+    provider.operation_metadata.remove("continuation_replay");
+    history.push(json!({"role":"assistant","content":reply}));
+    history.push(json!({"role":"user","content":"Continue with a new thread."}));
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider,
+            request: threaded_request(&history),
+        },
+    )
+    .await
+    .expect("normal requests can create a fresh native thread after recovery");
+    let sent = services.requests.lock();
+    let next: Value = serde_json::from_slice(&sent[3].body).unwrap();
+    assert_eq!(next["thread"], json!({"type":"create"}));
+    assert_eq!(next["messages"].as_array().unwrap().len(), 5);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn unrelated_upstream_failures_are_not_reclassified_as_continuation_loss() {
     let (runtime, plugin) = load_plugin().await;
     for status in [400, 401, 429, 503] {
         let services = Arc::new(MockServices {
@@ -1594,66 +1674,21 @@ async fn unrelated_upstream_failures_are_not_replayed() {
             },
         )
         .await;
-        assert!(result.is_err());
+        match result {
+            Err(RuntimeError::Plugin { kind, .. }) => assert!(
+                !matches!(
+                    kind,
+                    ErrorKind::ContinuationNotFound | ErrorKind::ContinuationUnavailable
+                ),
+                "{status}: unrelated failure was reclassified as continuation loss"
+            ),
+            other => panic!("{status}: expected a plugin failure, got {other:?}"),
+        }
         assert_eq!(services.requests.lock().len(), 1);
         assert!(services.private_state.lock().is_none());
-        // 不明确的失败不请求恢复，也不重新开始。
+        // 普通失败只声明一次开始、发送一次，不产生第二次请求。
         assert_eq!(*services.wire_log.lock(), ["start", "request"]);
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn ungranted_recovery_is_the_final_error_without_a_second_request() {
-    let (runtime, plugin) = load_plugin().await;
-    let reply = json!([{"type":"text","text":"READY"}]);
-    let services = Arc::new(MockServices {
-        deny_recovery: true,
-        script: Mutex::new(VecDeque::from([
-            (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
-            (404, "application/json",
-             json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
-                 "details":{"error_code":"thread_not_found"}}}).to_string(), Some("req_rejected".into())),
-        ])),
-        ..Default::default()
-    });
-    let mut provider = signed_in();
-    provider
-        .operation_metadata
-        .insert("transport_affinity".into(), json!("denied-session"));
-    let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: threaded_request(&history),
-        },
-    )
-    .await
-    .expect("first turn");
-    history.push(json!({"role":"assistant","content":reply}));
-    history.push(json!({"role":"user","content":"Continue."}));
-    let state_before = services.private_state.lock().clone();
-    let result = run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider,
-            request: threaded_request(&history),
-        },
-    )
-    .await;
-    assert!(result.is_err(), "a denied recovery must fail the operation");
-    // 被拒绝的恢复是终态：没有第二次起始/请求，且失败的轮次不改写线程状态。
-    assert_eq!(
-        *services.wire_log.lock(),
-        ["start", "request", "start", "request", "replay_denied"]
-    );
-    assert_eq!(services.requests.lock().len(), 2);
-    assert_eq!(*services.private_state.lock(), state_before);
 }
 
 #[tokio::test(flavor = "current_thread")]

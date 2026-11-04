@@ -123,7 +123,6 @@ pub(crate) struct VendorCallContext {
     pub(crate) client_headers: Vec<(String, String)>,
     pub(crate) metadata: BTreeMap<String, Value>,
     pub(crate) send_admission: Option<crate::rpm::SendAdmission>,
-    pub(crate) continuation_fallback: Option<Arc<AiRequest>>,
     pub(crate) root_request: crate::rpm::RootRequest,
 }
 
@@ -141,7 +140,6 @@ impl VendorCallContext {
             client_headers: Vec::new(),
             metadata: BTreeMap::new(),
             send_admission: None,
-            continuation_fallback: None,
             root_request: crate::rpm::current_root_request(),
         }
     }
@@ -989,7 +987,6 @@ impl Gateway {
             state,
             secrets,
             event_delivery_failed: AtomicBool::new(false),
-            continuation_fallback: context.continuation_fallback.clone(),
         });
         let scope = OperationScope::new(
             services.clone(),
@@ -1435,7 +1432,6 @@ struct ScopedHostServices {
     state: StateScope,
     secrets: ProtectedSecrets,
     event_delivery_failed: AtomicBool,
-    continuation_fallback: Option<Arc<AiRequest>>,
 }
 
 impl ScopedHostServices {
@@ -1616,12 +1612,6 @@ impl HostServices for ScopedHostServices {
         self.ensure_current()?;
         drop(fence);
         Ok(())
-    }
-
-    async fn replay_continuation(&self) -> Result<Option<Arc<AiRequest>>, HostFailure> {
-        self.ensure_current()?;
-        self.network.replay_continuation()?;
-        Ok(self.continuation_fallback.clone())
     }
 
     fn log(&self, level: LogLevel, message: &str) {

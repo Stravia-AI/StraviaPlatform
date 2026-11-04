@@ -8,8 +8,7 @@ use stravia_runtime_contract::protocol::{
     ir::{AiResponse, ServerToolUsage, Usage},
 };
 use stravia_vendor_sdk::{
-    ErrorKind, GuestHost, PluginError, ProviderSnapshot, SearchRequest, SearchResponse,
-    SearchSource, WsMessage, WsRequest,
+    GuestHost, ProviderSnapshot, SearchRequest, SearchResponse, SearchSource, WsMessage, WsRequest,
 };
 
 use super::auth::account_id_from_jwt;
@@ -526,18 +525,6 @@ fn request_continuation_id(body: &Value) -> Option<&str> {
         .flatten()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-}
-
-/// Only an attempt that carried a continuation can be recovered, and only from
-/// proof that the model never ran: a local socket miss before any frame was
-/// sent, or the exact unstarted upstream rejection classified by
-/// `classify_codex_websocket_error`. Everything else keeps its real error.
-pub(super) fn continuation_replayable(body: &Value, error: &PluginError) -> bool {
-    request_continuation_id(body).is_some()
-        && matches!(
-            error.kind,
-            ErrorKind::ContinuationUnavailable | ErrorKind::ContinuationNotFound
-        )
 }
 
 pub(super) fn infer_websocket(

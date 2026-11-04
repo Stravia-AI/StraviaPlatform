@@ -535,7 +535,6 @@ struct Recording {
     closed: Mutex<Vec<Option<String>>>,
     /// Ordered "started" / "failed" / "completed" lifecycle events.
     events: Mutex<Vec<&'static str>>,
-    replays: Mutex<usize>,
 }
 
 struct ConnectionRecord {
@@ -554,8 +553,6 @@ enum Connect {
 
 struct MockServices {
     connects: Mutex<std::collections::VecDeque<Connect>>,
-    /// `None`: the host grants no replay (default trait refusal).
-    replay: Option<Option<Arc<AiRequest>>>,
     recorded: Arc<Recording>,
 }
 
@@ -628,19 +625,6 @@ impl HostServices for MockServices {
             ),
             recorded: Arc::clone(&self.recorded),
         }))
-    }
-
-    async fn replay_continuation(&self) -> Result<Option<Arc<AiRequest>>, HostFailure> {
-        match &self.replay {
-            Some(retained) => {
-                *self.recorded.replays.lock() += 1;
-                Ok(retained.clone())
-            }
-            None => Err(HostFailure::new(
-                ErrorKind::Unsupported,
-                "continuation replay is unavailable",
-            )),
-        }
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -839,26 +823,21 @@ async fn execute_once(
         provider,
         request,
         [Connect::Frames(frames)],
-        None,
         recorded,
     )
     .await
 }
 
-/// `replay`: `None` refuses recovery; `Some(retained)` grants it and returns
-/// the host's retained full history (`Some`) or nothing (`None`).
 async fn execute_scripted(
     runtime: &VendorRuntime,
     plugin: &LoadedPlugin,
     provider: ProviderSnapshot,
     request: AiRequest,
     connects: impl IntoIterator<Item = Connect>,
-    replay: Option<Option<Arc<AiRequest>>>,
     recorded: &Arc<Recording>,
 ) -> Result<OperationOutput, RuntimeError> {
     let services = Arc::new(MockServices {
         connects: Mutex::new(connects.into_iter().collect()),
-        replay,
         recorded: Arc::clone(recorded),
     });
     let scope = OperationScope::new(
@@ -1140,7 +1119,7 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn no_code_continuation_error_requires_requested_id_before_response_created() {
+async fn continuation_rejection_is_classified_only_for_a_requested_unstarted_attempt() {
     let (runtime, plugin) = load_codex().await;
     let rejection = serde_json::json!({
         "type": "error", "status": 400,
@@ -1152,7 +1131,11 @@ async fn no_code_continuation_error_requires_requested_id_before_response_create
         "response": response_resource("in_progress", serde_json::json!([]), "resp_started")
     })
     .to_string();
-    for (previous_id, saw_created) in [(None, false), (Some("resp_missing"), true)] {
+    for (previous_id, saw_created, continuation_lost) in [
+        (None, false, false),
+        (Some("resp_missing"), true, false),
+        (Some("resp_missing"), false, true),
+    ] {
         let mut turn_request = request();
         turn_request.parameters.continuation =
             previous_id.map(|id| Continuation::PreviousResponse(id.into()));
@@ -1162,19 +1145,17 @@ async fn no_code_continuation_error_requires_requested_id_before_response_create
         }
         frames.push(rejection.clone());
         let recorded = Arc::new(Recording::default());
-        // Recovery is granted, so an unwanted replay would be observable.
         let result = execute_scripted(
             &runtime,
             &plugin,
             codex_provider(),
             turn_request,
             [Connect::Frames(frames)],
-            Some(None),
             &recorded,
         )
         .await;
+        // 插件只发送一次并把精确事实交给宿主，不自行重连或重发。
         assert_eq!(recorded.connections.lock().len(), 1);
-        assert_eq!(*recorded.replays.lock(), 0);
         assert_eq!(
             recorded.connections.lock()[0].continuation_id.as_deref(),
             previous_id
@@ -1183,16 +1164,30 @@ async fn no_code_continuation_error_requires_requested_id_before_response_create
             recorded.sent.lock()[0]["previous_response_id"].as_str(),
             previous_id
         );
-        assert!(
-            matches!(
-                result,
-                Err(RuntimeError::Plugin {
-                    kind: ErrorKind::Upstream(_),
-                    ..
-                })
-            ),
-            "unexpected classification for previous_id={previous_id:?}, saw_created={saw_created}: {result:?}"
-        );
+        if continuation_lost {
+            assert!(
+                matches!(
+                    result,
+                    Err(RuntimeError::Plugin {
+                        kind: ErrorKind::ContinuationNotFound,
+                        upstream_status: Some(400),
+                        ..
+                    })
+                ),
+                "unexpected classification for previous_id={previous_id:?}, saw_created={saw_created}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(RuntimeError::Plugin {
+                        kind: ErrorKind::Upstream(_),
+                        ..
+                    })
+                ),
+                "unexpected classification for previous_id={previous_id:?}, saw_created={saw_created}: {result:?}"
+            );
+        }
     }
 }
 
@@ -1206,8 +1201,8 @@ fn user_item(text: &str) -> AiItem {
     }
 }
 
-/// Request settings that must survive a continuation replay unchanged.
-fn with_replay_settings(mut request: AiRequest) -> AiRequest {
+/// Request settings that must reach the single model dispatch unchanged.
+fn with_continuation_settings(mut request: AiRequest) -> AiRequest {
     request.parallel_tool_calls = Some(false);
     request.parameters.cache.key = Some("replay-cache-key".into());
     request.parameters.service_tier = Some(ServiceTier::Priority);
@@ -1234,75 +1229,52 @@ fn input_texts(frame: &serde_json::Value) -> Vec<String> {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn local_socket_miss_replays_retained_history_inside_the_plugin() {
+async fn local_socket_miss_reports_continuation_unavailable_before_starting() {
     let (runtime, plugin) = load_codex().await;
     let recorded = Arc::new(Recording::default());
     let mut provider = codex_provider();
     provider
         .operation_metadata
         .insert("transport_affinity".into(), "replay-window".into());
-    // The host dispatched only the increment and kept the full history.
-    let delta = with_replay_settings(AiRequest::new("gpt-6-astra", vec![user_item("delta")]));
-    let full = Arc::new(with_replay_settings(AiRequest::new(
-        "gpt-6-astra",
-        vec![user_item("history"), user_item("delta")],
-    )));
+    let delta = with_continuation_settings(AiRequest::new("gpt-6-astra", vec![user_item("delta")]));
     let result = execute_scripted(
         &runtime,
         &plugin,
         provider,
         delta,
-        [
-            Connect::Miss,
-            Connect::Frames(codex_frames(0, "resp_replayed")),
-        ],
-        Some(Some(full)),
+        [Connect::Miss],
         &recorded,
     )
-    .await
-    .expect("recovered inference");
-    let OperationOutput::Infer(response) = result else {
-        panic!("expected inference");
-    };
-    assert_eq!(response.id, "resp_replayed");
-    assert_eq!(response.output_text(), "你好，我是 ChatGPT。");
-    assert_eq!(*recorded.replays.lock(), 1);
-    // The miss sent nothing; only one successful attempt reaches the wire.
-    assert_eq!(*recorded.events.lock(), vec!["started", "completed"]);
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Plugin {
+                kind: ErrorKind::ContinuationUnavailable,
+                upstream_status: None,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    // The local miss sent no frame and never declared the model boundary; Core
+    // may now authorize one full-history dispatch on a fresh plugin operation.
+    assert!(recorded.events.lock().is_empty());
+    assert!(recorded.sent.lock().is_empty());
     let connections = recorded.connections.lock();
-    assert_eq!(connections.len(), 2);
+    assert_eq!(connections.len(), 1);
     assert_eq!(
         connections[0].continuation_id.as_deref(),
         Some("resp_missing")
-    );
-    assert_eq!(connections[1].continuation_id, None);
-    assert_eq!(
-        connections[0].headers["thread-id"],
-        connections[1].headers["thread-id"]
-    );
-    let sent = recorded.sent.lock();
-    assert_eq!(sent.len(), 1);
-    assert!(sent[0].get("previous_response_id").is_none());
-    let input = input_texts(&sent[0]);
-    assert_eq!(input.len(), 2);
-    assert!(input[0].contains("history") && input[1].contains("delta"));
-    assert_eq!(sent[0]["parallel_tool_calls"], false);
-    assert_eq!(sent[0]["prompt_cache_key"], "replay-cache-key");
-    assert_eq!(sent[0]["service_tier"], "priority");
-    assert_eq!(sent[0]["store"], false);
-    assert_eq!(
-        sent[0]["client_metadata"]["thread_id"].as_str(),
-        connections[1].headers.get("thread-id").map(String::as_str)
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn exact_remote_rejection_replays_dispatched_history_without_failed_event() {
+async fn exact_remote_rejection_propagates_continuation_not_found_without_failed_event() {
     let (runtime, plugin) = load_codex().await;
     let recorded = Arc::new(Recording::default());
-    // The host did not trim: the dispatched request already holds full history.
-    let full = with_replay_settings(AiRequest::new(
+    let full = with_continuation_settings(AiRequest::new(
         "gpt-6-astra",
         vec![user_item("history"), user_item("delta")],
     ));
@@ -1311,52 +1283,41 @@ async fn exact_remote_rejection_replays_dispatched_history_without_failed_event(
         &plugin,
         codex_provider(),
         full,
-        [
-            Connect::Frames(vec![continuation_rejection()]),
-            Connect::Frames(codex_frames(0, "resp_replayed")),
-        ],
-        Some(None),
+        [Connect::Frames(vec![continuation_rejection()])],
         &recorded,
     )
-    .await
-    .expect("recovered inference");
-    let OperationOutput::Infer(response) = result else {
-        panic!("expected inference");
-    };
-    assert_eq!(response.id, "resp_replayed");
-    assert_eq!(*recorded.replays.lock(), 1);
-    assert_eq!(
-        *recorded.events.lock(),
-        vec!["started", "started", "completed"],
-        "the rejected attempt must not surface as a failed event"
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Plugin {
+                kind: ErrorKind::ContinuationNotFound,
+                upstream_status: Some(400),
+                ..
+            })
+        ),
+        "{result:?}"
     );
+    // The exact unstarted rejection is a pre-execution fact, not a failed model
+    // event; the plugin makes no second connection or frame.
+    assert_eq!(*recorded.events.lock(), vec!["started"]);
+    assert_eq!(recorded.connections.lock().len(), 1);
     let sent = recorded.sent.lock();
-    assert_eq!(sent.len(), 2);
+    assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["previous_response_id"], "resp_missing");
-    assert!(sent[1].get("previous_response_id").is_none());
-    assert_eq!(input_texts(&sent[0]), input_texts(&sent[1]));
-    for key in [
-        "parallel_tool_calls",
-        "prompt_cache_key",
-        "service_tier",
-        "client_metadata",
-    ] {
-        assert_eq!(sent[0][key], sent[1][key], "{key}");
-    }
-    assert_eq!(recorded.connections.lock()[1].continuation_id, None);
-    assert_eq!(
-        *recorded.closed.lock(),
-        vec![None, Some("resp_replayed".into())]
-    );
+    assert_eq!(input_texts(&sent[0]).len(), 2);
+    assert_eq!(sent[0]["parallel_tool_calls"], false);
+    assert_eq!(sent[0]["prompt_cache_key"], "replay-cache-key");
+    assert_eq!(sent[0]["service_tier"], "priority");
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn inline_compaction_recovers_exact_stale_id_and_keeps_other_errors() {
+async fn inline_compaction_keeps_exact_stale_id_error_and_other_errors() {
     let (runtime, plugin) = load_codex().await;
     // An inline trigger makes the plugin preserve upstream errors.
     let compacting = || {
-        let mut request = with_replay_settings(AiRequest::new(
+        let mut request = with_continuation_settings(AiRequest::new(
             "gpt-6-astra",
             vec![user_item("history"), user_item("delta")],
         ));
@@ -1378,36 +1339,34 @@ async fn inline_compaction_recovers_exact_stale_id_and_keeps_other_errors() {
         &plugin,
         codex_provider(),
         compacting(),
-        [
-            Connect::Frames(vec![continuation_rejection()]),
-            Connect::Frames(codex_frames(0, "resp_compacted")),
-        ],
-        Some(None),
+        [Connect::Frames(vec![continuation_rejection()])],
         &recorded,
     )
-    .await
-    .expect("recovered inline compaction");
-    let OperationOutput::Infer(response) = result else {
-        panic!("expected inference");
-    };
-    assert_eq!(response.id, "resp_compacted");
-    assert_eq!(*recorded.replays.lock(), 1);
-    assert_eq!(
-        *recorded.events.lock(),
-        vec!["started", "started", "completed"]
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::Plugin {
+                kind: ErrorKind::ContinuationNotFound,
+                upstream_status: Some(400),
+                ..
+            })
+        ),
+        "{result:?}"
     );
+    assert_eq!(recorded.connections.lock().len(), 1);
     {
         let sent = recorded.sent.lock();
+        assert_eq!(sent.len(), 1);
         assert!(sent[0].get("previous_response_id").is_some());
-        assert!(sent[1].get("previous_response_id").is_none());
         assert!(
-            input_texts(&sent[1])
+            input_texts(&sent[0])
                 .iter()
                 .any(|item| item.contains("compaction_trigger"))
         );
     }
 
-    // Any other upstream rejection is still delivered, never replayed.
+    // Any other upstream rejection is still delivered, never reclassified.
     let other = serde_json::json!({
         "type": "error", "status": 400,
         "error": {"type": "invalid_request_error", "message": "Invalid `input`: unsupported content"}
@@ -1420,37 +1379,6 @@ async fn inline_compaction_recovers_exact_stale_id_and_keeps_other_errors() {
         codex_provider(),
         compacting(),
         [Connect::Frames(vec![other])],
-        Some(None),
-        &recorded,
-    )
-    .await;
-    assert!(
-        matches!(result, Err(RuntimeError::Plugin { .. })),
-        "{result:?}"
-    );
-    assert_eq!(*recorded.replays.lock(), 0);
-    assert_eq!(recorded.connections.lock().len(), 1);
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn failed_replay_propagates_its_own_error_and_is_not_repeated() {
-    let (runtime, plugin) = load_codex().await;
-    let recorded = Arc::new(Recording::default());
-    let full = with_replay_settings(AiRequest::new(
-        "gpt-6-astra",
-        vec![user_item("history"), user_item("delta")],
-    ));
-    let result = execute_scripted(
-        &runtime,
-        &plugin,
-        codex_provider(),
-        full,
-        [
-            Connect::Frames(vec![continuation_rejection()]),
-            Connect::Frames(vec![continuation_rejection()]),
-        ],
-        Some(None),
         &recorded,
     )
     .await;
@@ -1464,24 +1392,33 @@ async fn failed_replay_propagates_its_own_error_and_is_not_repeated() {
         ),
         "{result:?}"
     );
-    assert_eq!(*recorded.replays.lock(), 1);
-    assert_eq!(recorded.connections.lock().len(), 2);
+    assert_eq!(recorded.connections.lock().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn replay_without_required_full_history_fails_before_any_resend() {
+async fn http_only_continuation_delta_is_rejected_before_started_or_send() {
     let (runtime, plugin) = load_codex().await;
     let recorded = Arc::new(Recording::default());
-    // A bare continuation increment with no retained history is not a request.
-    let increment = with_replay_settings(AiRequest::new("gpt-6-astra", Vec::new()));
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_preference".into(), "http-only".into());
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "http-window".into());
+    // The host may have retained full history; the plugin must not silently
+    // drop the reference and send the remaining history as a truncated delta.
+    let delta = with_continuation_settings(AiRequest::new(
+        "gpt-6-astra",
+        vec![user_item("history"), user_item("delta")],
+    ));
     let result = execute_scripted(
         &runtime,
         &plugin,
-        codex_provider(),
-        increment,
-        [Connect::Miss],
-        Some(None),
+        provider,
+        delta,
+        Vec::<Connect>::new(),
         &recorded,
     )
     .await;
@@ -1489,41 +1426,14 @@ async fn replay_without_required_full_history_fails_before_any_resend() {
         matches!(
             result,
             Err(RuntimeError::Plugin {
-                kind: ErrorKind::Invalid,
+                kind: ErrorKind::ContinuationUnavailable,
+                upstream_status: None,
                 ..
             })
         ),
         "{result:?}"
     );
-    assert_eq!(recorded.connections.lock().len(), 1);
+    assert!(recorded.events.lock().is_empty());
+    assert!(recorded.connections.lock().is_empty());
     assert!(recorded.sent.lock().is_empty());
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn denied_replay_keeps_the_hosts_refusal() {
-    let (runtime, plugin) = load_codex().await;
-    let recorded = Arc::new(Recording::default());
-    let full = with_replay_settings(AiRequest::new("gpt-6-astra", vec![user_item("history")]));
-    let result = execute_scripted(
-        &runtime,
-        &plugin,
-        codex_provider(),
-        full,
-        [Connect::Frames(vec![continuation_rejection()])],
-        None,
-        &recorded,
-    )
-    .await;
-    assert!(
-        matches!(
-            result,
-            Err(RuntimeError::Plugin {
-                kind: ErrorKind::Unsupported,
-                ..
-            })
-        ),
-        "{result:?}"
-    );
-    assert_eq!(recorded.connections.lock().len(), 1);
 }

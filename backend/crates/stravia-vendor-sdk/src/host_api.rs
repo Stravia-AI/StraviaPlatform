@@ -1,9 +1,7 @@
-use stravia_runtime_contract::protocol::ir::{
-    AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
-};
+use stravia_runtime_contract::protocol::ir::{AiResponse, AiStreamDelta, NativeCompactionResponse};
 
 use crate::bindings::stravia::vendor::{host, types};
-use crate::envelope::{decode_payload, encode_payload, error};
+use crate::envelope::{encode_payload, error};
 use crate::guest::{ErrorKind, PluginError};
 
 pub use host::{HttpResponse, WsConnection};
@@ -73,18 +71,6 @@ impl GuestHost {
     /// HTTP request or WebSocket frame. Auxiliary requests must not call this.
     pub fn emit_started(&self) -> Result<(), PluginError> {
         host::emit_started()
-    }
-
-    /// Recover once after a verified pre-execution continuation rejection or
-    /// a local socket miss. Never call after output or ambiguous transport
-    /// failure. Returns retained full history when the host dispatched a delta;
-    /// otherwise the original input already contains full history.
-    /// The next send must call `emit_started` and still consumes destination RPM.
-    pub fn replay_continuation(&self) -> Result<Option<AiRequest>, PluginError> {
-        host::replay_continuation()?
-            .as_ref()
-            .map(|payload| decode_payload(payload).map(|envelope| envelope.body))
-            .transpose()
     }
 
     /// Backpressured canonical stream emission.

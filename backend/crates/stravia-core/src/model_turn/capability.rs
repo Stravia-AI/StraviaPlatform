@@ -899,7 +899,6 @@ fn clone_context(context: &VendorCallContext) -> VendorCallContext {
     cloned.metadata = context.metadata.clone();
     cloned.root_request = context.root_request.clone();
     cloned.send_admission = context.send_admission.clone();
-    cloned.continuation_fallback = context.continuation_fallback.clone();
     cloned
 }
 

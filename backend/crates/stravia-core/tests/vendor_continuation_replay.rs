@@ -1,5 +1,5 @@
-//! 真实 Claude Code Wasm + Core Gateway/HTTP router + 隔离 SQLite + 回环上游：
-//! 线程续接被上游明确拒绝时，插件在同一次操作内部完整重放一次。
+//! 真实 Vendor Wasm + Core Gateway/HTTP router + 隔离 SQLite + 回环上游：
+//! 线程续接被拒绝或本地连接失效时，宿主在同一次逻辑 attempt 内完整重放一次。
 //!
 //! 前置：`task build:vendors:all`（读取 target/vendor-plugins-all）。上游、凭据均为假 fixture。
 
@@ -30,6 +30,9 @@ use stravia_core::proxy::server::create_router;
 mod sqlite_fixture;
 mod vendor_plugin_artifacts;
 use vendor_plugin_artifacts::install_distributed_vendor_plugin;
+
+#[path = "vendor_continuation_replay/codex.rs"]
+mod codex;
 
 const MODEL: &str = "claude-sonnet-4-5";
 const ROUTE: &str = "claude-replay-route";
@@ -163,7 +166,7 @@ impl Harness {
                 CreateManualProviderModel {
                     metadata: json!({
                         "id": MODEL, "name": MODEL,
-                        "modalities": {"input": ["text"], "output": ["text"]},
+                        "modalities": {"input": ["text", "image"], "output": ["text"]},
                         "limit": {"context": 200000, "output": 8192}
                     }),
                     template_id: None,
@@ -230,6 +233,10 @@ impl Harness {
                 .push(json!({"role": "assistant", "content": [{"type": "text", "text": "READY"}]}));
             messages.push(json!({"role": "user", "content": format!("Continue {index}.")}));
         }
+        self.messages(messages).await
+    }
+
+    async fn messages(&self, messages: Vec<Value>) -> (StatusCode, Value) {
         let response = create_router(self.gateway.clone())
             .oneshot(
                 Request::post("/v1/messages")
@@ -257,23 +264,7 @@ impl Harness {
 
     /// 持久化的 Target attempt 终态，按开始顺序：`(status, error_code)`。
     async fn attempts(&self) -> anyhow::Result<Vec<(String, Option<String>)>> {
-        self.gateway.admin().observation_flush().await?;
-        let paths = DataPaths::new(&self.gateway.config.data_dir);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                sqlx::sqlite::SqliteConnectOptions::new()
-                    .filename(paths.database())
-                    .read_only(true),
-            )
-            .await?;
-        let rows = sqlx::query_as(
-            "SELECT status, error_code FROM target_attempt_observations ORDER BY started_at, id",
-        )
-        .fetch_all(&pool)
-        .await?;
-        pool.close().await;
-        Ok(rows)
+        attempt_statuses(&self.gateway).await
     }
 
     async fn target_state(&self) -> anyhow::Result<String> {
@@ -289,13 +280,35 @@ impl Harness {
     }
 }
 
+async fn attempt_statuses(gateway: &Gateway) -> anyhow::Result<Vec<(String, Option<String>)>> {
+    gateway.admin().observation_flush().await?;
+    let paths = DataPaths::new(&gateway.config.data_dir);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(paths.database())
+                .read_only(true),
+        )
+        .await?;
+    let rows = sqlx::query_as(
+        "SELECT status, error_code FROM target_attempt_observations ORDER BY started_at, id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+    Ok(rows)
+}
+
 fn completed(count: usize) -> Vec<(String, Option<String>)> {
     vec![("completed".to_owned(), None); count]
 }
 
-/// 线程失效 → 插件内部完整重放成功：宿主只看到一条成功 attempt，没有失败事件。
+/// 线程失效 → 宿主完整重放含图工具结果：只记录成功 attempt，没有失败事件。
 #[tokio::test]
 async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::Result<()> {
+    use base64::Engine as _;
+
     let harness = Harness::start().await?;
     harness.script([
         message("msg_1"),
@@ -304,7 +317,19 @@ async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::R
     ]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
-    let (status, body) = harness.turn(1).await;
+    let source = json!({
+        "type": "base64", "media_type": "image/png",
+        "data": base64::engine::general_purpose::STANDARD.encode(include_bytes!("fixtures/media/transparent.png"))
+    });
+    let (status, body) = harness.messages(vec![
+        json!({"role": "user", "content": "Remember the marker."}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "READY"}]}),
+        json!({"role": "user", "content": "Inspect the screenshot."}),
+        json!({"role": "assistant", "content": [{"type": "tool_use", "id": "read_image", "name": "read_image", "input": {}}]}),
+        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "read_image", "content": [
+            {"type": "text", "text": "Screenshot"}, {"type": "image", "source": source}
+        ]}]}),
+    ]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["content"][0]["text"], "READY");
 
@@ -312,9 +337,17 @@ async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::R
         let sent = harness.upstream.bodies.lock();
         assert_eq!(sent.len(), 3, "one rejected send and exactly one replay");
         assert_eq!(sent[1]["thread"]["type"], "continue");
-        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(sent[2]["thread"], json!({"type": "create"}));
-        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 3);
+        assert!(sent[2].get("thread").is_none());
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            sent[1]["messages"][2]["content"][0]["content"][1]["source"],
+            source
+        );
+        assert_eq!(
+            sent[2]["messages"][4]["content"][0]["content"][1]["source"],
+            source
+        );
     }
 
     // 被消化的线程拒绝不是 attempt：两轮各一条成功，没有任何 failed 记录。
@@ -374,7 +407,7 @@ async fn half_open_probe_recovers_thread_rejection_in_its_single_attempt() -> an
         let sent = harness.upstream.bodies.lock();
         assert_eq!(sent.len(), 4);
         assert_eq!(sent[2]["thread"]["type"], "continue");
-        assert_eq!(sent[3]["thread"], json!({"type": "create"}));
+        assert!(sent[3].get("thread").is_none());
         assert_eq!(sent[3]["messages"].as_array().unwrap().len(), 3);
     }
 

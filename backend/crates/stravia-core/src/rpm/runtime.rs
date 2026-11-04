@@ -548,8 +548,8 @@ impl SendEligibility {
 
 impl SendAdmission {
     /// 已确认模型未执行的续接拒绝不占用唯一的恢复探测；重发仍重新扣目的地 RPM。
-    /// 调用次数与首个输出限制由操作级 VendorRuntime 持有。
-    pub(crate) fn replay_continuation(&self) -> Result<(), stravia_vendor_runtime::HostFailure> {
+    /// 仅由宿主 Model Turn 在一次性、无输出的完整历史恢复前调用。
+    pub(crate) fn reset_unexecuted_send(&self) -> Result<(), stravia_vendor_runtime::HostFailure> {
         let _state = self.admission.inner.lock();
         if self.cancellation.is_cancelled() || self.deadline.is_exceeded() {
             return Err(stravia_vendor_runtime::HostFailure::new(
