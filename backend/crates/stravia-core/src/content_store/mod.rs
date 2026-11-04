@@ -32,6 +32,7 @@ pub(crate) use descriptor::{
 
 // 对外稳定名称：content_store::sqlite::… 与 content_store::postgres::…。
 pub(crate) mod sqlite {
+    pub(crate) use super::sql::read_ahead_unreferenced;
     pub(crate) use super::sql::sqlite::*;
 }
 pub(crate) mod postgres {

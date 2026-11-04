@@ -48,6 +48,24 @@ macro_rules! claim_columns {
     };
 }
 
+/// SQLite 写租约外的只读预读：按 [`sqlite::enqueue_unreferenced`] 的同一引用检查读一遍
+/// 候选正文，把写事务随后要读的引用索引页带进 OS 页缓存。结果不参与任何判断。
+pub(crate) async fn read_ahead_unreferenced(pool: &SqlitePool, ids: &[i64]) -> anyhow::Result<()> {
+    for chunk in ids.chunks(400) {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT COUNT(*) FROM contents c WHERE c.id IN (",
+        );
+        let mut list = query.separated(",");
+        for id in chunk {
+            list.push_bind(*id);
+        }
+        list.push_unseparated(") AND ");
+        query.push(unreferenced!("c.id"));
+        query.build().fetch_one(pool).await?;
+    }
+    Ok(())
+}
+
 macro_rules! backend {
     (
         $module:ident,

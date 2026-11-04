@@ -575,6 +575,10 @@ impl InteractionObservation {
     async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<u64> {
         let mut removed = 0_u64;
         loop {
+            // 预读在写者任务之外进行：写者与全库写租约都只等删除本身。
+            if let Some(cutoff) = expired_before {
+                self.inner.store.read_ahead_expired(cutoff).await?;
+            }
             let (done, receiver) = oneshot::channel();
             self.inner
                 .writer
@@ -2524,9 +2528,18 @@ mod snapshot_tests {
         // 用存储屏障检验实际写入先后，不依赖机器速度或调度延迟。
         sqlx::raw_sql("CREATE TRIGGER require_admission_progress BEFORE DELETE ON interaction_observations WHEN OLD.id='expired-0204' AND NOT EXISTS (SELECT 1 FROM inference_run_observations WHERE id='during-retention') BEGIN SELECT RAISE(ABORT,'retention starved admission'); END;")
             .execute(&pool).await?;
+        let mut resets = observation.inner.updates.subscribe();
         let purge = observation.purge_history(Some(1));
         tokio::pin!(purge);
-        assert!(futures::poll!(&mut purge).is_pending());
+        // 推进到第一批提交（以它的 reset 通知为准）后才准入：此刻清理只在等写者回执。
+        // 先检查再推进，避免清理已开始下一批的写租约外预读、占住测试池唯一的连接。
+        while !matches!(
+            resets.try_recv(),
+            Ok(ObservationUpdate::ResetRequired { .. })
+        ) {
+            assert!(futures::poll!(&mut purge).is_pending());
+            tokio::task::yield_now().await;
+        }
         let run = test_run(&observation, "during-retention", facts(Vec::new()));
         observation.flush().await?;
         purge.await?;
