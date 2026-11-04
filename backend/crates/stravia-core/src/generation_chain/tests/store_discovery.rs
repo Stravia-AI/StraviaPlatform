@@ -3620,6 +3620,311 @@ async fn previous_response_resolves_references_to_persisted_input_items() {
 }
 
 #[tokio::test]
+async fn generation_history_restores_developer_instructions_without_duplication() {
+    for explicit_parent in [false, true] {
+        for cache_bytes in [1, 16 * 1024 * 1024] {
+            let chain = GenerationChain::from_turn_chain(
+                Arc::new(crate::turn_chain::test_store().await),
+                None,
+                crate::runtime_cache::RuntimeCache::tinyufo(cache_bytes),
+                crate::history_retention::HistoryRetention::for_tests(),
+            );
+            let owner = principal("developer-instructions-owner");
+            let ingress = if explicit_parent {
+                OPEN_RESPONSES_2026_04_24
+            } else {
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
+            };
+            let pair = ProtocolTransform::global()
+                .bind(ingress, ANTHROPIC_MESSAGES_2023_06_01)
+                .expect("registered protocol pair");
+            let history = serde_json::json!([
+                {"role": "developer", "content": "Keep the system prompt unchanged."},
+                {"role": "user", "content": "question"},
+            ]);
+            let request = pair
+                .decode_request(if explicit_parent {
+                    serde_json::json!({"model": "model", "input": history})
+                } else {
+                    serde_json::json!({"model": "model", "messages": history})
+                })
+                .expect("decode root request");
+            let mut root = chain
+                .begin(owner.clone(), request)
+                .await
+                .expect("begin root");
+            let mut response = AiResponse::new("upstream", "model");
+            response.push_output_text("answer");
+            assert!(root.stage(&mut response, &generation_source(), None));
+            root.persist().await.expect("persist root");
+
+            for follow_up in ["follow-up", "another branch"] {
+                let next = if explicit_parent {
+                    serde_json::json!({
+                        "model": "model",
+                        "previous_response_id": root.id(),
+                        "input": [{"role": "user", "content": follow_up}],
+                    })
+                } else {
+                    serde_json::json!({
+                        "model": "model",
+                        "messages": [
+                            {"role": "developer", "content": "Keep the system prompt unchanged."},
+                            {"role": "user", "content": "question"},
+                            {"role": "assistant", "content": "answer"},
+                            {"role": "user", "content": follow_up},
+                        ],
+                    })
+                };
+                let resumed = chain
+                    .begin(
+                        owner.clone(),
+                        pair.decode_request(next).expect("decode continuation"),
+                    )
+                    .await
+                    .expect("begin continuation");
+                assert_eq!(resumed.parent_id(), Some(root.id()));
+                let wire = pair
+                    .encode_request(resumed.request().clone())
+                    .expect("encode restored request")
+                    .body;
+                assert_eq!(
+                    wire["system"], "Keep the system prompt unchanged.",
+                    "explicit_parent={explicit_parent}, cache_bytes={cache_bytes}, follow_up={follow_up}",
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn generation_history_preserves_instructions_across_standard_protocols_and_tool_turns() {
+    let protocols = [
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        OPEN_RESPONSES_2026_04_24,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ];
+    for ingress in protocols {
+        for cache_bytes in [1, 16 * 1024 * 1024] {
+            for tool_turn in [false, true] {
+                let chain = GenerationChain::from_turn_chain(
+                    Arc::new(crate::turn_chain::test_store().await),
+                    None,
+                    crate::runtime_cache::RuntimeCache::tinyufo(cache_bytes),
+                    crate::history_retention::HistoryRetention::for_tests(),
+                );
+                let owner = principal("standard-protocol-instructions-owner");
+                let pair = ProtocolTransform::global()
+                    .bind(ingress, ingress)
+                    .expect("registered protocol pair");
+                let user = serde_json::json!({"role": "user", "content": "question"});
+                let developer = serde_json::json!({
+                    "role": "developer", "content": "Preserve this instruction exactly once."
+                });
+                let mut seed = if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+                    serde_json::json!({
+                        "model": "model", "messages": [developer, user],
+                        "tools": [{"type": "function", "function": {
+                            "name": "lookup", "parameters": {"type": "object"}
+                        }}],
+                    })
+                } else if ingress == OPEN_RESPONSES_2026_04_24 {
+                    serde_json::json!({
+                        "model": "model", "input": [developer, user],
+                        "tools": [{"type": "function", "name": "lookup",
+                                   "parameters": {"type": "object"}}],
+                    })
+                } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
+                    serde_json::json!({
+                        "model": "model", "max_tokens": 256,
+                        "system": "Preserve this instruction exactly once.",
+                        "messages": [user],
+                        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+                    })
+                } else {
+                    serde_json::json!({
+                        "model": "model",
+                        "systemInstruction": {"parts": [{"text": "Preserve this instruction exactly once."}]},
+                        "contents": [{"role": "user", "parts": [{"text": "question"}]}],
+                        "tools": [{"functionDeclarations": [{
+                            "name": "lookup", "parameters": {"type": "object"}
+                        }]}],
+                    })
+                };
+                if !tool_turn {
+                    seed.as_object_mut().unwrap().remove("tools");
+                }
+                let mut root = chain
+                    .begin(
+                        owner.clone(),
+                        pair.decode_request(seed.clone()).expect("decode root"),
+                    )
+                    .await
+                    .expect("begin root");
+                let mut response = AiResponse::new("upstream", "model");
+                if tool_turn {
+                    response.items = vec![AiItem::function_call(ToolCall {
+                        id: "call_lookup".into(),
+                        name: "lookup".into(),
+                        arguments: "{}".into(),
+                    })];
+                } else {
+                    response.push_output_text("answer");
+                }
+                let public = pair
+                    .encode_response(&response)
+                    .expect("encode client delivery");
+                assert!(root.stage(&mut response, &generation_source(), None));
+                root.persist().await.expect("persist root");
+
+                for follow_up in ["follow-up", "another branch"] {
+                    let mut replay = seed.clone();
+                    if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+                        let input = replay["messages"].as_array_mut().unwrap();
+                        input.push(public["choices"][0]["message"].clone());
+                        input.push(if tool_turn {
+                            serde_json::json!({
+                                "role": "tool", "content": follow_up,
+                                "tool_call_id": public["choices"][0]["message"]["tool_calls"][0]["id"],
+                            })
+                        } else {
+                            serde_json::json!({"role": "user", "content": follow_up})
+                        });
+                    } else if ingress == OPEN_RESPONSES_2026_04_24 {
+                        let input = replay["input"].as_array_mut().unwrap();
+                        input.extend(public["output"].as_array().unwrap().iter().cloned());
+                        input.push(if tool_turn {
+                            serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": public["output"][0]["call_id"],
+                                "output": follow_up,
+                            })
+                        } else {
+                            serde_json::json!({"role": "user", "content": follow_up})
+                        });
+                    } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
+                        let input = replay["messages"].as_array_mut().unwrap();
+                        input.push(serde_json::json!({
+                            "role": "assistant", "content": public["content"],
+                        }));
+                        input.push(if tool_turn {
+                            serde_json::json!({"role": "user", "content": [{
+                                "type": "tool_result", "content": follow_up,
+                                "tool_use_id": public["content"][0]["id"],
+                            }]})
+                        } else {
+                            serde_json::json!({"role": "user", "content": follow_up})
+                        });
+                    } else {
+                        let input = replay["contents"].as_array_mut().unwrap();
+                        input.push(public["candidates"][0]["content"].clone());
+                        input.push(if tool_turn {
+                            serde_json::json!({"role": "user", "parts": [{"functionResponse": {
+                                "id": "call_lookup", "name": "lookup",
+                                "response": {"result": follow_up},
+                            }}]})
+                        } else {
+                            serde_json::json!({"role": "user", "parts": [{"text": follow_up}]})
+                        });
+                    }
+                    let resumed = chain
+                        .begin(
+                            owner.clone(),
+                            pair.decode_request(replay).expect("decode replay"),
+                        )
+                        .await
+                        .expect("begin continuation");
+                    assert_eq!(
+                        resumed.parent_id(),
+                        Some(root.id()),
+                        "ingress={ingress}, cache_bytes={cache_bytes}, tool_turn={tool_turn}",
+                    );
+                    assert_eq!(resumed.has_matching_pending_tool_result(), tool_turn);
+                    for egress in protocols {
+                        let outgoing = ProtocolTransform::global()
+                            .bind(ingress, egress)
+                            .expect("registered protocol pair")
+                            .encode_request(resumed.request().clone())
+                            .expect("encode restored request");
+                        let decoded = ProtocolTransform::global()
+                            .bind(egress, egress)
+                            .expect("registered protocol pair")
+                            .decode_request(outgoing.body)
+                            .expect("decode upstream request");
+                        let instructions = decoded
+                            .instructions
+                            .into_iter()
+                            .chain(
+                                decoded
+                                    .items
+                                    .iter()
+                                    .filter(|item| {
+                                        matches!(item.role, Role::System | Role::Developer)
+                                    })
+                                    .map(|item| item.content.to_text()),
+                            )
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        assert_eq!(
+                            instructions, "Preserve this instruction exactly once.",
+                            "ingress={ingress}, egress={egress}, cache_bytes={cache_bytes}, tool_turn={tool_turn}, follow_up={follow_up}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn previous_response_preserves_equal_instructions_and_developer_message() {
+    let chain = generation_chain().await;
+    let owner = principal("equal-instructions-owner");
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+        .expect("registered protocol pair");
+    let request = pair
+        .decode_request(serde_json::json!({
+            "model": "model",
+            "instructions": "Keep both instruction sources.",
+            "input": [
+                {"role": "developer", "content": "Keep both instruction sources."},
+                {"role": "user", "content": "question"},
+            ],
+        }))
+        .expect("decode root request");
+    let mut root = chain
+        .begin(owner.clone(), request)
+        .await
+        .expect("begin root");
+    let mut response = AiResponse::new("upstream", "model");
+    response.push_output_text("answer");
+    assert!(root.stage(&mut response, &generation_source(), None));
+    root.persist().await.expect("persist root");
+
+    let continuation = pair
+        .decode_request(serde_json::json!({
+            "model": "model",
+            "previous_response_id": root.id(),
+            "input": [{"role": "user", "content": "follow-up"}],
+        }))
+        .expect("decode continuation");
+    let resumed = chain
+        .begin(owner, continuation)
+        .await
+        .expect("begin continuation");
+    let wire = pair
+        .encode_request(resumed.request().clone())
+        .expect("encode restored request")
+        .body;
+    assert_eq!(
+        wire["system"],
+        "Keep both instruction sources.\nKeep both instruction sources.",
+    );
+}
+
+#[tokio::test]
 async fn previous_response_inherits_instructions_unless_replaced() {
     let store = generation_store().await;
     let owner = principal("owner");

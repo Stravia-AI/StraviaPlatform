@@ -648,6 +648,8 @@ Client Projection／Delivery 保持 Marker 持久化、实际交付、Sent 确�
 
 ### 4.8 Generation Chain 与 Responses response-chain
 
+父节点物化只从已保存的有效请求配置、`effective_system` 与执行历史恢复模型输入，不从客户端投影的 `client_delta.system` 补写执行指令。客户端历史规范化可以把首部单条纯文本 `developer` 投影为指令，但执行历史仍可保留原始消息；此时有效顶层指令为 `null` 是完整状态，不是缺失信息。显式父响应、自动父发现及冷热缓存路径遵守同一规则，不按文本相等删除合法的独立指令来源。已经写入重复有效指令的旧节点不自动改写，受影响对话应从不携带旧错误历史的新对话开始。
+
 Client Projection 优先使用能够无损回传的原生思考字段：已知无保护载荷的单段标量思考不再额外添加 Preview Delimiter、创建或发布 Thinking History Marker，原始空白和客户端编辑保留。同协议非 Chat 的受保护思考沿用原生载体；Chat 只有一个标量 reasoning 字段，首个正文前独立思考块可原生交付，后续独立块及正文后的思考仍投影以保留边界和顺序。已知跨协议的 indexed 或可能追加签名／密文的载体继续按既有方式投影，即使最终未追加保护载荷，也不为事后省略 Marker 而缓冲整轮输出；流式与非流式采用相同判定。隐藏平台工具及已保存 Marker 的恢复契约不变，旧历史不重写。
 
 Responses 的跨协议 Thinking Preview 与其 History Marker 属于同一个合成 reasoning carrier。流式交付与非流式交付生成相同的客户端 Item 边界，Generation Chain 保存的客户端历史必须与实际交付一致；独立 reasoning Item、原生 summary/content part 的身份及受保护载荷仍分别保存。该规则不合并全局相邻消息、不放宽严格前缀核验，也不重写已保存的节点或 Observation。回放时 Marker 恢复权威原始载荷，Preview 不再重复进入执行历史。

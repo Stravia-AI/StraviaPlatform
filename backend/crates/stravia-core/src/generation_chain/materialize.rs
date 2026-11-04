@@ -214,6 +214,8 @@ fn materialize_generation_replay<'a>(
     }
     let root_id = root_id.ok_or_else(|| "generation chain was empty".to_string())?;
     let last = last.expect("a nonempty chain has a final node");
+    // 客户端投影可能已将 developer 提取为指令，但执行历史仍保留该消息。
+    // 执行指令缺省不代表缺失；回退到客户端指令会把同一提示恢复两次。
     let (
         mut client_history,
         effective_request,
@@ -224,17 +226,14 @@ fn materialize_generation_replay<'a>(
         Cow::Owned(node) => (
             node.client_history,
             node.effective_request,
-            node.effective_system.or(node.client_delta.system),
+            node.effective_system,
             node.upstream_response_id,
             node.effective_state,
         ),
         Cow::Borrowed(node) => (
             node.client_history.clone(),
             node.effective_request.clone(),
-            node.effective_system
-                .as_ref()
-                .or(node.client_delta.system.as_ref())
-                .cloned(),
+            node.effective_system.clone(),
             node.upstream_response_id.clone(),
             node.effective_state.clone(),
         ),
