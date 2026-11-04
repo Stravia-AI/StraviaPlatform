@@ -1455,7 +1455,67 @@ fn compaction_block_is_replayed_byte_faithfully_with_its_beta() {
 }
 
 #[test]
-fn only_the_latest_compaction_block_is_sent() {
+fn compaction_replay_keeps_the_signed_assistant_tail_in_wire_order() {
+    let compaction = serde_json::json!({
+        "type": "compaction",
+        "content": "The user asked for a file inspection.",
+        "signature": "signed-compaction",
+        "tool_changes": [{"name": "read", "opaque": ["unchanged"]}]
+    });
+    for thinking in [
+        serde_json::json!({
+            "type": "thinking",
+            "thinking": "Inspect both files before answering.",
+            "signature": "signed-thinking"
+        }),
+        serde_json::json!({"type": "redacted_thinking", "data": "opaque-thinking"}),
+    ] {
+        let tail = serde_json::json!([
+            thinking,
+            {"type": "tool_use", "id": "read_a", "name": "read", "input": {"path": "a"}},
+            {"type": "text", "text": "Also checking the second file."},
+            {"type": "tool_use", "id": "read_b", "name": "read", "input": {"path": "b"}}
+        ]);
+        let later_tail = serde_json::json!([
+            {"type": "thinking", "thinking": "Check the remaining file.", "signature": "signed-later-thinking"},
+            {"type": "tool_use", "id": "read_c", "name": "read", "input": {"path": "c"}},
+            {"type": "text", "text": "This turn also retains commentary after the tool call."}
+        ]);
+        let request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
+            .decode_request(serde_json::json!({
+                "model": "claude",
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "assistant", "content": [compaction.clone()]},
+                    {"role": "assistant", "content": tail},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "read_a", "content": "first file"},
+                        {"type": "tool_result", "tool_use_id": "read_b", "content": "second file"}
+                    ]},
+                    {"role": "assistant", "content": later_tail},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "read_c", "content": "third file"}
+                    ]}
+                ]
+            }))
+            .unwrap();
+
+        let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
+        let blocks = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(
+            blocks[0], compaction,
+            "compaction must precede retained thinking"
+        );
+        assert_eq!(&blocks[1..], tail.as_array().unwrap());
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "read_a");
+        assert_eq!(body["messages"][1]["content"][1]["tool_use_id"], "read_b");
+        assert_eq!(body["messages"][2]["content"], later_tail);
+        assert_eq!(body["messages"][3]["content"][0]["tool_use_id"], "read_c");
+    }
+}
+
+#[test]
+fn latest_compaction_replaces_older_message_prefix() {
     let old = serde_json::json!({"type": "compaction", "content": "old", "signature": "sig-old"});
     let new = serde_json::json!({"type": "compaction", "content": "new", "signature": "sig-new"});
     let request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
@@ -1479,6 +1539,14 @@ fn only_the_latest_compaction_block_is_sent() {
         .filter(|block| block["type"] == "compaction")
         .collect::<Vec<_>>();
     assert_eq!(blocks, [&new]);
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role": "assistant", "content": [new]},
+            {"role": "user", "content": [{"type": "text", "text": "go on"}]}
+        ]),
+        "messages summarized by the latest compaction must not be replayed"
+    );
 }
 
 #[test]

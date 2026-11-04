@@ -496,7 +496,7 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 
 `POST /v1/responses/compact` 是独立 HTTP unary 操作。Request 经过既有认证与协议解码后，沿正常 Route 选择当前 Target；Responses 内嵌的 `compaction_trigger` 和客户端 `context_management` 同样属于远程压缩透传。平台不提供开关或触发阈值，不注入默认控制，不按目录容量限制客户端阈值。
 
-独立 compact 的出口只保留该端点支持的字段；兼容入口接受的普通 Responses 控制（如 `reasoning`）不因此成为 compact 透传字段，`stream` 也不会发送到上游。
+独立 compact 的出口只保留目标原生压缩端点支持的字段；兼容入口接受的普通 Responses 控制（如 `reasoning`）不因此成为 Responses `/responses/compact` 透传字段。该 Responses 出口不发送 `stream`；Anthropic 与 Codex 出口则使用各自的原生流式压缩协议，完成后再返回入口协议的完整 compact 结果，见 [ADR-0089](../adr/0089-carry-native-compaction-across-anthropic-and-responses.md)。
 
 独立 compact 操作在 Target 协议无法承载时返回 `compaction_unsupported`，不改成普通生成或本地摘要。协议可承载但能力未知时仍尝试转发，由上游裁决；不为寻找压缩能力而跳过当前 Target，不因压缩失败而重试或切换 Target，上游成功和错误均返回客户端。独立 compact 返回完整下一窗口及 opaque state，不形成空 Generation；后续回放保留既有 Principal 隔离、原生状态来源和 Target 绑定约束。WebSocket 上不新增独立 compact 操作。
 

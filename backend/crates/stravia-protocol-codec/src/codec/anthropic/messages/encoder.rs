@@ -63,13 +63,13 @@ impl AnthropicEncoder {
         } else {
             let mut generated_tool_id_seq = 0;
             let mut raw_messages = Vec::new();
-            // The API takes exactly one compaction block; the last state supersedes the rest.
+            // 原生压缩状态替换此前整个消息窗口，不能把已摘要消息再次发给上游。
             let last_compaction = req.items.iter().rposition(AiItem::is_compaction);
             for (index, msg) in req.items.into_iter().enumerate() {
                 if matches!(msg.role, Role::System | Role::Developer) {
                     continue;
                 }
-                if msg.is_compaction() && Some(index) != last_compaction {
+                if last_compaction.is_some_and(|boundary| index < boundary) {
                     continue;
                 }
                 raw_messages.push(encode_message(
@@ -78,7 +78,10 @@ impl AnthropicEncoder {
                     &supplied_tool_ids,
                 )?);
             }
-            Value::Array(normalize_anthropic_messages(raw_messages))
+            Value::Array(normalize_anthropic_messages(
+                raw_messages,
+                last_compaction.is_some(),
+            ))
         };
         let compaction_replayed = messages_val.as_array().is_some_and(|messages| {
             messages.iter().any(|message| {
@@ -1410,7 +1413,10 @@ fn normalized_anthropic_tool_id(
     }
 }
 
-fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
+fn normalize_anthropic_messages(
+    messages: Vec<Value>,
+    preserve_assistant_order: bool,
+) -> Vec<Value> {
     let mut normalized: Vec<Value> = Vec::new();
     for mut msg in messages {
         let Some(obj) = msg.as_object_mut() else {
@@ -1438,6 +1444,11 @@ fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
             ("role", Value::String(role)),
             ("content", Value::Array(blocks)),
         ]));
+    }
+
+    // compaction 必须领先；其后所有保留轮次也属于签名上下文，不能套用兼容上游的重排。
+    if preserve_assistant_order {
+        return normalized;
     }
 
     // DeepSeek's Anthropic-compatible endpoint requires assistant tool_use

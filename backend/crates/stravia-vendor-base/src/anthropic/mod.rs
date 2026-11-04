@@ -184,15 +184,11 @@ fn infer(
     let mut headers = common::header_pairs(&codec_headers)?;
 
     set_header(&mut headers, "content-type", "application/json".into());
+    // 原生压缩现在也强制流式；统一声明 SSE 并兼容 unary 代理。
     set_header(
         &mut headers,
         "accept",
-        if operation == Operation::Compact {
-            "application/json"
-        } else {
-            "text/event-stream, application/json"
-        }
-        .into(),
+        "text/event-stream, application/json".into(),
     );
     set_header(&mut headers, "anthropic-version", "2023-06-01".into());
     if operation == Operation::Compact {

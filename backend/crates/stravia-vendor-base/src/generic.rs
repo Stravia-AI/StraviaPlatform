@@ -166,7 +166,12 @@ pub(crate) fn execute_inference(
         )
         .map_err(|error| common::plugin_error(ErrorKind::Invalid, error.to_string()))?;
         stravia_protocol_codec::codec::compaction::add_anthropic_compaction_beta(&mut headers);
-        set_header(&mut headers, "accept", "application/json".into());
+        // 共享 helper 强制 stream:true，上游会以 SSE 交付完整签名块。
+        set_header(
+            &mut headers,
+            "accept",
+            "text/event-stream, application/json".into(),
+        );
     }
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
     prepare_gemini_imported_tool_history(protocol, model, &url, &mut encoded.body);

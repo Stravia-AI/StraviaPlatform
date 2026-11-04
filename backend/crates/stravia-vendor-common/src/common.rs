@@ -235,7 +235,9 @@ pub fn decode_anthropic_compaction_preserving_upstream_errors(
     host: &GuestHost,
     response: HttpResponse,
 ) -> Result<NativeCompactionResponse, PluginError> {
-    preserve_compaction_upstream_errors(host, response, decode_anthropic_compaction)
+    preserve_compaction_upstream_errors(host, response, |response| {
+        decode_anthropic_compaction(host, response)
+    })
 }
 
 /// Relay a non-success standalone compaction response as the upstream's own
@@ -277,16 +279,63 @@ pub fn decode_compaction(response: HttpResponse) -> Result<NativeCompactionRespo
     )
 }
 
+/// Decode a native Anthropic compaction response.
+///
+/// 原生压缩强制 `stream: true`，所以成功响应的 Content-Type 决定解码路径：
+///
+/// - `text/event-stream`：先把完整 SSE 信封折叠成原始 Anthropic `message`，保留
+///   签名块的全部未知字段与 `usage.iterations`，再按普通 Message 解析。流内错误、
+///   非法 JSON 或缺失 `message_stop` 都是错误，截断流不会变成成功摘要。
+/// - 其他类型：按响应声明的 unary JSON 解析。
+///
+/// 非 2xx 继续由 [`upstream_error`] 保留上游原始错误体；调用方
+/// [`decode_anthropic_compaction_preserving_upstream_errors`] 还会把它原样中继给客户端。
 pub fn decode_anthropic_compaction(
+    host: &GuestHost,
     response: HttpResponse,
 ) -> Result<NativeCompactionResponse, PluginError> {
-    let body = read_compaction_body(response)?;
-    stravia_protocol_codec::codec::compaction::parse_anthropic_compaction(body).map_err(|error| {
-        model_error(
-            AiErrorKind::ServerError,
-            format!("invalid Anthropic compaction response: {error}"),
-        )
-    })
+    let status = response.status()?;
+    let headers = response.headers()?;
+    if !(200..300).contains(&status) {
+        let body = read_http_body(&response, MAX_ERROR_BODY)?;
+        return Err(upstream_error(status, &headers, &body));
+    }
+    let streaming = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value.to_ascii_lowercase().contains("text/event-stream")
+    });
+    let body = read_http_body(&response, MAX_UNARY_BODY)?;
+    let message = if streaming {
+        match stravia_protocol_codec::codec::compaction::fold_anthropic_compaction_stream(&body) {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(upstream) = error.downcast_ref::<AiError>() {
+                    host.emit_delta(&AiStreamDelta::StreamError {
+                        error: upstream.clone(),
+                    })?;
+                }
+                return Err(model_error(
+                    AiErrorKind::ServerError,
+                    format!("invalid Anthropic compaction stream: {error}"),
+                ));
+            }
+        }
+    } else {
+        serde_json::from_slice(&body).map_err(|error| {
+            model_error(
+                AiErrorKind::ServerError,
+                format!("upstream returned invalid compaction JSON: {error}"),
+            )
+        })?
+    };
+    stravia_protocol_codec::codec::compaction::parse_anthropic_compaction(message).map_err(
+        |error| {
+            model_error(
+                AiErrorKind::ServerError,
+                format!("invalid Anthropic compaction response: {error}"),
+            )
+        },
+    )
 }
 
 fn read_compaction_body(response: HttpResponse) -> Result<serde_json::Value, PluginError> {

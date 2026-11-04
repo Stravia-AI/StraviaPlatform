@@ -166,8 +166,8 @@ pub(crate) struct ShapedRequest {
 /// - `system` 归一为客户端自有的块数组，剔除过期计费头和重复的身份块；
 /// - 思考、effort、采样、prefill、上下文编辑按型号能力约束；
 /// - 自定义工具声明、选择、排除列表及历史调用／引用统一加一层 `_` 前缀；
-/// - `compact` 为真时保留 `compaction` 控制、去掉 `stream`（压缩响应是一次性的完整块），
-///   否则强制流式。
+/// - `compact` 为真时保留 `compaction` 控制；与其他推理一样强制流式，原生压缩的
+///   完整签名块和 `usage.iterations` 由 SSE 信封一次性交付。
 ///
 /// `auto_output_limit` 表示 `max_tokens` 来自发现数据或编码器的必填回退，此时思考
 /// 预算需让位于该上限。工具 ID、参数、schema 与 `tool_result.is_error` 保持原值。
@@ -190,12 +190,8 @@ pub(crate) fn prepare(
     } else {
         None
     };
-    if compact {
-        object.remove("stream");
-    } else {
-        // Claude Code 只走流式推理；流式同时避开非流式请求的长输出时限。
-        object.insert("stream".into(), Value::Bool(true));
-    }
+    // 与 OMP 的原生压缩一致走流式，避免非流式请求的长输出时限。
+    object.insert("stream".into(), Value::Bool(true));
     restrict_to_claude_code_fields(object);
     if let Some(compaction) = compaction {
         object.insert("compaction".into(), compaction);
@@ -240,7 +236,8 @@ pub(crate) fn prepare(
 ///   省略 tools，`thread` 与 `diagnostics` 都指向 `previous_message_id`；
 /// - [`ThreadMode::Disabled`]：与创建相同但不带线程控制，也不声明线程相关 beta。
 ///
-/// 压缩请求是独立的一元请求，不属于任何线程：永不携带线程控制，且不能续接。
+/// 压缩请求和携带原生压缩块的回放都属于无状态请求：永不携带线程控制，也不按
+/// `message_offset` 切片，必须发送完整历史（上游要求压缩块位于可回放窗口的起始处）。
 /// 计费指纹、`betas` 与 tools 判定始终基于完整历史，续接不会因省略而改变。
 /// `body` 只被借用；缓存断点只复制承载它的那一条消息。
 pub(crate) fn encode(
@@ -258,11 +255,13 @@ pub(crate) fn encode(
         Some(Value::Array(messages)) => messages,
         Some(_) => return Err("Anthropic messages must be an array".into()),
     };
-    let continuing = context.mode == ThreadMode::Continue;
-    if continuing && compact {
+    if compact && context.mode == ThreadMode::Continue {
         return Err("a compaction request cannot continue a message thread".into());
     }
-    let threaded = !compact && context.mode != ThreadMode::Disabled;
+    let compaction_replay = carries_compaction(object);
+    // 即使会话计划给出 Continue，压缩块回放也不能续接或切片。
+    let continuing = !compaction_replay && context.mode == ThreadMode::Continue;
+    let threaded = !compact && !compaction_replay && context.mode != ThreadMode::Disabled;
     let previous = if continuing {
         let id = context
             .previous_message_id
@@ -944,7 +943,7 @@ fn beta_header(object: &Map<String, Value>, threaded: bool) -> String {
     betas.join(",")
 }
 
-fn carries_compaction(object: &Map<String, Value>) -> bool {
+pub(crate) fn carries_compaction(object: &Map<String, Value>) -> bool {
     object.contains_key("compaction")
         || object
             .get("messages")
@@ -1952,62 +1951,24 @@ mod tests {
     }
 
     #[test]
-    fn compaction_is_unary_keeps_its_control_and_declares_its_beta() {
-        let prepared = prepare(
-            json!({
-                "model": "claude-sonnet-4-5",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": "history"}],
-                "compaction": {"type": "summarize", "instructions": "Only file names"}
-            }),
-            &ModelCapabilities::default(),
-            false,
-            true,
-        )
-        .unwrap();
-        assert!(prepared.get("stream").is_none());
-        let shaped = encode(
-            &prepared,
-            DEFAULT_CLIENT_VERSION,
-            &identity(),
-            &context(ThreadMode::Create),
-            true,
-        )
-        .unwrap();
-        let body: Value = serde_json::from_slice(&shaped.body).unwrap();
-        assert_eq!(
-            body["compaction"],
-            json!({"type": "summarize", "instructions": "Only file names"})
-        );
-        assert!(
-            body.get("stream").is_none(),
-            "compaction responses are not streamed"
-        );
-        assert!(
-            betas_of(&shaped).contains(&"compact-2026-09-04"),
-            "{}",
-            shaped.betas
-        );
-        // 压缩是独立的一元请求：不属于任何线程，也不声明线程 beta。
+    fn compaction_history_cannot_be_sliced_or_threaded() {
+        let prepared = prep(json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "compaction", "content": "Summary", "signature": "sig-1"}
+                ]},
+                {"role": "user", "content": "What was the codeword?"}
+            ]
+        }));
+        // 即使持久化计划认为可以续接，压缩块回放也必须全量、无线程控制。
+        let (body, shaped) = wire(&prepared, &continuing(1));
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["content"][0]["signature"], "sig-1");
         assert!(body.get("thread").is_none() && body.get("diagnostics").is_none());
         assert!(!betas_of(&shaped).contains(&THREADS_BETA));
-        assert!(body["metadata"]["user_id"].is_string());
-        assert!(
-            body["system"][0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with(BILLING_PREFIX)
-        );
-        let error = encode(
-            &prepared,
-            DEFAULT_CLIENT_VERSION,
-            &identity(),
-            &continuing(0),
-            true,
-        )
-        .err()
-        .expect("a compaction cannot continue a thread");
-        assert!(error.contains("compaction"), "{error}");
+        assert!(betas_of(&shaped).contains(&"compact-2026-09-04"));
     }
 
     #[test]
@@ -2028,6 +1989,11 @@ mod tests {
         );
         // 压缩块须逐字节回放：缓存断点或任何附加字段都会使上游拒绝签名。
         assert_eq!(body["messages"][0]["content"][0], block);
+        assert!(
+            body.get("thread").is_none() && body.get("diagnostics").is_none(),
+            "signed compaction replay cannot be combined with a message thread"
+        );
+        assert!(!betas_of(&shaped).contains(&THREADS_BETA));
     }
 
     #[test]

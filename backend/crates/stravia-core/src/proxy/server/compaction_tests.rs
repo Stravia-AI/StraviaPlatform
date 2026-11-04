@@ -701,7 +701,11 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
             let seen = received.recv().await.unwrap();
             assert_eq!(seen.path, "/v1/messages");
             assert_eq!(seen.body["compaction"], json!({"type": "summarize"}));
-            assert!(seen.body.get("stream").is_none(), "{}", seen.body);
+            assert_eq!(
+                seen.body["stream"], true,
+                "native compaction must request an SSE envelope: {}",
+                seen.body
+            );
             assert!(
                 seen.body["system"].to_string().contains("keep file names"),
                 "{}",

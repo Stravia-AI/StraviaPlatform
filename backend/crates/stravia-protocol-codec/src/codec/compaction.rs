@@ -9,7 +9,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
-use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
+use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind, AiItem, AiRequest};
 
 /// Marks an opaque field value as a Stravia envelope. Native Anthropic signatures and
 /// OpenAI `encrypted_content` never start with it, so unwrapped state is never misread.
@@ -278,6 +278,179 @@ pub fn anthropic_compaction_events(message: &Value) -> Vec<(&'static str, Value)
     events
 }
 
+/// 把完整的 Anthropic Messages SSE 响应折叠回原始 `message` 对象。
+///
+/// 原生压缩强制 `stream: true`：上游在 `content_block_start` 中一次给出完整的
+/// `compaction` 块，在 `message_delta.usage` 中给出 `iterations` 计费明细。这里
+/// 直接聚合原始 SSE 信封，不经过普通的 `AiStreamDelta` 解码，因此签名块里的所有
+/// 未知字段（`signature`、`tool_changes` 等）与 usage 明细都会原样保留，再由
+/// [`parse_anthropic_compaction`] 密封给宿主。
+///
+/// 只有收到 `message_stop` 且 `stop_reason == "compaction"` 才算完成；流内
+/// `error` 事件、非法 JSON、未终止流都返回错误，不把截断结果当成成功摘要。
+pub fn fold_anthropic_compaction_stream(body: &[u8]) -> anyhow::Result<Value> {
+    let text = std::str::from_utf8(body)
+        .map_err(|error| anyhow::anyhow!("Anthropic compaction stream is not UTF-8: {error}"))?;
+    let mut fold = AnthropicCompactionFold::default();
+    let mut buffer = String::new();
+    crate::consume_sse_frames(&mut buffer, text, |frame| fold.push_frame(frame))?;
+    if !buffer.trim().is_empty() {
+        // 末帧可以省略结尾空行；补上后仍要求 `message_stop`，真正的截断继续失败。
+        buffer.push_str("\n\n");
+        crate::consume_sse_frames(&mut buffer, "", |frame| fold.push_frame(frame))?;
+    }
+    fold.finish()
+}
+
+#[derive(Default)]
+struct AnthropicCompactionFold {
+    message: Option<Value>,
+    blocks: Vec<Value>,
+    saw_message_stop: bool,
+}
+
+impl AnthropicCompactionFold {
+    fn push_frame(&mut self, frame: &str) -> anyhow::Result<()> {
+        let Some((event, mut data)) = parse_anthropic_compaction_event(frame)? else {
+            return Ok(());
+        };
+        let event = event
+            .or_else(|| data.get("type").and_then(Value::as_str))
+            .ok_or_else(|| anyhow::anyhow!("Anthropic compaction stream event has no type"))?;
+        match event {
+            "message_start" => {
+                if self.message.is_some() {
+                    anyhow::bail!("Anthropic compaction stream repeated message_start");
+                }
+                let message = data.get_mut("message").map(Value::take).ok_or_else(|| {
+                    anyhow::anyhow!("Anthropic compaction message_start has no message")
+                })?;
+                anyhow::ensure!(
+                    message.is_object(),
+                    "Anthropic compaction message_start message is not an object"
+                );
+                self.message = Some(message);
+            }
+            "content_block_start" => {
+                anyhow::ensure!(
+                    self.message.is_some(),
+                    "Anthropic compaction content arrived before message_start"
+                );
+                anyhow::ensure!(
+                    data.get("index").and_then(Value::as_u64) == Some(self.blocks.len() as u64),
+                    "Anthropic compaction content block index is out of order"
+                );
+                let block = data
+                    .get_mut("content_block")
+                    .map(Value::take)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Anthropic compaction content_block_start has no block")
+                    })?;
+                anyhow::ensure!(
+                    block.is_object(),
+                    "Anthropic compaction content block is not an object"
+                );
+                self.blocks.push(block);
+            }
+            // on-demand 压缩只交付完整块，不复用普通生成的文本/工具增量拼接。
+            "content_block_delta" => {
+                anyhow::bail!("Anthropic on-demand compaction returned an unexpected block delta")
+            }
+            "message_delta" => {
+                let message = self.message.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("Anthropic compaction content arrived before message_start")
+                })?;
+                let object = message.as_object_mut().ok_or_else(|| {
+                    anyhow::anyhow!("Anthropic compaction message is not an object")
+                })?;
+                if let Some(delta) = data.get_mut("delta") {
+                    let Value::Object(delta) = delta.take() else {
+                        anyhow::bail!("Anthropic compaction message_delta is not an object");
+                    };
+                    object.extend(delta);
+                }
+                if let Some(usage) = data.get_mut("usage") {
+                    let Value::Object(usage) = usage.take() else {
+                        anyhow::bail!("Anthropic compaction usage is not an object");
+                    };
+                    let target = object
+                        .entry("usage")
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    let target = target.as_object_mut().ok_or_else(|| {
+                        anyhow::anyhow!("Anthropic compaction message usage is not an object")
+                    })?;
+                    target.extend(usage);
+                }
+            }
+            "message_stop" => self.saw_message_stop = true,
+            "error" => {
+                let error = data.get("error").unwrap_or(&data);
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string());
+                return Err(AiError::new(AiErrorKind::ServerError, message)
+                    .with_raw(data)
+                    .into());
+            }
+            // 心跳和块结束不改变整块交付的签名载荷。
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> anyhow::Result<Value> {
+        if !self.saw_message_stop {
+            anyhow::bail!("Anthropic compaction stream ended before message_stop");
+        }
+        let mut message = self.message.take().ok_or_else(|| {
+            anyhow::anyhow!("Anthropic compaction stream ended before message_start")
+        })?;
+        let stop_reason = message.get("stop_reason").and_then(Value::as_str);
+        if stop_reason != Some("compaction") {
+            anyhow::bail!(
+                "Anthropic compaction stream stopped without a compaction summary (stop_reason: {})",
+                stop_reason.unwrap_or("none")
+            );
+        }
+        message
+            .as_object_mut()
+            .expect("message is an object")
+            .insert("content".into(), Value::Array(self.blocks));
+        Ok(message)
+    }
+}
+
+/// 解析一帧 SSE；单行 data 借用原缓冲区，多行时才分配拼接。
+fn parse_anthropic_compaction_event(frame: &str) -> anyhow::Result<Option<(Option<&str>, Value)>> {
+    let mut event = None;
+    let mut data: Option<std::borrow::Cow<'_, str>> = None;
+    for line in frame.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if let Some(name) = line.strip_prefix("event:") {
+            event = Some(name.trim());
+        } else if let Some(payload) = line.strip_prefix("data:") {
+            let payload = payload.strip_prefix(' ').unwrap_or(payload);
+            match &mut data {
+                Some(data) => {
+                    let data = data.to_mut();
+                    data.push('\n');
+                    data.push_str(payload);
+                }
+                None => data = Some(std::borrow::Cow::Borrowed(payload)),
+            }
+        }
+    }
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    let data: Value = serde_json::from_str(&data).map_err(|error| {
+        anyhow::anyhow!("Anthropic compaction stream returned invalid JSON event: {error}")
+    })?;
+    Ok(Some((event, data)))
+}
+
 /// Native standalone compaction result from an Anthropic upstream.
 ///
 /// `items` are decoded from the same Responses resource the Responses client will be
@@ -328,10 +501,12 @@ pub fn take_anthropic_compaction_control(request: &mut AiRequest) -> Option<Valu
 
 /// Turn an encoded Anthropic Messages body into a standalone compaction request.
 ///
-/// The API rejects `compaction` together with `context_management`, `stop_sequences`,
-/// `output_config.format` and forced `tool_choice`, and a compaction result is only
-/// meaningful as a unary message, so those are stripped rather than forwarded to a
-/// guaranteed 400. Everything else (system, tools, thinking) stays as encoded.
+/// 与 OMP 的原生压缩请求一致：始终 `stream: true`，让上游在 SSE 信封中一次交付完整
+/// 签名块与 `usage.iterations`。API 拒绝 `compaction` 与 `context_management`、
+/// `stop_sequences`、`output_config.format`、强制 `tool_choice` 同时出现，并要求
+/// `output_config.task_budget.remaining` 不随压缩请求发送，因此这里只删除这些互斥
+/// 字段；`model`、`system`、`tools`、`thinking`、`effort` 与 task budget 的其余
+/// 字段继续按编码结果发送。
 pub fn prepare_anthropic_compaction_body(
     body: &mut Value,
     control: Option<Value>,
@@ -339,19 +514,18 @@ pub fn prepare_anthropic_compaction_body(
     let object = body
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Anthropic compaction request body must be an object"))?;
-    for key in [
-        "stream",
-        "stop_sequences",
-        "tool_choice",
-        "context_management",
-    ] {
+    for key in ["stop_sequences", "tool_choice", "context_management"] {
         object.remove(key);
     }
+    object.insert("stream".into(), Value::Bool(true));
     if let Some(config) = object
         .get_mut("output_config")
         .and_then(Value::as_object_mut)
     {
         config.remove("format");
+        if let Some(budget) = config.get_mut("task_budget").and_then(Value::as_object_mut) {
+            budget.remove("remaining");
+        }
         if config.is_empty() {
             object.remove("output_config");
         }
@@ -522,6 +696,164 @@ mod tests {
         assert_eq!(back["content"][0]["type"], "compaction");
     }
 
+    fn sse(event: &str, data: Value) -> String {
+        format!("event: {event}\ndata: {data}\n\n")
+    }
+
+    #[test]
+    fn native_compaction_stream_preserves_the_full_signed_block_and_iteration_usage() {
+        let block = json!({
+            "type": "compaction",
+            "content": "Summary of the work",
+            "signature": "sig-stream",
+            "tool_changes": [{"name": "read", "opaque": ["unchanged"]}],
+            "opaque_future": {"keep": true}
+        });
+        let body = [
+            sse(
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_compact",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-x",
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 7
+                        }
+                    }
+                }),
+            ),
+            sse(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": block.clone()
+                }),
+            ),
+            sse(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            sse(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "compaction", "stop_sequence": null},
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "iterations": [
+                            {
+                                "type": "compaction",
+                                "input_tokens": 64,
+                                "output_tokens": 2002,
+                                "cache_creation_input_tokens": 80082
+                            },
+                            {"type": "message", "input_tokens": 5, "output_tokens": 1}
+                        ],
+                        "opaque_usage": {"keep": true}
+                    }
+                }),
+            ),
+            sse("message_stop", json!({"type": "message_stop"})),
+        ]
+        .concat();
+
+        let message = fold_anthropic_compaction_stream(body.as_bytes()).unwrap();
+        assert_eq!(message["content"], json!([block.clone()]));
+        assert_eq!(message["stop_reason"], "compaction");
+        assert_eq!(message["usage"]["cache_read_input_tokens"], 7);
+        assert_eq!(message["usage"]["iterations"].as_array().unwrap().len(), 2);
+        assert_eq!(message["usage"]["opaque_usage"]["keep"], true);
+
+        let resource = responses_compaction_from_anthropic(&message).unwrap();
+        let Some(Envelope::Anthropic { block: sealed }) =
+            open(resource["output"][0]["encrypted_content"].as_str().unwrap())
+        else {
+            panic!("native stream signature state must be sealed");
+        };
+        assert_eq!(sealed["tool_changes"], block["tool_changes"]);
+        assert_eq!(sealed["opaque_future"], block["opaque_future"]);
+        assert_eq!(resource["usage"]["input_tokens"], 64);
+        assert_eq!(resource["usage"]["output_tokens"], 2002);
+
+        // 末尾事件可以省略空行；只要 message_stop 完整仍可解析。
+        let message = fold_anthropic_compaction_stream(body.trim_end().as_bytes()).unwrap();
+        assert_eq!(message["content"][0]["signature"], "sig-stream");
+        // 标准 SSE 也允许 CRLF 行尾。
+        let message =
+            fold_anthropic_compaction_stream(body.replace('\n', "\r\n").as_bytes()).unwrap();
+        assert_eq!(message["content"][0]["signature"], "sig-stream");
+    }
+
+    #[test]
+    fn native_compaction_stream_rejects_truncation_stream_errors_and_other_stops() {
+        let start = sse(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {"id": "msg_compact", "model": "claude-x", "content": []}
+            }),
+        );
+        let block = sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "compaction",
+                    "content": "Summary",
+                    "signature": "sig-stream"
+                }
+            }),
+        );
+        let stop = sse("message_stop", json!({"type": "message_stop"}));
+        for (body, expected) in [
+            (format!("{start}{block}"), "message_stop"),
+            (
+                format!(
+                    "{start}{block}{}{stop}",
+                    sse(
+                        "error",
+                        json!({
+                            "type": "error",
+                            "error": {"type": "overloaded_error", "message": "Overloaded"}
+                        }),
+                    ),
+                ),
+                "Overloaded",
+            ),
+            (
+                format!(
+                    "{start}{block}{}{stop}",
+                    sse(
+                        "message_delta",
+                        json!({
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn"}
+                        }),
+                    ),
+                ),
+                "end_turn",
+            ),
+            (format!("{start}data: {{not-json\n\n"), "invalid JSON"),
+        ] {
+            let error = fold_anthropic_compaction_stream(body.as_bytes()).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error}"
+            );
+        }
+    }
+
     #[test]
     fn upstream_anthropic_state_registers_the_item_a_responses_client_replays() {
         use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
@@ -540,34 +872,70 @@ mod tests {
     }
 
     #[test]
-    fn compaction_request_drops_controls_the_api_rejects_and_keeps_existing_betas() {
+    fn compaction_request_streams_and_drops_controls_the_api_rejects() {
         let mut body = json!({
             "model": "claude-x",
             "max_tokens": 1000,
-            "stream": true,
+            "stream": false,
+            "system": [{"type": "text", "text": "stable system"}],
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
             "stop_sequences": ["x"],
             "tool_choice": {"type": "any"},
             "context_management": {"edits": []},
-            "output_config": {"format": {"type": "json_schema"}},
+            "output_config": {
+                "format": {"type": "json_schema"},
+                "effort": "high",
+                "task_budget": {"type": "tokens", "total": 64000, "remaining": 48000}
+            },
             "messages": []
         });
         prepare_anthropic_compaction_body(&mut body, Some(json!({"instructions": "Be brief"})))
             .unwrap();
-        for key in [
-            "stream",
-            "stop_sequences",
-            "tool_choice",
-            "context_management",
-            "output_config",
-        ] {
+        for key in ["stop_sequences", "tool_choice", "context_management"] {
             assert!(body.get(key).is_none(), "{key} must be stripped");
         }
+        assert_eq!(
+            body["stream"],
+            json!(true),
+            "native compaction always streams"
+        );
+        assert_eq!(
+            body["output_config"],
+            json!({
+                "effort": "high",
+                "task_budget": {"type": "tokens", "total": 64000}
+            }),
+            "format/remaining conflict with compaction; effort/total do not"
+        );
         assert_eq!(
             body["compaction"],
             json!({"type": "summarize", "instructions": "Be brief"})
         );
-        prepare_anthropic_compaction_body(&mut body, None).unwrap();
-        assert_eq!(body["compaction"], json!({"type": "summarize"}));
+        // 模型、system、tools、thinking 继续随压缩请求发送。
+        assert_eq!(body["system"][0]["text"], "stable system");
+        assert_eq!(body["tools"][0]["name"], "read");
+        assert_eq!(body["thinking"]["type"], "enabled");
+
+        let mut without_stream = json!({
+            "model": "claude-x",
+            "max_tokens": 1000,
+            "messages": []
+        });
+        prepare_anthropic_compaction_body(&mut without_stream, None).unwrap();
+        assert_eq!(without_stream["stream"], json!(true));
+        assert_eq!(without_stream["compaction"], json!({"type": "summarize"}));
+        assert!(without_stream.get("output_config").is_none());
+
+        let mut format_only = json!({
+            "output_config": {"format": {"type": "json_schema"}},
+            "messages": []
+        });
+        prepare_anthropic_compaction_body(&mut format_only, None).unwrap();
+        assert!(
+            format_only.get("output_config").is_none(),
+            "an output_config left empty by removing format is dropped"
+        );
 
         let mut headers = vec![(
             "Anthropic-Beta".to_owned(),

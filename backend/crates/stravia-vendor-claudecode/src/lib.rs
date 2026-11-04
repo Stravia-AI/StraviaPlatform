@@ -286,8 +286,12 @@ fn infer(
     let mut plan = store
         .plan(&scope, session_id, &body, now_ms()?)
         .map_err(invalid)?;
-    if compact {
+    // 原生压缩块只能作为完整窗口回放：独立压缩和携带压缩块的历史都必须发送全量
+    // 历史，不能续接线程或按 offset 切片。无压缩历史的会话保持原有线程行为。
+    if compact || body.as_object().is_some_and(request::carries_compaction) {
         plan.context.mode = ThreadMode::Disabled;
+        plan.context.message_offset = 0;
+        plan.context.previous_message_id = None;
     }
     let url = format!(
         "{}?beta=true",
