@@ -4394,6 +4394,13 @@ CREATE INDEX observation_blocks_channel_idx ON public.observation_blocks USING b
 
 
 --
+-- Name: observation_blocks_run_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX observation_blocks_run_idx ON public.observation_blocks USING btree (run_id);
+
+
+--
 -- Name: observation_event_contents_content_idx; Type: INDEX; Schema: public; Owner: -
 --
 
