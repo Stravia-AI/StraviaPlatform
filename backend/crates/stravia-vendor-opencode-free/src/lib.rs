@@ -247,6 +247,15 @@ pub fn select_protocol(
     Ok(PROTOCOL.to_owned())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    check_provider(channel, &provider)?;
+    connection::check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -261,12 +270,6 @@ pub fn execute(
         OperationInput::Discover { provider, .. } if operation == Operation::Discover => {
             check_provider(channel, &provider)?;
             discover(host, &provider)
-        }
-        OperationInput::ConnectionCheck { provider, .. }
-            if operation == Operation::ConnectionCheck =>
-        {
-            check_provider(channel, &provider)?;
-            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
         }
         other => Err(common::unsupported(
             other.operation().as_str(),
@@ -301,11 +304,7 @@ fn string_field(
 }
 
 pub fn descriptor() -> VendorDescriptor {
-    let capabilities = BTreeSet::from([
-        Capability::Infer,
-        Capability::ModelDiscovery,
-        Capability::ConnectionCheck,
-    ]);
+    let capabilities = BTreeSet::from([Capability::Infer, Capability::ModelDiscovery]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
         version: Version::parse(env!("CARGO_PKG_VERSION"))
@@ -377,6 +376,14 @@ struct OpencodeFreeVendor;
 impl VendorGuest for OpencodeFreeVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(

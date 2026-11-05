@@ -152,9 +152,6 @@ async fn check_saved(
     if let Err(result) = validate_guest_configuration(admin, &validated, &context).await {
         return Ok(result);
     }
-    if !supports_connection_check(&validated.channel) {
-        return Ok(unsupported());
-    }
 
     let prepared = match admin
         .gw
@@ -356,9 +353,6 @@ async fn check_draft(
     if let Err(result) = validate_guest_configuration(admin, &validated, &context).await {
         return Ok(result);
     }
-    if !supports_connection_check(&validated.channel) {
-        return Ok(unsupported());
-    }
 
     let mut operation_metadata = BTreeMap::new();
     operation_metadata.insert("use_proxy".into(), Value::Bool(effective_use_proxy));
@@ -441,10 +435,6 @@ async fn load_staged_oauth(
         return Ok(Err(configuration_failure("invalid_configuration")));
     }
     Ok(Ok(StagedOAuth { session, bundle }))
-}
-
-fn supports_connection_check(channel: &ChannelDescriptor) -> bool {
-    channel.capabilities.contains(&Capability::ConnectionCheck)
 }
 
 async fn validate_guest_configuration(

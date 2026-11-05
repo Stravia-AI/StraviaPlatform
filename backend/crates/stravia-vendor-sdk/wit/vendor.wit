@@ -8,8 +8,9 @@ package stravia:vendor@0.6.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
-    /// Vendor operation kinds. A plugin may implement any non-empty subset
-    /// per channel; absence must be reported, not faked with empty success.
+    /// Vendor operation kinds. Connection checks are mandatory per channel;
+    /// other operations are optional advertised capabilities. Unsupported
+    /// operations must be reported, not faked with empty success.
     enum operation-kind {
         /// Chat / inference canonical turn.
         infer,
@@ -27,7 +28,8 @@ interface types {
         allowance,
         /// Business validation of proposed config values.
         config-validation,
-        /// Explicit non-generating upstream connection check.
+        /// Mandatory explicit non-generating upstream connection check.
+        /// Return unsupported when no safe read-only probe is available.
         connection-check,
     }
 

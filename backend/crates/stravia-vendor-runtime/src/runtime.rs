@@ -1082,9 +1082,9 @@ fn admit_operation(
             None,
         ));
     };
-    if !channel
-        .capabilities
-        .contains(&operation.required_capability())
+    if operation
+        .required_capability()
+        .is_some_and(|capability| !channel.capabilities.contains(&capability))
     {
         return Err(RuntimeError::from_guest(
             ErrorKind::Unsupported,
@@ -1682,6 +1682,69 @@ mod profile_admission_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn admission_allows_connection_check_without_capability() {
+        admit_operation(
+            &descriptor(),
+            "alpha",
+            "default",
+            "default",
+            Operation::ConnectionCheck,
+        )
+        .expect("required connection check must not need an optional capability");
+    }
+
+    #[test]
+    fn connection_check_admission_rejects_unknown_profile() {
+        let error = admit_operation(
+            &descriptor(),
+            "gamma",
+            "default",
+            "default",
+            Operation::ConnectionCheck,
+        )
+        .expect_err("required checks must not inherit another profile");
+        assert!(matches!(
+            error,
+            RuntimeError::Plugin {
+                kind: ErrorKind::Unsupported,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connection_check_admission_rejects_unknown_channel() {
+        let error = admit_operation(
+            &descriptor(),
+            "alpha",
+            "other",
+            "other",
+            Operation::ConnectionCheck,
+        )
+        .expect_err("required checks must not inherit another channel");
+        assert!(matches!(
+            error,
+            RuntimeError::Plugin {
+                kind: ErrorKind::Unsupported,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connection_check_admission_rejects_snapshot_channel_mismatch() {
+        let error = admit_operation(
+            &descriptor(),
+            "alpha",
+            "default",
+            "other",
+            Operation::ConnectionCheck,
+        )
+        .expect_err("required checks must use the snapshot channel");
+        assert!(matches!(error, RuntimeError::InvalidOutput));
     }
 
     #[test]

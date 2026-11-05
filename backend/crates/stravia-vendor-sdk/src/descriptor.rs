@@ -83,8 +83,9 @@ impl<'de> Deserialize<'de> for LocalizedText {
     }
 }
 
-/// A vendor capability. Each channel declares its own non-empty set; the
-/// provider-level set is the union used for coarse admission checks.
+/// An optional vendor capability. Each channel declares its own non-empty set;
+/// the provider-level set is the union used for coarse admission checks.
+/// Required connection checks are not advertised as capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -104,8 +105,6 @@ pub enum Capability {
     Allowance,
     /// Plugin-side validation of proposed config values.
     ConfigValidation,
-    /// Explicit, non-generating upstream connection check.
-    ConnectionCheck,
 }
 
 impl Capability {
@@ -120,7 +119,6 @@ impl Capability {
             Self::ModelDiscovery => "model_discovery",
             Self::Allowance => "allowance",
             Self::ConfigValidation => "config_validation",
-            Self::ConnectionCheck => "connection_check",
         }
     }
 
@@ -135,7 +133,6 @@ impl Capability {
             "model_discovery" => Self::ModelDiscovery,
             "allowance" => Self::Allowance,
             "config_validation" => Self::ConfigValidation,
-            "connection_check" => Self::ConnectionCheck,
             _ => return None,
         })
     }

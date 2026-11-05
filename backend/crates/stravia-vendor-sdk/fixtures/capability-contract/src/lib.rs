@@ -100,6 +100,18 @@ impl Profile {
 }
 
 impl VendorGuest for CapabilityContractVendor {
+    fn check_connection(
+        _host: &GuestHost,
+        _channel: &str,
+        _provider: stravia_vendor_sdk::ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        Err(PluginError {
+            kind: ErrorKind::Unsupported,
+            message: "capability contract fixture does not exercise connection checks".into(),
+            upstream_status: None,
+        })
+    }
+
     fn descriptor() -> VendorDescriptor {
         let profile = profile();
         let capabilities = profile.capabilities();

@@ -341,6 +341,15 @@ pub fn select_protocol(
     }
     Ok(PROTOCOL.into())
 }
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    route(channel, &provider)?;
+    connection::check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -359,9 +368,6 @@ pub fn execute(
         OperationInput::Auth { provider, request } => {
             auth::execute(host, &provider, request).map(OperationOutput::Auth)
         }
-        OperationInput::ConnectionCheck { provider, .. } => {
-            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
-        }
         other => Err(common::unsupported(other.operation().as_str(), ID, channel)),
     }
 }
@@ -370,7 +376,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::Infer,
         Capability::ModelDiscovery,
         Capability::AuthOauth,
-        Capability::ConnectionCheck,
     ]);
     let channel = ChannelDescriptor {
         id: "subscription".into(),
@@ -441,6 +446,13 @@ struct MuseCodeVendor;
 impl VendorGuest for MuseCodeVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
     fn select_protocol(
         operation: Operation,

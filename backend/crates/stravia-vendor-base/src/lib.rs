@@ -91,29 +91,12 @@ fn add_allowance_capabilities(mut descriptor: ProviderDescriptor) -> ProviderDes
             channel.capabilities.insert(Capability::Allowance);
         }
     }
-    add_connection_check_capability(&mut descriptor);
-    descriptor
-}
-
-/// Declare `ConnectionCheck` exactly where a real probe exists. Catalog
-/// profiles are derived outside this function, so `catalog::provider_set`
-/// applies the same predicate to every profile it publishes.
-pub(crate) fn add_connection_check_capability(descriptor: &mut ProviderDescriptor) {
-    let implementation = descriptor.implementation.clone();
-    for channel in &mut descriptor.channels {
-        if connection_check::supports(
-            &descriptor.provider_id,
-            &channel.id,
-            implementation.as_deref(),
-        ) {
-            channel.capabilities.insert(Capability::ConnectionCheck);
-        }
-    }
     descriptor.capabilities = descriptor
         .channels
         .iter()
         .flat_map(|channel| channel.capabilities.iter().copied())
         .collect();
+    descriptor
 }
 
 /// Returns the single fallback manifest exported by this component.
@@ -191,6 +174,21 @@ fn azure_endpoint(request: &AiRequest) -> String {
     endpoint.to_string()
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    validate_target(&provider, channel)?;
+    if provider.channel != channel {
+        return Err(error(
+            ErrorKind::Invalid,
+            "snapshot channel does not match execute channel",
+        ));
+    }
+    connection_check::execute(host, channel, &provider)
+}
+
 /// Dispatches an operation by the supplier profile embedded in the snapshot.
 pub fn execute(
     host: &GuestHost,
@@ -232,24 +230,6 @@ pub fn execute(
         return allowance::execute(&provider_id, host, provider, request)
             .map(OperationOutput::Allowance);
     }
-    if operation == Operation::ConnectionCheck {
-        let OperationInput::ConnectionCheck {
-            provider,
-            request: _,
-        } = input
-        else {
-            return Err(error(ErrorKind::Invalid, "connection check input mismatch"));
-        };
-        if provider.channel != channel {
-            return Err(error(
-                ErrorKind::Invalid,
-                "snapshot channel does not match execute channel",
-            ));
-        }
-        return connection_check::execute(host, channel, &provider)
-            .map(OperationOutput::ConnectionCheck);
-    }
-
     match provider_id.as_str() {
         "openai" => openai::execute("openai", host, operation, channel, input),
         "anthropic" => anthropic::execute("anthropic", host, operation, channel, input),
@@ -447,6 +427,14 @@ struct BaseVendor;
 impl VendorGuest for BaseVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(

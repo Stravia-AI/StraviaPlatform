@@ -33,7 +33,9 @@ Core 统一管理已保存 OAuth 连接的刷新，不由各管理入口或 Vend
 
 临时执行与已保存连接一样，由宿主在 `operation_metadata.vendor_profile` 中传入本次取得的有效 Profile。动态目录 Profile 不一定存在于 Base 的编译时清单，草稿检查和配置校验不能因此丢失实现路由、误报 `unsupported`；此元数据不扩张网络授权。
 
-Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再执行显式声明的 `ConnectionCheck`。失败使用 `configuration`、`transport`、`upstream`、`response` 阶段和本地化 code；宿主不把原始上游 body 或插件执行诊断作为错误展示。上游拒绝请求属于 `upstream`，成功响应无法按协议解析属于 `response`。未声明安全检查能力返回中性 `unsupported`，不能记作连接失败，也不能以配置校验或静态模型冒充连通。
+`ConnectionCheck` 是每个插件必须实现的操作，不属于可选 `Capability`，不出现在插件支持功能列表中。Rust SDK 的 `VendorGuest::check_connection` 没有默认实现；统一分发在确认 Profile 和 channel 身份后直接调用该方法，不再经过可选能力准入或 `execute`。已安装且仍声明 `connection_check` 能力的独立组件须使用新 SDK 重建并重新导入；WIT 操作布局与版本不变。
+
+Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再执行必需的 `ConnectionCheck`。失败使用 `configuration`、`transport`、`upstream`、`response` 阶段和本地化 code；宿主不把原始上游 body 或插件执行诊断作为错误展示。上游拒绝请求属于 `upstream`，成功响应无法按协议解析属于 `response`。插件实现确认没有安全只读探针时，显式返回中性 `unsupported`，不能记作连接失败，也不能以配置校验或静态模型冒充连通。
 
 成功结果只声明实际证据范围：`endpoint` 证明访问过配置端点，`credentials` 证明固定账号端点接受凭据，`endpoint_and_credentials` 同时证明两者。公开或鉴权语义未知的模型目录只能证明端点；仅携带认证头不能证明凭据已被接受。Vertex 自定义端点配合直接 access token 同样只能证明端点，不能清除凭据失效标记。只有明确的凭据验证成功才能恢复凭据健康；已保存检查按最终执行的 Provider / OAuth 版本及插件 publication fence 条件写回。
 

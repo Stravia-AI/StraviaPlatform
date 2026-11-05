@@ -45,7 +45,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::ModelDiscovery,
         Capability::Allowance,
         Capability::ConfigValidation,
-        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -167,6 +166,15 @@ pub fn select_protocol(
     }
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    require_route(channel, &provider)?;
+    allowance::connection_check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -198,10 +206,6 @@ pub fn execute(
             provider,
             request: _,
         } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
-        OperationInput::ConnectionCheck {
-            provider,
-            request: _,
-        } => allowance::connection_check(host, &provider).map(OperationOutput::ConnectionCheck),
         OperationInput::ConfigValidation {
             provider: _,
             request,
@@ -211,6 +215,10 @@ pub fn execute(
                 proposed_base_url: None,
             },
         )),
+        other => Err(unsupported(format!(
+            "Codex does not implement {} through execute",
+            other.operation().as_str()
+        ))),
     }
 }
 
@@ -921,6 +929,14 @@ struct CodexVendor;
 impl VendorGuest for CodexVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(
