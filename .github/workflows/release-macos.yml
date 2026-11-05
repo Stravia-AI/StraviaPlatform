@@ -1,0 +1,132 @@
+name: macOS release assets
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Expected release version; omit for build-only validation
+        type: string
+        required: false
+        default: ""
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: true
+      STRAVIA_UPDATER_PUBLIC_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.99.1"
+  BUN_VERSION: "1.4.2"
+  TASK_VERSION: "3.52.0"
+  APPLE_SIGNING_IDENTITY: "-"
+
+jobs:
+  build:
+    name: Desktop (${{ matrix.suffix }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            suffix: darwin-aarch64
+            binary_arch: arm64
+          - runner: macos-15-intel
+            suffix: darwin-x86_64
+            binary_arch: x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate repository versions
+        id: version
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = json.loads(Path("package.json").read_text())["version"]
+          cargo = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+          desktop = json.loads(Path("backend/apps/stravia-desktop/tauri.conf.json").read_text())["version"]
+          if version != cargo or version != desktop:
+              raise SystemExit("Repository versions must match before building macOS assets")
+          expected = os.environ["EXPECTED_VERSION"]
+          if expected and version != expected:
+              raise SystemExit("Repository version does not match the release")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          PY
+
+      - name: Validate updater signing credentials
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
+        run: python3 .github/scripts/configure_updater_signing.py
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          target: wasm32-wasip2
+          cache: 'false'
+          cache-save-if: 'false'
+          cache-on-failure: 'false'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+          no-cache: true
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
+      - name: Build macOS application, DMG, and signed updater archive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: task build:desktop BUNDLES="app,dmg"
+
+      - name: Verify and collect macOS release assets
+        env:
+          ASSET_BASENAME: stravia-desktop-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
+          BINARY_ARCH: ${{ matrix.binary_arch }}
+        run: |
+          shopt -s nullglob
+          apps=(target/release/bundle/macos/*.app)
+          archives=(target/release/bundle/macos/*.app.tar.gz)
+          dmgs=(target/release/bundle/dmg/*.dmg)
+          if [[ ${#apps[@]} -ne 1 || ${#archives[@]} -ne 1 || ${#dmgs[@]} -ne 1 ]]; then
+            printf 'Expected one app, updater archive, and DMG; found %s, %s, %s\n' \
+              "${#apps[@]}" "${#archives[@]}" "${#dmgs[@]}" >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict "${apps[0]}"
+          lipo -verify_arch "${BINARY_ARCH}" "${apps[0]}/Contents/MacOS/stravia-desktop"
+          hdiutil verify "${dmgs[0]}"
+          tar -tzf "${archives[0]}" > /dev/null
+          test -s "${archives[0]}.sig"
+          mkdir -p dist
+          cp "${dmgs[0]}" "dist/${ASSET_BASENAME}.dmg"
+          cp "${archives[0]}" "dist/${ASSET_BASENAME}.app.tar.gz"
+          cp "${archives[0]}.sig" "dist/${ASSET_BASENAME}.app.tar.gz.sig"
+
+      - name: Upload macOS release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.suffix }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

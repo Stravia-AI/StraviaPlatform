@@ -1,6 +1,6 @@
 # 发布带签名的 Desktop 更新
 
-Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 仍是更新产物、清单与签名的权威来源；应用更新发现默认通过内置的生产更新分发服务进行，也可用 `STRAVIA_UPDATER_URL` 覆盖，该服务提供 GitHub 兼容的 Release 列表与重写后的清单，`release_url` 仍指向官方 GitHub Release。发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64 四个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
+Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 仍是更新产物、清单与签名的权威来源；应用更新发现默认通过内置的生产更新分发服务进行，也可用 `STRAVIA_UPDATER_URL` 覆盖，该服务提供 GitHub 兼容的 Release 列表与重写后的清单，`release_url` 仍指向官方 GitHub Release。发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64、macOS Intel、macOS Apple Silicon 六个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
 
 Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像。
 
@@ -36,7 +36,7 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 1. 确保 `Cargo.toml`、`package.json` 和 `backend/apps/stravia-desktop/tauri.conf.json` 版本一致，并在 `CHANGELOG.md` 中存在该版本的非空章节。
 2. 从 `main` 中的目标 commit 创建 `vMAJOR.MINOR.PATCH` 或合法 SemVer prerelease tag。
-3. 推送 tag。`release.yml` 会确认完整 CI 通过，签署四个平台产物，执行 `.github/scripts/generate_updater_manifest.py`，创建 draft Release，发布容器镜像，最后公开 Release。
+3. 推送 tag。`release.yml` 会确认完整 CI 通过，签署六个平台产物，执行 `.github/scripts/generate_updater_manifest.py`，创建 draft Release，发布容器镜像，最后公开 Release。
 4. 任一签名 secret、`.sig`、平台产物或清单字段缺失时 workflow 必须失败。不要通过移除校验、手工上传无签名安装包或发布部分清单来绕过失败。
 
 发布回归必须遵循当前产品契约：已开始的 Responses 流只以单个 `response.failed` 收口，并保留部分输出和原生错误详情；重启恢复用例必须在上游请求仍受事件门控、尚未交付时模拟进程中断，不能以固定延迟或优雅关闭后的已完成请求代替崩溃场景。修复失败后先运行对应定向检查，再重新执行完整发布矩阵。
@@ -44,6 +44,26 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:web`，不直接以生产 `target/release/stravia-server` 替代测试服务。Admin 先串行准备 `build:test:development` 与 `build:test:services`；Chromium 先串行准备 `build:test:release` 与 `build:test:services`。`target/test-artifacts/services/` 保留带 `test-harness` 的独立服务副本，支持 loopback catalog 等测试参数；生产副本与开发模式副本独立保存，后续不同 feature graph 的构建不能覆盖正在验证的测试服务。
 
 `stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。更新分发服务读取该清单后仅把平台下载 URL 重写为自己的下载端点；版本、平台键、签名和下载字节保持不变。
+
+### macOS 构建与独立验证
+
+`release-macos.yml` 是正式发布与手动验证共用的构建流程。在 `macos-15`（Apple Silicon）和 `macos-15-intel`（Intel）原生构建，分别上传 `desktop-darwin-aarch64` 和 `desktop-darwin-x86_64` Actions artifacts，每个平台包含：
+
+- `stravia-desktop-v<version>-darwin-<arch>.dmg`：首次安装镜像。
+- `stravia-desktop-v<version>-darwin-<arch>.app.tar.gz`：Tauri updater 使用的应用归档。
+- 对应的 `.app.tar.gz.sig`：由现有 updater 私钥生成的签名；清单使用 `darwin-aarch64` / `darwin-x86_64` 平台键，不使用 DMG 作为更新包。
+
+构建后会验证应用的 Ad-hoc 代码签名、Mach-O 架构、DMG 校验和、归档可读性与签名文件存在性。当前采用 `APPLE_SIGNING_IDENTITY=-`，没有 Developer ID 签名和 Apple 公证。Ad-hoc 不是 Apple 认证，Tauri updater 签名也不能替代它；从浏览器下载后，Gatekeeper 仍可能阻止首次启动。不得把构建通过描述为已经通过 Gatekeeper 或用户安装验证。
+
+只验证 macOS、不运行完整发布矩阵时：
+
+```bash
+gh workflow run release.yml --ref <branch> -f macos_only=true
+```
+
+该入口只构建并上传 Actions artifacts，不创建 Release、不发布镜像，也不改变正式 tag 发布的完整 CI 门禁。需要检查 GitHub Release 上传时，经授权将同一次成功运行的两平台产物上传到独立草稿，不覆盖已有正式版。草稿上传成功不等于完整六平台发布、生产更新分发或设备安装已验证。
+
+旧版 Desktop（包括 0.6.2）的更新清单校验只接受四个平台，会拒绝新增 macOS 后的六平台清单；现有用户需要手工安装首个支持六平台清单的版本，不提供绕过校验的兼容路径。
 
 ### 同一提交的 CI 复用
 
@@ -72,5 +92,7 @@ CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:we
 - Windows ARM64：确认仅出现 NSIS passive 原生进度窗。已保存安装语言时不得额外出现语言选择窗。
 - Linux x86_64 AppImage：确认应用内安装进度、原地替换和 relaunch。
 - Linux ARM64 AppImage：确认应用内安装进度、原地替换和 relaunch。
+- macOS Intel：确认 DMG 安装、应用归档更新、签名校验和 relaunch；记录首次下载的 Gatekeeper 行为。
+- macOS Apple Silicon：确认 DMG 安装、应用归档更新、签名校验和 relaunch；记录首次下载的 Gatekeeper 行为。
 
 Smoke 环境必须把 `STRAVIA_UPDATER_URL` 指向受控更新分发服务，避免未覆盖时访问生产源；显式空值或非法覆盖必须明确失败而不是静默回退。同时验证签名损坏、平台条目缺失、只读 AppImage 和网络失败都 fail closed。没有对应架构设备时，在发布记录中明确写明未验证的平台、原因和风险，不能把另一架构的结果当作替代。

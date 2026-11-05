@@ -12,6 +12,8 @@ SEMVER = re.compile(
     r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
 )
 PLATFORM_FILENAMES = {
+    "darwin-aarch64": "stravia-desktop-v{version}-darwin-aarch64.app.tar.gz",
+    "darwin-x86_64": "stravia-desktop-v{version}-darwin-x86_64.app.tar.gz",
     "linux-aarch64": "stravia-desktop-v{version}-linux-aarch64.AppImage",
     "linux-x86_64": "stravia-desktop-v{version}-linux-x86_64.AppImage",
     "windows-aarch64": "stravia-desktop-v{version}-windows-aarch64-setup.exe",

@@ -8,6 +8,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).with_name("generate_updater_manifest.py")
 VERSION = "1.2.3"
 PLATFORMS = {
+    "darwin-aarch64": f"stravia-desktop-v{VERSION}-darwin-aarch64.app.tar.gz",
+    "darwin-x86_64": f"stravia-desktop-v{VERSION}-darwin-x86_64.app.tar.gz",
     "linux-x86_64": f"stravia-desktop-v{VERSION}-linux-x86_64.AppImage",
     "linux-aarch64": f"stravia-desktop-v{VERSION}-linux-aarch64.AppImage",
     "windows-x86_64": f"stravia-desktop-v{VERSION}-windows-x86_64-setup.exe",
@@ -40,7 +42,7 @@ class GenerateUpdaterManifestTests(unittest.TestCase):
             check=False,
         )
 
-    def test_generates_four_signed_https_platform_entries(self) -> None:
+    def test_generates_signed_https_platform_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.create_artifacts(root)
@@ -59,13 +61,33 @@ class GenerateUpdaterManifestTests(unittest.TestCase):
                 )
 
     def test_fails_when_any_signature_is_missing(self) -> None:
+        for platform, filename in PLATFORMS.items():
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.create_artifacts(root)
+                (root / f"{filename}.sig").unlink()
+                result = self.run_generator(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(platform, result.stderr)
+
+    def test_fails_when_any_updater_artifact_is_missing(self) -> None:
+        for platform, filename in PLATFORMS.items():
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.create_artifacts(root)
+                (root / filename).unlink()
+                result = self.run_generator(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(platform, result.stderr)
+
+    def test_fails_when_macos_signature_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.create_artifacts(root)
-            (root / f"{PLATFORMS['windows-aarch64']}.sig").unlink()
+            (root / f"{PLATFORMS['darwin-aarch64']}.sig").write_text(" \n", encoding="utf-8")
             result = self.run_generator(root)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("windows-aarch64", result.stderr)
+            self.assertIn("empty updater signature for darwin-aarch64", result.stderr)
 
 
 if __name__ == "__main__":

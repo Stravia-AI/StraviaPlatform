@@ -30,7 +30,7 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode
 
 | 形态 | 实现 | 适用场景 |
 |---|---|---|
-| Desktop | Tauri v2 桌面应用，当前发布 Windows / Linux 安装包 | 个人开发者，本地运行与集成管理 |
+| Desktop | Tauri v2 桌面应用，发布 Windows / Linux / macOS 安装包；macOS 当前为未公证的 Ad-hoc 签名 | 个人开发者，本地运行与集成管理 |
 | Server | 独立 Rust 二进制，始终启动 Proxy、Admin API 与内嵌 WebUI | 自托管、团队共享 |
 
 核心原则：`stravia-core` 不绑定 HTTP listener，拥有模型接入、平台工具与内置 Agent 执行、存储和管理业务逻辑。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。

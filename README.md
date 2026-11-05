@@ -59,7 +59,7 @@ Agent behavior is defined and versioned by the platform — Stravia is not a use
 
 ## Quick Start
 
-**Desktop** — download the Windows (NSIS) or Linux (AppImage) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) and open it. The full platform runs locally with an integrated management UI. macOS builds are not currently provided.
+**Desktop** — download the Windows (NSIS), Linux (AppImage), or macOS (DMG, Intel / Apple Silicon) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases). The full platform runs locally with an integrated management UI. macOS builds use Ad-hoc signing without Apple notarization; Gatekeeper may block the first launch. See [release and signing details](docs/releasing.md#macos-构建与独立验证).
 
 If startup fails, the desktop app provides diagnostics and recovery options; it does not automatically reset your database.
 
@@ -172,7 +172,7 @@ Good to know: it catches what its rules know — not every secret, and not perso
 | Form          | Tauri app with integrated management UI             | Single headless binary or container image   |
 | Best for      | Individual developers; writes client config locally | Self-hosted and shared team deployments     |
 | Storage       | Local SQLite                                        | SQLite or PostgreSQL                        |
-| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image                  |
+| Get it        | Windows NSIS / Linux AppImage / macOS DMG on Releases | Archive · `ghcr.io` image                  |
 
 The same Rust core powers both; the management surface is the same WebUI.
 

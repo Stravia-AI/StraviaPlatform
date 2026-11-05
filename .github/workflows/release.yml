@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      macos_only:
+        description: Build and validate only macOS assets without publishing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,7 +28,17 @@ env:
 jobs:
   checks:
     name: Release checks
+    if: github.event_name != 'workflow_dispatch' || !inputs.macos_only
     uses: ./.github/workflows/ci.yml
+
+  verify-macos:
+    name: Validate macOS release assets
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_only
+    uses: ./.github/workflows/release-macos.yml
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
 
   prepare:
     name: Validate release inputs
@@ -214,6 +229,7 @@ jobs:
 
       - name: Install NASM for BoringSSL
         if: runner.os == 'Windows' && runner.arch == 'X64'
+        shell: pwsh
         run: |
           choco install nasm --yes --no-progress
           $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
@@ -321,6 +337,7 @@ jobs:
 
       - name: Install NASM for BoringSSL
         if: runner.os == 'Windows' && runner.arch == 'X64'
+        shell: pwsh
         run: |
           choco install nasm --yes --no-progress
           $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
@@ -373,67 +390,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
-        run: |
-          test -n "${TAURI_SIGNING_PRIVATE_KEY}"
-          test -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
-          test -n "${STRAVIA_UPDATER_PUBLIC_KEY}"
-          python3 <<'PY'
-          import base64
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          raw_public_key = (
-              os.environ["STRAVIA_UPDATER_PUBLIC_KEY"]
-              .strip()
-              .replace("\\r\\n", "\n")
-              .replace("\\n", "\n")
-          )
-          payload_match = re.search(
-              r"(?:^|\s)(RW[A-Za-z0-9+/=]+)\s*$",
-              raw_public_key,
-          )
-          if payload_match is None:
-              try:
-                  decoded_public_key = base64.b64decode(
-                      "".join(raw_public_key.split()),
-                      validate=True,
-                  ).decode("utf-8")
-              except (ValueError, UnicodeDecodeError):
-                  decoded_public_key = ""
-              payload_match = re.search(
-                  r"(?:^|\s)(RW[A-Za-z0-9+/=]+)\s*$",
-                  decoded_public_key,
-              )
-          if payload_match is None:
-              raise SystemExit(
-                  "STRAVIA_UPDATER_PUBLIC_KEY must contain a Minisign public key"
-              )
-          public_key_text = (
-              "untrusted comment: minisign public key\n"
-              f"{payload_match.group(1)}\n"
-          )
-          public_key = base64.b64encode(
-              public_key_text.encode("utf-8")
-          ).decode("ascii")
-
-          config_path = Path("backend/apps/stravia-desktop/tauri.conf.json")
-          config = json.loads(config_path.read_text(encoding="utf-8"))
-          config["plugins"]["updater"]["pubkey"] = public_key
-          config_path.write_text(
-              json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
-          )
-
-          delimiter = "STRAVIA_UPDATER_PUBLIC_KEY_EOF"
-          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
-              output.write(
-                  f"STRAVIA_UPDATER_PUBLIC_KEY<<{delimiter}\n"
-                  f"{public_key}\n"
-                  f"{delimiter}\n"
-              )
-          PY
+        run: python3 .github/scripts/configure_updater_signing.py
 
       - name: Build desktop bundle
         env:
@@ -478,6 +435,17 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+
+  build-macos:
+    name: macOS desktop
+    needs: prepare
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
 
   docker-build:
     name: Docker validation (${{ matrix.platform }})
@@ -533,6 +501,7 @@ jobs:
       - prepare
       - build-server
       - build-desktop
+      - build-macos
       - build-vendor-plugins
     runs-on: ubuntu-24.04
     steps:

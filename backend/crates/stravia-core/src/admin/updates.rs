@@ -27,7 +27,9 @@ const MAX_RELEASE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_RELEASE_PAGES: usize = 10;
 const RELEASE_PAGE_SIZE: usize = 100;
-const REQUIRED_PLATFORMS: [&str; 4] = [
+const REQUIRED_PLATFORMS: [&str; 6] = [
+    "darwin-aarch64",
+    "darwin-x86_64",
     "linux-aarch64",
     "linux-x86_64",
     "windows-aarch64",
@@ -1695,5 +1697,19 @@ mod tests {
             validate_manifest(&release, incomplete).unwrap_err().code,
             "UPDATE_MANIFEST_PLATFORM_MISSING"
         );
+    }
+
+    #[test]
+    fn manifest_requires_both_macos_architectures() {
+        let release = release("1.2.0", false);
+        for platform in ["darwin-aarch64", "darwin-x86_64"] {
+            let mut manifest = valid_manifest("1.2.0", RELEASE_URL);
+            manifest.platforms.0.remove(platform);
+            assert_eq!(
+                validate_manifest(&release, manifest).unwrap_err().code,
+                "UPDATE_MANIFEST_PLATFORM_MISSING",
+                "{platform}"
+            );
+        }
     }
 }

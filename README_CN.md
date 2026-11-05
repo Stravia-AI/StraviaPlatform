@@ -59,7 +59,7 @@ Agent 行为由平台实现定义并进行版本管理 —— Stravia 不是用�
 
 ## 快速开始
 
-**桌面应用** —— 从 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 Windows（NSIS）或 Linux（AppImage）安装包并运行，完整平台在本地启动并自带集成管理界面。暂不提供 macOS 产物。
+**桌面应用** —— 从 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 Windows（NSIS）、Linux（AppImage）或 macOS（DMG，Intel / Apple Silicon）安装包，完整平台在本地启动并自带集成管理界面。macOS 构建使用 Ad-hoc 签名，未经过 Apple 公证，Gatekeeper 可能阻止首次启动。详见[发布与签名说明](docs/releasing.md#macos-构建与独立验证)。
 
 启动遇到问题时，桌面应用会提供诊断信息和恢复入口；不会自动重置数据库。
 
@@ -172,7 +172,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 | 形态     | Tauri 桌面应用，集成管理界面           | 单一无头二进制或容器镜像              |
 | 适用     | 个人开发者；可直接写入本机客户端配置   | 自托管与团队共享部署                  |
 | 存储     | 本地 SQLite                            | SQLite 或 PostgreSQL                  |
-| 获取     | Releases 上的 Windows NSIS / Linux AppImage | 压缩包 · `ghcr.io` 镜像 |
+| 获取     | Releases 上的 Windows NSIS / Linux AppImage / macOS DMG | 压缩包 · `ghcr.io` 镜像 |
 
 同一套 Rust 核心驱动两种形态，管理面是同一个 WebUI。
 
