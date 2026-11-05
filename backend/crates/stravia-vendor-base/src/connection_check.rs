@@ -63,12 +63,6 @@ fn route(provider_id: &str, implementation: Option<&str>) -> Option<Route> {
     })
 }
 
-/// Every Base channel is either declared with `ConnectionCheck` or rejected as
-/// unsupported; the capability and this predicate are derived from one route.
-pub(crate) fn supports(provider_id: &str, channel: &str, implementation: Option<&str>) -> bool {
-    channel == "default" && route(provider_id, implementation).is_some()
-}
-
 pub(crate) fn execute(
     host: &GuestHost,
     channel: &str,

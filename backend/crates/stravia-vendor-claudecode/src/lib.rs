@@ -53,7 +53,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
-        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -164,6 +163,15 @@ pub fn select_protocol(
     Ok(ANTHROPIC_MESSAGES_2023_06_01.to_string())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    require_route(channel, &provider)?;
+    allowance::connection_check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -191,10 +199,6 @@ pub fn execute(
             provider,
             request: _,
         } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
-        OperationInput::ConnectionCheck {
-            provider,
-            request: _,
-        } => allowance::connection_check(host, &provider).map(OperationOutput::ConnectionCheck),
         other => Err(common::unsupported(
             &format!("{:?}", other.operation()),
             VENDOR_ID,
@@ -647,6 +651,14 @@ struct ClaudeCodeVendor;
 impl VendorGuest for ClaudeCodeVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(

@@ -148,17 +148,19 @@ impl Operation {
         }
     }
 
-    pub const fn required_capability(self) -> Capability {
+    /// Optional operations require an advertised capability; connection checks
+    /// are required for every owned provider profile and channel.
+    pub const fn required_capability(self) -> Option<Capability> {
         match self {
-            Self::Infer => Capability::Infer,
-            Self::Compact => Capability::Compact,
-            Self::Search => Capability::Search,
-            Self::MediaImage => Capability::MediaImage,
-            Self::Auth => Capability::AuthOauth,
-            Self::Discover => Capability::ModelDiscovery,
-            Self::Allowance => Capability::Allowance,
-            Self::ConfigValidation => Capability::ConfigValidation,
-            Self::ConnectionCheck => Capability::ConnectionCheck,
+            Self::Infer => Some(Capability::Infer),
+            Self::Compact => Some(Capability::Compact),
+            Self::Search => Some(Capability::Search),
+            Self::MediaImage => Some(Capability::MediaImage),
+            Self::Auth => Some(Capability::AuthOauth),
+            Self::Discover => Some(Capability::ModelDiscovery),
+            Self::Allowance => Some(Capability::Allowance),
+            Self::ConfigValidation => Some(Capability::ConfigValidation),
+            Self::ConnectionCheck => None,
         }
     }
 }
@@ -937,6 +939,16 @@ impl OperationOutput {
 pub trait VendorGuest {
     fn descriptor() -> VendorDescriptor;
 
+    /// Required, non-generating upstream connection check for the selected
+    /// provider profile and channel. Implementations without a safe read-only
+    /// probe must explicitly return `Unsupported`, not generate content or
+    /// report local configuration validation as a successful connection.
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<ConnectionCheckResponse, PluginError>;
+
     /// Select the egress protocol for a canonical model request. This hook is
     /// pure: host transport, private state, and event imports are unavailable
     /// while it runs. Single-protocol guests inherit the configured protocol.
@@ -1088,9 +1100,9 @@ fn admit_provider<G: VendorGuest>(
             "provider profile does not implement the selected channel",
         ));
     };
-    if !channel
-        .capabilities
-        .contains(&operation.required_capability())
+    if operation
+        .required_capability()
+        .is_some_and(|capability| !channel.capabilities.contains(&capability))
     {
         return Err(error(
             ErrorKind::Unsupported,
@@ -1145,7 +1157,13 @@ pub fn dispatch<G: VendorGuest>(
     let input = OperationInput::decode(operation, &channel, input)?;
     admit_provider::<G>(operation, input.provider())?;
     let host = GuestHost::new();
-    G::execute(&host, operation, &channel, input)?.encode_for(operation)
+    let output = match input {
+        OperationInput::ConnectionCheck { provider, .. } => {
+            G::check_connection(&host, &channel, provider).map(OperationOutput::ConnectionCheck)
+        }
+        input => G::execute(&host, operation, &channel, input),
+    }?;
+    output.encode_for(operation)
 }
 
 /// Register one [`VendorGuest`] implementation as the component export.
@@ -1220,13 +1238,21 @@ mod profile_admission_tests {
             }
         }
 
+        fn check_connection(
+            _host: &GuestHost,
+            _channel: &str,
+            _provider: ProviderSnapshot,
+        ) -> Result<ConnectionCheckResponse, PluginError> {
+            unreachable!("admission test never executes the guest")
+        }
+
         fn execute(
             _host: &GuestHost,
             _operation: Operation,
             _channel: &str,
             _input: OperationInput,
         ) -> Result<OperationOutput, PluginError> {
-            unreachable!("admission test never executes the guest")
+            unreachable!("connection checks must not execute optional operations")
         }
     }
 
@@ -1281,6 +1307,61 @@ mod profile_admission_tests {
     fn does_not_union_capabilities_across_provider_profiles() {
         let error = admit_provider::<MultiProfileGuest>(Operation::Search, &snapshot("alpha"))
             .expect_err("alpha must not inherit beta search support");
+        assert!(matches!(error.kind, ErrorKind::Unsupported));
+    }
+
+    fn dispatch_connection_check(
+        provider: ProviderSnapshot,
+        channel: &str,
+    ) -> Result<Vec<u8>, PluginError> {
+        let (operation, input) = OperationInput::ConnectionCheck {
+            provider,
+            request: ConnectionCheckRequest::default(),
+        }
+        .encode_for_host()
+        .unwrap();
+        dispatch::<MultiProfileGuest>(operation, channel.into(), input)
+    }
+
+    #[test]
+    fn connection_check_dispatch_rejects_unknown_profile() {
+        let error = dispatch_connection_check(snapshot("gamma"), "default")
+            .expect_err("required checks must not inherit another provider profile");
+        assert!(matches!(error.kind, ErrorKind::Unsupported));
+    }
+
+    #[test]
+    fn connection_check_dispatch_rejects_unknown_channel() {
+        let mut provider = snapshot("alpha");
+        provider.channel = "other".into();
+        let error = dispatch_connection_check(provider, "other")
+            .expect_err("required checks must not inherit another channel");
+        assert!(matches!(error.kind, ErrorKind::Unsupported));
+    }
+
+    #[test]
+    fn connection_check_dispatch_rejects_snapshot_channel_mismatch() {
+        let error = dispatch_connection_check(snapshot("alpha"), "other")
+            .expect_err("required checks must use the snapshot channel");
+        assert!(matches!(error.kind, ErrorKind::Invalid));
+    }
+
+    #[test]
+    fn optional_operation_dispatch_still_requires_capability() {
+        let (operation, input) = OperationInput::Search {
+            provider: snapshot("alpha"),
+            request: SearchRequest {
+                query: "test".into(),
+                continuation: None,
+                allowed_domains: Vec::new(),
+                language: None,
+                max_sources: None,
+            },
+        }
+        .encode_for_host()
+        .unwrap();
+        let error = dispatch::<MultiProfileGuest>(operation, "default".into(), input)
+            .expect_err("required connection checks must not admit optional search");
         assert!(matches!(error.kind, ErrorKind::Unsupported));
     }
 

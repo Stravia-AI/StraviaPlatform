@@ -33,6 +33,15 @@ pub fn select_protocol(
     Ok("devin-connect".into())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    validate_provider(channel, &provider)?;
+    allowance::check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -73,6 +82,14 @@ struct DevinVendor;
 impl VendorGuest for DevinVendor {
     fn descriptor() -> VendorDescriptor {
         crate::descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        crate::check_connection(host, channel, provider)
     }
 
     fn select_protocol(

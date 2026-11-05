@@ -110,7 +110,6 @@ impl VendorGuest for ManagementContractVendor {
             Capability::AuthOauth,
             Capability::ModelDiscovery,
             Capability::Allowance,
-            Capability::ConnectionCheck,
         ]);
         VendorDescriptor {
             vendor_id: profile.vendor_id().into(),
@@ -196,6 +195,51 @@ impl VendorGuest for ManagementContractVendor {
         }
     }
 
+    fn check_connection(
+        host: &GuestHost,
+        _channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<ConnectionCheckResponse, PluginError> {
+        require_connection(&provider)?;
+        if provider
+            .credentials
+            .get("access_token")
+            .and_then(Value::as_str)
+            == Some("fixture-static-check")
+        {
+            return Ok(ConnectionCheckResponse {
+                verified: ConnectionCheckVerification::EndpointAndCredentials,
+            });
+        }
+        let wire: ConnectionCheckWire = post_json(
+            host,
+            &provider,
+            "connection_check",
+            "/check",
+            serde_json::json!({}),
+            true,
+        )
+        .map_err(|failure| {
+            if matches!(failure.kind, ErrorKind::Invalid) {
+                error(
+                    ErrorKind::InvalidResponse,
+                    "invalid connection check response",
+                )
+            } else {
+                failure
+            }
+        })?;
+        if !wire.accepted {
+            return Err(error(
+                ErrorKind::Auth,
+                "connection check credentials were rejected",
+            ));
+        }
+        Ok(ConnectionCheckResponse {
+            verified: ConnectionCheckVerification::EndpointAndCredentials,
+        })
+    }
+
     fn execute(
         host: &GuestHost,
         operation: Operation,
@@ -211,46 +255,6 @@ impl VendorGuest for ManagementContractVendor {
             }
             (Operation::Allowance, OperationInput::Allowance { provider, .. }) => {
                 allowance(host, &provider).map(OperationOutput::Allowance)
-            }
-            (Operation::ConnectionCheck, OperationInput::ConnectionCheck { provider, .. }) => {
-                require_connection(&provider)?;
-                if provider
-                    .credentials
-                    .get("access_token")
-                    .and_then(Value::as_str)
-                    == Some("fixture-static-check")
-                {
-                    return Ok(OperationOutput::ConnectionCheck(ConnectionCheckResponse {
-                        verified: ConnectionCheckVerification::EndpointAndCredentials,
-                    }));
-                }
-                let wire: ConnectionCheckWire = post_json(
-                    host,
-                    &provider,
-                    "connection_check",
-                    "/check",
-                    serde_json::json!({}),
-                    true,
-                )
-                .map_err(|failure| {
-                    if matches!(failure.kind, ErrorKind::Invalid) {
-                        error(
-                            ErrorKind::InvalidResponse,
-                            "invalid connection check response",
-                        )
-                    } else {
-                        failure
-                    }
-                })?;
-                if !wire.accepted {
-                    return Err(error(
-                        ErrorKind::Auth,
-                        "connection check credentials were rejected",
-                    ));
-                }
-                Ok(OperationOutput::ConnectionCheck(ConnectionCheckResponse {
-                    verified: ConnectionCheckVerification::EndpointAndCredentials,
-                }))
             }
             (Operation::Infer, OperationInput::Infer { provider, request }) => {
                 infer(host, &provider, &request)

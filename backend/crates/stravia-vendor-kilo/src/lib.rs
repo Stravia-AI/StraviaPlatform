@@ -140,7 +140,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::ModelDiscovery,
         Capability::AuthOauth,
         Capability::Allowance,
-        Capability::ConnectionCheck,
     ]);
     let channel = ChannelDescriptor {
         id: "default".into(),
@@ -237,6 +236,15 @@ pub fn select_protocol(
     }
     .into())
 }
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    check(channel, &provider)?;
+    connection::check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -257,9 +265,6 @@ pub fn execute(
         OperationInput::Allowance { provider, .. } => {
             allowance::execute(host, &provider).map(OperationOutput::Allowance)
         }
-        OperationInput::ConnectionCheck { provider, .. } => {
-            connection::check(host, &provider).map(OperationOutput::ConnectionCheck)
-        }
         OperationInput::Infer { provider, request } => request::infer(host, &provider, request),
         _ => Err(fail(ErrorKind::Unsupported, "Unsupported Kilo operation")),
     }
@@ -270,6 +275,13 @@ struct KiloVendor;
 impl VendorGuest for KiloVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
     fn select_protocol(
         operation: Operation,

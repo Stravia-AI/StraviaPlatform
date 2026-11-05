@@ -17,6 +17,18 @@ use stravia_vendor_sdk::{
 struct LifecycleContractVendor;
 
 impl VendorGuest for LifecycleContractVendor {
+    fn check_connection(
+        _host: &GuestHost,
+        _channel: &str,
+        _provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        Err(PluginError {
+            kind: ErrorKind::Unsupported,
+            message: "lifecycle contract fixture does not exercise connection checks".into(),
+            upstream_status: None,
+        })
+    }
+
     fn descriptor() -> VendorDescriptor {
         let capabilities = BTreeSet::from([Capability::Infer, Capability::ConfigValidation]);
         VendorDescriptor {

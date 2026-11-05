@@ -94,7 +94,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::ModelDiscovery,
         Capability::Allowance,
         Capability::ConfigValidation,
-        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -204,6 +203,15 @@ pub fn select_protocol(
     Ok("command-code/generate/v1".into())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    check_provider(channel, &provider)?;
+    discovery::connection_check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -226,9 +234,6 @@ pub fn execute(
         }
         (Operation::Allowance, OperationInput::Allowance { provider, .. }) => {
             allowance::execute(host, &provider).map(OperationOutput::Allowance)
-        }
-        (Operation::ConnectionCheck, OperationInput::ConnectionCheck { provider, .. }) => {
-            discovery::connection_check(host, &provider).map(OperationOutput::ConnectionCheck)
         }
         (
             Operation::ConfigValidation,
@@ -832,6 +837,14 @@ struct CommandCodeVendor;
 impl VendorGuest for CommandCodeVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(

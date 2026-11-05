@@ -37,7 +37,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
-        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -119,6 +118,15 @@ pub fn select_protocol(
     Ok(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.to_string())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    require_route(channel, &provider)?;
+    connection::execute(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -150,9 +158,6 @@ pub fn execute(
             provider,
             request: _,
         } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
-        OperationInput::ConnectionCheck { provider, .. } => {
-            connection::execute(host, &provider).map(OperationOutput::ConnectionCheck)
-        }
         _ => Err(common::unsupported(operation.as_str(), VENDOR_ID, channel)),
     }
 }
@@ -164,6 +169,13 @@ struct AntigravityVendor;
 impl VendorGuest for AntigravityVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
     fn select_protocol(
         operation: Operation,

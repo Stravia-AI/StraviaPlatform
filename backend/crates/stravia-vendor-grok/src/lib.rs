@@ -45,6 +45,15 @@ pub fn select_protocol(
     Ok(OPEN_RESPONSES_2026_04_24.to_string())
 }
 
+pub fn check_connection(
+    host: &GuestHost,
+    channel: &str,
+    provider: ProviderSnapshot,
+) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+    check_provider(channel, &provider)?;
+    allowance::connection_check(host, &provider)
+}
+
 pub fn execute(
     host: &GuestHost,
     operation: Operation,
@@ -69,10 +78,6 @@ pub fn execute(
         OperationInput::Allowance { provider, request } => {
             allowance::execute(host, provider, request).map(OperationOutput::Allowance)
         }
-        OperationInput::ConnectionCheck {
-            provider,
-            request: _,
-        } => allowance::connection_check(host, &provider).map(OperationOutput::ConnectionCheck),
         other => Err(common::unsupported(
             other.operation().as_str(),
             VENDOR_ID,
@@ -87,7 +92,6 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
-        Capability::ConnectionCheck,
     ]);
     VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
@@ -950,6 +954,14 @@ struct GrokVendor;
 impl VendorGuest for GrokVendor {
     fn descriptor() -> VendorDescriptor {
         descriptor()
+    }
+
+    fn check_connection(
+        host: &GuestHost,
+        channel: &str,
+        provider: ProviderSnapshot,
+    ) -> Result<stravia_vendor_sdk::ConnectionCheckResponse, PluginError> {
+        check_connection(host, channel, provider)
     }
 
     fn select_protocol(
