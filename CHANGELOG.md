@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- The Admin diagnostic replay E2E fixture now accepts the required Responses `developer` role for system instructions instead of rejecting valid protected-reasoning replay with HTTP 422.
 - Open Responses JSON Schema responses now accept `text.format.description: null` in both JSON and streaming response snapshots, preventing valid upstream results from failing with `invalid_upstream_response`. Request descriptions still require strings when supplied, and invalid response description types remain errors.
 - Multi-turn Responses and Chat Completions now inherit controls only from requests, never from reported response parameters, whether default or non-default. Sampling, tools, `service_tier` and reasoning follow one rule: preserve requested values and omissions, allow explicit next-turn overrides and resets, and keep Target thinking mappings request-derived. Responses still report actual upstream execution values independently. This prevents unsupported-parameter errors and request controls silently changing between turns.
 - Protected-reasoning continuation now compares the original provider context before client Marker projection. Local history remains client-shaped rather than retaining provider-side credential redaction; changing thinking effort or credential-protection policy cannot reuse an incompatible upstream context.

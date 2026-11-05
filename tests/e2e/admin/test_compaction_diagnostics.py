@@ -288,7 +288,7 @@ def diagnostic_provider(admin_env: dict[str, Any]):
                     self._write_json(422, {"error": {"type": "invalid_context", "message": "public reasoning projection was forwarded"}})
                     return
                 expected_messages = [
-                    ("system", _PROJECTED_CHANGED_SYSTEM_TEXT),
+                    ("developer", _PROJECTED_CHANGED_SYSTEM_TEXT),
                     ("user", _PROJECTED_QUESTION_TEXT),
                     ("assistant", _PROJECTED_REASONING_TEXT),
                     ("assistant", _PROJECTED_SOURCE_TEXT),
