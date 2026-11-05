@@ -7,7 +7,13 @@ import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { formatNumber } from '#lib/format.js'
 
-import type { CredentialMatch, CredentialRule, CustomCredentialRule } from '#lib/types.js'
+import type { CredentialMatch, CredentialRule, CredentialRuleCatalog, CustomCredentialRule } from '#lib/types.js'
+import {
+  disabledRuleIdsAfterToggle,
+  filterRuleRows,
+  ruleSearchText,
+  type RuleRow,
+} from '#lib/credential-rule-catalog.js'
 
 import PageHeader from '#lib/components/page-header.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
@@ -42,11 +48,13 @@ import {
   DataTable,
   createDataTableColumnHelper,
   type DataTableCellContext,
+  type DataTableRow,
   type DataTableRowPointerEvent,
 } from '#lib/components/ui/data-table/index.js'
 
 import {
   credentialRulesQuery,
+  CREDENTIAL_RULES_KEY,
   CUSTOM_CREDENTIAL_RULES_KEY,
   customCredentialRulesQuery,
 } from '#lib/credential-protection-queries.js'
@@ -66,11 +74,6 @@ import { Textarea } from '#lib/components/ui/textarea/index.js'
 const settingKey = 'reversible_redaction_enabled'
 const queryKey = ['setting', settingKey]
 
-// 内置与自定义规则在同一张表浏览；详情与编辑各自沿用唯一的表面。
-type RuleRow =
-  | { origin: 'builtin'; id: string; name: string; rule: CredentialRule }
-  | { origin: 'custom'; id: string; name: string; rule: CustomCredentialRule }
-
 const queryClient = useQueryClient()
 const settingQuery = createQuery(() => ({ queryKey, queryFn: () => admin.settings.get(settingKey) }))
 
@@ -85,6 +88,8 @@ let detailsOpen = $state(false)
 let selectedRule = $state.raw<CredentialRule>()
 let customSheet = $state<{ show: (rule: CustomCredentialRule | null) => void }>()
 let originFilter = $state('all')
+let savingRuleId = $state<string | null>(null)
+let ruleSaveError = $state('')
 let ruleSearch = $state('')
 let pagination = $state({ pageIndex: 0, pageSize: 25 })
 const rules = $derived(rulesQuery.data?.rules ?? [])
@@ -93,14 +98,7 @@ const ruleRows = $derived<RuleRow[]>([
   ...customRules.map((rule): RuleRow => ({ origin: 'custom', id: rule.id, name: rule.name, rule })),
   ...rules.map((rule): RuleRow => ({ origin: 'builtin', id: rule.id, name: rule.name, rule })),
 ])
-const visibleRows = $derived.by(() => {
-  const needle = ruleSearch.trim().toLocaleLowerCase()
-  return ruleRows.filter(
-    (row) =>
-      (originFilter === 'all' || row.origin === originFilter) &&
-      (!needle || ruleSearchText(row).toLocaleLowerCase().includes(needle)),
-  )
-})
+const visibleRows = $derived(filterRuleRows(ruleRows, originFilter, ruleSearch))
 const ruleNames = $derived(new Map(ruleRows.map((row) => [row.id, row.name])))
 const ruleRowById = $derived(new Map(ruleRows.map((row) => [row.id, row])))
 const originFilterLabel = $derived(
@@ -137,13 +135,41 @@ const ruleColumns = ruleColumn.columns([
     enableSorting: false,
     size: 320,
   }),
+  ruleColumn.accessor((row) => row.rule.enabled, {
+    id: 'enabled',
+    header: () => m.credential_protection_rule_enabled(),
+    meta: { label: () => m.credential_protection_rule_enabled(), width: 'compact', align: 'end' },
+    cell: (context) => renderSnippet(ruleEnabledCell, context),
+    size: 96,
+  }),
 ])
 
-// 自定义规则的匹配文本可能就是凭据本身，不参与搜索索引。
-function ruleSearchText(row: RuleRow): string {
-  return row.origin === 'builtin'
-    ? `${row.name} ${row.id} ${row.rule.target} ${row.rule.description} ${row.rule.keywords.join(' ')}`
-    : `${row.name} ${row.id} ${row.rule.description}`
+async function setRuleEnabled(rule: CredentialRule, enabled: boolean): Promise<void> {
+  if (!rulesQuery.isSuccess || savingRuleId !== null || enabled === rule.enabled) return
+  const ruleIds = disabledRuleIdsAfterToggle(rules, rule.id, enabled)
+  // PUT 替换完整集合：串行保存所有行，不能让另一行基于旧目录覆盖本次提交。
+  savingRuleId = rule.id
+  ruleSaveError = ''
+  try {
+    const result = await admin.credentialProtection.setDisabledRules(ruleIds)
+    const disabled = new Set(result.rule_ids)
+    queryClient.setQueryData<CredentialRuleCatalog>(CREDENTIAL_RULES_KEY, (current) =>
+      current
+        ? { ...current, rules: current.rules.map((item) => ({ ...item, enabled: !disabled.has(item.id) })) }
+        : current,
+    )
+    await queryClient.invalidateQueries({ queryKey: CREDENTIAL_RULES_KEY })
+  } catch (error) {
+    ruleSaveError = localizeBackendErrorMessage(error)
+    toast.error(ruleSaveError)
+  } finally {
+    savingRuleId = null
+  }
+}
+
+function handleRuleRowClick({ event, original }: DataTableRowPointerEvent<RuleRow>): void {
+  if (event.target instanceof Element && event.target.closest('button, a, [role="switch"]')) return
+  openRule(original)
 }
 
 const HOUR_MS = 3_600_000
@@ -301,10 +327,27 @@ function selectMatch(match: CredentialMatch): void {
       <span class="font-medium">{row.name}</span>
       {#if row.origin === 'custom'}
         <Badge variant="secondary">{m.credential_custom_badge()}</Badge>
-        {#if !row.rule.enabled}<Badge variant="outline">{m.common_disabled_status()}</Badge>{/if}
       {/if}
+      {#if !row.rule.enabled}<Badge variant="outline">{m.common_disabled_status()}</Badge>{/if}
     </span>
   </button>
+{/snippet}
+
+{#snippet ruleEnabledCell(context: DataTableCellContext<RuleRow>)}
+  {@const row = context.row.original}
+  {#if row.origin === 'builtin'}
+    <div class="flex items-center justify-end gap-2">
+      {#if savingRuleId === row.id}<Spinner aria-label={m.settings_saving()} />{/if}
+      <Switch
+        bind:checked={() => row.rule.enabled, (checked: boolean) => void setRuleEnabled(row.rule, checked)}
+        disabled={savingRuleId !== null || !rulesQuery.isSuccess}
+        aria-busy={savingRuleId === row.id}
+        aria-label={m.credential_protection_rule_toggle({ name: row.name })} />
+    </div>
+  {:else}
+    <span class="text-xs text-muted-foreground"
+      >{row.rule.enabled ? m.common_enabled_status() : m.common_disabled_status()}</span>
+  {/if}
 {/snippet}
 
 {#snippet customConditions(rule: CustomCredentialRule)}
@@ -430,7 +473,7 @@ function selectMatch(match: CredentialMatch): void {
       {:else if tab === 'rules'}
         <div class="toolbar-actions" data-slot="credential-rules-toolbar">
           {#if !rulesQuery.isError}
-            <InputGroup.Root class="w-full min-w-0 sm:w-auto sm:max-w-72 sm:flex-1 sm:basis-48">
+            <InputGroup.Root class="w-full min-w-0 sm:w-40 sm:max-w-72 sm:flex-1">
               <InputGroup.Input
                 id="credential-rule-search"
                 bind:value={ruleSearch}
@@ -453,6 +496,7 @@ function selectMatch(match: CredentialMatch): void {
                 </Select.Group>
               </Select.Content>
             </Select.Root>
+            <Field.Help hint={m.credential_protection_rule_disable_effect()} />
           {/if}
           <Button onclick={() => customSheet?.show(null)}>
             <PlusIcon data-icon="inline-start" />{m.credential_custom_add()}
@@ -485,6 +529,11 @@ function selectMatch(match: CredentialMatch): void {
     <Tabs.Content value="rules" class="flex min-h-0 min-w-0 flex-col">
       <section class="workspace-panel rules-panel" aria-labelledby="credential-rules-title">
         <h2 id="credential-rules-title" class="sr-only">{m.credential_protection_catalog_title()}</h2>
+        {#if ruleSaveError}
+          <div class="panel-notice">
+            <Alert.Root variant="destructive"><Alert.Description>{ruleSaveError}</Alert.Description></Alert.Root>
+          </div>
+        {/if}
         {#if rulesQuery.isError}
           <div class="panel-state">
             <RequestFailure
@@ -505,6 +554,8 @@ function selectMatch(match: CredentialMatch): void {
             columns={ruleColumns}
             labels={tableLabels}
             getRowId={(row: RuleRow) => row.id}
+            rowClass={(row: DataTableRow<RuleRow>) =>
+              !row.original.rule.enabled ? 'bg-muted/30 text-muted-foreground' : undefined}
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
@@ -513,7 +564,7 @@ function selectMatch(match: CredentialMatch): void {
             paginator
             bind:pagination
             pageSizeOptions={[10, 25, 50]}
-            onRowClick={({ row }: DataTableRowPointerEvent<RuleRow>) => openRule(row.original)}>
+            onRowClick={handleRuleRowClick}>
             {#snippet empty()}
               <Empty.Root
                 ><Empty.Header

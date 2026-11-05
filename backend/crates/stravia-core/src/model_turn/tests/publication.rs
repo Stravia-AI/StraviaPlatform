@@ -893,7 +893,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,updated_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,NULL,?,?,'[\"github-pat\"]')")
+    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_used_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,NULL,?,?,'[\"github-pat\"]')")
         .bind(secret)
         .bind(now)
         .bind(now)

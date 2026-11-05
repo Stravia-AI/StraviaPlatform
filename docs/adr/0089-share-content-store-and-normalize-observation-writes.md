@@ -39,6 +39,8 @@ Turn Chain 与 Observation 共用 `log_retention_days`（0024 迁移的触发器
 
 只有根对象计时，用的都是已有的列。Marker、可逆脱敏映射与原生压缩登记（下称依赖）不保存到期时间：被 Turn 节点引用时不回收，没有引用后才按下限窗口回收。
 
+> **局部被取代。** [ADR-0090](0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md) 取代表中「未被引用且已发布或已确认的依赖按首次发布或确认 + N」对可逆脱敏映射的部分：映射按 `last_used_at + N + G`（G 为一小时）回收，迁移 0045 将其扫描水位由 `reversible_redaction_mappings.published_at` 改为 `reversible_redaction_mappings.last_used_at`，并替换回收索引；下文期限扫描与实施说明中的映射 `published_at` 水位同样局部被取代。History Marker 与原生压缩登记仍按首次发布或确认 + N，引用保护与其他决定不变。
+
 |记录|保留规则（N 为当前天数）|
 |---|---|
 |Interaction|`last_active_at + N` 后回收；`running` 不回收（现状）|

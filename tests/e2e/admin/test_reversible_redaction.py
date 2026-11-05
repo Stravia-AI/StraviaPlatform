@@ -383,7 +383,7 @@ def save_retention_days(env: dict[str, Any], days: str) -> None:
 
 
 def age_out_mapping(env: dict[str, Any], reference: str) -> None:
-    """让映射落到“首次发布 + N”之外并被清扫回收。
+    """让映射落到“最近一次使用 + N”之外并被清扫回收。
 
     期限列的扫描水位只向前推进，所以先保存 30 天把水位推到 30 天前，再把引用该映射的 Turn
     节点与映射本身回拨到 20 天前，最后把 N 缩到 10 天：节点先被回收，映射随即失去最后一条引用。
@@ -397,7 +397,11 @@ def age_out_mapping(env: dict[str, Any], reference: str) -> None:
         "(SELECT node_pk FROM turn_node_redaction_mappings WHERE reference = ?)",
         old, reference,
     )
-    mapping_sql(env, "UPDATE reversible_redaction_mappings SET published_at = ? WHERE reference = ?", old, reference)
+    mapping_sql(
+        env,
+        "UPDATE reversible_redaction_mappings SET published_at = ?, last_used_at = ? WHERE reference = ?",
+        old, old, reference,
+    )
     save_retention_days(env, "10")
     assert mapping_sql(
         env, "SELECT COUNT(*) FROM reversible_redaction_mappings WHERE reference = ?", reference,

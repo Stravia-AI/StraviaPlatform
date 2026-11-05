@@ -32,6 +32,8 @@ pub(crate) struct ProtectedSecrets(std::sync::Arc<parking_lot::RwLock<Vec<Protec
 struct ProtectedSecret {
     raw: String,
     json: String,
+    /// 弱秘密只在词边界处遮罩，与出站替换同一判定，避免 `pass` 把 `password` 拆开。
+    weak: bool,
 }
 
 impl ProtectedSecret {
@@ -39,8 +41,9 @@ impl ProtectedSecret {
         let raw = secret.to_owned();
         let encoded = serde_json::to_string(secret).expect("string serialization");
         Self {
-            raw,
+            weak: stravia_credential_protection::strength::is_weak(&raw),
             json: encoded[1..encoded.len() - 1].to_owned(),
+            raw,
         }
     }
 }
@@ -54,6 +57,10 @@ impl ProtectedSecrets {
             }
         }
         values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.read().is_empty()
     }
 
     /// 已注册明文的稳定指纹；用于内容端点 ETag，映射新增或消失都会改变结果。
@@ -135,10 +142,10 @@ impl ProtectedSecrets {
 fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
     let Some(first_marker) = marker::find_reference(text) else {
         for secret in values {
-            redact_protected_literal(text, &secret.raw);
+            redact_protected_literal(text, &secret.raw, secret.weak);
             // Wire and tool argument strings may contain another serialized JSON layer.
             if secret.json != secret.raw {
-                redact_protected_literal(text, &secret.json);
+                redact_protected_literal(text, &secret.json, secret.weak);
             }
         }
         return;
@@ -151,9 +158,9 @@ fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
         let marker_start = cursor + offset;
         let mut unprotected = text[cursor..marker_start].to_owned();
         for secret in values {
-            redact_protected_literal(&mut unprotected, &secret.raw);
+            redact_protected_literal(&mut unprotected, &secret.raw, secret.weak);
             if secret.json != secret.raw {
-                redact_protected_literal(&mut unprotected, &secret.json);
+                redact_protected_literal(&mut unprotected, &secret.json, secret.weak);
             }
         }
         output.push_str(&unprotected);
@@ -164,19 +171,41 @@ fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
 
     let mut unprotected = text[cursor..].to_owned();
     for secret in values {
-        redact_protected_literal(&mut unprotected, &secret.raw);
+        redact_protected_literal(&mut unprotected, &secret.raw, secret.weak);
         if secret.json != secret.raw {
-            redact_protected_literal(&mut unprotected, &secret.json);
+            redact_protected_literal(&mut unprotected, &secret.json, secret.weak);
         }
     }
     output.push_str(&unprotected);
     *text = output;
 }
 
-fn redact_protected_literal(text: &mut String, secret: &str) {
-    if text.contains(secret) {
-        *text = text.replace(secret, REDACTED);
+fn redact_protected_literal(text: &mut String, secret: &str, weak: bool) {
+    if !text.contains(secret) {
+        return;
     }
+    if !weak {
+        *text = text.replace(secret, REDACTED);
+        return;
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(offset) = text[search..].find(secret) {
+        let start = search + offset;
+        let end = start + secret.len();
+        if stravia_credential_protection::strength::at_word_boundary(text, start, end) {
+            output.push_str(&text[copied..start]);
+            output.push_str(REDACTED);
+            copied = end;
+            search = end;
+        } else {
+            // 只越过首字符：越过整个未命中的位置会漏掉与它重叠的合法命中。
+            search = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    output.push_str(&text[copied..]);
+    *text = output;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1271,6 +1300,33 @@ mod tests {
         let mut unrelated = "private\"mapped\nvalue".to_owned();
         ProtectedSecrets::default().text(&mut unrelated);
         assert_eq!(unrelated, "private\"mapped\nvalue");
+    }
+
+    #[test]
+    fn weak_protected_secrets_are_masked_only_at_word_boundaries() {
+        let protected = ProtectedSecrets::default();
+        protected.register(["pass", "Xk9mQ2vLp7Rt4Zw8"]);
+        let mut text =
+            "pass password bypass pass_1 (pass) 请用pass登录 \"pass\" aXk9mQ2vLp7Rt4Zw8b"
+                .to_owned();
+        protected.text(&mut text);
+        assert_eq!(
+            text,
+            "*** password bypass pass_1 (***) 请用***登录 \"***\" a***b"
+        );
+        // 重叠候选：首个位置不在边界上时仍要继续向后找。
+        let overlapping = ProtectedSecrets::default();
+        overlapping.register(["aaaa"]);
+        let mut text = "aaaaa aaaa".to_owned();
+        overlapping.text(&mut text);
+        assert_eq!(text, "aaaaa ***");
+        // JSON 转义形式同样按边界判断。
+        let escaped = ProtectedSecrets::default();
+        escaped.register(["a\"b"]);
+        let mut value = serde_json::json!({ "arguments": "{\"value\":\"x a\\\"b y\"}" });
+        escaped.value(&mut value);
+        let arguments: Value = serde_json::from_str(value["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["value"], "x *** y");
     }
 
     fn redaction_marker() -> String {

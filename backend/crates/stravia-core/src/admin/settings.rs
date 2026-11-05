@@ -22,6 +22,9 @@ impl AdminService {
             anyhow::bail!("custom_currency is managed through the currency API");
         }
         reject_removed_proxy_setting(key)?;
+        if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
+            anyhow::bail!("{key} is managed through the credential rules API");
+        }
         if key == crate::outbound_proxy::SETTINGS_KEY {
             let config =
                 crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
@@ -61,6 +64,9 @@ impl AdminService {
             anyhow::bail!("custom_currency is managed through the currency API");
         }
         reject_removed_proxy_setting(key)?;
+        if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
+            anyhow::bail!("{key} is managed through the credential rules API");
+        }
         if key == crate::outbound_proxy::SETTINGS_KEY {
             let mut config =
                 crate::outbound_proxy::OutboundProxySettings::from_setting(Some(value))?;

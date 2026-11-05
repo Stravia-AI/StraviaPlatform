@@ -7,6 +7,7 @@ import { prepareApp } from './prepare-app'
 function rule(index: number): CredentialRule {
   return {
     id: `rule-${index}`,
+    enabled: true,
     name: `Provider token ${index}`,
     target: 'token',
     description: `Matches provider token ${index}.`,

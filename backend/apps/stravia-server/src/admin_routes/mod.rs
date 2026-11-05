@@ -255,6 +255,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         )
         .route("/api-keys/{id}", api_keys_item)
         .route("/reversible-redaction/rules", get(credential_rules))
+        .route(
+            "/reversible-redaction/disabled-rules",
+            put(set_disabled_credential_rules),
+        )
         .route("/reversible-redaction/test", post(test_credentials))
         .route(
             "/reversible-redaction/custom-rules",

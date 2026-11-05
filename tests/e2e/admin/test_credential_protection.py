@@ -678,6 +678,110 @@ def test_custom_rules_crud_validation_and_protected_roundtrip(admin_env: dict[st
         assert status == 200 and body["data"] == [], body
 
 
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_disabled_builtin_rules_stop_new_hits_and_replacement_but_keep_restoration(admin_env: dict[str, Any]) -> None:
+    disabled = f"{BASE}/disabled-rules"
+    setting = "reversible_redaction_disabled_rules"
+    text = f"token {SECRET}"
+
+    def put_disabled(env: dict[str, Any], rule_ids: list[str]) -> tuple[int, dict[str, Any]]:
+        return http_request("PUT", f"{env['admin']}{disabled}", payload={"rule_ids": rule_ids}, headers=env["auth"])
+
+    def enabled_rules(env: dict[str, Any]) -> dict[str, bool]:
+        status, body = http_request("GET", f"{env['admin']}{BASE}/rules", headers=env["auth"])
+        assert status == 200, body
+        return {rule["id"]: rule["enabled"] for rule in body["data"]["rules"]}
+
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-disabled-rules"
+        _, key = _create_route(env, model)
+        set_enabled(env, True)
+        try:
+            assert all(enabled_rules(env).values())
+            status, response = _proxy(env, key, model, [{"role": "user", "content": text}])
+            assert status == 200, response
+            outbound = received[-1]["body"]["messages"][-1]["content"]
+            reference = REFERENCE.search(outbound)
+            assert reference is not None and SECRET not in outbound
+            reference = reference.group()
+
+            for rule_ids, rejected in [(["github-pat", "no-such-rule"], "no-such-rule"), (["custom.anything"], "custom.anything")]:
+                status, body = put_disabled(env, rule_ids)
+                assert status == 400, body
+                assert body["code"] == "credential_rule_unknown" and body["params"] == {"rule_id": rejected}
+            assert all(enabled_rules(env).values()), "a rejected request changes nothing"
+            status, body = http_request(
+                "PUT", f"{env['admin']}/api/v1/settings/{setting}", payload={"value": '["github-pat"]'}, headers=env["auth"],
+            )
+            assert "error" in body and "ok" not in body, body
+            assert mapping_sql(env, "SELECT COUNT(*) FROM settings WHERE name = ?", setting) == [(0,)]
+
+            status, body = put_disabled(env, ["github-pat", "github-pat"])
+            assert status == 200 and body["data"] == {"rule_ids": ["github-pat"]}, body
+            states = enabled_rules(env)
+            assert states.pop("github-pat") is False and all(states.values())
+            assert "github-pat" not in {match["rule_id"] for match in detect_text(env, text)}
+
+            # 禁用后不再替换：被禁用规则创建的映射不再出站替换，新的明文也原样发出。
+            status, response = _proxy(env, key, model, [{"role": "user", "content": text}])
+            assert status == 200, response
+            assert received[-1]["body"]["messages"][-1]["content"] == text
+            # 已经发出的占位符仍可还原。
+            status, response = _proxy(env, key, model, [{"role": "user", "content": f"again {reference}"}])
+            assert status == 200, response
+            assert received[-1]["body"]["messages"][-1]["content"] == f"again {reference}"
+            assert response["choices"][0]["message"]["content"] == f"again {SECRET}"
+
+            status, body = put_disabled(env, [])
+            assert status == 200 and body["data"] == {"rule_ids": []}, body
+            assert all(enabled_rules(env).values())
+            status, response = _proxy(env, key, model, [{"role": "user", "content": text}])
+            assert status == 200, response
+            outbound = received[-1]["body"]["messages"][-1]["content"]
+            assert SECRET not in outbound and REFERENCE.search(outbound)
+        finally:
+            put_disabled(env, [])
+            set_enabled(env, False)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_weak_custom_secret_is_replaced_only_at_word_boundaries(admin_env: dict[str, Any]) -> None:
+    custom = f"{BASE}/custom-rules"
+    weak, strong = "pass1", "Team-Alpha-Phrase-2026"
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-weak-secret"
+        _, key = _create_route(env, model)
+        set_enabled(env, True)
+        created: list[str] = []
+        try:
+            for name, text in [("Weak", weak), ("Strong", strong)]:
+                status, body = http_request(
+                    "POST", f"{env['admin']}{custom}",
+                    payload={"name": name, "spec": {"mode": "simple", "text": text}}, headers=env["auth"],
+                )
+                assert status == 200, body
+                created.append(body["data"]["id"])
+
+            content = f"pass1word xpass1 pass1_ pass1 (pass1) x{strong}y"
+            status, response = _proxy(env, key, model, [{"role": "user", "content": content}])
+            assert status == 200, response
+            assert response["choices"][0]["message"]["content"] == content
+            outbound = received[-1]["body"]["messages"][-1]["content"]
+            # 弱秘密只在单词边界替换；强秘密按子串替换。
+            assert outbound.startswith("pass1word xpass1 pass1_ ")
+            assert strong not in outbound
+            assert len(REFERENCE.findall(outbound)) == 3
+            assert outbound.count(weak) == 3
+        finally:
+            for rule_id in created:
+                http_request("DELETE", f"{env['admin']}{custom}/{rule_id}", headers=env["auth"])
+            set_enabled(env, False)
+
+
 @contextmanager
 def _sqlite_write_lock(database_path: Path) -> Iterator[sqlite3.Connection]:
     """Hold an external SQLite write transaction without blocking readers."""

@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::Value;
 
-use super::{RedactionError, marker, store::Mapping};
+use super::{RedactionError, marker, store::Mapping, strength};
 use stravia_runtime_contract::protocol::ir::{
     AiItem, AiRequest, AiResponse, ContentBlock, CustomTool, DocumentSource, EmbeddingInput,
     MessageContent, NamespaceMember, NativeTool, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META,
@@ -112,34 +112,82 @@ pub(super) fn active(mapping: &Mapping) -> bool {
     marker::valid_reference(&mapping.reference)
 }
 
+struct Candidate<'a> {
+    mapping: &'a Mapping,
+    /// 被查找的字面值：出站是秘密，还原是占位符。
+    needle: &'a str,
+    /// 弱秘密只在词边界处替换，见 [`strength`]。还原按固定格式的占位符匹配，不分强弱。
+    weak: bool,
+}
+
+/// 一次请求（或一次还原）要查找的字面值，按长度降序准备一次，供其中每段文本复用；
+/// 强弱判定也只在这里做一次，不在逐文本、逐位置的热路径上重复计算。
+pub(super) struct Candidates<'a> {
+    restore: bool,
+    entries: Vec<Candidate<'a>>,
+}
+
+impl<'a> Candidates<'a> {
+    /// 出站：把 `include` 允许的映射的秘密换成占位符。
+    ///
+    /// 使用已加载的快照，即使映射在遍历期间过期也照常替换；
+    /// `redact_request` 在发出前拒绝已过期却被用到的映射。
+    pub(super) fn outbound(mappings: &'a [Mapping], include: impl Fn(&Mapping) -> bool) -> Self {
+        Self::build(mappings, false, include)
+    }
+
+    /// 还原：把有效占位符换回秘密。是否还原与规则开关无关。
+    pub(super) fn restoring(mappings: &'a [Mapping]) -> Self {
+        Self::build(mappings, true, active)
+    }
+
+    fn build(mappings: &'a [Mapping], restore: bool, include: impl Fn(&Mapping) -> bool) -> Self {
+        let mut entries: Vec<_> = mappings
+            .iter()
+            .filter(|m| include(m) && !m.secret.is_empty())
+            .map(|mapping| Candidate {
+                mapping,
+                needle: if restore {
+                    &mapping.reference
+                } else {
+                    &mapping.secret
+                },
+                weak: !restore && strength::is_weak(&mapping.secret),
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            b.needle
+                .len()
+                .cmp(&a.needle.len())
+                .then_with(|| a.needle.cmp(b.needle))
+                .then_with(|| a.mapping.reference.cmp(&b.mapping.reference))
+        });
+        Self { restore, entries }
+    }
+
+    fn find(&self, text: &str, position: usize) -> Option<&Candidate<'a>> {
+        self.entries.iter().find(|candidate| {
+            text[position..].starts_with(candidate.needle)
+                && (!candidate.weak
+                    || strength::at_word_boundary(
+                        text,
+                        position,
+                        position + candidate.needle.len(),
+                    ))
+        })
+    }
+}
+
 /// Single pass over original bytes: inserted secrets/references are never scanned again.
 pub(super) fn replace<'a>(
     text: &'a str,
-    mappings: &[Mapping],
-    restore: bool,
+    candidates: &Candidates<'_>,
     used: &mut BTreeSet<String>,
 ) -> Cow<'a, str> {
-    if text.is_empty() || mappings.is_empty() {
+    if text.is_empty() || candidates.entries.is_empty() {
         return Cow::Borrowed(text);
     }
-    let mut candidates: Vec<_> = mappings
-        .iter()
-        // Outbound protection uses the loaded snapshot even if it expires during
-        // traversal. redact_request rejects expired used mappings before dispatch.
-        .filter(|m| (!restore || active(m)) && !m.secret.is_empty())
-        .collect();
-    candidates.sort_by(|a, b| {
-        let a_key = if restore { &a.reference } else { &a.secret };
-        let b_key = if restore { &b.reference } else { &b.secret };
-        b_key
-            .len()
-            .cmp(&a_key.len())
-            .then_with(|| a_key.cmp(b_key))
-            .then_with(|| a.reference.cmp(&b.reference))
-    });
-    if candidates.is_empty() {
-        return Cow::Borrowed(text);
-    }
+    let restore = candidates.restore;
     let mut result = String::new();
     let mut copied = 0;
     let mut position = 0;
@@ -150,10 +198,7 @@ pub(super) fn replace<'a>(
             position += reference.len();
             continue;
         }
-        if let Some(mapping) = candidates
-            .iter()
-            .find(|m| text[position..].starts_with(if restore { &m.reference } else { &m.secret }))
-        {
+        if let Some(Candidate { mapping, .. }) = candidates.find(text, position) {
             let (from, to) = if restore {
                 (&mapping.reference, &mapping.secret)
             } else {
@@ -1007,10 +1052,13 @@ pub(super) struct Redacted {
     pub placements: BTreeMap<String, BTreeSet<TextOrigin>>,
 }
 
+/// `include` 决定哪些映射参与出站替换；其余映射只用于核对与还原。
 pub fn redact_request(
     value: &mut AiRequest,
     mappings: &[Mapping],
+    include: impl Fn(&Mapping) -> bool,
 ) -> Result<Redacted, RedactionError> {
+    let candidates = Candidates::outbound(mappings, include);
     let mut used = BTreeSet::new();
     let mut placements: BTreeMap<String, BTreeSet<TextOrigin>> = BTreeMap::new();
     write_surface::request(
@@ -1019,7 +1067,7 @@ pub fn redact_request(
         Origin::of("other_text"),
         &mut |text, _, origin| {
             let mut here = BTreeSet::new();
-            let replaced = replace(text, mappings, false, &mut here);
+            let replaced = replace(text, &candidates, &mut here);
             if origin.fresh {
                 for reference in &here {
                     placements
@@ -1051,8 +1099,9 @@ pub(super) fn restore_item(
     mappings: &[Mapping],
     used: &mut BTreeSet<String>,
 ) -> Result<(), RedactionError> {
+    let candidates = Candidates::restoring(mappings);
     write_surface::item_text(item, false, Origin::of("other_text"), &mut |text, _, _| {
-        Ok(replace(text, mappings, true, used))
+        Ok(replace(text, &candidates, used))
     })
 }
 
@@ -1061,8 +1110,9 @@ pub(super) fn restore_arguments(
     mappings: &[Mapping],
     used: &mut BTreeSet<String>,
 ) -> Result<(), RedactionError> {
+    let candidates = Candidates::restoring(mappings);
     arguments_text(arguments, &mut |text, _| {
-        Ok(replace(text, mappings, true, used))
+        Ok(replace(text, &candidates, used))
     })
 }
 
@@ -1085,8 +1135,9 @@ pub(super) fn restore_unknown(
         .get("__google_response_metadata")
         .is_some_and(Value::is_object);
     let mut changed = false;
+    let candidates = Candidates::restoring(mappings);
     write_surface::wire_text(&mut value, Origin::of("other_text"), &mut |text, _, _| {
-        let replaced = replace(text, mappings, true, used);
+        let replaced = replace(text, &candidates, used);
         changed |= matches!(replaced, Cow::Owned(_));
         Ok(replaced)
     })?;
@@ -1104,10 +1155,11 @@ pub(super) fn restore_compaction(
     for item in &mut value.items {
         restore_item(item, mappings, &mut used)?;
     }
+    let candidates = Candidates::restoring(mappings);
     if let Some(output) = value.wire.get_mut("output").and_then(Value::as_array_mut) {
         for item in output {
             write_surface::wire_text(item, Origin::of("other_text"), &mut |text, _, _| {
-                Ok(replace(text, mappings, true, &mut used))
+                Ok(replace(text, &candidates, &mut used))
             })?;
         }
     }
@@ -1128,6 +1180,7 @@ pub(super) fn restore_response(
 ) -> Result<Restored, RedactionError> {
     let mut used = BTreeSet::new();
     let mut tool_calls: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let candidates = Candidates::restoring(mappings);
     for item in &mut value.items {
         write_surface::item_text(
             item,
@@ -1135,7 +1188,7 @@ pub(super) fn restore_response(
             Origin::of("other_text"),
             &mut |text, _, origin| {
                 let mut here = BTreeSet::new();
-                let restored = replace(text, mappings, true, &mut here);
+                let restored = replace(text, &candidates, &mut here);
                 if let (Some(id), "tool_arguments") = (origin.tool_id, origin.source) {
                     tool_calls
                         .entry(id.to_owned())
@@ -1159,6 +1212,93 @@ mod tests {
     use crate::marker::{IDENTIFIER_LEN, PREFIX, SUFFIX};
     use stravia_runtime_contract::hook::{ContextCompleteness, ContextSnapshot};
 
+    fn redact_all(value: &mut AiRequest, mappings: &[Mapping]) -> Result<Redacted, RedactionError> {
+        redact_request(value, mappings, |_| true)
+    }
+
+    fn mapping_of(secret: &str, fill: char) -> Mapping {
+        Mapping {
+            reference: format!(
+                "{PREFIX}{}{SUFFIX}",
+                fill.to_string().repeat(IDENTIFIER_LEN)
+            ),
+            secret: secret.into(),
+            rule_ids: Default::default(),
+        }
+    }
+
+    fn outbound(text: &str, mappings: &[Mapping]) -> String {
+        replace(
+            text,
+            &Candidates::outbound(mappings, |_| true),
+            &mut BTreeSet::new(),
+        )
+        .into_owned()
+    }
+
+    #[test]
+    fn weak_secrets_only_match_at_word_boundaries() {
+        let weak = mapping_of("pass", 'a');
+        let input = "password bypass my_pass pass1 | pass, = pass \"pass\" 请使用pass登录";
+        assert_eq!(
+            outbound(input, std::slice::from_ref(&weak)),
+            format!(
+                "password bypass my_pass pass1 | {r}, = {r} \"{r}\" 请使用{r}登录",
+                r = weak.reference
+            )
+        );
+    }
+
+    #[test]
+    fn strong_secrets_match_anywhere_including_next_to_word_characters() {
+        let strong = mapping_of("sk-proj-Qz8Xv2Lm9Tt4Rb7Hs1", 'b');
+        assert!(!strength::is_weak(&strong.secret));
+        // 字面量 `\n` 之后紧跟秘密：前一个字符是单词字符 `n`，强秘密仍须替换。
+        let input = format!("log\\n{0} and x{0}y", strong.secret);
+        assert_eq!(
+            outbound(&input, std::slice::from_ref(&strong)),
+            format!("log\\n{0} and x{0}y", strong.reference)
+        );
+    }
+
+    #[test]
+    fn a_weak_match_rejected_at_its_boundary_falls_back_to_a_shorter_candidate() {
+        // `foo bar x` 紧贴 `y`，在边界处被拒绝；同一位置更短的 `foo bar` 后面是空格，可以替换。
+        let longer = mapping_of("foo bar x", 'c');
+        let shorter = mapping_of("foo bar", 'd');
+        assert!(strength::is_weak(&longer.secret) && strength::is_weak(&shorter.secret));
+        let mappings = [longer, shorter.clone()];
+        assert_eq!(
+            outbound("foo bar xy", &mappings),
+            format!("{} xy", shorter.reference)
+        );
+    }
+
+    #[test]
+    fn restoration_ignores_secret_strength() {
+        let weak = mapping_of("pass", 'e');
+        let input = format!("see {}word", weak.reference);
+        let restored = replace(
+            &input,
+            &Candidates::restoring(std::slice::from_ref(&weak)),
+            &mut BTreeSet::new(),
+        );
+        assert_eq!(restored, "see password");
+    }
+
+    #[test]
+    fn outbound_replacement_skips_mappings_the_caller_excludes() {
+        let kept = mapping_of("Q8n4Vk7sT2p9X5a3Lc6D0h1R", 'f');
+        let excluded = mapping_of("Z7m3Bx5vN1c9Kd2Fq8Wr4Ty6", 'g');
+        let all = [kept.clone(), excluded.clone()];
+        let candidates = Candidates::outbound(&all, |m| m.secret != excluded.secret);
+        let input = format!("{} {}", kept.secret, excluded.secret);
+        assert_eq!(
+            replace(&input, &candidates, &mut BTreeSet::new()),
+            format!("{} {}", kept.reference, excluded.secret)
+        );
+    }
+
     #[test]
     fn replacements_keep_longest_matches_unicode_and_inserted_values_literal() {
         let first = Mapping {
@@ -1175,7 +1315,7 @@ mod tests {
         let mut used = BTreeSet::new();
         let input = "开始 密钥-long / 密钥 结束";
         assert_eq!(
-            replace(input, &mappings, false, &mut used),
+            replace(input, &Candidates::outbound(&mappings, |_| true), &mut used),
             format!(
                 "开始 {} / {} 结束",
                 mappings[1].reference, mappings[0].reference
@@ -1190,7 +1330,11 @@ mod tests {
             mappings[1].clone(),
         ];
         assert_eq!(
-            replace(&nested[0].reference, &nested, true, &mut BTreeSet::new()),
+            replace(
+                &nested[0].reference,
+                &Candidates::restoring(&nested),
+                &mut BTreeSet::new()
+            ),
             nested[1].reference,
         );
     }
@@ -1226,11 +1370,19 @@ mod tests {
         };
         let mut used = BTreeSet::new();
         let input = format!("{reference} {identifier}");
-        let replaced = replace(&input, std::slice::from_ref(&mapping), false, &mut used);
+        let replaced = replace(
+            &input,
+            &Candidates::outbound(std::slice::from_ref(&mapping), |_| true),
+            &mut used,
+        );
         assert_eq!(replaced, format!("{reference} {}", mapping.reference));
         assert_eq!(used, BTreeSet::from([mapping.reference.clone()]));
         assert_eq!(
-            replace(&replaced, &[mapping], true, &mut BTreeSet::new()),
+            replace(
+                &replaced,
+                &Candidates::restoring(std::slice::from_ref(&mapping)),
+                &mut BTreeSet::new()
+            ),
             format!("{reference} {identifier}")
         );
     }
@@ -1260,7 +1412,7 @@ mod tests {
             ContextSnapshot::from_request(&request, ContextCompleteness::Full)
                 .write_to_request(&mut request);
         }
-        redact_request(&mut request, std::slice::from_ref(&mapping)).unwrap();
+        redact_all(&mut request, std::slice::from_ref(&mapping)).unwrap();
         payload[0]["text"] = Value::String(mapping.reference.clone());
         let MessageContent::Blocks(blocks) = &request.items[0].content else {
             panic!("expected a rebuilt tool result");
@@ -1294,7 +1446,7 @@ mod tests {
         let mut request = AiRequest::new("model", vec![item]);
         for _ in 0..2 {
             assert!(matches!(
-                redact_request(&mut request, std::slice::from_ref(&mapping)),
+                redact_all(&mut request, std::slice::from_ref(&mapping)),
                 Err(RedactionError::AmbiguousToolResult)
             ));
             restore_item(
@@ -1334,7 +1486,7 @@ mod tests {
         let mut request = AiRequest::new("model", vec![item]);
         ContextSnapshot::from_request(&request, ContextCompleteness::Full)
             .write_to_request(&mut request);
-        redact_request(&mut request, std::slice::from_ref(&mapping)).unwrap();
+        redact_all(&mut request, std::slice::from_ref(&mapping)).unwrap();
         let MessageContent::Blocks(blocks) = &request.items[0].content else {
             panic!("expected a rebuilt tool result");
         };
@@ -1371,7 +1523,7 @@ mod tests {
         let texts = request_texts(&request, true)
             .expect("malformed arguments are still readable for detection");
         assert!(texts.iter().any(|text| text.contains(&mapping.secret)));
-        redact_request(&mut request, std::slice::from_ref(&mapping))
+        redact_all(&mut request, std::slice::from_ref(&mapping))
             .expect("malformed arguments must not fail redaction");
         let redacted = &request.items[0].tool_calls.as_ref().unwrap()[0].arguments;
         assert!(!redacted.contains(&mapping.secret));
@@ -1412,7 +1564,7 @@ mod tests {
         );
         let texts = request_texts(&request, true).expect("readable");
         assert!(texts.iter().any(|text| text.contains(&escaped.secret)));
-        redact_request(&mut request, std::slice::from_ref(&escaped)).expect("redact");
+        redact_all(&mut request, std::slice::from_ref(&escaped)).expect("redact");
         let redacted = &request.items[0].tool_calls.as_ref().unwrap()[0].arguments;
         assert!(redacted.contains(&escaped.reference));
         assert!(!redacted.contains(&escaped.secret));
@@ -1486,7 +1638,7 @@ mod tests {
                 .count(),
             9
         );
-        redact_request(&mut request, std::slice::from_ref(&mapping)).unwrap();
+        redact_all(&mut request, std::slice::from_ref(&mapping)).unwrap();
         assert_eq!(
             request.parameters.session.id.as_deref(),
             Some(mapping.secret.as_str())
@@ -1548,7 +1700,7 @@ mod tests {
             );
             let mut request = request(malformed);
             assert!(matches!(
-                redact_request(&mut request, std::slice::from_ref(&mapping)),
+                redact_all(&mut request, std::slice::from_ref(&mapping)),
                 Err(RedactionError::InvalidText)
             ));
 
@@ -1608,13 +1760,13 @@ mod tests {
                 user("thanks"),
             ],
         );
-        let outcome = redact_request(&mut replayed, std::slice::from_ref(&mapping)).unwrap();
+        let outcome = redact_all(&mut replayed, std::slice::from_ref(&mapping)).unwrap();
         assert_eq!(outcome.references, vec![mapping.reference.clone()]);
         assert!(outcome.placements.is_empty());
 
         // 同一密钥出现在最后一条 Assistant 之后的工具结果里：那是本次提交的位置，不是裸文本位置。
         let mut submitted = AiRequest::new("model", vec![user(&mapping.secret), call, result]);
-        let outcome = redact_request(&mut submitted, std::slice::from_ref(&mapping)).unwrap();
+        let outcome = redact_all(&mut submitted, std::slice::from_ref(&mapping)).unwrap();
         let places = &outcome.placements[&mapping.reference];
         assert_eq!(places.len(), 1);
         let place = places.iter().next().unwrap();
@@ -1670,15 +1822,14 @@ mod tests {
         let mut request = AiRequest::new("model", Vec::new());
         request.instructions = Some(mapping.secret.clone());
         assert!(matches!(
-            redact_request(&mut request, std::slice::from_ref(&mapping)),
+            redact_all(&mut request, std::slice::from_ref(&mapping)),
             Err(RedactionError::InvalidText)
         ));
         let mut used = BTreeSet::new();
         assert_eq!(
             replace(
                 &mapping.reference,
-                std::slice::from_ref(&mapping),
-                true,
+                &Candidates::restoring(std::slice::from_ref(&mapping)),
                 &mut used
             ),
             mapping.reference
@@ -1686,7 +1837,7 @@ mod tests {
         assert!(used.is_empty());
         request.instructions = Some("ordinary text".into());
         assert_eq!(
-            redact_request(&mut request, &[mapping]).unwrap().references,
+            redact_all(&mut request, &[mapping]).unwrap().references,
             Vec::<String>::new()
         );
         assert_eq!(request.instructions.as_deref(), Some("ordinary text"));

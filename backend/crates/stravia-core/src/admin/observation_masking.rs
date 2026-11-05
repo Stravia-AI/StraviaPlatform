@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+use stravia_credential_protection::policy::RuleScopeSource;
 use stravia_credential_protection::store::MappingStore;
 use stravia_runtime_contract::Principal;
 
@@ -74,6 +75,7 @@ impl CredentialMasker {
     /// 其交互的载荷与摘要不会被遍历。
     pub(super) async fn load<F>(
         mappings: &dyn MappingStore,
+        rules: &dyn RuleScopeSource,
         ids: impl IntoIterator<Item = String>,
         lookup: F,
     ) -> anyhow::Result<Self>
@@ -97,14 +99,22 @@ impl CredentialMasker {
             .values()
             .filter_map(|principal| maskable_principal(principal))
             .collect();
+        // 只在确有映射时读取规则状态，没有映射的响应不付出这次查询。
+        let scope = rules.rule_scope().await?;
         let mut loaded = BTreeMap::new();
         for principal in principals {
             let active = mappings.active(&Principal::new(principal)).await?;
-            if active.is_empty() {
+            // 创建它的规则已全部停用的映射不再遮罩：与出站替换一致，其明文不再被当作受保护内容。
+            let secrets = ProtectedSecrets::default();
+            secrets.register(
+                active
+                    .iter()
+                    .filter(|mapping| scope.allows(mapping))
+                    .map(|mapping| mapping.secret.as_str()),
+            );
+            if secrets.is_empty() {
                 continue;
             }
-            let secrets = ProtectedSecrets::default();
-            secrets.register(active.iter().map(|mapping| mapping.secret.as_str()));
             loaded.insert(principal.to_owned(), secrets);
         }
         Ok(Self {
@@ -267,6 +277,7 @@ impl CredentialMasker {
 /// 实时订阅的主体掩码器：有效映射最多每秒刷新一次，刷新失败时结束订阅而不是输出明文。
 pub(super) struct LiveCredentialMasker {
     mappings: Arc<dyn MappingStore>,
+    rules: Arc<dyn RuleScopeSource>,
     observation: InteractionObservation,
     interaction_id: String,
     principal: Option<String>,
@@ -277,11 +288,13 @@ pub(super) struct LiveCredentialMasker {
 impl LiveCredentialMasker {
     pub(super) async fn load(
         mappings: Arc<dyn MappingStore>,
+        rules: Arc<dyn RuleScopeSource>,
         observation: InteractionObservation,
         interaction_id: String,
     ) -> anyhow::Result<Self> {
         let mut masker = Self {
             mappings,
+            rules,
             observation,
             interaction_id,
             principal: None,
@@ -312,9 +325,17 @@ impl LiveCredentialMasker {
         if let Some(principal) = self.principal.as_deref().and_then(maskable_principal) {
             let active = self.mappings.active(&Principal::new(principal)).await?;
             if !active.is_empty() {
+                let scope = self.rules.rule_scope().await?;
                 let protected = ProtectedSecrets::default();
-                protected.register(active.iter().map(|mapping| mapping.secret.as_str()));
-                secrets = Some(protected);
+                protected.register(
+                    active
+                        .iter()
+                        .filter(|mapping| scope.allows(mapping))
+                        .map(|mapping| mapping.secret.as_str()),
+                );
+                if !protected.is_empty() {
+                    secrets = Some(protected);
+                }
             }
         }
         self.secrets = secrets;
@@ -410,9 +431,12 @@ impl AdminService {
             .collect();
         let lookup_ids = ids.clone();
         let observation = self.gw.observation.clone();
-        CredentialMasker::load(&*self.gw.redaction.mappings, ids, async move {
-            observation.interaction_principals(&lookup_ids).await
-        })
+        CredentialMasker::load(
+            &*self.gw.redaction.mappings,
+            &self.gw.redaction,
+            ids,
+            async move { observation.interaction_principals(&lookup_ids).await },
+        )
         .await
     }
 
@@ -423,6 +447,7 @@ impl AdminService {
     ) -> anyhow::Result<ObservationStream> {
         let masker = LiveCredentialMasker::load(
             Arc::clone(&self.gw.redaction.mappings),
+            Arc::new(self.gw.redaction.clone()),
             self.gw.observation.clone(),
             interaction_id.clone(),
         )
@@ -443,8 +468,32 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use stravia_credential_protection::policy::RuleScope;
     use stravia_credential_protection::store::{DetectedSecret, InternedMappings, Mapping};
     use stravia_runtime_contract::redaction::RedactionError;
+
+    /// 指定内置规则被禁用，其余启用。
+    struct Disabled(&'static [&'static str]);
+
+    #[async_trait]
+    impl RuleScopeSource for Disabled {
+        async fn rule_scope(&self) -> Result<RuleScope, RedactionError> {
+            Ok(RuleScope::new(
+                Arc::new(self.0.iter().map(|rule| (*rule).to_owned()).collect()),
+                [],
+            ))
+        }
+    }
+
+    /// 所有规则都启用：测试关注的是遮罩流程本身。
+    struct AllRules;
+
+    #[async_trait]
+    impl RuleScopeSource for AllRules {
+        async fn rule_scope(&self) -> Result<RuleScope, RedactionError> {
+            Ok(RuleScope::default())
+        }
+    }
 
     const PLAINTEXT: &str = "sk-live-abcdefghijklmnopqrstuvwxyz";
 
@@ -463,6 +512,8 @@ mod tests {
         existence_calls: AtomicUsize,
         any_active: bool,
         fail: bool,
+        /// 所有映射的创建规则；默认为空，即创建之前的无归因映射。
+        attributed_to: Vec<String>,
     }
 
     impl CountingMappings {
@@ -511,7 +562,7 @@ mod tests {
                 .map(|secret| Mapping {
                     reference: format!("ref-{secret}"),
                     secret: secret.clone(),
-                    rule_ids: Vec::new().into(),
+                    rule_ids: self.attributed_to.clone().into(),
                 })
                 .collect())
         }
@@ -619,6 +670,7 @@ mod tests {
         let lookup_calls = Arc::clone(&lookups);
         let masker = CredentialMasker::load(
             &mappings,
+            &AllRules,
             ["first".to_owned(), "second".to_owned()],
             async move {
                 lookup_calls.fetch_add(1, Ordering::AcqRel);
@@ -643,7 +695,7 @@ mod tests {
         let mappings = CountingMappings::default();
         let lookups = Arc::new(AtomicUsize::new(0));
         let lookup_calls = Arc::clone(&lookups);
-        CredentialMasker::load(&mappings, Vec::new(), async move {
+        CredentialMasker::load(&mappings, &AllRules, Vec::new(), async move {
             lookup_calls.fetch_add(1, Ordering::AcqRel);
             Ok(HashMap::new())
         })
@@ -659,6 +711,7 @@ mod tests {
         let mappings = CountingMappings::with(&[PLAINTEXT]);
         let masker = CredentialMasker::load(
             &mappings,
+            &AllRules,
             ["first".to_owned(), "second".to_owned(), "third".to_owned()],
             async {
                 Ok(HashMap::from([
@@ -710,6 +763,7 @@ mod tests {
         let mappings = CountingMappings::with(&[PLAINTEXT]);
         let masker = CredentialMasker::load(
             &mappings,
+            &AllRules,
             ["owned".to_owned(), "unprotected".to_owned()],
             async {
                 Ok(HashMap::from([
@@ -740,7 +794,7 @@ mod tests {
             fail: true,
             ..Default::default()
         };
-        let result = CredentialMasker::load(&mappings, ["first".to_owned()], async {
+        let result = CredentialMasker::load(&mappings, &AllRules, ["first".to_owned()], async {
             Ok(HashMap::from([("first".to_owned(), "owner".to_owned())]))
         })
         .await;
@@ -752,6 +806,7 @@ mod tests {
         let mappings = CountingMappings::with(&[PLAINTEXT]);
         let result = CredentialMasker::load(
             &mappings,
+            &AllRules,
             ["first".to_owned(), "missing".to_owned()],
             async { Ok(HashMap::from([("first".to_owned(), "owner".to_owned())])) },
         )
@@ -767,6 +822,7 @@ mod tests {
         let mappings = CountingMappings::with(&[PLAINTEXT]);
         let masker = CredentialMasker::load(
             &mappings,
+            &AllRules,
             [
                 "owner-interaction".to_owned(),
                 "other-interaction".to_owned(),
@@ -803,15 +859,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mappings_whose_only_rule_is_disabled_are_no_longer_masked() -> anyhow::Result<()> {
+        let mappings = CountingMappings {
+            attributed_to: vec!["github-pat".into()],
+            ..CountingMappings::with(&[PLAINTEXT])
+        };
+        let load = |rules: &'static [&'static str]| {
+            let mappings = &mappings;
+            async move {
+                CredentialMasker::load(
+                    mappings,
+                    &Disabled(rules),
+                    ["interaction".to_owned()],
+                    async {
+                        Ok(HashMap::from([(
+                            "interaction".to_owned(),
+                            "owner".to_owned(),
+                        )]))
+                    },
+                )
+                .await
+            }
+        };
+        let masked = |masker: &CredentialMasker| {
+            let mut events = vec![event(Some("interaction"), PLAINTEXT)];
+            masker.mask_events(&mut events, Some("interaction"));
+            events[0].payload["error"]["message"].clone()
+        };
+
+        assert_eq!(masked(&load(&[]).await?), json!("***"));
+        assert_eq!(masked(&load(&["unrelated"]).await?), json!("***"));
+        assert_eq!(
+            masked(&load(&["github-pat"]).await?),
+            json!(PLAINTEXT),
+            "禁用后明文不再被当作受保护内容"
+        );
+        // 正文 ETag 由 version() 参与计算：规则状态变化必须使旧的遮罩结果失效。
+        assert_ne!(
+            load(&[]).await?.version(),
+            load(&["github-pat"]).await?.version()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn client_and_upstream_error_pages_mask_messages_only_for_owned_interactions()
     -> anyhow::Result<()> {
         let mappings = CountingMappings::with(&[PLAINTEXT]);
-        let masker = CredentialMasker::load(&mappings, ["owner-interaction".to_owned()], async {
-            Ok(HashMap::from([(
-                "owner-interaction".to_owned(),
-                "owner".to_owned(),
-            )]))
-        })
+        let masker = CredentialMasker::load(
+            &mappings,
+            &AllRules,
+            ["owner-interaction".to_owned()],
+            async {
+                Ok(HashMap::from([(
+                    "owner-interaction".to_owned(),
+                    "owner".to_owned(),
+                )]))
+            },
+        )
         .await?;
         let failure = |message: &str| FailureDiagnostic {
             source: Some("upstream".into()),
@@ -934,6 +1039,7 @@ mod tests {
         let (_directory, _pool, observation) = test_observation().await?;
         let masker = LiveCredentialMasker::load(
             Arc::clone(&mappings) as Arc<dyn MappingStore>,
+            Arc::new(AllRules),
             observation,
             "interaction".into(),
         )
@@ -952,6 +1058,7 @@ mod tests {
         let (_directory, _pool, observation) = test_observation().await?;
         let mut masker = LiveCredentialMasker::load(
             Arc::clone(&mappings) as Arc<dyn MappingStore>,
+            Arc::new(AllRules),
             observation,
             "interaction".into(),
         )
@@ -986,6 +1093,7 @@ mod tests {
         let (_directory, _pool, observation) = test_observation().await?;
         let masker = LiveCredentialMasker::load(
             Arc::new(mappings) as Arc<dyn MappingStore>,
+            Arc::new(AllRules),
             observation,
             "interaction".into(),
         )
@@ -1034,7 +1142,7 @@ mod tests {
 
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query(
-            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,updated_at,pending_until) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_used_at,pending_until) VALUES (?,?,?,?,?,?)",
         )
         .bind("ref-owner")
         .bind("api-key:owner")
@@ -1054,7 +1162,7 @@ mod tests {
 
         let lookup_ids = ids.clone();
         let lookup = observation.clone();
-        let masker = CredentialMasker::load(&store, ids, async move {
+        let masker = CredentialMasker::load(&store, &AllRules, ids, async move {
             lookup.interaction_principals(&lookup_ids).await
         })
         .await?;

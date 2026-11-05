@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::interaction_observation::{RunObserver, RunPublicationGuard};
 use crate::storage::DynStorage;
+use stravia_credential_protection::policy::{
+    self, DISABLED_RULES_KEY, RedactionPolicy, RuleScope, RuleScopeSource,
+};
 use stravia_credential_protection::store::{Mapping, MappingStore};
 use stravia_credential_protection::{
     CredentialDiscovery, RedactionHost, RedactionObserver, SqlCustomRuleStore,
@@ -14,20 +17,33 @@ use stravia_runtime_contract::redaction::{RedactionError, RedactionTrace};
 
 struct SettingsHost(DynStorage);
 
+/// 读取总开关与被禁用的内置规则。任一设置无法解释时失败关闭：
+/// 不能在读不懂配置时猜测「全部启用」或「全部关闭」。
+pub(crate) async fn read_policy(storage: &DynStorage) -> Result<RedactionPolicy, RedactionError> {
+    let settings = storage.settings();
+    let enabled = match settings
+        .get(stravia_credential_protection::SETTING_KEY)
+        .await
+    {
+        Ok(None) => false,
+        Ok(Some(value)) if value == "false" => false,
+        Ok(Some(value)) if value == "true" => true,
+        _ => return Err(RedactionError::Storage),
+    };
+    let disabled = settings
+        .get(DISABLED_RULES_KEY)
+        .await
+        .map_err(|_| RedactionError::Storage)?;
+    Ok(RedactionPolicy {
+        enabled,
+        disabled_rules: Arc::new(policy::parse_disabled_rules(disabled.as_deref())?),
+    })
+}
+
 #[async_trait::async_trait]
 impl RedactionHost for SettingsHost {
-    async fn enabled(&self) -> Result<bool, RedactionError> {
-        match self
-            .0
-            .settings()
-            .get(stravia_credential_protection::SETTING_KEY)
-            .await
-        {
-            Ok(None) => Ok(false),
-            Ok(Some(value)) if value == "false" => Ok(false),
-            Ok(Some(value)) if value == "true" => Ok(true),
-            _ => Err(RedactionError::Storage),
-        }
+    async fn policy(&self) -> Result<RedactionPolicy, RedactionError> {
+        read_policy(&self.0).await
     }
 }
 
@@ -155,7 +171,16 @@ impl ReversibleRedaction {
     }
 }
 
+#[async_trait::async_trait]
+impl RuleScopeSource for ReversibleRedaction {
+    async fn rule_scope(&self) -> Result<RuleScope, RedactionError> {
+        self.capability.rule_scope().await
+    }
+}
+
 #[cfg(test)]
 mod custom_rule_tests;
+#[cfg(test)]
+mod disabled_rule_tests;
 #[cfg(test)]
 mod mapping_tests;
