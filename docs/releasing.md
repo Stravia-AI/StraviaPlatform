@@ -55,6 +55,8 @@ CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:we
 
 构建后会验证应用的 Ad-hoc 代码签名、Mach-O 架构、DMG 校验和、归档可读性与签名文件存在性。当前采用 `APPLE_SIGNING_IDENTITY=-`，没有 Developer ID 签名和 Apple 公证。Ad-hoc 不是 Apple 认证，Tauri updater 签名也不能替代它；从浏览器下载后，Gatekeeper 仍可能阻止首次启动。不得把构建通过描述为已经通过 Gatekeeper 或用户安装验证。
 
+当前 Tauri 已默认启用 macOS 透明窗口所需 API，不再设置废弃的 `macOSPrivateApi` / `macos-private-api` 开关；窗口透明与原生视觉效果配置保持不变。
+
 只验证 macOS、不运行完整发布矩阵时：
 
 ```bash

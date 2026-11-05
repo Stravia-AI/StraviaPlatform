@@ -43,9 +43,6 @@ rust-embed = { workspace = true }
 tauri-plugin-wdio = { workspace = true, optional = true }
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-tauri = { workspace = true, features = ["macos-private-api"] }
-
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
