@@ -1614,25 +1614,26 @@ async fn host_authorized_continuation_replay_sends_full_history_without_a_thread
     .await
     .expect("the host-authorized full replay succeeds");
 
-    let sent = services.requests.lock();
-    assert_eq!(sent.len(), 3);
-    let replay: Value = serde_json::from_slice(&sent[2].body).unwrap();
-    assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
-    assert!(!wire_header(&sent[2], "anthropic-beta").contains("message-threads"));
-    assert_eq!(replay["messages"].as_array().unwrap().len(), 3);
-    assert_eq!(replay["messages"][1]["content"], reply);
-    assert!(replay.get("tools").is_some());
-    // 重放是独立的新插件操作：重试的 HTTP 请求使用新的 request id，但仍不复用
-    // 被拒绝的线程状态。
-    assert_ne!(
-        wire_header(&sent[1], "x-client-request-id"),
-        wire_header(&sent[2], "x-client-request-id")
-    );
-    assert_eq!(
-        *services.wire_log.lock(),
-        ["start", "request", "start", "request", "start", "request"]
-    );
-    drop(sent);
+    {
+        let sent = services.requests.lock();
+        assert_eq!(sent.len(), 3);
+        let replay: Value = serde_json::from_slice(&sent[2].body).unwrap();
+        assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
+        assert!(!wire_header(&sent[2], "anthropic-beta").contains("message-threads"));
+        assert_eq!(replay["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(replay["messages"][1]["content"], reply);
+        assert!(replay.get("tools").is_some());
+        // 重放是独立的新插件操作：重试的 HTTP 请求使用新的 request id，但仍不复用
+        // 被拒绝的线程状态。
+        assert_ne!(
+            wire_header(&sent[1], "x-client-request-id"),
+            wire_header(&sent[2], "x-client-request-id")
+        );
+        assert_eq!(
+            *services.wire_log.lock(),
+            ["start", "request", "start", "request", "start", "request"]
+        );
+    }
 
     provider.operation_metadata.remove("continuation_replay");
     history.push(json!({"role":"assistant","content":reply}));

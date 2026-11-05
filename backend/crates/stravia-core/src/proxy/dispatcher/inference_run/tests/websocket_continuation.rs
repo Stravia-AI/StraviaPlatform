@@ -460,42 +460,28 @@ async fn responses_advanced_tip_forces_sibling_full_history() {
 }
 
 #[tokio::test]
-async fn responses_coded_missing_tip_replays_once_with_existing_retry_budget() {
-    let fixture = responses_websocket_fixture().await;
-    set_target_retry_budget(&fixture.gateway, MODEL, 1).await;
-    let first = user_input("parent");
-    let (status, parent) = post_responses(&fixture, vec![first.clone()]).await;
-    assert_eq!(status, StatusCode::OK, "{parent}");
-    *fixture.state.next_error.lock() = Some(UpstreamError::MissingPrevious);
-    let (status, child) = post_responses(&fixture, continued_input(&first, &parent, "child")).await;
-    assert_eq!(status, StatusCode::OK, "{child}");
-    let frames = fixture.state.frames.lock();
-    assert_eq!(
-        frames.len(),
-        3,
-        "one continuation and one full replay: {frames:?}"
-    );
-    assert_eq!(frames[1].frame["previous_response_id"], "upstream-0");
-    assert!(frames[2].frame.get("previous_response_id").is_none());
-    assert_eq!(frames[2].frame["input"].as_array().map(Vec::len), Some(3));
-}
-
-#[tokio::test]
-async fn responses_remote_missing_tip_requires_existing_retry_budget() {
-    let fixture = responses_websocket_fixture().await;
-    let first = user_input("parent");
-    let (status, parent) = post_responses(&fixture, vec![first.clone()]).await;
-    assert_eq!(status, StatusCode::OK, "{parent}");
-    *fixture.state.next_error.lock() = Some(UpstreamError::MissingPrevious);
-    let (status, _) = post_responses(&fixture, continued_input(&first, &parent, "child")).await;
-    assert_ne!(status, StatusCode::OK);
-    let frames = fixture.state.frames.lock();
-    assert_eq!(
-        frames.len(),
-        2,
-        "remote miss with retry budget zero must not replay: {frames:?}"
-    );
-    assert_eq!(frames[1].frame["previous_response_id"], "upstream-0");
+async fn responses_coded_missing_tip_replays_once_independently_of_retry_budget() {
+    for retry_budget in [0, 1] {
+        let fixture = responses_websocket_fixture().await;
+        set_target_retry_budget(&fixture.gateway, MODEL, retry_budget).await;
+        let first = user_input("parent");
+        let (status, parent) = post_responses(&fixture, vec![first.clone()]).await;
+        assert_eq!(status, StatusCode::OK, "{parent}");
+        *fixture.state.next_error.lock() = Some(UpstreamError::MissingPrevious);
+        let (status, child) =
+            post_responses(&fixture, continued_input(&first, &parent, "child")).await;
+        assert_eq!(status, StatusCode::OK, "{child}");
+        assert_eq!(child["output"][0]["content"][0]["text"], "answer-1");
+        let frames = fixture.state.frames.lock();
+        assert_eq!(
+            frames.len(),
+            3,
+            "one continuation and one full replay: {frames:?}"
+        );
+        assert_eq!(frames[1].frame["previous_response_id"], "upstream-0");
+        assert!(frames[2].frame.get("previous_response_id").is_none());
+        assert_eq!(frames[2].frame["input"].as_array().map(Vec::len), Some(3));
+    }
 }
 
 #[tokio::test]

@@ -45,9 +45,9 @@ CI 的 Admin 与 Chromium E2E 复用 `task test:e2e:admin` 和 `task test:e2e:we
 
 `stravia-updater.json` 使用版本化 Release asset URL，并内联每个平台 `.sig` 的内容。普通安装包、`.sig`、清单和 `SHA256SUMS` 会一起上传到同一个精确版本 Release。更新分发服务读取该清单后仅把平台下载 URL 重写为自己的下载端点；版本、平台键、签名和下载字节保持不变。
 
-### macOS 构建与独立验证
+### macOS 发布构建与手动验证
 
-`release-macos.yml` 是正式发布与手动验证共用的构建流程。在 `macos-15`（Apple Silicon）和 `macos-15-intel`（Intel）原生构建，分别上传 `desktop-darwin-aarch64` 和 `desktop-darwin-x86_64` Actions artifacts，每个平台包含：
+macOS 构建直接集成在 `release.yml` 的 `build-macos` 任务中，正式发布与手动验证共用同一任务，不使用独立 workflow。在 `macos-15`（Apple Silicon）和 `macos-15-intel`（Intel）原生构建，分别上传 `desktop-darwin-aarch64` 和 `desktop-darwin-x86_64` Actions artifacts，每个平台包含：
 
 - `stravia-desktop-v<version>-darwin-<arch>.dmg`：首次安装镜像。
 - `stravia-desktop-v<version>-darwin-<arch>.app.tar.gz`：Tauri updater 使用的应用归档。

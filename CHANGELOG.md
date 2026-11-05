@@ -4,7 +4,7 @@
 
 ### Added
 
-- macOS desktop release CI now builds native Intel and Apple Silicon DMG installers and signed Tauri updater archives. Tag releases require all six desktop platforms; a macOS-only manual validation run uploads artifacts without publishing. macOS apps use Ad-hoc signing, not Developer ID signing or Apple notarization, so Gatekeeper may block the first launch. Existing Desktop versions, including 0.6.2, reject the new six-platform update manifest and need a manual installation of the first version supporting it.
+- The unified `release.yml` workflow now builds native Intel and Apple Silicon DMG installers and signed Tauri updater archives, without a separate macOS workflow. Tag releases require all six desktop platforms; a macOS-only manual validation run uploads artifacts without publishing. macOS apps use Ad-hoc signing, not Developer ID signing or Apple notarization, so Gatekeeper may block the first launch. Existing Desktop versions, including 0.6.2, reject the new six-platform update manifest and need a manual installation of the first version supporting it.
 
 ### Changed
 
