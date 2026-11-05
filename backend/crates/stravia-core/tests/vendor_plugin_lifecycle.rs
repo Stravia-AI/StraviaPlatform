@@ -1020,7 +1020,10 @@ async fn protocol_selection_errors_preserve_diagnostics_but_protect_client_error
     Ok(())
 }
 
-async fn assert_wasm_fault_is_scoped(mode: &str) -> anyhow::Result<()> {
+async fn assert_wasm_fault_is_scoped(
+    mode: &str,
+    context: Option<stravia_core::proxy::context::RequestContext>,
+) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
     install(&gateway, "lifecycle-v1.wasm", false).await?;
@@ -1048,8 +1051,58 @@ async fn assert_wasm_fault_is_scoped(mode: &str) -> anyhow::Result<()> {
     .await?;
     let token = api_key(&gateway, &[&fault.route_id, &healthy.route_id]).await?;
     let router = create_router(gateway.clone());
+    let expected_status = if context.is_some() {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    let mut deadline_control = None;
+    let fault_router = if let Some(context) = context {
+        deadline_control = Some((
+            context.deadline.clone(),
+            gateway.admin().observation_subscribe(0),
+        ));
+        Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(
+                    stravia_core::proxy::ingress::open_responses::responses::handler,
+                ),
+            )
+            .with_state(gateway.clone())
+            .layer(axum::Extension(context))
+    } else {
+        router.clone()
+    };
 
-    let mut fault_call = tokio::spawn(invoke(router.clone(), token.clone(), fault.route_id));
+    let mut fault_call = tokio::spawn(invoke(fault_router, token.clone(), fault.route_id));
+    if let Some((deadline, mut observations)) = deadline_control {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    response = &mut fault_call => {
+                        anyhow::bail!("guest finished before its deadline was expired: {:?}", response?);
+                    }
+                    update = futures::StreamExt::next(&mut observations) => {
+                        let Some(update) = update else {
+                            anyhow::bail!("observation stream ended before the guest started");
+                        };
+                        // 首个 attempt 的 Started 合并进 Model Turn 开始事件。
+                        if let stravia_core::admin::ObservationUpdate::Change(event) = update
+                            && event.kind == "model_turn_started"
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        // Started 由真实 guest 发出；此后主动过期共享时限，避免等待产品的
+        // 300 秒空闲窗口，也不把 CPU 死循环重新伪装成已移除的 fuel 配额错误。
+        deadline.reset(std::time::Instant::now());
+    }
     let failed = tokio::select! {
         response = &mut fault_call => response?,
         request = upstream.next() => {
@@ -1058,8 +1111,7 @@ async fn assert_wasm_fault_is_scoped(mode: &str) -> anyhow::Result<()> {
         }
     };
     assert_eq!(
-        failed.0,
-        StatusCode::BAD_GATEWAY,
+        failed.0, expected_status,
         "unexpected fault response: {}",
         failed.1
     );
@@ -1961,7 +2013,7 @@ async fn one_operation_can_overlap_http_calls_without_implicitly_forwarding_cred
 async fn protocol_selection_cannot_perform_network_state_or_event_side_effects()
 -> anyhow::Result<()> {
     for mode in ["selection-http", "selection-state", "selection-event"] {
-        assert_wasm_fault_is_scoped(mode).await?;
+        assert_wasm_fault_is_scoped(mode, None).await?;
     }
     Ok(())
 }
@@ -2001,7 +2053,11 @@ async fn an_http_origin_does_not_authorize_websocket_on_the_same_host_and_port()
 /// 限定在该调用内且插件可继续服务。
 #[tokio::test]
 async fn spinning_guest_is_preempted_by_deadline_and_the_plugin_recovers() -> anyhow::Result<()> {
-    assert_wasm_fault_is_scoped("fuel").await
+    let context = stravia_core::proxy::context::RequestContext::new(
+        stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+        std::time::Duration::from_secs(300),
+    );
+    assert_wasm_fault_is_scoped("fuel", Some(context)).await
 }
 
 /// 沙箱的字节/内存预算已移除；这些模式原先会触顶失败，现在应与

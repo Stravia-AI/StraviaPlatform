@@ -423,6 +423,7 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 
 - 所有 crate（包括 Wasm 契约 fixture）的 package 版本与依赖统一由根 `Cargo.toml` 的 workspace 声明，依赖解析由唯一的根 `Cargo.lock` 管理；子清单继承 workspace，不维护独立版本、依赖版本或锁文件。
 - `stravia-vendor-capability-contract-fixture`、`stravia-vendor-lifecycle-contract-fixture`、`stravia-vendor-management-contract-fixture`、`stravia-vendor-legacy-contract-fixture` 是根 workspace 中的 Wasm 专用工作负载，通过 `task build:vendor-fixtures` 构建，并由真实 Component 契约、生命周期及管理回归覆盖。手动 entrypoint fixture 使用当前 `0.6.0` WIT，不依赖 SDK 的 guest 封装，验证 HTTP 协商、原始响应、预编码请求及无压缩 WS；它不承诺旧 ABI 兼容。常规 host clippy 与 unit lane（包括测试预编译）显式排除这四个 crate，不在 host 上编译 fixture；unit lane 仍排除 `stravia-desktop`。
+- `stravia-core/tests/vendor_plugin_lifecycle.rs` 的 CPU 死循环回归使用受控 `RequestContext` 调用真实 Responses handler，在 guest 发出 Started、首个 attempt 合并进 Model Turn 开始事件后，主动过期共享 deadline。它断言 HTTP 504、无已知用量和同一插件仍能处理健康调用，不等待或修改产品默认的 300 秒空闲时限；协议选择副作用等插件故障仍严格断言 HTTP 502。
 - `backend/crates/stravia-vendor-sdk/` 提供 Rust SDK 与 `stravia:vendor@0.6.0` WIT；`stravia-runtime-contract` 提供 canonical 类型，`stravia-protocol-codec` 提供四类标准 codec 与通用 canonical 转换辅助。
 - `backend/crates/stravia-vendor-runtime/` 实现 Component 执行与受控资源；Core 的 `src/plugin/` 负责安装、连接快照、网络授权、私有状态及版本切换协调。
 - 同一 Engine 的运行时克隆可复用相同完整 SHA-256 字节身份、仍被已加载版本持有的不可变编译 Component，并合并同一身份的并发编译。缓存只保存有界元数据与弱引用，不延长退役版本的生命周期，也不缓存加载失败；每次加载仍检查 imports，并使用新的 Store 实例读取和验证 descriptor。操作的 HostServices、私有状态、取消与权限边界不共享。
