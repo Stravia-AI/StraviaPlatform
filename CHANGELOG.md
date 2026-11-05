@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.3] - 2026-11-05
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Added
 
 - Credential Protection → Current rules now lets administrators disable bundled rules. Disabling a rule also stops outbound replacement and Observation masking for remembered credentials attributed only to disabled rules; disabling or deleting a custom rule has the same effect. Existing placeholders remain restorable, and credentials detected again by an enabled rule are still replaced. The rules API adds `enabled`; `PUT /api/v1/reversible-redaction/disabled-rules` replaces the disabled built-in rule set.
