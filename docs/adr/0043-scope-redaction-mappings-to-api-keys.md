@@ -4,6 +4,8 @@ status: accepted
 
 # 可逆脱敏映射以 API Key 为隔离边界
 
+> **局部被取代。** [ADR-0090](0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md) 取代下述局部约定：本文「占位符复用」中的存续期内出站复用增加规则开关条件：归因为空或至少一条创建规则当前启用才参与出站替换；禁用、停用或删除规则不阻止旧占位符还原。「保留时间」中已发布映射按首次发布加 N 回收，改为按 `last_used_at + N + G`（G 为一小时）滑动回收，Turn 节点引用保护与 Principal 访问边界不变。
+
 > [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 部分取代本文「保留时间」与占位符复用中的有效期约定：映射不再有可续期的到期时间，改为被 Turn 节点引用时不回收、失去引用后按未发布窗口或首次发布时刻加统一历史保留天数回收，扫描是唯一的删除方。映射的访问边界仍只看 Principal，不因此改变。
 
 Stravia 持久化可恢复凭据原文的可逆脱敏映射状态，使后续轮次及进程重启后仍能还原 Provider 返回的已有占位符。映射只以 Stravia API Key 对应的 Principal 为访问隔离边界；同一 API Key 下持有有效占位符时可跨对话和分支还原，不要求历史祖先关系，其他 API Key 不得还原。

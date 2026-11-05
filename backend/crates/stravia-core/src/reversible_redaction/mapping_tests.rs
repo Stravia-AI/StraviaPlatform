@@ -4,6 +4,8 @@ use stravia_credential_protection::store::{DetectedSecret, MappingStore, SqlMapp
 use stravia_runtime_contract::Principal;
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+const HOUR_MS: i64 = 60 * 60 * 1_000;
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -88,6 +90,178 @@ async fn assert_published_mapping_is_kept_for_retention(store: &SqlMappingStore)
         .unwrap();
     assert_eq!(store.plaintext(&reference).await.unwrap(), None);
     assert!(store.active(&owner).await.unwrap().is_empty());
+}
+
+async fn last_used_at(store: &SqlMappingStore, reference: &str) -> i64 {
+    let sql = "SELECT last_used_at FROM reversible_redaction_mappings WHERE reference = $1";
+    match store {
+        SqlMappingStore::Sqlite(pool) => {
+            sqlx::query_scalar(sql)
+                .bind(reference)
+                .fetch_one(pool)
+                .await
+        }
+        SqlMappingStore::Postgres(pool) => {
+            sqlx::query_scalar(sql)
+                .bind(reference)
+                .fetch_one(pool)
+                .await
+        }
+    }
+    .unwrap()
+}
+
+async fn set_last_used_at(store: &SqlMappingStore, reference: &str, value: i64) {
+    let sql = "UPDATE reversible_redaction_mappings SET last_used_at = $2 WHERE reference = $1";
+    match store {
+        SqlMappingStore::Sqlite(pool) => sqlx::query(sql)
+            .bind(reference)
+            .bind(value)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+        SqlMappingStore::Postgres(pool) => sqlx::query(sql)
+            .bind(reference)
+            .bind(value)
+            .execute(pool)
+            .await
+            .map(|_| ()),
+    }
+    .unwrap();
+}
+
+async fn queued_for_reclamation(store: &SqlMappingStore, reference: &str, enqueue: bool) -> i64 {
+    let insert =
+        "INSERT INTO redaction_mapping_gc(reference) VALUES ($1) ON CONFLICT(reference) DO NOTHING";
+    let count = "SELECT COUNT(*) FROM redaction_mapping_gc WHERE reference = $1";
+    match store {
+        SqlMappingStore::Sqlite(pool) => {
+            if enqueue {
+                sqlx::query(insert)
+                    .bind(reference)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query_scalar(count)
+                .bind(reference)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        SqlMappingStore::Postgres(pool) => {
+            if enqueue {
+                sqlx::query(insert)
+                    .bind(reference)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query_scalar(count)
+                .bind(reference)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+    }
+}
+
+async fn published_mapping(store: &SqlMappingStore, owner: &Principal, secret: &str) -> String {
+    let reference = store
+        .intern(owner, &[detect(secret)])
+        .await
+        .unwrap()
+        .mappings
+        .remove(0)
+        .reference;
+    store
+        .publish(owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    reference
+}
+
+/// 重复使用在续期粒度内只读不写；超出粒度后才把起点推到当前。
+async fn assert_use_renews_the_idle_window_at_most_once_per_hour(store: &SqlMappingStore) {
+    let owner = Principal::new("renewal-owner");
+    let reference = published_mapping(store, &owner, "renewal-secret").await;
+    let first = last_used_at(store, &reference).await;
+
+    store
+        .publish(&owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    assert_eq!(
+        last_used_at(store, &reference).await,
+        first,
+        "粒度内的重复使用不写库"
+    );
+
+    let stale = first - 2 * HOUR_MS;
+    set_last_used_at(store, &reference, stale).await;
+    store
+        .publish(&owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    assert!(
+        last_used_at(store, &reference).await >= first,
+        "超过粒度的使用把起点推到当前"
+    );
+}
+
+/// 保留期从最近一次使用起算：被使用过的映射活过首次发布后的 N 天，
+/// 并且要超过 N 加续期粒度才被回收。
+async fn assert_idle_window_slides_from_the_last_use(store: &SqlMappingStore) {
+    let owner = Principal::new("sliding-owner");
+    let reference = published_mapping(store, &owner, "sliding-secret").await;
+    let used = now();
+    // 先把水位线拉回到本场景之前。
+    store.sweep(used - 400 * DAY_MS, DAY * 7).await.unwrap();
+    set_last_used_at(store, &reference, used - 6 * DAY_MS).await;
+    store.sweep(used, DAY * 7).await.unwrap();
+    assert!(store.plaintext(&reference).await.unwrap().is_some());
+
+    // 在第 6 天再次使用：窗口从此刻重新计算，早已超过首次发布后的 N 天仍保留。
+    store
+        .publish(&owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    store.sweep(used + 6 * DAY_MS, DAY * 7).await.unwrap();
+    assert!(store.plaintext(&reference).await.unwrap().is_some());
+
+    store
+        .sweep(used + 7 * DAY_MS + HOUR_MS - 1_000, DAY * 7)
+        .await
+        .unwrap();
+    assert!(
+        store.plaintext(&reference).await.unwrap().is_some(),
+        "未超过 N 加续期粒度不回收"
+    );
+    store
+        .sweep(used + 7 * DAY_MS + HOUR_MS + 60_000, DAY * 7)
+        .await
+        .unwrap();
+    assert_eq!(store.plaintext(&reference).await.unwrap(), None);
+}
+
+/// 已被扫描入队的映射在领取前被使用：领取时按最新的使用时刻复查，保留映射并移出队列。
+async fn assert_reused_mapping_leaves_the_reclamation_queue(store: &SqlMappingStore) {
+    let owner = Principal::new("queued-owner");
+    let reference = published_mapping(store, &owner, "queued-secret").await;
+    set_last_used_at(store, &reference, now() - 30 * DAY_MS).await;
+    assert_eq!(queued_for_reclamation(store, &reference, true).await, 1);
+
+    store
+        .publish(&owner, std::slice::from_ref(&reference))
+        .await
+        .unwrap();
+    store.sweep(now(), DAY * 7).await.unwrap();
+
+    assert_eq!(
+        store.plaintext(&reference).await.unwrap().as_deref(),
+        Some("queued-secret")
+    );
+    assert_eq!(queued_for_reclamation(store, &reference, false).await, 0);
 }
 
 /// 并发 intern 只有一个事务可声明新建；规则随映射创建持久化，再次命中不改写归因；
@@ -264,6 +438,9 @@ async fn sqlite_mapping_reclaims_only_after_pending_or_published_floor() {
     let store = SqlMappingStore::sqlite(pool.clone());
     assert_unpublished_mapping_waits_for_pending_window(&store).await;
     assert_published_mapping_is_kept_for_retention(&store).await;
+    assert_use_renews_the_idle_window_at_most_once_per_hour(&store).await;
+    assert_idle_window_slides_from_the_last_use(&store).await;
+    assert_reused_mapping_leaves_the_reclamation_queue(&store).await;
     pool.close().await;
 }
 
@@ -297,6 +474,9 @@ async fn postgres_mapping_reclaims_only_after_pending_or_published_floor() {
     let store = SqlMappingStore::postgres(pool.clone());
     assert_unpublished_mapping_waits_for_pending_window(&store).await;
     assert_published_mapping_is_kept_for_retention(&store).await;
+    assert_use_renews_the_idle_window_at_most_once_per_hour(&store).await;
+    assert_idle_window_slides_from_the_last_use(&store).await;
+    assert_reused_mapping_leaves_the_reclamation_queue(&store).await;
     assert_concurrent_intern_keeps_rules_and_isolates_principals(&store).await;
     assert_batch_publish_is_scoped_to_the_principal(&store).await;
     let restart_owner = Principal::new("restart-owner");

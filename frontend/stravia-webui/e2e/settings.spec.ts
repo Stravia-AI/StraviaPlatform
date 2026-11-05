@@ -2110,6 +2110,7 @@ const credentialCatalog: CredentialRuleCatalog = {
   filter: 'len(secret) > 8',
   rules: Array.from({ length: 35 }, (_, index) => ({
     id: `fixture-rule-${index}`,
+    enabled: true,
     name: `Fixture credential ${index}`,
     target: 'Fixture API credentials',
     description: 'Detects test-only API credentials with local context.',

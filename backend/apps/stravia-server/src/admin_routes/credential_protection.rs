@@ -4,7 +4,7 @@ use stravia_core::admin::{
     CredentialDiscoveryError, CredentialDiscoveryQuery, CredentialDiscoveryReuseQuery,
     CredentialVisibility,
 };
-use stravia_credential_protection::{CustomRuleError, CustomRuleInput};
+use stravia_credential_protection::{CustomRuleError, CustomRuleInput, DisabledRulesError};
 
 use super::*;
 
@@ -18,6 +18,36 @@ pub(super) async fn credential_rules(State(gateway): State<Gateway>) -> Response
     match gateway.admin().credential_protection_rules().await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
         Err(_) => unavailable("credential_rules_unavailable"),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct DisabledRulesInput {
+    rule_ids: Vec<String>,
+}
+
+pub(super) async fn set_disabled_credential_rules(
+    State(gateway): State<Gateway>,
+    Json(input): Json<DisabledRulesInput>,
+) -> Response {
+    match gateway
+        .admin()
+        .set_credential_disabled_rules(input.rule_ids)
+        .await
+    {
+        Ok(rule_ids) => {
+            Json(serde_json::json!({ "data": { "rule_ids": rule_ids } })).into_response()
+        }
+        Err(DisabledRulesError::Unknown(rule_id)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "code": "credential_rule_unknown",
+                "error": DisabledRulesError::Unknown(rule_id.clone()).to_string(),
+                "params": { "rule_id": rule_id },
+            })),
+        )
+            .into_response(),
+        Err(DisabledRulesError::Storage) => unavailable("credential_disabled_rules_unavailable"),
     }
 }
 

@@ -549,10 +549,13 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
 
 #[tokio::test]
 async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
-    for (first_enabled, second_enabled, reusable) in [
-        (true, true, true),
-        (true, false, false),
-        (false, true, false),
+    // `rule_disabled` 在两次请求之间禁用命中 SECRET 的内置规则：总开关仍开，
+    // 但出站视图变回明文，同样不能复用旧的 Provider 侧历史。
+    for (first_enabled, second_enabled, rule_disabled, reusable) in [
+        (true, true, false, true),
+        (true, false, false, false),
+        (false, true, false, false),
+        (true, true, true, false),
     ] {
         let (upstream, _, captured) =
             serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
@@ -609,6 +612,13 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
             )
             .await
             .unwrap();
+        if rule_disabled {
+            gateway
+                .admin()
+                .set_credential_disabled_rules(vec!["github-pat".into()])
+                .await
+                .unwrap();
+        }
         let response = reqwest::Client::new()
             .post(&url)
             .headers(headers)
@@ -636,7 +646,10 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
             assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
         } else {
             assert!(requests[1].get("previous_response_id").is_none());
-            assert_eq!(requests[1].to_string().contains(SECRET), !second_enabled);
+            assert_eq!(
+                requests[1].to_string().contains(SECRET),
+                !second_enabled || rule_disabled
+            );
             assert_eq!(requests[1]["input"].as_array().unwrap().len(), 3);
         }
         gateway.shutdown().await;

@@ -188,6 +188,8 @@ export const admin = {
   },
   credentialProtection: {
     rules: () => request<CredentialRuleCatalog>('GET', '/reversible-redaction/rules'),
+    setDisabledRules: (ruleIds: string[]) =>
+      request<{ rule_ids: string[] }>('PUT', '/reversible-redaction/disabled-rules', { rule_ids: ruleIds }),
     discoveries: (query: CredentialDiscoveryQuery = {}) =>
       request<CredentialDiscoveryPage>('GET', `/reversible-redaction/discoveries${queryString(query)}`),
     hit: (id: string, index: number, options: { reveal?: boolean } = {}) =>

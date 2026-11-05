@@ -163,6 +163,10 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.setup_error_gateway({}, options)
     case 'credential_rules_unavailable':
       return m.credential_protection_catalog_failed({}, options)
+    case 'credential_rule_unknown':
+      return m.credential_protection_rule_unknown({ rule_id: extractString(payload.params, 'rule_id') }, options)
+    case 'credential_disabled_rules_unavailable':
+      return m.credential_protection_rules_save_failed({}, options)
     case 'credential_test_failed':
       return m.credential_protection_tester_failed({}, options)
     case 'custom_credential_rule_invalid':

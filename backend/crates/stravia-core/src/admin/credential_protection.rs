@@ -5,14 +5,53 @@ use super::{
     CredentialDiscoveryReuses, CredentialVisibility,
 };
 use crate::interaction_observation::CredentialDiscoveryBody;
+use std::collections::BTreeSet;
+use stravia_credential_protection::policy::{self, DISABLED_RULES_KEY};
 use stravia_credential_protection::{
     CredentialMatch, CredentialRuleCatalog, CustomRule, CustomRuleError, CustomRuleInput,
+    DisabledRulesError,
 };
 
 impl AdminService {
-    /// 返回当前实例内置的本地规则及其有效条件，不执行检测或联网验证。
+    /// 返回当前实例内置的本地规则及其有效条件与启用状态，不执行检测或联网验证。
     pub async fn credential_protection_rules(&self) -> anyhow::Result<CredentialRuleCatalog> {
-        Ok(stravia_credential_protection::rule_catalog().await?)
+        let mut catalog = stravia_credential_protection::rule_catalog().await?;
+        let disabled = self.disabled_credential_rules().await?;
+        for rule in &mut catalog.rules {
+            rule.enabled = !disabled.contains(&rule.id);
+        }
+        Ok(catalog)
+    }
+
+    /// 整体替换被禁用的内置规则集合，返回去重排序后的结果。
+    ///
+    /// 禁用只停止新的检出与出站替换：已生成的映射的占位符仍可还原，
+    /// 其他启用规则仍可检出同一个秘密。自定义规则用各自的 `enabled`，不在此集合内。
+    pub async fn set_credential_disabled_rules(
+        &self,
+        rule_ids: Vec<String>,
+    ) -> Result<Vec<String>, DisabledRulesError> {
+        let catalog = stravia_credential_protection::rule_catalog()
+            .await
+            .map_err(|_| DisabledRulesError::Storage)?;
+        let known: BTreeSet<&str> = catalog.rules.iter().map(|rule| rule.id.as_str()).collect();
+        if let Some(unknown) = rule_ids.iter().find(|id| !known.contains(id.as_str())) {
+            return Err(DisabledRulesError::Unknown(unknown.clone()));
+        }
+        let rules: BTreeSet<String> = rule_ids.into_iter().collect();
+        self.gw
+            .storage
+            .settings()
+            .set(DISABLED_RULES_KEY, &policy::encode_disabled_rules(&rules))
+            .await
+            .map_err(|_| DisabledRulesError::Storage)?;
+        Ok(rules.into_iter().collect())
+    }
+
+    /// 运行时忽略目录中已不存在的规则 ID（例如内置规则集升级后被移除的规则）。
+    async fn disabled_credential_rules(&self) -> anyhow::Result<BTreeSet<String>> {
+        let value = self.gw.storage.settings().get(DISABLED_RULES_KEY).await?;
+        Ok(policy::parse_disabled_rules(value.as_deref())?)
     }
 
     /// 只检测本次提交的文本；不查询秘密字典，不持久化输入或改变保护状态。
@@ -146,7 +185,7 @@ impl AdminService {
         self.gw.redaction.custom_rules.list().await
     }
 
-    /// 新规则只影响之后的请求；已生成的映射按原保留期继续有效。
+    /// 新规则只影响之后的请求；已生成的映射按空闲保留期继续有效。
     pub async fn create_credential_custom_rule(
         &self,
         input: CustomRuleInput,
@@ -162,7 +201,8 @@ impl AdminService {
         self.gw.redaction.custom_rules.update(id, input).await
     }
 
-    /// 删除规则不清除已生成的映射；这些映射在保留期内仍参与替换与还原。
+    /// 删除规则不清除已生成的映射：占位符仍可还原直到映射过期。
+    /// 但只由该规则检出的映射不再参与出站替换，与停用规则一致。
     pub async fn delete_credential_custom_rule(&self, id: &str) -> Result<(), CustomRuleError> {
         self.gw.redaction.custom_rules.delete(id).await
     }

@@ -575,7 +575,10 @@ def read_credential_evidence(args, directory, expectations):
         connection, placeholder, backend = _connect(args, directory)
         reader = _SqlReader(connection, placeholder)
         now = time.time_ns() // 1_000_000
-        legacy_expiry = "expires_at" in _table_columns(connection, placeholder, "reversible_redaction_mappings")
+        mapping_columns = _table_columns(connection, placeholder, "reversible_redaction_mappings")
+        legacy_expiry = "expires_at" in mapping_columns
+        # 空闲过期：保留期从最近一次使用起算，published_at 只表示已发布过。
+        idle_expiry = "last_used_at" in mapping_columns
         retention_ms = 0
         if not legacy_expiry:
             configured = reader.rows("SELECT value FROM settings WHERE name='log_retention_days'", ())
@@ -607,14 +610,16 @@ def read_credential_evidence(args, directory, expectations):
                     _require(identities.get(secret, reference) == reference and
                              reverse_identities.get(reference, secret) == secret,
                              "credential_reused_identity")
-                    # ADR-0089 removed the mapping expires_at column: a published
-                    # mapping is kept for the retention window counted from published_at.
+                    # ADR-0089 removed the mapping expires_at column; a later change made the
+                    # window idle-based: a mapping is kept for the retention window counted
+                    # from its last use (last_used_at), and from published_at before that.
                     deadline_column = "expires_at" if legacy_expiry else "pending_until"
+                    used_column = "last_used_at" if idle_expiry else "published_at"
                     rows = reader.rows(
-                        f"SELECT principal,secret,published_at,{deadline_column} "
+                        f"SELECT principal,secret,published_at,{deadline_column},{used_column} "
                         "FROM reversible_redaction_mappings WHERE reference=?", (reference,))
                     _require(len(rows) == 1, "credential_mapping_missing")
-                    owner, stored_secret, published_at, deadline = rows[0]
+                    owner, stored_secret, published_at, deadline, last_used = rows[0]
                     _require(isinstance(owner, str) and bool(owner), "credential_principal")
                     _require(principal is None or principal == owner, "credential_principal")
                     _require(isinstance(stored_secret, str) and stored_secret == secret,
@@ -625,7 +630,8 @@ def read_credential_evidence(args, directory, expectations):
                         _require(type(deadline) is int and deadline > now, "credential_expired")
                     else:
                         _require(deadline is None, "credential_unpublished")
-                        _require(published_at + retention_ms > now, "credential_expired")
+                        _require(type(last_used) is int and last_used + retention_ms > now,
+                                 "credential_expired")
                     principal = owner
                     identities[secret] = reference
                     reverse_identities[reference] = secret

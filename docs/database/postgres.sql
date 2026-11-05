@@ -2125,7 +2125,7 @@ CREATE TABLE public.reversible_redaction_mappings (
     secret text NOT NULL,
     published_at bigint,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL,
+    last_used_at bigint NOT NULL,
     rule_ids text DEFAULT '[]'::text NOT NULL,
     pending_until bigint,
     CONSTRAINT reversible_redaction_mappings_pending_until_check CHECK (((published_at IS NULL) OR (pending_until IS NULL)))
@@ -4555,17 +4555,17 @@ CREATE INDEX rejected_requests_window_idx ON public.rejected_request_observation
 
 
 --
+-- Name: reversible_redaction_mappings_last_used_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX reversible_redaction_mappings_last_used_at_idx ON public.reversible_redaction_mappings USING btree (last_used_at);
+
+
+--
 -- Name: reversible_redaction_mappings_pending_until_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX reversible_redaction_mappings_pending_until_idx ON public.reversible_redaction_mappings USING btree (pending_until);
-
-
---
--- Name: reversible_redaction_mappings_published_at_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reversible_redaction_mappings_published_at_idx ON public.reversible_redaction_mappings USING btree (published_at);
 
 
 --

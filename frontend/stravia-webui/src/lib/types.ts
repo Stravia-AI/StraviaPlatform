@@ -12,6 +12,7 @@ export * from './types/money'
 
 export interface CredentialRule {
   id: string
+  enabled: boolean
   name: string
   target: string
   description: string

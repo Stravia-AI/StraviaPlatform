@@ -1,8 +1,10 @@
 mod custom;
 mod detection;
 pub mod marker;
+pub mod policy;
 pub mod store;
 mod stream;
+pub mod strength;
 mod text;
 
 pub use custom::{
@@ -20,6 +22,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+pub use policy::DisabledRulesError;
+use policy::{RedactionPolicy, RuleScope, RuleScopeSource};
 use store::{DetectedSecret, Mapping, MappingStore};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
@@ -33,7 +37,8 @@ const MARKER_INSTRUCTION: &str =
 /// Runtime settings boundary. Invalid or unavailable settings fail closed in the host.
 #[async_trait::async_trait]
 pub trait RedactionHost: Send + Sync {
-    async fn enabled(&self) -> Result<bool, RedactionError>;
+    /// 每个请求读取一次，保证同一请求内的开关与规则集一致。
+    async fn policy(&self) -> Result<RedactionPolicy, RedactionError>;
 }
 
 /// Owned per-run observation boundary; retained by the committed intern task on cancellation.
@@ -168,6 +173,18 @@ fn restored_in_tool_calls(
         .collect()
 }
 
+#[async_trait::async_trait]
+impl RuleScopeSource for ReversibleRedaction {
+    async fn rule_scope(&self) -> Result<RuleScope, RedactionError> {
+        let policy = self.host.policy().await?;
+        let custom = self.custom_rules.compiled().await?;
+        Ok(RuleScope::new(
+            policy.disabled_rules,
+            custom.ids().map(str::to_owned),
+        ))
+    }
+}
+
 #[derive(Clone)]
 pub struct ReversibleRedaction {
     host: Arc<dyn RedactionHost>,
@@ -188,18 +205,30 @@ impl ReversibleRedaction {
         }
     }
 
-    /// 只检测本次提交的文本，规则集与实际保护一致（内置规则加已启用的自定义规则）。
+    /// 只检测本次提交的文本，规则集与实际保护一致（未被禁用的内置规则加已启用的自定义规则）。
     pub async fn test_text(&self, text: String) -> Result<Vec<CredentialMatch>, RedactionError> {
-        detection::test_text(text, self.custom_rules.compiled().await?).await
+        let policy = self.host.policy().await?;
+        let rules = detection::Rules {
+            custom: self.custom_rules.compiled().await?,
+            disabled: policy.disabled_rules,
+        };
+        detection::test_text(text, rules).await
     }
 
     /// 只读定位一段已落库的文本；`secret` 为映射明文时，秘密字面值等于它的匹配标记为命中。
+    ///
+    /// 用于解释历史命中并在管理端遮罩，因此不受内置规则禁用影响：
+    /// 规则事后被禁用不能让当时的命中显示成未命中。
     pub async fn locate_text(
         &self,
         text: String,
         secret: Option<String>,
     ) -> Result<Vec<CredentialTextMatch>, RedactionError> {
-        detection::locate_text(text, secret, self.custom_rules.compiled().await?).await
+        let rules = detection::Rules {
+            custom: self.custom_rules.compiled().await?,
+            disabled: Arc::default(),
+        };
+        detection::locate_text(text, secret, rules).await
     }
 
     pub async fn protect(
@@ -208,11 +237,23 @@ impl ReversibleRedaction {
         request: &mut Arc<AiRequest>,
         observer: Option<Arc<dyn RedactionObserver>>,
     ) -> Result<Vec<Mapping>, RedactionError> {
-        let enabled = self.host.enabled().await?;
+        let policy = self.host.policy().await?;
+        let enabled = policy.enabled;
         let mut mappings = self.mappings.active(principal).await?;
         if enabled {
             let (texts, origins) = text::request_text_origins(request, true)?;
-            let found = detection::detect(texts, self.custom_rules.compiled().await?).await?;
+            let custom = self.custom_rules.compiled().await?;
+            let scope = RuleScope::new(
+                policy.disabled_rules.clone(),
+                custom.ids().map(str::to_owned),
+            );
+            let rules = detection::Rules {
+                custom,
+                disabled: policy.disabled_rules,
+            };
+            let found = detection::detect(texts, rules).await?;
+            // 本次被启用规则检出的秘密一律替换，哪怕它的映射是被现已禁用的规则创建的。
+            let mut detected_references = BTreeSet::new();
             // 本次请求新建的映射；其余被替换的映射都是复用。
             let mut created_references = BTreeSet::new();
             let reuse_observer = observer.clone();
@@ -269,6 +310,12 @@ impl ReversibleRedaction {
                 })
                 .await
                 .map_err(|_| RedactionError::Storage)??;
+                detected_references.extend(
+                    discovered
+                        .mappings
+                        .iter()
+                        .map(|mapping| mapping.reference.clone()),
+                );
                 created_references.extend(
                     discovered
                         .created
@@ -285,7 +332,10 @@ impl ReversibleRedaction {
                 }
             }
             let request = Arc::make_mut(request);
-            let redacted = text::redact_request(request, &mappings)?;
+            // 创建它的规则已全部禁用的映射不再出站替换；占位符仍可还原，所以仍留在 `mappings` 里。
+            let redacted = text::redact_request(request, &mappings, |mapping| {
+                detected_references.contains(&mapping.reference) || scope.allows(mapping)
+            })?;
             request.meta.redaction.record(redacted.references)?;
             // 复用命中以实际发生的替换为准，已知凭据出现在检测器认不出的位置也会记录。
             if let Some(observer) = reuse_observer {
@@ -476,17 +526,20 @@ mod tests {
 
     #[tokio::test]
     async fn locate_text_marks_only_matches_of_the_requested_secret() {
-        let custom = Arc::new(
-            detection::CompiledCustomRules::compile(std::iter::empty::<(
-                &str,
-                &custom::CustomRuleSpec,
-            )>())
-            .unwrap(),
-        );
+        let rules = detection::Rules {
+            custom: Arc::new(
+                detection::CompiledCustomRules::compile(std::iter::empty::<(
+                    &str,
+                    &custom::CustomRuleSpec,
+                )>())
+                .unwrap(),
+            ),
+            disabled: Arc::default(),
+        };
         let wanted = "ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH";
         let other = "ghp_7Cp6lO1uK8rW3zQ5sJ2mE4vG0iA9bXyTdHnF";
         let text = format!("first {wanted}\nsecond {other}");
-        let found = detection::locate_text(text.clone(), Some(wanted.into()), custom.clone())
+        let found = detection::locate_text(text.clone(), Some(wanted.into()), rules.clone())
             .await
             .unwrap();
         let github: Vec<_> = found
@@ -501,7 +554,7 @@ mod tests {
         let encoded = text.encode_utf16().count();
         assert!(github.iter().all(|found| found.end <= encoded));
 
-        let unmarked = detection::locate_text(text, None, custom).await.unwrap();
+        let unmarked = detection::locate_text(text, None, rules).await.unwrap();
         assert!(unmarked.iter().all(|found| !found.hit));
     }
 

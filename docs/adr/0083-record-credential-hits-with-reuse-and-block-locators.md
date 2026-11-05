@@ -4,6 +4,8 @@ status: superseded by ADR-0087
 
 # 命中记录同时记录新增与复用，并携带块级定位
 
+> **局部被取代。** [ADR-0090](0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md) 取代下述局部约定：本文「已知凭据出现在检测器认不出的上下文也能记录」的出站替换部分增加当前规则开关与强弱边界条件，不再意味着所有存续映射在任意字面位置都替换。`rule_ids` 仍保留创建时归因、不改写，但归因为空或至少一条创建规则当前启用才参与出站替换；旧占位符仍可还原，事件与块级定位口径不变。
+
 > Interaction 级聚合与 `kind` 筛选、复用作为列表行、占位符 `marker` 仅限 Debug Run、命中记录不保存可定位片段这几项已被 [ADR-0087](0087-list-credential-hits-per-mapping-with-retained-item-context.md) 取代。`credential_mappings_reused` 事件及其口径、`locators`、映射 `rule_ids` 与请求记录的块级高亮入口仍然有效；原文保留供追溯。
 
 ## 决定

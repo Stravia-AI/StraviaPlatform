@@ -10,7 +10,11 @@ use super::{DetectedCredential, DetectedFinding, reference_ranges};
 use crate::custom::{CustomRuleError, CustomRuleSpec, invalid};
 
 enum Matcher {
-    Literal(String),
+    Literal {
+        text: String,
+        /// 弱文本只在词边界处命中，与出站替换共用同一判定，避免 `pass` 命中 `password`。
+        weak: bool,
+    },
     Pattern {
         regex: Regex,
         secret_group: usize,
@@ -28,6 +32,11 @@ struct CompiledRule {
 pub struct CompiledCustomRules(Vec<CompiledRule>);
 
 impl CompiledCustomRules {
+    /// 已启用的自定义规则 ID；停用或删除的规则不在其中。
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|rule| rule.id.as_str())
+    }
+
     pub(crate) fn compile<'a>(
         rules: impl IntoIterator<Item = (&'a str, &'a CustomRuleSpec)>,
     ) -> Result<Self, CustomRuleError> {
@@ -35,7 +44,10 @@ impl CompiledCustomRules {
             .into_iter()
             .map(|(id, spec)| {
                 let matcher = match spec {
-                    CustomRuleSpec::Simple { text } => Matcher::Literal(text.clone()),
+                    CustomRuleSpec::Simple { text } => Matcher::Literal {
+                        weak: crate::strength::is_weak(text),
+                        text: text.clone(),
+                    },
                     CustomRuleSpec::Pattern {
                         regex,
                         secret_group,
@@ -106,9 +118,10 @@ impl Matcher {
     /// 返回秘密在 `raw` 中的字节区间；区间总落在字符边界上且非空。
     fn find(&self, raw: &str, lower: &str) -> Vec<(usize, usize)> {
         match self {
-            Self::Literal(text) => raw
+            Self::Literal { text, weak } => raw
                 .match_indices(text.as_str())
                 .map(|(start, matched)| (start, start + matched.len()))
+                .filter(|&(start, end)| !weak || crate::strength::at_word_boundary(raw, start, end))
                 .collect(),
             Self::Pattern {
                 regex,
@@ -144,5 +157,32 @@ impl Matcher {
                     .collect()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn found(text: &str, haystack: &str) -> Vec<(usize, usize)> {
+        let spec = CustomRuleSpec::Simple { text: text.into() };
+        let rules = CompiledCustomRules::compile([("custom.t", &spec)]).unwrap();
+        rules.0[0].matcher.find(haystack, &haystack.to_lowercase())
+    }
+
+    #[test]
+    fn a_weak_simple_rule_matches_only_whole_words() {
+        assert_eq!(
+            found("pass", "pass password bypass (pass)"),
+            vec![(0, 4), (22, 26)]
+        );
+        assert_eq!(found("pass", "请用pass登录"), vec![(6, 10)]);
+    }
+
+    #[test]
+    fn a_strong_simple_rule_matches_inside_longer_words() {
+        let strong = "Xk9mQ2vLp7Rt4Zw8";
+        let haystack = format!("a{strong}b");
+        assert_eq!(found(strong, &haystack), vec![(1, 1 + strong.len())]);
     }
 }

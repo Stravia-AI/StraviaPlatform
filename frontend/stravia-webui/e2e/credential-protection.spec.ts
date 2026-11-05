@@ -15,6 +15,7 @@ import { prepareApp } from './prepare-app'
 function builtin(index: number): CredentialRule {
   return {
     id: `fixture-rule-${index}`,
+    enabled: true,
     name: `Fixture credential ${index}`,
     target: 'Fixture API credentials',
     description: 'Detects test-only API credentials with local context.',
@@ -1680,12 +1681,13 @@ test.describe('custom rule Sheet', () => {
     await page.getByRole('button', { name: 'Add custom rule' }).click()
     const sheet = sheetOf(page)
     await expect(sheet.getByRole('heading', { name: 'Add custom rule' })).toBeVisible()
-    // 没有常驻说明文字：标题之外既无 Sheet 描述也无字段说明。
+    // 可选解释仅在问号提示中；停用会停止替换的风险提示必须常驻。
     await expect(sheet.locator('[data-slot="sheet-description"]')).toHaveCount(0)
-    await expect(sheet.locator('[data-slot="field-description"]')).toHaveCount(0)
+    await expect(sheet.locator('[data-slot="field-description"]')).toHaveCount(1)
+    await expect(sheet.locator('#custom-rule-enabled-help')).toContainText('are no longer replaced')
     const helps = sheet.getByRole('button', { name: 'More about this field' })
     await helps.first().focus()
-    await expect(page.getByText('Type the text to protect. It')).toBeVisible()
+    await expect(page.getByText('Type the text to protect. Matching')).toBeVisible()
     await page.keyboard.press('Escape')
     await helps.nth(1).focus()
     await expect(page.getByText('Case-sensitive and matched as typed')).toBeVisible()

@@ -248,9 +248,15 @@ async function remove(): Promise<void> {
           </Field.Field>
 
           <Field.Field orientation="horizontal">
-            <Field.Label for="custom-rule-enabled" hint={m.credential_custom_enabled_help()}
-              >{m.credential_custom_enabled()}</Field.Label>
-            <Switch id="custom-rule-enabled" bind:checked={draft.enabled} disabled={busy} />
+            <Field.Content>
+              <Field.Label for="custom-rule-enabled">{m.credential_custom_enabled()}</Field.Label>
+              <Field.Description id="custom-rule-enabled-help">{m.credential_custom_enabled_help()}</Field.Description>
+            </Field.Content>
+            <Switch
+              id="custom-rule-enabled"
+              bind:checked={draft.enabled}
+              disabled={busy}
+              aria-describedby="custom-rule-enabled-help" />
           </Field.Field>
 
           {#if formError}

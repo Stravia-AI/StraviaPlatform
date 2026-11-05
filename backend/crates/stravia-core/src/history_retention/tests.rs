@@ -384,6 +384,29 @@ impl Fixture {
             .publish(&self.owner, &[reference.to_owned()])
             .await
             .expect("publish mapping");
+        // 映射的下限是最近一次使用 + N + 续期粒度（见 `MappingStore::sweep`）。把使用时刻前移
+        // 一个粒度，让映射与 Marker 在同一刻到期，这里的用例才能继续只验证依赖回收的先后；
+        // 粒度本身的保留语义由 `reversible_redaction::mapping_tests` 覆盖。
+        let shift = stravia_credential_protection::store::RENEWAL_GRANULARITY.as_millis() as i64;
+        match &self.db {
+            Db::Sqlite(pool) => {
+                sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - ? WHERE reference = ?")
+                    .bind(shift)
+                    .bind(reference)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+            Db::Postgres(pool) => {
+                sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - $1 WHERE reference = $2")
+                    .bind(shift)
+                    .bind(reference)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            }
+        }
+        .expect("align mapping floor with markers");
     }
 
     async fn native_compaction(

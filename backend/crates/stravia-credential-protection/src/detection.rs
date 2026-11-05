@@ -21,7 +21,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use expression::{Context, Program};
 use pattern::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Serialize)]
@@ -46,6 +46,8 @@ pub struct CredentialRule {
     pub skip_report: bool,
     pub specificity: i64,
     pub confidence: String,
+    /// 是否参与检测与出站替换；目录本身是静态的，由管理端按当前设置填写。
+    pub enabled: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -108,22 +110,26 @@ pub async fn rule_catalog() -> Result<CredentialRuleCatalog> {
         .map_err(|_| RedactionError::Detection)?
 }
 
-pub(super) async fn detect(
-    texts: Vec<String>,
-    custom: Arc<CompiledCustomRules>,
-) -> Result<Vec<DetectedCredential>> {
+/// 一次检测使用的规则集：全部内置规则减去被禁用的，加上已启用的自定义规则。
+#[derive(Clone)]
+pub(super) struct Rules {
+    pub custom: Arc<CompiledCustomRules>,
+    pub disabled: Arc<BTreeSet<String>>,
+}
+
+pub(super) async fn detect(texts: Vec<String>, rules: Rules) -> Result<Vec<DetectedCredential>> {
     tokio::task::spawn_blocking(move || {
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
-        detect_all(&texts, &custom)
+        detect_all(&texts, &rules)
     })
     .await
     .map_err(|_| RedactionError::Detection)?
 }
 
 /// 内置与自定义规则共用一份按秘密去重的结果；同一秘密的命中位置合并保留。
-fn detect_all(texts: &[&str], custom: &CompiledCustomRules) -> Result<Vec<DetectedCredential>> {
-    let mut credentials = detector()?.detect(texts)?;
-    for extra in custom.detect(texts) {
+fn detect_all(texts: &[&str], rules: &Rules) -> Result<Vec<DetectedCredential>> {
+    let mut credentials = detector()?.detect(texts, &rules.disabled)?;
+    for extra in rules.custom.detect(texts) {
         match credentials
             .iter_mut()
             .find(|credential| credential.secret == extra.secret)
@@ -145,12 +151,9 @@ fn reference_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-pub async fn test_text(
-    text: String,
-    custom: Arc<CompiledCustomRules>,
-) -> Result<Vec<CredentialMatch>> {
+pub(super) async fn test_text(text: String, rules: Rules) -> Result<Vec<CredentialMatch>> {
     tokio::task::spawn_blocking(move || {
-        Ok(positioned(&text, &custom, None)?
+        Ok(positioned(&text, &rules, None)?
             .into_iter()
             .map(|found| CredentialMatch {
                 rule_id: found.rule_id,
@@ -171,19 +174,15 @@ pub async fn test_text(
 pub(super) async fn locate_text(
     text: String,
     secret: Option<String>,
-    custom: Arc<CompiledCustomRules>,
+    rules: Rules,
 ) -> Result<Vec<CredentialTextMatch>> {
-    tokio::task::spawn_blocking(move || positioned(&text, &custom, secret.as_deref()))
+    tokio::task::spawn_blocking(move || positioned(&text, &rules, secret.as_deref()))
         .await
         .map_err(|_| RedactionError::Detection)?
 }
 
-fn positioned(
-    text: &str,
-    custom: &CompiledCustomRules,
-    secret: Option<&str>,
-) -> Result<Vec<CredentialTextMatch>> {
-    let mut findings: Vec<_> = detect_all(&[text], custom)?
+fn positioned(text: &str, rules: &Rules, secret: Option<&str>) -> Result<Vec<CredentialTextMatch>> {
+    let mut findings: Vec<_> = detect_all(&[text], rules)?
         .into_iter()
         .flat_map(|credential| {
             let hit = secret.is_some_and(|secret| credential.secret == secret);
@@ -521,6 +520,7 @@ impl Detector {
                             skip_report: source.skip_report,
                             specificity: source.specificity,
                             confidence: source.confidence,
+                            enabled: true,
                         }
                     })
                     .collect(),
@@ -528,7 +528,19 @@ impl Detector {
         })
     }
 
-    pub(super) fn detect(&self, texts: &[&str]) -> Result<Vec<DetectedCredential>> {
+    /// `disabled` 中的规则不检出自己的秘密，但仍可作为其他规则的组件提供前置证据：
+    /// 父规则要求的上下文是否存在与该组件是否被报告无关。
+    pub(super) fn detect(
+        &self,
+        texts: &[&str],
+        disabled: &BTreeSet<String>,
+    ) -> Result<Vec<DetectedCredential>> {
+        let off: Vec<bool> = self
+            .catalog
+            .rules
+            .iter()
+            .map(|rule| disabled.contains(&rule.id))
+            .collect();
         let mut unique = HashMap::new();
         let mut reported_positions = HashSet::new();
         let mut secrets: Vec<DetectedCredential> = Vec::new();
@@ -548,7 +560,8 @@ impl Detector {
             let mut composites: Vec<Composite<'_>> = Vec::new();
             for &index in &self.order {
                 let rule = &self.rules[index];
-                if rule.skip_report
+                if off[index]
+                    || rule.skip_report
                     || !rule.keywords.is_empty()
                         && !rule.keywords.iter().any(|&keyword| present[keyword])
                 {
@@ -607,7 +620,7 @@ impl Detector {
                     {
                         continue;
                     }
-                    if finding.secret.is_empty() {
+                    if finding.secret.is_empty() || off[finding.rule] {
                         continue;
                     }
                     let credential_index = *unique.entry(finding.secret).or_insert_with(|| {
@@ -808,16 +821,25 @@ impl Component {
 mod tests {
     use super::*;
 
+    fn rules_without(disabled: &[&str]) -> Rules {
+        Rules {
+            custom: Arc::new(CompiledCustomRules::compile([]).unwrap()),
+            disabled: Arc::new(disabled.iter().map(|id| (*id).to_owned()).collect()),
+        }
+    }
+
+    fn detect_with(texts: &[&str], disabled: &[&str]) -> Vec<DetectedCredential> {
+        detector()
+            .unwrap()
+            .detect(texts, &rules_without(disabled).disabled)
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn canonical_bittrex_identity_preserves_secret_occurrences() {
         let secret = "a7b2c9d4e0f6g3h8i1j5k9l2m4n6o8p0";
         let text = format!("中文😀 bittrex={secret}\nbittrex={secret}");
-        let matches = test_text(
-            text.clone(),
-            Arc::new(CompiledCustomRules::compile([]).unwrap()),
-        )
-        .await
-        .unwrap();
+        let matches = test_text(text.clone(), rules_without(&[])).await.unwrap();
         let selected: Vec<_> = matches
             .iter()
             .filter(|finding| finding.rule_id == "bittrex-access-key")
@@ -871,11 +893,10 @@ mod tests {
 
     #[test]
     fn canonical_catalog_keeps_real_component_prerequisites_and_field_isolation() {
-        let detector = detector().unwrap();
         let secret = format!("AIK_SECRET_{}", "a7B2c9D4e0F6g3H8".repeat(4));
         let client = "AIK_CLIENT_a7B2c9D4e0F6g3H8i1J5k9L2";
         let has_secret = |texts: &[&str]| {
-            detector.detect(texts).unwrap().iter().any(|item| {
+            detect_with(texts, &[]).iter().any(|item| {
                 item.secret == secret
                     && item
                         .findings
@@ -894,7 +915,7 @@ mod tests {
         let personal = format!("apk_user_{}", "Zx8Qp2Lm7Vt4Rk9Hs1Jd6Fg3Wc5Nb0Ty".repeat(5));
         let service = format!("apk_{}", "Ub3Ye7Io1Ma5Sw9Xq2Ce6Rv0Gn4Hl8Pk".repeat(3));
         let text = format!("devin personal {personal}\ndevin service {service}\n");
-        let detected = detector().unwrap().detect(&[&text]).unwrap();
+        let detected = detect_with(&[&text], &[]);
         let rule_of = |secret: &str| {
             detected
                 .iter()
@@ -903,6 +924,40 @@ mod tests {
         };
         assert_eq!(rule_of(&personal), Some("devin-personal-api-key"));
         assert_eq!(rule_of(&service), Some("devin-service-api-key"));
+    }
+
+    #[test]
+    fn a_disabled_rule_reports_nothing_but_the_others_still_do() {
+        let secret = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
+        let text = format!("api_key={secret}");
+        let found = |disabled: &[&str]| {
+            detect_with(&[&text], disabled)
+                .iter()
+                .any(|item| item.secret == secret)
+        };
+        assert!(found(&[]));
+        assert!(!found(&["generic-api-key"]));
+        assert!(found(&["github-pat"]));
+    }
+
+    #[test]
+    fn a_disabled_component_still_counts_as_evidence_without_being_reported() {
+        let secret = format!("AIK_SECRET_{}", "a7B2c9D4e0F6g3H8".repeat(4));
+        let client = "AIK_CLIENT_a7B2c9D4e0F6g3H8i1J5k9L2";
+        let text = format!("{client}\n{secret}");
+        let reported = |disabled: &[&str]| -> Vec<String> {
+            let mut secrets: Vec<_> = detect_with(&[&text], disabled)
+                .into_iter()
+                .map(|item| item.secret)
+                .collect();
+            secrets.sort();
+            secrets
+        };
+        assert_eq!(reported(&[]), vec![client.to_owned(), secret.clone()]);
+        // 组件被禁用：客户端 ID 不再上报，但父规则仍凭它成立。
+        assert_eq!(reported(&["aikido-client-id"]), vec![secret.clone()]);
+        // 父规则被禁用：整个组合不再产生命中。
+        assert!(reported(&["aikido-client-secret"]).is_empty());
     }
 
     #[tokio::test]
@@ -914,8 +969,7 @@ mod tests {
             "-----END PRIVATE KEY-----"
         );
         let text = format!("中文😀 api_key={secret}\n次行 api_key={secret}\n{private_key}\n结束");
-        let none = Arc::new(CompiledCustomRules::compile([]).unwrap());
-        let matches = test_text(text.clone(), none).await.unwrap();
+        let matches = test_text(text.clone(), rules_without(&[])).await.unwrap();
         let utf16: Vec<_> = text.encode_utf16().collect();
         let generic: Vec<_> = matches
             .iter()
