@@ -114,7 +114,7 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict "${apps[0]}"
-          lipo -verify_arch "${BINARY_ARCH}" "${apps[0]}/Contents/MacOS/stravia-desktop"
+          lipo "${apps[0]}/Contents/MacOS/stravia-desktop" -verify_arch "${BINARY_ARCH}"
           hdiutil verify "${dmgs[0]}"
           tar -tzf "${archives[0]}" > /dev/null
           test -s "${archives[0]}.sig"
