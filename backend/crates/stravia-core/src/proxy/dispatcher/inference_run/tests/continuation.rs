@@ -1447,3 +1447,879 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     assert_eq!(first_calls.load(Ordering::SeqCst), 0);
     assert_eq!(second_calls.load(Ordering::SeqCst), 2);
 }
+
+/// 自定义 Responses Provider 的 `use_websocket` / `use_previous_response_id`
+/// 行为回归：真实 Gateway 经本地 HTTP + WebSocket 上游，观察实际传输与请求体。
+///
+/// 上游按 `store=false` 的真实语义工作：WebSocket 的 `previous_response_id`
+/// 只在该连接的当前 tip 上有效，HTTP 只认 `store=true` 保存过的响应；
+/// 任何越界使用都会被拒绝并记录为 violation，测试同时断言 violation 为空。
+mod responses_option_continuation {
+    use super::*;
+    use axum::{Json, response::IntoResponse};
+    use serde_json::{Map, Value, json};
+    use std::collections::HashSet;
+
+    const MODEL: &str = "custom-responses-option-continuation";
+    const CACHE_KEY: &str = "option-continuation-cache-key";
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Transport {
+        Http,
+        WebSocket,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Observed {
+        transport: Transport,
+        socket: Option<usize>,
+        body: Value,
+    }
+
+    #[derive(Clone, Default)]
+    struct UpstreamState {
+        observed: Arc<parking_lot::Mutex<Vec<Observed>>>,
+        authorizations: Arc<parking_lot::Mutex<Vec<Option<String>>>>,
+        violations: Arc<parking_lot::Mutex<Vec<String>>>,
+        stored: Arc<parking_lot::Mutex<HashSet<String>>>,
+        next_socket: Arc<AtomicUsize>,
+        next_response: Arc<AtomicUsize>,
+        close_after_next_response: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    fn snapshot(id: &str, status: &str, output: Vec<Value>, store: bool, request: &Value) -> Value {
+        let usage = if status == "completed" {
+            json!({
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 1}
+            })
+        } else {
+            Value::Null
+        };
+        let mut response =
+            stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                id,
+                "provider-model",
+                status,
+                output,
+                Value::Null,
+                Value::Null,
+                usage,
+            );
+        // Responses 报告本轮实际采用的参数；默认快照会把 high 错报成 null，
+        // 使后续请求因有效推理配置不一致而正确地退回完整历史。
+        for (key, value) in response.as_object_mut().expect("response resource") {
+            if let Some(requested) = request.get(key) {
+                *value = requested.clone();
+            }
+        }
+        response["store"] = store.into();
+        response
+    }
+
+    /// 每个上游响应固定为「受保护推理 + 助手文本」，密文与答案都带序号。
+    fn response_output(ordinal: usize) -> Vec<Value> {
+        vec![
+            json!({
+                "id": format!("rs-{ordinal}"),
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": format!("thinking-{ordinal}")}],
+                "content": [],
+                "encrypted_content": format!("cipher-{ordinal}")
+            }),
+            json!({
+                "id": format!("msg-{ordinal}"),
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": format!("answer-{ordinal}"),
+                    "annotations": []
+                }]
+            }),
+        ]
+    }
+
+    fn response_events(id: &str, ordinal: usize, store: bool, request: &Value) -> Vec<Value> {
+        let output = response_output(ordinal);
+        let message_id = format!("msg-{ordinal}");
+        let text = format!("answer-{ordinal}");
+        let mut events = vec![
+            json!({"type": "response.created", "response": snapshot(id, "in_progress", Vec::new(), store, request)}),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": format!("rs-{ordinal}"),
+                    "type": "reasoning",
+                    "status": "in_progress",
+                    "summary": [],
+                    "content": []
+                }
+            }),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": output[0]}),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "item_id": message_id,
+                "output_index": 1,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": [], "logprobs": []}
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "output_index": 1,
+                "content_index": 0,
+                "delta": text
+            }),
+            json!({
+                "type": "response.content_part.done",
+                "item_id": message_id,
+                "output_index": 1,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": text, "annotations": [], "logprobs": []}
+            }),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": output[1]}),
+            json!({"type": "response.completed", "response": snapshot(id, "completed", output, store, request)}),
+        ];
+        for (sequence, event) in events.iter_mut().enumerate() {
+            event["sequence_number"] = sequence.into();
+        }
+        events
+    }
+
+    fn missing_previous(previous: &str) -> Value {
+        json!({
+            "type": "error",
+            "status": 400,
+            "error": {
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "message": format!("response {previous} is not available here")
+            }
+        })
+    }
+
+    async fn upstream_websocket(
+        State(state): State<UpstreamState>,
+        headers: HeaderMap,
+        upgrade: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        let socket = state.next_socket.fetch_add(1, Ordering::SeqCst);
+        state.authorizations.lock().push(
+            headers
+                .get(header::AUTHORIZATION)
+                .map(|v| v.to_str().expect("authorization header").to_owned()),
+        );
+        upgrade.on_upgrade(move |mut websocket| async move {
+            let mut tip: Option<String> = None;
+            while let Some(Ok(AxumWebSocketMessage::Text(text))) = websocket.recv().await {
+                let body: Value = serde_json::from_str(&text).expect("Responses WebSocket frame");
+                state.observed.lock().push(Observed {
+                    transport: Transport::WebSocket,
+                    socket: Some(socket),
+                    body: body.clone(),
+                });
+                if let Some(previous) = body.get("previous_response_id").and_then(Value::as_str)
+                    && tip.as_deref() != Some(previous)
+                {
+                    state.violations.lock().push(format!(
+                        "socket {socket} received {previous} while its tip was {tip:?}"
+                    ));
+                    websocket
+                        .send(AxumWebSocketMessage::Text(
+                            missing_previous(previous).to_string().into(),
+                        ))
+                        .await
+                        .expect("send missing previous response error");
+                    continue;
+                }
+                let ordinal = state.next_response.fetch_add(1, Ordering::SeqCst);
+                let id = format!("upstream-{ordinal}");
+                for event in response_events(&id, ordinal, false, &body) {
+                    websocket
+                        .send(AxumWebSocketMessage::Text(event.to_string().into()))
+                        .await
+                        .expect("send Responses WebSocket event");
+                }
+                tip = Some(id);
+                if state
+                    .close_after_next_response
+                    .swap(false, Ordering::SeqCst)
+                {
+                    websocket
+                        .send(AxumWebSocketMessage::Close(None))
+                        .await
+                        .expect("close upstream socket");
+                    break;
+                }
+            }
+        })
+    }
+
+    async fn upstream_http(
+        State(state): State<UpstreamState>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        state.observed.lock().push(Observed {
+            transport: Transport::Http,
+            socket: None,
+            body: body.clone(),
+        });
+        if let Some(previous) = body.get("previous_response_id").and_then(Value::as_str)
+            && !state.stored.lock().contains(previous)
+        {
+            state
+                .violations
+                .lock()
+                .push(format!("HTTP received unstored response {previous}"));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(missing_previous(previous)["error"].clone()),
+            )
+                .into_response();
+        }
+        let ordinal = state.next_response.fetch_add(1, Ordering::SeqCst);
+        let id = format!("upstream-{ordinal}");
+        let store = body.get("store").and_then(Value::as_bool) != Some(false);
+        if store {
+            state.stored.lock().insert(id.clone());
+        }
+        if body.get("stream").and_then(Value::as_bool) == Some(true) {
+            let mut stream = response_events(&id, ordinal, store, &body)
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().expect("event type")
+                    )
+                })
+                .collect::<String>();
+            stream.push_str("data: [DONE]\n\n");
+            ([(header::CONTENT_TYPE, "text/event-stream")], stream).into_response()
+        } else {
+            Json(snapshot(
+                &id,
+                "completed",
+                response_output(ordinal),
+                store,
+                &body,
+            ))
+            .into_response()
+        }
+    }
+
+    struct Fixture {
+        gateway: Gateway,
+        _directory: tempfile::TempDir,
+        upstream: tokio::task::JoinHandle<()>,
+        state: UpstreamState,
+        authorization: HeaderValue,
+        provider_id: String,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.upstream.abort();
+        }
+    }
+
+    impl Fixture {
+        fn observed(&self) -> Vec<Observed> {
+            self.state.observed.lock().clone()
+        }
+
+        fn authorizations(&self) -> Vec<Option<String>> {
+            self.state.authorizations.lock().clone()
+        }
+
+        fn assert_no_violations(&self, label: &str) {
+            let violations = self.state.violations.lock();
+            assert!(
+                violations.is_empty(),
+                "{label}: upstream rejected a temporary response ID: {violations:?}"
+            );
+        }
+    }
+
+    fn options(websocket: bool, previous: bool) -> Map<String, Value> {
+        let mut options = Map::new();
+        options.insert("use_websocket".into(), websocket.into());
+        options.insert("use_previous_response_id".into(), previous.into());
+        options
+    }
+
+    async fn start_fixture(vendor_options: Map<String, Value>) -> Fixture {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local Responses upstream");
+        let address = listener.local_addr().expect("local Responses address");
+        let base_url = format!("http://{address}/v1");
+        let state = UpstreamState::default();
+        let app = Router::new()
+            .route("/v1/responses", get(upstream_websocket).post(upstream_http))
+            .with_state(state.clone());
+        let upstream = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("local Responses upstream");
+        });
+
+        let directory = tempfile::tempdir().expect("gateway directory");
+        let gateway = Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .expect("Gateway");
+        let provider = gateway
+            .admin()
+            .create_provider(CreateProvider {
+                name: Some(format!("{MODEL}-provider")),
+                source: ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some("open-responses".into()),
+                    base_url,
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "test-key".into(),
+                },
+                vendor_options,
+                use_proxy: false,
+            })
+            .await
+            .expect("create custom Responses provider");
+        gateway
+            .admin()
+            .create_manual_provider_model(
+                &provider.id,
+                "provider-model",
+                crate::provider_models::CreateManualProviderModel {
+                    metadata: json!({
+                        "id": "provider-model",
+                        "modalities": {"input": ["text", "image"], "output": ["text"]},
+                        "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"]
+                    }),
+                    template_id: None,
+                },
+            )
+            .await
+            .expect("create provider model");
+        let provider_id = provider.id.clone();
+        gateway
+            .admin()
+            .create_model(CreateRoute {
+                output_modality: crate::db::models::RouteOutputModality::Text,
+                model_id: MODEL.into(),
+                display_name: None,
+                balance: Some("traffic_equalization".into()),
+                targets: vec![CreateTarget {
+                    enabled: true,
+                    provider_id: provider.id,
+                    model: "provider-model".into(),
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: Some(0),
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                }],
+                default_thinking_level: None,
+                billing: None,
+            })
+            .await
+            .expect("create route");
+        let headers = authorized_headers(&gateway).await;
+        Fixture {
+            gateway,
+            _directory: directory,
+            upstream,
+            state,
+            authorization: headers[header::AUTHORIZATION].clone(),
+            provider_id,
+        }
+    }
+
+    async fn post(fixture: &Fixture, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = crate::proxy::server::create_router(fixture.gateway.clone())
+            .oneshot(
+                Request::post(path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, fixture.authorization.clone())
+                    .body(Body::from(body.to_string()))
+                    .expect("public inference request"),
+            )
+            .await
+            .expect("public inference response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("public inference body");
+        let body = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "public inference JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+        (status, body)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Ingress {
+        Responses,
+        Chat,
+    }
+
+    /// 模拟标准客户端：Responses 只携带 Stravia 的 `previous_response_id` 与新输入；
+    /// Chat 无状态地重放完整历史（含上一轮返回的助手消息）。`Clone` 即从当前节点分叉。
+    #[derive(Clone)]
+    struct Client {
+        ingress: Ingress,
+        store: bool,
+        effort: &'static str,
+        history: Vec<Value>,
+        previous: Option<String>,
+    }
+
+    impl Client {
+        fn new(ingress: Ingress, store: bool) -> Self {
+            Self {
+                ingress,
+                store,
+                effort: "high",
+                history: Vec::new(),
+                previous: None,
+            }
+        }
+
+        fn user_message(&self, prompt: &str, with_image: bool) -> Value {
+            let data_url = format!("data:image/png;base64,{PNG}");
+            let (text_type, image) = match self.ingress {
+                Ingress::Responses => (
+                    "input_text",
+                    json!({"type": "input_image", "image_url": data_url}),
+                ),
+                Ingress::Chat => (
+                    "text",
+                    json!({"type": "image_url", "image_url": {"url": data_url}}),
+                ),
+            };
+            let mut content = vec![json!({"type": text_type, "text": prompt})];
+            if with_image {
+                content.push(image);
+            }
+            json!({"role": "user", "content": content})
+        }
+
+        async fn send(&mut self, fixture: &Fixture, prompt: &str, with_image: bool) {
+            let user = self.user_message(prompt, with_image);
+            match self.ingress {
+                Ingress::Responses => {
+                    let mut body = json!({
+                        "model": MODEL,
+                        "store": self.store,
+                        "prompt_cache_key": CACHE_KEY,
+                        "reasoning": {"effort": self.effort},
+                        "input": [user],
+                    });
+                    if let Some(previous) = &self.previous {
+                        body["previous_response_id"] = json!(previous);
+                    }
+                    let (status, response) = post(fixture, "/v1/responses", body).await;
+                    assert_eq!(status, StatusCode::OK, "{response}");
+                    self.previous = Some(
+                        response["id"]
+                            .as_str()
+                            .expect("Stravia response ID")
+                            .to_owned(),
+                    );
+                }
+                Ingress::Chat => {
+                    self.history.push(user);
+                    let body = json!({
+                        "model": MODEL,
+                        "store": self.store,
+                        "prompt_cache_key": CACHE_KEY,
+                        "reasoning_effort": self.effort,
+                        "messages": self.history,
+                    });
+                    let (status, response) = post(fixture, "/v1/chat/completions", body).await;
+                    assert_eq!(status, StatusCode::OK, "{response}");
+                    self.history.push(response["choices"][0]["message"].clone());
+                }
+            }
+        }
+    }
+
+    fn input_wire(request: &Value) -> String {
+        request["input"].to_string()
+    }
+
+    fn input_len(request: &Value) -> usize {
+        request["input"].as_array().map_or(0, Vec::len)
+    }
+
+    fn assert_first_request(label: &str, request: &Value) {
+        assert!(
+            request.get("previous_response_id").is_none(),
+            "{label}: {request}"
+        );
+        assert_eq!(input_len(request), 1, "{label}: {request}");
+        let wire = input_wire(request);
+        assert!(
+            wire.contains("first") && wire.contains(PNG),
+            "{label}: {request}"
+        );
+    }
+
+    /// 完整历史：无任何上游 ID；每个已完成回合贡献用户、推理、助手三项，
+    /// 图片与受保护推理密文都由本地 Generation Chain 恢复。
+    fn assert_full_history(label: &str, request: &Value, prior_turns: usize, latest: &str) {
+        assert!(
+            request.get("previous_response_id").is_none(),
+            "{label}: {request}"
+        );
+        assert_eq!(
+            input_len(request),
+            prior_turns * 3 + 1,
+            "{label}: {request}"
+        );
+        let wire = input_wire(request);
+        assert!(
+            wire.contains("first") && wire.contains(PNG),
+            "{label}: {request}"
+        );
+        assert!(wire.contains(latest), "{label}: {request}");
+        for ordinal in 0..prior_turns {
+            assert!(
+                wire.contains(&format!("cipher-{ordinal}")),
+                "{label}: {request}"
+            );
+            assert!(
+                wire.contains(&format!("answer-{ordinal}")),
+                "{label}: {request}"
+            );
+        }
+    }
+
+    /// 增量续接：精确的上游 tip 加仅含新输入的一项。
+    fn assert_continues(label: &str, request: &Value, previous: &str, latest: &str) {
+        assert_eq!(
+            request["previous_response_id"],
+            json!(previous),
+            "{label}: {request}"
+        );
+        assert_eq!(input_len(request), 1, "{label}: {request}");
+        let wire = input_wire(request);
+        assert!(wire.contains(latest), "{label}: {request}");
+        assert!(
+            !wire.contains(PNG) && !wire.contains("cipher-") && !wire.contains("answer-"),
+            "{label}: {request}"
+        );
+    }
+
+    async fn assert_option_matrix(ingress: Ingress) {
+        for (websocket, previous) in [(false, false), (false, true), (true, false), (true, true)] {
+            let label = format!(
+                "{ingress:?} use_websocket={websocket} use_previous_response_id={previous}"
+            );
+            let fixture = start_fixture(options(websocket, previous)).await;
+            let mut client = Client::new(ingress, false);
+            client.send(&fixture, "first", true).await;
+            client.send(&fixture, "second", false).await;
+
+            fixture.assert_no_violations(&label);
+            let observed = fixture.observed();
+            assert_eq!(observed.len(), 2, "{label}: {observed:?}");
+            for request in &observed {
+                assert_eq!(request.body["prompt_cache_key"], CACHE_KEY, "{label}");
+                assert_eq!(request.body["reasoning"]["effort"], "high", "{label}");
+            }
+            let transport = if websocket {
+                Transport::WebSocket
+            } else {
+                Transport::Http
+            };
+            assert!(
+                observed
+                    .iter()
+                    .all(|request| request.transport == transport),
+                "{label}: {observed:?}"
+            );
+            assert_eq!(
+                fixture.authorizations().len(),
+                usize::from(websocket),
+                "{label}: one WebSocket handshake only when enabled"
+            );
+            assert!(
+                observed
+                    .iter()
+                    .all(|request| request.body["store"] == json!(false)),
+                "{label}: {observed:?}"
+            );
+            assert_first_request(&label, &observed[0].body);
+            if websocket && previous {
+                assert_eq!(observed[0].socket, observed[1].socket, "{label}");
+                assert_continues(&label, &observed[1].body, "upstream-0", "second");
+            } else {
+                assert_full_history(&label, &observed[1].body, 1, "second");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_ingress_selects_transport_and_history_for_each_option_combination() {
+        assert_option_matrix(Ingress::Responses).await;
+    }
+
+    #[tokio::test]
+    async fn chat_ingress_selects_transport_and_history_for_each_option_combination() {
+        assert_option_matrix(Ingress::Chat).await;
+    }
+
+    #[tokio::test]
+    async fn toggling_previous_response_id_keeps_images_and_protected_reasoning() {
+        for ingress in [Ingress::Responses, Ingress::Chat] {
+            let fixture = start_fixture(options(true, true)).await;
+            let mut client = Client::new(ingress, false);
+            client.send(&fixture, "first", true).await;
+            fixture
+                .gateway
+                .admin()
+                .update_provider(
+                    &fixture.provider_id,
+                    crate::db::models::UpdateProvider {
+                        vendor_options: Some(options(true, false)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("disable previous response optimization");
+            client.send(&fixture, "second", false).await;
+            fixture
+                .gateway
+                .admin()
+                .update_provider(
+                    &fixture.provider_id,
+                    crate::db::models::UpdateProvider {
+                        vendor_options: Some(options(true, true)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("enable previous response optimization");
+            client.send(&fixture, "third", false).await;
+            client.send(&fixture, "fourth", false).await;
+
+            fixture.assert_no_violations("toggled previous response optimization");
+            let observed = fixture.observed();
+            assert_eq!(observed.len(), 4, "{ingress:?}: {observed:?}");
+            assert!(
+                observed
+                    .iter()
+                    .all(|request| request.transport == Transport::WebSocket)
+            );
+            assert_full_history("disabled previous response", &observed[1].body, 1, "second");
+            assert_full_history("changed provider options", &observed[2].body, 2, "third");
+            assert_continues(
+                "restored optimization",
+                &observed[3].body,
+                "upstream-2",
+                "fourth",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_thinking_effort_replays_history_before_resuming_websocket() {
+        for ingress in [Ingress::Responses, Ingress::Chat] {
+            let fixture = start_fixture(options(true, true)).await;
+            let mut client = Client::new(ingress, false);
+            client.send(&fixture, "first", true).await;
+            client.effort = "low";
+            client.send(&fixture, "second", false).await;
+            client.send(&fixture, "third", false).await;
+
+            fixture.assert_no_violations("changed thinking effort");
+            let observed = fixture.observed();
+            assert_eq!(observed.len(), 3, "{ingress:?}: {observed:?}");
+            assert_eq!(observed[0].body["reasoning"]["effort"], "high");
+            assert_eq!(observed[1].body["reasoning"]["effort"], "low");
+            assert_eq!(observed[2].body["reasoning"]["effort"], "low");
+            assert_full_history("changed effort", &observed[1].body, 1, "second");
+            assert_continues("same new effort", &observed[2].body, "upstream-1", "third");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_continuation_follows_previous_response_id_option_when_upstream_stores_state() {
+        for (label, vendor_options, continues) in [
+            ("defaults", Map::new(), true),
+            ("previous enabled", options(false, true), true),
+            ("previous disabled", options(false, false), false),
+        ] {
+            let fixture = start_fixture(vendor_options).await;
+            let mut client = Client::new(Ingress::Responses, true);
+            client.send(&fixture, "first", true).await;
+            client.send(&fixture, "second", false).await;
+
+            fixture.assert_no_violations(label);
+            let observed = fixture.observed();
+            assert_eq!(observed.len(), 2, "{label}: {observed:?}");
+            assert!(fixture.authorizations().is_empty(), "{label}: HTTP only");
+            assert!(
+                observed
+                    .iter()
+                    .all(|request| request.transport == Transport::Http
+                        && request.body["store"] == json!(true)),
+                "{label}: {observed:?}"
+            );
+            assert_first_request(label, &observed[0].body);
+            if continues {
+                assert_continues(label, &observed[1].body, "upstream-0", "second");
+            } else {
+                assert_full_history(label, &observed[1].body, 1, "second");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_or_replaced_websocket_never_receives_a_temporary_response_id() {
+        let fixture = start_fixture(options(true, true)).await;
+        fixture
+            .state
+            .close_after_next_response
+            .store(true, Ordering::SeqCst);
+        let mut client = Client::new(Ingress::Responses, false);
+        client.send(&fixture, "first", true).await;
+        // 上游在第一轮后关闭连接：第二轮必须完整历史，且不先发失败的增量。
+        client.send(&fixture, "second", false).await;
+        // 新连接上的下一轮可以安全续接。
+        client.send(&fixture, "third", false).await;
+        {
+            let observed = fixture.observed();
+            assert_eq!(observed.len(), 3, "{observed:?}");
+            assert_ne!(observed[0].socket, observed[1].socket);
+            assert_full_history("closed socket", &observed[1].body, 1, "second");
+            assert_eq!(observed[1].socket, observed[2].socket);
+            assert_continues("new socket tip", &observed[2].body, "upstream-1", "third");
+        }
+
+        fixture
+            .gateway
+            .admin()
+            .update_provider(
+                &fixture.provider_id,
+                crate::db::models::UpdateProvider {
+                    api_key: Some("rotated-test-key".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("rotate provider API key");
+        client.send(&fixture, "fourth", false).await;
+
+        fixture.assert_no_violations("lost or replaced socket");
+        let observed = fixture.observed();
+        assert_eq!(observed.len(), 4, "{observed:?}");
+        assert_ne!(observed[2].socket, observed[3].socket);
+        assert_full_history("replaced credential", &observed[3].body, 3, "fourth");
+        assert_eq!(
+            fixture.authorizations(),
+            vec![
+                Some("Bearer test-key".to_owned()),
+                Some("Bearer test-key".to_owned()),
+                Some("Bearer rotated-test-key".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn advanced_websocket_tip_sends_full_history_to_a_chat_sibling() {
+        let fixture = start_fixture(options(true, true)).await;
+        let mut parent = Client::new(Ingress::Chat, false);
+        parent.send(&fixture, "first", true).await;
+        let mut child_a = parent.clone();
+        let mut child_b = parent.clone();
+        child_a.send(&fixture, "child-a", false).await;
+        child_b.send(&fixture, "child-b", false).await;
+
+        fixture.assert_no_violations("sibling branch");
+        let observed = fixture.observed();
+        assert_eq!(observed.len(), 3, "{observed:?}");
+        assert_eq!(observed[0].socket, observed[1].socket);
+        assert_continues("first child", &observed[1].body, "upstream-0", "child-a");
+        assert_full_history("advanced sibling", &observed[2].body, 1, "child-b");
+        assert!(
+            !input_wire(&observed[2].body).contains("child-a"),
+            "{:?}",
+            observed[2].body
+        );
+    }
+
+    /// 请求 `store: true`，但上游实际不保留状态（只认存活连接的 tip，与
+    /// 代理型上游一致）：请求里的 store 不能让 Gateway 把临时 ID 带到别的连接。
+    #[tokio::test]
+    async fn store_true_request_never_sends_a_temporary_id_beyond_the_live_websocket_tip() {
+        let fixture = start_fixture(options(true, true)).await;
+        fixture
+            .state
+            .close_after_next_response
+            .store(true, Ordering::SeqCst);
+        let mut client = Client::new(Ingress::Responses, true);
+        client.send(&fixture, "first", true).await;
+        client.send(&fixture, "second", false).await;
+        let mut sibling = client.clone();
+        client.send(&fixture, "third", false).await;
+        sibling.send(&fixture, "sibling", false).await;
+
+        fixture.assert_no_violations("store=true against a non-retaining upstream");
+        let observed = fixture.observed();
+        assert_eq!(observed.len(), 4, "{observed:?}");
+        assert!(
+            observed
+                .iter()
+                .all(|request| request.transport == Transport::WebSocket
+                    && request.body["store"] == json!(true)),
+            "{observed:?}"
+        );
+        assert_first_request("store=true first", &observed[0].body);
+        // 第一条连接已被上游关闭：换连接后只能发完整历史。
+        assert_ne!(observed[0].socket, observed[1].socket);
+        assert_full_history("store=true closed socket", &observed[1].body, 1, "second");
+        // 新连接的 tip 可续接。
+        assert_eq!(observed[1].socket, observed[2].socket);
+        assert_continues(
+            "store=true live tip",
+            &observed[2].body,
+            "upstream-1",
+            "third",
+        );
+        // tip 已前进，从 second 分叉出的 sibling 必须完整历史。
+        assert_full_history("store=true stale sibling", &observed[3].body, 2, "sibling");
+        assert!(
+            !input_wire(&observed[3].body).contains("third"),
+            "{:?}",
+            observed[3].body
+        );
+    }
+}

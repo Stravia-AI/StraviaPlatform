@@ -74,8 +74,8 @@ fn responses_encoder_targets_slash_v1_responses_and_preserves_stream_choice() {
     assert_eq!(body.get("stream").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(
         body.get("store").and_then(|v| v.as_bool()),
-        Some(true),
-        "Open Responses defaults to local persistence"
+        Some(false),
+        "an omitted store is never an implicit upstream persistence request"
     );
     assert_eq!(
         ResponsesEncoder.egress_path("gpt-5.4", false),
@@ -84,26 +84,23 @@ fn responses_encoder_targets_slash_v1_responses_and_preserves_stream_choice() {
 }
 #[test]
 fn responses_encoder_keeps_instructions_distinct_from_system_messages() {
-    let mut req = responses_request(
-        vec![
-            AiItem {
-                role: IrRole::System,
-                content: IrMessageContent::Text("system context".to_string().into()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-            AiItem {
-                role: IrRole::User,
-                content: IrMessageContent::Text("hi".to_string().into()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-        ],
-        false,
-    );
-    req.instructions = Some("request instructions".into());
+    let req = ResponsesDecoder
+        .decode_request(json!({
+            "model": "gpt-5.4",
+            "instructions": "request instructions",
+            "input": [
+                {"role": "system", "content": "system context"},
+                {"role": "developer", "content": "existing developer"},
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "hi"},
+                    {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "high"}
+                ]},
+                {"role": "assistant", "content": "ack"},
+                {"role": "system", "content": "later system context"},
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .expect("decode mixed instruction history");
 
     let (body, _) = ResponsesEncoder.encode_request(req).expect("encode");
     assert_eq!(
@@ -111,12 +108,41 @@ fn responses_encoder_keeps_instructions_distinct_from_system_messages() {
         Some("request instructions")
     );
     let input = body.get("input").and_then(|v| v.as_array()).expect("input");
-    assert_eq!(input.len(), 2);
     assert_eq!(
-        input[0].get("role").and_then(|v| v.as_str()),
-        Some("system")
+        input
+            .iter()
+            .map(|item| item["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "developer",
+            "developer",
+            "user",
+            "assistant",
+            "developer",
+            "user"
+        ]
     );
-    assert_eq!(input[1].get("role").and_then(|v| v.as_str()), Some("user"));
+    assert_eq!(
+        input
+            .iter()
+            .map(|item| item["content"][0]["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "system context",
+            "existing developer",
+            "hi",
+            "ack",
+            "later system context",
+            "continue"
+        ]
+    );
+    assert_eq!(
+        input[2]["content"],
+        json!([
+            {"type": "input_text", "text": "hi"},
+            {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "high"}
+        ])
+    );
 }
 #[test]
 fn responses_encoder_emits_function_call_and_function_call_output_items() {

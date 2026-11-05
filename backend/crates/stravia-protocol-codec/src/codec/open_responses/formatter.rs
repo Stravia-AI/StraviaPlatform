@@ -545,7 +545,7 @@ pub fn response_resource_snapshot(
         "usage": usage,
         "max_output_tokens": null,
         "max_tool_calls": null,
-        "store": true,
+        "store": false,
         "background": false,
         "service_tier": "default",
         "metadata": {},

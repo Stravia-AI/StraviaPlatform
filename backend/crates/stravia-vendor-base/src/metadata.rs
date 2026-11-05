@@ -566,6 +566,39 @@ fn custom_standard() -> (
             equals: Value::String("openai-compatible".into()),
         }),
     });
+    for (key, label, description, default) in [
+        (
+            "use_websocket",
+            crate::messages::responses_use_websocket(),
+            crate::messages::responses_use_websocket_description(),
+            false,
+        ),
+        (
+            "use_previous_response_id",
+            crate::messages::responses_use_previous_response_id(),
+            crate::messages::responses_use_previous_response_id_description(),
+            true,
+        ),
+    ] {
+        descriptor.2.push(ConfigField {
+            key: key.into(),
+            label,
+            description: Some(description),
+            kind: ConfigFieldKind::Bool,
+            required: false,
+            default_json: Some(Value::Bool(default)),
+            group: Some("advanced".into()),
+            secret: false,
+            min: None,
+            max: None,
+            max_length: None,
+            pattern: None,
+            visible_when: Some(stravia_vendor_sdk::FieldCondition {
+                field: stravia_vendor_sdk::FieldCondition::PROTOCOL_CONTEXT.into(),
+                equals: Value::String("open-responses".into()),
+            }),
+        });
+    }
     descriptor
 }
 

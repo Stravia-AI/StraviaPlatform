@@ -45,9 +45,9 @@ use project::*;
 use store::*;
 
 pub(crate) use project::{
-    apply_provider_effective_response, generation_node_is_completed,
-    generation_session_fingerprint, generation_session_id_fingerprint, has_gemini_tool_calls,
-    project_client_history, set_generation_session_id,
+    generation_node_is_completed, generation_session_fingerprint,
+    generation_session_id_fingerprint, has_gemini_tool_calls, project_client_history,
+    set_generation_session_id,
 };
 pub(crate) use store::{
     GenerationDiscoveryWorkspace, hydrate_response_artifact_references,
@@ -214,10 +214,18 @@ pub(crate) struct GenerationChainWrite {
     parent: Arc<ActiveGenerationChain>,
     request_delta: Arc<AiRequest>,
     request: Arc<AiRequest>,
+    provider_context: Option<ProviderHistoryContext>,
     id: String,
     discovery_workspace: Option<GenerationDiscoveryWorkspace>,
     staged: Option<StagedGeneration>,
     commit_fence: Option<GenerationCommitFence>,
+}
+
+#[derive(Clone)]
+struct ProviderHistoryContext {
+    hash: [u8; 32],
+    items: usize,
+    reasoning: stravia_runtime_contract::protocol::ir::ReasoningConfig,
 }
 
 impl Clone for GenerationChainWrite {
@@ -228,6 +236,7 @@ impl Clone for GenerationChainWrite {
             parent: Arc::clone(&self.parent),
             request_delta: Arc::clone(&self.request_delta),
             request: Arc::clone(&self.request),
+            provider_context: self.provider_context.clone(),
             id: self.id.clone(),
             // Execution legs never retain the preparation-only workspace.
             discovery_workspace: None,
@@ -740,6 +749,7 @@ impl GenerationChain {
             parent: Arc::new(parent),
             request_delta,
             request,
+            provider_context: None,
             id: self.store.allocate_id(),
             discovery_workspace: None,
             staged: None,
@@ -932,10 +942,31 @@ impl GenerationChainState {
         target_namespace: &str,
         egress: impl Into<Option<ProtocolId>>,
     ) -> Self {
+        Self::from_request_with_context(
+            request,
+            target_namespace,
+            egress,
+            (
+                stravia_runtime_contract::protocol::ir::canonical::history_context_hash(
+                    &request.items,
+                ),
+                request.items.len(),
+            ),
+        )
+    }
+
+    fn from_request_with_context(
+        request: &AiRequest,
+        target_namespace: &str,
+        egress: impl Into<Option<ProtocolId>>,
+        context: ([u8; 32], usize),
+    ) -> Self {
         let egress = egress.into();
         let mut state = Self {
-            context_fingerprint: history_context_fingerprint(&request.items),
-            context_messages: request.items.len(),
+            context_fingerprint: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                &context.0,
+            ),
+            context_messages: context.1,
             provider_model: request.model.clone(),
             target_namespace: target_namespace.to_owned(),
             protocol: egress

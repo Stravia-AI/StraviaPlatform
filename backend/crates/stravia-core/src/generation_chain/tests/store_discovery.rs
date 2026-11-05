@@ -4283,7 +4283,8 @@ async fn response_history_survives_gateway_restart_with_sqlite() {
 async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
     let store = generation_store().await;
     let owner = principal("owner");
-    let request = responses_request(vec![user_message("m1")]);
+    let mut request = responses_request(vec![user_message("m1")]);
+    request.parameters.store = Some(true);
     let state =
         GenerationChainState::from_request(&request, "provider-a", OPEN_RESPONSES_2026_04_24);
     let mut response = AiResponse::new("upstream-1", "model");
@@ -4306,6 +4307,7 @@ async fn compatible_parent_uses_upstream_id_and_only_new_messages() {
         .expect("save response");
 
     let mut next = responses_request(vec![user_message("m2")]);
+    next.parameters.store = Some(true);
     crate::router::stamp_previous_response_id(&mut next, "resp_gateway_1");
     let active = store
         .materialize_parent(&owner, &mut next)
@@ -4734,7 +4736,7 @@ fn native_upstream_reuse_requires_the_same_provider_model() {
 }
 
 #[test]
-fn refreshing_request_semantics_tracks_provider_effective_controls() {
+fn refreshing_request_semantics_tracks_effective_request_controls() {
     let mut request = responses_request(vec![user_message("new")]);
     let mut state =
         GenerationChainState::from_request(&request, "provider-a", OPEN_RESPONSES_2026_04_24);

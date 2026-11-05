@@ -1480,7 +1480,13 @@ async fn prepare_attempt(
         })?;
     let require_affinity = request_requires_affinity(&provider_request);
     let mut continuation_fallback = None;
-    if compact || thinking_replayed {
+    // 完整历史已恢复；关闭原生续接只跳过上游优化，不影响本地父链与缓存。
+    let use_previous_response_id = provider_snapshot
+        .options
+        .get("use_previous_response_id")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false);
+    if compact || thinking_replayed || !use_previous_response_id {
         if crate::router::parent_id_from_request(&provider_request).is_some() {
             crate::router::clear_previous_response_id(Arc::make_mut(&mut provider_request));
         }
@@ -1880,6 +1886,14 @@ async fn begin_attempt(
     let model_turn_id = prepared.model_turn_id.clone();
     let route_context = prepared.route.clone();
     let publication = VendorPublication::default();
+    // 提供方视图仅用于续接证明和 Target 控制，本地历史仍使用客户端视图。
+    // 证明必须涵盖完整输入，不能把 continuation delta 当作完整历史。
+    let effective_request = Arc::clone(
+        prepared
+            .continuation_fallback
+            .as_ref()
+            .unwrap_or(&prepared.request),
+    );
     let target_identity = TargetIdentity {
         actual_model: prepared.actual_model.clone(),
         provider_id: prepared.route.provider_id.clone(),
@@ -2003,6 +2017,7 @@ async fn begin_attempt(
             driver.deadline_guard = Some(deadline_guard);
             Ok(ModelTurn {
                 model_turn_id,
+                provider_request: effective_request,
                 route: route_context,
                 target: target_identity,
                 output: Box::pin(VendorOutputStream::new(output_rx, driver, publication)),
@@ -2833,7 +2848,7 @@ fn thinking_authority(
 }
 
 fn request_requires_affinity(request: &AiRequest) -> bool {
-    request.parameters.store == Some(false)
+    !crate::generation_chain::request_preserves_upstream_response(request)
 }
 
 fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {

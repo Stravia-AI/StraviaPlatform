@@ -359,11 +359,6 @@ struct Attempt {
 
 fn normalize_request(model: &str, request: &mut AiRequest) {
     request.model = model.to_owned();
-    for item in &mut request.items {
-        if item.role == stravia_runtime_contract::protocol::ir::Role::System {
-            item.role = stravia_runtime_contract::protocol::ir::Role::Developer;
-        }
-    }
     request.parameters.store = Some(false);
 }
 

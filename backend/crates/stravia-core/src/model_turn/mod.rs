@@ -331,6 +331,7 @@ impl TargetIdentity {
 
 pub struct ModelTurn {
     pub(crate) model_turn_id: String,
+    pub(crate) provider_request: Arc<AiRequest>,
     pub route: RouteContext,
     pub target: TargetIdentity,
     pub output: CanonicalEventStream,
@@ -357,6 +358,7 @@ impl ModelTurn {
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
                 publication: None,
             },
+            provider_request: Arc::new(request),
             route,
             output: Box::pin(futures::stream::iter(events)),
             streamed: false,

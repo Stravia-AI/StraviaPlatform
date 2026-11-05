@@ -319,7 +319,7 @@ fn explicit_null_resets_never_leave_as_null_controls() {
     ] {
         assert!(body.get(field).is_none(), "{field}");
     }
-    assert_eq!(body["store"], true);
+    assert_eq!(body["store"], false);
     assert!(body["text"]["format"].get("strict").is_none());
     assert!(body["text"].get("verbosity").is_none());
     assert!(body.get("reasoning").is_none());
@@ -332,6 +332,35 @@ fn explicit_null_resets_never_leave_as_null_controls() {
     assert_eq!(profile["top_logprobs"], 0);
     assert_eq!(profile["text"]["verbosity"], "low");
     assert_eq!(profile["reasoning"]["effort"], "low");
+}
+
+#[test]
+fn omitted_store_encodes_false_while_explicit_true_is_kept_in_body_and_profile() {
+    for (wire_store, expected) in [
+        (None, false),
+        (Some(serde_json::Value::Null), false),
+        (Some(serde_json::json!(false)), false),
+        (Some(serde_json::json!(true)), true),
+    ] {
+        let mut wire = serde_json::json!({
+            "model": "gpt", "input": "hello",
+            "reasoning": {"effort": "high"},
+        });
+        if let Some(store) = wire_store.clone() {
+            wire["store"] = store;
+        }
+        let request = ResponsesDecoder.decode_request(wire).unwrap();
+        let profile = response_profile_from_request(&request);
+        let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
+        assert_eq!(body["store"], expected, "body for {wire_store:?}");
+        assert_eq!(profile["store"], expected, "profile for {wire_store:?}");
+        // 无状态响应必须携带加密推理内容，才能由客户端在下一轮自行回放。
+        assert_eq!(
+            body["include"].is_array(),
+            !expected,
+            "include for {wire_store:?}"
+        );
+    }
 }
 
 #[test]
@@ -713,38 +742,6 @@ fn writes_max_target_effort_without_a_local_allow_list() {
     let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
 
     assert_eq!(body["reasoning"]["effort"], "max");
-}
-
-#[test]
-fn preserves_request_instructions_and_developer_role_with_dated_defaults() {
-    let mut request = AiRequest::new(
-        "logical-model",
-        vec![
-            AiItem {
-                role: Role::Developer,
-                content: MessageContent::Text("Use repository conventions.".to_owned().into()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-            AiItem {
-                role: Role::User,
-                content: MessageContent::Text("Implement it.".to_owned().into()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-        ],
-    );
-    request.instructions = Some("Follow the accepted design.".into());
-
-    let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
-
-    assert_eq!(body["instructions"], "Follow the accepted design.");
-    assert_eq!(body["input"][0]["role"], "developer");
-    assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
-    assert_eq!(body["store"], true);
-    assert_eq!(body["stream"], false);
 }
 
 #[test]

@@ -490,7 +490,7 @@ pub(crate) async fn hydrate_response_artifact_references(
 }
 
 pub(crate) fn request_preserves_upstream_response(request: &AiRequest) -> bool {
-    request.parameters.store.unwrap_or(true)
+    request.parameters.store.unwrap_or(false)
 }
 
 /// discover_prefix 一次调用内不变的核验输入：借用于调用方已算好的投影与
@@ -1337,10 +1337,14 @@ impl GenerationChainStore {
     #[cfg(test)]
     pub(crate) async fn save(
         &self,
-        commit: GenerationChainCommit<'_>,
+        mut commit: GenerationChainCommit<'_>,
     ) -> Result<(), TurnCommitError> {
         let projected =
             project_client_commit(commit.parent, commit.request_delta, &commit.response)?;
+        let request = commit.effective_request.unwrap_or(commit.request_delta);
+        commit.effective_state.context_fingerprint = history_context_fingerprint(&request.items);
+        commit.effective_state.context_messages = request.items.len();
+        commit.effective_state.append_output(&commit.response);
         self.save_projected(commit, projected).await
     }
 
@@ -1386,10 +1390,14 @@ impl GenerationChainStore {
             effective_request.to_mut().items.drain(..input_start);
             effective_inline = true;
         }
-        effective_state.context_fingerprint = history_context_fingerprint(&effective_request.items);
-        effective_state.context_messages = effective_request.items.len();
+        // 普通提交保留 stage 捕获的提供方语义；只有压缩改变窗口边界时才重新计算。
+        if effective_inline {
+            effective_state.context_fingerprint =
+                history_context_fingerprint(&effective_request.items);
+            effective_state.context_messages = effective_request.items.len();
+            effective_state.append_output(&response);
+        }
         effective_state.refresh_request_semantics(&effective_request);
-        effective_state.append_output(&response);
         if !effective_inline
             && let Some(proof) =
                 effective_request

@@ -14,6 +14,7 @@ use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Usage;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
 use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+use stravia_runtime_contract::protocol::ir::vendor_ext::OPEN_RESPONSES_PROVIDER_STORE_META;
 
 /// Ordered source part identity: `(is_reasoning_content, index)`.
 /// The explicit category keeps summaries before content without reserving bits
@@ -54,6 +55,7 @@ pub struct StreamResponseAccumulator {
     pub model: String,
     response_metadata: Option<serde_json::Value>,
     chat_reasoning_field: Option<serde_json::Value>,
+    provider_store: Option<bool>,
     google_response_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     native_metadata: serde_json::Map<String, serde_json::Value>,
     items: Vec<AccumulatedItem>,
@@ -229,21 +231,31 @@ impl StreamResponseAccumulator {
                 }
             }
             AiStreamDelta::ResponseMetadata { metadata } => {
-                if let Some(object) = metadata.as_object()
-                    && let Some(value) = object.get(CHAT_REASONING_FIELD_META)
-                {
-                    if value.is_null() || value.as_str() == Some("") {
+                if let Some(object) = metadata.as_object() {
+                    let reasoning_field = object.get(CHAT_REASONING_FIELD_META);
+                    let provider_store = object.get(OPEN_RESPONSES_PROVIDER_STORE_META);
+                    if let Some(value) = reasoning_field
+                        && (value.is_null() || value.as_str() == Some(""))
+                    {
                         self.chat_reasoning_field = Some(value.clone());
                     }
-                    // Chat 字段存在性不是 Responses profile；单独信号不能抹掉上游 profile。
-                    if object.len() > 1 {
-                        let mut profile = object.clone();
-                        profile.remove(CHAT_REASONING_FIELD_META);
-                        self.response_metadata = Some(serde_json::Value::Object(profile));
+                    if let Some(stored) = provider_store.and_then(serde_json::Value::as_bool) {
+                        self.provider_store = Some(stored);
                     }
-                } else {
-                    self.response_metadata = Some(metadata.clone());
+                    let private_fields = usize::from(reasoning_field.is_some())
+                        + usize::from(provider_store.is_some());
+                    // 私有旁路信号不能抹掉已有的有效控制画像。
+                    if private_fields > 0 {
+                        if object.len() > private_fields {
+                            let mut profile = object.clone();
+                            profile.remove(CHAT_REASONING_FIELD_META);
+                            profile.remove(OPEN_RESPONSES_PROVIDER_STORE_META);
+                            self.response_metadata = Some(serde_json::Value::Object(profile));
+                        }
+                        return;
+                    }
                 }
+                self.response_metadata = Some(metadata.clone());
             }
             AiStreamDelta::ProtectedThinkingStart { .. } => {}
             AiStreamDelta::ThinkingDelta(text) => {
@@ -527,6 +539,7 @@ impl StreamResponseAccumulator {
             model,
             response_metadata,
             chat_reasoning_field,
+            provider_store,
             google_response_metadata,
             mut native_metadata,
             items,
@@ -655,6 +668,12 @@ impl StreamResponseAccumulator {
         }
         resp.vendor.egress.extend(native_metadata);
         resp.usage = usage;
+        if let Some(stored) = provider_store {
+            resp.vendor.egress.insert(
+                OPEN_RESPONSES_PROVIDER_STORE_META.into(),
+                serde_json::Value::Bool(stored),
+            );
+        }
         if let Some(value) = chat_reasoning_field {
             resp.vendor
                 .ingress

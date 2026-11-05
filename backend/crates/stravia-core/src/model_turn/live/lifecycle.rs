@@ -473,24 +473,6 @@ impl Operation<'_, '_> {
 
         match (compact, result) {
             (false, OperationOutput::Infer(response)) => {
-                if prepared.request.meta.redaction.has_provider_proof() {
-                    // 上游画像不含宿主解析出的 Target control，证明仍需保留本轮实际派发的控制。
-                    let request = Arc::make_mut(&mut prepared.request);
-                    let target_control = request.reasoning.target_control.take();
-                    let effective_controls =
-                        crate::generation_chain::apply_provider_effective_response(
-                            request, &response,
-                        )
-                        .is_some();
-                    request.reasoning.target_control = target_control;
-                    if effective_controls {
-                        prepared
-                            .request
-                            .meta
-                            .redaction
-                            .observe_provider_controls(&prepared.request);
-                    }
-                }
                 if !self.emitted_delta {
                     // Synthetic deltas are observable and may become persisted history before the
                     // terminal response is consumed. Externalize output media first so neither path

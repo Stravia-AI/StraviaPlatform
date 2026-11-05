@@ -1,6 +1,6 @@
 use crate::Gateway;
 use crate::history_marker::{HiddenHistorySegment, HistoryMarker, HistoryMarkerError};
-use crate::model_turn::TargetIdentity;
+use crate::model_turn::ModelTurn;
 use crate::tool_execution::DetachedPlatformExecution;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -12,6 +12,7 @@ use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::vendor_ext::OPEN_RESPONSES_PROVIDER_STORE_META;
 
 use super::ledger::RunLedger;
 use super::projection::ProjectedDeltaBatch;
@@ -104,6 +105,7 @@ fn visit_completion_media(
 #[derive(Clone)]
 struct GenerationChainCompletion {
     write: crate::generation_chain::GenerationChainWrite,
+    provider_request: std::sync::Arc<AiRequest>,
     source: crate::generation_chain::GenerationSource,
     owns_response_identity: bool,
     response_continuation_available: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -128,10 +130,10 @@ impl CompletionContext {
         gateway: Gateway,
         generation: super::GenerationChainRun,
         ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
-        target: &TargetIdentity,
-        model_turn_id: String,
+        turn: &ModelTurn,
         observer: crate::interaction_observation::RunObserver,
     ) -> Self {
+        let target = &turn.target;
         let owns_response_identity = ingress == OPEN_RESPONSES_2026_04_24;
         let logical_model = generation.write.as_ref().map_or_else(
             || generation.client_request.model.clone(),
@@ -140,6 +142,7 @@ impl CompletionContext {
         let prior_publications = generation.vendor_publications.clone();
         let generation_chain = generation.write.map(|write| GenerationChainCompletion {
             write,
+            provider_request: std::sync::Arc::clone(&turn.provider_request),
             source: crate::generation_chain::GenerationSource::Target(target.thinking_source()),
             owns_response_identity,
             response_continuation_available: target.response_continuation_available.clone(),
@@ -153,7 +156,7 @@ impl CompletionContext {
             logical_model,
             principal: generation.principal,
             generation_chain,
-            model_turn_id,
+            model_turn_id: turn.model_turn_id.clone(),
             observer,
         }
     }
@@ -647,6 +650,9 @@ pub(super) async fn complete_canonical_response(
         run.remove_exposed_tools(chain.write.request_mut());
         chain
             .write
+            .observe_provider_response(&chain.provider_request, &canonical_response);
+        chain
+            .write
             .record_inline_publications(&ledger.compaction_records.lock());
     }
     let reusable_upstream_id = generation_chain
@@ -654,6 +660,7 @@ pub(super) async fn complete_canonical_response(
         .is_some_and(|chain| {
             upstream_response_is_available(
                 chain.write.request(),
+                &upstream_response,
                 &chain.response_continuation_available,
             ) && crate::generation_chain::generation_node_is_completed(&response)
                 && response_preserves_upstream(&upstream_response, &canonical_response)
@@ -697,9 +704,17 @@ pub(super) async fn complete_canonical_response(
 
 fn upstream_response_is_available(
     request: &AiRequest,
+    response: &AiResponse,
     response_continuation_available: &std::sync::atomic::AtomicBool,
 ) -> bool {
-    crate::generation_chain::request_preserves_upstream_response(request)
+    // 请求允许存储并不证明 Provider 实际存储；未存储响应只能复用仍可用的 socket。
+    (crate::generation_chain::request_preserves_upstream_response(request)
+        && response
+            .vendor
+            .egress
+            .get(OPEN_RESPONSES_PROVIDER_STORE_META)
+            .and_then(serde_json::Value::as_bool)
+            != Some(false))
         || response_continuation_available.load(std::sync::atomic::Ordering::Acquire)
 }
 
@@ -1177,8 +1192,87 @@ mod tests {
         request.parameters.store = Some(false);
         let unavailable = std::sync::atomic::AtomicBool::new(false);
         let available = std::sync::atomic::AtomicBool::new(true);
+        let response = AiResponse::new("response", "model");
 
-        assert!(!upstream_response_is_available(&request, &unavailable));
-        assert!(upstream_response_is_available(&request, &available));
+        assert!(!upstream_response_is_available(
+            &request,
+            &response,
+            &unavailable
+        ));
+        assert!(upstream_response_is_available(
+            &request, &response, &available
+        ));
+    }
+
+    #[test]
+    fn upstream_storage_controls_http_continuation_without_changing_local_store() {
+        use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
+        use stravia_protocol_codec::transform::ProtocolTransform;
+
+        let pair = ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .unwrap();
+        for stored in [false, true] {
+            for streaming in [false, true] {
+                let mut wire = pair
+                    .encode_response(&AiResponse::new("upstream", "model"))
+                    .unwrap();
+                wire["store"] = stored.into();
+                let (response, public) = if streaming {
+                    let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
+                    let mut created = wire.clone();
+                    created["status"] = "in_progress".into();
+                    let mut accumulator = StreamResponseAccumulator::default();
+                    let mut events = Vec::new();
+                    for (sequence, (event, resource)) in
+                        [("response.created", created), ("response.completed", wire)]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let payload = serde_json::json!({
+                            "type": event, "sequence_number": sequence, "response": resource,
+                        });
+                        let deltas = decoder
+                            .decode_chunk(format!("event: {event}\ndata: {payload}\n\n").as_bytes())
+                            .unwrap();
+                        accumulator.apply_all(&deltas);
+                        events.extend(encoder.encode_deltas(&deltas).unwrap());
+                    }
+                    let terminal = events
+                        .iter()
+                        .find(|event| event.event.as_deref() == Some("response.completed"))
+                        .unwrap();
+                    let public: serde_json::Value = serde_json::from_str(&terminal.data).unwrap();
+                    (accumulator.into_ai_response(), public["response"].clone())
+                } else {
+                    let response = pair.decode_response(wire).unwrap();
+                    let public = pair.encode_response(&response).unwrap();
+                    (response, public)
+                };
+                // 公开 store 只反映请求意图（省略为 false），不回显上游实际存储事实。
+                assert_eq!(public["store"], false);
+                assert!(
+                    public
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .all(|key| !key.starts_with("__"))
+                );
+                for requested in [None, Some(false), Some(true)] {
+                    let mut request = AiRequest::new("model", Vec::new());
+                    request.parameters.store = requested;
+                    let unavailable = std::sync::atomic::AtomicBool::new(false);
+                    let available = std::sync::atomic::AtomicBool::new(true);
+                    assert_eq!(
+                        upstream_response_is_available(&request, &response, &unavailable),
+                        requested.unwrap_or(false) && stored,
+                        "stored={stored}, requested={requested:?}, streaming={streaming}",
+                    );
+                    assert!(upstream_response_is_available(
+                        &request, &response, &available
+                    ));
+                }
+            }
+        }
     }
 }
