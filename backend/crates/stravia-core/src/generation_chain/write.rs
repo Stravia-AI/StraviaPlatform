@@ -140,6 +140,23 @@ impl GenerationChainWrite {
     pub(crate) fn observe_effective(&mut self, request: impl Into<Arc<AiRequest>>) {
         // The restoration owner supplies the client-shaped effective view.
         self.request = request.into();
+        self.provider_context = None;
+    }
+
+    /// 续接指纹必须来自提供方视图，不能包含交付投影新增的思考 Marker。
+    pub(crate) fn observe_provider_response(&mut self, request: &AiRequest, response: &AiResponse) {
+        let mut hash =
+            stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&request.items);
+        for item in &response.items {
+            hash = stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(
+                &hash, item,
+            );
+        }
+        self.provider_context = Some(ProviderHistoryContext {
+            hash,
+            items: request.items.len() + response.items.len(),
+            reasoning: request.reasoning.clone(),
+        });
     }
 
     pub(crate) fn stage(
@@ -161,17 +178,30 @@ impl GenerationChainWrite {
         if let Some(source) = source.thinking_source() {
             source.stamp_response(response);
         }
-        attach_persisted_profile(
-            response,
-            &mut self.request,
-            self.parent.parent_id.as_deref(),
-        );
+        if let Some(context) = &self.provider_context
+            && (self.request.reasoning.level != context.reasoning.level
+                || self.request.reasoning.target_control != context.reasoning.target_control)
+        {
+            // 只采用 Target 映射出的控制；脱敏正文和平台说明不能成为本地历史。
+            Arc::make_mut(&mut self.request)
+                .reasoning
+                .clone_from(&context.reasoning);
+        }
+        attach_persisted_profile(response, &self.request, self.parent.parent_id.as_deref());
+        let context = self.provider_context.as_ref().map(|context| (context.hash, context.items)).unwrap_or_else(|| {
+            let mut hash = stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&self.request.items);
+            for item in &response.items {
+                hash = stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(&hash, item);
+            }
+            (hash, self.request.items.len() + response.items.len())
+        });
         let (effective_state, upstream_response_id) = match source {
             GenerationSource::Target(source) => (
-                GenerationChainState::from_request(
+                GenerationChainState::from_request_with_context(
                     &self.request,
                     &source.namespace,
                     Option::<ProtocolId>::None,
+                    context,
                 )
                 .with_protocol_identity(source.protocol.as_ref())
                 .with_provider_model(&source.actual_model)
@@ -179,7 +209,12 @@ impl GenerationChainWrite {
                 upstream_response_id,
             ),
             GenerationSource::Hook { protocol } => (
-                GenerationChainState::from_request(&self.request, "hook", Some(*protocol)),
+                GenerationChainState::from_request_with_context(
+                    &self.request,
+                    "hook",
+                    Some(*protocol),
+                    context,
+                ),
                 None,
             ),
         };

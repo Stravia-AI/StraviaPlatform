@@ -1,6 +1,186 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_continuation_never_adopts_reported_controls_into_request_controls() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let explicit = serde_json::json!({
+        "temperature": 0.25, "top_p": 0.75, "max_output_tokens": 128,
+        "presence_penalty": 0.5, "frequency_penalty": 0.125,
+        "parallel_tool_calls": false, "top_logprobs": 2,
+        "truncation": "auto", "max_tool_calls": 3,
+        "service_tier": "priority",
+        "text": {"verbosity": "low"},
+        "reasoning": {"effort": "low", "summary": "concise"}
+    });
+    let reported_defaults = serde_json::json!({
+        "temperature": 1.0, "top_p": 1.0,
+        "presence_penalty": 0.0, "frequency_penalty": 0.0,
+        "top_logprobs": 0, "parallel_tool_calls": true,
+        "truncation": "disabled", "tools": [], "tool_choice": "auto",
+        "service_tier": "default",
+        "text": {"format": {"type": "text"}, "verbosity": "medium"},
+        "reasoning": {"effort": "medium", "summary": "detailed"}
+    });
+    let reported_non_defaults = serde_json::json!({
+        "temperature": 1.5, "top_p": 0.5, "max_output_tokens": 42,
+        "presence_penalty": 1.0, "frequency_penalty": 0.625,
+        "top_logprobs": 7, "parallel_tool_calls": false,
+        "truncation": "disabled", "max_tool_calls": 9,
+        "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+        "tool_choice": "required",
+        "service_tier": "flex",
+        "text": {"format": {"type": "text"}, "verbosity": "high"},
+        "reasoning": {"effort": "high", "summary": "detailed"}
+    });
+    let omitted_keys = [
+        "temperature",
+        "top_p",
+        "max_output_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "top_logprobs",
+        "parallel_tool_calls",
+        "truncation",
+        "max_tool_calls",
+        "tools",
+        "tool_choice",
+        "text",
+        "service_tier",
+    ];
+    for requested in [None, Some(&explicit)] {
+        for reported in [&reported_defaults, &reported_non_defaults] {
+            let chain = generation_chain().await;
+            let owner = principal("reported-controls-owner");
+            let mut body = serde_json::json!({
+                "model": "model", "input": "question", "store": true
+            });
+            if let Some(controls) = requested {
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(controls.as_object().unwrap().clone());
+            }
+            let initial = pair.decode_request(body).unwrap();
+            let mut root = chain.begin(owner.clone(), initial).await.unwrap();
+            let mut response = AiResponse::new("upstream", "model");
+            response.push_output_text("answer");
+            response.vendor.egress.insert(
+                "__open_responses_provider_effective".into(),
+                reported.clone(),
+            );
+            assert!(root.stage(&mut response, &generation_source(), None));
+            root.persist().await.unwrap();
+
+            // The response display keeps reporting what the upstream actually ran.
+            let public = pair.encode_response(&response).unwrap();
+            for key in [
+                "temperature",
+                "frequency_penalty",
+                "top_logprobs",
+                "service_tier",
+            ] {
+                assert_eq!(public[key], reported[key], "{key}: {public}");
+            }
+            assert_eq!(public["reasoning"]["summary"], "detailed");
+            if let Some(max) = reported.get("max_output_tokens") {
+                assert_eq!(&public["max_output_tokens"], max, "{public}");
+            }
+            // An inherited next turn carries only the parent request's own controls.
+            let mut follow_up = pair
+                .decode_request(serde_json::json!({
+                    "model": "model", "input": "continue", "store": true
+                }))
+                .unwrap();
+            crate::router::stamp_previous_response_id(&mut follow_up, root.id());
+            let resumed = chain.begin(owner.clone(), follow_up).await.unwrap();
+            let wire = pair.encode_request(resumed.request().clone()).unwrap().body;
+            match requested {
+                None => {
+                    for key in omitted_keys {
+                        assert!(wire.get(key).is_none(), "{key} must remain omitted: {wire}");
+                    }
+                    assert!(wire["reasoning"].get("effort").is_none(), "{wire}");
+                    assert_eq!(wire["reasoning"]["summary"], "auto");
+                }
+                Some(controls) => {
+                    for key in omitted_keys {
+                        assert_eq!(wire[key], controls[key], "{key} must be inherited: {wire}");
+                    }
+                    assert_eq!(wire["reasoning"], controls["reasoning"]);
+                }
+            }
+
+            // Explicit next-turn settings and explicit resets beat inheritance.
+            let mut overridden = pair
+                .decode_request(serde_json::json!({
+                    "model": "model", "input": "again", "store": true,
+                    "temperature": 0.625, "frequency_penalty": null,
+                    "service_tier": null,
+                    "reasoning": {"effort": "high"}
+                }))
+                .unwrap();
+            crate::router::stamp_previous_response_id(&mut overridden, root.id());
+            let resumed = chain.begin(owner, overridden).await.unwrap();
+            let wire = pair.encode_request(resumed.request().clone()).unwrap().body;
+            assert_eq!(wire["temperature"], 0.625);
+            assert!(wire.get("frequency_penalty").is_none(), "{wire}");
+            assert!(wire.get("service_tier").is_none(), "{wire}");
+            assert_eq!(wire["reasoning"]["effort"], "high");
+            assert_eq!(wire.get("top_p"), requested.map(|c| &c["top_p"]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_continuation_preserves_requested_service_tier() {
+    use stravia_protocol_codec::transform::ProtocolTransform;
+    use stravia_runtime_contract::protocol::ir::ServiceTier;
+
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    for (requested, reported, expected) in [
+        (None, "auto", None),
+        (
+            Some(ServiceTier::Priority),
+            "default",
+            Some(serde_json::json!("priority")),
+        ),
+    ] {
+        let chain = generation_chain().await;
+        let owner = principal("service-tier-owner");
+        let mut initial = responses_request(vec![user_message("question")]);
+        initial.parameters.service_tier = requested;
+        let mut root = chain.begin(owner.clone(), initial).await.unwrap();
+        let mut response = AiResponse::new("upstream", "model");
+        response.push_output_text("answer");
+        response.vendor.egress.insert(
+            "__open_responses_provider_effective".into(),
+            serde_json::json!({"service_tier": reported}),
+        );
+        assert!(root.stage(&mut response, &generation_source(), None));
+        root.persist().await.unwrap();
+
+        let public = pair.encode_response(&response).unwrap();
+        assert_eq!(public["service_tier"], reported);
+
+        let mut follow_up = responses_request(vec![user_message("continue")]);
+        crate::router::stamp_previous_response_id(&mut follow_up, root.id());
+        let resumed = chain.begin(owner.clone(), follow_up).await.unwrap();
+        let encoded = pair.encode_request(resumed.request().clone()).unwrap();
+        assert_eq!(encoded.body.get("service_tier"), expected.as_ref());
+
+        let mut overridden = responses_request(vec![user_message("new tier")]);
+        overridden.parameters.service_tier = Some(ServiceTier::Flex);
+        crate::router::stamp_previous_response_id(&mut overridden, root.id());
+        let resumed = chain.begin(owner, overridden).await.unwrap();
+        let encoded = pair.encode_request(resumed.request().clone()).unwrap();
+        assert_eq!(encoded.body["service_tier"], "flex");
+    }
+}
+
+#[tokio::test]
 async fn candidate_projection_uses_client_controls_and_retained_items() {
     let chain = generation_chain().await;
     let mut request = responses_request(vec![user_message("client input")]);

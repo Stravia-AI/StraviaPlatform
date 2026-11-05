@@ -246,7 +246,7 @@ fn infer(
         return infer_responses_websocket(
             host,
             &provider,
-            &body,
+            body,
             &encoded.headers,
             preserve_upstream_errors,
         )
@@ -371,7 +371,7 @@ fn retain_compact_fields(fields: Option<&Value>, body: &mut Value) -> Result<(),
 fn infer_responses_websocket(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    body: &Value,
+    body: Value,
     codec_headers: &http::HeaderMap,
     preserve_upstream_errors: bool,
 ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
@@ -396,28 +396,46 @@ fn infer_responses_websocket(
         .get("previous_response_id")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty());
-    let continuation_requested = previous_response_id.is_some();
     let continuation_id = (body.get("store").and_then(Value::as_bool) == Some(false))
         .then(|| previous_response_id.map(str::to_owned))
         .flatten();
-    let connection = host.ws_connect(stravia_vendor_sdk::WsRequest {
-        url,
-        headers,
-        protocols: Vec::new(),
-        continuation_id,
-        reuse_max_age_millis: None,
-    })?;
-    let mut frame = body.clone();
-    let object = frame
+    execute_responses_websocket(
+        host,
+        stravia_vendor_sdk::WsRequest {
+            url,
+            headers,
+            protocols: Vec::new(),
+            continuation_id,
+            reuse_max_age_millis: None,
+        },
+        body,
+        preserve_upstream_errors,
+        classify_responses_stream_error,
+    )
+}
+
+pub(crate) fn execute_responses_websocket(
+    host: &GuestHost,
+    request: stravia_vendor_sdk::WsRequest,
+    mut body: Value,
+    preserve_upstream_errors: bool,
+    classify_error: fn(&Value, bool) -> Option<PluginError>,
+) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
+    let continuation_requested = body
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let object = body
         .as_object_mut()
-        .ok_or_else(|| invalid("OpenAI Responses request body must be an object"))?;
+        .ok_or_else(|| invalid("Responses request body must be an object"))?;
     object.remove("stream");
     object.remove("background");
     object.insert("type".into(), Value::String("response.create".into()));
+    let connection = host.ws_connect(request)?;
     host.emit_started()?;
     connection.send(&stravia_vendor_sdk::WsMessage::Text(
-        serde_json::to_string(&frame)
-            .map_err(|_| invalid("OpenAI WebSocket request could not be encoded"))?,
+        serde_json::to_string(&body)
+            .map_err(|_| invalid("Responses WebSocket request could not be encoded"))?,
     ))?;
     common::decode_ai_response_websocket_with_error_classifier(
         host,
@@ -425,7 +443,7 @@ fn infer_responses_websocket(
         connection,
         preserve_upstream_errors,
         continuation_requested,
-        classify_responses_stream_error,
+        classify_error,
     )
 }
 

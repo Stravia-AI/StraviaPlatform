@@ -18,7 +18,7 @@ use stravia_vendor_sdk::{
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, HttpRequest,
     MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderSnapshot, ValidationIssue, read_http_body,
+    ProviderSnapshot, TransportPreference, ValidationIssue, WsRequest, read_http_body,
 };
 
 use crate::metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS;
@@ -174,6 +174,55 @@ pub(crate) fn execute_inference(
         );
     }
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
+    if vendor_id == "custom"
+        && protocol == OPEN_RESPONSES_PROTOCOL
+        && operation == Operation::Infer
+        && provider.transport_preference() != TransportPreference::HttpOnly
+        && provider
+            .options
+            .get("use_websocket")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        let mut url = url::Url::parse(&url)
+            .map_err(|_| common::plugin_error(ErrorKind::Invalid, "invalid Responses URL"))?;
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            _ => {
+                return Err(common::plugin_error(
+                    ErrorKind::Invalid,
+                    "Responses requires an HTTP base URL",
+                ));
+            }
+        };
+        url.set_scheme(scheme).map_err(|_| {
+            common::plugin_error(ErrorKind::Invalid, "invalid Responses URL scheme")
+        })?;
+        // 自定义上游可能忽略 store:true；任何 ID 都先核验原 socket 的 tip，
+        // 不可复用时由宿主恢复完整历史，不能把临时 ID 送到新连接。
+        let continuation_id = encoded
+            .body
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned);
+        return crate::openai::execute_responses_websocket(
+            host,
+            WsRequest {
+                url: url.into(),
+                headers,
+                protocols: Vec::new(),
+                continuation_id,
+                reuse_max_age_millis: None,
+            },
+            encoded.body,
+            preserve_upstream_errors,
+            classify_open_responses_error,
+        )
+        .map(Box::new)
+        .map(OperationOutput::Infer);
+    }
     prepare_gemini_imported_tool_history(protocol, model, &url, &mut encoded.body);
     let body = stravia_runtime_contract::json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(

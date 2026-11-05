@@ -311,6 +311,16 @@ pub fn decode_effective_response_profile(
     profile: &serde_json::Map<String, Value>,
 ) -> Result<AiRequest> {
     let mut body = profile.clone();
+    // Response descriptions are nullable; request descriptions are not.
+    if let Some(format) = body
+        .get_mut("text")
+        .and_then(|text| text.get_mut("format"))
+        .and_then(Value::as_object_mut)
+        && format.get("type").and_then(Value::as_str) == Some("json_schema")
+        && format.get("description").is_some_and(Value::is_null)
+    {
+        format.remove("description");
+    }
     body.insert("model".into(), Value::String(model.to_owned()));
     body.insert(
         "input".into(),

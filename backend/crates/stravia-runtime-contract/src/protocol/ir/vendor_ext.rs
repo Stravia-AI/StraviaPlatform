@@ -23,6 +23,9 @@ use std::collections::HashMap;
 /// 该私有载体可经过响应和流式元数据，但不得出现在公开协议资源中。
 pub const CHAT_REASONING_FIELD_META: &str = "__stravia_chat_reasoning_field";
 
+/// 上游实际保存响应的结果；只用于续接资格，不覆盖本地 store，也不进入公开资源。
+pub const OPEN_RESPONSES_PROVIDER_STORE_META: &str = "__open_responses_provider_store";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VendorExtensions {
     /// Extra fields from the ingress body (client side).

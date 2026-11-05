@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use stravia_vendor_sdk::{
-    Capability, MODELS_SOURCE_CATALOG, OriginDeclaration, OriginHost, ProviderDescriptor,
+    Capability, ConfigFieldKind, MODELS_SOURCE_CATALOG, OriginDeclaration, OriginHost,
+    ProviderDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,6 +121,29 @@ pub(crate) fn resolve_permissions(
                 configuration_field: field,
                 connection_scoped: true,
             });
+            // 只有已声明且由管理员开启的开关才能补充对应 WS origin；
+            // 不将普通 HTTP 授权隐式扩展到 WebSocket，也不放宽 host/port。
+            if options.get("use_websocket").and_then(Value::as_bool) == Some(true)
+                && descriptor.config_fields.iter().any(|field| {
+                    field.key == "use_websocket"
+                        && !field.secret
+                        && matches!(field.kind, ConfigFieldKind::Bool)
+                })
+            {
+                let mut url = url::Url::parse(value)?;
+                let scheme = match url.scheme() {
+                    "https" => "wss",
+                    "http" => "ws",
+                    _ => anyhow::bail!("WebSocket transport requires an HTTP base URL"),
+                };
+                url.set_scheme(scheme)
+                    .map_err(|_| anyhow::anyhow!("invalid WebSocket URL scheme"))?;
+                grants.push(NetworkGrant {
+                    origin: NetworkOrigin::Exact(url.origin().ascii_serialization()),
+                    configuration_field: Some("use_websocket".into()),
+                    connection_scoped: true,
+                });
+            }
         }
 
         for field in &descriptor.network.field_origins {
@@ -291,5 +315,78 @@ mod tests {
         }
         assert!(exact_origin("https://*.example.com").is_err());
         assert!(exact_origin("https://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn websocket_opt_in_grants_only_the_saved_base_counterpart() {
+        let mut descriptor: ProviderDescriptor = serde_json::from_value(serde_json::json!({
+            "provider_id": "transport-test",
+            "display_name": "Transport test",
+            "channels": [],
+            "capabilities": [],
+            "config_fields": [{
+                "key": "use_websocket",
+                "label": {"en-US": "Use WebSocket"},
+                "kind": {"type": "bool"},
+                "required": false,
+                "secret": false
+            }]
+        }))
+        .unwrap();
+        for (base, paired) in [
+            (
+                "https://saved.example.com/v1",
+                "wss://saved.example.com/responses",
+            ),
+            (
+                "http://saved.example.com:8080/v1",
+                "ws://saved.example.com:8080/responses",
+            ),
+        ] {
+            for enabled in [None, Some(false), Some(true)] {
+                let options = enabled
+                    .map(|enabled| BTreeMap::from([("use_websocket".into(), Value::Bool(enabled))]))
+                    .unwrap_or_default();
+                let grants = resolve_permissions(
+                    &descriptor,
+                    Some(base),
+                    None,
+                    None,
+                    &options,
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                let policy =
+                    NetworkPolicy::compile(grants.into_iter().map(|grant| grant.origin)).unwrap();
+                assert!(policy.allows(&url::Url::parse(base).unwrap()));
+                assert_eq!(
+                    policy.allows(&url::Url::parse(paired).unwrap()),
+                    enabled == Some(true)
+                );
+                for excluded in [
+                    "wss://other.example.com/",
+                    "wss://sub.saved.example.com/",
+                    "wss://saved.example.com:8443/",
+                    "ws://saved.example.com:9090/",
+                ] {
+                    assert!(
+                        !policy.allows(&url::Url::parse(excluded).unwrap()),
+                        "{excluded}"
+                    );
+                }
+            }
+        }
+        descriptor.config_fields.clear();
+        let grants = resolve_permissions(
+            &descriptor,
+            Some("https://saved.example.com/v1"),
+            None,
+            None,
+            &BTreeMap::from([("use_websocket".into(), Value::Bool(true))]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let policy = NetworkPolicy::compile(grants.into_iter().map(|grant| grant.origin)).unwrap();
+        assert!(!policy.allows(&url::Url::parse("wss://saved.example.com/").unwrap()));
     }
 }

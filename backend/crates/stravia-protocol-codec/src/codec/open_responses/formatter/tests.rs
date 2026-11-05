@@ -332,7 +332,7 @@ fn response_resource_has_dated_required_keys_and_effective_defaults() {
     );
     assert_eq!(formatted["tools"], serde_json::json!([]));
     assert_eq!(formatted["metadata"], serde_json::json!({}));
-    assert_eq!(formatted["store"], true);
+    assert_eq!(formatted["store"], false);
     assert_eq!(formatted["background"], false);
     assert!(formatted["usage"].is_null());
 }

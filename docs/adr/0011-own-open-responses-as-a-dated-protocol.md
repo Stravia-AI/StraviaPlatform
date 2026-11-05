@@ -19,6 +19,7 @@ Stravia 将官方 Open Responses `2026-04-24` 作为唯一 Responses-shaped cano
 - `OpenAIResponsesV1`、`openai-responses` aliases 和旧目录一次性删除，不保留兼容层或未发布数据迁移。
 - Dated OpenAPI 继续作为 canonical baseline 和回归基线，不再作为 ingress additive surface 的封闭 allowlist。
 - 同协议 Target 保留未知 additive 顶层字段和 rolling hosted tools；未知 `owner:*` Namespaced Extension 仍须显式注册。
+- 角色兼容映射由共享 codec 统一承担：所有 Responses 出站将 System 原位投影为 Developer，不提升到 `instructions`，不改入站或 canonical 历史，也不另设 Provider 开关。公开 schema 仍允许两种角色；这是出站策略，接受上游不再区分两种角色的风险。跨到没有 Developer role 的目标时，Developer 仍静默降级为 System。
 - 跨协议路径优先成功转换：`client_metadata`、`include`、response decoration 以及 `tool_choice=auto/none` 下目标不能执行的 hosted tools 可以省略。
 - 无法表达的内容、身份、引用、结构、required/named tool 或其它硬约束仍在 Provider call 前拒绝。
 - `background` 和 `compact` 以稳定的 unsupported-feature contract 返回，不以 stub 伪装支持。

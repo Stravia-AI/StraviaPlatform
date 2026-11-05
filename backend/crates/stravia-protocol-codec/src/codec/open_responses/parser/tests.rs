@@ -55,6 +55,187 @@ fn dated_response(partial: Value) -> Value {
 fn sse_data(data: &str) -> String {
     format!("data: {data}\n\n")
 }
+
+fn json_schema_response(description: Value) -> Value {
+    dated_response(serde_json::json!({
+        "text": {"format": {
+            "type": "json_schema",
+            "name": "result",
+            "description": description,
+            "schema": {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }},
+        "output": [{
+            "type": "message",
+            "id": "msg_result",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "{\"ok\":true}", "annotations": []}]
+        }]
+    }))
+}
+
+#[test]
+fn json_schema_response_accepts_null_description() {
+    let response = ResponsesResponseParser
+        .parse_response(json_schema_response(Value::Null))
+        .expect("response descriptions may be null");
+
+    assert_eq!(response.output_text(), r#"{"ok":true}"#);
+    assert_eq!(response.stop_reason.as_deref(), Some("stop"));
+}
+
+#[test]
+fn json_schema_stream_accepts_null_description_at_each_response_stage() {
+    for null_stage in 0..3 {
+        let mut parser = ResponsesStreamParser::new();
+        let mut deltas = Vec::new();
+        for (stage, event) in [
+            "response.created",
+            "response.in_progress",
+            "response.completed",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let description = if stage == null_stage {
+                Value::Null
+            } else {
+                Value::String("Boolean result".into())
+            };
+            let mut response = json_schema_response(description);
+            if stage < 2 {
+                response["status"] = Value::String("in_progress".into());
+                response["output"] = serde_json::json!([]);
+            } else {
+                let mut item = response["output"][0].clone();
+                item["status"] = Value::String("in_progress".into());
+                item["content"] = serde_json::json!([]);
+                deltas.extend(
+                    parser
+                        .parse_chunk(&sse_event(
+                            "response.output_item.added",
+                            &serde_json::json!({
+                                "type": "response.output_item.added",
+                                "sequence_number": 2,
+                                "output_index": 0,
+                                "item": item
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                );
+                deltas.extend(
+                    parser
+                        .parse_chunk(&sse_event(
+                            "response.output_item.done",
+                            &serde_json::json!({
+                                "type": "response.output_item.done",
+                                "sequence_number": 3,
+                                "output_index": 0,
+                                "item": response["output"][0]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                );
+            }
+            deltas.extend(
+                parser
+                    .parse_chunk(&sse_event(
+                        event,
+                        &serde_json::json!({
+                            "type": event,
+                            "sequence_number": if stage == 2 { 4 } else { stage },
+                            "response": response
+                        })
+                        .to_string(),
+                    ))
+                    .expect("nullable description must not abort a response stage"),
+            );
+        }
+        deltas.extend(parser.finish().unwrap());
+        assert!(deltas.iter().any(|delta| matches!(
+            delta,
+            AiStreamDelta::Done { stop_reason } if stop_reason == "stop"
+        )));
+        let mut response = AiResponse::new("response", "model");
+        response.items = deltas
+            .into_iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::ItemDone { item, .. } => Some(item),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(response.output_text(), r#"{"ok":true}"#);
+    }
+}
+
+#[test]
+fn json_schema_response_rejects_non_string_non_null_descriptions() {
+    for description in [
+        serde_json::json!(42),
+        serde_json::json!(true),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let mut response = json_schema_response(description);
+        response["output"] = serde_json::json!([]);
+        assert!(
+            ResponsesResponseParser
+                .parse_response(response.clone())
+                .is_err()
+        );
+        let mut parser = ResponsesStreamParser::new();
+        let mut created = json_schema_response(Value::String("Boolean result".into()));
+        created["status"] = Value::String("in_progress".into());
+        created["output"] = serde_json::json!([]);
+        parser
+            .parse_chunk(&sse_event(
+                "response.created",
+                &serde_json::json!({
+                    "type": "response.created",
+                    "sequence_number": 0,
+                    "response": created
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert!(
+            parser
+                .parse_chunk(&sse_event(
+                    "response.completed",
+                    &serde_json::json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response
+                    })
+                    .to_string(),
+                ))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn json_schema_request_still_rejects_null_description() {
+    let response = json_schema_response(Value::Null);
+    assert!(
+        super::super::decoder::ResponsesDecoder
+            .decode_request(serde_json::json!({
+                "model": "model",
+                "input": "Return a JSON result.",
+                "text": response["text"]
+            }))
+            .is_err()
+    );
+}
+
 #[test]
 fn standalone_compact_window_replays_native_identity_without_generation_coercion() {
     let native = serde_json::json!({

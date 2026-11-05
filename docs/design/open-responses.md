@@ -167,6 +167,8 @@ Core typed bodies 覆盖：
 
 顶层 `instructions` 是独立 request field，不转换为 System/Developer message。Continuation 可按第 8 节继承它。
 
+Stravia 对所有 Responses 出站统一将 System message 的 wire role 写为 `developer`，不区分入站协议、Provider、HTTP/SSE 或 WebSocket，也不提供额外开关。转换只发生在共享请求编码器：消息内容、part、数量与位置保持，已有 Developer message 不合并，System message 不提升或复制到顶层 `instructions`。入站与本地 canonical 历史仍保留原角色，非 Responses 出站维持原映射。公开 Responses schema 仍允许 System；这是 Stravia 的统一出站策略，不是协议的 system 禁令。
+
 Open Responses `developer` message 在目标协议有等价角色时原样映射。目标协议无 Developer role 时，按已接受的兼容例外静默降级为 System。这是已接受的 role 映射，须在 ADR 和 contract tests 中固定；其它目标无法表达的语义遵循默认省略政策。
 
 ### 5.5 Stream model
@@ -235,14 +237,22 @@ Open Responses 规范没有为所有省略字段定义统一 server default。St
 | `text` | `{ "format": { "type": "text" } }` |
 | `tools` | `[]` |
 | `metadata` | `{}` |
-| `store` | `true` |
+| `store` | `false` |
 | `background` | `false` |
 
 Conformant same-protocol upstream 明确返回的 provider-executed effective values 优先；upstream 未回显时使用 Stravia effective profile。Gateway-owned response ID、logical model、store、metadata、safety identifier 和 local lifecycle 不被 upstream 覆盖。
 
+响应展示与可继承的请求配置分开保存。所有请求控制都以请求为准，不论响应回报的是默认值、非默认值还是与请求不同的实际执行值，都不据此新增、删除或覆写下一轮参数。显式续接和完整历史的前缀恢复只继承父请求已解析的控制；下一轮显式值优先，显式 `null` 按既有 reset 规则阻止继承。请求原本省略的可选字段不会因为响应中出现该字段而变成显式参数。
+
+`service_tier`、采样参数、工具配置和思考控制遵循同一规则，不再分别维护响应默认值白名单。例如请求 `service_tier: auto` 不因响应报告实际等级而改变，请求 `reasoning.summary: auto` 不因响应给出 `detailed` / `concise` 摘要而改变。Target 的思考映射来自本轮实际请求，不由响应反推。上游实际存储结果是续接资格事实，不是可继承的请求控制，见 §8.2。
+
+旧节点若已经把响应控制写进 `effective_request`，无法再区分原始省略与上游回报；本次不猜测或迁移这些历史值。此类对话应新建会话，或在下一轮显式指定所需控制、以 `null` 重置不需要的继承值。
+
 ### 6.3 ResponseResource
 
 Gateway 生成 response ID、timestamps 和 lifecycle status。`model` 始终返回客户端选择的 logical Model ID，不泄漏 Provider Model ID。ResponseResource 必须包含 dated schema 的 required keys；不再输出非标准 top-level `output_text` convenience field。
+
+JSON Schema 输出格式的 `text.format.description` 遵循请求与响应各自的 schema：请求中出现时必须为字符串，响应中允许字符串或 `null`。JSON 响应与流式 response snapshot 共用响应侧校验；将 response profile 转换为内部请求形态时，合法的 `null` 描述按未提供处理，不放宽请求校验，也不允许数字、布尔值等非法描述类型。
 
 Usage 仅在 input/output totals、cached tokens 和 reasoning tokens 全部可信时输出完整 object。任一组成部分未知时输出 `usage: null`，不得用 `0` 表示 unknown。
 
@@ -299,6 +309,8 @@ WebSocket 不在 `response.create` body 中重复传 token。所谓“每轮重�
 
 ### 7.3 上游 Responses WebSocket
 
+Custom Open Responses 连接可通过独立的 `use_websocket`（默认关闭）和 `use_previous_response_id`（默认开启）选择传输与原生续接。关闭后者只停止上游 ID 优化，保留本地历史、客户端续接、图片、推理恢复及 prompt cache；WebSocket 仍可使用完整历史。配置与严格 socket-tip 约束见 [Vendor 插件设计](vendor-plugins.md#custom-responses-的传输与续接)。
+
 下游 WebSocket ingress 与 Vendor Plugin 使用的上游受控 host transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Wasm Vendor Plugin 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run，Embeddings 仍走 HTTP。插件从 Responses HTTP URL 选择对应的 `ws:`/`wss:` 目标，宿主 transport 复用同一网络栈的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers，并执行 origin 授权。Codex guest 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
 
 连接池按精确 Target namespace、affinity、URL、认证与握手参数隔离，并保存每条空闲连接最新成功完成的 upstream response ID；每个连接同一时刻只执行一个 response。连接 60 分钟后不再复用，宿主最多保留 64 条空闲连接，满时淘汰最早归池的连接；该限制不是 in-flight 连接上限。`store=false` 只有在原子取得匹配 tip 的可用 socket 后才能发送续接 ID。sibling 占用、tip 前移、重启、断线、淘汰或 max-age 导致匹配失败时，在任何增量请求发出前切换为完整 Effective Model Request，不消耗上游恢复预算。取消关闭所属 socket。
@@ -321,11 +333,13 @@ Response Chain 是协议无关 Generation Chain 的 Responses 投影。Stravia �
 
 | client `store` | Stravia | same-protocol upstream |
 |---|---|---|
-| 省略/`true` | durable 保存 canonical Response Chain | 发送 `store=true`，允许 Provider 持久化和复用 upstream response ID |
-| `false` over HTTP | durable 保存 Generation Chain；后续 `previous_response_id` 可由 Stravia materialize | 发送 `store=false` |
-| `false` over WebSocket | durable 保存 Generation Chain；connection-local state 仍可降低同 socket continuation 开销 | 发送 `store=false` |
+| 显式 `true` | durable 保存 canonical Response Chain | 发送 `store=true`；实际存储事实及其它资格均允许时可复用 upstream response ID |
+| 省略/`false` over HTTP | durable 保存 Generation Chain；后续 `previous_response_id` 可由 Stravia materialize | 发送 `store=false`，不依赖持久化 upstream response ID |
+| 省略/`false` over WebSocket | durable 保存 Generation Chain；connection-local state 仍可降低同 socket continuation 开销 | 发送 `store=false`，临时 ID 仅限原连接的准确 tip |
 
-`store` 是 Upstream Store Hint，不是 Stravia 数据保留开关。`metadata` 和 `safety_identifier` 始终由 Stravia 本地拥有，不发送远端 Provider。它们只在 dated schema 允许的位置存储和回显。
+`store` 是每轮独立的 Upstream Store Hint，不是 Stravia 数据保留开关。省略时默认 `false`，不会继承上一轮的 `store:true`；显式 `true` 始终保留。此默认同时用于 Responses 出站编码和公开 ResponseResource，也适用于其它入口转换到 Responses 的请求。`metadata` 和 `safety_identifier` 始终由 Stravia 本地拥有，不发送远端 Provider。它们只在 dated schema 允许的位置存储和回显。
+
+请求允许存储不等于上游实际保存了响应。上游同步响应或 SSE 终态明确返回 `store=false` 时，该响应 ID 不作为后续 HTTP 续接锚点；Stravia 仍可从本地 Generation Chain 恢复完整历史，包括图片和受保护推理。只有传输层确认仍可复用的 WebSocket 才允许使用这种临时锚点。上游存储结果作为私有执行事实保留，不覆盖客户端的 `store` 回显，也不改变本地历史保留策略。
 
 只有完整交付给客户端的 `completed` 和 `incomplete` terminal response 才提交 Response Chain。`failed`、客户端断线、delivery failure 或取消不提交，避免 durable history 指向客户端从未完整观察到的节点。
 
@@ -339,13 +353,15 @@ Continuation materialize 的逻辑顺序固定为：
 parent input → parent output → new input
 ```
 
-显式 request-level config 覆盖 parent effective config；省略的 `instructions`、tools、tool choice、reasoning、text format、sampling 和其它可继承配置使用 parent effective values。根请求仍必须显式提供 model 和 input。
+显式 request-level config 覆盖父请求的已解析配置；省略的 `instructions`、tools、tool choice、reasoning、text format、sampling 和其它可继承配置只从父请求继承，不从父响应的实际执行值继承。根请求仍必须显式提供 model 和 input。
 
-当 same-protocol Target、Provider instance、Provider Model 和有效配置均可安全复用，且 upstream 已持久化 parent 时，adapter 可以使用 upstream continuation ID；否则必须从 canonical graph 展开历史。该优化不得改变 Gateway response identity 或 representability checks。
+只有 same-protocol Target、Provider instance、Provider Model 和有效配置均可安全复用，并满足「upstream 已持久化 parent」或「传输层确认 parent 仍是同一可用 WebSocket 的当前 tip」之一时，adapter 才可以使用 upstream continuation ID；否则必须从 canonical graph 展开历史。该优化不得改变 Gateway response identity 或 representability checks。
+
+上游续接校验使用投影前的完整提供方输入与原始输出摘要，不把交付给 Chat 等客户端的思考 Marker 当作上游上下文。完整输入快照不能是已经裁剪的 continuation delta。本地持久历史仍使用客户端形态；脱敏后的正文和平台说明不回写到该历史，避免下一轮关闭凭据保护后继续继承旧脱敏视图。Target 已映射的思考控制独立记录，思考等级等请求控制发生变化时重新发送完整历史，而不是放宽指纹校验。
 
 ### 8.4 Reusable Response Prefix
 
-客户端没有显式父节点且提交完整历史时，Stravia 可自动发现已完成 Response Chain 的最长严格等价前缀。发现发生在历史恢复、Request Hook、Vendor canonical mutation、默认 effective profile 归一化与 representability gate 之后；Hook 始终观察完整逻辑历史。比较只在完整 canonical `AiItem` 边界进行，不切分 content block 或字符，不做文本/原始 wire 模糊匹配。reasoning summary/content/signature、tool correlation、Unknown block、角色、ArtifactRef 与媒体 metadata 均参与语义比较。
+客户端没有显式父节点且提交完整历史时，Stravia 可自动发现已完成 Response Chain 的最长严格等价前缀。发现发生在历史恢复、Request Hook、Vendor canonical mutation、请求控制归一化与 representability gate 之后；Hook 始终观察完整逻辑历史。比较只在完整 canonical `AiItem` 边界进行，不切分 content block 或字符，不做文本/原始 wire 模糊匹配。reasoning summary/content/signature、tool correlation、Unknown block、角色、ArtifactRef 与媒体 metadata 均参与语义比较。
 
 候选必须属于同一 Principal、精确 Target、Provider 账号与 credential/config generation、base URL、resolved model 和 Open Responses egress，并具有相同 instructions、tools/tool choice、reasoning controls、response format、sampling 与其它请求约束。只有已完整交付、upstream terminal 为 `completed`、upstream response ID 存在且 UpstreamResponse/ClientOutput Hook 未改变输出的节点写入索引；`incomplete`、`failed`、取消、delivery failure 与本次请求完整相等的节点不是自动候选。最长 `item_count` 优先；同长度按 `completed_at`、node ID 降序确定性选择。显式 `previous_response_id` 始终优先且允许空 input。
 
@@ -625,6 +641,7 @@ Vendored OpenAPI、hash、Rust schema tests、behavior tests 和 contract matrix
 
 ## 18. 已接受风险
 
+- Responses 上游不再观察到 System 与 Developer message 的角色差异；混合指令的内容和位置仍保留，不据此承诺上游模型对冲突指令的具体处理。
 - Developer → System 降级完全静默，目标协议无法观察原 role 差异。
 - 第 10.3 节 sampling/operational hints 可被静默省略，跨协议输出可能因此变化。
 - 合法同协议字段不做静态 Target preflight，Provider 可能在执行前以 4xx 才报告不支持。

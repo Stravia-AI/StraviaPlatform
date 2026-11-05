@@ -548,60 +548,11 @@ pub(crate) fn generation_node_is_completed(response: &AiResponse) -> bool {
         .map_or_else(|| response.error.is_none(), |status| status == "completed")
 }
 
-/// 应用上游确认的有效控制，并借用原画像供持久化投影使用。
-/// 无画像时返回 None；画像无法解码时保留原请求。
-pub(crate) fn apply_provider_effective_response<'a>(
-    request: &mut AiRequest,
-    response: &'a AiResponse,
-) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
-    let profile = response
-        .vendor
-        .egress
-        .get("__open_responses_provider_effective")
-        .or_else(|| {
-            response
-                .vendor
-                .ingress
-                .get("__open_responses_response_profile")
-        })
-        .and_then(serde_json::Value::as_object)?;
-    apply_provider_effective_request(request, profile);
-    Some(profile)
-}
-
-fn apply_provider_effective_request(
-    request: &mut AiRequest,
-    profile: &serde_json::Map<String, serde_json::Value>,
-) {
-    let Ok(effective) =
-        stravia_protocol_codec::codec::open_responses::decoder::decode_effective_response_profile(
-            &request.model,
-            profile,
-        )
-    else {
-        return;
-    };
-    apply_decoded_provider_effective_request(request, effective);
-}
-
-fn apply_decoded_provider_effective_request(request: &mut AiRequest, mut effective: AiRequest) {
-    effective.normalize_parameters();
-    request.generation = effective.generation;
-    request.tools = effective.tools;
-    request.tool_choice = effective.tool_choice;
-    request.parallel_tool_calls = effective.parallel_tool_calls;
-    request.reasoning = effective.reasoning;
-    request.parameters.max_tool_calls = effective.parameters.max_tool_calls;
-    request.parameters.logprobs = effective.parameters.logprobs;
-    request.parameters.truncation = effective.parameters.truncation;
-    request.parameters.verbosity = effective.parameters.verbosity;
-    request.parameters.service_tier = effective.parameters.service_tier;
-    request.response_format = effective.response_format;
-}
-
+/// 响应资源展示上游实际执行的参数，但它只是展示数据：请求控制的唯一来源是
+/// 调用方请求本身，这里不会把任何响应参数写回 `request`。
 pub(super) fn attach_persisted_profile(
     response: &mut AiResponse,
-    request: &mut Arc<AiRequest>,
+    request: &AiRequest,
     previous_response_id: Option<&str>,
 ) {
     let mut profile =
@@ -621,14 +572,6 @@ pub(super) fn attach_persisted_profile(
             })
             .and_then(serde_json::Value::as_object);
         if let Some(provider_effective) = provider_effective {
-            if let Ok(effective) =
-                stravia_protocol_codec::codec::open_responses::decoder::decode_effective_response_profile(
-                    &request.model,
-                    provider_effective,
-                )
-            {
-                apply_decoded_provider_effective_request(Arc::make_mut(request), effective);
-            }
             profile.extend(provider_effective.clone());
         }
         profile.insert(

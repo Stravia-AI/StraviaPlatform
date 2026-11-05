@@ -481,24 +481,6 @@ async fn responses_coded_missing_tip_replays_once_with_existing_retry_budget() {
 }
 
 #[tokio::test]
-async fn responses_remote_missing_tip_requires_existing_retry_budget() {
-    let fixture = responses_websocket_fixture().await;
-    let first = user_input("parent");
-    let (status, parent) = post_responses(&fixture, vec![first.clone()]).await;
-    assert_eq!(status, StatusCode::OK, "{parent}");
-    *fixture.state.next_error.lock() = Some(UpstreamError::MissingPrevious);
-    let (status, _) = post_responses(&fixture, continued_input(&first, &parent, "child")).await;
-    assert_ne!(status, StatusCode::OK);
-    let frames = fixture.state.frames.lock();
-    assert_eq!(
-        frames.len(),
-        2,
-        "remote miss with retry budget zero must not replay: {frames:?}"
-    );
-    assert_eq!(frames[1].frame["previous_response_id"], "upstream-0");
-}
-
-#[tokio::test]
 async fn responses_failed_full_replay_is_not_retried_again() {
     let fixture = responses_websocket_fixture().await;
     set_target_retry_budget(&fixture.gateway, MODEL, 1).await;

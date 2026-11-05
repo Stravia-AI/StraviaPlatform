@@ -5,6 +5,7 @@ use crate::SseEvent;
 use stravia_runtime_contract::protocol::ir::AiItemStatus;
 use stravia_runtime_contract::protocol::ir::usage::Usage;
 use stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META;
+use stravia_runtime_contract::protocol::ir::vendor_ext::OPEN_RESPONSES_PROVIDER_STORE_META;
 use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind, AiStreamDelta};
 
 fn public_stream_error(error: &AiError) -> serde_json::Value {
@@ -1548,11 +1549,17 @@ impl ResponsesStreamFormatter {
                 }
                 AiStreamDelta::ResponseMetadata { metadata } => {
                     if let Some(metadata) = metadata.as_object() {
-                        // 内部 Chat 存在性信号不属于公开资源，也不代表真实 reasoning item。
+                        // 私有字段存在性和上游存储事实不属于公开资源。
                         self.response_profile.extend(
                             metadata
                                 .iter()
-                                .filter(|(key, _)| key.as_str() != CHAT_REASONING_FIELD_META)
+                                .filter(|(key, _)| {
+                                    !matches!(
+                                        key.as_str(),
+                                        CHAT_REASONING_FIELD_META
+                                            | OPEN_RESPONSES_PROVIDER_STORE_META
+                                    )
+                                })
                                 .map(|(key, value)| (key.clone(), value.clone())),
                         );
                     }

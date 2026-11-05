@@ -14,6 +14,7 @@ use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Role;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
 use stravia_runtime_contract::protocol::ir::usage::Usage;
+use stravia_runtime_contract::protocol::ir::vendor_ext::OPEN_RESPONSES_PROVIDER_STORE_META;
 
 pub(super) const DATED_EVENT_TYPES: &[&str] = &[
     "error",
@@ -618,6 +619,10 @@ impl ResponsesResponseParser {
         ai_resp.items = items;
         ai_resp.stop_reason = stop_reason;
         ai_resp.usage = usage;
+        ai_resp.vendor.egress.insert(
+            OPEN_RESPONSES_PROVIDER_STORE_META.into(),
+            Value::Bool(wire._store),
+        );
         let mut effective = serde_json::Map::new();
         for field in [
             "tools",
@@ -1338,6 +1343,11 @@ impl ResponsesStreamParser {
                 if usage.required_components_known {
                     deltas.push(AiStreamDelta::Usage(usage));
                 }
+                deltas.push(AiStreamDelta::ResponseMetadata {
+                    metadata: serde_json::json!({
+                        (OPEN_RESPONSES_PROVIDER_STORE_META): response["store"],
+                    }),
+                });
                 deltas.push(AiStreamDelta::ResponseTerminal {
                     status: expected_status.to_owned(),
                     incomplete_details: response.get("incomplete_details").cloned(),

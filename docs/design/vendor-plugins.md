@@ -365,6 +365,21 @@ Claude Code 的函数工具白名单依据 [2.1.317 官方发布包](https://reg
 - 现有 `protocol-openai-chat-completions`、`protocol-open-responses`、`protocol-anthropic-messages`、`protocol-gemini` 四个独立 Profile 入口并入 Custom。迁移已有连接时保留连接 UUID、凭据与 Route；具体选择标识、WIT 版本及迁移 SQL 是满足该迁移约束的实现选择，本轮不另设产品策略。
 - 该合并已实现：base 只注册一个 `custom` Profile，其 channel 通过 `protocols` 枚举声明可选协议；管理写入按该枚举校验，不接受任意协议字符串。存量 `protocol-*` 连接由迁移 `0059` 改写为 `custom`，保留 UUID、凭据、protocol 值与 Route。
 
+### Custom Responses 的传输与续接
+
+选择 Open Responses 时，连接的「高级设置」提供两个独立的布尔选项，仍由插件描述符生成表单并通过 `vendor_options` 保存：
+
+|选项|默认值|契约|
+|---|---|---|
+|`use_websocket`|`false`|为普通推理尝试上游 Responses WebSocket；关闭时使用 HTTP/SSE。由同一 Responses URL 将 `http` / `https` 转为 `ws` / `wss`，不另设地址。独立压缩仍走 HTTP。|
+|`use_previous_response_id`|`true`|尝试安全的上游 ID 续接；关闭时不再尝试该优化，始终发送完整有效历史，不关闭本地历史、客户端 Stravia `previous_response_id`、受保护推理恢复或 prompt cache。|
+
+WebSocket 开启但 ID 续接关闭时仍复用合格的连接，只是不发送上游 `previous_response_id`。ID 续接开启不意味着一定发送 ID：请求控制、完整历史前缀、账号与 Target 必须符合既有等价性校验。Custom WebSocket 对所有续接 ID 都要求原子取得该 ID 正好是当前 tip 的可用连接；即使请求允许 `store=true`，也不能据此假设代理上游保存了响应。断线、换凭据、tip 前移或分支不匹配时发送完整历史，不把临时 ID 带到新连接。HTTP 继续遵守上游实际存储事实。
+
+这些选项不修改客户端的 `store` 意图，也不控制角色兼容。所有 Responses 出站由共享 codec 将 system message 原位编码为 developer；HTTP/SSE、WebSocket、Custom 与 Codex 使用同一规则，无需额外开关。消息内容、顺序与独立的 `instructions` 保持，本地历史不改写。上游仍须真正支持对应传输及请求形态；WS 握手成功不表示模型请求已被接受。HTTP 回退和完整历史恢复只在宿主现有安全边界与预算内发生，不在结果已开始后重发。
+
+CC Switch 4.0.25 的 Responses → Chat Completions 转换会丢弃 `previous_response_id` 和 `store:false`，不会替客户端补回被省略的历史。该入口必须发送完整 `messages` 历史，或改用 Responses；Stravia 不从缓存键猜测缺失的父会话。Stravia 的 Responses 出站 `store` 现默认 `false`，因此省略该字段也不会请求上游持久化，但这不补回丢失的父 ID。实测 Sub2API 0.2.18 的 Codex OAuth WebSocket context pool 会拒绝输入中的 system 消息；共享 codec 的统一 developer 出站投影覆盖这一消息形态，不把 system 提升到 instructions，也不改变上述续接约束。
+
 ### Custom 的思考字段映射与补齐
 
 base 插件为 `custom` Profile 的 OpenAI-compatible Chat Completions 声明固定思考字段配置。管理员在 Custom 连接的「连接设置 → 高级设置」中选择已支持的上游字段，并按需开启缺失补齐；字段、中英文说明、协议显示条件及分组均由插件描述符提供，宿主复用动态表单，不添加 Core 或 WebUI 的供应商专属逻辑。其他协议隐藏这些选项，不提供任意字段名输入。
@@ -643,6 +658,7 @@ HTTP 由 `async-compression` 编码、`tower-http` 流式解码。WS 的 HTTP、
 - 附属 origin 可由插件元数据声明为连接配置中的地址字段，例如 SAP AI Core 的 `tokenUrl`。宿主仅从管理员保存的值解析精确 origin，在保存或变更时展示范围，并将权限固定到操作快照；插件运行时返回值、私有状态和上游响应不能增加授权。
 - 插件固定声明的 `OriginDeclaration.host` 支持原有精确主机字符串，或 `{"regex":"..."}` 形式的主机正则；精确主机仍不支持 `*` 通配。SDK 验证正则原始语法，宿主在冻结操作权限时编译完整主机匹配，非法表达式使整个权限策略构造失败。管理面明确展示正则及其协议、端口；该能力不适用于运行时返回的地址或连接字段值。
 - origin 按协议、主机与有效端口匹配，路径由插件构造。HTTP 与 WebSocket 使用各自明确获准的协议，不因主机相同就隐式扩大协议或端口范围。
+- 描述符明确声明非秘密布尔字段 `use_websocket`，且管理员保存为 `true` 时，宿主只为已保存 base URL 增加同主机、同有效端口的 `http→ws` / `https→wss` origin。未声明、关闭或缺省该字段均不扩张授权；附属地址、子域和其他端口不因此获准。
 - 管理员可以显式将当前连接配置为本机或局域网服务，不一刀切禁止私网目标；这一配置不授权访问其他本机或私网地址。
 - 安装或更新页面展示插件声明的附属服务地址。HTTP / WebSocket 首次请求、每次重定向及池化 WebSocket 的实际地址均检查同一冻结策略，不自动将原目标的认证头转发到另一 origin。
 - 所有入口的连接管理与报文分帧仍由宿主负责：插件不得设置 `Transfer-Encoding`、`Content-Length`、`Upgrade` 或受控代理头。HTTP 的 `Connection` 只允许 `keep-alive`（HTTP/2 下由传输层移除）；WS 的标准握手头由宿主生成。新增压缩入口独占 `Accept-Encoding`、`Content-Encoding` 和 `Sec-WebSocket-Extensions`，手写受控头在发送或复用连接前拒绝；旧入口仅保留上述既有 header 驱动行为，不扩大 origin、凭据或代理权限。

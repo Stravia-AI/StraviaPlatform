@@ -125,8 +125,7 @@ impl ResponsesEncoder {
             };
             if let Some(content) = content {
                 let role = match item.role {
-                    Role::System => "system",
-                    Role::Developer => "developer",
+                    Role::System | Role::Developer => "developer",
                     Role::User => "user",
                     Role::Assistant => "assistant",
                     Role::Tool => unreachable!("tool items were emitted above"),
@@ -318,7 +317,7 @@ fn insert_owned_request_control_fields(
 }
 
 fn insert_request_control_fields(obj: &mut serde_json::Map<String, Value>, req: &AiRequest) {
-    obj.insert("store".into(), req.parameters.store.unwrap_or(true).into());
+    obj.insert("store".into(), req.parameters.store.unwrap_or(false).into());
     if let Some(instructions) = &req.instructions {
         obj.insert("instructions".into(), Value::String(instructions.clone()));
     }
@@ -490,7 +489,7 @@ fn insert_request_control_fields(obj: &mut serde_json::Map<String, Value>, req: 
             || req.reasoning.target_control.is_some()
             || req.reasoning.budget_tokens.is_some());
     let mut include = Vec::new();
-    if parameters.store == Some(false) && reasoning_enabled {
+    if parameters.store != Some(true) && reasoning_enabled {
         include.push(Value::String("reasoning.encrypted_content".into()));
     }
     if parameters.logprobs.is_some() {
