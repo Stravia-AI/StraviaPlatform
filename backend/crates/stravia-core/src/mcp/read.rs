@@ -21,19 +21,21 @@ use stravia_runtime_contract::{
         SessionContext, StraviaReadDomain, ToolExecutionContext, ToolId,
     },
     protocol::ir::ContentBlock,
+    turn_chain::{TurnNodeId, TurnNodeKind, TurnUnavailable},
 };
 use stravia_web_access::fetch::{FetchErrorCode, ReadText, convert_read_bytes};
 use stravia_web_access_contract::read_path::{
-    ReadInput, ReadOptions, ReadTarget, input_schema, parse_read_path,
+    ContinuationTarget, ReadInput, ReadOptions, ReadSchemaScope, ReadTarget, input_schema,
+    model_input_schema, parse_read_input,
 };
 use stravia_web_search::host::PublicSearchHost;
 use tokio::io::AsyncReadExt;
 
 pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
-const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned stravia://artifacts/<artifact-id> path. Add ?download=1 to obtain download information without model execution. Public reads wait up to 60 seconds, then return a durable execution path and status. Read stravia://tool-executions/<id>?wait=<non-negative seconds> for status and original result or error; omitted wait returns immediately, and explicit waits may exceed 60 seconds within the query deadline. Cancelling a query stops only its wait. Local cancellation cannot guarantee upstream work or quota consumption stops.";
-const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_path are search query parameters. Public HTTP(S) resource options use #stravia?.";
-const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown; WAV, MP3, FLAC, OGG, AAC or AIFF audio is understood by transcription and summary. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_path for explicit continuation.";
+const DOWNLOAD_DESCRIPTION: &str = "Read one path: an owned stravia://artifacts/<artifact-id>, a stravia://tool-executions/<id>, or a next_path copied verbatim from an earlier read. Append `:` selectors to a resource path, without encoding: :raw for exact source text, :download for download information without model execution, and line ranges :N, :N-M, :N+K or :-K (comma-separated, e.g. :1-50,90-100). Public reads wait up to 60 seconds, then return a durable stravia://tool-executions/<id> path and status; read that path with wait=<non-negative seconds> for status and the original result or error. Omitted wait returns immediately; explicit waits may exceed 60 seconds within the query deadline. Cancelling a query stops only its wait. Local cancellation cannot guarantee upstream work or quota consumption stops.";
+const NETWORK_DESCRIPTION: &str = "For a complete sourced research report, set path to stravia://search and question to the plain-text query; allowed_domains optionally limits final sources. To continue research, set path to the report's stravia://turns/<turn-id> and question to the follow-up; omitted allowed_domains inherits the previous limits. Public HTTP(S) URLs read as webpage Markdown or files and accept the same `:` selectors; write a colon that belongs to the URL itself as %3A when it would look like a selector, and add a trailing slash after a bare host:port.";
+const MEDIA_DESCRIPTION: &str = "Static JPEG, PNG or WebP images default to a description with all readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown; WAV, MP3, FLAC, OGG, AAC or AIFF audio is transcribed and summarized. Put a specific question in question as plain text. To follow up, set path to the returned stravia://turns/<turn-id> with a question; list additional Artifact paths or public URLs in attachments only when the follow-up needs more media.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -287,8 +289,8 @@ impl ReadTool {
                 .map_err(|_| PlatformToolError::new("Principal authorization failed"))
         })
         .await??;
-        let target = parse_read_path(&input.path)
-            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        let target =
+            parse_read_input(&input).map_err(|error| PlatformToolError::new(error.to_string()))?;
         let resource_path = match target {
             ReadTarget::ToolExecution(execution) => {
                 return self
@@ -315,7 +317,20 @@ impl ReadTool {
                     .await?,
                     "Networking is unavailable",
                 )?;
-                return self.dispatch(StraviaReadDomain::Query, json!({"query":search.query,"previous_path":search.previous_path,"allowed_domains":search.allowed_domains}), context).await;
+                return self
+                    .dispatch(
+                        StraviaReadDomain::Query,
+                        json!({
+                            "query": search.query,
+                            "previous_path": null,
+                            "allowed_domains": search.allowed_domains,
+                        }),
+                        context,
+                    )
+                    .await;
+            }
+            ReadTarget::Continuation(continuation) => {
+                return self.read_continuation(continuation, context).await;
             }
             ReadTarget::Resource(resource) => resource,
         };
@@ -342,10 +357,6 @@ impl ReadTool {
                 require(
                     context.read_scope.networking() && enabled.networking(),
                     "Networking is unavailable in this run",
-                )?;
-                require(
-                    resource_path.options.previous_path.is_none(),
-                    "HTML does not accept media continuation",
                 )?;
                 let result = if self.internal {
                     fetch_page(&self.gateway, resource_path.url, &context).await?
@@ -440,10 +451,6 @@ impl ReadTool {
         .await??;
         let artifact = reader.artifact.clone();
         if base_mime(&artifact.mime_type) == text::SNAPSHOT_MIME {
-            require(
-                options.previous_path.is_none(),
-                "Text snapshots do not accept media continuation",
-            )?;
             if options.download {
                 let exported = before_execution(&context.cancellation, async {
                     text::export(
@@ -587,7 +594,7 @@ impl ReadTool {
         if !options.download && stravia_media::documents::is_office_document(&content_type) {
             require(
                 !options.raw,
-                "Office documents do not support raw; use ?download=1",
+                "Office documents do not support raw; use :download",
             )?;
             let artifact = match artifact {
                 Some(artifact) => artifact,
@@ -601,10 +608,6 @@ impl ReadTool {
                 .await;
         }
         if !options.download {
-            require(
-                options.previous_path.is_none(),
-                "Text and binary files do not accept media continuation",
-            )?;
             let base = source_url
                 .as_deref()
                 .and_then(|value| url::Url::parse(value).ok());
@@ -667,7 +670,6 @@ impl ReadTool {
             options.question.unwrap_or_else(|| {
                 "Describe the image content and extract all readable text.".into()
             }),
-            options.previous_path,
             context,
         )
         .await
@@ -693,15 +695,14 @@ impl ReadTool {
             options
                 .question
                 .unwrap_or_else(|| "Transcribe the audio and summarize its content.".into()),
-            options.previous_path,
             context,
         )
         .await
     }
 
-    /// Office document reads: `?question` routes into Media Understanding;
+    /// Office document reads: a `question` routes into Media Understanding;
     /// otherwise the extracted Markdown becomes an ordinary paginated text
-    /// snapshot. `?download` is handled by callers before this point; `?raw`
+    /// snapshot. `:download` is handled by callers before this point; `:raw`
     /// is meaningless for processed Markdown and is rejected.
     async fn read_document(
         &self,
@@ -713,18 +714,12 @@ impl ReadTool {
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         require(
             !options.raw,
-            "Office documents do not support raw; use ?download=1",
+            "Office documents do not support raw; use :download",
         )?;
         require(options.cursor.is_none(), "Cursor requires a text snapshot")?;
         if let Some(question) = options.question {
-            return self
-                .understand(artifact.id, question, options.previous_path, context)
-                .await;
+            return self.understand(artifact.id, question, context).await;
         }
-        require(
-            options.previous_path.is_none(),
-            "Media continuation requires a question",
-        )?;
         let derivatives = crate::media::runtime(&self.gateway)
             .media_derivatives
             .ok_or_else(|| PlatformToolError::new("Media document storage is unavailable"))?;
@@ -777,13 +772,154 @@ impl ReadTool {
         .await
     }
 
+    /// 对单个媒体 Artifact 发起一次新的 Media 轮。
     async fn understand(
         &self,
         id: ArtifactId,
         question: String,
-        previous_path: Option<String>,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
+        self.require_media(&context).await?;
+        self.prepare_media_source(&id, &context).await?;
+        self.dispatch(
+            StraviaReadDomain::Media,
+            json!({
+                "prompt": question,
+                "artifacts": [{"path": id.reference()}],
+                "previous_path": null,
+            }),
+            context,
+        )
+        .await
+    }
+
+    /// 续接一个已有 Turn：按节点类型分派到搜索续接或媒体续接。
+    async fn read_continuation(
+        &self,
+        continuation: ContinuationTarget,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        let ContinuationTarget {
+            turn_path,
+            question,
+            attachments,
+            allowed_domains,
+        } = continuation;
+        let id = TurnNodeId::from_reference(&turn_path)
+            .map_err(|_| PlatformToolError::new("Invalid Turn Reference"))?;
+        let kind = before_execution(
+            &context.cancellation,
+            self.gateway.turn_chains.node_kind(&context.principal, &id),
+        )
+        .await?
+        .map_err(|error| match error {
+            TurnUnavailable::Unavailable => PlatformToolError::new("Turn unavailable"),
+            error => {
+                tracing::warn!(%error, "StraviaRead Turn lookup failed");
+                PlatformToolError::new("Turn lookup failed")
+            }
+        })?;
+        match kind {
+            TurnNodeKind::WebSearch => {
+                require(
+                    !self.internal,
+                    "Internal retrieval does not accept research continuation",
+                )?;
+                require(
+                    attachments.is_empty(),
+                    "attachments only apply to media continuation",
+                )?;
+                require(
+                    context.read_scope.networking(),
+                    "Networking was not exposed for this run",
+                )?;
+                require(
+                    before_execution(
+                        &context.cancellation,
+                        networking_available(&self.gateway, &context.principal),
+                    )
+                    .await?,
+                    "Networking is unavailable",
+                )?;
+                self.dispatch(
+                    StraviaReadDomain::Query,
+                    json!({
+                        "query": question,
+                        "previous_path": turn_path,
+                        "allowed_domains": allowed_domains,
+                    }),
+                    context,
+                )
+                .await
+            }
+            TurnNodeKind::Agent => {
+                require(
+                    allowed_domains.is_none(),
+                    "allowed_domains only apply to search continuation",
+                )?;
+                self.require_media(&context).await?;
+                let mut artifacts = Vec::with_capacity(attachments.len());
+                for attachment in &attachments {
+                    let artifact = self.attachment_artifact(attachment, &context).await?;
+                    artifacts.push(json!({"path": artifact.reference()}));
+                }
+                self.dispatch(
+                    StraviaReadDomain::Media,
+                    json!({
+                        "prompt": question,
+                        "artifacts": artifacts,
+                        "previous_path": turn_path,
+                    }),
+                    context,
+                )
+                .await
+            }
+            TurnNodeKind::Response => Err(PlatformToolError::new(
+                "Turn cannot be continued with StraviaRead",
+            )),
+        }
+    }
+
+    /// 把续接附件解析为当前 Principal 名下可用的 Artifact：
+    /// Artifact Reference 校验归属，公网 URL 先收存为 Artifact。
+    async fn attachment_artifact(
+        &self,
+        attachment: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<ArtifactId, PlatformToolError> {
+        let id = if attachment.starts_with("stravia://artifacts/") {
+            ArtifactId::from_reference(attachment).map_err(artifact_error)?
+        } else {
+            let resource = crate::media::ingest::fetch_public_read_resource(
+                attachment,
+                &context.cancellation,
+                false,
+            )
+            .await
+            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+            let crate::media::ingest::PublicReadResource::File {
+                content_type,
+                bytes,
+                ..
+            } = resource
+            else {
+                return Err(PlatformToolError::new(
+                    "Attachment URL must point to an image, audio or Office file",
+                ));
+            };
+            require(
+                supported_image(&content_type)
+                    || stravia_media::audio::is_supported_audio_mime(&content_type)
+                    || stravia_media::documents::is_office_document(&content_type),
+                "Attachment URL must point to an image, audio or Office file",
+            )?;
+            self.store_bytes(&content_type, bytes, context).await?.id
+        };
+        self.prepare_media_source(&id, context).await?;
+        Ok(id)
+    }
+
+    async fn require_media(&self, context: &ToolExecutionContext) -> Result<(), PlatformToolError> {
         require(
             context.read_scope.media(),
             "Media Understanding was not exposed for this run",
@@ -798,18 +934,26 @@ impl ReadTool {
             )
             .await?,
             "Media Understanding is unavailable",
-        )?;
+        )
+    }
+
+    /// 校验 Artifact 归属、延长保留期，并确认其媒体类型对应的理解能力可用。
+    async fn prepare_media_source(
+        &self,
+        id: &ArtifactId,
+        context: &ToolExecutionContext,
+    ) -> Result<(), PlatformToolError> {
         let store = self
             .gateway
             .artifact_store()
             .ok_or_else(|| PlatformToolError::new("Artifact storage is unavailable"))?;
         let reader = before_execution(&context.cancellation, async {
             store
-                .extend_retention(&context.principal, &id, retention(&self.gateway).await?)
+                .extend_retention(&context.principal, id, retention(&self.gateway).await?)
                 .await
                 .map_err(artifact_error)?;
             store
-                .open(&context.principal, &id)
+                .open(&context.principal, id)
                 .await
                 .map_err(artifact_error)
         })
@@ -833,16 +977,7 @@ impl ReadTool {
         // Media preprocessing acquires its own guard for the actual byte read.
         // Do not hold a second store connection while awaiting that execution.
         drop(reader);
-        self.dispatch(
-            StraviaReadDomain::Media,
-            json!({
-                "prompt": question,
-                "artifacts": [{"path": id.reference()}],
-                "previous_path": previous_path,
-            }),
-            context,
-        )
-        .await
+        Ok(())
     }
 }
 
@@ -999,7 +1134,7 @@ impl PlatformTool for ReadTool {
         Some(DOWNLOAD_DESCRIPTION)
     }
     fn parameters(&self) -> Value {
-        input_schema()
+        model_input_schema(ReadSchemaScope::FULL)
     }
     fn parallel_safe(&self) -> bool {
         true
@@ -1061,10 +1196,13 @@ impl McpTool for ReadTool {
         )
     }
     fn input_schema(&self) -> Value {
-        input_schema()
+        input_schema(ReadSchemaScope::FULL)
     }
-    async fn input_schema_for(&self, _context: &McpContext) -> Value {
-        input_schema()
+    async fn input_schema_for(&self, context: &McpContext) -> Value {
+        let scope = self
+            .capabilities(&Principal::new(context.api_key_id.clone()))
+            .await;
+        input_schema(schema_scope(scope, false))
     }
     fn deadline(&self) -> Duration {
         Duration::from_secs(15 * 60)
@@ -1144,8 +1282,17 @@ fn is_execution_query(arguments: &Value) -> Result<bool, PlatformToolError> {
     let input = <ReadInput as serde::Deserialize>::deserialize(arguments)
         .map_err(|error| PlatformToolError::new(format!("invalid StraviaRead input: {error}")))?;
     let target =
-        parse_read_path(&input.path).map_err(|error| PlatformToolError::new(error.to_string()))?;
+        parse_read_input(&input).map_err(|error| PlatformToolError::new(error.to_string()))?;
     Ok(matches!(target, ReadTarget::ToolExecution(_)))
+}
+
+/// 把运行时的暴露范围映射为 schema 裁剪范围；`internal` 为内部检索工具。
+pub(crate) fn schema_scope(scope: ReadExposureScope, internal: bool) -> ReadSchemaScope {
+    ReadSchemaScope {
+        networking: scope.networking(),
+        media: scope.media(),
+        internal,
+    }
 }
 
 struct WebPageTool {
@@ -1166,7 +1313,7 @@ impl PlatformTool for WebPageTool {
         Some("Read public webpages as Markdown with sources and extraction limitations.")
     }
     fn parameters(&self) -> Value {
-        input_schema()
+        model_input_schema(ReadSchemaScope::FULL)
     }
     async fn execute(
         &self,
@@ -1223,7 +1370,7 @@ async fn fetch_page(
 
 pub(crate) async fn execute_internal_read(
     gateway: &crate::Gateway,
-    path: String,
+    input: ReadInput,
     mut context: ToolExecutionContext,
 ) -> Result<PlatformToolOutput, PlatformToolError> {
     context.read_scope = ReadExposureScope::FULL;
@@ -1231,7 +1378,9 @@ pub(crate) async fn execute_internal_read(
     let mut router = ReadTool::new(gateway, &mut tools)
         .map_err(|error| PlatformToolError::new(error.to_string()))?;
     router.internal = true;
-    router.read(json!({"path":path}), context).await
+    let arguments =
+        serde_json::to_value(input).map_err(|error| PlatformToolError::new(error.to_string()))?;
+    router.read(arguments, context).await
 }
 
 fn description(scope: ReadExposureScope) -> String {

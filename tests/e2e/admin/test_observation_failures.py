@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from http.client import HTTPConnection
 from urllib.request import Request, urlopen
 
 import pytest
@@ -29,6 +28,7 @@ from tests.common.helpers import (
     minimal_mock_provider,
     start_stravia_server,
     stop_stravia_server,
+    upload_artifact,
     wait_for_setup_token,
     wait_until_ready,
 )
@@ -2062,35 +2062,8 @@ def test_upstream_errors_include_capability_attempts(admin_env: dict[str, Any]) 
         image = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
         )
-        status, upload = http_request(
-            "POST",
-            f"{admin_env['proxy']}/v1/artifacts/uploads",
-            {"mime_type": "image/png", "size": len(image)},
-            auth,
-        )
-        assert status == 201, upload
-        connection = HTTPConnection(
-            "127.0.0.1", int(admin_env["proxy"].rsplit(":", 1)[1]), timeout=20
-        )
-        try:
-            connection.request(
-                "PUT",
-                f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1",
-                image,
-                {**auth, "x-upload-token": upload["upload_token"]},
-            )
-            part_response = connection.getresponse()
-            assert part_response.status == 200
-            part = json.loads(part_response.read())
-        finally:
-            connection.close()
-        status, artifact = http_request(
-            "POST",
-            f"{admin_env['proxy']}/v1/artifacts/uploads/{upload['upload_id']}/complete",
-            {"upload_token": upload["upload_token"], "parts": [part]},
-            auth,
-        )
-        assert status == 200 and artifact["mime_type"] == "image/png", artifact
+        status, artifact = upload_artifact(admin_env["proxy"], auth, image, "image/png")
+        assert status == 201 and artifact["mime_type"] == "image/png", artifact
         # 媒体理解由 MCP 工具同步触发；它经 Provider 发出的尝试属于 capability。
         status, queried = http_request(
             "POST",

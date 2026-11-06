@@ -4,6 +4,8 @@ status: accepted
 
 # 分离 Artifact 引用与临时传输授权
 
+> **局部被取代。** [ADR-0092](0092-replace-multipart-artifact-upload-with-single-request.md) 取代「上传授权有效期与消费规则」中「上传会话仍各自独立」的措辞：外部上传改为单请求 `POST /v1/artifacts`，不再有上传会话，每次上传请求相互独立。Upload Grant 的授权范围、15 分钟有效期与凭据交付边界不变，完整收存后按 Principal、声明 MIME 与全部字节复用文件身份的规则不变。
+
 Artifact Reference 保留现有 Principal 归属边界：引用本身不授予访问权，同一 Stravia API Key 对应的 Principal 可以跨对话解析，其他 Principal 不得解析。平台向客户端或 Provider 提供下载地址前必须先完成相应归属鉴权，再签发单个 Artifact 的限时 Artifact Download Grant；签名地址采用持有即授权的语义，在有效期内不要求额外 API Key。用于客户端上传的 Artifact Upload Grant 仅允许向指定 Principal 上传，不授予模型调用、读取已有文件或管理权限。
 
 该决策允许 Provider 在不持有 Stravia API Key 的情况下抓取文件，也让客户端能使用普通下载工具；代价是签名地址可被转交，泄露后在有效期内可被他人使用。拒绝把稳定 Artifact Reference 本身作为下载凭据，也不要求每次签名下载额外携带 API Key。“文件公开访问域名”仅表示下载入口的网络可达性，不表示文件永久公开。

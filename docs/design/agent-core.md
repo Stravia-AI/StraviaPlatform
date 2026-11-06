@@ -240,7 +240,7 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 ### 5.6 Artifact
 
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `stravia://artifacts/<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的查询参数，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
+`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `stravia://artifacts/<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的 `:` 选择器，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、并发或重启影响；暂存记录不具备幂等语义。
 
 SQLite 的 ready 对象清理以每个 Artifact 的独占对象锁作为删除声明，读取、grant 签发、续期及内容发布先持有共享侧；对象删除期间不持有 SQLite 写事务。删除任务拥有该锁直到对象 I/O 与最终元数据删除真正结束，调用方取消不能提前释放锁，因为 SQLite worker 和远端 DELETE 可能继续执行。对象删除失败保留元数据；元数据删除失败留下的过期对象不能直接复活，只有完整重新收存并校验字节后才修复底层对象并延长保留期。本地修复先写独立临时文件再发布；正常未过期复用不增加对象 I/O。PostgreSQL 沿用 advisory lock 与事务协调，保持相同可见性及保留语义。
 
@@ -248,7 +248,7 @@ SQLite 的 ready 对象清理以每个 Artifact 的独占对象锁作为删除�
 
 完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 是完整 256 bit 摘要按大端整数编码并左补齐的 55 位小写 base26 字母。28 位小写字母随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。系统按全新数据库契约运行，不接受或兼容旧随机 Artifact ID。
 
-`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
+`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
 
 ---
 
@@ -293,7 +293,7 @@ flowchart TB
 | `ModelTurnExecutor` | canonical request→event/final response | auth refresh、route、target retry、provider codec、usage | tool loop、history、delivery |
 | `AgentRunner` | AgentInput→AgentEvent stream | bounded loop、tool calls、schema repair、finalization、Turn commit | transport、Definition CRUD、background task |
 | `TurnChain` | append/materialize/branch/sweep | DAG、principal scope、统一保留期、引用保留、GC | model/tool execution |
-| `ArtifactStore` | stage/open/attach/release | LocalFS/S3、hash、multipart、refcount | model encoding、media analysis |
+| `ArtifactStore` | stage/open/attach/release | LocalFS/S3、hash、staging、refcount | model encoding、media analysis |
 | `PlatformToolRegistry` | versioned descriptor/execute | executor lookup、parallel policy | client tool continuation、agent nesting |
 | adapters | wire↔AgentInput/ToolResult | protocol-specific declaration与错误映射 | Agent loop |
 
@@ -467,27 +467,13 @@ Adapter delivery 失败不回滚已提交 Turn；当前没有独立 Run/delivery
 
 ```rust
 pub trait ArtifactStore: Send + Sync {
-    async fn create_upload(
+    async fn ingest(
         &self,
         principal: &Principal,
-        request: ArtifactUploadRequest,
-    ) -> Result<ArtifactUpload, ArtifactError>;
-
-    async fn upload_part(
-        &self,
-        principal: &Principal,
-        upload_id: &str,
-        upload_token: &str,
-        part_number: u32,
+        mime_type: &str,
+        size: Option<u64>,
         bytes: ArtifactByteStream,
-    ) -> Result<UploadedArtifactPart, ArtifactError>;
-
-    async fn complete_upload(
-        &self,
-        principal: &Principal,
-        upload_id: &str,
-        upload_token: &str,
-        parts: &[UploadedArtifactPart],
+        retention: Duration,
     ) -> Result<ArtifactRef, ArtifactError>;
 
     async fn open(
@@ -500,7 +486,7 @@ pub trait ArtifactStore: Send + Sync {
 }
 ```
 
-当前外部 ingest 只接受 API-key authenticated multipart upload；AgentInput 只接受同 principal 的 opaque ArtifactId。LocalFS path 只存在于 `ArtifactReader` 内部，不暴露给调用方；不接受 `file://`、任意本地路径、客户端 URL 或 provider file ID 作为持久化身份。
+当前外部 ingest 只接受 API-key 或临时 Upload Grant 认证的单请求上传（见 §11.3）；AgentInput 只接受同 principal 的 opaque ArtifactId。LocalFS path 只存在于 `ArtifactReader` 内部，不暴露给调用方；不接受 `file://`、任意本地路径、客户端 URL 或 provider file ID 作为持久化身份。
 
 ---
 
@@ -622,7 +608,7 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 | Agent Definition Config | definition_id、enabled、model_id、thinking_level、updated_at | Admin 唯一可改字段 |
 | Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、created_at | kind 至少 response/agent |
 | Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；LocalFS/S3；物理 key 独立于最终 ID |
-| Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | authenticated multipart staging；artifact_id 仅为内部暂存身份，不公开 |
+| Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | ingest 内部暂存记录（流式写入的 part 仅作内部实现）；artifact_id 仅为内部暂存身份，不公开 |
 
 当前不持久化运行中的 Agent Run、失败尝试、instance lease 或 event chunks。只有成功/预算收束成功的 Turn 会进入 Turn Chain；失败、取消或进程退出不会产生可续接节点。
 
@@ -648,7 +634,7 @@ Failed/Cancelled Run 不持久化；其 typed error 只通过当前 Event Stream
 ### 10.2 TTL 与 GC
 
 - Agent Turn 与 Response Chain 共用历史保留天数 N（`log_retention_days`，默认 7，最小 1）：节点按 `created_at + N` 计时，提交与续接都不刷新祖先；只要子树中还有未到期的后代，祖先就因有子节点而保留，未使用的 sibling branch 各自到期。到期不等于立即不可读：读取没有时间条件，由每小时的扫描回收没有子节点、也不是原生压缩来源的到期节点，扫描前仍可读、可续接（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。
-- Artifact 默认保留 7 天；multipart upload 使用 idle TTL，每次成功 part 上传都会刷新。
+- Artifact 默认保留 7 天；ingest 暂存使用 1 小时 idle TTL，每次成功写入 part 都会刷新。
 - Gateway lifecycle 每小时驱动历史（Observation、Turn 节点、依赖与共享正文）与 Artifact sweep；失败记录 warning 并在下一周期重试。
 - 当前 Artifact 没有引用计数或显式删除；到期后由 sweeper 清理 metadata、object 与未完成 staging。
 - Revision 当前不自动回收，以保证已存活 Turn 可按固定 Revision 续接。
@@ -686,6 +672,23 @@ EndpointCapabilities::native_video
 - 不在 codec 内做下载、抽帧、转录或 OCR；
 - 未来 portable video Definition 必须显式包含版本化 media preprocessing PlatformTool。
 
+附件的交付方式由 `protocol-codec` 的 `attachment` 模块按（协议，附件种类）给出，是 Core 每次 Target 调用前选择签名下载 URL 或内联 base64、以及跨协议请求裁剪判断媒体能否被目标承载的唯一事实源，Core 不再维护第二份矩阵。取值以各 encoder 的实际 wire 承载为准，且只在官方 schema 定义了 URL 载体时才声明 URL：
+
+| 协议 | Image | Audio | File | Video | Document |
+|---|---|---|---|---|---|
+| Anthropic Messages | URL/内联 | — | URL（仅 PDF）/内联 | — | URL（仅 PDF）/内联 |
+| Google Gemini | URL/内联 | URL/内联 | URL/内联 | URL/内联 | URL/内联 |
+| OpenAI Compatible | URL/内联 | 内联（WAV/MP3） | 内联 | — | 内联 |
+| Open Responses | URL/内联 | — | URL/内联 | URL/内联 | URL/内联 |
+| Bedrock Converse | 内联 | — | 内联 | — | 内联 |
+| Cohere Chat | URL/内联 | — | — | — | — |
+| watsonx Text Chat | URL/内联 | 内联（WAV/MP3） | — | — | — |
+| Gateway Language Model | URL/内联 | — | URL/内联 | URL/内联 | — |
+
+内联时部分协议还限制 MIME（Anthropic 与 Bedrock 的图片只接受 JPEG/PNG/GIF/WebP，Anthropic 与 Bedrock 的 Document 只接受 PDF 等），不满足时明确失败。没有共享标准 endpoint 的 guest 无法假定支持 URL，一律内联 canonical bytes，该语义属于 Core。
+
+`stravia://artifacts/<id>` 既可作为 URL 来源也可作为 FileId 来源：二者经同一准入（校验引用格式、归属并延长保留期）与同一交付路径，按上表改写为签名下载 URL 或 base64，并同样向本次交付副本补稳定引用；带查询串、fragment 或后缀的引用、以及其他 `stravia://` 值无效。供应商自己的 file id 原样透传。
+
 官方来源：
 
 - [OpenAI image inputs](https://platform.openai.com/docs/guides/images-vision)
@@ -695,22 +698,25 @@ EndpointCapabilities::native_video
 
 ### 11.3 Upload surface
 
-当前 API：
+当前 API 只有一个端点（[ADR-0092](../adr/0092-replace-multipart-artifact-upload-with-single-request.md)）：
 
 ```text
-POST /v1/artifacts/uploads
-PUT  /v1/artifacts/uploads/{upload_id}/parts/{part_number}
-POST /v1/artifacts/uploads/{upload_id}/complete
+POST /v1/artifacts
+Content-Type: <MIME>
+
+<原始字节>
 ```
 
 实现满足：
 
-- 使用 inference API key principal；anonymous 在读取上传 body 前拒绝；
-- 单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy；
-- upload token 只授权同 principal、同 upload；part 流式写盘并计算 SHA-256 etag；
-- replacement delta、aggregate size、part manifest、owner 与完整内容 digest 在完成前校验；
-- 创建只返回 `upload_id`、`upload_token`、`expires_at`；完成才返回最终 Artifact `path`、MIME 与 size，不接受客户端声明的最终内容摘要作为身份依据；
-- upload idle TTL 在每次成功 part 后刷新，Gateway sweeper 清理过期 staging 与 metadata。
+- 请求体就是文件字节，`Content-Type` 就是 MIME；缺少 Content-Type、`application/x-www-form-urlencoded`（curl `--data-binary` 不带 `-H` 时的默认值）或 `multipart/*` 返回 415，避免把表单边界写进文件内容。MIME 校验与归一化沿用 ingest 现有规则；
+- 使用 inference API key principal 或临时 Upload Grant；anonymous 在读取上传 body 前拒绝；
+- 请求体流式写入 `ArtifactStore::ingest`，不整体缓冲；单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy，均由 ingest 路径执行；
+- ingest 的 staging idle TTL 为 1 小时，覆盖大文件单请求上传的耗时；Gateway sweeper 清理过期 staging 与 metadata；
+- Artifact 保留期跟随 `log_retention_days`；
+- 内容身份由服务端对完整内容计算，同一 principal 重复上传相同内容得到同一 `path`；不接受客户端声明的内容摘要；
+- 成功返回 201，响应体为 `{"path","mime_type","size"}`；错误体为 JSON，复用 Gateway 统一的 `error_response`；
+- 不提供断点续传。
 
 当前不提供 S3 presigned multipart、客户端 URL ingest 或 content-based MIME sniffing；这些能力必须在对应 backend/validator 实施后再开放。
 
@@ -890,7 +896,7 @@ MCP execution failure使用 tool `isError`/structured error；JSON-RPC error 仅
 
 ### 阶段 C：ArtifactStore 与 canonical video
 
-已完成内部／S3 bytes、SQLite/PostgreSQL metadata、authenticated multipart HTTP、稳定 Artifact Reference、限时下载与上传授权、canonical `Video`、Gemini native-video 映射与非原生 typed reject。清理通过进行中读取保护与未过期下载授权协调，不采用引用计数续期。
+已完成内部／S3 bytes、SQLite/PostgreSQL metadata、认证的单请求上传 HTTP、稳定 Artifact Reference、限时下载与上传授权、canonical `Video`、Gemini native-video 映射与非原生 typed reject。清理通过进行中读取保护与未过期下载授权协调，不采用引用计数续期。
 
 验收 seam 包括公开 HTTP／MCP 的上传、收存与下载，以及 Artifact Store 的 Principal 隔离、暂存配额、固定授权期限、读取／清理竞争、SQLite/PostgreSQL 重建与真实 S3 预签名下载；不以 refcount 或签名访问刷新逻辑保留期。
 
@@ -912,7 +918,7 @@ Web Search 已作为首个生产 vertical slice 实施。上层 `WebSearchRunner
 
 完整 interface、clean cutover、迁移与验收见 [`web-search.md`](web-search.md) 和 [`ADR-0017`](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)。
 
-Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，Artifact Reference 的 `?question=` 指定问题，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，具体问题放在 `question` 字段，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 ---
 

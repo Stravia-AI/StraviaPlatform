@@ -1176,7 +1176,8 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("stravia://artifacts/{id}?question=Describe%20the%20image")
+                                            "path": format!("stravia://artifacts/{id}"),
+                                            "question": "Describe the image"
                                         }).to_string()
                                     }
                                 }]
@@ -1225,7 +1226,9 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("stravia://artifacts/{id}?question=Identify%20the%20subject&previous_path=stravia%3A%2F%2Fturns%2F{turn_id}")
+                                            "path": format!("stravia://turns/{turn_id}"),
+                                            "question": "Identify the subject",
+                                            "attachments": [format!("stravia://artifacts/{id}")]
                                         }).to_string()
                                     }
                                 }]

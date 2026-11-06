@@ -130,6 +130,26 @@ def http_request(
     return status, _decode_body(body)
 
 
+def upload_artifact(
+    proxy: str,
+    auth: dict[str, str],
+    data: bytes,
+    mime_type: str,
+    timeout: float = 15.0,
+) -> tuple[int, Any]:
+    """Upload bytes with one `POST /v1/artifacts`; `Content-Type` is the MIME."""
+    request = Request(
+        url=f"{proxy}/v1/artifacts", method="POST", data=data,
+        headers={**auth, "Content-Type": mime_type},
+    )
+    opener = build_opener(ProxyHandler(), _CompleteRequestHTTPHandler())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return int(response.status), _decode_body(response.read())
+    except HTTPError as error:
+        return int(error.code), _decode_body(error.read())
+
+
 def download_observation_bundle(
     env: dict[str, Any], detail: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, str], bytes]:

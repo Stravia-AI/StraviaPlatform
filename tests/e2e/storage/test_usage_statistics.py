@@ -21,7 +21,7 @@ import pytest
 from tests.common.observation_contents import input_text
 from tests.common.helpers import (
     find_free_port, http_request, initialize_server, minimal_mock_provider,
-    start_stravia_server, stop_stravia_server, wait_for_setup_token, wait_until_ready,
+    start_stravia_server, stop_stravia_server, upload_artifact, wait_for_setup_token, wait_until_ready,
 )
 from tests.e2e.admin.test_observations import (
     _create_route, _detail, _finished_detail, _proxy, _route_interactions, _wait_for,
@@ -1176,27 +1176,8 @@ def test_capability_upstream_failure_counts_as_upstream_error(usage_env):
         key = body["data"]["key"]
         auth = {"Authorization": f"Bearer {key}"}
         image = base64.b64decode(PNG)
-        status, upload = http_request(
-            "POST", f"{env['proxy']}/v1/artifacts/uploads",
-            {"mime_type": "image/png", "size": len(image)}, auth,
-        )
-        assert status == 201, upload
-        connection = HTTPConnection("127.0.0.1", int(env["proxy"].rsplit(":", 1)[1]), timeout=20)
-        try:
-            connection.request(
-                "PUT", f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1", image,
-                {**auth, "x-upload-token": upload["upload_token"]},
-            )
-            response = connection.getresponse()
-            assert response.status == 200
-            part = json.loads(response.read())
-        finally:
-            connection.close()
-        status, artifact = http_request(
-            "POST", f"{env['proxy']}/v1/artifacts/uploads/{upload['upload_id']}/complete",
-            {"upload_token": upload["upload_token"], "parts": [part]}, auth,
-        )
-        assert status == 200 and artifact["mime_type"] == "image/png", artifact
+        status, artifact = upload_artifact(env["proxy"], auth, image, "image/png")
+        assert status == 201 and artifact["mime_type"] == "image/png", artifact
         # 媒体理解由 MCP 读取同步触发；它经 Provider 发出的尝试属于 capability。
         status, queried = http_request(
             "POST", f"{env['proxy']}/mcp",

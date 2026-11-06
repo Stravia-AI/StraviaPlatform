@@ -151,8 +151,11 @@ def test_public_tool_execution_cleanup_and_restart(
         assert status == 200 and "result" in body, (status, body)
         return body["result"]
 
-    def read(key: str, path: str) -> dict[str, Any]:
-        return call(key, "StraviaRead", {"path": path})
+    def read(key: str, path: str, wait: int | None = None) -> dict[str, Any]:
+        arguments: dict[str, Any] = {"path": path}
+        if wait is not None:
+            arguments["wait"] = wait
+        return call(key, "StraviaRead", arguments)
 
     try:
         database: dict[str, Any] = {"backend": "sqlite"}
@@ -223,7 +226,7 @@ def test_public_tool_execution_cleanup_and_restart(
         assert denied["structuredContent"] == missing["structuredContent"]
 
         release_first.set()
-        completed = read(key, first_path + "?wait=120")["structuredContent"]
+        completed = read(key, first_path, wait=120)["structuredContent"]
         assert completed["status"] == "completed", completed
         assert completed["result"]["media"] == {"width": 1, "height": 1}
         release_source = upstream.images.get(timeout=30)
@@ -234,7 +237,7 @@ def test_public_tool_execution_cleanup_and_restart(
         assert read(key, pending_path)["structuredContent"]["status"] == "pending"
         # 诊断清理不释放执行门、不取消已交接的领域工作。
         release_source.set()
-        source_completed = read(key, source_path + "?wait=120")["structuredContent"]
+        source_completed = read(key, source_path, wait=120)["structuredContent"]
         assert source_completed["status"] == "completed", source_completed
         assert source_completed["result"]["media"] == {"width": 1, "height": 1}
         release_pending = upstream.images.get(timeout=30)
@@ -259,7 +262,7 @@ def test_public_tool_execution_cleanup_and_restart(
         assert interrupted["structuredContent"]["error"]
         assert read(key, source_path)["structuredContent"] == source_completed
         assert read(key, first_path)["structuredContent"] == completed
-        grant = read(key, completed["result"]["path"] + "?download=1")["structuredContent"]
+        grant = read(key, completed["result"]["path"] + ":download")["structuredContent"]
         status, _, image = http_bytes("GET", grant["download_url"])
         assert status == 200 and image == base64.b64decode(PNG)
         assert [request["prompt"] for request in upstream.image_requests] == [

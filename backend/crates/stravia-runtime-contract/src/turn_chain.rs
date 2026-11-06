@@ -457,6 +457,31 @@ pub trait TurnChainStore: Send + Sync {
         id: &TurnNodeId,
     ) -> Result<Vec<TurnNode>, TurnUnavailable>;
 
+    /// 返回该 Principal 可见且未过期节点的类型；不存在、过期或不属于该 Principal 时
+    /// 返回 [`TurnUnavailable::Unavailable`]。
+    ///
+    /// 默认实现依次按 [`TurnNodeKind::WebSearch`]、[`TurnNodeKind::Agent`]、
+    /// [`TurnNodeKind::Response`] 试探 [`Self::materialize`]：`Unavailable` 时继续
+    /// 下一种，存储错误直接返回。存储实现应覆盖为一次查询。
+    async fn node_kind(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<TurnNodeKind, TurnUnavailable> {
+        for kind in [
+            TurnNodeKind::WebSearch,
+            TurnNodeKind::Agent,
+            TurnNodeKind::Response,
+        ] {
+            match self.materialize(principal, kind, id).await {
+                Ok(_) => return Ok(kind),
+                Err(TurnUnavailable::Unavailable) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(TurnUnavailable::Unavailable)
+    }
+
     async fn materialize_with_expiry(
         &self,
         principal: &Principal,

@@ -83,7 +83,15 @@ async fn fixture(fail: bool) -> (TestApp, ReadTool, Arc<ControlledSearch>) {
 }
 
 async fn read(reader: &ReadTool, owner: &str, path: &str) -> McpToolOutput {
-    McpTool::call(reader, json!({"path":path}), &McpContext::new(owner.into()))
+    read_input(reader, owner, json!({"path":path})).await
+}
+
+async fn read_waiting(reader: &ReadTool, owner: &str, path: &str, wait: u64) -> McpToolOutput {
+    read_input(reader, owner, json!({"path":path,"wait":wait})).await
+}
+
+async fn read_input(reader: &ReadTool, owner: &str, input: serde_json::Value) -> McpToolOutput {
+    McpTool::call(reader, input, &McpContext::new(owner.into()))
         .await
         .unwrap()
 }
@@ -91,8 +99,14 @@ async fn read(reader: &ReadTool, owner: &str, path: &str) -> McpToolOutput {
 async fn background(reader: &ReadTool, owner: &str, upstream: &ControlledSearch) -> String {
     let reader = reader.clone();
     let owner = owner.to_owned();
-    let call =
-        tokio::spawn(async move { read(&reader, &owner, "search://controlled%20evidence").await });
+    let call = tokio::spawn(async move {
+        read_input(
+            &reader,
+            &owner,
+            json!({"path":"stravia://search","question":"controlled evidence"}),
+        )
+        .await
+    });
     upstream.entered.notified().await;
     // Acceptance is the barrier: setup and upstream admission run on real time.
     tokio::time::pause();
@@ -143,11 +157,10 @@ async fn search_queries_wait_independently_and_preserve_the_original_report() {
     let path = background(&reader, &app.key_id, &upstream).await;
     let immediate = read(&reader, &app.key_id, &path).await;
     assert_eq!(immediate.structured_content["status"], "running");
-    let zero = read(&reader, &app.key_id, &format!("{path}?wait=0")).await;
+    let zero = read_waiting(&reader, &app.key_id, &path, 0).await;
     assert_eq!(zero.structured_content, immediate.structured_content);
 
-    let short_path = format!("{path}?wait=7");
-    let short = registered_query(read(&reader, &app.key_id, &short_path)).await;
+    let short = registered_query(read_waiting(&reader, &app.key_id, &path, 7)).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(7)).await;
     tokio::time::resume();
@@ -162,12 +175,11 @@ async fn search_queries_wait_independently_and_preserve_the_original_report() {
     );
     let cancelled = registered_query(McpTool::call(
         &reader,
-        json!({"path":format!("{path}?wait=120")}),
+        json!({"path":path,"wait":120}),
         &cancelled_context,
     ))
     .await;
-    let long_path = format!("{path}?wait=120");
-    let mut survivor = registered_query(read(&reader, &app.key_id, &long_path)).await;
+    let mut survivor = registered_query(read_waiting(&reader, &app.key_id, &path, 120)).await;
     cancellation.cancel();
     assert!(cancelled.await.unwrap().is_error);
     // A >60-second query must not itself hand off or reset the original deadline.
@@ -197,7 +209,7 @@ async fn failed_background_search_is_a_successful_status_read_and_owner_is_not_d
     let (app, reader, upstream) = fixture(true).await;
     let path = background(&reader, &app.key_id, &upstream).await;
     upstream.release.notify_one();
-    let completed = read(&reader, &app.key_id, &format!("{path}?wait=120")).await;
+    let completed = read_waiting(&reader, &app.key_id, &path, 120).await;
     assert!(!completed.is_error);
     assert_eq!(completed.structured_content["status"], "failed");
     assert!(

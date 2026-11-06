@@ -74,7 +74,7 @@ type ImageGenerateOutput = {
 
 `media.width` 与 `media.height` 从实际生成文件读取，不以请求参数代填。结果不重复返回裸 Artifact ID，也不重复返回推算比例或分辨率档位。其他媒体类型的 `media` 字段随对应能力定义。
 
-新生成结果直接附带 `download_url`，不增加 `expires_at`。它使用所属 Principal 的既有 15 分钟 bearer 下载授权，固定从配置的完整 `client_base_url`（含协议、端口及部署路径）经过平台读取实际存储文件，即使开启外部签名下载也不改用 S3 或文件公开入口。此规则不改变 Provider 交付及 `StraviaRead({path: "stravia://artifacts/<artifact-id>?download=1"})` 的既有下载策略，也不回写历史结果；异步执行查询原样保留生成结果中的链接，不自动续期或重新生成。
+新生成结果直接附带 `download_url`，不增加 `expires_at`。它使用所属 Principal 的既有 15 分钟 bearer 下载授权，固定从配置的完整 `client_base_url`（含协议、端口及部署路径）经过平台读取实际存储文件，即使开启外部签名下载也不改用 S3 或文件公开入口。此规则不改变 Provider 交付及 `StraviaRead({"path": "stravia://artifacts/<artifact-id>:download"})` 的既有下载策略，也不回写历史结果；异步执行查询原样保留生成结果中的链接，不自动续期或重新生成。
 
 工具描述要求用 `![图片描述](download_url "stravia://artifacts/<artifact-id>")` 展示结果，代入实际链接和稳定 `path`；title 在链接失效后保留产物身份，不代表自动续签或重新生成。有效链接的展示不要求额外调用 Read，稳定 `path` 仍用于后续参考图复用。
 
@@ -92,7 +92,7 @@ type ImageGenerateOutput = {
 
 领域最终结果与 Marker 的本次交付结果分别持久化。常规交付由所属 Inference Run 的 ToolResult Hook 处理后封存；交付的是执行引用时，Marker 以后仍恢复该次引用，不随后台完成而替换。除系统确定的取消结果外，原请求消失导致 Hook 无法完成时，Marker 保存明确交付处理错误，不放行原始成功结果；这不取消已交接工作，也不改写其独立最终结果。后台完成不调用旧 Hook，后续查询输出由查询所属请求的 Hook 处理。
 
-用 `StraviaRead({"path":"stravia://tool-executions/<id>?wait=120"})` 查询。省略 `wait` 或设为 `0` 立即返回；正整数表示本次查询最多等待的秒数，可超过初次 60 秒窗口，但不得越过查询请求与原执行的剩余期限。完成会提前唤醒所有等待者；取消查询只停止自己的等待。重复查询不重新执行、不创建后台查询任务、不延长执行或保留期。`wait` 只适用于执行引用，不新增顶层参数；非法值、重复和未知选项明确拒绝。
+用 `StraviaRead({"path":"stravia://tool-executions/<id>","wait":120})` 查询。省略 `wait` 或设为 `0` 立即返回；正整数表示本次查询最多等待的秒数，可超过初次 60 秒窗口，但不得越过查询请求与原执行的剩余期限。完成会提前唤醒所有等待者；取消查询只停止自己的等待。重复查询不重新执行、不创建后台查询任务、不延长执行或保留期。`wait` 只适用于执行引用，其他 path 携带该字段时明确拒绝；非法值与未知字段同样明确拒绝。
 
 未完成时返回稳定 `path` 与真实 `pending` / `running` 状态；完成时返回 `{"path":"…","status":"completed","result":<原工具结果>}`。原结果中的 Artifact、报告与分页引用继续按原规则消费。原任务失败或进程重启中断时，查询本身成功，返回 `failed` / `interrupted` 与 `error`，不设置本次读取的工具错误标志。未知、过期、被清理或不属于当前 Principal 的引用是查询错误；未知与其他 Principal 的引用不泄露存在性。
 

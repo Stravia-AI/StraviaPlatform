@@ -397,7 +397,7 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 平台工具使用标准 function 声明，`name` 为 `StraviaRead`，参数由统一入口 schema 描述。旧平台扩展 `stravia:web_search` 不再接受，不保留调用别名。Provider-native `web_search` 等工具类型继续按其原协议透传，不被平台工具改名覆盖；客户端自有的同名 function 也不因此改写为原生工具类型。
 
-模型侧 `StraviaRead` 声明使用 `strict: true`，MCP、外层模型与内部 Agent 共用唯一必填字符串 `path`，禁止额外顶层字段。搜索使用 `search://`，允许域名和续接 ID 位于搜索 query；资源选项位于 `#stravia?` fragment。旧 url、顶层可选字段、query:// 和 Stravia 管理的 blocked_domains 明确拒绝。长报告仅裁剪工具交付副本的 answer，并在 pagination 中提供文本快照续读路径，历史完整报告不受影响。
+模型侧 `StraviaRead` 声明使用 `strict: true`，所有出现的字段都列入 `required`，`question`、`attachments`、`allowed_domains`、`wait` 写成可空类型；MCP 使用只有 `path` 必填的可选形式。MCP、外层模型与内部 Agent 共用 `path` 加纯文本字段的输入：`path` 只承载地址和 `:` 选择器，搜索使用 `stravia://search` 并在 `question` 放搜索文本，`allowed_domains` 是独立字段；续接把 `stravia://turns/<turn-id>` 直接作为 `path`。旧 url、旧 URL scheme、旧 `#`／`?` 选项和 Stravia 管理的 blocked_domains 明确拒绝。长报告仅裁剪工具交付副本的 answer，并在 pagination 中提供文本快照续读路径，历史完整报告不受影响。
 
 ### 9.3 Final output policy
 

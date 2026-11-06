@@ -66,15 +66,18 @@ async fn long_unicode_line_is_complete_and_independent_of_the_original_artifact(
         .find(|tool| tool.name == "StraviaRead")
         .unwrap();
     assert_eq!(tool.input_schema.get("required"), Some(&json!(["path"])));
-    assert_eq!(
-        tool.input_schema
-            .get("properties")
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .len(),
-        1
-    );
+    // 字段按 Principal 当前的能力裁剪：该 key 只启用了媒体理解。
+    let properties = tool
+        .input_schema
+        .get("properties")
+        .unwrap()
+        .as_object()
+        .unwrap();
+    for name in ["path", "question", "attachments", "wait"] {
+        assert!(properties.contains_key(name), "missing {name}");
+    }
+    assert!(!properties.contains_key("allowed_domains"));
+    assert!(!properties.contains_key("previous_path"));
     let original = "中文🙂".repeat(9 * 1024);
     let source = put(
         &app,
@@ -135,11 +138,7 @@ async fn selected_crlf_ranges_share_the_line_budget_without_context_or_phantom_l
     let client = connect(&app).await;
     let lines: Vec<String> = (1..=260).map(|line| format!("line {line}\r\n")).collect();
     let source = put(&app, "text/plain", lines.concat().into_bytes()).await;
-    let first = page(
-        &client,
-        &format!("{}?lines=1-150,201-260", source.reference()),
-    )
-    .await;
+    let first = page(&client, &format!("{}:1-150,201-260", source.reference())).await;
     assert_eq!(
         first["content"],
         [lines[..150].concat(), lines[200..250].concat()].concat()
@@ -150,15 +149,13 @@ async fn selected_crlf_ranges_share_the_line_budget_without_context_or_phantom_l
     assert_eq!(last["returned_ranges"][0]["start_line"], 251);
     assert_eq!(last["has_more"], false);
     let snapshot = first["read_path"].as_str().unwrap();
-    let selected = page(&client, &format!("{snapshot}?lines=-1")).await;
+    let selected = page(&client, &format!("{snapshot}:-1")).await;
     assert_eq!(selected["content"], "line 260\r\n");
-    let counted = page(&client, &format!("{snapshot}?lines=259%2B2")).await;
+    let counted = page(&client, &format!("{snapshot}:259+2")).await;
     assert_eq!(counted["content"], "line 259\r\nline 260\r\n");
-    for range in ["0", "-0", "-+1", "261", "18446744073709551615%2B2"] {
+    for range in ["0", "-0", "-+1", "261", "18446744073709551615+2"] {
         assert_eq!(
-            call(&client, &format!("{snapshot}?lines={range}"))
-                .await
-                .is_error,
+            call(&client, &format!("{snapshot}:{range}")).await.is_error,
             Some(true)
         );
     }
@@ -175,12 +172,10 @@ async fn empty_snapshot_reads_and_downloads_exactly_empty_text() {
     assert_eq!(empty["has_more"], false);
     let reference = empty["read_path"].as_str().unwrap();
     assert_eq!(
-        call(&client, &format!("{reference}?lines=1"))
-            .await
-            .is_error,
+        call(&client, &format!("{reference}:1")).await.is_error,
         Some(true)
     );
-    let download = page(&client, &format!("{reference}?download=1")).await;
+    let download = page(&client, &format!("{reference}:download")).await;
     let response = reqwest::get(download["download_url"].as_str().unwrap())
         .await
         .unwrap();
@@ -197,7 +192,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
     let first = page(&client, &source.reference()).await;
     let reference = first["read_path"].as_str().unwrap();
     let next = first["next_path"].as_str().unwrap();
-    let encoded = next.split_once("cursor=").unwrap().1;
+    let encoded = next.split_once(":cursor=").unwrap().1;
     let cursor: Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
@@ -221,14 +216,14 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&mutation).unwrap());
         assert_eq!(
-            call(&client, &format!("{reference}?cursor={encoded}"))
+            call(&client, &format!("{reference}:cursor={encoded}"))
                 .await
                 .is_error,
             Some(true)
         );
     }
     assert_eq!(
-        call(&client, &format!("{}?cursor={encoded}", source.reference()))
+        call(&client, &format!("{}:cursor={encoded}", source.reference()))
             .await
             .is_error,
         Some(true)
@@ -361,7 +356,7 @@ async fn untrusted_snapshot_envelopes_are_validated_and_source_truncation_surviv
     assert_eq!(last["source_truncated"], true);
     assert_eq!(last["has_more"], false);
     assert!(last.get("next_path").is_none());
-    let download = page(&client, &format!("{}?download=1", source.reference())).await;
+    let download = page(&client, &format!("{}:download", source.reference())).await;
     let response = reqwest::get(download["download_url"].as_str().unwrap())
         .await
         .unwrap();

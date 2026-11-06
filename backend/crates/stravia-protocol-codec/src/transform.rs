@@ -1185,8 +1185,13 @@ fn request_block_representable(
     target: Protocol,
     block: &stravia_runtime_contract::protocol::ir::ContentBlock,
 ) -> bool {
+    use crate::attachment::{
+        AttachmentKind, attachment_block_supported, inline_media_type_supported,
+    };
     use stravia_runtime_contract::protocol::ir::{ContentBlock, MediaSource};
 
+    // 媒体块的种类级能力来自 `attachment` 的交付能力表；来源变体与 Bedrock/Anthropic
+    // 的角色、MIME 限制仍按各 encoder 的实际载体在下面逐项判断。
     // 思考块由 thinking replay 按来源剥离受保护载荷，再由出口 codec 决定原生承载或
     // 降级为正文；无法承载的受保护载荷按契约忽略，不属于意外丢失。
     if matches!(block, ContentBlock::RedactedThinking { .. }) {
@@ -1209,10 +1214,9 @@ fn request_block_representable(
             } => true,
             ContentBlock::Image { source, .. } => match source {
                 MediaSource::Url(_) | MediaSource::FileId { .. } => true,
-                MediaSource::Base64 { media_type, .. } => matches!(
-                    media_type.as_str(),
-                    "image/jpeg" | "image/png" | "image/gif" | "image/webp"
-                ),
+                MediaSource::Base64 { media_type, .. } => {
+                    inline_media_type_supported(target, AttachmentKind::Image, media_type)
+                }
             },
             ContentBlock::File { source, media_type } => match source {
                 MediaSource::FileId { .. } => true,
@@ -1223,50 +1227,43 @@ fn request_block_representable(
                     media_type: source_type,
                     ..
                 } => {
-                    matches!(source_type.as_str(), "application/pdf" | "text/plain")
+                    inline_media_type_supported(target, AttachmentKind::File, source_type)
                         && media_type.as_ref().is_none_or(|mime| mime == source_type)
                 }
             },
             _ => false,
         },
-        Protocol::GoogleGemini => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::Audio { .. }
-                | ContentBlock::Document { .. }
-                | ContentBlock::File { .. }
-                | ContentBlock::Video { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-                | ContentBlock::ExecutableCode { .. }
-                | ContentBlock::CodeExecutionResult { .. }
-        ),
-        Protocol::OpenAICompatible => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::Audio { .. }
-                | ContentBlock::File { .. }
-                | ContentBlock::Document { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-        ),
-        Protocol::OpenResponses => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::File { .. }
-                | ContentBlock::Document { .. }
-                | ContentBlock::Video {
-                    source: stravia_runtime_contract::protocol::ir::MediaSource::Url { .. }
-                        | stravia_runtime_contract::protocol::ir::MediaSource::Base64 { .. },
-                    ..
-                }
-                | ContentBlock::Refusal { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-        ),
+        Protocol::GoogleGemini => {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. }
+                    | ContentBlock::ExecutableCode { .. }
+                    | ContentBlock::CodeExecutionResult { .. }
+            ) || attachment_block_supported(target, block)
+        }
+        Protocol::OpenAICompatible => {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. }
+            ) || attachment_block_supported(target, block)
+        }
+        Protocol::OpenResponses => {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::Refusal { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. }
+            ) || match block {
+                // file id 没有 input_video 载体，视频只能是 URL 或内联。
+                ContentBlock::Video { source, .. } => !matches!(source, MediaSource::FileId { .. }),
+                _ => attachment_block_supported(target, block),
+            }
+        }
         Protocol::BedrockConverse => {
             matches!(
                 block,
@@ -1289,35 +1286,19 @@ fn request_block_representable(
                 || matches!(block, ContentBlock::File {
             source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 { media_type: source_type, data },
             media_type,
-        } if !data.is_empty() && matches!(media_type.as_deref().unwrap_or(source_type),
-            "application/pdf" | "text/csv" | "application/csv" | "application/msword"
-            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            | "application/vnd.ms-excel" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            | "text/html" | "text/plain" | "text/markdown" | "text/x-markdown"))
+        } if !data.is_empty() && inline_media_type_supported(
+            target,
+            AttachmentKind::File,
+            media_type.as_deref().unwrap_or(source_type)))
         }
-        Protocol::CohereChat => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-        ),
-        Protocol::WatsonxTextChat => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-        ),
-        Protocol::GatewayLanguageModel => matches!(
-            block,
-            ContentBlock::Text { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::File { .. }
-                | ContentBlock::Video { .. }
-                | ContentBlock::ToolUse { .. }
-                | ContentBlock::ToolResult { .. }
-        ),
+        Protocol::CohereChat | Protocol::WatsonxTextChat | Protocol::GatewayLanguageModel => {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. }
+            ) || attachment_block_supported(target, block)
+        }
     }
 }
 

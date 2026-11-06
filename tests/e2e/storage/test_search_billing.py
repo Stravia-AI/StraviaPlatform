@@ -125,7 +125,10 @@ def test_external_search_route_bills_attempt_to_root_api_key(usage_env, repo_roo
         status, result = http_request("POST", f"{env['proxy']}/mcp", {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
                 "name": "StraviaRead",
-                "arguments": {"path": "search://billing%20probe"},
+                "arguments": {
+                    "path": "stravia://search",
+                    "question": "billing probe",
+                },
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": {},

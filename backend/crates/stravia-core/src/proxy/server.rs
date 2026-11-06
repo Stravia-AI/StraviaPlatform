@@ -27,18 +27,7 @@ pub fn create_router(gateway: Gateway) -> Router {
     let mcp_router = crate::mcp::router(gateway.clone());
     let observation_gateway = gateway.clone();
     let router = Router::new()
-        .route(
-            "/v1/artifacts/uploads",
-            post(super::artifacts::create_upload),
-        )
-        .route(
-            "/v1/artifacts/uploads/{upload_id}/parts/{part_number}",
-            axum::routing::put(super::artifacts::upload_part),
-        )
-        .route(
-            "/v1/artifacts/uploads/{upload_id}/complete",
-            post(super::artifacts::complete_upload),
-        )
+        .route("/v1/artifacts", post(super::artifacts::upload))
         .route(
             "/v1/artifacts/downloads/{token}",
             get(super::artifacts::download),

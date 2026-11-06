@@ -1,4 +1,4 @@
-use crate::{Principal, agent::ArtifactPolicy, identifier::valid_digest_id};
+use crate::{Principal, identifier::valid_digest_id};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
@@ -22,16 +22,9 @@ impl ArtifactId {
         &self.0
     }
 
+    /// 解析精确的 Artifact Reference；任何查询串、fragment 或后缀都视为无效。
     pub fn from_reference(reference: &str) -> Result<Self, ArtifactError> {
-        if reference.contains('#') {
-            return Err(ArtifactError::Invalid(
-                "Artifact Reference fragments are not supported".into(),
-            ));
-        }
-        let identity = reference
-            .split_once('?')
-            .map_or(reference, |(identity, _)| identity);
-        let id = identity
+        let id = reference
             .strip_prefix("stravia://artifacts/")
             .filter(|id| valid_digest_id(id))
             .ok_or_else(|| ArtifactError::Invalid("invalid Artifact Reference".into()))?;
@@ -187,29 +180,6 @@ pub struct ArtifactDownload {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactUpload {
-    pub upload_id: String,
-    pub upload_token: String,
-    pub expires_at: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArtifactUploadRequest {
-    pub mime_type: String,
-    pub size: u64,
-    pub idle_ttl: Duration,
-    pub retention_ttl: Duration,
-    pub policy: ArtifactPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UploadedArtifactPart {
-    pub part_number: u32,
-    pub etag: String,
-    pub size: u64,
-}
-
 #[derive(Debug, Clone)]
 pub enum ArtifactSource {
     LocalPath(PathBuf),
@@ -275,30 +245,6 @@ pub trait ArtifactStore: Send + Sync {
         id: &ArtifactId,
         retention: Duration,
     ) -> Result<(ArtifactRef, Bytes), ArtifactError>;
-    /// 仅分配上传任务；接收并校验全部内容之前没有最终 Artifact ID。
-    async fn create_upload(
-        &self,
-        principal: &Principal,
-        request: ArtifactUploadRequest,
-    ) -> Result<ArtifactUpload, ArtifactError>;
-
-    async fn upload_part(
-        &self,
-        principal: &Principal,
-        upload_id: &str,
-        upload_token: &str,
-        part_number: u32,
-        bytes: ArtifactByteStream,
-    ) -> Result<UploadedArtifactPart, ArtifactError>;
-
-    /// 按完整内容确定最终身份，不受分片边界影响；不缩短已有内容的保留期。
-    async fn complete_upload(
-        &self,
-        principal: &Principal,
-        upload_id: &str,
-        upload_token: &str,
-        parts: &[UploadedArtifactPart],
-    ) -> Result<ArtifactRef, ArtifactError>;
 
     async fn open(
         &self,
@@ -328,17 +274,13 @@ mod tests {
         let id = "a".repeat(crate::identifier::DIGEST_ID_LEN);
         let path = format!("stravia://artifacts/{id}");
         assert_eq!(ArtifactId::from_reference(&path).unwrap().as_str(), id);
-        assert_eq!(
-            ArtifactId::from_reference(&format!("{path}?question=read%20this"))
-                .unwrap()
-                .as_str(),
-            id
-        );
         assert_eq!(ArtifactId::new(&id).reference(), path);
 
         for invalid in [
             format!("sa:{id}"),
             format!("https://stravia/artifact/{id}"),
+            format!("{path}?question=read%20this"),
+            format!("{path}:download"),
             format!("stravia://artifacts/{id}/extra"),
             format!("stravia://artifacts/{id}#fragment"),
             format!(

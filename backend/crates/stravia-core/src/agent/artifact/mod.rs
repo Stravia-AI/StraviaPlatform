@@ -11,10 +11,9 @@ use sqlx::{PgPool, SqlitePool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-#[cfg(test)]
-use stravia_runtime_contract::agent::ArtifactPolicy;
 use stravia_runtime_contract::{
     Principal,
+    agent::ArtifactPolicy,
     identifier::{encode_digest, new_id, valid_digest_id, valid_id},
 };
 
@@ -23,6 +22,29 @@ const MAX_PRINCIPAL_STAGING_BYTES: u64 = 4 * MAX_ARTIFACT_BYTES;
 const MAX_PRINCIPAL_STAGING_UPLOADS: i64 = 16;
 
 pub(crate) const ARTIFACT_STORAGE_FAILURE_MESSAGE: &str = "Artifact storage failed";
+
+/// 内部暂存任务；单请求上传与内部 ingest 都只通过该表示驱动存储层。
+#[derive(Debug, Clone)]
+pub(super) struct ArtifactUpload {
+    pub upload_id: String,
+    pub upload_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ArtifactUploadRequest {
+    pub mime_type: String,
+    pub size: u64,
+    pub idle_ttl: Duration,
+    pub retention_ttl: Duration,
+    pub policy: ArtifactPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UploadedArtifactPart {
+    pub part_number: u32,
+    pub etag: String,
+    pub size: u64,
+}
 
 pub(crate) struct ArtifactErrorMapping {
     pub(crate) status: u16,

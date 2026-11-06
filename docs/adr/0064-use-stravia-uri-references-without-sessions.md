@@ -4,6 +4,8 @@ status: accepted
 
 # 统一 Stravia 引用外壳但不引入 Session
 
+> **局部被取代。** [ADR-0091](0091-read-paths-with-colon-selectors-and-plain-fields.md) 取代下述局部约定：StraviaRead query 参数 `previous_path` 改为续接 path；续接直接把 `stravia://turns/<turn-id>` 作为 `path`，媒体续接的新增媒体放在 `attachments`；Artifact Reference 的 `raw`、`download`、`lines`、`cursor` 读取选项改为 path 末尾的 `:` 选择器，`question` 改为独立字段，不再作为 query 参数。平台内置 Agent Definition 的统一调用入口、Web Search 与 Media Understanding 的工具 JSON 字段 `previous_path` 仍有效，引用外壳、Principal 边界与 Turn 语义不变。[ADR-0092](0092-replace-multipart-artifact-upload-with-single-request.md) 以单请求 `POST /v1/artifacts` 取代分片上传，下文“上传完成 HTTP 辅助结果”即该请求的成功响应，对外不再有上传 `upload_id`。
+
 ## 引用外壳与边界
 
 Stravia 采用 `stravia://artifacts/<artifact-id>` 表达 Artifact Reference，采用 `stravia://turns/<turn-id>` 表达 Turn Reference。两者都是稳定、不透明的引用外壳；选择 `turns` 而不是 `sessions`，是为了保持 [ADR-0007](0007-own-agent-execution-behind-native-seams.md) 已确定的不可变节点语义：Turn Reference 精确选择一个续接节点，无隐式 latest、可变 head 或独立 Session 身份，从任意可访问旧节点续接仍会自然产生互不合并的分支。

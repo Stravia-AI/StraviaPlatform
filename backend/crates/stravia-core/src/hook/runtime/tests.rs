@@ -409,7 +409,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             call: stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "independent-query-call".into(),
                 name: "StraviaRead".into(),
-                arguments: serde_json::json!({"path":format!("{path}?wait=120")}).to_string(),
+                arguments: serde_json::json!({"path":path,"wait":120}).to_string(),
             },
         },
         stravia_runtime_contract::CancellationToken::new(),

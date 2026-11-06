@@ -327,6 +327,15 @@ pub(super) fn apply_request_actions(
                         exposed.spec
                     }
                 };
+                // 工具声明的字段按合并后的暴露范围裁剪；已暂存的 spec 同样重算。
+                staged_read_scope = staged_read_scope.union(scope);
+                spec.parameters = stravia_web_access_contract::read_path::model_input_schema(
+                    stravia_web_access_contract::read_path::ReadSchemaScope {
+                        networking: staged_read_scope.networking(),
+                        media: staged_read_scope.media(),
+                        internal: false,
+                    },
+                );
                 if !description.is_empty() {
                     match spec.description.as_mut() {
                         Some(current) if !current.lines().any(|line| line == description) => {
@@ -343,7 +352,6 @@ pub(super) fn apply_request_actions(
                 protected_specs.insert(provider_name.clone(), spec.clone());
                 staged_tools.insert(provider_name.clone(), tool_id);
                 staged_tool_specs.insert(provider_name, spec);
-                staged_read_scope = staged_read_scope.union(scope);
             }
             HookAction::ExposeTool(tool_id) => {
                 if staged_tools.values().any(|exposed| exposed == &tool_id) {

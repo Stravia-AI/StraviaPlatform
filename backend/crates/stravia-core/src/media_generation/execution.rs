@@ -86,7 +86,7 @@ fn parse_input(input: &Value) -> Result<GenerateRequest, GenerationError> {
     }
     if references.iter().any(|reference| {
         if reference.starts_with("stravia://artifacts/") {
-            reference.contains(['?', '#']) || ArtifactId::from_reference(reference).is_err()
+            ArtifactId::from_reference(reference).is_err()
         } else if reference.starts_with("stravia://")
             || reference.starts_with("sa:")
             || reference.starts_with("https://stravia/artifact/")
@@ -98,7 +98,7 @@ fn parse_input(input: &Value) -> Result<GenerateRequest, GenerationError> {
     }) {
         return Err(GenerationError::new(
             "invalid_reference_image",
-            "Reference images must be plain Artifact References without read options, or public HTTP(S) URLs",
+            "Reference images must be plain Artifact References without selectors, or public HTTP(S) URLs",
         ));
     }
     Ok(input)

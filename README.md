@@ -121,7 +121,7 @@ When an upstream service is temporarily unavailable, Stravia retries or switches
 
 ### Platform tools and built-in agent runtime
 
-- `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
+- `StraviaRead` — one tool, one `path` plus a plain-text `question`: read files, webpages, research questions, and images with no URL encoding; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
 - **Web Search** — use the Local agent loop with a browser-backed Local source, Exa, or Zhipu, or bind an External Route whose Vendor plugin returns a complete cited report.
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
 - **Media Generation** — generate or edit an image through a saved Route backed by a capable Vendor plugin, then reuse its Artifact Reference in later tools.
