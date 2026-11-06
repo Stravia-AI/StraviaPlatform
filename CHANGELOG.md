@@ -10,6 +10,7 @@
 
 - Anthropic streams with signed thinking but no visible thinking text now preserve the reasoning item's position before subsequent text and tool calls in Responses history. Continuing with native compaction no longer sends the tool call before its thinking block and triggers `The final block in an assistant message cannot be thinking`. Signatures and compaction payloads remain unchanged. Rebuild and re-import standalone Anthropic-based plugins, including Claude Code; updating the host alone does not replace installed plugins. Previously saved, incorrectly ordered client history is not rewritten.
 - Model ID suggestions in the model editor now show each catalog model's full name and ID on separate wrapping lines instead of truncating both, so variants that differ only at the end (such as DeepSeek V4 Flash and DeepSeek V4 Flash Thinking) remain distinguishable. The suggestion list now matches the full input width, including the clear button.
+- macOS Desktop retains Hardened Runtime and grants the unsigned executable-memory entitlement required by Wasmtime's `mmap` / `mprotect` code path. Release checks now inspect the final executable's entitlements and run the bundled Wasm runtime from both the signed app and the extracted updater archive on Intel and Apple Silicon. The isolated `--smoke-test-runtime` mode does not use a user instance or production services; it does not replace native UI, installation or Gatekeeper verification.
 
 ## [0.6.3] - 2026-11-05
 

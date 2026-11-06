@@ -53,7 +53,13 @@ macOS 构建直接集成在 `release.yml` 的 `build-macos` 任务中，正式�
 - `stravia-desktop-v<version>-darwin-<arch>.app.tar.gz`：Tauri updater 使用的应用归档。
 - 对应的 `.app.tar.gz.sig`：由现有 updater 私钥生成的签名；清单使用 `darwin-aarch64` / `darwin-x86_64` 平台键，不使用 DMG 作为更新包。
 
-构建后会验证应用的 Ad-hoc 代码签名、Mach-O 架构、DMG 校验和、归档可读性与签名文件存在性。当前采用 `APPLE_SIGNING_IDENTITY=-`，没有 Developer ID 签名和 Apple 公证。Ad-hoc 不是 Apple 认证，Tauri updater 签名也不能替代它；从浏览器下载后，Gatekeeper 仍可能阻止首次启动。不得把构建通过描述为已经通过 Gatekeeper 或用户安装验证。
+构建后会验证应用的 Ad-hoc 代码签名、Mach-O 架构、DMG 校验和、归档可读性与签名文件存在性。两种 macOS 架构还会对最终 `.app` 和从 updater 归档解出的 `.app` 执行 `.github/scripts/verify_macos_runtime.py`：检查签名宿主保留 Hardened Runtime、只携带 `com.apple.security.cs.allow-unsigned-executable-memory` entitlement，然后运行其中的主程序进行真实 Wasm 运行检查；进程失败或超过 180 秒均阻止产物上传。
+
+`backend/apps/stravia-desktop/Entitlements.plist` 仅放开 Wasmtime 必需的未签名可执行内存。当前 Wasmtime 使用普通 `mmap` / `mprotect`，不是 `MAP_JIT`，因此仅添加 `allow-jit` 不能覆盖该路径。保留 Hardened Runtime，不添加 `disable-library-validation` 或其他无关豁免；这项权限允许进程执行动态生成的代码，应随 Wasmtime 内存分配策略变化重新评估。
+
+维护者可直接执行 `Stravia.app/Contents/MacOS/stravia-desktop --smoke-test-runtime`。该模式不接受其他参数，在新建的临时目录中走真实 Gateway 启动流程、编译并执行内置 Wasm 插件，确认 Base 插件加载成功后关闭 Gateway、清理目录并退出。远程 Catalog 和更新访问被禁用，不读取用户实例，不启动 WebView。它覆盖签名宿主的可执行页权限，不替代窗口交互、DMG 安装、应用更新或重启验证。
+
+当前采用 `APPLE_SIGNING_IDENTITY=-`，没有 Developer ID 签名和 Apple 公证。Ad-hoc 不是 Apple 认证，Tauri updater 签名也不能替代它；从浏览器下载后，Gatekeeper 仍可能阻止首次启动。不得把构建或运行检查通过描述为已经通过 Gatekeeper 或用户安装验证。
 
 当前 Tauri 已默认启用 macOS 透明窗口所需 API，不再设置废弃的 `macOSPrivateApi` / `macos-private-api` 开关；窗口透明与原生视觉效果配置保持不变。
 
