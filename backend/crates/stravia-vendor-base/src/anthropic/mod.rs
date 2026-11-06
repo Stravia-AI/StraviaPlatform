@@ -160,13 +160,9 @@ fn infer(
         Some(_) => Some("summarized"),
         None => None,
     };
-    let compaction_control = (operation == Operation::Compact)
-        .then(|| {
-            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
-                &mut request,
-            )
-        })
-        .flatten();
+    let compaction_control = (operation == Operation::Compact).then(|| {
+        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
+    });
     let encoded = crate::parameters::encode(
         &provider,
         &ANTHROPIC_MESSAGES_2023_06_01.to_string(),

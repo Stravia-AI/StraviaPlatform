@@ -150,6 +150,34 @@ def upload_artifact(
         return int(error.code), _decode_body(error.read())
 
 
+def responses_stream_result(body: bytes | str) -> dict[str, Any]:
+    """读取完整 Responses SSE，验证成功终态而不是把中间 item 当作成功。"""
+    text = body.decode() if isinstance(body, bytes) else body
+    events = [json.loads(line[6:]) for line in text.splitlines()
+              if line.startswith("data: ") and line[6:] != "[DONE]"]
+    assert not any(event.get("type") in ("error", "response.failed") for event in events), events
+    completed = [event["response"] for event in events if event.get("type") == "response.completed"]
+    assert len(completed) == 1, events
+    return completed[0]
+
+
+def responses_compaction(url: str, payload: dict[str, Any], headers: dict[str, str],
+                         timeout: float = 15.0) -> tuple[int, Any]:
+    """通过唯一的客户端 V2 入口请求压缩，并返回终态资源。"""
+    items = payload["input"]
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    if not any(item.get("type") == "compaction_trigger" for item in items):
+        items = [*items, {"type": "compaction_trigger"}]
+    status, response_headers, body = http_bytes(
+        "POST", url, {**payload, "input": items, "stream": True}, headers, timeout,
+    )
+    if status != 200:
+        return status, _decode_body(body)
+    assert "text/event-stream" in response_headers["content-type"], response_headers
+    return status, responses_stream_result(body)
+
+
 def download_observation_bundle(
     env: dict[str, Any], detail: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, str], bytes]:

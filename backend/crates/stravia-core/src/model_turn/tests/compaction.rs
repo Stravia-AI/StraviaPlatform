@@ -52,9 +52,21 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
                 Value::Null,
                 usage,
             );
+        let created =
+            stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                "compact-stream",
+                "upstream-model",
+                "in_progress",
+                Vec::new(),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            );
         let events = [
-            json!({"type":"response.output_item.done","output_index":0,"item":state}),
-            json!({"type":"response.completed","response":completed}),
+            json!({"type":"response.created","sequence_number":0,"response":created}),
+            json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"compaction","id":"compact-state-stream"}}),
+            json!({"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":state}),
+            json!({"type":"response.completed","sequence_number":3,"response":completed}),
         ];
         let body = events
             .iter()
@@ -236,13 +248,13 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
     };
     assert_eq!(result.wire["id"], "compact-stream");
     assert_eq!(
-        result.wire["output"][0]["content"][0]["text"],
-        "compact this"
+        stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(&result.items[0]),
+        Some(
+            json!({"type":"compaction","id":"compact-state-stream","encrypted_content":"stream-state","rolling_identity":{"version":2}})
+        )
     );
-    assert_eq!(
-        result.wire["output"][1]["rolling_identity"],
-        json!({"version":2})
-    );
+    assert_eq!(result.items.len(), 1);
+    assert!(result.items[0].is_compaction());
     for (standalone, code) in [
         (true, "invalid_encrypted_content"),
         (false, "previous_response_not_found"),

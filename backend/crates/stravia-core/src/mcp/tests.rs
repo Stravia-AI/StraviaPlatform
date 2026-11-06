@@ -830,12 +830,16 @@ async fn mcp_tool_call_and_proxy_run_share_principal_rpm_limit() {
     let body: Value = rejected_proxy.json().await.expect("Proxy limit response");
     assert_eq!(body["error"]["type"], "STRAVIA_RPM_LIMIT");
     let rejected_compact = http
-        .post(format!("{proxy_endpoint}/v1/responses/compact"))
+        .post(format!("{proxy_endpoint}/v1/responses"))
         .bearer_auth(&app.token)
-        .json(&json!({ "model": "unconfigured", "input": "hello" }))
+        .json(&json!({
+            "model": "unconfigured",
+            "stream": true,
+            "input": [{"role":"user","content":"hello"}, {"type": "compaction_trigger"}]
+        }))
         .send()
         .await
-        .expect("rejected remote compaction");
+        .expect("rejected V2 remote compaction");
     assert_eq!(
         rejected_compact.status(),
         reqwest::StatusCode::TOO_MANY_REQUESTS

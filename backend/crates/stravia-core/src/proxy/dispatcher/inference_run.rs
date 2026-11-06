@@ -854,7 +854,7 @@ impl RunTerminalContext {
     fn receive_native_items(
         &self,
         items: &[serde_json::Value],
-        standalone_window_delivered: bool,
+        standalone_body_delivered: bool,
     ) -> Vec<crate::model_turn::CompactionPublication> {
         let mut records = self.compaction_records.lock();
         records
@@ -865,7 +865,7 @@ impl RunTerminalContext {
                 }
                 let received = match record.mode {
                     crate::interaction_observation::CompactionMode::Standalone => {
-                        standalone_window_delivered
+                        standalone_body_delivered
                     }
                     crate::interaction_observation::CompactionMode::Inline => {
                         stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
@@ -1085,14 +1085,14 @@ impl Stream for ObservedDeliveryStream {
             }
             Poll::Ready(None) => {
                 if self.status_code < 400 {
-                    if self.transport == "http" {
-                        let receipts = self
-                            .terminal
-                            .receive_native_items(&self.unary_native_items, true);
-                        let _ = self
-                            .terminal
-                            .confirm_native_receipts(&self.observer, receipts);
-                    }
+                    // Standalone results are validated and buffered before delivery;
+                    // both JSON and SSE require the complete HTTP body receipt.
+                    let receipts = self
+                        .terminal
+                        .receive_native_items(&self.unary_native_items, true);
+                    let _ = self
+                        .terminal
+                        .confirm_native_receipts(&self.observer, receipts);
                     self.finish("delivered", None);
                 } else if self.status_code == 499 {
                     self.finish("cancelled", Some("request_cancelled".into()));

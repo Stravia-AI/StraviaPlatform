@@ -512,78 +512,7 @@ async fn responses_rejects_ambiguous_credentials() {
 }
 
 #[tokio::test]
-async fn responses_compact_requires_valid_authentication() {
-    let (fixture, _) = protected_responses_router().await;
-    let response = fixture
-        .router
-        .clone()
-        .oneshot(
-            Request::post("/v1/responses/compact")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"model":"auth-model","input":"hello"}"#))
-                .expect("compact request"),
-        )
-        .await
-        .expect("compact response");
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    drop(response);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn responses_compact_authenticates_before_parsing_the_body() {
-    let (fixture, _) = protected_responses_router().await;
-    for (content_type, body) in [
-        ("application/json", "{"),
-        ("text/plain", r#"{"model":"auth-model","input":"hello"}"#),
-    ] {
-        let response = fixture
-            .router
-            .clone()
-            .oneshot(
-                Request::post("/v1/responses/compact")
-                    .header("content-type", content_type)
-                    .body(Body::from(body))
-                    .expect("compact request"),
-            )
-            .await
-            .expect("compact response");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn responses_compact_preserves_authorization_failures_before_parsing_the_body() {
-    let (fixture, token) = protected_responses_router_with_key_state(false).await;
-    let response = fixture
-        .router
-        .clone()
-        .oneshot(
-            Request::post("/v1/responses/compact")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::from("{"))
-                .expect("compact request"),
-        )
-        .await
-        .expect("compact response");
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("compact response body"),
-    )
-    .expect("compact JSON");
-    assert_eq!(body["error"]["code"], "permission_denied");
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn responses_compact_rejects_streaming_transport_control() {
+async fn legacy_compact_route_is_not_found() {
     let (fixture, token) = protected_responses_router().await;
     let response = fixture
         .router
@@ -592,23 +521,78 @@ async fn responses_compact_rejects_streaming_transport_control() {
             Request::post("/v1/responses/compact")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
-                .body(Body::from(
-                    r#"{"model":"auth-model","input":"hello","stream":true}"#,
-                ))
-                .expect("malformed compact request"),
+                .body(Body::from(r#"{"model":"auth-model","input":"hello"}"#))
+                .expect("legacy compact request"),
         )
         .await
-        .expect("compact response");
+        .expect("legacy compact response");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn v2_compaction_requires_valid_authentication() {
+    let (fixture, _) = protected_responses_router().await;
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"auth-model","stream":true,"input":[{"role":"user","content":"hello"},{"type":"compaction_trigger"}]}"#,
+                ))
+                .expect("V2 compaction request"),
+        )
+        .await
+        .expect("V2 compaction response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    drop(response);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn v2_compaction_requires_stream_and_one_terminal_trigger() {
+    let (fixture, token) = protected_responses_router().await;
+    for (body, param) in [
+        (
+            r#"{"model":"auth-model","input":[{"role":"user","content":"hello"},{"type":"compaction_trigger"}]}"#,
+            "stream",
+        ),
+        (
+            r#"{"model":"auth-model","stream":true,"input":[{"type":"compaction_trigger"},{"role":"user","content":"hello"}]}"#,
+            "input",
+        ),
+        (
+            r#"{"model":"auth-model","stream":true,"input":[{"type":"compaction_trigger"},{"type":"compaction_trigger"}]}"#,
+            "input",
+        ),
+    ] {
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .expect("V2 compaction request"),
+            )
             .await
-            .expect("compact response body"),
-    )
-    .expect("compact JSON");
-    assert_eq!(body["error"]["code"], "invalid_request");
-    assert_eq!(body["error"]["param"], "body");
+            .expect("V2 compaction response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("V2 compaction response body"),
+        )
+        .expect("V2 compaction JSON");
+        assert_eq!(body["error"]["code"], "invalid_request");
+        assert_eq!(body["error"]["param"], param);
+    }
     fixture.close().await;
 }
 

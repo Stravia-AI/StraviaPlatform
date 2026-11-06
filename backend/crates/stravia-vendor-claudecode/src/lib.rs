@@ -241,13 +241,9 @@ fn infer(
         .summary
         .as_ref()
         .map(thinking::summary_display);
-    let compaction_control = (operation == Operation::Compact)
-        .then(|| {
-            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
-                &mut request,
-            )
-        })
-        .flatten();
+    let compaction_control = (operation == Operation::Compact).then(|| {
+        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
+    });
     let mut encoded = common::encode_inference_request(&protocol, request)?;
     // 通用 Anthropic 编码器不输出 `thinking.display`（部分兼容上游不认该字段）；
     // 本插件的上游是 Anthropic 本身，将统一的摘要意图映射为官方展示控制。

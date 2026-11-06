@@ -384,42 +384,6 @@ pub fn decode_compaction_window(output: &[Value]) -> Result<Vec<AiItem>> {
     Ok(items)
 }
 
-/// Decode the standalone compact resource without spoofing a generation response.
-pub fn parse_compaction_response(
-    resp: &Value,
-) -> Result<stravia_runtime_contract::protocol::ir::NativeCompactionResponse> {
-    let object = resp
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("compact response must be an object"))?;
-    if object.get("object").and_then(Value::as_str) != Some("response.compaction") {
-        anyhow::bail!("compact response object must be response.compaction");
-    }
-    required_non_empty_output_string(object, "id", "response.compaction")?;
-    if object.get("created_at").and_then(Value::as_i64).is_none() {
-        anyhow::bail!("compact response requires created_at");
-    }
-    let output = object
-        .get("output")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("compact response requires an output window"))?;
-    let items = decode_compaction_window(output)?;
-    if !items.iter().any(AiItem::is_compaction) {
-        anyhow::bail!("compact window contains no native compaction state");
-    }
-    let usage = if resp.get("usage").is_some_and(|value| !value.is_null()) {
-        Some(parse_dated_usage(resp)?)
-    } else {
-        None
-    };
-    Ok(
-        stravia_runtime_contract::protocol::ir::NativeCompactionResponse {
-            wire: resp.clone(),
-            items,
-            usage,
-        },
-    )
-}
-
 pub struct ResponsesResponseParser;
 
 impl ResponsesResponseParser {

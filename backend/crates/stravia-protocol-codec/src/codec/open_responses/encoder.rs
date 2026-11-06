@@ -610,7 +610,7 @@ fn take_native_compaction_item(
             // signed block in the opaque field instead of exposing a bare signature.
             let encrypted_content = match summary {
                 Some(summary) => {
-                    let block = item
+                    let mut block = item
                         .meta
                         .as_mut()
                         .and_then(|meta| {
@@ -620,14 +620,15 @@ fn take_native_compaction_item(
                             .ok()
                             .flatten()
                         })
-                        .unwrap_or_else(|| {
-                            serde_json::json!({
-                                "type": "compaction",
-                                "content": summary,
-                                "signature": encrypted_content,
-                            })
-                        });
-                    crate::codec::compaction::seal_anthropic(&block)
+                        .and_then(|block| match block {
+                            Value::Object(block) => Some(block),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    block.insert("type".into(), "compaction".into());
+                    block.insert("content".into(), summary.into());
+                    block.insert("signature".into(), encrypted_content.into());
+                    crate::codec::compaction::seal_anthropic(&Value::Object(block))
                 }
                 None => encrypted_content,
             };

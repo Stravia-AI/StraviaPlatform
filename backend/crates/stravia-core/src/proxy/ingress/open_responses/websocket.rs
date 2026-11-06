@@ -459,48 +459,49 @@ async fn serve(
                         continue;
                     }
                     terminal_started.store(false, Ordering::Release);
-                    let Some(object) = event.as_object_mut() else {
-                        in_flight.store(false, Ordering::Release);
-                        if send_error(
-                            &outgoing,
-                            400,
-                            "invalid_request",
-                            "response.create must be an object.",
-                        )
-                        .await
-                        {
-                            ingress.record_debug(|| {
-                                ws_wire(
-                                    "platform_to_client",
-                                    "text",
-                                    Value::String(
-                                        error_body(
-                                            400,
-                                            "invalid_request",
-                                            "response.create must be an object.",
-                                        )
-                                        .to_string(),
+                    {
+                        let Some(object) = event.as_object_mut() else {
+                            in_flight.store(false, Ordering::Release);
+                            if send_error(
+                                &outgoing,
+                                400,
+                                "invalid_request",
+                                "response.create must be an object.",
+                            )
+                            .await
+                            {
+                                ingress.record_debug(|| {
+                                    ws_wire(
+                                        "platform_to_client",
+                                        "text",
+                                        Value::String(
+                                            error_body(
+                                                400,
+                                                "invalid_request",
+                                                "response.create must be an object.",
+                                            )
+                                            .to_string(),
+                                        ),
+                                    )
+                                });
+                            }
+                            ingress.reject(crate::interaction_observation::RejectedOutcome {
+                                stage: "decode".into(),
+                                code: "invalid_request".into(),
+                                status_code: 400,
+                                failure: Some(
+                                    crate::interaction_observation::FailureDiagnostic::platform(
+                                        "invalid_request",
+                                        "response.create must be an object.",
+                                        400,
                                     ),
-                                )
-                            });
-                        }
-                        ingress.reject(crate::interaction_observation::RejectedOutcome {
-                            stage: "decode".into(),
-                            code: "invalid_request".into(),
-                            status_code: 400,
-                            failure: Some(
-                                crate::interaction_observation::FailureDiagnostic::platform(
-                                    "invalid_request",
-                                    "response.create must be an object.",
-                                    400,
                                 ),
-                            ),
-                        });
-                        continue;
-                    };
-                    object.remove("type");
-                    object.insert("stream".into(), Value::Bool(true));
-
+                            });
+                            continue;
+                        };
+                        object.remove("type");
+                        object.insert("stream".into(), Value::Bool(true));
+                    }
                     let gateway = gateway.clone();
                     let headers = headers.clone();
                     let outgoing = outgoing.clone();

@@ -9,7 +9,13 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
-use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind, AiItem, AiRequest};
+use stravia_runtime_contract::protocol::ir::{
+    AiError, AiErrorKind, AiItem, AiRequest, AiResponse, CompactionControl, ContentBlock,
+    MessageContent, NativeCompactionResponse, Role,
+};
+
+mod responses;
+pub use responses::parse_responses_compaction_stream;
 
 /// Marks an opaque field value as a Stravia envelope. Native Anthropic signatures and
 /// OpenAI `encrypted_content` never start with it, so unwrapped state is never misread.
@@ -23,9 +29,18 @@ pub const ENVELOPE_PLACEHOLDER_CONTENT: &str = "[Stravia remote compaction: opaq
 /// byte-faithful (the API rejects any edited signature, content or stray field).
 pub const ANTHROPIC_COMPACTION_BLOCK_META: &str = "__anthropic_compaction_block";
 
-/// Ingress bag key carrying the client's top-level Anthropic `compaction` request
-/// object (`{type, instructions?}`), present only on standalone compaction requests.
-pub const ANTHROPIC_COMPACTION_REQUEST_META: &str = "__anthropic_compaction_request";
+/// 缺省摘要任务指令；显式会话指令与 Anthropic 摘要指令均不被覆盖。
+pub const DEFAULT_COMPACTION_INSTRUCTIONS: &str = concat!(
+    "Summarize the conversation above as a concise, structured handoff for another assistant ",
+    "to continue the task. Do not continue the conversation or answer questions in it.\n\n",
+    "Preserve the user's goals, constraints, preferences, decisions, completed work, current ",
+    "work, blockers, and next steps. Preserve unanswered questions and pending requests exactly. ",
+    "Keep essential file paths, identifiers, error messages, command results, and repository ",
+    "changes. Distinguish observed facts from assumptions.\n\n",
+    "Use the sections Goal, Constraints, Progress, Decisions, Next Steps, and Critical Context ",
+    "where applicable. The summary replaces the supplied history: anything omitted will be ",
+    "lost. Do not call tools. Return only the summary.",
+);
 
 /// `anthropic-beta` value that enables on-demand compaction requests and blocks.
 pub const ANTHROPIC_COMPACTION_BETA: &str = "compact-2026-09-04";
@@ -96,20 +111,15 @@ fn short_hash(seed: &str) -> String {
     hash_hex(&hash_bytes(seed.as_bytes()))[..24].to_owned()
 }
 
-/// Anthropic on-demand compaction Message → Responses `response.compaction` resource.
-///
-/// Identity is derived from the signature, so the vendor that registers the state and
-/// the ingress that later answers the client agree on the same item without sharing
-/// anything but the upstream body.
-pub fn responses_compaction_from_anthropic(message: &Value) -> anyhow::Result<Value> {
-    let block = message
+fn anthropic_compaction_parts(message: &Value) -> anyhow::Result<(&Value, u64, u64)> {
+    let mut blocks = message
         .get("content")
         .and_then(Value::as_array)
-        .and_then(|content| {
-            content
-                .iter()
-                .find(|block| block.get("type").and_then(Value::as_str) == Some("compaction"))
-        })
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("compaction"));
+    let block = blocks
+        .next()
         .filter(|block| {
             block
                 .get("content")
@@ -129,7 +139,15 @@ pub fn responses_compaction_from_anthropic(message: &Value) -> anyhow::Result<Va
                     .unwrap_or("none")
             )
         })?;
-    let seed = block["signature"].as_str().unwrap_or_default();
+    anyhow::ensure!(
+        blocks.next().is_none(),
+        "Anthropic compaction returned multiple native states"
+    );
+    anyhow::ensure!(
+        message.get("stop_reason").and_then(Value::as_str) == Some("compaction"),
+        "Anthropic compaction stopped with stop_reason: {}",
+        message["stop_reason"]
+    );
     // Compaction billing lives in `usage.iterations`; the top level is zeroed.
     let (input, output) = message
         .pointer("/usage/iterations")
@@ -142,8 +160,8 @@ pub fn responses_compaction_from_anthropic(message: &Value) -> anyhow::Result<Va
                 })
                 .fold((0u64, 0u64), |(input, output), iteration| {
                     (
-                        input + iteration["input_tokens"].as_u64().unwrap_or(0),
-                        output + iteration["output_tokens"].as_u64().unwrap_or(0),
+                        input.saturating_add(iteration["input_tokens"].as_u64().unwrap_or(0)),
+                        output.saturating_add(iteration["output_tokens"].as_u64().unwrap_or(0)),
                     )
                 })
         })
@@ -159,75 +177,7 @@ pub fn responses_compaction_from_anthropic(message: &Value) -> anyhow::Result<Va
                     .unwrap_or(0),
             )
         });
-    Ok(json!({
-        "id": format!("resp_cmp_{}", short_hash(seed)),
-        "object": "response.compaction",
-        "created_at": chrono::Utc::now().timestamp(),
-        "output": [{
-            "type": "compaction",
-            "id": anthropic_state_id(seed),
-            "encrypted_content": seal_anthropic(block),
-        }],
-        "usage": {
-            "input_tokens": input,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens": output,
-            "output_tokens_details": {"reasoning_tokens": 0},
-            "total_tokens": input + output,
-        },
-    }))
-}
-
-/// Responses `response.compaction` resource → Anthropic Message with one sealed block.
-///
-/// The whole replacement window travels in the signature; the readable `content` is a
-/// fixed marker because a Responses window has no summary text to show.
-pub fn anthropic_message_from_responses_compaction(
-    resource: &Value,
-    model: &str,
-) -> anyhow::Result<Value> {
-    let output = resource
-        .get("output")
-        .and_then(Value::as_array)
-        .filter(|output| {
-            output
-                .iter()
-                .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
-        })
-        .ok_or_else(|| anyhow::anyhow!("compact resource has no native compaction state"))?;
-    let signature = seal_responses(output);
-    let (input, output_tokens) = (
-        resource
-            .pointer("/usage/input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        resource
-            .pointer("/usage/output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-    );
-    Ok(json!({
-        "id": format!("msg_cmp_{}", short_hash(&signature)),
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": [{
-            "type": "compaction",
-            "content": ENVELOPE_PLACEHOLDER_CONTENT,
-            "signature": signature,
-        }],
-        "stop_reason": "compaction",
-        "stop_sequence": null,
-        "usage": {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "iterations": [{
-                "type": "compaction",
-                "input_tokens": input,
-                "output_tokens": output_tokens,
-            }],
-        },
-    }))
+    Ok((block, input, output))
 }
 
 /// SSE events for an Anthropic compaction Message. The API delivers the block whole in
@@ -453,50 +403,179 @@ fn parse_anthropic_compaction_event(frame: &str) -> anyhow::Result<Option<(Optio
 
 /// Native standalone compaction result from an Anthropic upstream.
 ///
-/// `items` are decoded from the same Responses resource the Responses client will be
-/// shown, so registration and later replay see identical state. `wire` keeps the
-/// upstream body so an Anthropic client can be answered without translation.
+/// `items` 用于原生状态登记与协议转换；`wire` 保留身份和原生用量扩展。
 pub fn parse_anthropic_compaction(
     message: Value,
 ) -> anyhow::Result<stravia_runtime_contract::protocol::ir::NativeCompactionResponse> {
-    let resource = responses_compaction_from_anthropic(&message)?;
-    let mut response = crate::codec::open_responses::parser::parse_compaction_response(&resource)?;
-    response.wire = message;
-    Ok(response)
+    let (block, input, output) = anthropic_compaction_parts(&message)?;
+    let signature = block["signature"].as_str().expect("validated signature");
+    let mut item = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Compaction {
+            encrypted_content: signature.to_owned(),
+            summary: Some(
+                block["content"]
+                    .as_str()
+                    .expect("validated summary")
+                    .to_owned(),
+            ),
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: Some(
+            stravia_runtime_contract::protocol::ir::AiItemMetadata::boxed(
+                json!({ANTHROPIC_COMPACTION_BLOCK_META: block}),
+            ),
+        ),
+    };
+    item.set_graph_metadata(
+        Some(anthropic_state_id(signature)),
+        None,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+    );
+    let prompt_tokens = u32::try_from(input)?;
+    let completion_tokens = u32::try_from(output)?;
+    let usage = stravia_runtime_contract::protocol::ir::Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: u32::try_from(input.saturating_add(output))?,
+        required_components_known: true,
+        cache_read_tokens: Some(0),
+        reasoning_tokens: Some(0),
+        ..Default::default()
+    };
+    Ok(NativeCompactionResponse {
+        wire: message,
+        items: vec![item],
+        usage: Some(usage),
+    })
 }
 
-/// The compact resource the ingress client expects, whatever protocol the upstream spoke.
-///
-/// `wire` identifies itself (`response.compaction` vs `message`); a matching ingress
-/// gets the upstream body byte-for-byte.
-pub fn client_compaction_wire(
-    ingress: stravia_runtime_contract::protocol::ids::ProtocolEndpoint,
-    wire: &Value,
+/// 将上游压缩结果投影为可交付的 IR；V2 客户端自行重建保留消息窗口。
+pub fn compaction_response_ir(
+    response: NativeCompactionResponse,
     model: &str,
-) -> anyhow::Result<Value> {
-    use stravia_runtime_contract::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24,
-    };
-    let from_responses = wire.get("object").and_then(Value::as_str) == Some("response.compaction");
-    let from_anthropic = wire.get("type").and_then(Value::as_str) == Some("message");
-    if ingress == OPEN_RESPONSES_2026_04_24 && from_anthropic {
-        responses_compaction_from_anthropic(wire)
-    } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 && from_responses {
-        anthropic_message_from_responses_compaction(wire, model)
-    } else {
-        Ok(wire.clone())
+) -> anyhow::Result<AiResponse> {
+    let id = response
+        .wire
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Compaction response has no identity"))?;
+    let mut canonical = AiResponse::new(id, model);
+    let mut items = response.items;
+    items.retain(AiItem::is_compaction);
+    anyhow::ensure!(!items.is_empty(), "Compaction response has no native state");
+    anyhow::ensure!(
+        items.len() == 1,
+        "Compaction response has multiple native states"
+    );
+    canonical.items = items;
+    canonical.stop_reason = Some("compaction".into());
+    if let Some(usage) = response.usage {
+        canonical.usage = usage;
+    }
+    if let Some(created_at) = response.wire.get("created_at") {
+        canonical.vendor.ingress.insert(
+            "__open_responses_effective_request".into(),
+            json!({"created_at": created_at}),
+        );
+    }
+    if response.wire.get("type").and_then(Value::as_str) == Some("message")
+        && let Some(usage) = response.wire.get("usage")
+    {
+        canonical
+            .vendor
+            .egress
+            .insert("__anthropic_compaction_usage".into(), usage.clone());
+    }
+    Ok(canonical)
+}
+
+/// 补全独立压缩任务；显式会话指令保持原样，不与摘要专用指令混用。
+pub fn prepare_compaction_request(request: &mut AiRequest) {
+    if request.instructions.is_none() {
+        request.instructions = Some(DEFAULT_COMPACTION_INSTRUCTIONS.into());
+    }
+    if !standalone_compaction_requested(request) {
+        request.items.push(AiItem {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::CompactionTrigger {}]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        });
     }
 }
 
-/// Remove and return the client's Anthropic `compaction` control, if the request carried
-/// one. Requests that came from another protocol have none; the API then summarizes with
-/// its default instructions.
-pub fn take_anthropic_compaction_control(request: &mut AiRequest) -> Option<Value> {
-    request
-        .meta
-        .vendor
-        .ingress
-        .remove(ANTHROPIC_COMPACTION_REQUEST_META)
+/// V2 仅有会话级 instructions 载体；原生摘要指令以独立段落保留，不能覆盖会话。
+pub fn prepare_responses_compaction_request(request: &mut AiRequest) {
+    if let Some(instructions) = request
+        .parameters
+        .compaction
+        .take()
+        .and_then(|control| control.instructions)
+    {
+        match &mut request.instructions {
+            Some(session) => {
+                session.push_str("\n\nCompaction instructions:\n");
+                session.push_str(&instructions);
+            }
+            None => request.instructions = Some(instructions),
+        }
+    }
+    prepare_compaction_request(request);
+    request.stream.enabled = true;
+    request.parameters.store = Some(false);
+}
+
+/// 消费 IR 中的摘要控制与触发器，生成 Anthropic 原生请求控制。
+pub fn take_anthropic_compaction_control(request: &mut AiRequest) -> CompactionControl {
+    if request.instructions.is_none() {
+        request.instructions = Some(DEFAULT_COMPACTION_INSTRUCTIONS.into());
+    }
+    request.items.retain(|item| !item.is_compaction_trigger());
+    request.parameters.compaction.take().unwrap_or_default()
+}
+
+pub fn standalone_compaction_requested(request: &AiRequest) -> bool {
+    request.items.iter().any(AiItem::is_compaction_trigger)
+}
+
+/// 从规范状态生成原生 Anthropic 块；未知签名字段保留，已知字段以 IR 为准。
+pub(crate) fn anthropic_compaction_block(item: &AiItem) -> Option<Value> {
+    let MessageContent::Blocks(blocks) = &item.content else {
+        return None;
+    };
+    let [
+        ContentBlock::Compaction {
+            encrypted_content,
+            summary,
+        },
+    ] = blocks.as_slice()
+    else {
+        return None;
+    };
+    Some(if let Some(summary) = summary {
+        let mut block = item
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get(ANTHROPIC_COMPACTION_BLOCK_META))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        block.insert("type".into(), "compaction".into());
+        block.insert("content".into(), summary.clone().into());
+        block.insert("signature".into(), encrypted_content.clone().into());
+        Value::Object(block)
+    } else {
+        let wire = stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(item)?;
+        json!({
+            "type": "compaction", "content": ENVELOPE_PLACEHOLDER_CONTENT,
+            "signature": seal_responses(&[wire]),
+        })
+    })
 }
 
 /// Turn an encoded Anthropic Messages body into a standalone compaction request.
@@ -509,7 +588,7 @@ pub fn take_anthropic_compaction_control(request: &mut AiRequest) -> Option<Valu
 /// 字段继续按编码结果发送。
 pub fn prepare_anthropic_compaction_body(
     body: &mut Value,
-    control: Option<Value>,
+    control: Option<CompactionControl>,
 ) -> anyhow::Result<()> {
     let object = body
         .as_object_mut()
@@ -530,17 +609,13 @@ pub fn prepare_anthropic_compaction_body(
             object.remove("output_config");
         }
     }
-    let control = match control {
-        Some(Value::Object(mut control)) => {
-            control
-                .entry("type")
-                .or_insert_with(|| Value::String("summarize".into()));
-            Value::Object(control)
-        }
-        Some(_) => anyhow::bail!("Anthropic `compaction` must be an object"),
-        None => json!({"type": "summarize"}),
-    };
-    object.insert("compaction".into(), control);
+    let instructions = control
+        .and_then(|control| control.instructions)
+        .unwrap_or_else(|| DEFAULT_COMPACTION_INSTRUCTIONS.into());
+    object.insert(
+        "compaction".into(),
+        json!({"type": "summarize", "instructions": instructions}),
+    );
     Ok(())
 }
 
@@ -584,6 +659,16 @@ mod tests {
     };
     use stravia_runtime_contract::protocol::ir::CompactionControl;
 
+    fn responses_result(message: Value) -> Value {
+        let canonical =
+            compaction_response_ir(parse_anthropic_compaction(message).unwrap(), "m").unwrap();
+        crate::transform::ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+            .unwrap()
+            .encode_response(&canonical)
+            .unwrap()
+    }
+
     fn anthropic_message() -> Value {
         json!({
             "id": "msg_01",
@@ -609,7 +694,10 @@ mod tests {
         let mut request = AiRequest::new("model", vec![]);
         assert!(!native_compaction_requested(&request));
         for threshold_tokens in [None, Some(100_000)] {
-            request.parameters.compaction = Some(CompactionControl { threshold_tokens });
+            request.parameters.compaction = Some(CompactionControl {
+                threshold_tokens,
+                instructions: None,
+            });
             assert!(native_compaction_requested(&request));
         }
     }
@@ -632,8 +720,8 @@ mod tests {
 
     #[test]
     fn anthropic_result_becomes_a_responses_resource_with_billed_compaction_tokens() {
-        let resource = responses_compaction_from_anthropic(&anthropic_message()).unwrap();
-        assert_eq!(resource["object"], "response.compaction");
+        let resource = responses_result(anthropic_message());
+        assert_eq!(resource["object"], "response");
         assert_eq!(resource["output"][0]["id"], anthropic_state_id("sig-abc"));
         assert_eq!(resource["usage"]["input_tokens"], 1200);
         assert_eq!(resource["usage"]["output_tokens"], 300);
@@ -651,22 +739,36 @@ mod tests {
         let mut message = anthropic_message();
         message["content"] = json!([]);
         message["stop_reason"] = json!("max_tokens");
-        let error = responses_compaction_from_anthropic(&message).unwrap_err();
+        let error = parse_anthropic_compaction(message).unwrap_err();
         assert!(error.to_string().contains("max_tokens"), "{error}");
     }
 
     #[test]
-    fn responses_window_travels_inside_one_anthropic_block() {
-        let resource = json!({
-            "id": "resp_1",
-            "object": "response.compaction",
-            "output": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
-                {"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"}
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 4}
-        });
-        let message = anthropic_message_from_responses_compaction(&resource, "claude-x").unwrap();
+    fn responses_state_travels_inside_one_anthropic_block() {
+        let items = crate::codec::open_responses::parser::decode_compaction_window(&[
+            json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"}),
+        ])
+        .unwrap();
+        let canonical = compaction_response_ir(
+            NativeCompactionResponse {
+                wire: json!({"id": "resp_1"}),
+                items,
+                usage: Some(stravia_runtime_contract::protocol::ir::Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 4,
+                    total_tokens: 14,
+                    required_components_known: true,
+                    ..Default::default()
+                }),
+            },
+            "claude-x",
+        )
+        .unwrap();
+        let message = crate::transform::ProtocolTransform::global()
+            .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+            .unwrap()
+            .encode_response(&canonical)
+            .unwrap();
         assert_eq!(message["stop_reason"], "compaction");
         assert_eq!(message["usage"]["iterations"][0]["input_tokens"], 10);
         let block = &message["content"][0];
@@ -675,25 +777,103 @@ mod tests {
         else {
             panic!("window must be sealed");
         };
-        assert_eq!(output.len(), 2);
+        assert_eq!(
+            output,
+            vec![json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"})]
+        );
     }
 
     #[test]
-    fn client_wire_is_translated_only_across_protocols() {
+    fn compaction_delivery_encodes_ir_state_in_both_protocols() {
         let message = anthropic_message();
-        let resource = client_compaction_wire(OPEN_RESPONSES_2026_04_24, &message, "m").unwrap();
-        assert_eq!(resource["object"], "response.compaction");
+        let canonical =
+            compaction_response_ir(parse_anthropic_compaction(message.clone()).unwrap(), "m")
+                .unwrap();
+        let transform = crate::transform::ProtocolTransform::global();
+        let responses = transform
+            .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+            .unwrap()
+            .encode_response(&canonical)
+            .unwrap();
+        assert_eq!(responses["object"], "response");
+        assert_eq!(responses["status"], "completed");
+        let Some(Envelope::Anthropic { block }) = open(
+            responses["output"][0]["encrypted_content"]
+                .as_str()
+                .unwrap(),
+        ) else {
+            panic!("signed native block must survive IR delivery");
+        };
+        assert_eq!(block, message["content"][0]);
+        let native = transform
+            .bind(ANTHROPIC_MESSAGES_2023_06_01, ANTHROPIC_MESSAGES_2023_06_01)
+            .unwrap()
+            .encode_response(&canonical)
+            .unwrap();
+        assert_eq!(native["content"], message["content"]);
+        assert_eq!(native["usage"], message["usage"]);
+        assert_eq!(native["stop_reason"], "compaction");
+    }
+
+    #[test]
+    fn standalone_defaults_do_not_override_session_or_summary_instructions() {
+        for session in [None, Some("Follow repository policy")] {
+            for summary in [None, Some("Preserve pending questions")] {
+                let mut request = AiRequest::new(
+                    "claude-x",
+                    vec![AiItem {
+                        role: Role::User,
+                        content: MessageContent::Text("Task history".to_owned().into()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        meta: None,
+                    }],
+                );
+                request.instructions = session.map(str::to_owned);
+                request.parameters.compaction = Some(CompactionControl {
+                    threshold_tokens: None,
+                    instructions: summary.map(str::to_owned),
+                });
+                let control = take_anthropic_compaction_control(&mut request);
+                let mut body = crate::codec::anthropic::messages::encoder::AnthropicEncoder
+                    .encode_request(request)
+                    .unwrap()
+                    .0;
+                prepare_anthropic_compaction_body(&mut body, Some(control)).unwrap();
+                assert_eq!(
+                    body["system"],
+                    session.unwrap_or(DEFAULT_COMPACTION_INSTRUCTIONS)
+                );
+                assert_eq!(
+                    body["compaction"]["instructions"],
+                    summary.unwrap_or(DEFAULT_COMPACTION_INSTRUCTIONS)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn responses_compaction_keeps_session_and_summary_intent_without_inline_control() {
+        let pair = crate::transform::ProtocolTransform::global()
+            .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+            .unwrap();
+        let mut request = pair
+            .decode_request(json!({
+                "model": "model", "system": "Follow repository policy",
+                "messages": [{"role": "user", "content": "Find the regression"}],
+                "compaction": {"type": "summarize", "instructions": "Preserve pending questions"},
+            }))
+            .unwrap();
+        prepare_responses_compaction_request(&mut request);
+        let body = pair.encode_request(request).unwrap().body;
+        let instructions = body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("Follow repository policy"));
+        assert!(instructions.contains("Preserve pending questions"));
+        assert!(body.get("context_management").is_none());
         assert_eq!(
-            client_compaction_wire(ANTHROPIC_MESSAGES_2023_06_01, &message, "m").unwrap(),
-            message
+            body["input"].as_array().unwrap().last().unwrap()["type"],
+            "compaction_trigger"
         );
-        assert_eq!(
-            client_compaction_wire(OPEN_RESPONSES_2026_04_24, &resource, "m").unwrap(),
-            resource
-        );
-        let back = client_compaction_wire(ANTHROPIC_MESSAGES_2023_06_01, &resource, "m").unwrap();
-        assert_eq!(back["type"], "message");
-        assert_eq!(back["content"][0]["type"], "compaction");
     }
 
     fn sse(event: &str, data: Value) -> String {
@@ -774,7 +954,7 @@ mod tests {
         assert_eq!(message["usage"]["iterations"].as_array().unwrap().len(), 2);
         assert_eq!(message["usage"]["opaque_usage"]["keep"], true);
 
-        let resource = responses_compaction_from_anthropic(&message).unwrap();
+        let resource = responses_result(message.clone());
         let Some(Envelope::Anthropic { block: sealed }) =
             open(resource["output"][0]["encrypted_content"].as_str().unwrap())
         else {
@@ -858,7 +1038,7 @@ mod tests {
     fn upstream_anthropic_state_registers_the_item_a_responses_client_replays() {
         use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
         let registered = parse_anthropic_compaction(anthropic_message()).unwrap();
-        let resource = responses_compaction_from_anthropic(&anthropic_message()).unwrap();
+        let resource = responses_result(anthropic_message());
         let replayed =
             crate::codec::open_responses::decoder::decode_input_item(&resource["output"][0])
                 .unwrap()
@@ -890,8 +1070,14 @@ mod tests {
             },
             "messages": []
         });
-        prepare_anthropic_compaction_body(&mut body, Some(json!({"instructions": "Be brief"})))
-            .unwrap();
+        prepare_anthropic_compaction_body(
+            &mut body,
+            Some(CompactionControl {
+                instructions: Some("Be brief".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
         for key in ["stop_sequences", "tool_choice", "context_management"] {
             assert!(body.get(key).is_none(), "{key} must be stripped");
         }
@@ -924,7 +1110,11 @@ mod tests {
         });
         prepare_anthropic_compaction_body(&mut without_stream, None).unwrap();
         assert_eq!(without_stream["stream"], json!(true));
-        assert_eq!(without_stream["compaction"], json!({"type": "summarize"}));
+        assert_eq!(without_stream["compaction"]["type"], "summarize");
+        assert_eq!(
+            without_stream["compaction"]["instructions"],
+            DEFAULT_COMPACTION_INSTRUCTIONS
+        );
         assert!(without_stream.get("output_config").is_none());
 
         let mut format_only = json!({

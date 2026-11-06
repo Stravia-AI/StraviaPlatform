@@ -66,6 +66,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     first_request.parameters.compaction =
         Some(stravia_runtime_contract::protocol::ir::CompactionControl {
             threshold_tokens: Some(2000),
+            ..Default::default()
         });
     let mut below_threshold = chain
         .begin_native_compaction(owner.clone(), first_request.clone())

@@ -56,6 +56,8 @@ use crate::model_turn::support::ai_response_to_deltas as canonical_ai_response_t
 use crate::proxy::context::RequestContext;
 use crate::proxy::security::{ClientCredential, Security};
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
+use stravia_protocol_codec::codec::compaction;
+use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::model_turn::CanonicalEvent;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -120,19 +122,16 @@ fn reject_before_admission(
     response
 }
 
-/// Standalone compaction answer in the ingress protocol, whatever protocol the upstream
-/// spoke. A matching upstream body is relayed verbatim; a foreign one is translated so the
-/// client only ever sees its own wire format.
+/// Standalone compaction output is an IR response encoded by the ordinary
+/// ingress codec. The V2 client sees one native compaction item and a normal
+/// completed response; no `response.compaction` resource or retained window.
 fn compaction_response(
     ingress: ProtocolId,
-    wire: &serde_json::Value,
-    model: &str,
-    stream: bool,
+    request: &AiRequest,
+    response: stravia_runtime_contract::protocol::ir::NativeCompactionResponse,
 ) -> Response {
-    let wire = match stravia_protocol_codec::codec::compaction::client_compaction_wire(
-        ingress, wire, model,
-    ) {
-        Ok(wire) => wire,
+    let canonical = match compaction::compaction_response_ir(response, &request.model) {
+        Ok(canonical) => canonical,
         Err(error) => {
             return coded_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -141,25 +140,48 @@ fn compaction_response(
             );
         }
     };
-    if !stream || ingress != stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
-    {
-        return axum::Json(wire).into_response();
-    }
-    // Anthropic delivers a compaction block whole, so the unary upstream result streams
-    // exactly like a native one.
-    let body: String =
-        stravia_protocol_codec::codec::compaction::anthropic_compaction_events(&wire)
+    if ingress == stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01 {
+        let pair = match ProtocolTransform::global().bind(ingress, ingress) {
+            Ok(pair) => pair,
+            Err(error) => {
+                return coded_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_compaction_response",
+                    &error.to_string(),
+                );
+            }
+        };
+        let encoded = match pair.encode_response(&canonical) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return coded_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_compaction_response",
+                    &error.to_string(),
+                );
+            }
+        };
+        if !request.stream.enabled {
+            return axum::Json(encoded).into_response();
+        }
+        let body: String = compaction::anthropic_compaction_events(&encoded)
             .into_iter()
             .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
             .collect();
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
-        ],
-        body,
-    )
-        .into_response()
+        return (
+            [
+                (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            body,
+        )
+            .into_response();
+    }
+    let mut delivery = DeliveryAdapter::buffered_stream(ingress, Some(ingress));
+    delivery.set_response_profile(request, None);
+    delivery
+        .deliver_canonical(&canonical, StatusCode::OK)
+        .response
 }
 
 fn ai_response_to_deltas(
@@ -460,8 +482,7 @@ pub(super) async fn orchestrate(
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
     });
-    let compact = ctx.extensions.get::<crate::model_turn::ModelTurnPurpose>()
-        == Some(crate::model_turn::ModelTurnPurpose::Compact);
+    let compact = compaction::standalone_compaction_requested(&request);
     let mut generation_chain_write = if !compact
         && matches!(
             request_kind,
@@ -827,7 +848,7 @@ pub(super) async fn orchestrate(
     );
     ctx.extensions.insert(ledger.clone());
     if compact {
-        let mut turn_input = TurnInput::new(principal.clone(), request)
+        let mut turn_input = TurnInput::new(principal.clone(), Arc::clone(&request))
             .with_execution(ctx.cancellation.clone(), ctx.deadline.clone())
             .with_observer(observer.clone())
             .with_extra_headers(forwarded_client_headers(&headers));
@@ -847,12 +868,9 @@ pub(super) async fn orchestrate(
             }
         };
         let response = match turn.output.next().await {
-            Some(Ok(CanonicalEvent::Compacted(response))) => compaction_response(
-                ingress,
-                &response.wire,
-                &client_request.model,
-                client_request.stream.enabled,
-            ),
+            Some(Ok(CanonicalEvent::Compacted(response))) => {
+                compaction_response(ingress, request.as_ref(), *response)
+            }
             Some(Err(error)) => {
                 return model_turn_error_response(error);
             }

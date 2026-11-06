@@ -237,29 +237,19 @@ fn json_schema_request_still_rejects_null_description() {
 }
 
 #[test]
-fn standalone_compact_window_replays_native_identity_without_generation_coercion() {
+fn native_compaction_history_replays_identity_and_unknown_item_fields() {
     let native = serde_json::json!({
         "type": "compaction", "id": "cmp_original", "encrypted_content": "opaque-state",
         "created_at": 1730000000, "rolling_state": {"version": 2, "scope": "account"}
     });
     let wire = serde_json::json!({
-        "id": "cmp_response", "object": "response.compaction", "created_at": 1730000001,
         "output": [
             {"type": "message", "role": "user", "content": "retained", "retained_context": {"scope": "window"}},
             native.clone(),
             {"type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}"},
             {"type": "function_call_output", "call_id": "call_1", "output": "done"}
-        ],
-        "rolling_window": {"boundary": "provider-owned"}
+        ]
     });
-    let compact = parse_compaction_response(&wire).unwrap();
-    assert_eq!(compact.wire, wire);
-    assert!(compact.usage.is_none());
-    assert!(
-        ResponsesResponseParser
-            .parse_response(wire.clone())
-            .is_err()
-    );
     let request = super::super::decoder::ResponsesDecoder
         .decode_request(serde_json::json!({
             "model": "codex", "input": wire["output"],

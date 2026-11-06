@@ -225,6 +225,7 @@ impl ResponsesDecoder {
                     .get("compact_threshold")
                     .and_then(Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok()),
+                instructions: None,
             });
         if let Some(metadata) = obj.get("client_metadata") {
             parameters.import_client_metadata(metadata.clone());

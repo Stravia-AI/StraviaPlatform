@@ -197,7 +197,7 @@ const localIgnored: Record<string, true> = {
   http_nonstream_client_uses_native_stream: true,
   http_malformed_and_truncated_sse_fail: true,
   http_non_success_json_keeps_status: true,
-  http_compaction_remains_unary_and_preserves_error: true,
+  http_compaction_uses_the_trigger_stream_and_preserves_error: true,
   real_base_executes_with_stable_wasi_patches_and_mixed_imports: true,
   "runtime::compilation_cache_tests::in_memory_compilation_reuses_live_components_and_recompiles_after_release": true,
   "runtime::residency_tests::idle_plugin_is_released_and_restored_from_the_persistent_cache": true,

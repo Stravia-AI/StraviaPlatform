@@ -1549,6 +1549,7 @@ mod tests {
             |p| {
                 p.compaction = Some(CompactionControl {
                     threshold_tokens: Some(1_000),
+                    instructions: None,
                 })
             },
         ];

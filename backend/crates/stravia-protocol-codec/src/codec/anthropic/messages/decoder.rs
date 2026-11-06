@@ -308,9 +308,6 @@ impl AnthropicDecoder {
         if let Some(v) = raw_system {
             ingress.insert("__anthropic_raw_system".into(), v);
         }
-        if let Some(v) = req.compaction.filter(|v| !v.is_null()) {
-            ingress.insert(compaction::ANTHROPIC_COMPACTION_REQUEST_META.into(), v);
-        }
         // ── Build AiRequest ───────────────────────────────────────────────────
         let tools_opt = if user_tools.is_empty() {
             None
@@ -366,7 +363,38 @@ impl AnthropicDecoder {
                     .and_then(|trigger| trigger.get("value"))
                     .and_then(Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok()),
+                instructions: None,
             });
+        if let Some(control) = req.compaction.filter(|control| !control.is_null()) {
+            anyhow::ensure!(
+                control.is_object(),
+                "Anthropic `compaction` must be an object"
+            );
+            anyhow::ensure!(
+                control.get("type").and_then(Value::as_str) == Some("summarize"),
+                "Anthropic `compaction.type` must be summarize"
+            );
+            let instructions = match control.get("instructions") {
+                Some(Value::String(instructions)) => Some(instructions.clone()),
+                None | Some(Value::Null) => None,
+                Some(_) => anyhow::bail!("Anthropic `compaction.instructions` must be a string"),
+            };
+            anyhow::ensure!(
+                ai_req.parameters.compaction.is_none(),
+                "Anthropic `compaction` cannot be combined with inline compaction"
+            );
+            ai_req.parameters.compaction = Some(CompactionControl {
+                threshold_tokens: None,
+                instructions,
+            });
+            ai_req.items.push(AiItem {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::CompactionTrigger {}]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            });
+        }
         ai_req.parameters.cache.retention = req
             .cache_control
             .as_ref()
