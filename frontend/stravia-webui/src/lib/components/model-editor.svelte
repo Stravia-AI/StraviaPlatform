@@ -16,6 +16,7 @@ import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
 import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
+import { beginTouchDrag, touchDragInProgress } from '#lib/touch-drag.js'
 import { idNameOption, type SearchComboboxOption } from '#lib/search-combobox-option.js'
 import { formatList } from '#lib/format.js'
 import { currencyForKind } from '#lib/money.js'
@@ -192,6 +193,7 @@ const disabledTargets = $derived(targets.filter((target) => !target.enabled))
 const isDraggingTarget = $derived(Boolean(draggedTargetKey))
 
 // 目标卡片拖到视口外的层或停用区时，页面需随指针滚动；浏览器自带的边缘滚动圈太窄，且被底部固定操作栏盖住。
+// 触屏拖拽（手柄 touch-action: none）更没有任何浏览器自带的滚动，同样依赖它。
 $effect(() => {
   if (isDraggingTarget) return startDragAutoscroll()
 })
@@ -491,6 +493,11 @@ function targetConfigured(target: RouteTargetForm): boolean {
 }
 
 function startTargetDrag(event: DragEvent, target: RouteTargetForm): void {
+  // 触屏手柄的拖拽由 Pointer Events 接管；长按后浏览器补发的原生 dragstart 会与之抢同一手势。
+  if (touchDragInProgress()) {
+    event.preventDefault()
+    return
+  }
   draggedTargetKey = target.key
   event.dataTransfer?.setData('text/plain', target.key)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'all'
@@ -512,10 +519,7 @@ function draggedKey(event: DragEvent): string {
   return draggedTargetKey || event.dataTransfer?.getData('text/plain') || ''
 }
 
-async function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): Promise<void> {
-  event.preventDefault()
-  event.stopPropagation()
-  const key = draggedKey(event)
+async function moveTargetToLane(key: string, priority: number, beforeKey?: string): Promise<void> {
   const target = targets.find((candidate) => candidate.key === key)
   if (!target) return
   if (beforeKey && target.enabled && target.priority === priority) {
@@ -531,10 +535,7 @@ async function dropOnLane(event: DragEvent, priority: number, beforeKey?: string
   draggedTargetKey = ''
 }
 
-async function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): Promise<void> {
-  event.preventDefault()
-  event.stopPropagation()
-  const key = draggedKey(event)
+async function moveTargetToInsertion(key: string, insertion: RouteTargetInsertion): Promise<void> {
   const target = targets.find((candidate) => candidate.key === key)
   if (!target) return
   if (!targetConfigured(target)) {
@@ -549,14 +550,86 @@ async function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion
   draggedTargetKey = ''
 }
 
-function dropInDock(event: DragEvent): void {
-  event.preventDefault()
-  const key = draggedKey(event)
+function moveTargetToDock(key: string): void {
   if (!moveRouteTargetToDock(targets, key)) {
     toast.error(m.model_editor_last_enabled_target_required())
     return
   }
   draggedTargetKey = ''
+}
+
+async function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): Promise<void> {
+  event.preventDefault()
+  event.stopPropagation()
+  await moveTargetToLane(draggedKey(event), priority, beforeKey)
+}
+
+async function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): Promise<void> {
+  event.preventDefault()
+  event.stopPropagation()
+  await moveTargetToInsertion(draggedKey(event), insertion)
+}
+
+function dropInDock(event: DragEvent): void {
+  event.preventDefault()
+  moveTargetToDock(draggedKey(event))
+}
+
+// 与模板中各落点元素的 data 属性一一对应；卡片落点复用其所在层。
+const TOUCH_DROP_ZONES = [
+  '[data-slot="target-card"][data-enabled="true"]',
+  '[data-slot="target-priority-connector"]',
+  '[data-slot="target-lane"]',
+  '[data-slot="target-dock"]',
+].join(', ')
+
+async function dropTouchTarget(key: string, zone: Element | null): Promise<void> {
+  try {
+    const slot = zone?.getAttribute('data-slot')
+    if (!zone || !slot) return
+    if (slot === 'target-dock') {
+      moveTargetToDock(key)
+    } else if (slot === 'target-priority-connector') {
+      const position = zone.getAttribute('data-position') ?? ''
+      if (position === 'top' || position === 'empty') await moveTargetToInsertion(key, { position: 'top' })
+      else if (position === 'bottom') await moveTargetToInsertion(key, { position: 'bottom' })
+      else {
+        await moveTargetToInsertion(key, {
+          position: 'between',
+          upperPriority: Number(zone.getAttribute('data-upper-priority')),
+          lowerPriority: Number(zone.getAttribute('data-lower-priority')),
+        })
+      }
+    } else {
+      const priority = Number(zone.closest('[data-slot="target-lane"]')?.getAttribute('data-priority'))
+      if (Number.isFinite(priority)) {
+        await moveTargetToLane(
+          key,
+          priority,
+          slot === 'target-card' ? (zone.getAttribute('data-key') ?? undefined) : undefined,
+        )
+      }
+    }
+  } finally {
+    // 触屏没有 dragend；无论落在哪里，结束后都要退出拖拽态。
+    draggedTargetKey = ''
+  }
+}
+
+function startTargetTouchDrag(event: PointerEvent, target: RouteTargetForm): void {
+  const source = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="target-card"]')
+  if (!source) return
+  beginTouchDrag(event, {
+    source,
+    zoneSelector: TOUCH_DROP_ZONES,
+    onStart: () => {
+      draggedTargetKey = target.key
+    },
+    onDrop: (zone) => dropTouchTarget(target.key, zone),
+    onCancel: () => {
+      draggedTargetKey = ''
+    },
+  })
 }
 
 function insertionLabel(insertion: RouteTargetInsertion): string {
@@ -833,7 +906,7 @@ async function saveModel(): Promise<void> {
     class={[
       'relative mx-auto flex w-full items-center justify-center overflow-hidden transition-[height,border-color,background-color,color] duration-150 motion-reduce:transition-none',
       isDraggingTarget
-        ? 'h-10 rounded-lg border border-dashed border-primary/60 bg-primary/5 text-primary'
+        ? 'h-10 rounded-lg border border-dashed border-primary/60 bg-primary/5 text-primary data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/20'
         : 'h-2 border border-transparent text-transparent',
     ]}
     role="group"
@@ -852,7 +925,14 @@ async function saveModel(): Promise<void> {
 
 {#snippet targetIdentity(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
   {@const modelIdentity = targetModelIdentity(target, summary)}
-  <GripVerticalIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+  <!-- 触屏拖拽手柄：负外距把 40px 触控区叠在卡片左上角，不改变版面；touch-none 让手指在此拖动时页面不滚动。 -->
+  <span
+    data-slot="target-drag-handle"
+    role="presentation"
+    class="-m-3 flex size-10 shrink-0 touch-none items-center justify-center pt-1 text-muted-foreground"
+    onpointerdown={(event) => startTargetTouchDrag(event, target)}>
+    <GripVerticalIcon class="size-4" />
+  </span>
   <span class="min-w-0">
     <span class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}
       >{modelIdentity.label}</span>
@@ -1121,7 +1201,7 @@ async function saveModel(): Promise<void> {
                 class={[
                   'relative mx-auto flex min-h-16 w-full items-center justify-center rounded-lg border border-dashed transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
                   isDraggingTarget
-                    ? 'border-primary/60 bg-primary/5 text-primary'
+                    ? 'border-primary/60 bg-primary/5 text-primary data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/20'
                     : 'border-border/80 bg-muted/20 text-muted-foreground',
                 ]}
                 role="group"
@@ -1143,7 +1223,9 @@ async function saveModel(): Promise<void> {
                     data-priority={lane.priority}
                     class={[
                       'grid min-h-20 grid-cols-[3rem_minmax(0,1fr)] rounded-lg border transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
-                      isDraggingTarget ? 'border-dashed border-primary/60 bg-primary/[0.025]' : 'border-transparent',
+                      isDraggingTarget
+                        ? 'border-dashed border-primary/60 bg-primary/[0.025] data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/10'
+                        : 'border-transparent',
                     ]}
                     aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
                     ondragenter={allowTargetDrop}
@@ -1174,7 +1256,7 @@ async function saveModel(): Promise<void> {
                             data-key={target.key}
                             draggable="true"
                             class={[
-                              'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg border bg-card p-3 text-left transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+                              'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg border bg-card p-3 text-left transition-opacity data-[drag-over=true]:border-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
                               draggedTargetKey === target.key && 'opacity-50',
                             ]}
                             onclick={() => editTarget(target)}
@@ -1253,7 +1335,8 @@ async function saveModel(): Promise<void> {
             data-slot="target-dock"
             class={[
               'min-w-0 rounded-lg border border-dashed p-3 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
-              isDraggingTarget && 'border-primary/60 bg-primary/5',
+              isDraggingTarget &&
+                'border-primary/60 bg-primary/5 data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/15',
             ]}
             aria-label={m.model_editor_disabled_targets()}
             ondragenter={allowTargetDrop}

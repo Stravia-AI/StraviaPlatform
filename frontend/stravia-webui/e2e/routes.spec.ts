@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 import { prepareApp } from './prepare-app'
 
@@ -1586,12 +1586,8 @@ test('Model editor keeps lanes, disabled area and footer on the form column at e
   }
 })
 
-test('Dragging a destination toward the page edge scrolls the page so it can reach the disabled area', async ({
-  page,
-}) => {
-  // 慢设备上连续移动可能只产生 dragenter；仍须及时停止边缘滚动并允许落下。
-  const session = await page.context().newCDPSession(page)
-  await session.send('Emulation.setCPUThrottlingRate', { rate: 6 })
+// 三层启用目标（优先级 3/2/1）加一个停用目标；停用区在窄视口中位于首屏之外。
+async function mockScrollRoute(page: Page): Promise<void> {
   const target = (id: string, priority: number, enabled: boolean) => ({
     id,
     model_id: 'scroll-route',
@@ -1624,6 +1620,15 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   await page.route('**/api/v1/providers/geo/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
   await page.route('**/api/v1/models/scroll-route', (route) => route.fulfill({ json: { data: saved } }))
   await page.route('**/api/v1/models/scroll-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
+}
+
+test('Dragging a destination toward the page edge scrolls the page so it can reach the disabled area', async ({
+  page,
+}) => {
+  // 慢设备上连续移动可能只产生 dragenter；仍须及时停止边缘滚动并允许落下。
+  const session = await page.context().newCDPSession(page)
+  await session.send('Emulation.setCPUThrottlingRate', { rate: 6 })
+  await mockScrollRoute(page)
 
   await page.setViewportSize({ width: 1440, height: 560 })
   await page.goto('/models/scroll-route')
@@ -1679,4 +1684,83 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   await page.mouse.up()
   await expect(enabledCards).toHaveCount(2)
   await expect(dock.locator('[data-slot="target-card"]')).toHaveCount(2)
+})
+
+test.describe('touch drag on a phone', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 740 } })
+
+  test('a destination moves between layers and into the disabled area by its handle, and a tap still opens the editor', async ({
+    page,
+  }) => {
+    await mockScrollRoute(page)
+    await page.goto('/models/scroll-route')
+    const main = page.getByRole('main')
+    const lanes = page.locator('[data-slot="target-lane"]')
+    const dock = page.locator('[data-slot="target-dock"]')
+    const footer = page.locator('[data-slot="model-editor-footer"]')
+    // 表单键按保存顺序生成：a/b/c 依次是 target-1/2/3。
+    const card = (id: 'a' | 'b' | 'c') =>
+      page.locator(`[data-slot="target-card"][data-key="target-${'abc'.indexOf(id) + 1}"]`)
+    const handle = (id: 'a' | 'b' | 'c') => card(id).locator('[data-slot="target-drag-handle"]')
+    await expect(lanes).toHaveCount(3)
+
+    // 浏览器不会为触屏补发 HTML5 拖放，这里直接用 CDP 注入真实触点。
+    const cdp = await page.context().newCDPSession(page)
+    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', point?: { x: number; y: number }) =>
+      cdp.send('Input.dispatchTouchEvent', { type, touchPoints: point && type !== 'touchEnd' ? [point] : [] })
+    const centerOf = async (locator: ReturnType<Page['locator']>) => {
+      const box = (await locator.boundingBox())!
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    }
+    const moveTo = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+      for (let step = 1; step <= 8; step++) {
+        await touch('touchMove', { x: from.x + ((to.x - from.x) * step) / 8, y: from.y + ((to.y - from.y) * step) / 8 })
+      }
+    }
+
+    // 不拖动的点按手柄与点按卡片一致：打开目标编辑器。
+    await handle('c').scrollIntoViewIfNeeded()
+    const tap = await centerOf(handle('c'))
+    await page.touchscreen.tap(tap.x, tap.y)
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    // 拖到另一层的卡片上：并入该层。
+    await card('a').scrollIntoViewIfNeeded()
+    const from = await centerOf(handle('c'))
+    await touch('touchStart', from)
+    await moveTo(from, from)
+    const to = await centerOf(card('a'))
+    await moveTo(from, to)
+    // 悬停落点高亮，预览跟手且不会成为第二张可查询的卡片。
+    await expect(card('a')).toHaveAttribute('data-drag-over', 'true')
+    await expect(page.locator('[data-slot="target-card"]')).toHaveCount(4)
+    await touch('touchEnd')
+    await expect(lanes).toHaveCount(2)
+    await expect(page.locator('[data-slot="target-lane"][data-priority="3"] [data-slot="target-card"]')).toHaveCount(2)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.locator('[data-slot="target-card"]')).toHaveCount(4)
+    await expect(page.locator('[data-drag-over]')).toHaveCount(0)
+
+    // 拖向屏幕底部：页面自动滚动，直到停用区露出，再放进去。
+    await card('b').scrollIntoViewIfNeeded()
+    const start = await centerOf(handle('b'))
+    await touch('touchStart', start)
+    const footerBox = (await footer.boundingBox())!
+    const edge = { x: start.x, y: footerBox.y + footerBox.height / 2 }
+    await moveTo(start, edge)
+    await expect
+      .poll(async () => {
+        const dockBox = (await dock.boundingBox())!
+        return dockBox.y + dockBox.height <= (await footer.boundingBox())!.y
+      })
+      .toBe(true)
+    const dockPoint = await centerOf(dock)
+    await moveTo(edge, dockPoint)
+    await touch('touchEnd')
+    await expect(dock.locator('[data-slot="target-card"]')).toHaveCount(2)
+    await expect(lanes).toHaveCount(1)
+    expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  })
 })
