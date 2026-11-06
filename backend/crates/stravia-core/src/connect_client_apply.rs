@@ -41,6 +41,8 @@ pub struct ConnectClientModel {
     pub default_thinking_level: Option<String>,
     #[serde(default)]
     pub supports_image_input: bool,
+    #[serde(default)]
+    pub supports_remote_compaction: bool,
     pub context_window: Option<u64>,
 }
 
@@ -546,13 +548,6 @@ fn plan_omp(
     // 可选参数改成必填；显式声明后 OMP 才发送与自身 schema 适配后的 `strict: true`。
     if let Some(object) = provider.as_object_mut() {
         object.insert("compat".to_owned(), json!({ "supportsStrictMode": true }));
-        // Stravia 仅支持 V2 远程压缩：普通流式 `/v1/responses` + 末尾
-        // `compaction_trigger`。自定义 provider 必须显式启用 V2，避免客户端
-        // 再尝试已删除的 `/v1/responses/compact`。
-        object.insert(
-            "remoteCompaction".to_owned(),
-            json!({ "enabled": true, "v2StreamingEnabled": true }),
-        );
     }
     upsert_json_path(
         &mut document,
@@ -816,6 +811,15 @@ fn responses_provider(input: &ConnectClientApplyInput, base_url_key: &str) -> Js
             ]);
             if matches!(input.tool, ConnectClientId::Omp) && modalities.contains(&"image") {
                 value.insert("imageCountBudget".to_owned(), json!(OMP_IMAGE_COUNT_BUDGET));
+            }
+            if matches!(input.tool, ConnectClientId::Omp) && model.supports_remote_compaction {
+                // Stravia 只支持 V2 远程压缩：普通流式 `/v1/responses` 加末尾
+                // `compaction_trigger`。只有所有 Target 都明确支持该能力的模型才启用，
+                // 避免客户端对不合格模型尝试已删除的 `/v1/responses/compact`。
+                value.insert(
+                    "remoteCompaction".to_owned(),
+                    json!({ "enabled": true, "v2StreamingEnabled": true }),
+                );
             }
             if reasoning && matches!(input.tool, ConnectClientId::Omp) {
                 let levels = model
@@ -1392,6 +1396,7 @@ mod tests {
             supported_thinking_levels: vec!["off".to_owned(), "medium".to_owned()],
             default_thinking_level: None,
             supports_image_input: true,
+            supports_remote_compaction: false,
             context_window: Some(200_000),
         }
     }
@@ -1769,56 +1774,169 @@ name = "Other"
         assert!(!text.contains("$serde_json::private::Number"));
     }
 
-    /// OMP 对自定义 Responses 模型默认不发 `strict`，而 Responses 上游省略时会自动严格化；
-    /// 配置必须显式声明支持。自定义 provider 也不会自动启用远程压缩；Stravia 只支持
-    /// V2 流式压缩，因此显式开启 `v2StreamingEnabled`。两项都只写在 OMP 自己的
-    /// provider 上，Pi 的 `models.json` 不包含它们。
     #[test]
-    fn omp_declares_strict_tool_support_and_remote_compaction_but_pi_does_not() {
+    fn omp_enables_remote_compaction_only_for_eligible_models() {
+        let models = |all_capable: bool| {
+            serde_json::json!([
+                {"modelId": "all-capable", "displayName": "All capable", "supportsRemoteCompaction": all_capable},
+                {"modelId": "mixed-targets", "displayName": "Mixed targets", "supportsRemoteCompaction": false},
+                {"modelId": "unknown", "displayName": "Unknown"}
+            ])
+        };
+        let apply_input = |all_capable: bool| -> ConnectClientApplyInput {
+            serde_json::from_value(serde_json::json!({
+                "tool": "omp", "host": "http://127.0.0.1:5174", "apiKey": "test-key",
+                "models": models(all_capable),
+            }))
+            .expect("valid client input")
+        };
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let plan = plan_connect_client_apply(
+            &apply_input(true),
+            &environment(temporary.path()),
+            &BTreeMap::new(),
+        )
+        .expect("OMP plan");
+        let document: serde_json::Value =
+            serde_saphyr::from_str(&planned_text(&plan, "models.yml")).expect("OMP YAML");
+        let provider = &document["providers"]["stravia"];
+        assert!(
+            provider.get("remoteCompaction").is_none(),
+            "provider defaults must not enable ineligible models"
+        );
+        assert_eq!(
+            provider["models"][0]["remoteCompaction"],
+            serde_json::json!({"enabled": true, "v2StreamingEnabled": true})
+        );
+        assert!(provider["models"][1].get("remoteCompaction").is_none());
+        assert!(provider["models"][2].get("remoteCompaction").is_none());
+
+        let all_capable: ConnectClientApplyInput = serde_json::from_value(serde_json::json!({
+            "tool": "omp", "host": "http://127.0.0.1:5174", "apiKey": "test-key",
+            "models": [
+                {"modelId": "capable-a", "displayName": "Capable A", "supportsRemoteCompaction": true},
+                {"modelId": "capable-b", "displayName": "Capable B", "supportsRemoteCompaction": true}
+            ]
+        }))
+        .expect("all-capable client input");
+        let all_capable_plan = plan_connect_client_apply(
+            &all_capable,
+            &environment(temporary.path()),
+            &BTreeMap::new(),
+        )
+        .expect("all-capable OMP plan");
+        let all_capable_yaml = planned_text(&all_capable_plan, "models.yml");
+        let all_capable_document: serde_json::Value =
+            serde_saphyr::from_str(&all_capable_yaml).expect("all-capable OMP YAML");
+        let all_capable_provider = &all_capable_document["providers"]["stravia"];
+        assert!(all_capable_provider.get("remoteCompaction").is_none());
+        let all_capable_models = all_capable_provider["models"].as_array().expect("models");
+        assert!(all_capable_models.iter().all(|model| {
+            model["remoteCompaction"]
+                == serde_json::json!({ "enabled": true, "v2StreamingEnabled": true })
+        }));
+        assert!(
+            preview_connect_client_apply(&all_capable)
+                .expect("all-capable OMP preview")
+                .preview
+                .contains("v2StreamingEnabled")
+        );
+
+        // 没有合格模型时，整个生成结果不出现客户端压缩开关。
+        let no_capability = plan_connect_client_apply(
+            &apply_input(false),
+            &environment(temporary.path()),
+            &BTreeMap::new(),
+        )
+        .expect("OMP plan without eligible models");
+        let no_capability_yaml = planned_text(&no_capability, "models.yml");
+        assert!(!no_capability_yaml.contains("remoteCompaction"));
+        assert!(
+            !preview_connect_client_apply(&apply_input(false))
+                .expect("OMP preview without eligible models")
+                .preview
+                .contains("remoteCompaction")
+        );
+
+        // 服务端 preview 与桌面写入共用同一份规划，不能生成另一套模型开关。
+        let preview = preview_connect_client_apply(&apply_input(true)).expect("OMP preview");
+        let (_, preview_yaml) = preview
+            .preview
+            .split_once('\n')
+            .expect("config path header");
+        let preview_document: serde_json::Value =
+            serde_saphyr::from_str(preview_yaml).expect("OMP preview YAML");
+        assert_eq!(
+            preview_document["providers"]["stravia"]["models"],
+            provider["models"]
+        );
+        assert!(
+            preview_document["providers"]["stravia"]
+                .get("remoteCompaction")
+                .is_none()
+        );
+    }
+
+    /// OMP 对自定义 Responses 模型默认不发 `strict`，而 Responses 上游省略时会自动严格化；
+    /// 配置必须显式声明支持。远程压缩只写在明确支持该能力的合格模型上；Stravia 只支持
+    /// V2 流式压缩，因此合格模型显式开启 `v2StreamingEnabled`。OMP 专用字段不写入 Pi。
+    #[test]
+    fn omp_declares_strict_tool_support_and_model_v2_compaction_but_pi_does_not() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut environment = environment(temporary.path());
         environment.insert(
             "PI_CODING_AGENT_DIR".to_owned(),
             temporary.path().join("pi").display().to_string(),
         );
+        let mut input = standard_input(ConnectClientId::Omp);
+        input.models[0].model_id = "all-capable".to_owned();
+        input.models[0].supports_remote_compaction = true;
+        input.models[1].model_id = "ineligible".to_owned();
 
-        let omp = plan_connect_client_apply(
-            &standard_input(ConnectClientId::Omp),
-            &environment,
-            &BTreeMap::new(),
-        )
-        .expect("OMP plan");
-        let text = planned_text(&omp, "models.yml");
-        let document = serde_saphyr::from_str::<serde_json::Value>(&text).expect("OMP YAML");
+        let omp =
+            plan_connect_client_apply(&input, &environment, &BTreeMap::new()).expect("OMP plan");
+        let document =
+            serde_saphyr::from_str::<serde_json::Value>(&planned_text(&omp, "models.yml"))
+                .expect("OMP YAML");
         let provider = &document["providers"]["stravia"];
         assert_eq!(
             provider["compat"]["supportsStrictMode"],
             serde_json::json!(true)
         );
+        assert!(provider.get("remoteCompaction").is_none());
+        let models = provider["models"].as_array().expect("models");
+        assert_eq!(models[0]["id"], "all-capable");
         // 整对象比较锁住只生成 V2 开关，避免 V1 入口配置死灰复燃。
         assert_eq!(
-            provider["remoteCompaction"],
+            models[0]["remoteCompaction"],
             serde_json::json!({ "enabled": true, "v2StreamingEnabled": true })
         );
+        assert_eq!(models[1]["id"], "ineligible");
+        assert!(models[1].get("remoteCompaction").is_none());
 
-        let pi = plan_connect_client_apply(
-            &standard_input(ConnectClientId::Pi),
-            &environment,
-            &BTreeMap::new(),
-        )
-        .expect("Pi plan");
+        let mut pi_input = standard_input(ConnectClientId::Pi);
+        pi_input.models = input.models;
+        let pi =
+            plan_connect_client_apply(&pi_input, &environment, &BTreeMap::new()).expect("Pi plan");
         let document = serde_json::from_str::<serde_json::Value>(&planned_text(&pi, "models.json"))
             .expect("Pi JSON");
         let provider = &document["providers"]["stravia"];
         assert!(provider.get("compat").is_none());
         assert!(provider.get("remoteCompaction").is_none());
+        assert!(
+            provider["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .all(|model| model.get("remoteCompaction").is_none())
+        );
     }
 
-    /// OMP 的 `providers.<Stravia>` 由接入流程整体拥有：用户已有的 provider 级
-    /// `compat` / `remoteCompaction` 与其它同层键一样被生成结果替换，避免旧的
-    /// `enabled: false` 或 V1 配置继续生效；provider 之外的键必须原样保留。
+    /// OMP 的 `providers.<Stravia>` 由接入流程整体拥有：重新接入时，用户已有的 provider 级
+    /// `compat` / `remoteCompaction` 和模型级旧压缩配置与其它同层键一样被生成结果替换，
+    /// 避免旧的 `enabled: false` 或 V1 配置继续生效；provider 之外的键必须原样保留。
     #[test]
-    fn omp_replaces_user_remote_compaction_like_other_owned_provider_keys() {
+    fn omp_reconnect_replaces_stale_provider_and_model_compaction_keys() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let path = temporary
             .path()
@@ -1834,31 +1952,46 @@ name = "Other"
     remoteCompaction:
       enabled: false
       compactEndpoint: /v1/responses/compact
+    models:
+      - id: route-one
+        remoteCompaction:
+          enabled: true
+          compactEndpoint: /v1/responses/compact
+      - id: route-two
+        remoteCompaction:
+          enabled: true
+          v2StreamingEnabled: true
+  other:
+    name: Other
 modelRoles:
   default: other/current
 "#
             .to_vec(),
         )]);
+        let mut input = standard_input(ConnectClientId::Omp);
+        input.models[0].supports_remote_compaction = true;
 
-        let plan = plan_connect_client_apply(
-            &standard_input(ConnectClientId::Omp),
-            &environment(temporary.path()),
-            &existing,
-        )
-        .expect("OMP plan");
+        let plan = plan_connect_client_apply(&input, &environment(temporary.path()), &existing)
+            .expect("OMP plan");
         let document =
             serde_saphyr::from_str::<serde_json::Value>(&planned_text(&plan, "models.yml"))
                 .expect("OMP YAML");
         assert_eq!(document["modelRoles"]["default"], "other/current");
+        assert_eq!(document["providers"]["other"]["name"], "Other");
         let provider = &document["providers"]["stravia"];
         assert_eq!(
             provider["compat"],
             serde_json::json!({ "supportsStrictMode": true })
         );
+        assert!(provider.get("remoteCompaction").is_none());
+        let models = provider["models"].as_array().expect("models");
+        assert_eq!(models[0]["id"], "route-one");
         assert_eq!(
-            provider["remoteCompaction"],
+            models[0]["remoteCompaction"],
             serde_json::json!({ "enabled": true, "v2StreamingEnabled": true })
         );
+        assert_eq!(models[1]["id"], "route-two");
+        assert!(models[1].get("remoteCompaction").is_none());
     }
 
     /// OMP 默认只保留最近 5 张图片，超出时改写已发送历史并使上游缓存失效；预算只写给

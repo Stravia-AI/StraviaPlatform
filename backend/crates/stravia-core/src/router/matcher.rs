@@ -41,6 +41,7 @@ mod tests {
             supported_thinking_levels: Vec::new(),
             context_window: None,
             supports_image_input: false,
+            supports_remote_compaction: false,
             targets: Vec::new(),
             default_thinking_level: None,
             billing: None,

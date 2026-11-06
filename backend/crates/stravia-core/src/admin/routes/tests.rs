@@ -70,6 +70,128 @@ async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider
     route_fixture_with_protocol("openai-compatible").await
 }
 
+#[tokio::test]
+async fn remote_compaction_requires_a_native_protocol() -> anyhow::Result<()> {
+    for (protocol, expected) in [
+        ("open-responses", true),
+        ("anthropic-messages", true),
+        ("openai-compatible", false),
+    ] {
+        let (_dir, gateway, provider) = route_fixture_with_protocol(protocol).await?;
+        let admin = gateway.admin();
+        let route = admin
+            .create_model(modality_route_input(
+                "compact-route",
+                &provider.id,
+                crate::db::models::RouteOutputModality::Text,
+                &[("upstream-model", true)],
+            ))
+            .await?;
+        assert_eq!(
+            serde_json::to_value(&route)?["supports_remote_compaction"],
+            json!(expected),
+            "protocol {protocol}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_compaction_requires_every_configured_target() -> anyhow::Result<()> {
+    let (_dir, gateway, provider) = route_fixture_with_protocol("open-responses").await?;
+    let admin = gateway.admin();
+    let mut targets = vec![json!({"provider_id":provider.id,"model":"upstream-model"})];
+    for (protocol, native) in [("anthropic-messages", true), ("openai-compatible", false)] {
+        let other = admin
+            .create_provider(CreateProvider {
+                name: Some(protocol.into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some(protocol.into()),
+                    base_url: "http://127.0.0.1:9".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            })
+            .await?;
+        register_output_model(&admin, &other.id, "upstream-model", json!({
+            "limit":{"context":if native {128000} else {64000}},
+            "modalities":{"input":if native {vec!["text","image"]} else {vec!["text"]},"output":["text"]}
+        })).await?;
+        targets.push(json!({"provider_id":other.id,"model":"upstream-model","enabled":native}));
+    }
+    let eligible = admin
+        .create_model(serde_json::from_value(json!({
+            "model_id":"compact-route", "output_modality":"text", "targets":&targets[..2]
+        }))?)
+        .await?;
+    assert!(eligible.supports_remote_compaction);
+
+    let mixed = admin
+        .update_model(
+            "compact-route",
+            serde_json::from_value(json!({
+                "targets":targets
+            }))?,
+        )
+        .await?;
+    assert!(
+        !mixed.supports_remote_compaction,
+        "disabled unsupported Target must still veto the flag"
+    );
+    assert_eq!(mixed.context_window, Some(128000));
+    assert!(mixed.supports_image_input);
+    let listed = serde_json::to_value(admin.list_models().await?)?;
+    assert_eq!(listed[0]["supports_remote_compaction"], json!(false));
+
+    let detail = admin
+        .get_provider_model(&provider.id, "upstream-model")
+        .await?;
+    admin
+        .update_provider_model_selection(
+            &provider.id,
+            "upstream-model",
+            UpdateProviderModelSelection {
+                policy: ProviderModelSelectionPolicy::ForceDisabled,
+                revision: detail.revision,
+            },
+        )
+        .await?;
+    let mut historical = eligible.clone();
+    let projection = RouteModule::new(&gateway);
+    projection
+        .refresh_route_target_projections(std::slice::from_mut(&mut historical))
+        .await?;
+    assert!(
+        !historical.supports_remote_compaction,
+        "unavailable model is not eligible"
+    );
+    historical = eligible.clone();
+    historical.targets[0].destination =
+        crate::db::identity::TargetDestination::new(provider.id.into(), "missing-model".into());
+    projection
+        .refresh_route_target_projections(std::slice::from_mut(&mut historical))
+        .await?;
+    assert!(
+        !historical.supports_remote_compaction,
+        "missing model evidence is not support"
+    );
+    historical = eligible;
+    historical.targets.clear();
+    projection
+        .refresh_route_target_projections(std::slice::from_mut(&mut historical))
+        .await?;
+    assert!(
+        !historical.supports_remote_compaction,
+        "empty Target set is not support"
+    );
+    Ok(())
+}
+
 fn modality_route_input(
     route_id: &str,
     provider_id: &str,

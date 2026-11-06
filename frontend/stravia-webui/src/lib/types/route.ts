@@ -20,6 +20,7 @@ export interface Route {
   supported_thinking_levels: ThinkingLevel[]
   context_window?: number | null
   supports_image_input?: boolean
+  supports_remote_compaction: boolean
   targets: Target[]
 }
 

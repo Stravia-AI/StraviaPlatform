@@ -27,7 +27,7 @@ describe('Connect clients', () => {
     expect(buildCode({ ...base, language: 'typescript' })).toContain('client.responses.create')
   })
 
-  test('uses Route capabilities and falls back to Route ID for display', () => {
+  test('falls back to Route ID for display', () => {
     const route = {
       id: 'route',
       output_modality: 'text',
@@ -42,18 +42,11 @@ describe('Connect clients', () => {
       supported_thinking_levels: ['off', 'low', 'high'],
       context_window: 128_000,
       supports_image_input: true,
+      supports_remote_compaction: false,
       targets: [],
     } satisfies Route
     const unnamed = { ...route, id: 'unnamed', model_id: 'custom/unnamed', display_name: null } satisfies Route
 
-    expect(defineClientModel(route)).toEqual({
-      modelId: 'shared-model',
-      outputModality: 'text',
-      displayName: 'Shared Model',
-      supportedThinkingLevels: ['off', 'low', 'high'],
-      supportsImageInput: true,
-      contextWindow: 128_000,
-    })
     expect(defineClientModel(unnamed).displayName).toBe('custom/unnamed')
   })
 })

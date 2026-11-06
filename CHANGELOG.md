@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- OMP client configuration now opts into V2 remote compaction per model, only when every configured Target, including disabled Targets, has known native-compaction support. Missing or unavailable capability evidence leaves the model unmarked. Reconnecting removes stale provider-wide defaults so unsupported models do not inherit the opt-in; Pi configuration is unchanged.
 - Standalone compaction supplies structured handoff instructions when the client omits them, without replacing explicit session or summary instructions. Anthropic signatures, full signed blocks, iteration usage, and Responses states pass through IR encoding; refusals, upstream errors, truncation, and duplicate states cannot become successful summaries.
 
 ## [0.6.4] - 2026-11-06
