@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from tests.common.helpers import http_request
+from tests.common.helpers import http_request, responses_compaction
 from tests.e2e.admin.test_observations import _detail, _client_errors, _route_interactions, _wait_for
 
 
@@ -36,9 +36,7 @@ def _window_semantics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def compaction_provider():
     """只有完整、按原序回放原生窗口才能完成后续业务请求。"""
     window = [
-        {"type": "message", "role": "user", "content": "retained task identity"},
         {"type": "compaction", "id": "cmp_state_one", "encrypted_content": "opaque-state-one"},
-        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "retained answer", "annotations": []}]},
     ]
     received: list[dict[str, Any]] = []
     windows: dict[str, list[dict[str, Any]]] = {}
@@ -74,15 +72,12 @@ def compaction_provider():
             compact_window = window if body.get("instructions") == "complete-window" else [{"type": "compaction", "id": f"cmp_{signature}", "encrypted_content": f"opaque-{signature}"}]
             if body.get("instructions") == "state-without-id":
                 compact_window = [{"type": "compaction", "encrypted_content": f"opaque-{signature}"}]
-            if self.path.endswith("/responses/compact") or trigger or automatic:
+            if trigger or automatic:
                 with lock:
                     for state in compact_window:
                         if state.get("type") == "compaction":
                             windows[state["encrypted_content"]] = compact_window
-            if self.path.endswith("/responses/compact"):
-                result = {"id": "cmp_operation_one" if body.get("instructions") == "complete-window" else f"cmp_operation_{signature}", "object": "response.compaction", "created_at": 1788825600, "output": compact_window}
-                status = 200
-            elif self.path.endswith("/responses"):
+            if self.path.endswith("/responses"):
                 items = body.get("input", [])
                 replaying = any(item.get("type") == "compaction" for item in items if isinstance(item, dict))
                 if invalid:
@@ -118,7 +113,9 @@ def compaction_provider():
                 if body["instructions"] == "reject-compaction-secret":
                     result["error"]["message"] = "rejected " + self.headers["Authorization"].removeprefix("Bearer ")
                 status = 503
-            if status == 200 and result.get("object") == "response" and (trigger or automatic):
+            if status == 200 and result.get("object") == "response" and trigger:
+                result["output"] = compact_window
+            elif status == 200 and result.get("object") == "response" and automatic:
                 result["output"] = compact_window + result["output"]
             streaming = body.get("stream") and status == 200 and result.get("object") == "response"
             if streaming:
@@ -207,12 +204,12 @@ def test_native_compact_window_continues_without_restoring_removed_history(admin
     source_input = [{"role": "user", "content": "removed-history-sentinel"}]
     status, source = http_request("POST", f"{admin_env['proxy']}/v1/responses", payload={"model": "native-compaction-roundtrip", "input": source_input}, headers=headers)
     assert status == 200, source
-    status, compacted = http_request("POST", f"{admin_env['proxy']}/v1/responses/compact", payload={"model": "native-compaction-roundtrip", "input": source_input + source["output"], "instructions": "complete-window"}, headers=headers)
+    status, compacted = responses_compaction(f"{admin_env['proxy']}/v1/responses", payload={"model": "native-compaction-roundtrip", "input": source_input + source["output"], "instructions": "complete-window"}, headers=headers)
     assert status == 200, compacted
-    assert compacted["object"] == "response.compaction"
-    assert compacted["id"] == "cmp_operation_one"
+    assert compacted["object"] == "response"
+    assert compacted["status"] == "completed"
     assert compacted["output"] == window
-    assert "usage" not in compacted
+    assert compacted["usage"]["input_tokens"] == 10
     # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
     time.sleep(2.01)
     status, continued = http_request("POST", f"{admin_env['proxy']}/v1/responses", payload={"model": "native-compaction-roundtrip", "input": compacted["output"] + [{"role": "user", "content": "continue the task"}]}, headers=headers)
@@ -233,17 +230,20 @@ def test_native_compact_window_continues_without_restoring_removed_history(admin
     assert compact_runs[0]["id"] in {run["id"] for run in source_detail["runs"]}
     admitted = next(event for event in compact_runs[0]["events"] if event["kind"] == "run_admitted")
     assert admitted["payload"]["has_new_user"] is False
-    assert compact_runs[0]["usage"]["input_tokens"] is None
-    assert compact_runs[0]["usage"]["output_tokens"] is None
+    assert compact_runs[0]["usage"]["input_tokens"] == 10
+    assert compact_runs[0]["usage"]["output_tokens"] == 4
     serialized = json.dumps({"interactions": interactions, "details": details})
     assert "opaque-state-one" not in serialized
     assert "local-test-credential" not in serialized
 
 
 def _request(env, key, model, items, *, compact=False, **extra):
-    return http_request("POST", f"{env['proxy']}/v1/responses" + ("/compact" if compact else ""),
-                        payload={"model": model, "input": items, **extra},
-                        headers={"authorization": f"Bearer {key}"})
+    payload = {"model": model, "input": items, **extra}
+    headers = {"authorization": f"Bearer {key}"}
+    url = f"{env['proxy']}/v1/responses"
+    if compact or any(item.get("type") == "compaction_trigger" for item in items):
+        return responses_compaction(url, payload, headers)
+    return http_request("POST", url, payload=payload, headers=headers)
 
 
 def _success(env, key, model, items, **extra):
@@ -418,12 +418,13 @@ def test_unknown_compaction_capability_is_forwarded(admin_env, compaction_provid
         items.append({"type": "compaction_trigger"})
     result = _success(admin_env, key, model, items, **extra)
     assert any(item["type"] == "compaction" for item in result["output"])
-    if mode == "standalone":
+    if mode in ("standalone", "trigger"):
         outbound = compaction_provider[2][0]
-        assert outbound["path"].endswith("/responses/compact")
-        # 独立 compact 不支持推理控制，兼容入口接受不代表出口可以透传。
-        assert "reasoning" not in outbound["body"]
-        assert "stream" not in outbound["body"]
+        assert outbound["path"].endswith("/responses")
+        assert outbound["body"]["stream"] is True
+        assert outbound["body"]["input"][-1]["type"] == "compaction_trigger"
+        if mode == "standalone":
+            assert outbound["body"]["reasoning"]["effort"] == "low"
 
 
 @pytest.mark.e2e
@@ -626,18 +627,13 @@ def test_unsupported_target_rejects_standalone_compaction_without_upstream_reque
 
 @pytest.mark.e2e
 @pytest.mark.admin
-@pytest.mark.parametrize("mode", ["controls", "trigger"])
-def test_chat_target_omits_unrepresentable_inline_compaction_and_preserves_business_text(admin_env, mode):
+def test_chat_target_omits_unrepresentable_inline_compaction_and_preserves_business_text(admin_env):
     from tests.e2e.admin.test_observations import _create_route
-    model = f"native-inline-omitted-{mode}"
+    model = "native-inline-omitted-controls"
     _route, key = _create_route(admin_env, model, protocol="openai-compatible")
-    text = f"continue the business request without native compaction {mode}"
+    text = "continue the business request without native inline compaction"
     items = [{"role": "user", "content": text}]
-    extra = {}
-    if mode == "controls":
-        extra["context_management"] = [{"type": "compaction", "compact_threshold": 2000}]
-    else:
-        items.append({"type": "compaction_trigger"})
+    extra = {"context_management": [{"type": "compaction", "compact_threshold": 2000}]}
     captured = admin_env["mock_server"].captured_requests
     before = len(captured)
     # ADR-0006 omits unrepresentable inference controls; it does not emulate compact.
@@ -867,8 +863,6 @@ def anthropic_compaction_provider():
             errors.append(f"native compaction control is malformed: {control!r}")
         elif set(control) - {"type", "instructions"}:
             errors.append(f"native compaction control has unsupported fields: {control!r}")
-        elif control.get("instructions") not in (None, expected["compact_instructions"]):
-            errors.append("native compaction instructions changed")
         enabled_betas = betas(headers)
         if _ANTHROPIC_COMPACTION_BETA not in enabled_betas:
             errors.append("native compaction beta is missing")
@@ -1291,8 +1285,8 @@ def test_anthropic_native_compaction_round_trip_replays_signed_tail_in_order(
     assert json.loads(function_call["arguments"]) == expected["tool_input"]
 
     # 2. Responses compact 必须把原生压缩改成 stream:true 的 Anthropic SSE 请求。
-    status, compacted = http_request(
-        "POST", f"{admin_env['proxy']}/v1/responses/compact",
+    status, compacted = responses_compaction(
+        f"{admin_env['proxy']}/v1/responses",
         payload={
             "model": model,
             "input": expected["prefix"],
@@ -1306,9 +1300,10 @@ def test_anthropic_native_compaction_round_trip_replays_signed_tail_in_order(
     assert compact_request["body"]["stream"] is True
     assert compact_request["body"]["compaction"]["type"] == "summarize"
     assert expected["compact_instructions"] in json.dumps(
-        [compact_request["body"].get("system"), compact_request["body"].get("compaction")],
+        compact_request["body"].get("system"),
         ensure_ascii=False,
     )
+    assert compact_request["body"]["compaction"]["instructions"] != expected["compact_instructions"]
     enabled_betas = [
         beta.strip()
         for beta in compact_request["headers"].get("anthropic-beta", "").split(",")
@@ -1320,7 +1315,7 @@ def test_anthropic_native_compaction_round_trip_replays_signed_tail_in_order(
         "thread", "diagnostics", "context_management", "stop_sequences",
     ))
     assert expected["prefix_marker"] in json.dumps(compact_request["body"]["messages"])
-    assert compacted["object"] == "response.compaction"
+    assert compacted["object"] == "response"
     assert len(compacted["output"]) == 1
     state = compacted["output"][0]
     assert state["type"] == "compaction"
@@ -1386,8 +1381,8 @@ def test_anthropic_compaction_stream_requires_message_stop_and_preserves_error(
         if mode == "truncated"
         else expected["error_instructions"]
     )
-    status, response = http_request(
-        "POST", f"{admin_env['proxy']}/v1/responses/compact",
+    status, response = responses_compaction(
+        f"{admin_env['proxy']}/v1/responses",
         payload={
             "model": model,
             "input": expected["prefix"],
@@ -1396,7 +1391,7 @@ def test_anthropic_compaction_stream_requires_message_stop_and_preserves_error(
         headers={"authorization": f"Bearer {key}"},
     )
     assert status != 200, response
-    assert not (isinstance(response, dict) and response.get("object") == "response.compaction")
+    assert not (isinstance(response, dict) and response.get("status") == "completed")
     if mode == "truncated":
         assert status == 502, response
     else:

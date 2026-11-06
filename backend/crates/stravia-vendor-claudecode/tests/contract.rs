@@ -268,7 +268,7 @@ fn native_compaction_usage() -> Value {
     })
 }
 
-/// 以 Anthropic 客户端入口构造独立原生压缩请求；压缩控制保存在 ingress meta 中。
+/// 以 Anthropic 客户端入口构造独立原生压缩请求，摘要控制与触发器进入 IR。
 fn native_compaction_request() -> AiRequest {
     anthropic_client_request(json!({
         "model": "claude-sonnet-4-5",
@@ -474,6 +474,32 @@ async fn native_compaction_stream_keeps_signed_state_and_iteration_usage() {
     let usage = response.usage.expect("compaction usage");
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (64, 2002));
     assert!(response.items[0].is_compaction());
+
+    let mut request = native_compaction_request();
+    request.instructions = None;
+    request.parameters.compaction.as_mut().unwrap().instructions = None;
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Compact {
+            provider: signed_in(),
+            request,
+        },
+    )
+    .await
+    .expect("omitted instructions use the local summary prompt");
+    let requests = services.requests.lock();
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let default = stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS;
+    assert_eq!(body["compaction"]["instructions"], default);
+    assert!(
+        body["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block.get("text").and_then(Value::as_str) == Some(default))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -504,6 +530,10 @@ async fn native_compaction_stream_truncation_and_errors_are_not_summaries() {
         (
             native_compaction_stream("end_turn", native_compaction_usage()),
             "end_turn",
+        ),
+        (
+            native_compaction_stream("refusal", native_compaction_usage()),
+            "refusal",
         ),
     ] {
         let services = Arc::new(MockServices {

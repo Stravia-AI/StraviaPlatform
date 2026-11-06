@@ -424,21 +424,27 @@ fn nested_null_controls_reset_without_emitting_nulls() {
 }
 
 #[test]
-fn compaction_control_is_kept_for_the_standalone_path_and_null_is_ignored() {
-    use crate::codec::compaction::ANTHROPIC_COMPACTION_REQUEST_META as META;
+fn compaction_control_enters_ir_and_null_does_not_request_compaction() {
     let request = AnthropicDecoder
         .decode_request(request_with(serde_json::json!({
             "compaction": {"type": "summarize", "instructions": "Be brief"}
         })))
         .unwrap();
     assert_eq!(
-        request.meta.vendor.ingress[META],
-        serde_json::json!({"type": "summarize", "instructions": "Be brief"})
+        serde_json::to_value(&request.parameters.compaction).unwrap(),
+        serde_json::json!({"instructions": "Be brief"})
     );
+    assert!(request.items.last().unwrap().is_compaction_trigger());
     let request = AnthropicDecoder
         .decode_request(request_with(serde_json::json!({"compaction": null})))
         .unwrap();
-    assert!(!request.meta.vendor.ingress.contains_key(META));
+    assert!(request.parameters.compaction.is_none());
+    assert!(
+        !request
+            .items
+            .iter()
+            .any(|item| item.is_compaction_trigger())
+    );
 }
 
 #[test]

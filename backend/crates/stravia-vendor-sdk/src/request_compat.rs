@@ -862,8 +862,6 @@ fn projection(
                 "__anthropic_raw_system",
                 "__anthropic_raw_messages",
                 "__anthropic_raw_tools",
-                // 独立压缩请求的 `compaction` 控制（如 instructions）只能由同协议上游表达。
-                "__anthropic_compaction_request",
             ],
             _ => &[],
         };
@@ -872,9 +870,6 @@ fn projection(
                 ingress.insert(key, Field::Json(value));
             }
         }
-    }
-    if let Some(value) = r.meta.vendor.ingress.get("__stravia_compact_fields") {
-        ingress.insert("__stravia_compact_fields", Field::Json(value));
     }
     (variant, ext, ingress)
 }
@@ -1030,7 +1025,10 @@ mod tests {
     fn installed_plugins_receive_native_compaction_controls() {
         let mut request = AiRequest::new("model", Vec::new());
         for threshold_tokens in [None, Some(2000)] {
-            request.parameters.compaction = Some(ir::CompactionControl { threshold_tokens });
+            request.parameters.compaction = Some(ir::CompactionControl {
+                threshold_tokens,
+                instructions: None,
+            });
             let responses = value(&request, "open-responses");
             let expected = if threshold_tokens.is_some() {
                 json!([{"type": "compaction", "compact_threshold": 2000}])
@@ -1101,6 +1099,7 @@ mod tests {
         p.truncation = Some(ir::Truncation::Auto);
         p.compaction = Some(ir::CompactionControl {
             threshold_tokens: Some(4096),
+            instructions: None,
         });
         p.metadata = Some([("key".into(), "value".into())].into());
         p.end_user_id = Some("user".into());

@@ -225,6 +225,10 @@ impl AnthropicResponseFormatter {
         let mut content = Vec::new();
 
         for item in &resp.items {
+            if let Some(block) = crate::codec::compaction::anthropic_compaction_block(item) {
+                content.push(block);
+                continue;
+            }
             if let MessageContent::Blocks(blocks) = &item.content {
                 for block in blocks {
                     match block {
@@ -313,6 +317,14 @@ impl AnthropicResponseFormatter {
             "output_tokens": resp.usage.completion_tokens,
         });
         extend_usage_json(&mut usage, &resp.usage);
+        if resp.stop_reason.as_deref() == Some("compaction") {
+            usage = if let Some(native) = resp.vendor.egress.get("__anthropic_compaction_usage") {
+                native.clone()
+            } else {
+                usage["type"] = "compaction".into();
+                serde_json::json!({"input_tokens": 0, "output_tokens": 0, "iterations": [usage]})
+            };
+        }
 
         serde_json::json!({
             "id": resp.id,

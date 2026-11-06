@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Remote compaction now uses V2: send `POST /v1/responses` with `stream: true` and exactly one trailing `compaction_trigger`. The response is ordinary Response SSE containing one native compaction item; clients rebuild their retained window. The V1 `/v1/responses/compact` route and server-side retained-window construction have been removed. Reconnect oh-my-pi to write `remoteCompaction: { enabled: true, v2StreamingEnabled: true }`; WebSocket standalone compaction is explicitly rejected rather than treated as ordinary inference.
+- Codex and other Responses compaction targets now share normal streaming request controls and canonical IR decoding, with no V1 fallback. Rebuild and re-import standalone Codex and Anthropic-based plugins; updating the host does not replace installed plugins. Upstreams that only support the old compact endpoint do not gain V2 support from this change.
+
+### Fixed
+
+- Standalone compaction supplies structured handoff instructions when the client omits them, without replacing explicit session or summary instructions. Anthropic signatures, full signed blocks, iteration usage, and Responses states pass through IR encoding; refusals, upstream errors, truncation, and duplicate states cannot become successful summaries.
+
 ## [0.6.4] - 2026-11-06
 
 ### Verification

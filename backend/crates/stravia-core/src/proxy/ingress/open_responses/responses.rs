@@ -97,6 +97,36 @@ pub async fn handler(
             );
         }
     };
+    if crate::proxy::dispatcher::is_websocket_delivery_deferred(&ctx)
+        && stravia_protocol_codec::codec::compaction::standalone_compaction_requested(&request)
+    {
+        return observation::reject(
+            observer,
+            "protocol",
+            "unsupported_feature",
+            protocol_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_feature",
+                Some("input"),
+                "Standalone compaction requires HTTP POST /v1/responses with stream: true; WebSocket response.create is not supported.",
+            ),
+        );
+    }
+    if let Err((param, message)) =
+        classify_standalone_compaction(&mut ctx, &request, OPEN_RESPONSES_2026_04_24)
+    {
+        return observation::reject(
+            observer,
+            "protocol",
+            "invalid_request",
+            protocol_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                Some(param),
+                message,
+            ),
+        );
+    }
     let response = dispatch_pipeline(
         gw,
         observer,
@@ -110,202 +140,38 @@ pub async fn handler(
     normalize_error_response(response).await
 }
 
-pub async fn compact(
-    State(gw): State<Gateway>,
-    mut ctx: axum::extract::Extension<RequestContext>,
-    headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    if let Err(response) = authenticate(&gw, &headers).await {
-        return *response;
+pub(crate) fn classify_standalone_compaction(
+    ctx: &mut axum::extract::Extension<RequestContext>,
+    request: &stravia_runtime_contract::protocol::ir::AiRequest,
+    ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
+) -> Result<(), (&'static str, String)> {
+    if !stravia_protocol_codec::codec::compaction::standalone_compaction_requested(request) {
+        return Ok(());
     }
-    let Json(body) = match body {
-        Ok(body) => body,
-        Err(rejection) => return json_rejection(rejection),
-    };
-    if let Err((param, message)) = validate_compact_request(&body) {
-        return protocol_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            Some(param),
-            message,
-        );
+    if ingress == OPEN_RESPONSES_2026_04_24 && !request.stream.enabled {
+        return Err((
+            "stream",
+            "Standalone compaction requires stream: true.".into(),
+        ));
     }
-    ctx.ingress_protocol = OPEN_RESPONSES_2026_04_24;
+    let triggers = request
+        .items
+        .iter()
+        .filter(|item| item.is_compaction_trigger())
+        .count();
+    if triggers != 1
+        || !request
+            .items
+            .last()
+            .is_some_and(stravia_runtime_contract::protocol::ir::AiItem::is_compaction_trigger)
+    {
+        return Err((
+            "input",
+            "Standalone compaction requires exactly one trailing compaction_trigger.".into(),
+        ));
+    }
     ctx.extensions
         .insert(crate::model_turn::ModelTurnPurpose::Compact);
-    let observer = observation::begin(
-        &gw,
-        &ctx,
-        "POST",
-        "/v1/responses/compact",
-        OPEN_RESPONSES_2026_04_24,
-    );
-    let envelope = RawEnvelope::new(
-        None,
-        std::collections::HashMap::new(),
-        "POST",
-        "/v1/responses/compact",
-    );
-    let pair = ProtocolTransform::global()
-        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
-        .expect("registered Responses adapter");
-    let explicit_fields = body
-        .as_object()
-        .expect("validated compact object")
-        .keys()
-        .cloned()
-        .map(Value::String)
-        .collect();
-    let mut request = match pair.decode_request(body) {
-        Ok(request) => request,
-        Err(error) => {
-            return observation::reject(
-                observer,
-                "decode",
-                "invalid_request",
-                protocol_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    None,
-                    error.to_string(),
-                ),
-            );
-        }
-    };
-    request.meta.vendor.ingress.insert(
-        "__stravia_compact_fields".into(),
-        Value::Array(explicit_fields),
-    );
-    normalize_error_response(
-        dispatch_pipeline(
-            gw,
-            observer,
-            headers,
-            envelope,
-            request,
-            OPEN_RESPONSES_2026_04_24,
-            ctx.0,
-        )
-        .await,
-    )
-    .await
-}
-
-fn validate_compact_request(body: &Value) -> Result<(), (&'static str, String)> {
-    const ALLOWED_FIELDS: &[&str] = &[
-        "model",
-        "input",
-        "previous_response_id",
-        "instructions",
-        "prompt_cache_key",
-        "prompt_cache_options",
-        "prompt_cache_retention",
-        "tools",
-        "parallel_tool_calls",
-        "reasoning",
-        "service_tier",
-        "text",
-        "access_programs",
-    ];
-    let object = body
-        .as_object()
-        .ok_or(("body", "compact request must be a JSON object".into()))?;
-    if let Some(field) = object
-        .keys()
-        .find(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
-    {
-        return Err(("body", format!("unknown compact request field '{field}'")));
-    }
-    if !object.get("model").is_some_and(Value::is_string) {
-        return Err(("model", "compact request requires string 'model'".into()));
-    }
-    for field in ["previous_response_id", "instructions"] {
-        if object
-            .get(field)
-            .is_some_and(|value| !value.is_null() && !value.is_string())
-        {
-            return Err((field, format!("'{field}' must be a string or null")));
-        }
-    }
-    if let Some(value) = object.get("prompt_cache_key") {
-        if !value.is_null() && !value.is_string() {
-            return Err((
-                "prompt_cache_key",
-                "'prompt_cache_key' must be a string or null".into(),
-            ));
-        }
-        if value
-            .as_str()
-            .is_some_and(|value| value.chars().count() > 64)
-        {
-            return Err((
-                "prompt_cache_key",
-                "'prompt_cache_key' exceeds maximum length 64".into(),
-            ));
-        }
-    }
-    if let Some(input) = object.get("input") {
-        match input {
-            Value::Null => {}
-            Value::String(text) if text.len() <= 10 * 1024 * 1024 => {}
-            Value::String(_) => {
-                return Err(("input", "'input' exceeds maximum length 10485760".into()));
-            }
-            Value::Array(items) => {
-                let mut ordinary = Vec::with_capacity(items.len());
-                for item in items {
-                    if item.get("type").and_then(Value::as_str) == Some("compaction") {
-                        validate_compaction_item(item)?;
-                    } else {
-                        ordinary.push(item.clone());
-                    }
-                }
-                if !ordinary.is_empty() {
-                    let validation = serde_json::json!({
-                        "model": "compact-schema-validation",
-                        "input": ordinary,
-                    });
-                    ProtocolTransform::global()
-                        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
-                        .expect("registered Open Responses pair")
-                        .decode_request(validation)
-                        .map_err(|error| ("input", error.to_string()))?;
-                }
-            }
-            _ => {
-                return Err(("input", "'input' must be a string, array, or null".into()));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_compaction_item(item: &Value) -> Result<(), (&'static str, String)> {
-    let object = item
-        .as_object()
-        .ok_or(("input", "compact input items must be objects".into()))?;
-    if object
-        .get("id")
-        .is_some_and(|value| !value.is_null() && !value.is_string())
-    {
-        return Err((
-            "input",
-            "compaction item 'id' must be a string or null".into(),
-        ));
-    }
-    let Some(encrypted_content) = object.get("encrypted_content").and_then(Value::as_str) else {
-        return Err((
-            "input",
-            "compaction item requires string 'encrypted_content'".into(),
-        ));
-    };
-    if encrypted_content.len() > 10 * 1024 * 1024 {
-        return Err((
-            "input",
-            "compaction item 'encrypted_content' exceeds maximum length 10485760".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -482,10 +348,10 @@ pub(super) async fn normalize_error_response(response: Response) -> Response {
             .and_then(Value::as_str)
             .and_then(|param| match param {
                 "background" => Some("background"),
-                "compact" => Some("compact"),
                 "content_type" => Some("content_type"),
                 "input" => Some("input"),
                 "previous_response_id" => Some("previous_response_id"),
+                "stream" => Some("stream"),
                 _ => None,
             })
     });

@@ -186,7 +186,8 @@ fn effective_profile_round_trip_retains_unified_response_controls() {
     assert_eq!(
         request.parameters.compaction,
         Some(CompactionControl {
-            threshold_tokens: Some(12000)
+            threshold_tokens: Some(12000),
+            instructions: None,
         })
     );
     let profile = effective_response_profile_from_request(&request);

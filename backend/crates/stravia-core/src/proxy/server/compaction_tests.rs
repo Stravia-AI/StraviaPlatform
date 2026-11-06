@@ -97,16 +97,73 @@ async fn publication_responses(
     )
 }
 
-async fn publication_compact(
+fn v2_compaction_events(id: &str, state: &Value) -> String {
+    let mut resource = completed(id, json!([]));
+    resource["status"] = "in_progress".into();
+    resource["completed_at"] = Value::Null;
+    resource["usage"] = Value::Null;
+    let created = json!({
+        "type": "response.created",
+        "response": resource
+    });
+    let mut stream = format!("event: response.created\ndata: {created}\n\n");
+    for event in [
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"compaction","id":state["id"]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":state}),
+        json!({"type":"response.completed","response":completed(id, json!([state]))}),
+    ] {
+        stream.push_str(&format!(
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        ));
+    }
+    stream
+}
+
+async fn v2_compaction_responses(
     State(requests): State<mpsc::Sender<ProviderRequest>>,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> axum::response::Response {
+    let is_standalone = body["input"]
+        .as_array()
+        .and_then(|items| items.last())
+        .is_some_and(|item| item["type"] == "compaction_trigger");
+    if !is_standalone {
+        return responses(State(requests), Json(body)).await;
+    }
     let (respond, response) = oneshot::channel();
     requests
         .send(ProviderRequest { body, respond })
         .await
         .unwrap();
-    Json(response.await.expect("test supplies real compact response"))
+    let response = response
+        .await
+        .expect("test supplies V2 compaction response");
+    (
+        [("content-type", "text/event-stream")],
+        response.as_str().unwrap_or_default().to_owned(),
+    )
+        .into_response()
+}
+
+async fn publication_v2_responses(
+    State((inline, compact)): State<(
+        mpsc::Sender<PublicationRequest>,
+        mpsc::Sender<ProviderRequest>,
+    )>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    let is_standalone = body["input"]
+        .as_array()
+        .and_then(|items| items.last())
+        .is_some_and(|item| item["type"] == "compaction_trigger");
+    if is_standalone {
+        v2_compaction_responses(State(compact), Json(body)).await
+    } else {
+        publication_responses(State(inline), Json(body))
+            .await
+            .into_response()
+    }
 }
 
 fn publication_frame(event: Value) -> Result<axum::body::Bytes, std::io::Error> {
@@ -125,8 +182,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let provider_address = provider_listener.local_addr().unwrap();
         let provider_router = Router::new()
-            .route("/v1/responses", post(publication_responses).with_state(requests))
-            .route("/v1/responses/compact", post(publication_compact).with_state(compact_requests));
+            .route("/v1/responses", post(publication_v2_responses).with_state((requests, compact_requests)));
         let provider_server = tokio::spawn(async move {
             axum::serve(provider_listener, provider_router).await.unwrap();
         });
@@ -220,26 +276,27 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert!(!events.iter().any(|event| event["type"] == "response.completed"), "registration failure cannot complete successfully: {wire}");
         assert!(events.iter().any(|event| event["type"] == "error" || event["type"] == "response.failed"), "client must observe terminal failure: {wire}");
 
-        let sending = client.post(format!("http://{address}/v1/responses/compact"))
+        let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
-            .json(&json!({"model":"native-publication","input":"standalone source window"}))
+            .json(&json!({"model":"native-publication","stream":true,"input":[
+                {"role":"user","content":[{"type":"input_text","text":"standalone source window"}]},
+                {"type":"compaction_trigger"}
+            ]}))
             .send();
         let supply = async {
             let request = compact_received.recv().await.unwrap();
-            assert!(request.body["input"].as_array().unwrap().iter().any(|item| {
-                item["content"].as_array().is_some_and(|parts| parts.iter().any(|part| {
-                    part["text"] == "standalone source window"
-                }))
-            }), "Provider must receive the standalone source text");
-            request.respond.send(json!({"id":"standalone-failure","object":"response.compaction","created_at":1730000001,"output":[native],"usage":{"input_tokens":32,"output_tokens":4,"total_tokens":36,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}})).unwrap();
+            assert_eq!(request.body["stream"], true);
+            assert_eq!(
+                request.body["input"].as_array().unwrap().last().unwrap()["type"],
+                "compaction_trigger"
+            );
+            request.respond.send(json!(v2_compaction_events("standalone-failure", &native))).unwrap();
         };
         let (response, ()) = tokio::join!(sending, supply);
         let response = response.unwrap();
         let status = response.status();
-        let failure: Value = response.json().await.unwrap();
-        assert!(status.is_server_error(), "{status}: {failure}");
-        assert!(failure["error"]["message"].as_str().is_some(), "standalone must return a visible error: {failure}");
-        assert!(!failure.to_string().contains("never-public-ciphertext"));
+        let failure = response.text().await.unwrap();
+        assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{failure}");
 
         // 查询路径不再隐式等待观测 writer；显式屏障代替基于时间的轮询。
         admin.observation_flush().await.unwrap();
@@ -264,27 +321,32 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         // is removed, ruling out Provider schema/routing errors as the failure cause.
         sqlx::query("DROP TRIGGER deny_native_publication")
             .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
-        let sending = client.post(format!("http://{address}/v1/responses/compact"))
+        let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
-            .json(&json!({"model":"native-publication","input":"standalone source window"}))
+            .json(&json!({"model":"native-publication","stream":true,"input":[
+                {"role":"user","content":[{"type":"input_text","text":"standalone source window"}]},
+                {"type":"compaction_trigger"}
+            ]}))
             .send();
         let supply = async {
             let request = compact_received.recv().await.unwrap();
-            assert!(request.body["input"].as_array().unwrap().iter().any(|item| {
-                item["content"].as_array().is_some_and(|parts| parts.iter().any(|part| {
-                    part["text"] == "standalone source window"
-                }))
-            }), "Provider must receive the standalone source text");
-            request.respond.send(json!({"id":"standalone-failure","object":"response.compaction","created_at":1730000001,"output":[native],"usage":{"input_tokens":32,"output_tokens":4,"total_tokens":36,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}})).unwrap();
+            assert_eq!(request.body["stream"], true);
+            assert_eq!(
+                request.body["input"].as_array().unwrap().last().unwrap()["type"],
+                "compaction_trigger"
+            );
+            request.respond.send(json!(v2_compaction_events("standalone-success", &native))).unwrap();
         };
         let (response, ()) = tokio::join!(sending, supply);
         let response = response.unwrap();
         assert!(response.status().is_success());
-        let delivered: Value = response.json().await.unwrap();
-        assert_eq!(delivered["output"], json!([native]));
+        let wire = response.text().await.unwrap();
+        assert!(wire.contains("response.output_item.done"));
+        assert!(wire.contains("response.completed"));
+        assert!(wire.contains("never-public-ciphertext"));
         let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24).unwrap();
-        let decoded = pair.decode_request(json!({"model":"native-publication","input":delivered["output"]})).unwrap();
+        let decoded = pair.decode_request(json!({"model":"native-publication","input":[native]})).unwrap();
         assert!(gateway.compaction.resolve(&Principal::new(key.id), &decoded.items).await.unwrap().is_some());
         server.abort();
         provider_server.abort();
@@ -293,7 +355,8 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
 }
 
 #[tokio::test]
-async fn inbound_responses_websocket_preserves_native_compaction_and_replays_current_window() {
+async fn inbound_responses_websocket_preserves_inline_native_compaction_and_replays_current_window()
+{
     tokio::time::timeout(Duration::from_secs(20), async {
         let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -473,6 +536,109 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         provider_server.abort();
         gateway.observation.shutdown().await;
     }).await.expect("native ingress WebSocket scenario timed out");
+}
+
+#[tokio::test]
+async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_without_generation() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
+        let harness = Harness::start(
+            "open-responses",
+            Router::new()
+                .route("/v1/responses", post(responses).with_state(requests)),
+        )
+        .await;
+        let mut socket = reqwest::Client::new()
+            .get(harness.url("/v1/responses"))
+            .bearer_auth(&harness.token)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        let history = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"standalone source window"}]});
+        let trigger = json!({"type":"compaction_trigger"});
+        for input in [
+            json!([history.clone(), trigger.clone()]),
+            json!([trigger.clone(), history.clone()]),
+            json!([trigger.clone(), trigger.clone()]),
+        ] {
+            socket
+                .send(reqwest_websocket::Message::Text(
+                    json!({"type":"response.create","model":"cross","input":input}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let message = socket.next().await.expect("rejection frame").unwrap();
+            let reqwest_websocket::Message::Text(text) = message else {
+                panic!("expected a JSON text error frame");
+            };
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(event["type"], "error", "{event}");
+            assert_eq!(event["status"], 400, "{event}");
+            assert_eq!(event["error"]["code"], "unsupported_feature", "{event}");
+            assert_eq!(event["error"]["type"], "invalid_request", "{event}");
+            assert!(
+                event["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("POST /v1/responses")),
+                "{event}"
+            );
+        }
+        assert!(
+            received.try_recv().is_err(),
+            "standalone compaction must not be dispatched to the upstream"
+        );
+
+        // Rejections leave the connection usable for an ordinary inference.
+        socket
+            .send(reqwest_websocket::Message::Text(
+                json!({"type":"response.create","model":"cross","input":"ordinary request"})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let ordinary = tokio::select! {
+            request = received.recv() => request.expect("ordinary inference request"),
+            event = socket.next() => panic!("Gateway answered before reaching the upstream: {event:?}"),
+        };
+        assert!(
+            ordinary.body.to_string().contains("ordinary request"),
+            "{}",
+            ordinary.body
+        );
+        ordinary
+            .respond
+            .send(completed(
+                "ordinary-completed",
+                json!([{
+                    "type":"message","id":"ordinary-output","role":"assistant","status":"completed",
+                    "content":[{"type":"output_text","text":"ordinary response","annotations":[]}]
+                }]),
+            ))
+            .unwrap();
+        let terminal = loop {
+            let message = socket.next().await.expect("ordinary event").unwrap();
+            let reqwest_websocket::Message::Text(text) = message else {
+                continue;
+            };
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            if event["type"] == "response.completed" {
+                break event;
+            }
+        };
+        assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+        socket
+            .close(reqwest_websocket::CloseCode::Normal, None)
+            .await
+            .unwrap();
+        harness.finish().await;
+    })
+    .await
+    .expect("WebSocket standalone compaction rejection timed out");
 }
 
 // ── Cross-protocol Remote Compaction (ADR-0089) ─────────────────────────────────
@@ -689,26 +855,30 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
         let block = upstream["content"][0].clone();
 
         let sending = client
-            .post(harness.url("/v1/responses/compact"))
+            .post(harness.url("/v1/responses"))
             .bearer_auth(&harness.token)
             .json(&json!({
                 "model": "cross",
-                "input": "summarize this long history",
-                "instructions": "keep file names"
+                "stream": true,
+                "input": [{"role":"user","content":"summarize this long history"}, {"type": "compaction_trigger"}]
             }))
             .send();
         let supply = async {
             let seen = received.recv().await.unwrap();
             assert_eq!(seen.path, "/v1/messages");
-            assert_eq!(seen.body["compaction"], json!({"type": "summarize"}));
+            assert_eq!(
+                seen.body["compaction"]["type"],
+                "summarize"
+            );
+            assert!(
+                seen.body["compaction"]["instructions"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "V2 compaction carries the platform summary instructions"
+            );
             assert_eq!(
                 seen.body["stream"], true,
                 "native compaction must request an SSE envelope: {}",
-                seen.body
-            );
-            assert!(
-                seen.body["system"].to_string().contains("keep file names"),
-                "{}",
                 seen.body
             );
             assert!(
@@ -731,11 +901,19 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
             "{}",
             response.text().await.unwrap()
         );
-        let resource: Value = response.json().await.unwrap();
-        assert_eq!(resource["object"], "response.compaction");
-        assert_eq!(resource["usage"]["input_tokens"], 1200);
-        assert_eq!(resource["usage"]["output_tokens"], 300);
-        let item = resource["output"][0].clone();
+        let wire = response.text().await.unwrap();
+        assert!(wire.contains("response.output_item.done"), "{wire}");
+        assert!(wire.contains("response.completed"), "{wire}");
+        let item = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find(|event| {
+                event["type"] == "response.output_item.done"
+                    && event["item"]["type"] == "compaction"
+            })
+            .map(|event| event["item"].clone())
+            .expect("exactly one V2 compaction item");
         assert_eq!(item["type"], "compaction");
         assert_eq!(
             stravia_protocol_codec::codec::compaction::open(
@@ -807,37 +985,17 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
 #[tokio::test]
 async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_window() {
     tokio::time::timeout(Duration::from_secs(60), async {
-        let (compact_requests, mut compact_received) = mpsc::channel::<ProviderRequest>(2);
         let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
         let harness = Harness::start(
             "open-responses",
-            Router::new()
-                .route(
-                    "/v1/responses/compact",
-                    post(publication_compact).with_state(compact_requests),
-                )
-                .route("/v1/responses", post(responses).with_state(requests)),
+            Router::new().route("/v1/responses", post(v2_compaction_responses).with_state(requests)),
         )
         .await;
         let client = reqwest::Client::new();
-        let retained = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"retained question"}]});
-        let upstream_resource = |id: &str, cipher: &str| {
-            json!({
-                "id": id,
-                "object": "response.compaction",
-                "created_at": 1730000001,
-                "output": [
-                    retained.clone(),
-                    {"type": "compaction", "id": format!("{id}_state"), "encrypted_content": cipher}
-                ],
-                "usage": {
-                    "input_tokens": 32, "output_tokens": 4, "total_tokens": 36,
-                    "input_tokens_details": {"cached_tokens": 0},
-                    "output_tokens_details": {"reasoning_tokens": 0}
-                }
-            })
+        let state = |id: &str, cipher: &str| {
+            json!({"type": "compaction", "id": id, "encrypted_content": cipher})
         };
-
+        let history = "summarize this long history";
         let sending = client
             .post(harness.url("/v1/messages"))
             .header("x-api-key", &harness.token)
@@ -845,30 +1003,39 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
             .json(&json!({
                 "model": "cross",
                 "max_tokens": 1024,
-                "messages": [{"role": "user", "content": "summarize this long history"}],
+                "messages": [{"role": "user", "content": history}],
                 "compaction": {"type": "summarize"}
             }))
             .send();
         let supply = async {
-            let request = compact_received.recv().await.unwrap();
-            assert!(request.body.to_string().contains("summarize this long history"));
-            request.respond.send(upstream_resource("cmp_up_1", "opaque-cipher")).unwrap();
+            let request = received.recv().await.unwrap();
+            assert_eq!(
+                request.body["input"].as_array().unwrap().last().unwrap()["type"],
+                "compaction_trigger"
+            );
+            assert!(request.body.to_string().contains(history));
+            request
+                .respond
+                .send(json!(v2_compaction_events(
+                    "cmp_up_1",
+                    &state("cmp_state_1", "opaque-cipher")
+                )))
+                .unwrap();
         };
         let response = exchange(sending, supply).await;
         assert!(response.status().is_success(), "{}", response.text().await.unwrap());
         let message: Value = response.json().await.unwrap();
         assert_eq!(message["type"], "message");
         assert_eq!(message["stop_reason"], "compaction");
-        assert_eq!(message["usage"]["iterations"][0]["input_tokens"], 32);
         let block = message["content"][0].clone();
         assert_eq!(block["type"], "compaction");
         let Some(stravia_protocol_codec::codec::compaction::Envelope::Responses { output }) =
             stravia_protocol_codec::codec::compaction::open(block["signature"].as_str().unwrap())
         else {
-            panic!("the Responses window must travel in the block signature: {block}");
+            panic!("the V2 state must travel in the block signature: {block}");
         };
-        assert_eq!(output[0], retained);
-        assert_eq!(output[1]["encrypted_content"], "opaque-cipher");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["encrypted_content"], "opaque-cipher");
 
         // `stream: true` still gets one whole block, framed as Anthropic SSE.
         let sending = client
@@ -883,8 +1050,14 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
             }))
             .send();
         let supply = async {
-            let request = compact_received.recv().await.unwrap();
-            request.respond.send(upstream_resource("cmp_up_2", "opaque-cipher-2")).unwrap();
+            let request = received.recv().await.unwrap();
+            request
+                .respond
+                .send(json!(v2_compaction_events(
+                    "cmp_up_2",
+                    &state("cmp_state_2", "opaque-cipher-2")
+                )))
+                .unwrap();
         };
         let response = exchange(sending, supply).await;
         assert!(response.status().is_success());
@@ -896,7 +1069,7 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
         assert!(wire.contains(r#""stop_reason":"compaction""#), "{wire}");
         assert!(wire.contains(r#""type":"compaction""#), "{wire}");
 
-        // Replay: the window sealed in the block expands back to native Responses items.
+        // Replay: the one V2 compaction state expands back to a native Responses item.
         let sending = client
             .post(harness.url("/v1/messages"))
             .header("x-api-key", &harness.token)
@@ -912,9 +1085,8 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
         let supply = async {
             let request = received.recv().await.unwrap();
             let input = request.body["input"].as_array().unwrap();
-            assert_eq!(input[0]["content"][0]["text"], "retained question", "{input:?}");
-            assert_eq!(input[1]["type"], "compaction", "{input:?}");
-            assert_eq!(input[1]["encrypted_content"], "opaque-cipher");
+            assert_eq!(input[0]["type"], "compaction", "{input:?}");
+            assert_eq!(input[0]["encrypted_content"], "opaque-cipher");
             assert!(input.last().unwrap().to_string().contains("next step"));
             request.respond.send(completed("followup", json!([{
                 "type":"message","id":"accepted","role":"assistant","status":"completed",
@@ -932,7 +1104,7 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
 }
 
 #[tokio::test]
-async fn anthropic_client_gets_the_anthropic_upstream_compaction_verbatim() {
+async fn anthropic_client_gets_the_upstream_compaction_state_through_ir() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let (requests, mut received) = mpsc::channel::<SeenRequest>(1);
         let harness = Harness::start(
@@ -971,7 +1143,16 @@ async fn anthropic_client_gets_the_anthropic_upstream_compaction_verbatim() {
         };
         let response = exchange(sending, supply).await;
         assert!(response.status().is_success());
-        assert_eq!(response.json::<Value>().await.unwrap(), upstream);
+        let message: Value = response.json().await.unwrap();
+        let upstream_block = &upstream["content"][0];
+        assert_eq!(message["type"], "message");
+        assert_eq!(message["stop_reason"], "compaction");
+        assert_eq!(message["content"][0]["type"], "compaction");
+        assert_eq!(
+            message["content"][0]["signature"],
+            upstream_block["signature"]
+        );
+        assert_eq!(message["content"][0]["content"], upstream_block["content"]);
         harness.finish().await;
     })
     .await

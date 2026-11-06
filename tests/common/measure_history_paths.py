@@ -39,7 +39,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from tests.common.helpers import (
     CompleteRequestHTTPConnection, initialize_server, start_stravia_server,
-    stop_stravia_server, wait_for_setup_token,
+    stop_stravia_server, wait_for_setup_token, responses_stream_result,
 )
 from tests.common.measure_protocol_http import (
     Catalog, ProcessReader, database_config, encode, response_frames, response_text,
@@ -125,36 +125,45 @@ class NativeProvider(BaseHTTPRequestHandler):
             expectation = self.server.expected
             previous_id = body.get("previous_response_id")
             previous_history = self.server.response_histories.get(previous_id) if previous_id else None
-        effective_items = (previous_history + items) if previous_history is not None else items
+        compact = bool(items) and items[-1].get("type") == "compaction_trigger"
+        history = items[:-1] if compact else items
+        effective_items = (previous_history + history) if previous_history is not None else history
         error_code = "unknown_previous_response" if previous_id and previous_history is None else None
         if semantics(effective_items) != semantics(expectation["input"]):
             error_code = error_code or "synthetic_history_mismatch"
-        compact = self.path == "/v1/responses/compact"
-        if self.path not in ("/v1/responses", "/v1/responses/compact"):
+        if self.path != "/v1/responses":
             error_code = error_code or "synthetic_unsupported_path"
         valid = error_code is None
         signature = hashlib.sha256(encode(semantics(effective_items))).hexdigest()[:24]
         text = expectation["text"]
+        result = response_frames("open-responses", "native-model", text, False)[0][1]
+        result["id"] = "resp_" + signature
         if compact:
             signature = hashlib.sha256(encode({"input": semantics(effective_items), "instructions": body.get("instructions")})).hexdigest()[:24]
             window = [
-                {"type": "message", "role": "user", "content": "retained task identity"},
                 {"type": "compaction", "id": "cmp_" + signature, "encrypted_content": "opaque-" + signature},
-                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "retained answer", "annotations": []}]},
             ]
-            result = {"id": "cmp_operation_" + signature, "object": "response.compaction", "created_at": 1788825600, "output": window}
+            result["output"] = window
         else:
-            result = response_frames("open-responses", "native-model", text, False)[0][1]
-            result["id"] = "resp_" + signature
             result["output"][0]["id"] = "msg_" + signature
         if valid and not compact:
             with self.server.lock:
                 self.server.response_histories[result["id"]] = json.loads(json.dumps(effective_items + result["output"]))
         if not valid:
             result = {"error": {"code": error_code}}
-        data = encode(result)
+        if compact and valid:
+            events = [
+                {"type": "response.created", "response": {**result, "status": "in_progress", "output": [], "usage": None}},
+                {"type": "response.output_item.added", "output_index": 0, "item": window[0]},
+                {"type": "response.output_item.done", "output_index": 0, "item": window[0]},
+                {"type": "response.completed", "response": result},
+            ]
+            data = b"".join(f"event: {event['type']}\ndata: {json.dumps({**event, 'sequence_number': sequence})}\n\n".encode()
+                            for sequence, event in enumerate(events))
+        else:
+            data = encode(result)
         self.send_response(200 if valid else 400)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/event-stream" if compact and valid else "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -351,6 +360,8 @@ class RequestTransport:
 
 def send(transport, base, key, model, items, upstream, case, expected_parent, text, previous=None, compact=False):
     body = {"model": model, "input": items}
+    if compact:
+        body.update(input=[*items, {"type": "compaction_trigger"}], stream=True)
     if previous:
         body["previous_response_id"] = previous
     if "instructions" in case:
@@ -373,7 +384,7 @@ def send(transport, base, key, model, items, upstream, case, expected_parent, te
             finally:
                 row["connect_ms"] = (time.perf_counter() - connect_started) * 1000
         request_started = time.perf_counter()
-        connection.request("POST", "/v1/responses" + ("/compact" if compact else ""), raw_body, {
+        connection.request("POST", "/v1/responses", raw_body, {
             "Authorization": "Bearer " + key, "Content-Type": "application/json",
             # Public ingress contract: enables session candidate indexing by
             # semantic-unit count before canonical-history verification.
@@ -384,7 +395,7 @@ def send(transport, base, key, model, items, upstream, case, expected_parent, te
         raw = response.read()
         row["latency_ms"] = (time.perf_counter() - started) * 1000
         row["http_request_ms"] = (time.perf_counter() - request_started) * 1000
-        result = json.loads(raw)
+        result = responses_stream_result(raw) if compact and response.status == 200 else json.loads(raw)
         error = result.get("error") if isinstance(result, dict) else None
         code = error.get("code") if isinstance(error, dict) else None
         safe_codes = {"synthetic_history_mismatch", "unknown_previous_response", "synthetic_unsupported_path",
@@ -392,7 +403,9 @@ def send(transport, base, key, model, items, upstream, case, expected_parent, te
                       "parent_generation_not_found", "generation_not_found", "invalid_compacted_window"}
         row["response_error_code"] = code if isinstance(code, str) and code in safe_codes else ("unrecognized_error_code" if code is not None else None)
         if compact:
-            row["terminal_valid"] = result.get("object") == "response.compaction" and bool(result.get("output"))
+            row["terminal_valid"] = (result.get("object") == "response" and result.get("status") == "completed"
+                                     and len(result.get("output", [])) == 1
+                                     and result["output"][0].get("type") == "compaction")
             # Compare against this provider arrival after synchronization below.
             row["content_valid"] = False
         else:

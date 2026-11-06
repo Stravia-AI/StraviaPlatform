@@ -5,6 +5,7 @@ pub mod formatter;
 pub mod parser;
 pub mod stream;
 
+use serde_json::Value;
 use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
 
 pub(super) fn stream_error_kind(error: &AiError) -> AiErrorKind {
@@ -172,7 +173,46 @@ pub(super) fn validate_extension_item(
     Ok(())
 }
 
-use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
+fn native_compaction_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> Option<Value> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
+    let MessageContent::Blocks(blocks) = &item.content else {
+        return None;
+    };
+    let (kind, encrypted_content) = match blocks.as_slice() {
+        [
+            ContentBlock::Compaction {
+                encrypted_content,
+                summary,
+            },
+        ] => (
+            "compaction",
+            Some(if summary.is_some() {
+                crate::codec::compaction::seal_anthropic(
+                    &crate::codec::compaction::anthropic_compaction_block(item)?,
+                )
+            } else {
+                encrypted_content.clone()
+            }),
+        ),
+        [ContentBlock::CompactionTrigger {}] => ("compaction_trigger", None),
+        _ => return None,
+    };
+    let mut wire = item
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("__open_responses_item"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    wire.insert("type".into(), kind.into());
+    if let Some(encrypted_content) = encrypted_content {
+        wire.insert("encrypted_content".into(), encrypted_content.into());
+    }
+    if let Some(id) = item.id_ref() {
+        wire.insert("id".into(), id.into());
+    }
+    Some(Value::Object(wire))
+}
 
 /// OpenAI server-side compaction permits dropping input/output before the latest
 /// newly emitted state (https://developers.openai.com/api/docs/guides/compaction).
@@ -182,6 +222,7 @@ pub fn inline_compaction_boundary(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
     fresh_states: &[stravia_runtime_contract::protocol::ir::AiItem],
 ) -> Option<usize> {
+    use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
     items.iter().rposition(|item| {
         item.is_compaction()
             && native_compaction_item(item).is_some_and(|wire| {

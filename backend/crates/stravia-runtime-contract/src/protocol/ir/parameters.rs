@@ -87,6 +87,9 @@ pub struct AudioOutput {
 pub struct CompactionControl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<u32>,
+    /// 摘要专用指令，与会话级 `AiRequest.instructions` 分离。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -626,6 +629,7 @@ impl RequestParameters {
                         &mut self.compaction,
                         Some(CompactionControl {
                             threshold_tokens: threshold,
+                            instructions: None,
                         }),
                     );
                 }

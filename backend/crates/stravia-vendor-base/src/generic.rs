@@ -130,13 +130,9 @@ pub(crate) fn execute_inference(
         .filter(|model| !model.is_empty())
         .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "inference requires a model"))?;
     request.model = model.to_owned();
-    let compaction_control = (operation == Operation::Compact)
-        .then(|| {
-            stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(
-                &mut request,
-            )
-        })
-        .flatten();
+    let compaction_control = (operation == Operation::Compact).then(|| {
+        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
+    });
     if !matches!(protocol, COHERE_PROTOCOL | GATEWAY_PROTOCOL) {
         thinking::apply(
             vendor_id,

@@ -222,16 +222,11 @@ fn infer(
     let preserve_upstream_errors = operation == Operation::Infer
         && protocol == OPEN_RESPONSES_2026_04_24
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
-    let compact_fields = if operation == Operation::Compact {
-        request
-            .meta
-            .vendor
-            .ingress
-            .get("__stravia_compact_fields")
-            .cloned()
-    } else {
-        None
-    };
+    if operation == Operation::Compact {
+        stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
+            &mut request,
+        );
+    }
     let encoded = crate::parameters::encode(&provider, &protocol.to_string(), request)?;
     let mut body = encoded.body;
     if protocol == OPEN_RESPONSES_2026_04_24 {
@@ -253,15 +248,7 @@ fn infer(
         .map(Box::new)
         .map(OperationOutput::Infer);
     }
-    if operation == Operation::Compact {
-        retain_compact_fields(compact_fields.as_ref(), &mut body)?;
-    }
-    let path = if operation == Operation::Compact {
-        "/v1/responses/compact".to_owned()
-    } else {
-        encoded.path
-    };
-    let url = endpoint(&provider.base_url, &path);
+    let url = endpoint(&provider.base_url, &encoded.path);
     let mut headers = common::header_pairs(&encoded.headers)?;
     set_header(&mut headers, "content-type", "application/json".into());
     if !headers
@@ -343,29 +330,6 @@ fn prepare_responses_body(
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
     headers.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
     headers.push((name.into(), value));
-}
-
-fn retain_compact_fields(fields: Option<&Value>, body: &mut Value) -> Result<(), PluginError> {
-    let object = body
-        .as_object_mut()
-        .ok_or_else(|| invalid("Open Responses compact request must be an object"))?;
-    let explicit = fields.and_then(Value::as_array);
-    object.retain(|key, _| {
-        matches!(key.as_str(), "model" | "input" | "instructions")
-            || (matches!(
-                key.as_str(),
-                "previous_response_id"
-                    | "prompt_cache_key"
-                    | "prompt_cache_options"
-                    | "prompt_cache_retention"
-                    | "service_tier"
-            ) && explicit.is_none_or(|fields| {
-                fields
-                    .iter()
-                    .any(|field| field.as_str() == Some(key.as_str()))
-            }))
-    });
-    Ok(())
 }
 
 fn infer_responses_websocket(
@@ -821,34 +785,5 @@ mod tests {
             prepare_responses_body(&provider, &mut body).unwrap();
             assert_eq!(body.get("include"), include.as_ref());
         }
-    }
-
-    #[test]
-    fn compact_metadata_cannot_authorize_nonofficial_fields() {
-        let mut body = serde_json::json!({
-            "model": "model", "input": [], "instructions": "keep",
-            "previous_response_id": "response", "prompt_cache_key": "cache",
-            "service_tier": "default", "max_output_tokens": 10,
-            "unknown": {"business": true}
-        });
-        retain_compact_fields(
-            Some(&serde_json::json!([
-                "previous_response_id",
-                "prompt_cache_key",
-                "service_tier",
-                "max_output_tokens",
-                "unknown"
-            ])),
-            &mut body,
-        )
-        .unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "model": "model", "input": [], "instructions": "keep",
-                "previous_response_id": "response", "prompt_cache_key": "cache",
-                "service_tier": "default"
-            })
-        );
     }
 }

@@ -741,13 +741,6 @@ pub(super) fn scan_responses_body(
             }
             "response.completed" | "response.done" => {
                 let response = payload.get("response").cloned().unwrap_or(payload);
-                if response
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| status != "completed")
-                {
-                    return Err(retryable("Codex response was incomplete"));
-                }
                 return Ok((output_items, response));
             }
             "error" | "response.failed" | "response.incomplete" => {

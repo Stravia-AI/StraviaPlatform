@@ -226,7 +226,9 @@ pub fn decode_compaction_preserving_upstream_errors(
     host: &GuestHost,
     response: HttpResponse,
 ) -> Result<NativeCompactionResponse, PluginError> {
-    preserve_compaction_upstream_errors(host, response, decode_compaction)
+    preserve_compaction_upstream_errors(host, response, |response| {
+        decode_compaction(host, response)
+    })
 }
 
 /// Decode standalone Anthropic compaction (`compaction` request parameter), with the
@@ -242,7 +244,7 @@ pub fn decode_anthropic_compaction_preserving_upstream_errors(
 
 /// Relay a non-success standalone compaction response as the upstream's own
 /// failed envelope; a successful one is handed to `decode`, which owns the
-/// vendor's wire format (unary JSON, or a stream folded into a compact resource).
+/// vendor's native stream format.
 pub fn preserve_compaction_upstream_errors(
     host: &GuestHost,
     response: HttpResponse,
@@ -267,13 +269,30 @@ pub fn preserve_compaction_upstream_errors(
     Err(failure)
 }
 
-pub fn decode_compaction(response: HttpResponse) -> Result<NativeCompactionResponse, PluginError> {
-    let body = read_compaction_body(response)?;
-    stravia_protocol_codec::codec::open_responses::parser::parse_compaction_response(&body).map_err(
+pub fn decode_compaction(
+    host: &GuestHost,
+    response: HttpResponse,
+) -> Result<NativeCompactionResponse, PluginError> {
+    let status = response.status()?;
+    let headers = response.headers()?;
+    if !(200..300).contains(&status) {
+        let body = read_http_body(&response, MAX_ERROR_BODY)?;
+        return Err(upstream_error(status, &headers, &body));
+    }
+    let body = read_http_body(&response, MAX_UNARY_BODY)?;
+    stravia_protocol_codec::codec::compaction::parse_responses_compaction_stream(&body).map_err(
         |error| {
+            if let Some(upstream) = error.downcast_ref::<AiError>() {
+                return match host.emit_delta(&AiStreamDelta::StreamError {
+                    error: upstream.clone(),
+                }) {
+                    Ok(()) => model_error(AiErrorKind::ServerError, error.to_string()),
+                    Err(error) => error,
+                };
+            }
             model_error(
                 AiErrorKind::ServerError,
-                format!("invalid Open Responses compaction response: {error}"),
+                format!("invalid Responses compaction stream: {error}"),
             )
         },
     )
@@ -336,22 +355,6 @@ pub fn decode_anthropic_compaction(
             )
         },
     )
-}
-
-fn read_compaction_body(response: HttpResponse) -> Result<serde_json::Value, PluginError> {
-    let status = response.status()?;
-    let headers = response.headers()?;
-    if !(200..300).contains(&status) {
-        let body = read_http_body(&response, MAX_ERROR_BODY)?;
-        return Err(upstream_error(status, &headers, &body));
-    }
-    let body = read_http_body(&response, MAX_UNARY_BODY)?;
-    serde_json::from_slice(&body).map_err(|error| {
-        model_error(
-            AiErrorKind::ServerError,
-            format!("upstream returned invalid compaction JSON: {error}"),
-        )
-    })
 }
 
 pub fn decode_ai_response(

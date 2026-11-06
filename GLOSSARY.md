@@ -428,7 +428,7 @@ _避免使用_：摘要文本匹配、Thinking History Marker、可变 Session h
 
 ## Remote Compaction Request
 
-Remote Compaction Request 是客户端发起、由当前选中 Target 的上游执行的上下文压缩请求。独立 compact 操作在协议无法承载时返回不支持；能力未知但协议可承载时仍尝试转发，由上游裁决，成功或错误直接返回客户端，不为完成压缩而重试或切换 Target。普通推理中的 inline 控制与触发条目遵循 ADR-0006：目标无法表达时省略，继续处理可表达的业务输入，不代表压缩成功，也不生成压缩状态。它不是平台主动压缩策略，没有平台配置或本地摘要。Open Responses 与 Anthropic Messages 都按各自原生机制接收，并把上游结果翻译成入口协议；另一协议产生的状态封装在本协议的不透明字段里回传，见 ADR-0089。
+Remote Compaction Request 是客户端发起、由当前选中 Target 的上游执行的上下文压缩请求。独立压缩在协议无法承载时返回不支持；能力未知但协议可承载时仍由上游裁决，成功或错误直接返回客户端，不为完成压缩而重试或切换 Target。显式独立压缩与普通推理中的 inline 控制不同：后者在目标无法表达时可按 ADR-0006 省略并继续处理业务输入，不代表压缩成功。它不是平台主动压缩策略，没有平台配置或本地摘要。客户端负责构造压缩后的保留窗口；平台只交付上游状态并执行协议转换。另一协议产生的状态封装在入口协议的不透明字段里回传，见 ADR-0089。
 _避免使用_：Native Automatic Window、平台自动压缩、累计 token 限额
 
 ## Current Tool Continuation

@@ -1098,6 +1098,9 @@ fn item_block_representable(
         _ => {
             request_block_representable(target, block)
                 || output
+                    && target == Protocol::AnthropicMessages
+                    && matches!(block, ContentBlock::Compaction { .. })
+                || output
                     && matches!(
                         target,
                         Protocol::OpenResponses
@@ -1432,6 +1435,8 @@ fn response_item_representable(
 ) -> bool {
     if target == Protocol::OpenResponses {
         open_responses_output_item_representable(item)
+    } else if target == Protocol::AnthropicMessages && item.is_compaction() {
+        true
     } else {
         !item.is_compaction() && !item.is_compaction_trigger() && item.unknown_ref().is_none()
     }

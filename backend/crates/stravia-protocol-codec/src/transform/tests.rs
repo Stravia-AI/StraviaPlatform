@@ -1421,16 +1421,13 @@ fn anthropic_compaction_summary_survives_as_text_on_targets_without_the_block() 
 
 #[test]
 fn anthropic_target_replays_an_anthropic_state_a_responses_client_carried() {
-    let resource = crate::codec::compaction::responses_compaction_from_anthropic(&json!({
-        "type": "message",
-        "content": [{"type": "compaction", "content": "Refactored the parser", "signature": "sig-1"}],
-        "stop_reason": "compaction",
-        "usage": {"input_tokens": 0, "output_tokens": 0}
-    }))
-    .unwrap();
+    let state = json!({"type": "compaction", "id": crate::codec::compaction::anthropic_state_id("sig-1"),
+    "encrypted_content": crate::codec::compaction::seal_anthropic(&json!({
+        "type": "compaction", "content": "Refactored the parser", "signature": "sig-1",
+    }))});
     let responses_history = json!({
         "model": "claude",
-        "input": [resource["output"][0].clone(), {"role": "user", "content": "keep going"}]
+        "input": [state, {"role": "user", "content": "keep going"}]
     });
     let to_anthropic = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
@@ -1463,14 +1460,10 @@ fn foreign_target_downgrade_applies_only_when_every_state_is_readable() {
     let pair = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .unwrap();
-    let anthropic_state = crate::codec::compaction::responses_compaction_from_anthropic(&json!({
-        "type": "message",
-        "content": [{"type": "compaction", "content": "Summary", "signature": "sig-1"}],
-        "stop_reason": "compaction",
-        "usage": {"input_tokens": 0, "output_tokens": 0}
-    }))
-    .unwrap()["output"][0]
-        .clone();
+    let anthropic_state = json!({"type": "compaction", "id": crate::codec::compaction::anthropic_state_id("sig-1"),
+    "encrypted_content": crate::codec::compaction::seal_anthropic(&json!({
+        "type": "compaction", "content": "Summary", "signature": "sig-1",
+    }))});
     let responses_state =
         json!({"type": "compaction", "id": "cmp_r", "encrypted_content": "opaque"});
 

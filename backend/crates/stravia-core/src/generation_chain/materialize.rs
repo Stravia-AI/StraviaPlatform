@@ -947,8 +947,11 @@ pub(super) fn request_parameters_retained_bytes(parameters: &RequestParameters) 
     if let Some(compaction) = parameters.compaction.as_ref() {
         let CompactionControl {
             threshold_tokens: _,
+            instructions,
         } = compaction;
-        bytes = bytes.saturating_add(std::mem::size_of::<CompactionControl>());
+        bytes = bytes
+            .saturating_add(std::mem::size_of::<CompactionControl>())
+            .saturating_add(option_string_bytes(instructions));
     }
     if let Some(metadata) = parameters.metadata.as_ref() {
         bytes = bytes.saturating_add(metadata.iter().fold(0usize, |bytes, (key, value)| {

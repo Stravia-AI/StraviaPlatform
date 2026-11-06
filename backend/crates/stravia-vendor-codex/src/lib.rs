@@ -246,6 +246,13 @@ fn infer(
     let model = required_model(&provider)?;
     require_codex_protocol(&provider)?;
     normalize_request(model, &mut request);
+    if operation == Operation::Compact {
+        // V2 使用同一份 typed IR：缺省摘要指令是实时 base instructions，
+        // 触发器位于 input 末尾；不发送 V1 context_management 控制。
+        stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
+            &mut request,
+        );
+    }
 
     let protocol = OPEN_RESPONSES_2026_04_24;
     let preserve_upstream_errors = operation == Operation::Infer
@@ -269,7 +276,6 @@ fn infer(
         &provider,
         &protocol.to_string(),
         request,
-        operation,
         websocket,
         &session,
     )?;
@@ -288,7 +294,6 @@ fn infer(
         body,
         headers: codec_headers,
         egress_path,
-        retained,
     } = attempt;
     let path = strip_v1_prefix(&egress_path).to_owned();
     let mut headers = codec_headers;
@@ -344,10 +349,8 @@ fn infer(
             decoded.map(Box::new).map(OperationOutput::Infer)
         }
         Operation::Compact => {
-            common::preserve_compaction_upstream_errors(host, response, |response| {
-                compaction::decode(response, retained)
-            })
-            .map(OperationOutput::Compact)
+            common::preserve_compaction_upstream_errors(host, response, compaction::decode)
+                .map(OperationOutput::Compact)
         }
         _ => Err(invalid(
             "Codex codec returned an unexpected operation result",
@@ -362,7 +365,6 @@ struct Attempt {
     /// Codec headers for the HTTP wire; empty for WebSocket.
     headers: Vec<(String, String)>,
     egress_path: String,
-    retained: Vec<Value>,
 }
 
 fn normalize_request(model: &str, request: &mut AiRequest) {
@@ -383,7 +385,6 @@ fn prepare_attempt(
     provider: &ProviderSnapshot,
     protocol: &str,
     mut request: AiRequest,
-    operation: Operation,
     websocket: bool,
     session: &codex::NativeSession,
 ) -> Result<Attempt, PluginError> {
@@ -405,18 +406,11 @@ fn prepare_attempt(
     } else {
         codex::prepare_body(&mut body)?;
     }
-    // 独立压缩与官方客户端一致：普通流式 /responses + 末尾 compaction_trigger。
-    let retained = if operation == Operation::Compact {
-        compaction::arm(&mut body)?
-    } else {
-        Vec::new()
-    };
     session.apply_body(&mut body);
     Ok(Attempt {
         body,
         headers,
         egress_path: encoded.path,
-        retained,
     })
 }
 
@@ -1016,6 +1010,61 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[test]
+    fn v2_compaction_request_uses_live_instructions_and_typed_trigger() {
+        use stravia_runtime_contract::protocol::ir::CompactionControl;
+
+        let mut explicit = AiRequest::new("gpt-6-astra", Vec::new());
+        explicit.instructions = Some("session rules".into());
+        explicit.parameters.compaction = Some(CompactionControl {
+            threshold_tokens: Some(4096),
+            instructions: Some("summary rules".into()),
+        });
+        stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
+            &mut explicit,
+        );
+        assert_eq!(
+            explicit.instructions.as_deref(),
+            Some("session rules\n\nCompaction instructions:\nsummary rules")
+        );
+        assert!(explicit.parameters.compaction.is_none());
+        assert!(explicit.items.last().unwrap().is_compaction_trigger());
+        let encoded =
+            common::encode_inference_request(&OPEN_RESPONSES_2026_04_24.to_string(), explicit)
+                .unwrap()
+                .body;
+        assert_eq!(
+            encoded["instructions"],
+            json!("session rules\n\nCompaction instructions:\nsummary rules")
+        );
+        assert_eq!(
+            encoded["input"].as_array().unwrap().last().unwrap(),
+            &json!({"type": "compaction_trigger"})
+        );
+        assert!(encoded.get("context_management").is_none());
+
+        let mut defaulted = AiRequest::new("gpt-6-astra", Vec::new());
+        stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
+            &mut defaulted,
+        );
+        assert_eq!(
+            defaulted.instructions.as_deref(),
+            Some(stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS)
+        );
+        let encoded =
+            common::encode_inference_request(&OPEN_RESPONSES_2026_04_24.to_string(), defaulted)
+                .unwrap()
+                .body;
+        assert_eq!(
+            encoded["instructions"],
+            stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS
+        );
+        assert_eq!(
+            encoded["input"].as_array().unwrap().last().unwrap(),
+            &json!({"type": "compaction_trigger"})
         );
     }
 

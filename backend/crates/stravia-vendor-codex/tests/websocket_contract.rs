@@ -197,7 +197,10 @@ async fn http_non_success_json_keeps_status() {
 #[ignore = "requires task build:vendors:all"]
 async fn http_compaction_uses_the_trigger_stream_and_preserves_error() {
     http_case("compact").await;
+    http_case("compact-explicit").await;
     http_case("compact-error").await;
+    http_case("compact-duplicate").await;
+    http_case("compact-truncated").await;
 }
 
 async fn http_case(case: &'static str) {
@@ -261,6 +264,24 @@ async fn http_case(case: &'static str) {
                 &serde_json::json!({"type": "compaction_trigger"})
             );
             assert!(body.get("context_management").is_none());
+            assert_eq!(body["store"], false);
+            assert_eq!(
+                body["tools"],
+                serde_json::json!([{"type": "function", "name": "lookup",
+                    "parameters": {"type": "object"}}])
+            );
+            assert_eq!(body["reasoning"]["effort"], "high");
+            if case == "compact-explicit" {
+                assert_eq!(
+                    body["instructions"],
+                    "session instructions\n\nCompaction instructions:\nexplicit summary rules"
+                );
+            } else if case == "compact" {
+                assert_eq!(
+                    body["instructions"],
+                    stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS
+                );
+            }
         }
         assert_eq!(body["stream"], true);
         assert_eq!(header("x-client-request-id"), Some(thread));
@@ -305,22 +326,32 @@ async fn http_case(case: &'static str) {
         }
         if matches!(
             case,
-            "error" | "malformed" | "truncated" | "compact" | "compact-error"
+            "error"
+                | "malformed"
+                | "truncated"
+                | "compact"
+                | "compact-explicit"
+                | "compact-error"
+                | "compact-duplicate"
+                | "compact-truncated"
         ) {
             let payload = match case {
-                "compact" => {
+                "compact" | "compact-explicit" | "compact-duplicate" | "compact-truncated" => {
                     let state = serde_json::json!({"type":"compaction","id":"cmp_1","encrypted_content":"synthetic-state"});
-                    let ignored = serde_json::json!({"type":"message","id":"msg_ignored","status":"completed","role":"assistant","content":[{"type":"output_text","text":"IGNORED","annotations":[],"logprobs":[]}]});
-                    [
+                    let mut events = vec![
                         serde_json::json!({"type":"response.created","sequence_number":0,"response":response_resource("in_progress",serde_json::json!([]),"resp_cmp")}),
-                        serde_json::json!({"type":"response.compaction.compacting","sequence_number":1}),
-                        serde_json::json!({"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":ignored}),
-                        serde_json::json!({"type":"response.output_item.done","sequence_number":3,"output_index":1,"item":state}),
-                        serde_json::json!({"type":"response.completed","sequence_number":4,"response":response_resource("completed",serde_json::json!([]),"resp_cmp")}),
-                    ]
-                    .iter()
-                    .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()))
-                    .collect::<String>()
+                        serde_json::json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"compaction","id":"cmp_1"}}),
+                        serde_json::json!({"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":state.clone()}),
+                    ];
+                    if case == "compact-duplicate" {
+                        events.push(serde_json::json!({"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"type":"compaction","id":"cmp_2"}}));
+                        events.push(serde_json::json!({"type":"response.output_item.done","sequence_number":4,"output_index":1,"item":serde_json::json!({"type":"compaction","id":"cmp_2","encrypted_content":"second-state"})}));
+                    }
+                    let terminal_sequence = events.len();
+                    if case != "compact-truncated" {
+                        events.push(serde_json::json!({"type":"response.completed","sequence_number":terminal_sequence,"response":response_resource("completed",serde_json::json!([]),"resp_cmp")}));
+                    }
+                    events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect::<String>()
                 }
                 "error" | "compact-error" => serde_json::json!({"error":{"type":"invalid_request_error","message":"synthetic upstream rejection"}}).to_string(),
                 "malformed" => "event: response.created\ndata: {not-json}\n\n".to_string(),
@@ -405,6 +436,24 @@ async fn http_case(case: &'static str) {
     );
     let mut inference = request();
     inference.stream.enabled = case != "nonstream";
+    if case.starts_with("compact") {
+        inference.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
+            name: "lookup".into(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }]);
+        inference.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
+    }
+    if case == "compact-explicit" {
+        inference.instructions = Some("session instructions".into());
+        inference.parameters.compaction =
+            Some(stravia_runtime_contract::protocol::ir::CompactionControl {
+                threshold_tokens: Some(4096),
+                instructions: Some("explicit summary rules".into()),
+            });
+    }
     if case == "logprobs" {
         inference = stravia_protocol_codec::codec::open_responses::decoder::ResponsesDecoder
             .decode_request(serde_json::json!({
@@ -451,27 +500,43 @@ async fn http_case(case: &'static str) {
         }
         return;
     }
-    if case == "compact" {
+    if matches!(case, "compact" | "compact-explicit") {
         let OperationOutput::Compact(response) = result.expect("trigger compaction succeeds")
         else {
             panic!("expected compaction")
         };
-        assert_eq!(response.wire["object"], "response.compaction");
+        assert_eq!(response.wire["object"], "response");
         assert_eq!(response.wire["id"], "resp_cmp");
-        // 窗口 = 保留的用户消息 + 唯一的 compaction item；同流里的助手回复被忽略。
-        assert_eq!(response.wire["output"].as_array().unwrap().len(), 2);
-        assert_eq!(response.wire["output"][0]["role"], "user");
-        assert_eq!(response.wire["output"][0]["content"][0]["text"], "你好");
-        assert_eq!(response.wire["output"][1]["type"], "compaction");
+        assert_eq!(response.wire["created_at"], 1790129800);
         assert_eq!(
-            response.wire["output"][1]["encrypted_content"],
-            "synthetic-state"
+            stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
+                &response.items[0]
+            ),
+            Some(
+                serde_json::json!({"type":"compaction","id":"cmp_1","encrypted_content":"synthetic-state"})
+            )
         );
-        assert!(response.usage.is_some());
+        assert_eq!(response.items.len(), 1);
+        assert!(response.items[0].is_compaction());
+        assert_eq!(response.usage.unwrap().total_tokens, 30);
         assert!(!services.deltas.lock().iter().any(|delta| matches!(
             delta,
             AiStreamDelta::TextDelta(_) | AiStreamDelta::TextDeltaWithMetadata { .. }
         )));
+        return;
+    }
+    if matches!(case, "compact-duplicate" | "compact-truncated") {
+        assert!(
+            matches!(result, Err(RuntimeError::Plugin { .. })),
+            "{result:?}"
+        );
+        assert!(
+            !services
+                .deltas
+                .lock()
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::Done { .. }))
+        );
         return;
     }
     if matches!(case, "malformed" | "truncated") {

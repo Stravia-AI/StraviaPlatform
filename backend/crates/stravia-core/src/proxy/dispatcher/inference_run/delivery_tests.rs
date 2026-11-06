@@ -473,3 +473,118 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
     assert_eq!(detail.runs[0].status, "failed");
     assert!(detail.runs[0].generation_node_id.is_none());
 }
+
+#[tokio::test]
+async fn standalone_sse_receipt_requires_the_complete_http_body() {
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
+
+    for (complete, expected_phase) in [(true, "published"), (false, "delivery_unconfirmed")] {
+        let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            crate::history_retention::HistoryRetention::new(7),
+            false,
+            crate::generation_chain::test_chain().await,
+        )
+        .await;
+        let request = std::sync::Arc::new(AiRequest::new("model", Vec::new()));
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "standalone-delivery".into(),
+                method: "POST".into(),
+                path: "/v1/responses".into(),
+                protocol: "open-responses/responses/2026-04-24".into(),
+            })
+            .admit(
+                RunStart {
+                    id: "standalone-delivery".into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "local-route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "open-responses/responses/2026-04-24".into(),
+                },
+                AdmissionFacts {
+                    client_request: (*request).clone().into(),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
+        let wire = serde_json::json!({"type":"compaction","id":"standalone-state","encrypted_content":"native-state"});
+        let item = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
+            .unwrap()
+            .unwrap();
+        let compaction = Compaction::sqlite(pool);
+        let principal = stravia_runtime_contract::Principal::new("owner");
+        let record = compaction
+            .register(
+                &principal,
+                CompactionRegistration {
+                    source_generation_id: None,
+                    source_record_ids: Vec::new(),
+                    operation_id: "standalone-operation".into(),
+                    target: CompactionTarget {
+                        target_key: "local-target".into(),
+                        namespace: "local-account".into(),
+                        model: "local-model".into(),
+                        protocol: "open-responses/responses/2026-04-24".into(),
+                    },
+                    window: vec![item.clone()],
+                    state_items: vec![item.clone()],
+                },
+            )
+            .await
+            .unwrap();
+        let publications = crate::model_turn::CompactionPublications::default();
+        publications.lock().push(CompactionPublication {
+            record_id: record.id,
+            operation_id: "standalone-operation".into(),
+            model_turn_id: "turn".into(),
+            mode: CompactionMode::Standalone,
+            source_generation_id: None,
+            state: item,
+            receipt: CompactionReceipt::Pending,
+        });
+        let terminal =
+            RunTerminalContext::new(None, None, request, compaction, principal, publications);
+        let frame = format!(
+            "event: response.completed\ndata: {}\n\n",
+            serde_json::json!({"type":"response.completed","response":{"output":[wire]}})
+        );
+        let response = wrap_observed_delivery(
+            ([("content-type", "text/event-stream")], frame.clone()).into_response(),
+            tracing::Span::none(),
+            observer,
+            "open-responses/responses/2026-04-24".into(),
+            terminal,
+            None,
+        );
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), frame);
+        if complete {
+            assert!(body.next().await.is_none());
+        }
+        drop(body);
+        observation.flush().await.unwrap();
+        let forest = observation.query_forest(Default::default()).await.unwrap();
+        let detail = observation
+            .get_interaction(&forest.roots[0].interactions[0].id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let phases = detail.runs[0]
+            .events
+            .iter()
+            .filter(|event| event.kind == "compaction_operation")
+            .map(|event| event.payload["phase"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(phases, [expected_phase]);
+    }
+}

@@ -53,10 +53,6 @@ pub fn create_router(gateway: Gateway) -> Router {
                 .get(ingress::open_responses::websocket::handler),
         )
         .route(
-            "/v1/responses/compact",
-            post(ingress::open_responses::responses::compact),
-        )
-        .route(
             "/v1/messages",
             post(ingress::anthropic_messages::messages::handler),
         )

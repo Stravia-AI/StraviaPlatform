@@ -82,8 +82,8 @@ pub struct EmbeddingOutput {
     pub extensions: serde_json::Map<String, Value>,
 }
 
-/// A native compact result is a replacement context window, not a generation.
-/// `wire` is authoritative for delivery, including identity, time and rolling fields.
+/// 原生压缩结果不是一次 Generation。`items` 与 `usage` 是交付的语义来源；
+/// `wire` 仅保留上游身份、时间及原生用量扩展，交付前仍须通过协议编码器。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeCompactionResponse {
     pub wire: Value,

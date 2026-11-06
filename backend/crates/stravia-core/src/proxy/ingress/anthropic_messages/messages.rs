@@ -72,17 +72,21 @@ pub async fn handler(
             );
         }
     };
-    // A top-level `compaction` object makes this a standalone remote compaction request:
-    // it must not create a Generation Chain node or run the agent loop, same as
-    // `/v1/responses/compact`.
-    if request
-        .meta
-        .vendor
-        .ingress
-        .contains_key(stravia_protocol_codec::codec::compaction::ANTHROPIC_COMPACTION_REQUEST_META)
+    // Native Anthropic on-demand compaction is typed IR: a trailing
+    // compaction_trigger marks the standalone request.
+    if let Err((param, message)) =
+        crate::proxy::ingress::open_responses::responses::classify_standalone_compaction(
+            &mut ctx,
+            &request,
+            ANTHROPIC_MESSAGES_2023_06_01,
+        )
     {
-        ctx.extensions
-            .insert(crate::model_turn::ModelTurnPurpose::Compact);
+        return observation::reject(
+            observer,
+            "protocol",
+            "invalid_request",
+            crate::proxy::dispatcher::decode_error_response(format!("invalid {param}: {message}")),
+        );
     }
     dispatch_pipeline(
         gw,

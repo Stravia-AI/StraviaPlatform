@@ -379,6 +379,8 @@ OpenAI 有**三种**原生形态，且互相独立。[O1][O2][O4]
 
 ## 8. 对 Stravia 的含义
 
+以下区分上游能力与 Stravia 接入契约。Stravia 独立压缩现已切换为 V2：`POST /v1/responses`、`stream: true`、末尾唯一 `compaction_trigger`；不再暴露或回退到 `/v1/responses/compact`。本报告保留的厂商旧端点描述是上游事实，不代表当前 Stravia 支持该入口；仅支持旧端点的上游不因此具有 V2 能力。客户端重建保留窗口，平台不再执行旧的保留消息预算与截断。当前边界见 [ADR-0089](../adr/0089-carry-native-compaction-across-anthropic-and-responses.md)。
+
 ### 8.1 可以忠实转发的上游
 
 只有 Anthropic、OpenAI、xAI 三家具备“服务端压缩 + 可回传状态”的完整闭环：
