@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.4] - 2026-11-06
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Changed
 
 - Model and provider choices in the WebUI now share one searchable picker: model destinations and providers in the model editor, manual model templates, media understanding, web search, Connect clients, media generation, and the provider and model filters in Request history and model change history. Type in the field to filter; each option shows its name with the ID on a second line, and both wrap instead of being truncated. Filters treat an empty value as all and offer a clear button. The chat composer's model picker and API Key model allowlists keep their dedicated controls.
