@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- The automatic update check no longer keeps offering an outdated version for up to a day after a newer release is published. While a cached update is still pending, the check refreshes after one hour instead of 24; "up to date" results are still reused for 24 hours, and "Check for updates" always queries the update source.
 - Request destinations in the model editor can now be reordered on touch screens. Press and drag the grip at the top-left of a destination card to move it between layers, insert a new layer, or move it to the disabled area; the page scrolls as the finger nears the screen edge. Tapping a card still opens its editor, and mouse dragging is unchanged.
 - Standalone compaction supplies structured handoff instructions when the client omits them, without replacing explicit session or summary instructions. Anthropic signatures, full signed blocks, iteration usage, and Responses states pass through IR encoding; refusals, upstream errors, truncation, and duplicate states cannot become successful summaries.
 

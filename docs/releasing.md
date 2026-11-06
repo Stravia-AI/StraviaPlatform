@@ -12,7 +12,7 @@ Server 与 Desktop 内置生产更新分发服务 `https://updater.stravia.cn`�
 
 - 更新检查请求 `<base>/api/v1/releases?per_page=100&page=N`，清单来自服务返回的 `stravia-updater.json` asset URL。客户端最多检查 10 页，超过视为错误。应用不再直接查询 GitHub Releases API，也没有旧入口后备。
 - 未配置覆盖值时使用内置生产地址；显式空值、空白或非法地址只在检查时产生 `UPDATE_SOURCE_INVALID`，不会静默回退或阻止 Server/Desktop 启动及其他功能；debug 构建仍默认禁用生产更新检查。
-- 发布通道、跳过版本、常规成功/失败检查 TTL、出站代理偏好、HTTPS 校验和 Tauri 签名校验保持不变。
+- 发布通道、跳过版本、失败检查重试间隔、出站代理偏好、HTTPS 校验和 Tauri 签名校验保持不变。自动检查对「已是最新」的成功结果复用 24 小时；缓存中仍有待安装候选版本时只复用 1 小时，避免新版本发布后继续提示或下载已被取代的旧候选。手动检查始终绕过缓存。
 - 历史缓存的 manifest 下载入口必须匹配当前生效的更新源，包括未覆盖时的内置生产源。旧 GitHub 地址、其他服务地址或非法覆盖配置下，仍展示历史版本信息但禁用下载并报告错误；不匹配来源的缓存不会阻止自动检查重新发现清单，也不会通过猜测 tag 改写旧地址。
 - 服务返回的 `release_notes_url`/`html_url` 必须是官方 GitHub Release URL；清单平台 URL 由服务改写，但签名仍由现有 Tauri 公钥验证。
 

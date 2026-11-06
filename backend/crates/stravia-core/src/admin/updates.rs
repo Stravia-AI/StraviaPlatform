@@ -22,6 +22,9 @@ const UPDATE_SOURCE_ENV: &str = "STRAVIA_UPDATER_URL";
 const DEFAULT_UPDATE_SOURCE_URL: &str = "https://updater.stravia.cn";
 const MANIFEST_ASSET_NAME: &str = "stravia-updater.json";
 const SUCCESS_CACHE_TTL: chrono::Duration = chrono::Duration::hours(24);
+// 待安装的候选版本会被后续发布取代；缓存过久会一直提示（并让桌面端下载）已过时的版本。
+// 无更新时 24 小时已足够，且能限制每次约 1 MB 的 Release 列表请求。
+const AVAILABLE_UPDATE_CACHE_TTL: chrono::Duration = chrono::Duration::hours(1);
 const FAILURE_RETRY_DELAY: chrono::Duration = chrono::Duration::hours(1);
 const MAX_RELEASE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_RESPONSE_BYTES: usize = 256 * 1024;
@@ -532,9 +535,19 @@ impl UpdateService {
                     .is_ok()
             });
         if mode == UpdateCheckMode::Automatic && cached_source_matches {
+            // 与 view 一致：不高于已安装版本的历史候选不算待安装更新。
+            let success_ttl = if state
+                .available_update
+                .as_ref()
+                .is_some_and(|update| update.version > self.current_version)
+            {
+                AVAILABLE_UPDATE_CACHE_TTL
+            } else {
+                SUCCESS_CACHE_TTL
+            };
             if state
                 .last_success_at
-                .is_some_and(|checked_at| now.signed_duration_since(checked_at) < SUCCESS_CACHE_TTL)
+                .is_some_and(|checked_at| now.signed_duration_since(checked_at) < success_ttl)
             {
                 return self.view(state).await;
             }
@@ -1584,21 +1597,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_check_caches_success_for_twenty_four_hours_and_manual_bypasses_it() {
+    async fn automatic_check_caches_up_to_date_for_twenty_four_hours_and_manual_bypasses_it() {
         let source = Arc::new(FakeSource::new([
+            ReleaseReply::Releases(vec![release("1.2.0", false)]),
             ReleaseReply::Releases(vec![release("1.2.0", false)]),
             ReleaseReply::Releases(vec![release("1.2.0", false)]),
         ]));
         let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
-        let service = service(Arc::clone(&source), Arc::clone(&clock), "1.0.0");
+        let service = service(Arc::clone(&source), Arc::clone(&clock), "1.2.0");
 
-        service.check(UpdateCheckMode::Automatic).await.unwrap();
+        let first = service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(first.check_status, UpdateCheckStatus::UpToDate);
         clock.advance(chrono::Duration::hours(23));
         service.check(UpdateCheckMode::Automatic).await.unwrap();
         assert_eq!(source.calls.load(Ordering::SeqCst), 1);
 
         service.check(UpdateCheckMode::Manual).await.unwrap();
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+
+        clock.advance(chrono::Duration::hours(24));
+        service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(source.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn automatic_check_replaces_a_cached_candidate_with_a_newer_release_after_one_hour() {
+        let source = Arc::new(FakeSource::new([
+            ReleaseReply::Releases(vec![release("1.2.0", false)]),
+            ReleaseReply::Releases(vec![release("1.2.0", false), release("1.3.0", false)]),
+        ]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let service = service(Arc::clone(&source), Arc::clone(&clock), "1.0.0");
+
+        let first = service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(
+            first.available_update.unwrap().version,
+            Version::parse("1.2.0").unwrap()
+        );
+
+        clock.advance(chrono::Duration::minutes(59));
+        let cached = service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(
+            cached.available_update.unwrap().version,
+            Version::parse("1.2.0").unwrap()
+        );
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+
+        clock.advance(chrono::Duration::minutes(1));
+        let refreshed = service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            refreshed.available_update.unwrap().version,
+            Version::parse("1.3.0").unwrap()
+        );
     }
 
     #[tokio::test]
