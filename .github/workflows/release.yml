@@ -520,9 +520,19 @@ jobs:
           fi
           codesign --verify --deep --strict "${apps[0]}"
           lipo "${apps[0]}/Contents/MacOS/stravia-desktop" -verify_arch "${BINARY_ARCH}"
+          python3 .github/scripts/verify_macos_runtime.py "${apps[0]}"
           hdiutil verify "${dmgs[0]}"
           tar -tzf "${archives[0]}" > /dev/null
           test -s "${archives[0]}.sig"
+          extracted="$(mktemp -d)"
+          trap 'rm -rf "$extracted"' EXIT
+          tar -xzf "${archives[0]}" -C "$extracted"
+          archived_apps=("$extracted"/*.app)
+          if [[ ${#archived_apps[@]} -ne 1 ]]; then
+            printf 'Expected one app in the updater archive\n' >&2
+            exit 1
+          fi
+          python3 .github/scripts/verify_macos_runtime.py "${archived_apps[0]}"
           mkdir -p dist
           cp "${dmgs[0]}" "dist/${ASSET_BASENAME}.dmg"
           cp "${archives[0]}" "dist/${ASSET_BASENAME}.app.tar.gz"

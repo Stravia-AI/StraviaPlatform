@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- macOS Desktop retains Hardened Runtime and grants the unsigned executable-memory entitlement required by Wasmtime's `mmap` / `mprotect` code path. Release checks now inspect the final executable's entitlements and run the bundled Wasm runtime from both the signed app and the extracted updater archive on Intel and Apple Silicon. The isolated `--smoke-test-runtime` mode does not use a user instance or production services; it does not replace native UI, installation or Gatekeeper verification.
+
 ## [0.6.3] - 2026-11-05
 
 ### Verification
