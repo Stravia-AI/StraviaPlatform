@@ -255,6 +255,470 @@ async fn opaque_media_uses_inline_bytes_and_standard_media_keeps_signed_download
     gateway.shutdown().await;
 }
 
+/// 开启签名下载并返回 owner 的网关夹具。
+async fn delivery_gateway(label: &str) -> (tempfile::TempDir, crate::Gateway, Principal) {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set(
+            "artifact_settings",
+            r#"{"external_signed_downloads":true,"client_base_url":"https://downloads.example","file_public_base_url":"https://downloads.example"}"#,
+        )
+        .await
+        .unwrap();
+    let owner = gateway
+        .admin()
+        .create_api_key(
+            serde_json::from_value(serde_json::json!({
+                "name": label,
+                "transparent_injection_enabled": true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    (directory, gateway, Principal::new(owner.id))
+}
+
+fn user_request(
+    blocks: Vec<stravia_runtime_contract::protocol::ir::ContentBlock>,
+) -> Arc<stravia_runtime_contract::protocol::ir::AiRequest> {
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
+    let mut item = AiItem::output_text("");
+    item.role = Role::User;
+    item.content = MessageContent::Blocks(blocks);
+    Arc::new(AiRequest::new("model", vec![item]))
+}
+
+fn request_blocks(
+    request: &stravia_runtime_contract::protocol::ir::AiRequest,
+) -> &[stravia_runtime_contract::protocol::ir::ContentBlock] {
+    let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+        &request.items[0].content
+    else {
+        panic!("expected media blocks");
+    };
+    blocks
+}
+
+async fn normalize_blocks_as(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    blocks: Vec<stravia_runtime_contract::protocol::ir::ContentBlock>,
+) -> Result<
+    Arc<stravia_runtime_contract::protocol::ir::AiRequest>,
+    stravia_runtime_contract::artifact::ArtifactError,
+> {
+    let mut request = user_request(blocks);
+    ingest::normalize_shared_request(
+        gateway,
+        principal,
+        &mut request,
+        &stravia_runtime_contract::CancellationToken::new(),
+    )
+    .await?;
+    Ok(request)
+}
+
+#[tokio::test]
+async fn artifact_file_id_is_delivered_through_the_same_path_as_artifact_url() {
+    use stravia_runtime_contract::protocol::ids::{
+        ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        WATSONX_TEXT_CHAT_V1,
+    };
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, DocumentSource, MediaSource};
+
+    let (_directory, gateway, owner) = delivery_gateway("file-id-owner").await;
+    let png = include_bytes!("../../tests/fixtures/media/transparent.png");
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let seeded = normalize_blocks_as(
+        &gateway,
+        &owner,
+        vec![
+            ContentBlock::Image {
+                source: MediaSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: encode(png),
+                },
+                detail: None,
+                cache_control: None,
+            },
+            ContentBlock::Document {
+                source: DocumentSource::Base64Pdf {
+                    data: encode(b"%PDF-1.7\nfile id document\n"),
+                },
+                title: None,
+                context: None,
+                cache_control: None,
+            },
+            ContentBlock::File {
+                source: MediaSource::Base64 {
+                    media_type: "text/plain".into(),
+                    data: encode(b"plain attachment"),
+                },
+                media_type: None,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let [
+        ContentBlock::Image {
+            source: MediaSource::Url(image_ref),
+            ..
+        },
+        ContentBlock::Document {
+            source: DocumentSource::Url(pdf_ref),
+            ..
+        },
+        ContentBlock::File {
+            source: MediaSource::Url(text_ref),
+            ..
+        },
+        ..,
+    ] = request_blocks(&seeded)
+    else {
+        panic!("expected stored artifact references");
+    };
+
+    let by_file_id = |id: &str, detail: Option<&str>| MediaSource::FileId {
+        file_id: id.to_owned(),
+        detail: detail.map(str::to_owned),
+    };
+    let normalized = normalize_blocks_as(
+        &gateway,
+        &owner,
+        vec![
+            ContentBlock::Image {
+                source: by_file_id(image_ref, Some("high")),
+                detail: None,
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                source: by_file_id("file-vendor-123", None),
+                detail: None,
+                cache_control: None,
+            },
+            ContentBlock::File {
+                source: by_file_id(pdf_ref, None),
+                media_type: None,
+            },
+            ContentBlock::File {
+                source: by_file_id(text_ref, None),
+                media_type: None,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    // 准入只校验并续期，来源保持引用形式；File 的 MIME 取自 Artifact。
+    let blocks = request_blocks(&normalized);
+    assert!(matches!(
+        &blocks[0],
+        ContentBlock::Image { source: MediaSource::FileId { file_id, .. }, .. } if file_id == image_ref
+    ));
+    assert!(matches!(
+        &blocks[2],
+        ContentBlock::File { media_type: Some(mime), .. } if mime == "application/pdf"
+    ));
+    assert!(matches!(
+        &blocks[3],
+        ContentBlock::File { media_type: Some(mime), .. } if mime == "text/plain"
+    ));
+
+    // 支持 URL 的协议：图片改写为签名下载地址，供应商 file id 原样透传。
+    let mut openai = normalized.clone();
+    let transfers = ingest::materialize_request(
+        &gateway,
+        &owner,
+        &mut openai,
+        Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
+    )
+    .await
+    .unwrap();
+    let blocks = request_blocks(&openai);
+    let ContentBlock::Image {
+        source: MediaSource::Url(url),
+        detail,
+        ..
+    } = &blocks[0]
+    else {
+        panic!("artifact FileId image must receive a signed URL");
+    };
+    assert!(url.starts_with("https://downloads.example/v1/artifacts/downloads/"));
+    assert_eq!(detail.as_deref(), Some("high"));
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0].0, *url);
+    assert!(matches!(
+        &blocks[1],
+        ContentBlock::Image { source: MediaSource::FileId { file_id, .. }, .. }
+            if file_id == "file-vendor-123"
+    ));
+    // OpenAI 的 file 部件只有 file_data / file_id，文件只能内联。
+    let ContentBlock::File {
+        source: MediaSource::Base64 { media_type, data },
+        ..
+    } = &blocks[2]
+    else {
+        panic!("artifact FileId file must be inlined for chat completions");
+    };
+    assert_eq!(media_type, "application/pdf");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+        b"%PDF-1.7\nfile id document\n"
+    );
+    // 稳定引用只补到本次交付副本，且供应商 file id 不会被当成引用。
+    let ContentBlock::Text { text, .. } = blocks.last().unwrap() else {
+        panic!("expected appended attachment references");
+    };
+    for reference in [image_ref, pdf_ref, text_ref] {
+        assert_eq!(text.matches(reference.as_str()).count(), 1);
+    }
+    assert!(!text.contains("file-vendor-123"));
+    assert!(matches!(
+        &request_blocks(&normalized)[0],
+        ContentBlock::Image {
+            source: MediaSource::FileId { .. },
+            ..
+        }
+    ));
+
+    // 只能内联的协议：图片改写为 base64，不签发下载授权。
+    let mut bedrock = normalized.clone();
+    let transfers =
+        ingest::materialize_request(&gateway, &owner, &mut bedrock, Some(BEDROCK_CONVERSE_V1))
+            .await
+            .unwrap();
+    assert!(transfers.is_empty());
+    let ContentBlock::Image {
+        source: MediaSource::Base64 { media_type, data },
+        ..
+    } = &request_blocks(&bedrock)[0]
+    else {
+        panic!("inline-only protocol must receive base64 image");
+    };
+    assert_eq!(media_type, "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+        png
+    );
+
+    // Anthropic 的文件 URL 只接受 PDF：PDF 走下载地址，纯文本退回内联。
+    let mut anthropic = normalized.clone();
+    let transfers = ingest::materialize_request(
+        &gateway,
+        &owner,
+        &mut anthropic,
+        Some(ANTHROPIC_MESSAGES_2023_06_01),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transfers.len(), 2, "image and PDF are delivered by URL");
+    let blocks = request_blocks(&anthropic);
+    assert!(matches!(
+        &blocks[2],
+        ContentBlock::File { source: MediaSource::Url(url), .. }
+            if url.starts_with("https://downloads.example/")
+    ));
+    assert!(matches!(
+        &blocks[3],
+        ContentBlock::File { source: MediaSource::Base64 { media_type, .. }, .. }
+            if media_type == "text/plain"
+    ));
+
+    // 协议没有文件载体时明确拒绝，而不是把 stravia:// 地址发给上游。
+    let mut watsonx = normalized.clone();
+    let error =
+        ingest::materialize_request(&gateway, &owner, &mut watsonx, Some(WATSONX_TEXT_CHAT_V1))
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot represent file attachment")
+    );
+
+    // 无共享标准 endpoint 的 guest 一律拿到 canonical bytes。
+    let mut opaque = normalized.clone();
+    let transfers = ingest::materialize_request(&gateway, &owner, &mut opaque, None)
+        .await
+        .unwrap();
+    assert!(transfers.is_empty());
+    assert!(matches!(
+        &request_blocks(&opaque)[0],
+        ContentBlock::Image {
+            source: MediaSource::Base64 { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &request_blocks(&opaque)[1],
+        ContentBlock::Image { source: MediaSource::FileId { file_id, .. }, .. }
+            if file_id == "file-vendor-123"
+    ));
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn artifact_file_id_admission_rejects_malformed_and_foreign_references() {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MediaSource};
+
+    let (_directory, gateway, owner) = delivery_gateway("file-id-admission-owner").await;
+    let seeded = normalize_blocks_as(
+        &gateway,
+        &owner,
+        vec![ContentBlock::Image {
+            source: MediaSource::Base64 {
+                media_type: "image/png".into(),
+                data: base64::engine::general_purpose::STANDARD
+                    .encode(include_bytes!("../../tests/fixtures/media/transparent.png")),
+            },
+            detail: None,
+            cache_control: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let ContentBlock::Image {
+        source: MediaSource::Url(reference),
+        ..
+    } = &request_blocks(&seeded)[0]
+    else {
+        panic!("expected stored image reference");
+    };
+    let image = |id: String| ContentBlock::Image {
+        source: MediaSource::FileId {
+            file_id: id,
+            detail: None,
+        },
+        detail: None,
+        cache_control: None,
+    };
+
+    // 带查询串、fragment、后缀或不是 Artifact 的 scheme 值都无效。
+    for invalid in [
+        format!("{reference}?download=1"),
+        format!("{reference}#fragment"),
+        format!("{reference}/extra"),
+        "stravia://not-an-artifact/abc".to_owned(),
+    ] {
+        assert!(
+            normalize_blocks_as(&gateway, &owner, vec![image(invalid.clone())])
+                .await
+                .is_err(),
+            "{invalid} must be rejected"
+        );
+    }
+    assert!(
+        normalize_blocks_as(&gateway, &owner, vec![image(reference.clone())])
+            .await
+            .is_ok()
+    );
+
+    // 不属于该 Principal 的 Artifact 在准入阶段就被拒绝。
+    let other = gateway
+        .admin()
+        .create_api_key(
+            serde_json::from_value(serde_json::json!({"name": "file-id-other-owner"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let other = Principal::new(other.id);
+    assert!(
+        normalize_blocks_as(&gateway, &other, vec![image(reference.clone())])
+            .await
+            .is_err(),
+        "FileId admission must retain Artifact ownership enforcement"
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn document_delivery_follows_the_shared_capability_table() {
+    use stravia_runtime_contract::protocol::ids::{
+        COHERE_CHAT_V2, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, WATSONX_TEXT_CHAT_V1,
+    };
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, DocumentSource};
+
+    let (_directory, gateway, owner) = delivery_gateway("document-owner").await;
+    let normalized = normalize_blocks_as(
+        &gateway,
+        &owner,
+        vec![ContentBlock::Document {
+            source: DocumentSource::Base64Pdf {
+                data: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7\ndocument\n"),
+            },
+            title: None,
+            context: None,
+            cache_control: None,
+        }],
+    )
+    .await
+    .unwrap();
+
+    // Gemini 的 document 走签名下载地址。
+    let mut gemini = normalized.clone();
+    let transfers = ingest::materialize_request(
+        &gateway,
+        &owner,
+        &mut gemini,
+        Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transfers.len(), 1);
+    assert!(matches!(
+        &request_blocks(&gemini)[0],
+        ContentBlock::Document { source: DocumentSource::Url(url), .. }
+            if url.starts_with("https://downloads.example/")
+    ));
+
+    // OpenAI 的 document 编码为 file_data，只能内联 PDF。
+    let mut openai = normalized.clone();
+    let transfers = ingest::materialize_request(
+        &gateway,
+        &owner,
+        &mut openai,
+        Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
+    )
+    .await
+    .unwrap();
+    assert!(transfers.is_empty());
+    assert!(matches!(
+        &request_blocks(&openai)[0],
+        ContentBlock::Document {
+            source: DocumentSource::Base64Pdf { .. },
+            ..
+        }
+    ));
+
+    // 没有 document 载体的协议明确拒绝。
+    for endpoint in [WATSONX_TEXT_CHAT_V1, COHERE_CHAT_V2] {
+        let mut request = normalized.clone();
+        let error = ingest::materialize_request(&gateway, &owner, &mut request, Some(endpoint))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot represent document attachment")
+        );
+    }
+    gateway.shutdown().await;
+}
+
 #[tokio::test]
 async fn shared_text_normalization_scrubs_parameter_keys_and_keeps_sql_errors() {
     use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};

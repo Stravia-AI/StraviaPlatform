@@ -127,14 +127,15 @@ async fn artifact_ingest_reuse_and_thinking_wait_for_same_pool_write_lease() {
 }
 
 #[test]
-fn artifact_reference_identity_ignores_question_and_rejects_non_digest_identities() {
+fn artifact_reference_requires_an_exact_digest_identity() {
     let digest = "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN);
-    let id = ArtifactId::from_reference(&format!("stravia://artifacts/{digest}?question=what%3F"))
-        .unwrap();
+    let id = ArtifactId::from_reference(&format!("stravia://artifacts/{digest}")).unwrap();
     assert_eq!(id.as_str(), digest);
     for reference in [
         format!("https://stravia/artifact/{digest}"),
         format!("sa:{digest}"),
+        format!("stravia://artifacts/{digest}?question=what%3F"),
+        format!("stravia://artifacts/{digest}:download"),
         format!("stravia://artifacts/{}", "a".repeat(54)),
         format!("stravia://artifacts/{}", "a".repeat(56)),
         format!("stravia://artifacts/{}", "A".repeat(55)),

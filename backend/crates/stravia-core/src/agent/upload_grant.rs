@@ -205,26 +205,21 @@ pub(crate) async fn upload_instructions(
             "client access address is required for upload instructions".into(),
         ));
     }
-    // JSON/shell 参数分别编码；保存的地址含单引号时仍不能逃出 shell 引号。
+    // 保存的地址含单引号时仍不能逃出 shell 引号。
     let base = settings
         .client_base_url
         .trim_end_matches('/')
         .replace('\'', "'\\''");
     Ok(Some(format!(
-        r#"When a client needs to submit a local file, explain or execute this client-side multipart upload workflow. The temporary upload credential below grants only uploads for fifteen minutes and can upload multiple files. Never send a local path for Stravia to fetch. Use the returned reference in a structured attachment or as the StraviaRead path to read its content.
-Requires curl, jq and a POSIX shell. Set FILE to the local file and MIME to its actual media type.
+        r#"When a client needs to submit a local file, explain or execute this client-side upload command. The temporary upload credential below grants only uploads for fifteen minutes and can upload multiple files. Never send a local path for Stravia to fetch. Use the returned `path` in a structured attachment or as the StraviaRead path to read its content.
+Requires curl and a POSIX shell. Set FILE to the local file and MIME to its actual media type.
 ```sh
 FILE='/path/to/file'
 MIME='application/octet-stream'
 BASE='{base}'
 AUTH='Bearer <stravia-upload-key>'
-SIZE=$(wc -c < "$FILE" | tr -d '[:space:]')
-UPLOAD=$(curl --fail-with-body -sS "$BASE/v1/artifacts/uploads" -H "Authorization: $AUTH" -H 'Content-Type: application/json' --data "$(jq -n --arg mime "$MIME" --argjson size "$SIZE" '{{mime_type:$mime,size:$size}}')") || exit 1
-ID=$(printf '%s' "$UPLOAD" | jq -er '.upload_id') || exit 1
-TOKEN=$(printf '%s' "$UPLOAD" | jq -er '.upload_token') || exit 1
-PART=$(curl --fail-with-body -sS -X PUT "$BASE/v1/artifacts/uploads/$ID/parts/1" -H "Authorization: $AUTH" -H "x-upload-token: $TOKEN" --data-binary "@$FILE") || exit 1
-curl --fail-with-body -sS "$BASE/v1/artifacts/uploads/$ID/complete" -H "Authorization: $AUTH" -H 'Content-Type: application/json' --data "$(jq -n --arg token "$TOKEN" --argjson part "$PART" '{{upload_token:$token,parts:[$part]}}')"
+curl --fail-with-body -sS "$BASE/v1/artifacts" -H "Authorization: $AUTH" -H "Content-Type: $MIME" --data-binary "@$FILE"
 ```
-The completion response includes the stable `reference`. It is not a download credential; only the same Principal may resolve it. Upload at most 100 MiB per file."#
+The response includes the stable `path`. It is not a download credential; only the same Principal may resolve it. Upload at most 100 MiB per file."#
     )))
 }

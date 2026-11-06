@@ -241,75 +241,8 @@ impl LocalArtifactStore {
     }
 }
 
-#[async_trait]
-impl ArtifactStore for LocalArtifactStore {
-    async fn configure(&self, settings: &ArtifactSettings) -> Result<(), ArtifactError> {
-        settings.validate()?;
-        *self.settings.write().await = settings.clone();
-        Ok(())
-    }
-
-    async fn ingest(
-        &self,
-        principal: &Principal,
-        mime_type: &str,
-        size: Option<u64>,
-        bytes: ArtifactByteStream,
-        retention: Duration,
-    ) -> Result<ArtifactRef, ArtifactError> {
-        self.ingest_stream(principal, mime_type, size, bytes, retention)
-            .await
-    }
-
-    async fn download(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-        retention: Duration,
-        settings: &ArtifactSettings,
-    ) -> Result<ArtifactDownload, ArtifactError> {
-        self.issue_download(principal, id, retention, settings, false)
-            .await
-    }
-
-    async fn download_relay(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-        retention: Duration,
-        settings: &ArtifactSettings,
-    ) -> Result<ArtifactDownload, ArtifactError> {
-        self.issue_download(principal, id, retention, settings, true)
-            .await
-    }
-
-    async fn read_download(&self, token: &str) -> Result<ArtifactReader, ArtifactError> {
-        self.open_grant(token).await
-    }
-
-    async fn read_bytes(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-        retention: Duration,
-    ) -> Result<(ArtifactRef, Bytes), ArtifactError> {
-        ArtifactStore::extend_retention(self, principal, id, retention).await?;
-        let reader = self.open(principal, id).await?;
-        let ArtifactSource::LocalPath(path) = &reader.source else {
-            return Err(ArtifactError::Storage(
-                "invalid internal Artifact source".into(),
-            ));
-        };
-        let bytes = tokio::fs::read(path).await.map_err(storage_error)?;
-        if bytes.len() as u64 != reader.artifact.size {
-            return Err(ArtifactError::Storage(
-                "Artifact content size mismatch".into(),
-            ));
-        }
-        Ok((reader.artifact, Bytes::from(bytes)))
-    }
-
-    async fn create_upload(
+impl LocalArtifactStore {
+    pub(super) async fn create_upload(
         &self,
         principal: &Principal,
         request: ArtifactUploadRequest,
@@ -434,11 +367,10 @@ impl ArtifactStore for LocalArtifactStore {
         Ok(ArtifactUpload {
             upload_id,
             upload_token,
-            expires_at: upload_expires_at,
         })
     }
 
-    async fn upload_part(
+    pub(super) async fn upload_part(
         &self,
         principal: &Principal,
         upload_id: &str,
@@ -586,7 +518,7 @@ impl ArtifactStore for LocalArtifactStore {
         })
     }
 
-    async fn complete_upload(
+    pub(super) async fn complete_upload(
         &self,
         principal: &Principal,
         upload_id: &str,
@@ -733,6 +665,75 @@ impl ArtifactStore for LocalArtifactStore {
     size: total_size,
         })
         }).await
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for LocalArtifactStore {
+    async fn configure(&self, settings: &ArtifactSettings) -> Result<(), ArtifactError> {
+        settings.validate()?;
+        *self.settings.write().await = settings.clone();
+        Ok(())
+    }
+
+    async fn ingest(
+        &self,
+        principal: &Principal,
+        mime_type: &str,
+        size: Option<u64>,
+        bytes: ArtifactByteStream,
+        retention: Duration,
+    ) -> Result<ArtifactRef, ArtifactError> {
+        self.ingest_stream(principal, mime_type, size, bytes, retention)
+            .await
+    }
+
+    async fn download(
+        &self,
+        principal: &Principal,
+        id: &ArtifactId,
+        retention: Duration,
+        settings: &ArtifactSettings,
+    ) -> Result<ArtifactDownload, ArtifactError> {
+        self.issue_download(principal, id, retention, settings, false)
+            .await
+    }
+
+    async fn download_relay(
+        &self,
+        principal: &Principal,
+        id: &ArtifactId,
+        retention: Duration,
+        settings: &ArtifactSettings,
+    ) -> Result<ArtifactDownload, ArtifactError> {
+        self.issue_download(principal, id, retention, settings, true)
+            .await
+    }
+
+    async fn read_download(&self, token: &str) -> Result<ArtifactReader, ArtifactError> {
+        self.open_grant(token).await
+    }
+
+    async fn read_bytes(
+        &self,
+        principal: &Principal,
+        id: &ArtifactId,
+        retention: Duration,
+    ) -> Result<(ArtifactRef, Bytes), ArtifactError> {
+        ArtifactStore::extend_retention(self, principal, id, retention).await?;
+        let reader = self.open(principal, id).await?;
+        let ArtifactSource::LocalPath(path) = &reader.source else {
+            return Err(ArtifactError::Storage(
+                "invalid internal Artifact source".into(),
+            ));
+        };
+        let bytes = tokio::fs::read(path).await.map_err(storage_error)?;
+        if bytes.len() as u64 != reader.artifact.size {
+            return Err(ArtifactError::Storage(
+                "Artifact content size mismatch".into(),
+            ));
+        }
+        Ok((reader.artifact, Bytes::from(bytes)))
     }
 
     async fn open(

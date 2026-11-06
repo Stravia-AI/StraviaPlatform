@@ -302,13 +302,7 @@ fn build_admin_cors_layer(origins: &[String]) -> CorsLayer {
 fn build_proxy_cors_layer(origins: &[String]) -> CorsLayer {
     build_cors_layer(
         origins,
-        [
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ],
+        [Method::GET, Method::POST, Method::DELETE, Method::OPTIONS],
         [
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -321,7 +315,6 @@ fn build_proxy_cors_layer(origins: &[String]) -> CorsLayer {
             header::HeaderName::from_static("openai-project"),
             header::HeaderName::from_static("idempotency-key"),
             header::HeaderName::from_static("x-request-id"),
-            header::HeaderName::from_static("x-upload-token"),
             header::HeaderName::from_static("mcp-protocol-version"),
             header::HeaderName::from_static("mcp-session-id"),
             header::HeaderName::from_static("last-event-id"),

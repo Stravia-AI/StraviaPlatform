@@ -4,15 +4,17 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use stravia_runtime_contract::hook::{
-    PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext, ToolId,
+    PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, ToolExecutionContext,
+    ToolId,
 };
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_web_access_contract::{
     DEFAULT_SEARCH_RESULTS, STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME,
-    read_path::{ReadInput, ReadTarget, input_schema, parse_read_path},
+    read_path::{ReadInput, ReadTarget, model_input_schema, parse_read_input},
 };
 
 use super::{SearchRequest, WebAccessError};
+use crate::mcp::read::schema_scope;
 
 pub(crate) fn internal_platform_tools(gateway: &crate::Gateway) -> Vec<Arc<dyn PlatformTool>> {
     vec![Arc::new(InternalReadTool {
@@ -36,12 +38,12 @@ impl PlatformTool for InternalReadTool {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a single path. search:// followed by percent-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. HTTP(S) resource options use #stravia?, while Artifact Reference options use ?question= or ?download=1.",
+            "Read a single path. Set path to stravia://search and question to plain-text search text for basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Resource paths accept `:` selectors such as :raw, :download or :1-50; put a specific question in question.",
         )
     }
 
     fn parameters(&self) -> Value {
-        input_schema()
+        model_input_schema(schema_scope(ReadExposureScope::FULL, true))
     }
 
     fn parallel_safe(&self) -> bool {
@@ -71,17 +73,12 @@ impl PlatformTool for InternalReadTool {
                 ))));
             }
         };
-        let target = parse_read_path(&request.path)
+        let target = parse_read_input(&request)
             .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        // 搜索续接由内部路由器统一拒绝（需要 Turn 类型），媒体续接与资源读取一并交给它。
         let ReadTarget::Search(search) = target else {
-            return crate::mcp::read::execute_internal_read(&self.gateway, request.path, context)
-                .await;
+            return crate::mcp::read::execute_internal_read(&self.gateway, request, context).await;
         };
-        if search.previous_path.is_some() {
-            return Err(PlatformToolError::new(
-                "Internal retrieval does not accept previous_path",
-            ));
-        }
         if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {
             return Err(PlatformToolError::new(
                 "Networking capability is unavailable",

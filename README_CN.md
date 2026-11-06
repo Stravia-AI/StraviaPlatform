@@ -121,7 +121,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 
 ### 平台工具与内置 Agent 运行时
 
-- `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
+- `StraviaRead` —— 一个工具、一个 `path` 加纯文本 `question`：读文件、网页、研究问题和图片，无需 URL 编码，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
 - **联网搜索** —— 可使用 Local Agent 循环配合需要浏览器的 Local 来源、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
 - **媒体生成** —— 通过由具备能力的 Vendor 插件支持的已保存 Route 生成或编辑图片，再用 Artifact Reference 在后续工具中复用。

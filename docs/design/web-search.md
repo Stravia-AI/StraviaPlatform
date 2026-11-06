@@ -8,7 +8,7 @@
 
 实现归属独立 `stravia-web-search` crate，包含 Runner、Local/External Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化及内部工具 ID 归 `stravia-web-access-contract`，静态地址规则继续归 `stravia-web-access`。
 
-Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `search://` path 执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `stravia://search` path 并在 `question` 中给出搜索文本，执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 与 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
 
 平台总开关决定联网能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 的联网分流均不可用。API Key 的 Transparent Injection 只决定是否自动暴露 `StraviaRead` 的联网分流，不承担显式调用授权；执行层强制检查本次暴露范围。
 
@@ -18,11 +18,13 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ```json
 {
-  "path": "search://question%20or%20topic?allowed_domains=example.com&previous_path=stravia%3A%2F%2Fturns%2Fabcdefghijklmnopqrstuvwxyzab"
+  "path": "stravia://search",
+  "question": "question or topic",
+  "allowed_domains": ["example.com"]
 }
 ```
 
-所有读取入口只接受必填字符串 `path`，禁止额外顶层字段。搜索文本严格 percent-decode 一次，文字中的 `+` 不变；首个未编码 `?` 后按 form query 解码。`previous_path` 是单值续接参数，值必须是精确的 `stravia://turns/<turn-id>`，`allowed_domains` 可重复，原始列表最多 20 项，规范化后去重。新根省略允许域名即无限制，续接省略则继承父策略，显式非空列表替换；不支持空列表清空，改为启动新根。未知、重复单值和无效编码明确拒绝。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。
+所有读取入口只接受一个 `path`，自由文本放在 `question`，其余字段按暴露范围出现，未知字段明确拒绝。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；显式空数组报错，省略或 `null` 表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名则继承父策略，显式非空列表替换。仍不支持用空列表清空允许域名，改为启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
 
 `blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
 
@@ -60,11 +62,11 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ### 统一资源读取与文本分页
 
-资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>#stravia?<options>`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 query 不重排或重编码，平台问题不发送给源站。选项为 `question`、`raw=1`、`lines`、`download=1`、`previous_path` 和平台生成的 `cursor`。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照。资源续接 ID 必须同时带媒体问题；HTML／文本不接受媒体续接。旧 `query://`、顶层 `url` 和 Artifact `?question=` 不再执行。
+资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>[:<选择器>...]`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 URL 的 query 与 fragment 原样保留，平台问题通过 `question` 字段传递，不发送给源站。选择器从 path 末尾按 `:` 剥离：`raw`、`download`、`cursor=<base64url>` 与行范围（`N`、`N-M`、`N+K`、`-K`，逗号分隔多段）。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照。authority 内的 `:` 不剥离；源 URL 字面以选择器形态结尾时把属于 URL 的 `:` 写成 `%3A`，裸 `host:port` 后加 `/` 再追加选择器。资源 path 不接受续接；媒体续接使用 Turn path 加 `attachments`，HTML／文本不接受媒体续接。旧平台调用别名、顶层 `url` 和 Artifact query 选项不再执行。示例：`{"path": "stravia://artifacts/<artifact-id>:1-50", "question": "What does this section say?"}`。
 
 公网与所属 Artifact 按内容类型一致读取：JPEG/PNG/WebP 默认理解并提取文字；HTML 默认 Markdown，附问题只返回 `question_applied=false`；JSON/XML/text 类文件读取原文本。未知二进制返回未读取说明与下载信息，不能用下载冒充指定内容操作。显式下载不执行模型。公网默认 HTML 保留现有 Provider／渲染路径；raw 直接取得正文一次，再严格按 BOM、Content-Type charset、HTML meta、缺省 UTF-8 解码，支持既有 UTF-8、Latin1、Windows-1252、UTF-16LE/BE；未知或无效编码失败。raw 正文不加行号或提示。
 
-首次文本读取建立所属 Principal 的不可变 Artifact 快照，每页最多 32KiB UTF-8 和 200 个源行。`lines` 支持 1-based `N`（到 EOF）、`N-M`、`N%2BK`（K 行）、`-K`、逗号多段，最多 16 段，排序并合并相邻／重叠范围。LF 计行，CRLF 原样保留，末尾 LF 不增加空行；范围开始越 EOF 失败，结束越 EOF 截到 EOF。空文本裸读成功，显式范围失败。超长单行在 UTF-8 边界切开，续页不漏字节。
+首次文本读取建立所属 Principal 的不可变 Artifact 快照，每页最多 32KiB UTF-8 和 200 个源行。行范围选择器支持 1-based `N`（到 EOF）、`N-M`、`N+K`（K 行）、`-K`、逗号多段，最多 16 段，排序并合并相邻／重叠范围。LF 计行，CRLF 原样保留，末尾 LF 不增加空行；范围开始越 EOF 失败，结束越 EOF 截到 EOF。空文本裸读成功，显式范围失败。超长单行在 UTF-8 边界切开，续页不漏字节。
 
 结果为 `content`、`read_path`、`returned_ranges`、`representation`、`has_more`、`source_truncated`、`limitations`，以及可选 `source_url`、`next_path`、`question_applied`。字节范围 0-based 半开、行号 1-based；正文没有额外上下文或分段省略符。直接复制 `next_path` 续读，不重新抓取、转换或调用模型。最后页没有 `next_path`，源截断状态独立保留。内部网页请求允许 500,000 字符，其他请求缺省仍为 8,000；批量抓取保留公平限额，显式大预算可提升总量。Exa 保留[官方 10,000 字符上限](https://exa.ai/docs/reference/get-contents)，触顶时报告源截断，不捏造后续页。
 
@@ -104,7 +106,7 @@ Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_i
 | Public router | `stravia-read` | `StraviaRead` | 是 | 是 | 否 |
 | Internal read router | `stravia-read` | `StraviaRead` | 否 | 否 | 是 |
 
-`GatewayBuilder` 先为内部 Agent 装配基础读取 router，再在外层 Hook/MCP registry 装配公开 router。外层 `search://` 调用完整 Web Search owner；内部 `search://` 只调用基础检索并拒绝研究续接 ID。两者的网页 URL 均复用现有 Web Access owner。插件通过 `PlatformTool::read_domain()` 贡献可判定领域、非空简短描述与处理入口；重复领域或冲突身份显式失败，不通过描述或加载顺序路由。
+`GatewayBuilder` 先为内部 Agent 装配基础读取 router，再在外层 Hook/MCP registry 装配公开 router。外层 `stravia://search` 调用完整 Web Search owner；内部相同 path 只调用基础检索并拒绝研究续接 ID。两者的网页 URL 均复用现有 Web Access owner。插件通过 `PlatformTool::read_domain()` 贡献可判定领域、非空简短描述与处理入口；重复领域或冲突身份显式失败，不通过描述或加载顺序路由。
 
 Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`、Revision 3，并且 `exposure = Internal`。旧 Revision 续接报 `incompatible_definition_revision`，要求启动新研究；不改写历史指令或静默重开根。
 

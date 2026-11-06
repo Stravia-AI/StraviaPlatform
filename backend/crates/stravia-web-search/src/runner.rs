@@ -267,6 +267,18 @@ impl WebSearchRunner {
         }
     }
 
+    /// 判断 `id` 对 `principal` 是否是可见且未过期的 Web Search 节点。
+    ///
+    /// Hook 只改写续接 Web Search 轮的参数，媒体轮、不存在或已过期的节点
+    /// 都不属于搜索轮；存储错误同样按“不是搜索轮”处理，真正的失败由
+    /// 随后执行的平台工具报告。
+    pub async fn is_search_turn(&self, principal: &Principal, id: &SearchTurnId) -> bool {
+        matches!(
+            self.turns.node_kind(principal, id).await,
+            Ok(TurnNodeKind::WebSearch)
+        )
+    }
+
     /// Starts a lazy Web Search event stream.
     ///
     /// The input requires an authenticated API-key [`Principal`], a non-empty

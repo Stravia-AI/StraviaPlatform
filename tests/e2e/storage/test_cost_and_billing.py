@@ -18,7 +18,7 @@ import pytest
 from tests.common.observation_contents import attempt_finishes, attempt_starts
 from tests.common.helpers import (
     WebSession, find_free_port, http_bytes, http_request, initialize_server,
-    start_stravia_server, stop_stravia_server, wait_for_setup_token, wait_until_ready,
+    start_stravia_server, stop_stravia_server, upload_artifact, wait_for_setup_token, wait_until_ready,
 )
 from tests.e2e.admin.test_observations import (
     _client_errors, _detail, _proxy, _route_interactions, _wait_for,
@@ -565,21 +565,8 @@ def test_mcp_internal_model_uses_called_route_billing_and_root_key(usage_env):
     })
     auth = {"Authorization": f"Bearer {key['key']}"}
     image = base64.b64decode(PNG)
-    status, upload = http_request("POST", env["proxy"] + "/v1/artifacts/uploads",
-                                  {"mime_type": "image/png", "size": len(image)}, auth)
-    assert status == 201, upload
-    connection = HTTPConnection("127.0.0.1", int(env["proxy"].rsplit(":", 1)[1]), timeout=20)
-    try:
-        connection.request("PUT", f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1", image,
-                           {**auth, "x-upload-token": upload["upload_token"]})
-        response = connection.getresponse()
-        assert response.status == 200
-        part = json.loads(response.read())
-    finally:
-        connection.close()
-    status, artifact = http_request("POST", env["proxy"] + f"/v1/artifacts/uploads/{upload['upload_id']}/complete",
-                                   {"upload_token": upload["upload_token"], "parts": [part]}, auth)
-    assert status == 200, artifact
+    status, artifact = upload_artifact(env["proxy"], auth, image, "image/png")
+    assert status == 201, artifact
     status, result = http_request("POST", env["proxy"] + "/mcp", {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "StraviaRead", "arguments": {"path": artifact["path"]},

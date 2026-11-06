@@ -54,7 +54,7 @@ async fn master_only_injection_can_download_owned_artifacts_without_media_or_net
             "type":"function",
             "function":{
                 "name":"StraviaRead",
-                "arguments":serde_json::json!({"path":format!("{}?download=1", artifact.reference())}).to_string()
+                "arguments":serde_json::json!({"path":format!("{}:download", artifact.reference())}).to_string()
             }
         }]);
         first["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
@@ -126,7 +126,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     tool_round["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
         "id": "guessed-search",
         "type": "function",
-        "function": {"name": "StraviaRead", "arguments": "{\"path\":\"search://unexposed%20networking\"}"}
+        "function": {"name": "StraviaRead", "arguments": "{\"path\":\"stravia://search\",\"question\":\"unexposed networking\"}"}
     }]);
     tool_round["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
     let (parent_url, parent_calls, requests) = serve_openai_sequence_with_requests(vec![

@@ -6,6 +6,8 @@ status: accepted
 
 StraviaRead 对客户端、外层模型和内部 Agent 只公开一个必填字符串 `path`，不保留顶层 `url`、可选参数或旧 `query://` 别名。搜索使用 `search://`，资源使用公网 HTTP(S) URL 或所属 Artifact Reference。此修订取代此前裸 Artifact 默认只下载、仅 Artifact query 可以指定问题的规则，使相同内容不因取得方式不同而改变默认行为。
 
+> **局部被取代。** [ADR-0091](0091-read-paths-with-colon-selectors-and-plain-fields.md) 取代下述局部约定：StraviaRead 只公开一个 `path` 字符串；搜索使用 `search://`，允许域名与续接参数位于搜索 query；公网资源选项位于 `#stravia?` fragment，Artifact 选项位于引用后的 query 参数。现在 `path` 只承载地址与无需编码的 `:` 选择器，自由文本、`attachments`、`allowed_domains`、`wait` 走可空字段，续接直接把 `stravia://turns/<turn-id>` 作为 `path`。原文其余决定不变。
+
 ## 内容决定默认行为
 
 JPEG、PNG、WebP 默认调用 Media Understanding，描述图片并提取可读文字；公网图片先按原有准入规则收存，所属图片直接使用原 Artifact。HTML 默认返回 Markdown，JSON/XML/文本直接读取；不支持的二进制返回文件与下载信息，并明确说明内容未读取。不会解包、执行文件或新增 PDF、视频等理解能力。

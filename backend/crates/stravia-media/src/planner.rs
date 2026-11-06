@@ -161,7 +161,7 @@ impl HookSession for MediaPlanningSession {
                     )))),
                     HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
-                        description: "Read an image Artifact path; add ?question= for a specific media question.".into(),
+                        description: "Read an image Artifact path; put a specific media question in question.".into(),
                     },
                 ],
             });
@@ -256,7 +256,7 @@ impl HookSession for MediaPlanningSession {
                 HookAction::ExposeRead {
                     scope: ReadExposureScope::new(false, true),
                     description:
-                        "Read an image Artifact path; add ?question= for a specific media question."
+                        "Read an image Artifact path; put a specific media question in question."
                             .into(),
                 },
             ],

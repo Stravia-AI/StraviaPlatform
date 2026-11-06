@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tower::ServiceExt;
 
 use super::create_router;
@@ -36,52 +36,19 @@ async fn json_body(response: axum::response::Response) -> Value {
 }
 
 async fn upload(router: &axum::Router, credential: &str, content: &'static str) -> Value {
-    let auth = format!("Bearer {credential}");
-    let created = router
+    let response = router
         .clone()
         .oneshot(
-            Request::post("/v1/artifacts/uploads")
-                .header("authorization", &auth)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"mime_type":"text/plain","size":content.len()}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let created = json_body(created).await;
-    let id = created["upload_id"].as_str().unwrap();
-    let token = created["upload_token"].as_str().unwrap();
-    let part = router
-        .clone()
-        .oneshot(
-            Request::put(format!("/v1/artifacts/uploads/{id}/parts/1"))
-                .header("authorization", &auth)
-                .header("x-upload-token", token)
+            Request::post("/v1/artifacts")
+                .header("authorization", format!("Bearer {credential}"))
+                .header("content-type", "text/plain")
                 .body(Body::from(content))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(part.status(), StatusCode::OK);
-    let part = json_body(part).await;
-    let completed = router
-        .clone()
-        .oneshot(
-            Request::post(format!("/v1/artifacts/uploads/{id}/complete"))
-                .header("authorization", &auth)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"upload_token":token,"parts":[part]}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(completed.status(), StatusCode::OK);
-    json_body(completed).await
+    assert_eq!(response.status(), StatusCode::CREATED);
+    json_body(response).await
 }
 
 #[tokio::test]
@@ -141,10 +108,10 @@ async fn upload_grant_is_multifile_fixed_lifetime_and_upload_only() {
     now.fetch_add(60 * 1000, Ordering::SeqCst);
     let expired = router
         .oneshot(
-            Request::post("/v1/artifacts/uploads")
+            Request::post("/v1/artifacts")
                 .header("authorization", format!("Bearer {}", grant.key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"mime_type":"text/plain","size":1}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from("x"))
                 .unwrap(),
         )
         .await
@@ -174,10 +141,10 @@ async fn issued_upload_grant_survives_restart_but_not_owner_revocation() {
     gateway.admin().delete_api_key(&key.id).await.unwrap();
     let denied = router
         .oneshot(
-            Request::post("/v1/artifacts/uploads")
+            Request::post("/v1/artifacts")
                 .header("authorization", format!("Bearer {}", grant.key))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"mime_type":"text/plain","size":1}"#))
+                .header("content-type", "text/plain")
+                .body(Body::from("x"))
                 .unwrap(),
         )
         .await

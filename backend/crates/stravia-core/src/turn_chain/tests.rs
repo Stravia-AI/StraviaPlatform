@@ -144,6 +144,95 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
     }
 }
 
+async fn set_node_created_at(store: &SqlTurnChainStore, id: &TurnNodeId, created_at: i64) {
+    match &store.backend {
+        Backend::Sqlite(pool) => {
+            sqlx::query("UPDATE turn_nodes SET created_at = $2 WHERE id = $1")
+                .bind(id.as_str())
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Backend::Postgres(pool) => {
+            sqlx::query("UPDATE turn_nodes SET created_at = $2 WHERE id = $1")
+                .bind(id.as_str())
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+async fn assert_node_kind_contract(store: &SqlTurnChainStore) {
+    let owner = principal("node-kind-owner");
+    let foreign = principal("node-kind-foreign");
+    let cases = [
+        (TurnNodeId::web_search(), TurnNodeKind::WebSearch),
+        (TurnNodeId::agent(), TurnNodeKind::Agent),
+        (TurnNodeId::response(), TurnNodeKind::Response),
+    ];
+    for (id, kind) in &cases {
+        store
+            .commit(TurnCommit {
+                id: id.clone(),
+                kind: *kind,
+                parent_id: None,
+                principal: owner.clone(),
+                payload_version: 1,
+                payload: serde_json::json!({"system": "node kind"}),
+                marker_references: Vec::new(),
+                redaction_references: Vec::new(),
+                compaction_record_ids: Vec::new(),
+                reusable_prefix: None,
+            })
+            .await
+            .expect("node kind fixture");
+        assert_eq!(store.node_kind(&owner, id).await.unwrap(), *kind);
+        assert_eq!(
+            store.node_kind(&foreign, id).await,
+            Err(TurnUnavailable::Unavailable),
+            "node kinds must stay inside their Principal"
+        );
+    }
+
+    // 到期节点不可见，即使 GC 尚未把它移出队列。
+    let expired = TurnNodeId::agent();
+    store
+        .commit(TurnCommit {
+            id: expired.clone(),
+            kind: TurnNodeKind::Agent,
+            parent_id: None,
+            principal: owner.clone(),
+            payload_version: 1,
+            payload: serde_json::json!({"system": "expired node kind"}),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+            compaction_record_ids: Vec::new(),
+            reusable_prefix: None,
+        })
+        .await
+        .expect("expired node kind fixture");
+    set_node_created_at(
+        store,
+        &expired,
+        now_millis() - store.retention.window_millis() - 1,
+    )
+    .await;
+    assert_eq!(
+        store.node_kind(&owner, &expired).await,
+        Err(TurnUnavailable::Unavailable)
+    );
+
+    mark_deleting(store, &cases[0].0).await;
+    assert_eq!(
+        store.node_kind(&owner, &cases[0].0).await,
+        Err(TurnUnavailable::Unavailable),
+        "deleting nodes are unavailable before their deadline"
+    );
+}
+
 async fn begin_collecting_first_reference(store: &SqlTurnChainStore, id: &TurnNodeId) {
     macro_rules! begin {
         ($pool:expr, $enqueue:path) => {{
@@ -503,6 +592,11 @@ async fn sqlite_gc_drains_references_beyond_one_batch_and_keeps_shared_content()
             .await,
         Err(TurnUnavailable::Unavailable)
     ));
+}
+
+#[tokio::test]
+async fn sqlite_node_kind_distinguishes_kinds_and_respects_visibility() {
+    assert_node_kind_contract(&test_store().await).await;
 }
 
 #[tokio::test]
@@ -1443,6 +1537,7 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
     assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_indexes(&store).await;
     assert_postgres_concurrent_commits_and_gc(&store).await;
     assert_deleting_retention_contract(&store).await;
+    assert_node_kind_contract(&store).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)

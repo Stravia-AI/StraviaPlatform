@@ -312,7 +312,8 @@ impl LocalArtifactStore {
                 ArtifactUploadRequest {
                     mime_type: mime_type.to_owned(),
                     size: reserved,
-                    idle_ttl: Duration::from_secs(900),
+                    // 单请求上传可能持续超过 15 分钟；暂存任务在每次写入后刷新。
+                    idle_ttl: Duration::from_secs(60 * 60),
                     retention_ttl: retention,
                     policy: stravia_runtime_contract::agent::ArtifactPolicy {
                         max_artifacts: 1,

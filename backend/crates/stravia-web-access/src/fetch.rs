@@ -19,7 +19,7 @@ const MAX_REDIRECTS: usize = 10;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
 const LOW_QUALITY_LIMITATION: &str =
     "The extracted content may be a page shell, login wall, or challenge page.";
-const LOSSY_DECODE_LIMITATION: &str = "The source encoding could not be decoded reliably; the returned text may contain substitutions. Use download=1 for the original bytes.";
+const LOSSY_DECODE_LIMITATION: &str = "The source encoding could not be decoded reliably; the returned text may contain substitutions. Use :download for the original bytes.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

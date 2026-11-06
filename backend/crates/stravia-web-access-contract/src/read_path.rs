@@ -1,86 +1,108 @@
-//! StraviaRead 唯一 path 契约：统一读取表达式的解析、schema 与格式化。
+//! StraviaRead 的唯一 path 契约：统一读取表达式的解析与工具 schema。
 //!
-//! 公开 MCP、外层模型与内部搜索 Agent 都只接收单个必填字符串 `path`，由
-//! [`parse_read_path`] 统一解析为 [`ReadTarget`]。工具 schema 统一使用
-//! [`input_schema`]，Hook 重新编码搜索 path 统一使用 [`format_search_path`]，
-//! 不再各自拼接字符串。
+//! 模型只提供一个 `path` 字符串和若干结构化字段，由 [`parse_read_input`] 解析为
+//! [`ReadTarget`]。这里没有任何 percent 解码或编码路径：自由文本放在 `question`，
+//! 结构化选项写成 path 末尾的 `:` 选择器。
 //!
-//! 语法概览：
-//! - 搜索：`search://<percent-encoded-text>?allowed_domains=a&allowed_domains=b&previous_path=<percent-encoded-turn-uri>`。
-//!   首个未编码 `?` 分隔文本与参数；文本严格 percent-decode（`+` 不转换为空格），
-//!   参数按 form 解码（`+` 视为空格）；所有 `%` 转义与 UTF-8 均先验证。
-//! - 资源：HTTP(S) URL 的工具选项使用 `#stravia?<options>`；Artifact Reference
-//!   使用 `stravia://artifacts/<digest>?<options>`。HTTP(S) 的普通 fragment 保留源 URL 语义，
-//!   Artifact fragment 一律拒绝；不支持旧 Artifact wrapper。
-//! - 选项为 `question`、`raw`、`lines`、`download`、`previous_path`、`cursor`，
-//!   互斥规则见 [`parse_read_path`]。
-//! - 执行查询：`stravia://tool-executions/<28 lowercase letters>?wait=<u64 seconds>`；
-//!   缺省或零立即观察，正数仅等待当前查询，不创建执行或延长原期限。
+//! 支持的 path 形式：
+//! - `stravia://search`：搜索；搜索文本放在 `question`，`allowed_domains` 限定最终来源。
+//! - `stravia://turns/<28 lowercase>`：续接上一轮；问题放在 `question`，附加媒体放在 `attachments`，
+//!   域名限制放在 `allowed_domains`。解析器不知道 turn 的类型，两者由 core 在查明类型后校验。
+//! - `stravia://tool-executions/<28 lowercase>`：观察已有执行；等待秒数放在 `wait`。
+//! - `stravia://artifacts/<55 lowercase>[选择器]`：Artifact 资源。
+//! - `http(s)://…[选择器]`：公网资源。
 //!
-//! 错误（[`ReadPathError`]）区分无效 scheme、选项、编码与范围，且不在消息中
-//! 回显完整带凭据 URL 或参数值。
+//! 选择器只对资源路径有效，从 path 末尾按 `:` 自右向左剥离：
+//! `raw`、`download`、`cursor=<base64url>`，以及行范围 `N`、`N-M`、`N+K`、`-K`
+//! （逗号分隔多段）。剥离有“底线”：Artifact 的底线是 55 位 id 结束处；HTTP(S) 的
+//! 底线是 authority 结束处，即 `scheme://` 之后第一个 `/`、`?` 或 `#`。没有该字符时
+//! 不剥离，因此 `https://host:8080` 里的 `:8080` 是端口。token 严格符合语法才剥离，
+//! 否则停止，剩余部分按字面作为地址。源 URL 本身以选择器形态结尾时，把那个 `:`
+//! 写成 `%3A`；`%3A` 原样发往源站。
+//!
+//! 旧语法（`search://`、`query://`、`#stravia?`、Artifact 的 `?options`、`?wait=`）
+//! 不保留别名，只返回带正确写法的错误。
+//!
+//! [`input_schema`] 是 MCP 使用的宽松形式（只有 `path` 必填）；[`model_input_schema`]
+//! 是模型工具声明使用的严格形式（出现的字段全部必填，可选字段类型可为 `null`）。
+//! 字段按 [`ReadSchemaScope`] 的暴露范围裁剪。
 
 use serde::{Deserialize, Serialize};
 
 use crate::normalize_domains;
 
-/// 搜索文本解码后的最大字节数，与 Web Search 执行侧既有限制一致。
+/// 搜索文本的最大字节数，与 Web Search 执行侧既有限制一致。
 pub const MAX_SEARCH_TEXT_BYTES: usize = 64 * 1024;
-/// 搜索 `allowed_domains` 参数在规范化前允许的原始条目上限。
+/// `allowed_domains` 在规范化前允许的原始条目上限。
 pub const MAX_ALLOWED_DOMAINS: usize = 20;
-/// `lines` 选项允许的最大分段数。
+/// 行范围允许的最大分段数。
 pub const MAX_LINE_SELECTIONS: usize = 16;
 
-/// Artifact Reference 前缀与 digest 长度；镜像 runtime-contract 的语法，
-/// 本 crate 不引入对该 crate 的依赖。
-const ARTIFACT_REFERENCE_PREFIX: &str = "stravia://artifacts/";
+const READ_SCHEME_PREFIX: &str = "stravia://";
+const SEARCH_PATH: &str = "stravia://search";
 const TURN_REFERENCE_PREFIX: &str = "stravia://turns/";
+const TOOL_EXECUTION_PREFIX: &str = "stravia://tool-executions/";
+const ARTIFACT_REFERENCE_PREFIX: &str = "stravia://artifacts/";
+/// 旧 HTTP(S) 工具选项所在的保留 fragment 前缀。
+const LEGACY_OPTIONS_FRAGMENT_PREFIX: &str = "stravia?";
 const TURN_ID_LEN: usize = 28;
 const ARTIFACT_DIGEST_LEN: usize = 55;
 
-/// StraviaRead 工具的唯一输入：单个必填 `path`。
+/// StraviaRead 工具的全部输入。
 ///
-/// 旧顶层 `url`、`i` 等字段由 `deny_unknown_fields` 明确拒绝，不做兼容别名。
+/// JSON 中的 `null` 与字段缺省含义相同；旧顶层 `url`、`previous_path` 等字段由
+/// `deny_unknown_fields` 明确拒绝，不做兼容别名。
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReadInput {
     pub path: String,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_domains: Option<Vec<String>>,
+    #[serde(default)]
+    pub wait: Option<u64>,
 }
 
-/// 解析后的读取目标：一次搜索或一次资源读取。
+/// 解析后的读取目标。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadTarget {
-    Search(SearchPath),
+    Search(SearchTarget),
+    Continuation(ContinuationTarget),
     Resource(ResourcePath),
     ToolExecution(ToolExecutionPath),
 }
 
-/// Read-only observation of an existing execution; `wait` never changes its deadline.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolExecutionPath {
-    pub id: String,
-    pub wait_seconds: u64,
-}
-
 /// 一次搜索读取。
 ///
-/// `allowed_domains` 为 `None` 表示参数缺省：新根搜索即无限制，续接由调用方
-/// 按父策略解析继承；`Some` 为显式非空列表，整体替换父策略。不存在用空列表
-/// 清空限制的语法。
+/// `allowed_domains` 为 `None` 表示字段缺省：新根搜索即无限制，续接时由调用方按
+/// 父策略解析继承；`Some` 为显式非空列表，整体替换父策略。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchPath {
+pub struct SearchTarget {
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_path: Option<String>,
 }
 
-/// 一次资源读取：HTTP(S) URL 或 Artifact Reference，附工具选项。
+/// 一次轮次续接；具体是搜索轮还是媒体轮由 core 用 `TurnChainStore::node_kind` 判定。
 ///
-/// `url` 保留 HTTP(S) 源站 path/query 与普通 fragment；工具选项已剥离。
-/// Artifact 的 `url` 是不含查询选项的裸 `stravia://artifacts/<digest>`。
+/// `turn_path` 是精确的 `stravia://turns/<id>`；`attachments` 已按逐项规则校验，可为空。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContinuationTarget {
+    pub turn_path: String,
+    pub question: String,
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
+}
+
+/// 一次资源读取：HTTP(S) URL 或 Artifact Reference。
+///
+/// `url` 保留源 URL 的 path、query 与普通 fragment；只剥离末尾的 `:` 选择器。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourcePath {
     pub url: String,
@@ -88,7 +110,7 @@ pub struct ResourcePath {
     pub options: ReadOptions,
 }
 
-/// 资源读取选项。全部缺省表示默认读取。
+/// 资源读取选项；全部缺省表示默认读取。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,16 +122,23 @@ pub struct ReadOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+/// Read-only observation of an existing execution; `wait` never changes its deadline.
+///
+/// `wait_seconds` 缺省为 0；正数只等待当前查询，不创建执行或延长原期限。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolExecutionPath {
+    pub id: String,
+    pub wait_seconds: u64,
 }
 
 /// 一次行选择，行号 1-based，按源文本 LF 计行。
 ///
-/// `parse_read_path` 产出的列表经过排序与合并的规范化：有界区间一律为
+/// 解析产生的列表经过排序与合并的规范化：有界区间一律为
 /// [`LineSelection::Inclusive`]，开放区间（到 EOF）为 [`LineSelection::From`]，
-/// [`LineSelection::Last`] 因依赖总行数只能在末尾保留（多个 `Last` 合并为最大
+/// [`LineSelection::Last`] 依赖总行数，只能在末尾保留（多个 `Last` 合并为最大
 /// 计数），与绝对区间的最终合并由快照层在已知总行数后完成。
 /// [`LineSelection::Count`] 仅供直接构造方使用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,82 +153,225 @@ pub enum LineSelection {
     Last(u64),
 }
 
-/// path 解析错误；区分无效 scheme、选项、编码与范围。
+/// path 与字段解析错误。
 ///
-/// Display 消息不回显完整 URL、搜索文本或选项值，避免泄露带凭据地址。
+/// Display 消息不回显完整 URL、question 或其他字段值，并给出可执行的正确写法。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReadPathError {
     /// path 为空或仅空白。
     #[error("read path must not be blank")]
     BlankPath,
-    /// 旧 `query://` 表达式；需改写为 `search://`。
-    #[error("legacy query:// read paths are no longer accepted; use search:// for search")]
-    LegacyQueryScheme,
-    /// 不是可识别的 http(s) URL、Artifact Reference 或 search 表达式。
+    /// 旧 `search://` 或 `query://` 表达式。
     #[error(
-        "read path must be an absolute http(s) URL, an Artifact Reference, or a search:// path"
+        "legacy search paths are not accepted; set path to `stravia://search` and put the search text in question"
+    )]
+    LegacySearchScheme,
+    /// 不是受支持的 path 形式。
+    #[error(
+        "read path must be `stravia://search`, a `stravia://turns/<turn-id>`, a `stravia://tool-executions/<id>`, a `stravia://artifacts/<artifact-id>`, or an absolute http(s) URL"
     )]
     InvalidScheme,
-    /// percent 转义或 UTF-8 解码失败；`component` 标明出错位置。
-    #[error("invalid percent-encoding in {component}: {reason}")]
-    InvalidEncoding {
-        component: &'static str,
-        reason: &'static str,
+    /// HTTP(S) URL 结构非法。
+    #[error(
+        "invalid http(s) URL; use an absolute URL and add a trailing slash after a bare host:port"
+    )]
+    InvalidUrl,
+    /// 精确匹配的 path 带上了后缀或选择器。
+    #[error("`{target}` accepts no suffix; {hint}")]
+    UnexpectedSuffix {
+        target: &'static str,
+        hint: &'static str,
     },
-    /// 搜索文本解码后为空或仅空白。
-    #[error("search text must not be blank")]
-    BlankSearchText,
-    /// 搜索文本解码后超过 65536 字节。
-    #[error("search text exceeds the 65536-byte limit after percent-decoding")]
-    SearchTextTooLarge,
-    /// 参数区结构非法（空参数区、空分段、嵌套 fragment 等）。
-    #[error("malformed read path parameters: {reason}")]
-    MalformedParameter { reason: &'static str },
-    /// 未知参数或选项；仅回显可安全打印的参数名。
-    #[error("unknown parameter: {parameter}")]
-    UnknownParameter { parameter: String },
-    /// 单值参数或选项重复出现。
-    #[error("duplicate parameter: {parameter}")]
-    DuplicateParameter { parameter: &'static str },
-    /// 参数或选项值为空。
-    #[error("parameter must not be empty: {parameter}")]
-    EmptyParameter { parameter: &'static str },
-    /// `raw`/`download` 只接受值 `1`。
-    #[error("option only accepts the value 1: {option}")]
-    InvalidFlagValue { option: &'static str },
-    /// `allowed_domains` 原始条目超过 20 项。
+    /// 该 path 形式缺少必填字段。
+    #[error("`{field}` is required for {target}; {hint}")]
+    MissingField {
+        field: &'static str,
+        target: &'static str,
+        hint: &'static str,
+    },
+    /// 字段在该 path 形式下不允许出现。
+    #[error("`{field}` is not accepted for {target}; {hint}")]
+    FieldNotAllowed {
+        field: &'static str,
+        target: &'static str,
+        hint: &'static str,
+    },
+    /// `question` 为空或仅空白。
+    #[error("question must not be blank")]
+    BlankQuestion,
+    /// `question` 超过 [`MAX_SEARCH_TEXT_BYTES`]。
+    #[error("question must not exceed 65536 UTF-8 bytes")]
+    QuestionTooLarge,
+    /// `allowed_domains` 原始条目超过 [`MAX_ALLOWED_DOMAINS`] 项。
     #[error("allowed_domains accepts at most 20 entries before normalization")]
     TooManyAllowedDomains { count: usize },
-    /// `allowed_domains` 含无效域名条目或规范化后无可保留条目。
-    #[error("allowed_domains entries must be valid domain filters")]
+    /// `allowed_domains` 是显式空数组。
+    #[error(
+        "allowed_domains must not be an empty list; omit it or stravia null to inherit or leave sources unrestricted, or list domains to replace them"
+    )]
+    EmptyAllowedDomains,
+    /// `allowed_domains` 含无效条目或规范化后无可保留条目。
+    #[error("allowed_domains entries must be valid domain filters, for example `docs.rs`")]
     InvalidAllowedDomains,
+    /// `attachments` 条目不是精确 Artifact Reference 或公网 http(s) URL。
+    #[error(
+        "each attachment must be an exact `stravia://artifacts/<artifact-id>` or a public http(s) URL, without `:` selectors or tool option fragments"
+    )]
+    InvalidAttachment,
+    /// `attachments` 含重复条目。
+    #[error("attachments must not contain duplicate entries")]
+    DuplicateAttachment,
     /// Artifact 引用不是裸身份或身份字符非法。
     #[error("invalid Artifact Reference: {reason}")]
     InvalidArtifactReference { reason: &'static str },
     /// Turn 引用不是精确的稳定 URI。
-    #[error("invalid Turn Reference")]
+    #[error(
+        "invalid Turn Reference; use exactly `stravia://turns/<turn-id>` with a 28-character lowercase id"
+    )]
     InvalidTurnReference,
-    #[error("invalid Tool Execution Reference")]
+    /// Tool Execution 引用不是精确的稳定 URI。
+    #[error(
+        "invalid Tool Execution Reference; use exactly `stravia://tool-executions/<id>` with a 28-character lowercase id"
+    )]
     InvalidToolExecutionReference,
-    #[error("wait must be a non-negative integer number of seconds within u64 range")]
-    InvalidWait,
+    /// 同一种选择器出现多次。
+    #[error("`{selector}` may appear at most once in a path")]
+    DuplicateSelector { selector: &'static str },
+    /// 旧 `?options` 语法；已改为 `:` 选择器。
+    #[error(
+        "legacy path options are not accepted; options are `:` selectors such as :raw, :download or :1-50; put questions in the question field"
+    )]
+    LegacyOptionsSyntax,
+    /// 旧 `?wait=` 语法；已改为 `wait` 字段。
+    #[error("legacy `?wait=` is not accepted; put the wait seconds in the wait field")]
+    LegacyWaitParameter,
     /// 行选择语法或数值非法。
     #[error("invalid lines selection: {reason}")]
     InvalidLineSelection { reason: &'static str },
-    /// 选项互斥或上下文限制被违反。
+    /// 选择器互斥或上下文限制被违反。
     #[error("conflicting read options: {reason}")]
     ConflictingOptions { reason: &'static str },
 }
 
-/// StraviaRead 的唯一输入 schema；模型与 MCP 均复用此定义。
-pub fn input_schema() -> serde_json::Value {
+/// 工具 schema 的暴露范围；由 core 的 `ReadExposureScope` 映射而来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadSchemaScope {
+    pub networking: bool,
+    pub media: bool,
+    pub internal: bool,
+}
+
+impl ReadSchemaScope {
+    /// 公网工具：networking 与 media 均可见，`internal` 为 false。
+    pub const FULL: Self = Self {
+        networking: true,
+        media: true,
+        internal: false,
+    };
+}
+
+/// 宽松输入 schema：只有 `path` 必填，供 MCP 使用。
+pub fn input_schema(scope: ReadSchemaScope) -> serde_json::Value {
+    let properties = schema_properties(scope, false);
     serde_json::json!({
         "type": "object",
-        "properties": {
-            "path": { "type": "string", "minLength": 1 }
-        },
+        "properties": properties,
         "required": ["path"],
         "additionalProperties": false
+    })
+}
+
+/// 严格输入 schema：出现的字段全部必填，可选字段类型含 `"null"`。
+///
+/// 供模型侧工具声明使用；跨协议编码器都能处理这种写法。
+pub fn model_input_schema(scope: ReadSchemaScope) -> serde_json::Value {
+    let properties = schema_properties(scope, true);
+    let required: Vec<&str> = properties.keys().map(String::as_str).collect();
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    })
+}
+
+fn schema_properties(
+    scope: ReadSchemaScope,
+    strict: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut properties = serde_json::Map::new();
+    properties.insert("path".into(), path_property());
+    if scope.networking || scope.media {
+        properties.insert("question".into(), question_property(strict));
+    }
+    if scope.media {
+        properties.insert("attachments".into(), attachments_property(strict));
+    }
+    if scope.networking {
+        properties.insert("allowed_domains".into(), allowed_domains_property(strict));
+    }
+    if !scope.internal {
+        properties.insert("wait".into(), wait_property(strict));
+    }
+    properties
+}
+
+fn path_property() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "minLength": 1,
+        "description": "Resource path; append `:` selectors such as :raw, :download or :1-50."
+    })
+}
+
+fn question_property(strict: bool) -> serde_json::Value {
+    let kind = if strict {
+        serde_json::json!(["string", "null"])
+    } else {
+        serde_json::json!("string")
+    };
+    serde_json::json!({
+        "type": kind,
+        "description": "Plain-text question or search text; no encoding."
+    })
+}
+
+fn attachments_property(strict: bool) -> serde_json::Value {
+    let kind = if strict {
+        serde_json::json!(["array", "null"])
+    } else {
+        serde_json::json!("array")
+    };
+    serde_json::json!({
+        "type": kind,
+        "items": { "type": "string" },
+        "description": "Additional Artifact paths or public URLs for a media follow-up."
+    })
+}
+
+fn allowed_domains_property(strict: bool) -> serde_json::Value {
+    let kind = if strict {
+        serde_json::json!(["array", "null"])
+    } else {
+        serde_json::json!("array")
+    };
+    serde_json::json!({
+        "type": kind,
+        "items": { "type": "string" },
+        "description": "Domains that final sources must belong to."
+    })
+}
+
+fn wait_property(strict: bool) -> serde_json::Value {
+    let kind = if strict {
+        serde_json::json!(["integer", "null"])
+    } else {
+        serde_json::json!("integer")
+    };
+    serde_json::json!({
+        "type": kind,
+        "minimum": 0,
+        "description": "Seconds to wait for a tool execution."
     })
 }
 
@@ -233,293 +405,346 @@ pub fn pagination_schema() -> serde_json::Value {
     })
 }
 
-/// 解析唯一 `path` 为搜索或资源读取目标。
+/// 解析 [`ReadInput`] 为读取目标。
 ///
-/// - 空白 path 报错；合法 URL 内容不做 trim。
-/// - `query://` 前缀明确拒绝，无兼容别名。
-/// - 搜索文本严格 percent-decode（`+` 保留），参数值按 form 解码（`+` 为空格）；
-///   拒绝空白文本、未知参数、重复单值参数、空域名与超过
-///   [`MAX_ALLOWED_DOMAINS`] 个原始条目；域名经 [`crate::normalize_domains`]
-///   规范化去重。
-/// - HTTP(S) 资源从 `#stravia?` 读取工具选项；Artifact 从 `?` 读取工具选项；
-///   Artifact 必须是 `stravia://artifacts/` 加 55 位小写 digest，并拒绝所有 fragment。
-/// - 选项约束：`question` 与 `previous_path` 非空；`raw`/`download` 只接受
-///   `1`；`raw` 与 `question` 互斥；`download` 与其他所有选项互斥；
-///   `previous_path` 仅媒体问题（资源侧需伴随 `question`）或搜索允许；
-///   `cursor` 仅对 Artifact 有效且与其他所有选项互斥。
-pub fn parse_read_path(path: &str) -> Result<ReadTarget, ReadPathError> {
+/// 每种 path 形式只接受表中列出的字段；其余字段报错，不做静默忽略。
+pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> {
+    let path = input.path.as_str();
     if path.trim().is_empty() {
         return Err(ReadPathError::BlankPath);
     }
-    if path.starts_with("query://") {
-        return Err(ReadPathError::LegacyQueryScheme);
+    if path.starts_with("search://") || path.starts_with("query://") {
+        return Err(ReadPathError::LegacySearchScheme);
     }
-    if let Some(rest) = path.strip_prefix("search://") {
-        return parse_search(rest);
+    if path == SEARCH_PATH {
+        return parse_search(input);
     }
-    if let Some(rest) = path.strip_prefix("stravia://tool-executions/") {
-        return parse_tool_execution(rest);
+    if path.starts_with(SEARCH_PATH) {
+        return Err(ReadPathError::UnexpectedSuffix {
+            target: "stravia://search",
+            hint: "put the search text in question",
+        });
     }
-    parse_resource(path)
+    if path.starts_with(TURN_REFERENCE_PREFIX) {
+        return parse_continuation(input, path);
+    }
+    if path.starts_with(TOOL_EXECUTION_PREFIX) {
+        return parse_tool_execution(input, path);
+    }
+    if path.starts_with(ARTIFACT_REFERENCE_PREFIX) {
+        return parse_artifact(input, path);
+    }
+    if path.starts_with(READ_SCHEME_PREFIX) {
+        return Err(ReadPathError::InvalidScheme);
+    }
+    parse_http_resource(input, path)
 }
 
-fn parse_tool_execution(rest: &str) -> Result<ReadTarget, ReadPathError> {
-    let (id, parameters) = rest
-        .split_once('?')
-        .map_or((rest, None), |(id, query)| (id, Some(query)));
-    if id.len() != TURN_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_lowercase()) {
-        return Err(ReadPathError::InvalidToolExecutionReference);
-    }
-    let mut wait_seconds = None;
-    if let Some(parameters) = parameters {
-        for segment in parameters.split('&') {
-            if segment.is_empty() || segment.contains('#') {
-                return Err(ReadPathError::MalformedParameter {
-                    reason: "execution parameters must contain nonempty entries and no fragment",
-                });
-            }
-            let (key, value) = segment.split_once('=').unwrap_or((segment, ""));
-            let key = decode_percent(key, "execution parameters", true)?;
-            let value = decode_percent(value, "execution parameters", true)?;
-            if key != "wait" {
-                return Err(ReadPathError::UnknownParameter {
-                    parameter: printable_parameter(&key),
-                });
-            }
-            if wait_seconds.is_some() {
-                return Err(ReadPathError::DuplicateParameter { parameter: "wait" });
-            }
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(ReadPathError::InvalidWait);
-            }
-            wait_seconds = Some(
-                value
-                    .parse::<u64>()
-                    .map_err(|_| ReadPathError::InvalidWait)?,
-            );
-        }
-    }
-    Ok(ReadTarget::ToolExecution(ToolExecutionPath {
-        id: id.to_owned(),
-        wait_seconds: wait_seconds.unwrap_or(0),
-    }))
-}
-
-/// 将搜索目标重新编码为 `search://` path；与 [`parse_read_path`] 严格互逆。
-///
-/// 文本与参数值对所有非 unreserved 字节做 percent 编码，因此文本中的 `?`、`#`、
-/// `+` 均不会破坏解析。`allowed_domains` 为 `Some(vec![])` 时会产出空值参数——
-/// 解析侧明确拒绝——以避免把显式空列表静默变成无限制。
-pub fn format_search_path(search: &SearchPath) -> String {
-    let mut path = String::with_capacity(13 + search.query.len());
-    path.push_str("search://");
-    encode_component(&mut path, &search.query);
-    let mut separator = '?';
-    if let Some(domains) = &search.allowed_domains {
-        if domains.is_empty() {
-            path.push_str("?allowed_domains=");
-            separator = '&';
-        } else {
-            for domain in domains {
-                path.push(separator);
-                separator = '&';
-                path.push_str("allowed_domains=");
-                encode_component(&mut path, domain);
-            }
-        }
-    }
-    if let Some(previous_path) = &search.previous_path {
-        path.push(separator);
-        path.push_str("previous_path=");
-        encode_component(&mut path, previous_path);
-    }
-    path
-}
-
-fn parse_search(rest: &str) -> Result<ReadTarget, ReadPathError> {
-    let (text_raw, query_raw) = match rest.split_once('?') {
-        Some((text, query)) => (text, Some(query)),
-        None => (rest, None),
-    };
-    let query = decode_percent(text_raw, "search text", false)?;
-    if query.trim().is_empty() {
-        return Err(ReadPathError::BlankSearchText);
-    }
+fn parse_search(input: &ReadInput) -> Result<ReadTarget, ReadPathError> {
+    let query = required_question(
+        input,
+        "`stravia://search`",
+        "set question to the plain-text search text",
+    )?;
     if query.len() > MAX_SEARCH_TEXT_BYTES {
-        return Err(ReadPathError::SearchTextTooLarge);
+        return Err(ReadPathError::QuestionTooLarge);
     }
-    let mut domains_raw: Vec<String> = Vec::new();
-    let mut previous_path: Option<String> = None;
-    if let Some(parameters) = query_raw {
-        if parameters.is_empty() {
-            return Err(ReadPathError::MalformedParameter {
-                reason: "search parameters must contain at least one entry after '?'",
-            });
-        }
-        for segment in parameters.split('&') {
-            if segment.is_empty() {
-                return Err(ReadPathError::MalformedParameter {
-                    reason: "search parameters must not contain empty entries",
-                });
-            }
-            let (key_raw, value_raw) = match segment.split_once('=') {
-                Some((key, value)) => (key, value),
-                None => (segment, ""),
-            };
-            let key = decode_percent(key_raw, "search parameters", true)?;
-            let value = decode_percent(value_raw, "search parameters", true)?;
-            match key.as_str() {
-                "allowed_domains" => {
-                    if value.trim().is_empty() {
-                        return Err(ReadPathError::EmptyParameter {
-                            parameter: "allowed_domains",
-                        });
-                    }
-                    if domains_raw.len() == MAX_ALLOWED_DOMAINS {
-                        return Err(ReadPathError::TooManyAllowedDomains {
-                            count: MAX_ALLOWED_DOMAINS + 1,
-                        });
-                    }
-                    domains_raw.push(value);
-                }
-                "previous_path" => {
-                    if previous_path.is_some() {
-                        return Err(ReadPathError::DuplicateParameter {
-                            parameter: "previous_path",
-                        });
-                    }
-                    if value.trim().is_empty() {
-                        return Err(ReadPathError::EmptyParameter {
-                            parameter: "previous_path",
-                        });
-                    }
-                    validate_turn_reference(&value)?;
-                    previous_path = Some(value);
-                }
-                _ => {
-                    return Err(ReadPathError::UnknownParameter {
-                        parameter: printable_parameter(&key),
-                    });
-                }
-            }
-        }
-    }
-    let allowed_domains = if domains_raw.is_empty() {
-        None
-    } else {
-        if domains_raw.len() > MAX_ALLOWED_DOMAINS {
-            return Err(ReadPathError::TooManyAllowedDomains {
-                count: domains_raw.len(),
-            });
-        }
-        let normalized =
-            normalize_domains(domains_raw).map_err(|_| ReadPathError::InvalidAllowedDomains)?;
-        if normalized.is_empty() {
-            return Err(ReadPathError::InvalidAllowedDomains);
-        }
-        Some(normalized)
-    };
-    Ok(ReadTarget::Search(SearchPath {
+    reject_field(
+        non_empty(input.attachments.as_ref()),
+        "attachments",
+        SEARCH_TARGET,
+        "attachments only apply to media turn continuations",
+    )?;
+    reject_field(
+        input.wait.as_ref(),
+        "wait",
+        SEARCH_TARGET,
+        "a search returns its report directly",
+    )?;
+    let allowed_domains = parse_allowed_domains(input.allowed_domains.as_ref())?;
+    Ok(ReadTarget::Search(SearchTarget {
         query,
         allowed_domains,
-        previous_path,
     }))
 }
 
-fn parse_resource(path: &str) -> Result<ReadTarget, ReadPathError> {
-    let is_artifact = path.starts_with(ARTIFACT_REFERENCE_PREFIX);
-    let (url, options_raw) = if is_artifact {
-        if path.contains('#') {
-            return Err(ReadPathError::InvalidArtifactReference {
-                reason: "fragments are not supported",
-            });
-        }
-        path.split_once('?')
-            .map_or((path, None), |(identity, options)| {
-                (identity, Some(options))
-            })
-    } else {
-        if path
-            .split_once('#')
-            .is_some_and(|(_, fragment)| fragment.contains('#'))
-        {
-            return Err(ReadPathError::MalformedParameter {
-                reason: "nested fragments are not supported in read options",
-            });
-        }
-        // HTTP(S) tool options stay in the reserved fragment so source queries retain
-        // their original signed-URL semantics.
-        match path.split_once('#') {
-            Some((base, fragment)) => match fragment.strip_prefix("stravia?") {
-                Some(options) => (base, Some(options)),
-                None => (path, None),
-            },
-            None => (path, None),
-        }
-    };
-    if let Some(options) = options_raw {
-        if options.is_empty() {
-            return Err(ReadPathError::MalformedParameter {
-                reason: "read options must contain at least one entry",
-            });
-        }
-        if options.contains('#') {
-            return Err(ReadPathError::MalformedParameter {
-                reason: "nested fragments are not supported in read options",
-            });
+fn parse_continuation(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+    let id = &path[TURN_REFERENCE_PREFIX.len()..];
+    if !is_stable_id(id) {
+        return Err(ReadPathError::InvalidTurnReference);
+    }
+    let question = required_question(
+        input,
+        "a `stravia://turns/<turn-id>` continuation",
+        "set question to the follow-up text",
+    )?;
+    let attachments = parse_attachments(input.attachments.as_ref())?;
+    reject_field(
+        input.wait.as_ref(),
+        "wait",
+        CONTINUATION_TARGET,
+        "a turn continuation completes inline",
+    )?;
+    let allowed_domains = parse_allowed_domains(input.allowed_domains.as_ref())?;
+    Ok(ReadTarget::Continuation(ContinuationTarget {
+        turn_path: path.to_owned(),
+        question,
+        attachments,
+        allowed_domains,
+    }))
+}
+
+fn parse_tool_execution(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+    let rest = &path[TOOL_EXECUTION_PREFIX.len()..];
+    if let Some((_, parameters)) = rest.split_once('?') {
+        if parameters.starts_with("wait") {
+            return Err(ReadPathError::LegacyWaitParameter);
         }
     }
-    if is_artifact {
-        validate_artifact_reference(url)?;
-    } else {
-        validate_http_url(url)?;
+    let (id, suffix) = rest
+        .split_once('?')
+        .map_or((rest, None), |(id, parameters)| (id, Some(parameters)));
+    if suffix.is_some() || !is_stable_id(id) {
+        return Err(ReadPathError::InvalidToolExecutionReference);
     }
-    let options = match options_raw {
-        Some(raw) => parse_read_options(raw)?,
-        None => ReadOptions::default(),
-    };
-    if options.cursor.is_some() && !is_artifact {
+    reject_field(
+        input.question.as_ref(),
+        "question",
+        TOOL_EXECUTION_TARGET,
+        "read it with wait for status and the original result",
+    )?;
+    reject_field(
+        non_empty(input.attachments.as_ref()),
+        "attachments",
+        TOOL_EXECUTION_TARGET,
+        "attachments only apply to media turn continuations",
+    )?;
+    reject_field(
+        input.allowed_domains.as_ref(),
+        "allowed_domains",
+        TOOL_EXECUTION_TARGET,
+        "allowed_domains only applies to search and turn continuations",
+    )?;
+    Ok(ReadTarget::ToolExecution(ToolExecutionPath {
+        id: id.to_owned(),
+        wait_seconds: input.wait.unwrap_or(0),
+    }))
+}
+
+fn parse_artifact(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+    if path.contains('?') || path.contains('#') {
+        return Err(ReadPathError::LegacyOptionsSyntax);
+    }
+    let floor = ARTIFACT_REFERENCE_PREFIX.len() + ARTIFACT_DIGEST_LEN;
+    let (url, selectors) = split_selectors(path, Some(floor))?;
+    if !is_artifact_reference(&url) {
+        return Err(ReadPathError::InvalidArtifactReference {
+            reason: "identity must be exactly 55 lowercase ASCII letters after `stravia://artifacts/`; append options as `:` selectors such as :raw, :download or :1-50",
+        });
+    }
+    reject_resource_fields(input)?;
+    let options = finish_resource_options(input, selectors, true)?;
+    Ok(ReadTarget::Resource(ResourcePath { url, options }))
+}
+
+fn parse_http_resource(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+    let (url, selectors) = split_selectors(path, http_authority_floor(path))?;
+    if url
+        .split_once('#')
+        .is_some_and(|(_, fragment)| fragment.starts_with(LEGACY_OPTIONS_FRAGMENT_PREFIX))
+    {
+        return Err(ReadPathError::LegacyOptionsSyntax);
+    }
+    validate_http_url(&url)?;
+    reject_resource_fields(input)?;
+    let options = finish_resource_options(input, selectors, false)?;
+    Ok(ReadTarget::Resource(ResourcePath { url, options }))
+}
+
+/// 资源 path 不接受的字段；`attachments: []` 视为缺省，不会触发。
+fn reject_resource_fields(input: &ReadInput) -> Result<(), ReadPathError> {
+    reject_field(
+        non_empty(input.attachments.as_ref()),
+        "attachments",
+        RESOURCE_TARGET,
+        "attachments only apply to media turn continuations",
+    )?;
+    reject_field(
+        input.allowed_domains.as_ref(),
+        "allowed_domains",
+        RESOURCE_TARGET,
+        "allowed_domains only applies to search and turn continuations",
+    )?;
+    reject_field(
+        input.wait.as_ref(),
+        "wait",
+        RESOURCE_TARGET,
+        "use a `stravia://tool-executions/<id>` path with wait for status",
+    )
+}
+
+fn finish_resource_options(
+    input: &ReadInput,
+    selectors: SelectorSet,
+    is_artifact: bool,
+) -> Result<ReadOptions, ReadPathError> {
+    if selectors.cursor.is_some() && !is_artifact {
         return Err(ReadPathError::ConflictingOptions {
             reason: "cursor is only valid on an Artifact Reference",
         });
     }
-    if options.previous_path.is_some() && options.question.is_none() {
+    let question = match input.question.as_deref() {
+        Some(text) if text.trim().is_empty() => return Err(ReadPathError::BlankQuestion),
+        Some(text) => Some(text.to_owned()),
+        None => None,
+    };
+    if selectors.raw && question.is_some() {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "previous_path requires a media question",
+            reason: "raw cannot be combined with question",
         });
     }
-    Ok(ReadTarget::Resource(ResourcePath {
-        url: url.to_owned(),
-        options,
-    }))
-}
-
-/// 校验 Artifact 裸身份：完整 SHA-256 的 55 位小写 base26 编码。
-fn validate_artifact_reference(url: &str) -> Result<(), ReadPathError> {
-    let identity = &url[ARTIFACT_REFERENCE_PREFIX.len()..];
-    if identity.len() == ARTIFACT_DIGEST_LEN
-        && identity.bytes().all(|byte| byte.is_ascii_lowercase())
+    if selectors.download
+        && (question.is_some()
+            || selectors.raw
+            || selectors.lines.is_some()
+            || selectors.cursor.is_some())
     {
-        return Ok(());
+        return Err(ReadPathError::ConflictingOptions {
+            reason: "download cannot be combined with other options",
+        });
     }
-    Err(ReadPathError::InvalidArtifactReference {
-        reason: "identity must contain exactly 55 lowercase ASCII letters",
+    if selectors.cursor.is_some()
+        && (question.is_some() || selectors.raw || selectors.lines.is_some())
+    {
+        return Err(ReadPathError::ConflictingOptions {
+            reason: "cursor cannot be combined with other options",
+        });
+    }
+    Ok(ReadOptions {
+        question,
+        raw: selectors.raw,
+        download: selectors.download,
+        lines: selectors.lines,
+        cursor: selectors.cursor,
     })
 }
 
-fn validate_turn_reference(path: &str) -> Result<(), ReadPathError> {
-    let id = path
-        .strip_prefix(TURN_REFERENCE_PREFIX)
-        .ok_or(ReadPathError::InvalidTurnReference)?;
-    if id.len() == TURN_ID_LEN && id.bytes().all(|byte| byte.is_ascii_lowercase()) {
-        Ok(())
-    } else {
-        Err(ReadPathError::InvalidTurnReference)
+const SEARCH_TARGET: &str = "`stravia://search`";
+const CONTINUATION_TARGET: &str = "a `stravia://turns/<turn-id>` continuation";
+const TOOL_EXECUTION_TARGET: &str = "a `stravia://tool-executions/<id>` path";
+const RESOURCE_TARGET: &str = "a resource path";
+
+fn required_question(
+    input: &ReadInput,
+    target: &'static str,
+    hint: &'static str,
+) -> Result<String, ReadPathError> {
+    match input.question.as_deref() {
+        None => Err(ReadPathError::MissingField {
+            field: "question",
+            target,
+            hint,
+        }),
+        Some(text) if text.trim().is_empty() => Err(ReadPathError::BlankQuestion),
+        Some(text) => Ok(text.to_owned()),
     }
 }
 
+/// 字段存在且有效时报错；`attachments: []` 先归一为缺省。
+fn reject_field<T>(
+    field_value: Option<&T>,
+    field: &'static str,
+    target: &'static str,
+    hint: &'static str,
+) -> Result<(), ReadPathError> {
+    match field_value {
+        Some(_) => Err(ReadPathError::FieldNotAllowed {
+            field,
+            target,
+            hint,
+        }),
+        None => Ok(()),
+    }
+}
+
+fn non_empty(values: Option<&Vec<String>>) -> Option<&Vec<String>> {
+    values.filter(|values| !values.is_empty())
+}
+
+fn parse_allowed_domains(
+    domains: Option<&Vec<String>>,
+) -> Result<Option<Vec<String>>, ReadPathError> {
+    let Some(domains) = domains else {
+        return Ok(None);
+    };
+    if domains.is_empty() {
+        return Err(ReadPathError::EmptyAllowedDomains);
+    }
+    if domains.len() > MAX_ALLOWED_DOMAINS {
+        return Err(ReadPathError::TooManyAllowedDomains {
+            count: domains.len(),
+        });
+    }
+    let normalized =
+        normalize_domains(domains.clone()).map_err(|_| ReadPathError::InvalidAllowedDomains)?;
+    if normalized.is_empty() {
+        return Err(ReadPathError::InvalidAllowedDomains);
+    }
+    Ok(Some(normalized))
+}
+
+fn parse_attachments(attachments: Option<&Vec<String>>) -> Result<Vec<String>, ReadPathError> {
+    let Some(attachments) = attachments else {
+        return Ok(Vec::new());
+    };
+    let mut seen = std::collections::HashSet::with_capacity(attachments.len());
+    for attachment in attachments {
+        if !is_attachment(attachment) {
+            return Err(ReadPathError::InvalidAttachment);
+        }
+        if !seen.insert(attachment.as_str()) {
+            return Err(ReadPathError::DuplicateAttachment);
+        }
+    }
+    Ok(attachments.clone())
+}
+
+fn is_attachment(attachment: &str) -> bool {
+    if attachment.starts_with(ARTIFACT_REFERENCE_PREFIX) {
+        return is_artifact_reference(attachment);
+    }
+    let Ok(parsed) = url::Url::parse(attachment) else {
+        return false;
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return false;
+    }
+    if parsed.host_str().is_none_or(|host| host.is_empty()) {
+        return false;
+    }
+    if parsed.host_str() == Some("stravia") && parsed.path().starts_with("/artifact/") {
+        return false;
+    }
+    !parsed
+        .fragment()
+        .is_some_and(|fragment| fragment.starts_with(LEGACY_OPTIONS_FRAGMENT_PREFIX))
+}
+
+fn is_stable_id(id: &str) -> bool {
+    id.len() == TURN_ID_LEN && id.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+/// 校验裸 Artifact 身份：完整 SHA-256 的 55 位小写 base26 编码。
+fn is_artifact_reference(url: &str) -> bool {
+    url.strip_prefix(ARTIFACT_REFERENCE_PREFIX)
+        .is_some_and(|identity| {
+            identity.len() == ARTIFACT_DIGEST_LEN
+                && identity.bytes().all(|byte| byte.is_ascii_lowercase())
+        })
+}
+
 fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
-    let parsed = url::Url::parse(url).map_err(|_| ReadPathError::InvalidScheme)?;
+    let parsed = url::Url::parse(url).map_err(|_| ReadPathError::InvalidUrl)?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(ReadPathError::InvalidScheme);
     }
@@ -531,145 +756,116 @@ fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
     Ok(())
 }
 
-fn parse_read_options(raw: &str) -> Result<ReadOptions, ReadPathError> {
-    let mut question: Option<String> = None;
-    let mut raw_flag = false;
-    let mut download = false;
-    let mut lines: Option<Vec<LineSelection>> = None;
-    let mut previous_path: Option<String> = None;
-    let mut cursor: Option<String> = None;
-    for segment in raw.split('&') {
-        if segment.is_empty() {
-            return Err(ReadPathError::MalformedParameter {
-                reason: "read options must not contain empty entries",
-            });
-        }
-        let (key_raw, value_raw) = match segment.split_once('=') {
-            Some((key, value)) => (key, value),
-            None => (segment, ""),
-        };
-        let key = decode_percent(key_raw, "read options", true)?;
-        let value = decode_percent(value_raw, "read options", true)?;
-        match key.as_str() {
-            "question" => {
-                if question.is_some() {
-                    return Err(ReadPathError::DuplicateParameter {
-                        parameter: "question",
-                    });
-                }
-                if value.trim().is_empty() {
-                    return Err(ReadPathError::EmptyParameter {
-                        parameter: "question",
-                    });
-                }
-                question = Some(value);
-            }
-            "raw" => {
-                if raw_flag {
-                    return Err(ReadPathError::DuplicateParameter { parameter: "raw" });
-                }
-                if value != "1" {
-                    return Err(ReadPathError::InvalidFlagValue { option: "raw" });
-                }
-                raw_flag = true;
-            }
-            "download" => {
-                if download {
-                    return Err(ReadPathError::DuplicateParameter {
-                        parameter: "download",
-                    });
-                }
-                if value != "1" {
-                    return Err(ReadPathError::InvalidFlagValue { option: "download" });
-                }
-                download = true;
-            }
-            "lines" => {
-                if lines.is_some() {
-                    return Err(ReadPathError::DuplicateParameter { parameter: "lines" });
-                }
-                if value.is_empty() {
-                    return Err(ReadPathError::EmptyParameter { parameter: "lines" });
-                }
-                lines = Some(parse_line_selections(&value)?);
-            }
-            "previous_path" => {
-                if previous_path.is_some() {
-                    return Err(ReadPathError::DuplicateParameter {
-                        parameter: "previous_path",
-                    });
-                }
-                if value.trim().is_empty() {
-                    return Err(ReadPathError::EmptyParameter {
-                        parameter: "previous_path",
-                    });
-                }
-                validate_turn_reference(&value)?;
-                previous_path = Some(value);
-            }
-            "cursor" => {
-                if cursor.is_some() {
-                    return Err(ReadPathError::DuplicateParameter {
-                        parameter: "cursor",
-                    });
-                }
-                if value.is_empty() {
-                    return Err(ReadPathError::EmptyParameter {
-                        parameter: "cursor",
-                    });
-                }
-                cursor = Some(value);
-            }
-            _ => {
-                return Err(ReadPathError::UnknownParameter {
-                    parameter: printable_parameter(&key),
-                });
-            }
-        }
+/// HTTP(S) 选择器剥离底线：`scheme://` 之后第一个 `/`、`?` 或 `#` 的字节位置。
+///
+/// 没有该字符时返回 `None`，整段按 URL 处理，端口里的 `:` 不会被剥离。
+fn http_authority_floor(path: &str) -> Option<usize> {
+    let (scheme, rest) = path.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
     }
-    if raw_flag && question.is_some() {
-        return Err(ReadPathError::ConflictingOptions {
-            reason: "raw cannot be combined with question",
-        });
-    }
-    if download
-        && (question.is_some()
-            || raw_flag
-            || lines.is_some()
-            || previous_path.is_some()
-            || cursor.is_some())
-    {
-        return Err(ReadPathError::ConflictingOptions {
-            reason: "download cannot be combined with other options",
-        });
-    }
-    if cursor.is_some()
-        && (question.is_some() || raw_flag || lines.is_some() || previous_path.is_some())
-    {
-        return Err(ReadPathError::ConflictingOptions {
-            reason: "cursor cannot be combined with other options",
-        });
-    }
-    if previous_path.is_some() && question.is_none() {
-        return Err(ReadPathError::ConflictingOptions {
-            reason: "previous_path requires a media question",
-        });
-    }
-    Ok(ReadOptions {
-        question,
-        raw: raw_flag,
-        download,
-        lines,
-        previous_path,
-        cursor,
-    })
+    let base = scheme.len() + "://".len();
+    rest.find(['/', '?', '#']).map(|index| base + index)
 }
 
-/// 解析 `lines` 值：`N`、`N-M`、`N+K`（`+` 在 URL 中须编码为 `%2B`）、`-K`，
-/// 逗号分隔多段。全部 1-based 正数、checked 运算、最多 [`MAX_LINE_SELECTIONS`]
-/// 段；按源顺序排序并合并相邻/重叠区间，多个 `Last` 合并为最大计数。
-fn parse_line_selections(value: &str) -> Result<Vec<LineSelection>, ReadPathError> {
-    let segments = value.split(',');
+#[derive(Default)]
+struct SelectorSet {
+    raw: bool,
+    download: bool,
+    cursor: Option<String>,
+    lines: Option<Vec<LineSelection>>,
+}
+
+enum Selector {
+    Raw,
+    Download,
+    Cursor(String),
+    Lines(Vec<LineSelection>),
+}
+
+/// 从 path 末尾自右向左剥离 `:` 选择器。
+///
+/// `floor` 是允许出现选择器冒号的最小字节位置；`None` 表示不剥离。token 严格符合
+/// 语法才剥离，否则停止，剩余部分按字面返回。
+fn split_selectors(
+    path: &str,
+    floor: Option<usize>,
+) -> Result<(String, SelectorSet), ReadPathError> {
+    let Some(floor) = floor else {
+        return Ok((path.to_owned(), SelectorSet::default()));
+    };
+    let mut end = path.len();
+    let mut selectors = SelectorSet::default();
+    while let Some(colon) = path[..end].rfind(':') {
+        if colon < floor {
+            break;
+        }
+        let Some(selector) = classify_selector(&path[colon + 1..end]) else {
+            break;
+        };
+        match selector {
+            Selector::Raw => {
+                if selectors.raw {
+                    return Err(ReadPathError::DuplicateSelector { selector: "raw" });
+                }
+                selectors.raw = true;
+            }
+            Selector::Download => {
+                if selectors.download {
+                    return Err(ReadPathError::DuplicateSelector {
+                        selector: "download",
+                    });
+                }
+                selectors.download = true;
+            }
+            Selector::Cursor(cursor) => {
+                if selectors.cursor.is_some() {
+                    return Err(ReadPathError::DuplicateSelector { selector: "cursor" });
+                }
+                selectors.cursor = Some(cursor);
+            }
+            Selector::Lines(lines) => {
+                if selectors.lines.is_some() {
+                    return Err(ReadPathError::InvalidLineSelection {
+                        reason: "combine line ranges with commas, e.g. :1-50,90-100",
+                    });
+                }
+                selectors.lines = Some(lines);
+            }
+        }
+        end = colon;
+    }
+    Ok((path[..end].to_owned(), selectors))
+}
+
+fn classify_selector(token: &str) -> Option<Selector> {
+    match token {
+        "raw" => return Some(Selector::Raw),
+        "download" => return Some(Selector::Download),
+        _ => {}
+    }
+    if let Some(cursor) = token.strip_prefix("cursor=") {
+        if !cursor.is_empty()
+            && cursor
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Some(Selector::Cursor(cursor.to_owned()));
+        }
+        return None;
+    }
+    if token.is_empty() {
+        return None;
+    }
+    parse_line_selections(token).ok().map(Selector::Lines)
+}
+
+/// 解析行范围：`N`、`N-M`、`N+K`、`-K`，逗号分隔多段。
+///
+/// 全部 1-based 正数、checked 运算、最多 [`MAX_LINE_SELECTIONS`] 段；按源顺序排序并
+/// 合并相邻/重叠区间，多个 `Last` 合并为最大计数。
+fn parse_line_selections(text: &str) -> Result<Vec<LineSelection>, ReadPathError> {
+    let segments = text.split(',');
     let count = segments.clone().take(MAX_LINE_SELECTIONS + 1).count();
     if count > MAX_LINE_SELECTIONS {
         return Err(ReadPathError::InvalidLineSelection {
@@ -755,145 +951,294 @@ fn parse_line_number(text: &str) -> Result<u64, ReadPathError> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(invalid());
     }
-    let value: u64 = text.parse().map_err(|_| invalid())?;
-    if value == 0 {
+    let number: u64 = text.parse().map_err(|_| invalid())?;
+    if number == 0 {
         return Err(invalid());
     }
-    Ok(value)
-}
-
-/// 严格 percent 解码；`plus_as_space` 为真时按 form 语义把 `+` 解码为空格。
-/// 所有 `%` 转义必须是两个十六进制位，解码结果必须是有效 UTF-8。
-fn decode_percent(
-    input: &str,
-    component: &'static str,
-    plus_as_space: bool,
-) -> Result<String, ReadPathError> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'%' {
-            let high = bytes.get(index + 1).and_then(|byte| hex_value(*byte));
-            let low = bytes.get(index + 2).and_then(|byte| hex_value(*byte));
-            match (high, low) {
-                (Some(high), Some(low)) => {
-                    out.push((high << 4) | low);
-                    index += 3;
-                }
-                _ => {
-                    return Err(ReadPathError::InvalidEncoding {
-                        component,
-                        reason: "percent escapes must be two hexadecimal digits",
-                    });
-                }
-            }
-        } else {
-            out.push(if byte == b'+' && plus_as_space {
-                b' '
-            } else {
-                byte
-            });
-            index += 1;
-        }
-    }
-    String::from_utf8(out).map_err(|_| ReadPathError::InvalidEncoding {
-        component,
-        reason: "decoded bytes are not valid UTF-8",
-    })
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// 仅回显可安全打印的参数名，避免把带凭据的 URL 片段带进错误消息。
-fn printable_parameter(key: &str) -> String {
-    if key.len() <= 64
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
-        key.to_owned()
-    } else {
-        "<unrecognized>".to_owned()
-    }
-}
-
-/// 对所有非 unreserved 字节做 percent 编码（含 `?`、`#`、`&`、`=`、`+`、`%`
-/// 与非 ASCII UTF-8），保证编码结果可被 [`parse_read_path`] 无歧义还原。
-fn encode_component(out: &mut String, value: &str) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for &byte in value.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => {
-                out.push('%');
-                out.push(HEX[(byte >> 4) as usize] as char);
-                out.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
+    Ok(number)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    #[test]
-    fn execution_queries_accept_full_wait_range_without_changing_identity() {
-        let id = "a".repeat(TURN_ID_LEN);
-        for (suffix, expected) in [
-            ("", 0),
-            ("?wait=0", 0),
-            ("?wait=61", 61),
-            ("?wait=18446744073709551615", u64::MAX),
-            ("?%77ait=%36%31", 61),
-        ] {
-            assert_eq!(
-                parse_read_path(&format!("stravia://tool-executions/{id}{suffix}")).unwrap(),
-                ReadTarget::ToolExecution(ToolExecutionPath {
-                    id: id.clone(),
-                    wait_seconds: expected
-                })
-            );
+    fn read_input(path: &str) -> ReadInput {
+        ReadInput {
+            path: path.to_owned(),
+            question: None,
+            attachments: None,
+            allowed_domains: None,
+            wait: None,
         }
     }
 
+    fn with_question(path: &str, question: &str) -> ReadInput {
+        ReadInput {
+            question: Some(question.to_owned()),
+            ..read_input(path)
+        }
+    }
+
+    fn parse(path: &str) -> Result<ReadTarget, ReadPathError> {
+        parse_read_input(&read_input(path))
+    }
+
+    fn artifact_path() -> String {
+        format!(
+            "{ARTIFACT_REFERENCE_PREFIX}{}",
+            "a".repeat(ARTIFACT_DIGEST_LEN)
+        )
+    }
+
+    fn turn_path() -> String {
+        format!("{TURN_REFERENCE_PREFIX}{}", "t".repeat(TURN_ID_LEN))
+    }
+
+    fn tool_execution_path() -> String {
+        format!("{TOOL_EXECUTION_PREFIX}{}", "e".repeat(TURN_ID_LEN))
+    }
+
+    fn resource(url: &str, options: ReadOptions) -> ReadTarget {
+        ReadTarget::Resource(ResourcePath {
+            url: url.to_owned(),
+            options,
+        })
+    }
+
     #[test]
-    fn execution_queries_reject_invalid_wait_and_uri_options() {
-        let base = format!("stravia://tool-executions/{}", "a".repeat(TURN_ID_LEN));
-        for suffix in [
-            "?",
-            "?wait",
-            "?wait=",
-            "?wait=-1",
-            "?wait=+1",
-            "?wait=1.0",
-            "?wait=1e2",
-            "?wait=18446744073709551616",
-            "?wait=NaN",
-            "?wait=1&wait=2",
-            "?wait=0&%77ait=1",
-            "?other=1",
-            "?wait=1&",
-            "?wait=%GG",
-            "?wait=1#fragment",
-            "#fragment",
-            "/extra",
-            "?download=1",
-            "?wait=１",
-        ] {
+    fn search_requires_question_and_normalizes_domains() {
+        assert_eq!(
+            parse_read_input(&with_question(SEARCH_PATH, "rust async")).unwrap(),
+            ReadTarget::Search(SearchTarget {
+                query: "rust async".into(),
+                allowed_domains: None,
+            })
+        );
+        assert!(matches!(
+            parse(SEARCH_PATH).unwrap_err(),
+            ReadPathError::MissingField {
+                field: "question",
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_read_input(&with_question(SEARCH_PATH, " \t ")).unwrap_err(),
+            ReadPathError::BlankQuestion
+        );
+        assert!(parse_read_input(&with_question(
+            SEARCH_PATH,
+            &"a".repeat(MAX_SEARCH_TEXT_BYTES)
+        ))
+        .is_ok());
+        assert_eq!(
+            parse_read_input(&with_question(
+                SEARCH_PATH,
+                &"a".repeat(MAX_SEARCH_TEXT_BYTES + 1)
+            ))
+            .unwrap_err(),
+            ReadPathError::QuestionTooLarge
+        );
+
+        let mut domains = with_question(SEARCH_PATH, "q");
+        domains.allowed_domains = Some(vec![
+            "Docs.RS".into(),
+            "docs.rs.".into(),
+            "example.com".into(),
+        ]);
+        assert_eq!(
+            parse_read_input(&domains).unwrap(),
+            ReadTarget::Search(SearchTarget {
+                query: "q".into(),
+                allowed_domains: Some(vec!["docs.rs".into(), "example.com".into()]),
+            })
+        );
+        domains.allowed_domains = Some(Vec::new());
+        assert_eq!(
+            parse_read_input(&domains).unwrap_err(),
+            ReadPathError::EmptyAllowedDomains
+        );
+        domains.allowed_domains = Some(vec!["docs.rs/path".into()]);
+        assert_eq!(
+            parse_read_input(&domains).unwrap_err(),
+            ReadPathError::InvalidAllowedDomains
+        );
+        domains.allowed_domains = Some(vec![" ".into()]);
+        assert_eq!(
+            parse_read_input(&domains).unwrap_err(),
+            ReadPathError::InvalidAllowedDomains
+        );
+        domains.allowed_domains = Some(
+            (0..=MAX_ALLOWED_DOMAINS)
+                .map(|index| format!("docs{index}.rs"))
+                .collect(),
+        );
+        assert!(matches!(
+            parse_read_input(&domains).unwrap_err(),
+            ReadPathError::TooManyAllowedDomains { .. }
+        ));
+    }
+
+    #[test]
+    fn search_path_is_exact_and_empty_attachments_equal_absent() {
+        for suffix in [":raw", "?q=x", "/extra", "#frag"] {
             assert!(
-                parse_read_path(&format!("{base}{suffix}")).is_err(),
+                matches!(
+                    parse_read_input(&with_question(&format!("{SEARCH_PATH}{suffix}"), "q"))
+                        .unwrap_err(),
+                    ReadPathError::UnexpectedSuffix { .. }
+                ),
+                "{suffix}"
+            );
+        }
+        let mut input = with_question(SEARCH_PATH, "q");
+        input.attachments = Some(Vec::new());
+        assert!(parse_read_input(&input).is_ok());
+    }
+
+    #[test]
+    fn continuation_requires_question_and_validates_attachments() {
+        let path = turn_path();
+        let mut follow_up = with_question(&path, "what changed?");
+        follow_up.attachments = Some(vec![artifact_path(), "https://example.com/a.png".into()]);
+        follow_up.allowed_domains = Some(vec!["Docs.RS".into()]);
+        assert_eq!(
+            parse_read_input(&follow_up).unwrap(),
+            ReadTarget::Continuation(ContinuationTarget {
+                turn_path: path.clone(),
+                question: "what changed?".into(),
+                attachments: vec![artifact_path(), "https://example.com/a.png".into()],
+                allowed_domains: Some(vec!["docs.rs".into()]),
+            })
+        );
+
+        let mut empty = with_question(&path, "q");
+        empty.attachments = Some(Vec::new());
+        assert_eq!(
+            parse_read_input(&empty).unwrap(),
+            ReadTarget::Continuation(ContinuationTarget {
+                turn_path: path.clone(),
+                question: "q".into(),
+                attachments: Vec::new(),
+                allowed_domains: None,
+            })
+        );
+        empty.allowed_domains = Some(Vec::new());
+        assert_eq!(
+            parse_read_input(&empty).unwrap_err(),
+            ReadPathError::EmptyAllowedDomains
+        );
+
+        assert!(matches!(
+            parse(&path).unwrap_err(),
+            ReadPathError::MissingField {
+                field: "question",
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_read_input(&with_question(&path, "  ")).unwrap_err(),
+            ReadPathError::BlankQuestion
+        );
+
+        let digest = "a".repeat(ARTIFACT_DIGEST_LEN);
+        for attachment in [
+            "sa:abc".to_owned(),
+            "relative/path".to_owned(),
+            "ftp://example.com/a.png".to_owned(),
+            format!(
+                "{ARTIFACT_REFERENCE_PREFIX}{}",
+                "A".repeat(ARTIFACT_DIGEST_LEN)
+            ),
+            format!("{ARTIFACT_REFERENCE_PREFIX}{digest}:download"),
+            format!("{ARTIFACT_REFERENCE_PREFIX}{digest}?question=q"),
+            format!("https://stravia/artifact/{digest}"),
+            "https://example.com/a#stravia?raw=1".to_owned(),
+            turn_path(),
+        ] {
+            let mut input = with_question(&path, "q");
+            input.attachments = Some(vec![attachment.clone()]);
+            assert_eq!(
+                parse_read_input(&input).unwrap_err(),
+                ReadPathError::InvalidAttachment,
+                "{attachment}"
+            );
+        }
+
+        // 附件按字面值处理：URL 末尾的选择器形态不被剥离，也不算无效。
+        let mut literal = with_question(&path, "q");
+        literal.attachments = Some(vec!["https://example.com/a:raw".into()]);
+        assert!(parse_read_input(&literal).is_ok());
+
+        let mut duplicate = with_question(&path, "q");
+        duplicate.attachments = Some(vec![artifact_path(), artifact_path()]);
+        assert_eq!(
+            parse_read_input(&duplicate).unwrap_err(),
+            ReadPathError::DuplicateAttachment
+        );
+    }
+
+    #[test]
+    fn continuation_path_is_exact_and_rejects_wait() {
+        let id = "a".repeat(TURN_ID_LEN);
+        for path in [
+            format!("{TURN_REFERENCE_PREFIX}{}", "a".repeat(TURN_ID_LEN - 1)),
+            format!("{TURN_REFERENCE_PREFIX}{}", "A".repeat(TURN_ID_LEN)),
+            format!("{TURN_REFERENCE_PREFIX}{id}:raw"),
+            format!("{TURN_REFERENCE_PREFIX}{id}?x=1"),
+            format!("{TURN_REFERENCE_PREFIX}{id}#frag"),
+        ] {
+            assert_eq!(
+                parse_read_input(&with_question(&path, "q")).unwrap_err(),
+                ReadPathError::InvalidTurnReference,
+                "{path}"
+            );
+        }
+        let mut wait = with_question(&turn_path(), "q");
+        wait.wait = Some(1);
+        assert!(matches!(
+            parse_read_input(&wait).unwrap_err(),
+            ReadPathError::FieldNotAllowed { field: "wait", .. }
+        ));
+    }
+
+    #[test]
+    fn tool_execution_takes_wait_from_the_field() {
+        let path = tool_execution_path();
+        let id = "e".repeat(TURN_ID_LEN);
+        assert_eq!(
+            parse(&path).unwrap(),
+            ReadTarget::ToolExecution(ToolExecutionPath {
+                id: id.clone(),
+                wait_seconds: 0,
+            })
+        );
+        for wait in [0, 61, u64::MAX] {
+            let mut input = read_input(&path);
+            input.wait = Some(wait);
+            assert_eq!(
+                parse_read_input(&input).unwrap(),
+                ReadTarget::ToolExecution(ToolExecutionPath {
+                    id: id.clone(),
+                    wait_seconds: wait,
+                })
+            );
+        }
+        let mut empty_attachments = read_input(&path);
+        empty_attachments.attachments = Some(Vec::new());
+        assert!(parse_read_input(&empty_attachments).is_ok());
+
+        for suffix in ["?wait=61", "?wait=", "?wait"] {
+            assert_eq!(
+                parse(&format!("{path}{suffix}")).unwrap_err(),
+                ReadPathError::LegacyWaitParameter,
+                "{suffix}"
+            );
+        }
+        for suffix in ["#frag", ":download", "?other=1", "/extra"] {
+            assert_eq!(
+                parse(&format!("{path}{suffix}")).unwrap_err(),
+                ReadPathError::InvalidToolExecutionReference,
                 "{suffix}"
             );
         }
@@ -902,208 +1247,595 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaa1",
         ] {
-            assert!(parse_read_path(&format!("stravia://tool-executions/{id}")).is_err());
+            assert_eq!(
+                parse(&format!("{TOOL_EXECUTION_PREFIX}{id}")).unwrap_err(),
+                ReadPathError::InvalidToolExecutionReference,
+                "{id}"
+            );
         }
-        assert!(parse_read_path("search://q?wait=1").is_err());
-        assert!(parse_read_path(&format!(
-            "stravia://artifacts/{}?wait=1",
-            "a".repeat(ARTIFACT_DIGEST_LEN)
-        ))
-        .is_err());
-        let ReadTarget::Resource(resource) =
-            parse_read_path("https://example.com/?wait=61").unwrap()
-        else {
-            panic!("ordinary URL query must remain a resource");
-        };
-        assert_eq!(resource.url, "https://example.com/?wait=61");
     }
 
     #[test]
-    fn search_encoding_round_trips_without_form_decoding_the_text() {
-        let previous_path = format!("stravia://turns/{}", "a".repeat(TURN_ID_LEN));
-        let search = SearchPath {
-            query: "中文 C++ & ? # %3F".into(),
-            allowed_domains: Some(vec!["docs.rs".into(), "example.com".into()]),
-            previous_path: Some(previous_path.clone()),
-        };
+    fn field_matrix_rejects_fields_outside_each_path_kind() {
+        type Setter = fn(&mut ReadInput);
+        let attachments: Setter = |input| input.attachments = Some(vec![artifact_path()]);
+        let domains: Setter = |input| input.allowed_domains = Some(vec!["docs.rs".into()]);
+        let wait: Setter = |input| input.wait = Some(1);
+        let question: Setter = |input| input.question = Some("q".into());
+        let http = "https://example.com/a".to_owned();
+        let cases: Vec<(String, bool, Setter, &str)> = vec![
+            (SEARCH_PATH.to_owned(), true, attachments, "attachments"),
+            (SEARCH_PATH.to_owned(), true, wait, "wait"),
+            (turn_path(), true, wait, "wait"),
+            (tool_execution_path(), false, question, "question"),
+            (tool_execution_path(), false, attachments, "attachments"),
+            (tool_execution_path(), false, domains, "allowed_domains"),
+            (artifact_path(), false, attachments, "attachments"),
+            (artifact_path(), false, domains, "allowed_domains"),
+            (artifact_path(), false, wait, "wait"),
+            (http.clone(), false, attachments, "attachments"),
+            (http.clone(), false, domains, "allowed_domains"),
+            (http, false, wait, "wait"),
+        ];
+        for (path, needs_question, set, field) in cases {
+            let mut input = read_input(&path);
+            if needs_question {
+                input.question = Some("q".into());
+            }
+            set(&mut input);
+            assert!(
+                matches!(
+                    parse_read_input(&input).unwrap_err(),
+                    ReadPathError::FieldNotAllowed { field: actual, .. } if actual == field
+                ),
+                "{path} {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_selectors_strip_in_either_order() {
+        let base = artifact_path();
+        let lines = Some(vec![LineSelection::Inclusive { start: 1, end: 20 }]);
+        let cases = [
+            (
+                format!("{base}:raw"),
+                ReadOptions {
+                    raw: true,
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:download"),
+                ReadOptions {
+                    download: true,
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:cursor=Abc_123-x"),
+                ReadOptions {
+                    cursor: Some("Abc_123-x".into()),
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:1-20"),
+                ReadOptions {
+                    lines: lines.clone(),
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:raw:1-20"),
+                ReadOptions {
+                    raw: true,
+                    lines: lines.clone(),
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:1-20:raw"),
+                ReadOptions {
+                    raw: true,
+                    lines,
+                    ..ReadOptions::default()
+                },
+            ),
+            (
+                format!("{base}:1-50,90-100"),
+                ReadOptions {
+                    lines: Some(vec![
+                        LineSelection::Inclusive { start: 1, end: 50 },
+                        LineSelection::Inclusive {
+                            start: 90,
+                            end: 100,
+                        },
+                    ]),
+                    ..ReadOptions::default()
+                },
+            ),
+        ];
+        for (path, options) in cases {
+            assert_eq!(parse(&path).unwrap(), resource(&base, options), "{path}");
+        }
         assert_eq!(
-            parse_read_path(&format_search_path(&search)).unwrap(),
-            ReadTarget::Search(search)
+            parse(&base).unwrap(),
+            resource(&base, ReadOptions::default())
         );
-        let encoded = format!(
-            "search://C++%2520?previous_path={}",
-            previous_path.replace(':', "%3A").replace('/', "%2F")
-        );
-        let ReadTarget::Search(search) = parse_read_path(&encoded).unwrap() else {
-            panic!("search")
-        };
-        assert_eq!(search.query, "C++%20");
+
+        let mut question = read_input(&format!("{base}:1-5"));
+        question.question = Some("what is this?".into());
         assert_eq!(
-            search.previous_path.as_deref(),
-            Some(previous_path.as_str())
+            parse_read_input(&question).unwrap(),
+            resource(
+                &base,
+                ReadOptions {
+                    question: Some("what is this?".into()),
+                    lines: Some(vec![LineSelection::Inclusive { start: 1, end: 5 }]),
+                    ..ReadOptions::default()
+                }
+            )
         );
     }
 
     #[test]
-    fn invalid_legacy_and_ambiguous_inputs_fail_closed() {
+    fn artifact_leftovers_and_legacy_forms_are_rejected() {
+        let base = artifact_path();
+        for path in [
+            format!("{base}x:raw"),
+            format!("{base}:cursor=bad!"),
+            format!("{base}:cursor="),
+            format!("{base}:cursor=a=b"),
+            format!("{base}:question=x"),
+            format!("{base}:0"),
+            format!("{ARTIFACT_REFERENCE_PREFIX}abc:raw"),
+            format!("{base}/extra"),
+        ] {
+            assert!(
+                matches!(
+                    parse(&path).unwrap_err(),
+                    ReadPathError::InvalidArtifactReference { .. }
+                ),
+                "{path}"
+            );
+        }
+        let message = parse(&format!("{base}x")).unwrap_err().to_string();
+        assert!(message.contains(":download"), "{message}");
+
+        for suffix in ["?question=%20", "?raw=1", "#section", ":1-2?x=y"] {
+            assert_eq!(
+                parse(&format!("{base}{suffix}")).unwrap_err(),
+                ReadPathError::LegacyOptionsSyntax,
+                "{suffix}"
+            );
+        }
+        let message = parse(&format!("{base}?question=x"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(":raw"), "{message}");
+        assert!(message.contains(":download"), "{message}");
+        assert!(message.contains("question field"), "{message}");
+    }
+
+    #[test]
+    fn http_selectors_respect_the_authority_floor_and_keep_source_text() {
+        let source = "https://example.com/a?sig=a%2Bb&x=%3A";
+        assert_eq!(
+            parse(&format!("{source}:raw")).unwrap(),
+            resource(
+                source,
+                ReadOptions {
+                    raw: true,
+                    ..ReadOptions::default()
+                }
+            )
+        );
+        // 端口属于 authority，没有 path 时整段按 URL 处理。
+        assert_eq!(
+            parse("https://host:8080").unwrap(),
+            resource("https://host:8080", ReadOptions::default())
+        );
+        assert_eq!(
+            parse("https://host:8080/:raw").unwrap(),
+            resource(
+                "https://host:8080/",
+                ReadOptions {
+                    raw: true,
+                    ..ReadOptions::default()
+                }
+            )
+        );
+        assert_eq!(
+            parse("https://host:8080:raw").unwrap_err(),
+            ReadPathError::InvalidUrl
+        );
+        // 普通 fragment 保留源语义；末尾选择器仍可剥离。
+        assert_eq!(
+            parse("https://example.com/a#section").unwrap(),
+            resource("https://example.com/a#section", ReadOptions::default())
+        );
+        assert_eq!(
+            parse("https://example.com/a#section:1-5").unwrap(),
+            resource(
+                "https://example.com/a#section",
+                ReadOptions {
+                    lines: Some(vec![LineSelection::Inclusive { start: 1, end: 5 }]),
+                    ..ReadOptions::default()
+                }
+            )
+        );
+        // 不符合语法的 token 停止剥离，剩余部分按字面作为地址。
+        assert_eq!(
+            parse("https://example.com/a:b:raw").unwrap(),
+            resource(
+                "https://example.com/a:b",
+                ReadOptions {
+                    raw: true,
+                    ..ReadOptions::default()
+                }
+            )
+        );
+        assert_eq!(
+            parse("https://example.com/:0").unwrap(),
+            resource("https://example.com/:0", ReadOptions::default())
+        );
+        // `%3A` 是字面值，原样保留。
+        assert_eq!(
+            parse("https://example.com/a%3A:download").unwrap(),
+            resource(
+                "https://example.com/a%3A",
+                ReadOptions {
+                    download: true,
+                    ..ReadOptions::default()
+                }
+            )
+        );
+        assert_eq!(
+            parse("https://example.com/a%3Araw").unwrap(),
+            resource("https://example.com/a%3Araw", ReadOptions::default())
+        );
+        // 大小写不敏感的 scheme 同样适用底线规则。
+        assert_eq!(
+            parse("HTTPS://host:8080").unwrap(),
+            resource("HTTPS://host:8080", ReadOptions::default())
+        );
+    }
+
+    #[test]
+    fn http_rejects_legacy_fragments_and_foreign_forms() {
+        for path in [
+            "https://example.com#stravia?raw=1",
+            "https://example.com/a?x=1#stravia?question=q",
+            "https://example.com/a#stravia?lines=1-2:download",
+        ] {
+            assert_eq!(
+                parse(path).unwrap_err(),
+                ReadPathError::LegacyOptionsSyntax,
+                "{path}"
+            );
+        }
         let digest = "a".repeat(ARTIFACT_DIGEST_LEN);
-        let artifact_path = format!("stravia://artifacts/{digest}");
-        let ReadTarget::Resource(resource) =
-            parse_read_path(&format!("{artifact_path}?question=Private%20question")).unwrap()
-        else {
-            panic!("Artifact resource")
-        };
-        assert_eq!(resource.url, artifact_path);
-        assert_eq!(
-            resource.options.question.as_deref(),
-            Some("Private question")
-        );
+        for path in [
+            "https://stravia/artifact/abc".to_owned(),
+            format!("sa:{digest}"),
+            "file:///etc/passwd".to_owned(),
+            "ftp://example.com/a".to_owned(),
+            "stravia://unknown".to_owned(),
+            "stravia://turns".to_owned(),
+        ] {
+            assert_eq!(
+                parse(&path).unwrap_err(),
+                ReadPathError::InvalidScheme,
+                "{path}"
+            );
+        }
+        assert_eq!(parse("/local/file").unwrap_err(), ReadPathError::InvalidUrl);
+        for path in ["", "  ", "\t"] {
+            assert_eq!(parse(path).unwrap_err(), ReadPathError::BlankPath);
+        }
+    }
 
+    #[test]
+    fn selector_and_question_combinations_are_enforced() {
+        let base = artifact_path();
+        let http = "https://example.com/a";
+        let conflict = |path: String, question: Option<&str>| {
+            let mut input = read_input(&path);
+            input.question = question.map(str::to_owned);
+            match parse_read_input(&input) {
+                Err(ReadPathError::ConflictingOptions { reason }) => reason,
+                other => panic!("expected conflict for {path}: {other:?}"),
+            }
+        };
+        assert!(conflict(format!("{base}:raw"), Some("q")).contains("question"));
         for path in [
+            format!("{base}:download:raw"),
+            format!("{base}:download:1-2"),
+            format!("{base}:download:cursor=a"),
+        ] {
+            assert!(conflict(path, None).starts_with("download"));
+        }
+        assert!(conflict(format!("{base}:download"), Some("q")).starts_with("download"));
+        for path in [
+            format!("{base}:cursor=a:raw"),
+            format!("{base}:cursor=a:1-2"),
+        ] {
+            assert!(conflict(path, None).starts_with("cursor"));
+        }
+        assert!(conflict(format!("{base}:cursor=a"), Some("q")).starts_with("cursor"));
+        assert!(conflict(format!("{http}:cursor=a"), None).contains("Artifact"));
+
+        // 行范围与 question 可以共存；raw 与行范围可以共存。
+        let mut lines = read_input(&format!("{http}:1-5"));
+        lines.question = Some("q".into());
+        assert!(parse_read_input(&lines).is_ok());
+        assert!(parse(&format!("{http}:raw:1-5")).is_ok());
+
+        for path in [&base, &http.to_owned()] {
+            assert_eq!(
+                parse_read_input(&with_question(path, " ")).unwrap_err(),
+                ReadPathError::BlankQuestion
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_selectors_are_rejected() {
+        let base = artifact_path();
+        assert_eq!(
+            parse(&format!("{base}:raw:raw")).unwrap_err(),
+            ReadPathError::DuplicateSelector { selector: "raw" }
+        );
+        assert_eq!(
+            parse(&format!("{base}:download:download")).unwrap_err(),
+            ReadPathError::DuplicateSelector {
+                selector: "download"
+            }
+        );
+        assert_eq!(
+            parse(&format!("{base}:cursor=a:cursor=b")).unwrap_err(),
+            ReadPathError::DuplicateSelector { selector: "cursor" }
+        );
+        let error = parse(&format!("{base}:1-2:3-4")).unwrap_err();
+        assert!(matches!(error, ReadPathError::InvalidLineSelection { .. }));
+        assert!(error
+            .to_string()
+            .contains("combine line ranges with commas"));
+        assert!(matches!(
+            parse("https://example.com/a:1-2:3-4").unwrap_err(),
+            ReadPathError::InvalidLineSelection { .. }
+        ));
+    }
+
+    #[test]
+    fn line_selections_merge_and_check_bounds() {
+        assert_eq!(
+            parse_line_selections("5+3,1-2,2-5,-2").unwrap(),
+            [
+                LineSelection::Inclusive { start: 1, end: 7 },
+                LineSelection::Last(2)
+            ]
+        );
+        assert_eq!(
+            parse_line_selections("10,3-4,-5,-9").unwrap(),
+            [
+                LineSelection::Inclusive { start: 3, end: 4 },
+                LineSelection::From(10),
+                LineSelection::Last(9)
+            ]
+        );
+        for selection in [
             "",
-            " ",
-            "query://old",
-            "file:///etc/passwd",
-            "/local/file",
-            "search://%FF",
-            "search://%",
-            "search://%2G",
-            "search://%20",
-            "search://q?blocked_domains=a.com",
-            "search://q?allowed_domains=",
-            "search://q?allowed_domains=+",
-            "search://q?allowed_domains=docs.rs&allowed_domains=+",
-            "search://q?previous_path=a&previous_path=b",
-            "search://q?previous_path=+",
-            "search://q?allowed_domains=%FF",
-            "search://q?unknown=x",
-            "https://stravia/artifact/a?question=legacy",
-            "https://stravia/artifact/a#ordinary",
-            "https://stravia/artifact/a/b",
-            "https://stravia/artifact/a%20b",
-            "https://example.com#ordinary#stravia?raw=1",
-            "https://example.com#stravia?raw=1#nested",
-            "https://example.com#stravia?raw=true",
-            "https://example.com#stravia?raw=1&raw=1",
-            "https://example.com#stravia?raw=1&question=q",
-            "https://example.com#stravia?question=+",
-            "https://example.com#stravia?question=%FF",
-            "https://example.com#stravia?download=1&lines=1",
-            "https://example.com#stravia?previous_path=t",
-            "https://example.com#stravia?cursor=abc",
-            "https://stravia/artifact/a#stravia?cursor=abc&raw=1",
+            "0",
+            "-0",
+            "3-2",
+            "1+0",
+            "1-2-3",
+            "18446744073709551615+2",
+            "18446744073709551616",
+            "1,,2",
+            "+1",
+            "1 2",
         ] {
             assert!(
-                parse_read_path(path).is_err(),
-                "accepted invalid path: {path}"
+                matches!(
+                    parse_line_selections(selection),
+                    Err(ReadPathError::InvalidLineSelection { .. })
+                ),
+                "{selection:?}"
             );
         }
-        for path in [
-            format!("sa:{}", "a".repeat(54)),
-            format!("sa:{}", "A".repeat(55)),
-            format!("sa:{digest}#stravia?question=q"),
-            format!("sa:{digest}?question=q#fragment"),
-        ] {
+        let at_limit = vec!["1-2"; MAX_LINE_SELECTIONS].join(",");
+        assert!(parse_line_selections(&at_limit).is_ok());
+        let over_limit = vec!["1-2"; MAX_LINE_SELECTIONS + 1].join(",");
+        assert!(matches!(
+            parse_line_selections(&over_limit),
+            Err(ReadPathError::InvalidLineSelection { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_syntax_errors_name_the_correct_form() {
+        for path in ["search://rust", "query://rust"] {
+            let error = parse(path).unwrap_err();
+            assert_eq!(error, ReadPathError::LegacySearchScheme);
+            let message = error.to_string();
+            assert!(message.contains("stravia://search"), "{message}");
+            assert!(message.contains("question"), "{message}");
+        }
+        let message = parse(&format!("{}?wait=1", tool_execution_path()))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("wait field"), "{message}");
+        let message = parse("https://example.com#stravia?raw=1")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(":raw") && message.contains("question field"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn errors_do_not_echo_urls_or_field_values() {
+        let secret = "secret";
+        let conflicting = with_question("https://example.com/a:raw", secret);
+        let mut bad_attachment = with_question(&turn_path(), secret);
+        bad_attachment.attachments = Some(vec![format!("ftp://user:{secret}@example.com")]);
+        let mut bad_domain = with_question(SEARCH_PATH, secret);
+        bad_domain.allowed_domains = Some(vec![format!("user:{secret}@example.com")]);
+        let inputs = [
+            read_input(&format!("ftp://user:{secret}@example.com")),
+            read_input(&format!("https://user:{secret}@example.com:raw")),
+            read_input(&format!("https://user:{secret}@example.com#stravia?raw=1")),
+            conflicting,
+            bad_attachment,
+            bad_domain,
+        ];
+        for input in inputs {
+            let message = parse_read_input(&input).unwrap_err().to_string();
             assert!(
-                parse_read_path(&path).is_err(),
-                "accepted invalid Artifact path: {path}"
+                !message.contains(secret) && !message.contains("user"),
+                "{message}"
             );
         }
+    }
+
+    #[test]
+    fn null_and_absent_fields_are_equivalent() {
+        let absent: ReadInput =
+            serde_json::from_value(json!({ "path": SEARCH_PATH, "question": "q" })).unwrap();
+        let nulls: ReadInput = serde_json::from_value(json!({
+            "path": SEARCH_PATH,
+            "question": "q",
+            "attachments": null,
+            "allowed_domains": null,
+            "wait": null,
+        }))
+        .unwrap();
+        assert_eq!(absent, nulls);
+        assert_eq!(
+            parse_read_input(&absent).unwrap(),
+            parse_read_input(&nulls).unwrap()
+        );
         for value in [
-            serde_json::json!({"url":"https://example.com"}),
-            serde_json::json!({"path":"search://q","i":"read"}),
-            serde_json::json!({"path":null}),
+            json!({ "url": "https://example.com" }),
+            json!({ "path": SEARCH_PATH, "previous_path": null }),
+            json!({ "path": SEARCH_PATH, "i": "read" }),
+            json!({ "path": null }),
+            json!({ "path": SEARCH_PATH, "wait": -1 }),
         ] {
             assert!(serde_json::from_value::<ReadInput>(value).is_err());
         }
     }
 
     #[test]
-    fn search_limits_apply_before_domain_deduplication_and_after_text_decoding() {
-        let ReadTarget::Search(search) =
-            parse_read_path("search://q?allowed_domains=Docs.RS&allowed_domains=docs.rs.").unwrap()
-        else {
-            panic!("search")
+    fn schemas_expose_fields_by_scope() {
+        let scope = |networking, media, internal| ReadSchemaScope {
+            networking,
+            media,
+            internal,
         };
-        assert_eq!(search.allowed_domains.unwrap(), ["docs.rs"]);
-        let domains = std::iter::repeat_n("allowed_domains=docs.rs", 21)
-            .collect::<Vec<_>>()
-            .join("&");
-        assert!(parse_read_path(&format!("search://q?{domains}")).is_err());
-        assert!(
-            parse_read_path(&format!("search://{}", "a".repeat(MAX_SEARCH_TEXT_BYTES))).is_ok()
-        );
-        assert!(parse_read_path(&format!(
-            "search://{}",
-            "a".repeat(MAX_SEARCH_TEXT_BYTES + 1)
-        ))
-        .is_err());
+        assert_eq!(ReadSchemaScope::FULL, scope(true, true, false));
+        let cases = [
+            (
+                scope(true, true, false),
+                vec!["allowed_domains", "attachments", "path", "question", "wait"],
+            ),
+            (
+                scope(true, true, true),
+                vec!["allowed_domains", "attachments", "path", "question"],
+            ),
+            (
+                scope(true, false, false),
+                vec!["allowed_domains", "path", "question", "wait"],
+            ),
+            (
+                scope(false, true, false),
+                vec!["attachments", "path", "question", "wait"],
+            ),
+            (scope(false, false, false), vec!["path", "wait"]),
+            (scope(false, false, true), vec!["path"]),
+        ];
+        for (scope, expected) in cases {
+            for schema in [input_schema(scope), model_input_schema(scope)] {
+                let mut keys: Vec<&str> = schema["properties"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, expected, "{scope:?}");
+                assert_eq!(schema["type"], json!("object"));
+                assert_eq!(schema["additionalProperties"], json!(false));
+            }
+            assert_eq!(input_schema(scope)["required"], json!(["path"]));
+            let strict = model_input_schema(scope);
+            let mut required: Vec<&str> = strict["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap())
+                .collect();
+            required.sort_unstable();
+            assert_eq!(required, expected, "{scope:?}");
+        }
     }
 
     #[test]
-    fn resource_options_do_not_rewrite_signed_source_queries() {
-        let source = "https://example.com/a?sig=a%2Bb&question=origin&x=%2520";
-        let ReadTarget::Resource(resource) =
-            parse_read_path(&format!("{source}#stravia?question=Private%20question")).unwrap()
-        else {
-            panic!("resource")
-        };
-        assert_eq!(resource.url, source);
-        assert_eq!(
-            resource.options.question.as_deref(),
-            Some("Private question")
-        );
-        let ReadTarget::Resource(resource) =
-            parse_read_path("https://example.com#section").unwrap()
-        else {
-            panic!("resource")
-        };
-        assert_eq!(resource.url, "https://example.com#section");
-    }
-
-    #[test]
-    fn line_selections_check_arithmetic_and_merge_ranges() {
-        let ReadTarget::Resource(resource) =
-            parse_read_path("https://example.com#stravia?lines=5%2B3,1-2,2-5,-2").unwrap()
-        else {
-            panic!("resource")
-        };
-        assert_eq!(
-            resource.options.lines.unwrap(),
-            [
-                LineSelection::Inclusive { start: 1, end: 7 },
-                LineSelection::Last(2)
-            ]
-        );
-        for selection in [
-            "0",
-            "-0",
-            "-%2B1",
-            "1+2",
-            "3-2",
-            "1%2B0",
-            "18446744073709551615%2B2",
-            "18446744073709551616",
-            "1,,2",
-        ] {
+    fn strict_schema_makes_every_field_required_and_nullable() {
+        let strict = model_input_schema(ReadSchemaScope::FULL);
+        for (name, property) in strict["properties"].as_object().unwrap() {
+            if name == "path" {
+                assert_eq!(property["type"], json!("string"));
+                continue;
+            }
+            let kinds = property["type"].as_array().unwrap();
             assert!(
-                parse_read_path(&format!("https://example.com#stravia?lines={selection}")).is_err()
+                kinds.iter().any(|kind| kind.as_str() == Some("null")),
+                "{name}"
+            );
+            assert!(
+                property["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{name}"
             );
         }
-        let ranges = std::iter::repeat_n("1-2", 17).collect::<Vec<_>>().join(",");
-        assert!(parse_read_path(&format!("https://example.com#stravia?lines={ranges}")).is_err());
-    }
+        assert_eq!(
+            strict["properties"]["attachments"]["type"],
+            json!(["array", "null"])
+        );
+        assert_eq!(
+            strict["properties"]["attachments"]["items"],
+            json!({"type": "string"})
+        );
+        assert_eq!(strict["properties"]["wait"]["minimum"], json!(0));
 
-    #[test]
-    fn parse_errors_do_not_echo_credentials_or_arbitrary_parameter_names() {
-        for path in [
-            "ftp://user:secret@example.com",
-            "https://user:secret@example.com#stravia?raw=0",
-            "https://example.com#stravia?https://user:secret@example.com=x",
-        ] {
-            let error = parse_read_path(path).unwrap_err().to_string();
-            assert!(!error.contains("secret"));
-            assert!(!error.contains("user"));
+        let loose = input_schema(ReadSchemaScope::FULL);
+        assert_eq!(loose["properties"]["question"]["type"], json!("string"));
+        assert_eq!(loose["properties"]["wait"]["type"], json!("integer"));
+
+        // 严格形式要求出现的字段全部给出；可选字段写成 null 仍是合法参数。
+        let arguments = json!({
+            "path": SEARCH_PATH,
+            "question": "q",
+            "attachments": null,
+            "allowed_domains": null,
+            "wait": null,
+        });
+        let keys = arguments
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in strict["required"].as_array().unwrap() {
+            assert!(keys.iter().any(|key| Some(key.as_str()) == name.as_str()));
         }
+        let input: ReadInput = serde_json::from_value(arguments).unwrap();
+        assert!(parse_read_input(&input).is_ok());
     }
 }

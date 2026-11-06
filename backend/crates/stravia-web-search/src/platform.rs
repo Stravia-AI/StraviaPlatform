@@ -16,7 +16,7 @@ use stravia_runtime_contract::protocol::ir::{
     ContentBlock, NativeTool, NativeToolKind, ToolChoice, WebSearchTool,
 };
 
-use stravia_web_access_contract::read_path::{ReadTarget, format_search_path, parse_read_path};
+use stravia_web_access_contract::read_path::{ReadInput, ReadTarget, parse_read_input};
 
 use super::{SearchTurnId, WebSearchEvent, WebSearchInput, WebSearchRunPolicy, WebSearchRunner};
 
@@ -344,7 +344,7 @@ impl HookSession for WebSearchHookSession {
                 }
                 actions.push(HookAction::ExposeRead {
                     scope: stravia_runtime_contract::hook::ReadExposureScope::new(true, false),
-                    description: "Use StraviaRead with a single path: search://<URL-encoded query> for complete sourced research, or public HTTP(S) URLs for webpage Markdown and file import.".into(),
+                    description: "Use StraviaRead with path stravia://search and the query in question for complete sourced research, or a public HTTP(S) URL for webpage Markdown and file import.".into(),
                 });
                 Ok(ActionBatch { actions })
             }
@@ -370,21 +370,27 @@ impl HookSession for WebSearchHookSession {
                     if platform_call.tool_id.as_str() != PUBLIC_WEB_SEARCH_TOOL_ID {
                         continue;
                     }
-                    let Ok(mut arguments) = serde_json::from_str::<serde_json::Map<String, Value>>(
+                    let Ok(arguments) = serde_json::from_str::<serde_json::Map<String, Value>>(
                         &platform_call.call.arguments,
                     ) else {
                         continue;
                     };
-                    let Some(path) = arguments.get("path").and_then(Value::as_str) else {
+                    let gateway = self.gateway.as_ref();
+                    let principal = &self.principal;
+                    let Some(rewritten) =
+                        rewritten_arguments(&arguments, filters, |turn_id| async move {
+                            match gateway.runner().await {
+                                Ok(runner) => runner.is_search_turn(principal, &turn_id).await,
+                                Err(_) => false,
+                            }
+                        })
+                        .await
+                    else {
                         continue;
                     };
-                    let Some(path) = rewritten_search_path(path, filters) else {
-                        continue;
-                    };
-                    arguments.insert("path".into(), serde_json::json!(path));
                     actions.push(HookAction::PatchResponse(ResponsePatch::SetToolArguments {
                         call_id: platform_call.call.id.clone().into_string(),
-                        arguments: Value::Object(arguments).to_string(),
+                        arguments: Value::Object(rewritten).to_string(),
                     }));
                 }
                 Ok(ActionBatch { actions })
@@ -458,16 +464,44 @@ struct DomainFilters {
     allowed_domains: Option<Vec<String>>,
 }
 
-/// Re-encodes a recognized search path with the native allowed domains
-/// replacing the model's own list. Returns `None` when the path is not a
-/// valid search target or the native declaration carries no domain override.
-/// No extra top-level fields are injected into the tool arguments.
-fn rewritten_search_path(path: &str, filters: &DomainFilters) -> Option<String> {
-    let ReadTarget::Search(mut search) = parse_read_path(path).ok()? else {
-        return None;
+/// 用原生 web_search 声明的域名限制替换 StraviaRead 参数里的 `allowed_domains`。
+///
+/// 只改写搜索入口：`path` 为搜索 path，或为 `is_search_turn` 确认属于当前
+/// Principal 的 Web Search 轮；媒体轮、资源 path 和无法解析的 path 保持原样。
+/// 原生声明没有域名限制时同样不改写。只替换这一个字段，不注入其他字段。
+async fn rewritten_arguments<F, Fut>(
+    arguments: &serde_json::Map<String, Value>,
+    filters: &DomainFilters,
+    is_search_turn: F,
+) -> Option<serde_json::Map<String, Value>>
+where
+    F: FnOnce(SearchTurnId) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let allowed_domains = filters.allowed_domains.clone()?;
+    let path = arguments.get("path")?.as_str()?;
+    // 只用解析器分类 path 形式；探测用的 question 不会被读取。
+    let probe = ReadInput {
+        path: path.to_owned(),
+        question: Some("probe".to_owned()),
+        attachments: None,
+        allowed_domains: None,
+        wait: None,
     };
-    search.allowed_domains = Some(filters.allowed_domains.clone()?);
-    Some(format_search_path(&search))
+    let applies = match parse_read_input(&probe).ok()? {
+        ReadTarget::Search(_) => true,
+        ReadTarget::Continuation(continuation) => {
+            let turn_id = SearchTurnId::from_reference(&continuation.turn_path).ok()?;
+            is_search_turn(turn_id).await
+        }
+        ReadTarget::Resource(_) | ReadTarget::ToolExecution(_) => false,
+    };
+    if !applies {
+        return None;
+    }
+    let mut rewritten = arguments.clone();
+    rewritten.insert("allowed_domains".into(), serde_json::json!(allowed_domains));
+    Some(rewritten)
 }
 
 impl DomainFilters {
@@ -561,11 +595,38 @@ mod tests {
         assert!(DomainFilters::from_native_tool(&tool).is_err());
     }
 
-    #[test]
-    fn native_empty_domain_filters_leave_model_search_path_unchanged() {
+    const SEARCH_PATH: &str = "stravia://search";
+    const TURN_PATH: &str = "stravia://turns/abcdefghijklmnopqrstuvwxyzab";
+
+    fn arguments(path: &str) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "path": path,
+            "question": "climate policy",
+            "attachments": null,
+            "allowed_domains": ["other.org"],
+        })
+        .as_object()
+        .expect("arguments")
+        .clone()
+    }
+
+    fn example_filters() -> DomainFilters {
+        DomainFilters::from_native_tool(&WebSearchTool {
+            allowed_domains: vec!["Example.COM".into(), "example.com".into()],
+            ..Default::default()
+        })
+        .expect("native allowed domains")
+    }
+
+    #[tokio::test]
+    async fn native_empty_domain_filters_leave_model_arguments_unchanged() {
         let filters = DomainFilters::from_native_tool(&WebSearchTool::default())
             .expect("empty canonical filters");
-        assert!(rewritten_search_path("search://plain", &filters).is_none());
+        assert!(
+            rewritten_arguments(&arguments(SEARCH_PATH), &filters, |_| async { true })
+                .await
+                .is_none()
+        );
     }
 
     #[test]
@@ -611,38 +672,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn native_allowed_domains_replace_the_model_search_path() {
-        let filters = DomainFilters::from_native_tool(&WebSearchTool {
-            allowed_domains: vec!["Example.COM".into(), "example.com".into()],
-            ..Default::default()
+    #[tokio::test]
+    async fn native_allowed_domains_replace_only_that_field_of_a_search() {
+        let original = arguments(SEARCH_PATH);
+        let rewritten = rewritten_arguments(&original, &example_filters(), |_| async {
+            panic!("a new search needs no Turn lookup")
         })
-        .expect("native allowed domains");
-        let previous_path = "stravia://turns/abcdefghijklmnopqrstuvwxyzab";
-        let rewritten = rewritten_search_path(
-            "search://climate%20policy?allowed_domains=other.org&previous_path=stravia%3A%2F%2Fturns%2Fabcdefghijklmnopqrstuvwxyzab",
-            &filters,
-        )
-        .expect("search path override");
-        let ReadTarget::Search(search) =
-            parse_read_path(&rewritten).expect("rewritten path must reparse")
-        else {
-            unreachable!("re-encoded search path must parse as a search target")
-        };
-        assert_eq!(search.query, "climate policy");
-        assert_eq!(search.allowed_domains, Some(vec!["example.com".to_owned()]));
-        assert_eq!(search.previous_path.as_deref(), Some(previous_path));
+        .await
+        .expect("search override");
 
         assert_eq!(
-            rewritten_search_path("search://plain", &DomainFilters::default()),
-            None
+            rewritten["allowed_domains"],
+            serde_json::json!(["example.com"])
         );
-        let override_filters = DomainFilters {
-            allowed_domains: Some(vec!["example.com".to_owned()]),
-        };
+        let mut expected = original.clone();
+        expected.insert("allowed_domains".into(), serde_json::json!(["example.com"]));
+        assert_eq!(rewritten, expected);
+    }
+
+    #[tokio::test]
+    async fn native_allowed_domains_replace_those_of_a_search_continuation() {
+        let rewritten = rewritten_arguments(
+            &arguments(TURN_PATH),
+            &example_filters(),
+            |turn_id| async move { turn_id.reference() == TURN_PATH },
+        )
+        .await
+        .expect("continuation override");
+
+        assert_eq!(rewritten["path"], TURN_PATH);
         assert_eq!(
-            rewritten_search_path("https://example.com/page", &override_filters),
-            None
+            rewritten["allowed_domains"],
+            serde_json::json!(["example.com"])
+        );
+    }
+
+    #[tokio::test]
+    async fn native_allowed_domains_leave_media_turns_resources_and_invalid_paths_alone() {
+        let filters = example_filters();
+        // 媒体轮或不可见的 Turn：查询结果不是搜索轮。
+        assert!(
+            rewritten_arguments(&arguments(TURN_PATH), &filters, |_| async { false })
+                .await
+                .is_none()
+        );
+        for path in [
+            "https://example.com/page".to_owned(),
+            format!("stravia://artifacts/{}", "a".repeat(55)),
+            "stravia://tool-executions/abcdefghijklmnopqrstuvwxyzab".to_owned(),
+            "search://plain".to_owned(),
+            "not a path".to_owned(),
+        ] {
+            let mut input = arguments(&path);
+            input.remove("question");
+            assert!(
+                rewritten_arguments(&input, &filters, |_| async { true })
+                    .await
+                    .is_none(),
+                "{path}"
+            );
+        }
+        let mut without_path = arguments(SEARCH_PATH);
+        without_path.remove("path");
+        assert!(
+            rewritten_arguments(&without_path, &filters, |_| async { true })
+                .await
+                .is_none()
         );
     }
 

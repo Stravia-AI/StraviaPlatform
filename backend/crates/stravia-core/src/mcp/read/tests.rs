@@ -142,7 +142,7 @@ async fn office_document_lines_select_from_extracted_markdown() {
         .unwrap();
     let result = reader
         .read(
-            json!({"path": format!("stravia://artifacts/{}?lines=1-1", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}:1-1", artifact.id.as_str())}),
             context,
         )
         .await
@@ -159,12 +159,12 @@ async fn office_document_lines_select_from_extracted_markdown() {
 #[tokio::test]
 async fn office_document_download_skips_extraction() {
     let (_dir, reader, context, _) = document_fixture().await;
-    // Bytes that fail container preflight still download: ?download=1 must not
+    // Bytes that fail container preflight still download: :download must not
     // run extraction or the model path.
     let corrupt = gateway_corrupt_docx(&reader, &context).await;
     let result = reader
         .read(
-            json!({"path": format!("stravia://artifacts/{}?download=1", corrupt.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}:download", corrupt.id.as_str())}),
             context.clone(),
         )
         .await
@@ -176,7 +176,7 @@ async fn office_document_download_skips_extraction() {
         "download output: {value}"
     );
 
-    // The same corrupt Artifact without ?download fails as a document error.
+    // The same corrupt Artifact without :download fails as a document error.
     let result = reader
         .read(
             json!({"path": format!("stravia://artifacts/{}", corrupt.id.as_str())}),
@@ -212,7 +212,7 @@ async fn office_document_rejects_raw() {
     let (_dir, reader, context, artifact) = document_fixture().await;
     let error = reader
         .read(
-            json!({"path": format!("stravia://artifacts/{}?raw=1", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}:raw", artifact.id.as_str())}),
             context,
         )
         .await
@@ -228,7 +228,7 @@ async fn office_document_question_routes_to_media_understanding() {
     // availability error.
     let error = reader
         .read(
-            json!({"path": format!("stravia://artifacts/{}?question=summary", artifact.id.as_str())}),
+            json!({"path": format!("stravia://artifacts/{}", artifact.id.as_str()), "question": "summary"}),
             context,
         )
         .await
@@ -281,9 +281,19 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
         first["report"]["limitations"],
         complete["report"]["limitations"]
     );
-    let ReadTarget::Resource(next) =
-        parse_read_path(first["pagination"]["next_path"].as_str().unwrap()).unwrap()
-    else {
+    let next_path = first["pagination"]["next_path"].as_str().unwrap();
+    assert!(
+        next_path.contains(":cursor="),
+        "continuation pages use the :cursor= selector: {next_path}"
+    );
+    let ReadTarget::Resource(next) = parse_read_input(&ReadInput {
+        path: next_path.to_owned(),
+        question: None,
+        attachments: None,
+        allowed_domains: None,
+        wait: None,
+    })
+    .unwrap() else {
         panic!("snapshot path")
     };
     let id = ArtifactId::from_reference(&next.url).unwrap();

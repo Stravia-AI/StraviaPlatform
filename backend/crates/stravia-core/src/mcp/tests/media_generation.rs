@@ -563,7 +563,7 @@ async fn cancellation_after_handoff_commit_before_ack_preserves_original_generat
     let completed = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{execution_path}?wait=120")})
+                json!({"path":execution_path,"wait":120})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -580,7 +580,7 @@ async fn cancellation_after_handoff_commit_before_ack_preserves_original_generat
     let download = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{artifact}?download=1")})
+                json!({"path":format!("{artifact}:download")})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -652,7 +652,7 @@ async fn bounded_generation_queries_share_a_durable_result_and_preserve_artifact
     let running = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{execution_path}?wait=0")})
+                json!({"path":execution_path,"wait":0})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -669,7 +669,7 @@ async fn bounded_generation_queries_share_a_durable_result_and_preserve_artifact
     let completed = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{execution_path}?wait=120")})
+                json!({"path":execution_path,"wait":120})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -686,7 +686,7 @@ async fn bounded_generation_queries_share_a_durable_result_and_preserve_artifact
     let download = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{artifact}?download=1")})
+                json!({"path":format!("{artifact}:download")})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -821,7 +821,7 @@ async fn execution_storage_failure_never_claims_handoff_or_success_or_retries_ge
                 crate::mcp::read::ReadTool::new(&fixture.app.gateway, &mut Vec::new()).unwrap();
             let result = McpTool::call(
                 &reader,
-                json!({"path":format!("{path}?wait=120")}),
+                json!({"path":path,"wait":120}),
                 &McpContext::new(fixture.app.key_id.clone()),
             )
             .await
@@ -1003,37 +1003,11 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
 async fn upload_image(app: &TestApp, bytes: Vec<u8>, mime: &str) -> String {
     let base = app.endpoint.strip_suffix("/mcp").unwrap();
     let http = reqwest::Client::new();
-    let upload: Value = http
-        .post(format!("{base}/v1/artifacts/uploads"))
-        .bearer_auth(&app.token)
-        .json(&json!({"mime_type":mime,"size":bytes.len()}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let upload_id = upload["upload_id"].as_str().unwrap();
-    let token = upload["upload_token"].as_str().unwrap();
-    let part: Value = http
-        .put(format!("{base}/v1/artifacts/uploads/{upload_id}/parts/1"))
-        .bearer_auth(&app.token)
-        .header("x-upload-token", token)
-        .body(bytes)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
     let completed: Value = http
-        .post(format!("{base}/v1/artifacts/uploads/{upload_id}/complete"))
+        .post(format!("{base}/v1/artifacts"))
         .bearer_auth(&app.token)
-        .json(&json!({"upload_token":token,"parts":[part]}))
+        .header("content-type", mime)
+        .body(bytes)
         .send()
         .await
         .unwrap()
@@ -1104,7 +1078,7 @@ async fn invalid_arguments_and_unsafe_references_never_start_generation() {
         json!({"type":"image","input":{"prompt":"hello","aspect_ratio":"2:1"}}),
         json!({"type":"image","input":{"prompt":"hello","resolution":null}}),
         json!({"type":"image","input":{"prompt":"hello","reference_images":vec![reference.clone();6]}}),
-        json!({"type":"image","input":{"prompt":"hello","reference_images":[format!("{reference}?download=1")]}}),
+        json!({"type":"image","input":{"prompt":"hello","reference_images":[format!("{reference}:download")]}}),
         json!({"type":"image","input":{"prompt":"hello","reference_images":[format!("data:image/png;base64,{PNG}")]}}),
         json!({"type":"image","input":{"prompt":"hello","reference_images":["http://127.0.0.1/private.png"]}}),
     ] {
@@ -1429,7 +1403,7 @@ async fn generated_image_downloads_real_bytes_and_can_be_edited() {
     let grant = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":format!("{reference}?download=1")})
+                json!({"path":format!("{reference}:download")})
                     .as_object()
                     .unwrap()
                     .clone(),

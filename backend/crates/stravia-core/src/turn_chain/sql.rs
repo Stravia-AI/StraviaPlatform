@@ -460,6 +460,50 @@ impl TurnChainStore for SqlTurnChainStore {
         Ok(MaterializedTurnChain { nodes, expires_at })
     }
 
+    /// 与 `materialize` 使用同一可见性规则：Principal 范围、统一保留期和未开始删除。
+    /// 只查询一次 `turn_nodes`，不读取正文或祖先链。
+    async fn node_kind(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<TurnNodeKind, TurnUnavailable> {
+        let principal = principal.continuation_key();
+        let cutoff = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(self.retention.window_millis());
+        let query = "SELECT n.kind FROM turn_nodes n \
+                     JOIN content_scopes s ON s.id=n.scope_id \
+                     WHERE n.id=$1 AND s.principal=$2 AND n.created_at>$3 \
+                     AND NOT EXISTS(SELECT 1 FROM turn_node_retention r \
+                                    WHERE r.node_pk=n.node_pk AND r.deleting)";
+        let kind: Option<String> = match &self.backend {
+            Backend::Sqlite(pool) => {
+                sqlx::query_scalar(query)
+                    .bind(id.as_str())
+                    .bind(&principal)
+                    .bind(cutoff)
+                    .fetch_optional(pool)
+                    .await
+            }
+            Backend::Postgres(pool) => {
+                sqlx::query_scalar(query)
+                    .bind(id.as_str())
+                    .bind(&principal)
+                    .bind(cutoff)
+                    .fetch_optional(pool)
+                    .await
+            }
+        }
+        .map_err(storage)?;
+        match kind.as_deref() {
+            Some("response") => Ok(TurnNodeKind::Response),
+            Some("agent") => Ok(TurnNodeKind::Agent),
+            Some("web_search") => Ok(TurnNodeKind::WebSearch),
+            Some(_) => Err(storage("unknown Turn node kind")),
+            None => Err(TurnUnavailable::Unavailable),
+        }
+    }
+
     #[tracing::instrument(
         target = "stravia::perf",
         name = "turn_chain.materialize",

@@ -5,10 +5,14 @@ use serde::Deserialize;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
+use stravia_protocol_codec::attachment::{
+    AttachmentDelivery, AttachmentKind, attachment_delivery, inline_media_type_supported,
+    url_media_type_supported,
+};
 use stravia_runtime_contract::artifact::{
     ArtifactError, ArtifactId, ArtifactSettings, ArtifactStore,
 };
-use stravia_runtime_contract::protocol::ids::{Protocol, ProtocolId};
+use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::{
     AiRequest, ContentBlock, DocumentSource, MediaSource, MessageContent, ToolResultContentKind,
 };
@@ -415,7 +419,7 @@ fn normalize_blocks<'a>(
                 ContentBlock::File { source, media_type }
                 | ContentBlock::Video { source, media_type } => {
                     normalize_source(gateway, principal, source, cancellation, retention).await?;
-                    if let MediaSource::Url(reference) = source {
+                    if let Some(reference) = artifact_reference(source) {
                         let reader = store(gateway)?
                             .open(principal, &ArtifactId::from_reference(reference)?)
                             .await?;
@@ -508,6 +512,33 @@ fn store(gateway: &crate::Gateway) -> Result<&dyn ArtifactStore, ArtifactError> 
         .ok_or_else(|| ArtifactError::Storage("Artifact storage is unavailable".into()))
 }
 
+/// Artifact Reference 的 scheme；以它开头但不是精确 Artifact Reference 的值一律无效。
+const ARTIFACT_SCHEME: &str = "stravia://";
+
+/// 来源中的 Artifact Reference：`Url` 与 Artifact 形式的 `FileId` 走同一条交付路径。
+fn artifact_reference(source: &MediaSource) -> Option<&str> {
+    match source {
+        MediaSource::Url(reference) => Some(reference),
+        MediaSource::FileId { file_id, .. } if file_id.starts_with(ARTIFACT_SCHEME) => {
+            Some(file_id)
+        }
+        _ => None,
+    }
+}
+
+/// 校验引用格式（带查询串、fragment 或任何后缀都无效），并延长其保留期。
+async fn extend_artifact_reference(
+    gateway: &crate::Gateway,
+    principal: &Principal,
+    reference: &str,
+    retention: Duration,
+) -> Result<(), ArtifactError> {
+    let id = ArtifactId::from_reference(reference)?;
+    store(gateway)?
+        .extend_retention(principal, &id, retention)
+        .await
+}
+
 async fn normalize_source(
     gateway: &crate::Gateway,
     principal: &Principal,
@@ -517,21 +548,11 @@ async fn normalize_source(
 ) -> Result<(), ArtifactError> {
     let (mime, bytes) = match source {
         MediaSource::Url(url) => {
-            if url.starts_with("stravia://artifacts/") {
-                if url.contains(['?', '#']) {
-                    return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
-                }
-                let id = ArtifactId::from_reference(url)?;
-                store(gateway)?
-                    .extend_retention(principal, &id, retention)
-                    .await?;
-                *url = id.reference();
+            if url.starts_with(ARTIFACT_SCHEME) {
+                extend_artifact_reference(gateway, principal, url, retention).await?;
                 return Ok(());
             }
-            if url.starts_with("stravia://")
-                || url.starts_with("sa:")
-                || url.starts_with("https://stravia/artifact/")
-            {
+            if url.starts_with("sa:") || url.starts_with("https://stravia/artifact/") {
                 return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
             }
             fetch_public_file(url, cancellation)
@@ -551,7 +572,14 @@ async fn normalize_source(
             }
             (media_type.clone(), Bytes::from(bytes))
         }
-        MediaSource::FileId { .. } => return Ok(()),
+        // Artifact 的 FileId 与 Url 共用同一套准入与交付，来源保持引用形式，到 Target
+        // 交付时才改写；供应商自己的 file id 原样透传。
+        MediaSource::FileId { file_id, .. } => {
+            if file_id.starts_with(ARTIFACT_SCHEME) {
+                extend_artifact_reference(gateway, principal, file_id, retention).await?;
+            }
+            return Ok(());
+        }
     };
     let size = bytes.len() as u64;
     let artifact = store(gateway)?
@@ -623,25 +651,37 @@ fn materialize_blocks<'a>(
         let mut references = String::new();
         let mut attachment_index = 0;
         for block in blocks.iter_mut() {
-            let kind = match block {
-                ContentBlock::Image { .. } => "image",
-                ContentBlock::Audio { .. } => "audio",
-                ContentBlock::File { .. } => "file",
-                ContentBlock::Video { .. } => "video",
-                _ => "",
-            };
+            // Artifact 形式的 FileId 在改写为 Url/Base64 后会丢失 detail，先并入 Image 自身字段。
+            if let ContentBlock::Image {
+                source:
+                    MediaSource::FileId {
+                        file_id,
+                        detail: file_detail,
+                    },
+                detail,
+                ..
+            } = block
+                && file_id.starts_with(ARTIFACT_SCHEME)
+                && detail.is_none()
+            {
+                *detail = file_detail.take();
+            }
+            let kind = AttachmentKind::of_block(block);
             match block {
                 ContentBlock::Image { source, .. }
                 | ContentBlock::Audio { source }
                 | ContentBlock::File { source, .. }
                 | ContentBlock::Video { source, .. } => {
+                    let Some(kind) = kind else { continue };
                     attachment_index += 1;
+                    // FileId 与 Url 一样会被改写为临时地址或 base64，同样补稳定引用。
                     if access.annotate_references
-                        && let MediaSource::Url(reference) = source
+                        && let Some(reference) = artifact_reference(source)
                     {
                         let _ = writeln!(
                             references,
-                            "Attachment {attachment_index} ({kind}): {reference}"
+                            "Attachment {attachment_index} ({kind}): {reference}",
+                            kind = kind.as_str()
                         );
                     }
                     materialize_source(access, source, protocol, kind, transfers).await?;
@@ -656,8 +696,14 @@ fn materialize_blocks<'a>(
                             );
                         }
                         let mut media = MediaSource::Url(url.clone());
-                        materialize_source(access, &mut media, protocol, "document", transfers)
-                            .await?;
+                        materialize_source(
+                            access,
+                            &mut media,
+                            protocol,
+                            AttachmentKind::Document,
+                            transfers,
+                        )
+                        .await?;
                         *source = match media {
                             MediaSource::Url(url) => DocumentSource::Url(url),
                             MediaSource::Base64 { data, media_type }
@@ -714,79 +760,70 @@ async fn materialize_source(
     access: &ArtifactAccess<'_>,
     source: &mut MediaSource,
     protocol: Option<ProtocolId>,
-    kind: &str,
+    kind: AttachmentKind,
     transfers: &mut Vec<(String, ArtifactId)>,
 ) -> Result<(), ArtifactError> {
-    let MediaSource::Url(reference) = source else {
+    // Url 与 Artifact 形式的 FileId 走同一条交付路径；供应商自己的 file id 原样透传。
+    let Some(reference) = artifact_reference(source) else {
         return Ok(());
     };
-    if reference.contains(['?', '#']) {
-        return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
-    }
     let id = ArtifactId::from_reference(reference)?;
-    let (url, inline) = match protocol.map(|protocol| protocol.protocol) {
-        // 无共享标准 endpoint 时，向 guest 提供 canonical bytes；不能假定其支持 URL。
-        None => (false, true),
-        Some(Protocol::BedrockConverse) => (false, kind == "image"),
-        Some(Protocol::AnthropicMessages) => (
-            matches!(kind, "image" | "document"),
-            matches!(kind, "image" | "document"),
-        ),
-        Some(Protocol::OpenAICompatible | Protocol::WatsonxTextChat) => {
-            (kind == "image", matches!(kind, "image" | "audio" | "file"))
-        }
-        Some(Protocol::OpenResponses) => (
-            matches!(kind, "image" | "file" | "video"),
-            matches!(kind, "image" | "file" | "video"),
-        ),
-        Some(Protocol::GoogleGemini | Protocol::GatewayLanguageModel) => {
-            (kind != "document", kind != "document")
-        }
-        Some(Protocol::CohereChat) => (kind == "image", kind == "image"),
-    };
-    if access.settings.external_signed_downloads && url {
+    let target = protocol.map(|protocol| protocol.protocol);
+    // 能力表在 protocol-codec；无共享标准 endpoint 时，向 guest 提供 canonical bytes，
+    // 不能假定其支持 URL。
+    let delivery = target.map_or(
+        AttachmentDelivery {
+            url: false,
+            inline: true,
+        },
+        |target| attachment_delivery(target, kind),
+    );
+    if let Some(target) = target
+        && access.settings.external_signed_downloads
+        && delivery.url
+    {
         let download = access
             .store
             .download(access.principal, &id, access.retention, access.settings)
             .await?;
-        if download
-            .expires_at
-            .saturating_sub(chrono::Utc::now().timestamp_millis())
-            < 300_000
-        {
-            return Err(ArtifactError::Invalid(
-                "Artifact download cannot retain five minutes of validity".into(),
-            ));
+        // 协议只接受特定 MIME 的 URL 时（例如 Anthropic 只接受 PDF），退回内联。
+        if url_media_type_supported(target, kind, &download.artifact.mime_type) {
+            if download
+                .expires_at
+                .saturating_sub(chrono::Utc::now().timestamp_millis())
+                < 300_000
+            {
+                return Err(ArtifactError::Invalid(
+                    "Artifact download cannot retain five minutes of validity".into(),
+                ));
+            }
+            transfers.push((download.url.clone(), id));
+            *source = MediaSource::Url(download.url);
+            return Ok(());
         }
-        transfers.push((download.url.clone(), id));
-        *source = MediaSource::Url(download.url);
-    } else if inline {
-        let (artifact, bytes) = access
-            .store
-            .read_bytes(access.principal, &id, access.retention)
-            .await?;
-        if kind == "audio"
-            && matches!(
-                protocol.map(|protocol| protocol.protocol),
-                Some(Protocol::OpenAICompatible | Protocol::WatsonxTextChat)
-            )
-            && !matches!(
-                artifact.mime_type.as_str(),
-                "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/mp3" | "audio/mpeg"
-            )
-        {
-            return Err(ArtifactError::Invalid(
-                "Target accepts only WAV or MP3 input audio".into(),
-            ));
-        }
-        *source = MediaSource::Base64 {
-            media_type: artifact.mime_type,
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        };
-    } else {
+    }
+    if !delivery.inline {
         return Err(ArtifactError::Invalid(format!(
-            "Target protocol cannot represent {kind} attachment"
+            "Target protocol cannot represent {} attachment",
+            kind.as_str()
         )));
     }
+    let (artifact, bytes) = access
+        .store
+        .read_bytes(access.principal, &id, access.retention)
+        .await?;
+    if let Some(target) = target
+        && !inline_media_type_supported(target, kind, &artifact.mime_type)
+    {
+        return Err(ArtifactError::Invalid(format!(
+            "Target protocol does not accept {} as inline {} input",
+            artifact.mime_type,
+            kind.as_str()
+        )));
+    }
+    *source = MediaSource::Base64 {
+        media_type: artifact.mime_type,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
     Ok(())
 }

@@ -352,10 +352,26 @@ mod tests {
                 },
             ],
         );
+        // `:download` 选择器被剥离，其余源 URL（含 `question=` 查询参数）原样保留。
         let stravia_web_access_contract::read_path::ReadTarget::Resource(path) =
-            stravia_web_access_contract::read_path::parse_read_path(
-                "https://example.com/file.png?sig=a%2Bb&question=platform#stravia?question=private%20question"
-            ).expect("resource path") else { panic!("resource target") };
+            stravia_web_access_contract::read_path::parse_read_input(
+                &stravia_web_access_contract::read_path::ReadInput {
+                    path: "https://example.com/file.png?sig=a%2Bb&question=platform:download"
+                        .into(),
+                    question: None,
+                    attachments: None,
+                    allowed_domains: None,
+                    wait: None,
+                },
+            )
+            .expect("resource path")
+        else {
+            panic!("resource target")
+        };
+        assert_eq!(
+            path.url,
+            "https://example.com/file.png?sig=a%2Bb&question=platform"
+        );
         let resource = fetch_read_resource_with(&path.url, false, &backend)
             .await
             .expect("resource download succeeds");

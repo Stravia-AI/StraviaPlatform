@@ -10,7 +10,7 @@ Stravia 定位为本地运行、可自托管的 **Agent infra（智能体基础�
 
 Stravia 可作为**桌面应用**在本地运行，也可作为**独立服务端**自托管，管理与配置由部署者控制。自托管不代表请求数据始终留在本机：模型调用和外部工具访问仍会发送至配置的上游服务。
 
-平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳各自独立：Artifact Reference 为 `stravia://artifacts/<55 位 ID>`，Turn Reference 为 `stravia://turns/<28 位 ID>`，Search Source 为 `stravia://turns/<28 位 ID>/sources/<ordinal>`；History Marker 为 `<!--sh:<28 位 ID>-->`，Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`，可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。平台资源自身统一以 `path` 输出，续接统一使用 `previous_path` 和完整 Turn URI；报告正文以方括号包裹完整 Artifact 或 Search Source URI，媒体 bridge 不再使用 `sm`／`st` 短提示。外壳不授予访问权；外部 Provider／客户端 ID、Codex UUID 请求／连接元数据和真实凭据 token 保持其协议格式。协议修复保留请求内确定性定位符，不额外为临时序号计算内容摘要。Open Responses item 保留 `<type>_<原样 response ID>_<ordinal>` 的可逆定位结构。旧 `sa:`、裸 Turn ID 与 `[sc:...]`／`[sm:...]`／`[st:...]` 不提供兼容解析；已有历史不批量重写或删除，旧历史引用可能明确失败。
+平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳各自独立：Artifact Reference 为 `stravia://artifacts/<55 位 ID>`，Turn Reference 为 `stravia://turns/<28 位 ID>`，Search Source 为 `stravia://turns/<28 位 ID>/sources/<ordinal>`；History Marker 为 `<!--sh:<28 位 ID>-->`，Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`，可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。平台资源自身统一以 `path` 输出，续接统一使用 `previous_path` 和完整 Turn URI（StraviaRead 例外：续接直接把完整 Turn URI 作为 `path`）；报告正文以方括号包裹完整 Artifact 或 Search Source URI，媒体 bridge 不再使用 `sm`／`st` 短提示。外壳不授予访问权；外部 Provider／客户端 ID、Codex UUID 请求／连接元数据和真实凭据 token 保持其协议格式。协议修复保留请求内确定性定位符，不额外为临时序号计算内容摘要。Open Responses item 保留 `<type>_<原样 response ID>_<ordinal>` 的可逆定位结构。旧 `sa:`、裸 Turn ID 与 `[sc:...]`／`[sm:...]`／`[st:...]` 不提供兼容解析；已有历史不批量重写或删除，旧历史引用可能明确失败。
 
 ```
 Claude Code · Codex CLI · Gemini CLI · OpenCode
@@ -75,7 +75,7 @@ stravia/
 │           │   ├── auth.rs
 │           │   ├── context.rs    # RequestContext / ContextBag
 │           │   ├── handler.rs    # models_list 只读端点（≤110 行）
-│           │   ├── artifacts.rs  # multipart upload / signed download adapters
+│           │   ├── artifacts.rs  # 单请求 upload / signed download adapters
 │           │   ├── security.rs   # crate-private client credential policy deep module
 │           │   ├── server.rs     # axum HTTP Server 启动
 │           │   ├── server/tests.rs   # Proxy HTTP 装配契约

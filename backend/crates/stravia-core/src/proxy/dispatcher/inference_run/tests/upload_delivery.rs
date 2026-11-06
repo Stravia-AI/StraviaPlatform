@@ -239,10 +239,10 @@ async fn upload_delivery_roundtrip(stream: bool) {
     let upload = router
         .clone()
         .oneshot(
-            Request::post("/v1/artifacts/uploads")
+            Request::post("/v1/artifacts")
                 .header(header::AUTHORIZATION, format!("Bearer {key}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"mime_type":"text/plain","size":1}"#))
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from("x"))
                 .unwrap(),
         )
         .await

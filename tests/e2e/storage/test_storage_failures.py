@@ -19,7 +19,7 @@ import pytest
 
 from tests.common.helpers import (
     SERVER_STARTUP_TIMEOUT, find_free_port, http_request, initialize_server,
-    stop_stravia_server, wait_for_setup_token, wait_until_ready,
+    stop_stravia_server, upload_artifact, wait_for_setup_token, wait_until_ready,
 )
 from tests.common.observation_contents import input_text
 from tests.common.measure_protocol_http import Catalog
@@ -349,11 +349,6 @@ def test_storage_failure_preserves_active_and_following_inference(
             env['mock'] = f'http://127.0.0.1:{server.server_port}'
             route_id, key = _create_route(env, 'local-storage-survival', retry_budget=3)
             auth = {'Authorization': f'Bearer {key}'}
-            upload = None
-            if source == 'artifact':
-                status, upload = http_request('POST', env['proxy'] + '/v1/artifacts/uploads',
-                                              {'mime_type': 'text/plain', 'size': 3}, auth)
-                assert status == 201, f'upload creation returned HTTP {status}'
             if source == 'debug':
                 status, body = http_request('PUT', env['admin'] + '/api/v1/observations/debug',
                                            {'enabled': True, 'confirmed': True}, env['auth'])
@@ -405,8 +400,8 @@ def test_storage_failure_preserves_active_and_following_inference(
                 trigger = HTTPConnection('127.0.0.1', int(env['proxy'].rsplit(':', 1)[1]), timeout=20)
                 try:
                     if source == 'artifact':
-                        trigger.request('PUT', f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1", b'abc',
-                                        {**auth, 'x-upload-token': upload['upload_token']})
+                        trigger.request('POST', '/v1/artifacts', b'abc',
+                                        {**auth, 'Content-Type': 'text/plain'})
                     else:
                         trigger.request('POST', '/v1/chat/completions', '{',
                                         {**auth, 'Content-Type': 'application/json'})
@@ -553,21 +548,8 @@ def configure_background_media(env, parent_route):
 def upload_background_image(env, key):
     image = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
     auth = {'Authorization': f'Bearer {key}'}
-    status, upload = http_request('POST', env['proxy'] + '/v1/artifacts/uploads',
-                                  {'mime_type': 'image/png', 'size': len(image)}, auth)
-    assert status == 201, f'image upload creation returned HTTP {status}'
-    connection = HTTPConnection('127.0.0.1', int(env['proxy'].rsplit(':', 1)[1]), timeout=20)
-    try:
-        connection.request('PUT', f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1", image,
-                           {**auth, 'x-upload-token': upload['upload_token']})
-        response = connection.getresponse()
-        assert response.status == 200
-        part = json.loads(response.read())
-    finally:
-        connection.close()
-    status, artifact = http_request('POST', env['proxy'] + f"/v1/artifacts/uploads/{upload['upload_id']}/complete",
-                                    {'upload_token': upload['upload_token'], 'parts': [part]}, auth)
-    assert status == 200 and artifact['mime_type'] == 'image/png', artifact
+    status, artifact = upload_artifact(env['proxy'], auth, image, 'image/png')
+    assert status == 201 and artifact['mime_type'] == 'image/png', artifact
     return artifact['path']
 
 
@@ -587,9 +569,6 @@ def test_storage_failure_preserves_published_background_media_task(
             key = configure_background_media(env, route_id)
             auth = {'Authorization': f'Bearer {key}'}
             upstream.artifact_path = upload_background_image(env, key)
-            status, upload = http_request('POST', env['proxy'] + '/v1/artifacts/uploads',
-                                          {'mime_type': 'text/plain', 'size': 3}, auth)
-            assert status == 201, f'fault upload creation returned HTTP {status}'
             # Public StraviaRead is the path facade. Its PNG artifact branch
             # delegates to the real configured Media Understanding provider.
             # HTTP 等待必须覆盖真实同步窗口，不能把产品交接期限缩短成测试专用值。
@@ -607,8 +586,8 @@ def test_storage_failure_preserves_published_background_media_task(
             arm.touch()
             trigger = HTTPConnection('127.0.0.1', int(env['proxy'].rsplit(':', 1)[1]), timeout=20)
             try:
-                trigger.request('PUT', f"/v1/artifacts/uploads/{upload['upload_id']}/parts/1", b'abc',
-                                {**auth, 'x-upload-token': upload['upload_token']})
+                trigger.request('POST', '/v1/artifacts', b'abc',
+                                {**auth, 'Content-Type': 'text/plain'})
                 response = trigger.getresponse()
                 response.read()
                 assert response.status == 500
@@ -632,7 +611,7 @@ def test_storage_failure_preserves_published_background_media_task(
             release.set()
             status, queried = http_request('POST', env['proxy'] + '/mcp', {
                 'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
-                    'name': 'StraviaRead', 'arguments': {'path': delivered['path'] + '?wait=30'},
+                    'name': 'StraviaRead', 'arguments': {'path': delivered['path'], 'wait': 30},
                     '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28',
                               'io.modelcontextprotocol/clientCapabilities': {}}}},
                 {**auth, 'Accept': 'application/json, text/event-stream',

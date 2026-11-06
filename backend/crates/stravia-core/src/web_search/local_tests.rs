@@ -80,7 +80,11 @@ impl ModelTurnExecutor for SchemaRepairModel {
                         .expect("search tool")
                         .name
                         .clone(),
-                    arguments: serde_json::json!({"path": "search://verified%20claim"}).to_string(),
+                    arguments: serde_json::json!({
+                        "path": "stravia://search",
+                        "question": "verified claim"
+                    })
+                    .to_string(),
                 }]);
                 response.stop_reason = Some("tool_calls".into());
             }
